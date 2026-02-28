@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 mush-ai.workspace = true
 mush-agent.workspace = true
+mush-session.workspace = true
 tokio.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true

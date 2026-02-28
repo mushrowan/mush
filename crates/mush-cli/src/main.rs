@@ -83,6 +83,8 @@ enum Command {
         /// session id (prefix match)
         id: String,
     },
+    /// open config file in $EDITOR
+    Config,
 }
 
 #[tokio::main]
@@ -115,6 +117,7 @@ async fn main() -> Result<()> {
         Some(Command::Sessions) => return list_sessions_cmd(),
         Some(Command::Status) => return status_cmd(),
         Some(Command::Delete { id }) => return delete_session_cmd(&id),
+        Some(Command::Config) => return config_cmd(),
         None => {}
     }
 
@@ -213,6 +216,12 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
     session.push_message(user_msg);
     session.auto_title();
 
+    // auto-compact when approaching context limit
+    let context_window = model.context_window as usize;
+    let transform: Option<mush_agent::ContextTransform<'_>> = Some(Box::new(move |msgs| {
+        Box::pin(async move { auto_compact(msgs, context_window) })
+    }));
+
     let config = AgentConfig {
         model: &model,
         system_prompt: Some(system_prompt),
@@ -223,6 +232,9 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
             .max_turns
             .or(cfg.max_turns)
             .unwrap_or(mush_agent::DEFAULT_MAX_TURNS),
+        get_steering: None,
+        get_follow_up: None,
+        transform_context: transform,
     };
 
     let mut stream = std::pin::pin!(agent_loop(config, session.messages.clone()));
@@ -288,6 +300,18 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
                     message.usage.cache_read_tokens,
                     cost.total(),
                 );
+            }
+            AgentEvent::ContextTransformed {
+                before_count,
+                after_count,
+            } => {
+                eprintln!("\x1b[2m(compacted: {before_count} → {after_count} messages)\x1b[0m");
+            }
+            AgentEvent::SteeringInjected { count } => {
+                eprintln!("\x1b[2m(steering: {count} messages injected)\x1b[0m");
+            }
+            AgentEvent::FollowUpInjected { count } => {
+                eprintln!("\x1b[2m(follow-up: {count} messages queued)\x1b[0m");
             }
             AgentEvent::MaxTurnsReached { max_turns } => {
                 eprintln!("\n\x1b[33m⚠ hit max turns limit ({max_turns})\x1b[0m");
@@ -394,6 +418,33 @@ async fn tui_mode(cli: Cli) -> Result<()> {
     Ok(())
 }
 
+/// compact messages if estimated tokens exceed 75% of context window
+fn auto_compact(messages: Vec<Message>, context_window: usize) -> Vec<Message> {
+    use mush_session::compact;
+
+    let estimated = compact::estimate_tokens(&messages);
+    let threshold = context_window * 3 / 4;
+
+    if estimated <= threshold || messages.len() <= 10 {
+        return messages;
+    }
+
+    let prompt = compact::build_compaction_prompt(&messages[..messages.len() - 10]);
+    let summary = format!(
+        "## Summary of earlier conversation\n\n\
+         The following is a condensed summary of the conversation so far:\n\n\
+         {prompt}"
+    );
+
+    let result = compact::compact_with_summary(messages, &summary, Some(10));
+    eprintln!(
+        "\x1b[2m(compacted: {} messages summarised, {} kept)\x1b[0m",
+        result.summarised_count,
+        result.messages.len()
+    );
+    result.messages
+}
+
 fn build_system_prompt(cwd: &std::path::Path) -> String {
     let cwd_str = cwd.display();
     let mut prompt = format!(
@@ -435,7 +486,7 @@ fn build_system_prompt(cwd: &std::path::Path) -> String {
 }
 
 fn list_models_short() -> String {
-    models::all_models()
+    models::all_models_with_user()
         .iter()
         .map(|m| format!("  {} ({})", m.id, m.provider))
         .collect::<Vec<_>>()
@@ -443,7 +494,7 @@ fn list_models_short() -> String {
 }
 
 fn list_models_cmd() -> Result<()> {
-    for m in models::all_models() {
+    for m in models::all_models_with_user() {
         let cost = format!("${:.2}/${:.2} per 1M tokens", m.cost.input, m.cost.output);
         println!("  \x1b[1m{}\x1b[0m ({})", m.id, m.provider);
         println!(
@@ -526,6 +577,39 @@ fn delete_session_cmd(id: &str) -> Result<()> {
             Err(eyre!("ambiguous prefix, be more specific"))
         }
     }
+}
+
+fn config_cmd() -> Result<()> {
+    let path = config::config_path();
+
+    // create default config if missing
+    if !path.exists() {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(
+            &path,
+            "# mush configuration\n\
+             # model = \"claude-sonnet-4-20250514\"\n\
+             # thinking = false\n\
+             # max_tokens = 16384\n\
+             # max_turns = 30\n\
+             # system_prompt = \"\"\n\
+             \n\
+             # [api_keys]\n\
+             # anthropic = \"sk-...\"\n\
+             # openrouter = \"sk-or-...\"\n",
+        )?;
+    }
+
+    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
+    let status = std::process::Command::new(&editor).arg(&path).status()?;
+
+    if !status.success() {
+        return Err(eyre!("{editor} exited with {status}"));
+    }
+
+    Ok(())
 }
 
 fn status_cmd() -> Result<()> {

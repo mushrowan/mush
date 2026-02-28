@@ -39,9 +39,14 @@ pub fn config_dir() -> PathBuf {
     }
 }
 
+/// path to the config file
+pub fn config_path() -> PathBuf {
+    config_dir().join("config.toml")
+}
+
 /// load config, returning default if file doesn't exist
 pub fn load_config() -> Config {
-    let path = config_dir().join("config.toml");
+    let path = config_path();
     if !path.exists() {
         return Config::default();
     }

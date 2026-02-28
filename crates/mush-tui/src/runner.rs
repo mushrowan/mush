@@ -1,6 +1,7 @@
 //! TUI runner - wires terminal, agent loop, and event handling together
 
 use std::io;
+use std::sync::Arc;
 
 use crossterm::ExecutableCommand;
 use crossterm::event::{self, Event};
@@ -10,6 +11,7 @@ use crossterm::terminal::{
 use futures::StreamExt;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use tokio::sync::Mutex;
 
 use mush_agent::tool::AgentTool;
 use mush_agent::{AgentConfig, AgentEvent, agent_loop, summarise_tool_args};
@@ -46,6 +48,9 @@ pub async fn run_tui(
     let mut pending_prompt: Option<String> = None;
     let mut conversation: Vec<Message> = Vec::new();
 
+    // shared steering queue: user can type while agent is running
+    let steering_queue: Arc<Mutex<Vec<Message>>> = Arc::new(Mutex::new(Vec::new()));
+
     // draw initial frame
     draw(&mut terminal, &app)?;
 
@@ -57,6 +62,21 @@ pub async fn run_tui(
                 timestamp_ms: Timestamp::now(),
             }));
 
+            let context_window = tui_config.model.context_window as usize;
+            let transform: Option<mush_agent::ContextTransform<'_>> = Some(Box::new(move |msgs| {
+                Box::pin(async move { auto_compact(msgs, context_window) })
+            }));
+
+            // steering callback: drains any messages queued by user input
+            let sq = steering_queue.clone();
+            let steering: Option<mush_agent::MessageCallback<'_>> = Some(Box::new(move || {
+                let sq = sq.clone();
+                Box::pin(async move {
+                    let mut q = sq.lock().await;
+                    q.drain(..).collect()
+                })
+            }));
+
             let config = AgentConfig {
                 model: &tui_config.model,
                 system_prompt: tui_config.system_prompt.clone(),
@@ -64,6 +84,9 @@ pub async fn run_tui(
                 registry,
                 options: tui_config.options.clone(),
                 max_turns: tui_config.max_turns,
+                get_steering: steering,
+                get_follow_up: None,
+                transform_context: transform,
             };
 
             let mut stream = std::pin::pin!(agent_loop(config, conversation.clone()));
@@ -101,6 +124,16 @@ pub async fn run_tui(
                                     app.active_tool = None;
                                     app.status = Some("aborted".into());
                                     break;
+                                }
+                                AppEvent::UserSubmit { text } => {
+                                    // queue as steering message
+                                    let msg = Message::User(UserMessage {
+                                        content: UserContent::Text(text.clone()),
+                                        timestamp_ms: Timestamp::now(),
+                                    });
+                                    steering_queue.lock().await.push(msg);
+                                    app.push_user_message(text);
+                                    app.status = Some("steering message queued".into());
                                 }
                                 _ => {}
                             }
@@ -173,6 +206,20 @@ fn handle_agent_event(
         AgentEvent::TurnStart { .. } if !app.is_streaming => {
             app.start_streaming();
         }
+        AgentEvent::SteeringInjected { count } => {
+            app.status = Some(format!("steering: {count} messages injected"));
+        }
+        AgentEvent::FollowUpInjected { count } => {
+            app.status = Some(format!("follow-up: {count} messages queued"));
+        }
+        AgentEvent::ContextTransformed {
+            before_count,
+            after_count,
+        } => {
+            app.status = Some(format!(
+                "compacted: {before_count} → {after_count} messages"
+            ));
+        }
         AgentEvent::MaxTurnsReached { max_turns } => {
             app.is_streaming = false;
             app.status = Some(format!("hit max turns limit ({max_turns})"));
@@ -186,6 +233,28 @@ fn handle_agent_event(
         }
         _ => {}
     }
+}
+
+/// compact messages if estimated tokens exceed 75% of context window
+fn auto_compact(messages: Vec<Message>, context_window: usize) -> Vec<Message> {
+    use mush_session::compact;
+
+    let estimated = compact::estimate_tokens(&messages);
+    let threshold = context_window * 3 / 4;
+
+    if estimated <= threshold || messages.len() <= 10 {
+        return messages;
+    }
+
+    let prompt = compact::build_compaction_prompt(&messages[..messages.len() - 10]);
+    let summary = format!(
+        "## Summary of earlier conversation\n\n\
+         The following is a condensed summary of the conversation so far:\n\n\
+         {prompt}"
+    );
+
+    let result = compact::compact_with_summary(messages, &summary, Some(10));
+    result.messages
 }
 
 fn draw(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &App) -> io::Result<()> {
