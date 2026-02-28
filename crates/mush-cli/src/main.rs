@@ -72,6 +72,10 @@ enum Command {
         /// provider to log out from (e.g. anthropic)
         provider: Option<String>,
     },
+    /// list available models
+    Models,
+    /// list saved sessions
+    Sessions,
 }
 
 #[tokio::main]
@@ -100,6 +104,8 @@ async fn main() -> Result<()> {
     match cli.command {
         Some(Command::Login { provider }) => return login_flow(provider).await,
         Some(Command::Logout { provider }) => return logout_flow(provider),
+        Some(Command::Models) => return list_models_cmd(),
+        Some(Command::Sessions) => return list_sessions_cmd(),
         None => {}
     }
 
@@ -122,7 +128,7 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
     let model = models::find_model_by_id(&model_id).ok_or_else(|| {
         eyre!(
             "unknown model: {model_id}\n\navailable models:\n{}",
-            list_models()
+            list_models_short()
         )
     })?;
 
@@ -193,7 +199,7 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
     // add the user message
     let user_msg = Message::User(UserMessage {
         content: UserContent::Text(prompt),
-        timestamp_ms: timestamp_ms(),
+        timestamp_ms: timestamp_ms_now(),
     });
     session.push_message(user_msg);
     session.auto_title();
@@ -311,7 +317,7 @@ async fn tui_mode(cli: Cli) -> Result<()> {
     let model = models::find_model_by_id(&model_id).ok_or_else(|| {
         eyre!(
             "unknown model: {model_id}\n\navailable models:\n{}",
-            list_models()
+            list_models_short()
         )
     })?;
 
@@ -441,12 +447,74 @@ fn build_system_prompt(cwd: &std::path::Path) -> String {
     prompt
 }
 
-fn list_models() -> String {
+fn list_models_short() -> String {
     models::all_models()
         .iter()
         .map(|m| format!("  {} ({})", m.id, m.provider))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn list_models_cmd() -> Result<()> {
+    for m in models::all_models() {
+        let cost = format!("${:.2}/${:.2} per 1M tokens", m.cost.input, m.cost.output);
+        println!("  \x1b[1m{}\x1b[0m ({})", m.id, m.provider);
+        println!(
+            "    context: {}k, max output: {}, {cost}",
+            m.context_window / 1000,
+            m.max_output_tokens
+        );
+    }
+    Ok(())
+}
+
+fn list_sessions_cmd() -> Result<()> {
+    let store = SessionStore::new(SessionStore::default_dir());
+    let sessions = store
+        .list()
+        .map_err(|e| eyre!("failed to list sessions: {e}"))?;
+
+    if sessions.is_empty() {
+        println!("no saved sessions");
+        return Ok(());
+    }
+
+    for meta in &sessions {
+        let title = meta.title.as_deref().unwrap_or("(untitled)");
+        let age = format_age(meta.updated_at);
+        println!(
+            "  \x1b[2m{}\x1b[0m  {} \x1b[2m({}, {} msgs, {})\x1b[0m",
+            &meta.id.0[..8],
+            title,
+            meta.model_id,
+            meta.message_count,
+            age,
+        );
+    }
+    println!("\nresume with: mush -c <id>");
+    Ok(())
+}
+
+fn format_age(timestamp_ms: u64) -> String {
+    let now = timestamp_ms_now();
+    let elapsed = now.saturating_sub(timestamp_ms);
+    let secs = elapsed / 1000;
+    if secs < 60 {
+        "just now".into()
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86400)
+    }
+}
+
+fn timestamp_ms_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 async fn login_flow(provider_id: Option<String>) -> Result<()> {
@@ -521,11 +589,4 @@ fn logout_flow(provider_id: Option<String>) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn timestamp_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
 }
