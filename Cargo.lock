@@ -1052,6 +1052,7 @@ dependencies = [
 name = "mush-agent"
 version = "0.1.0"
 dependencies = [
+ "async-stream",
  "futures",
  "miette",
  "mush-ai",
