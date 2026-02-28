@@ -48,8 +48,11 @@ impl Widget for MessageList<'_> {
                 lines.push(Line::raw(""));
             }
             if !self.app.streaming_text.is_empty() {
-                for line in self.app.streaming_text.lines() {
-                    lines.push(Line::raw(format!("  {line}")));
+                let md_text = render_markdown(&self.app.streaming_text);
+                for line in md_text.lines {
+                    let mut spans: Vec<Span<'_>> = vec![Span::raw("  ")];
+                    spans.extend(line.spans);
+                    lines.push(Line::from(spans));
                 }
             }
             if self.app.streaming_text.is_empty() && self.app.streaming_thinking.is_empty() {
@@ -118,9 +121,12 @@ fn render_message(msg: &DisplayMessage, lines: &mut Vec<Line<'_>>) {
         ]));
     }
 
-    // main content
-    for line in msg.content.lines() {
-        lines.push(Line::raw(format!("  {line}")));
+    // main content (markdown rendered)
+    let md_text = render_markdown(&msg.content);
+    for line in md_text.lines {
+        let mut spans: Vec<Span<'_>> = vec![Span::raw("  ")];
+        spans.extend(line.spans);
+        lines.push(Line::from(spans));
     }
 
     // tool calls
@@ -151,6 +157,14 @@ fn render_message(msg: &DisplayMessage, lines: &mut Vec<Line<'_>>) {
                 .add_modifier(Modifier::DIM),
         ));
     }
+}
+
+/// render markdown text to styled ratatui Text
+fn render_markdown(source: &str) -> Text<'static> {
+    if source.is_empty() {
+        return Text::default();
+    }
+    crate::markdown::render(source)
 }
 
 #[cfg(test)]
