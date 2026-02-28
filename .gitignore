@@ -1,0 +1,13 @@
+# rust
+target/
+
+# nix
+result
+result-*
+
+# reference repos
+pi-mono/
+opencode/
+
+# direnv
+.direnv/

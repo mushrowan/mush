@@ -1,0 +1,27 @@
+[package]
+name = "mush-cli"
+description = "the mush binary"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "mush"
+path = "src/main.rs"
+
+[dependencies]
+mush-ai.workspace = true
+mush-agent.workspace = true
+mush-tools.workspace = true
+mush-session.workspace = true
+mush-ext.workspace = true
+mush-tui.workspace = true
+tokio.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+miette.workspace = true
+color-eyre.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true

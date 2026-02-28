@@ -1,0 +1,20 @@
+[package]
+name = "mush-tools"
+description = "built-in tools (read, write, edit, bash, grep, find, ls)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mush-ai.workspace = true
+mush-agent.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+miette.workspace = true
+ignore.workspace = true
+globset.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true

@@ -1,0 +1,19 @@
+[package]
+name = "mush-tui"
+description = "terminal UI for mush"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mush-ai.workspace = true
+mush-agent.workspace = true
+mush-session.workspace = true
+mush-ext.workspace = true
+tokio.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
