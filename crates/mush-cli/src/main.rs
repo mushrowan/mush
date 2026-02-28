@@ -1,5 +1,7 @@
 //! mush cli - minimal coding agent
 
+mod config;
+
 use clap::Parser;
 use color_eyre::eyre::{Result, eyre};
 use futures::StreamExt;
@@ -10,6 +12,7 @@ use mush_ai::providers;
 use mush_ai::registry::ApiRegistry;
 use mush_ai::stream::StreamEvent;
 use mush_ai::types::*;
+use mush_ext::loader;
 use mush_session::{Session, SessionStore};
 use mush_tools::builtin_tools;
 
@@ -82,8 +85,17 @@ async fn main() -> Result<()> {
 }
 
 async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
-    let model = models::find_model_by_id(&cli.model)
-        .ok_or_else(|| eyre!("unknown model: {}\n\navailable models:\n{}", cli.model, list_models()))?;
+    let cfg = config::load_config();
+
+    // CLI args override config file
+    let model_id = if cli.model != "claude-sonnet-4-20250514" {
+        cli.model.clone()
+    } else {
+        cfg.model.unwrap_or_else(|| cli.model.clone())
+    };
+
+    let model = models::find_model_by_id(&model_id)
+        .ok_or_else(|| eyre!("unknown model: {model_id}\n\navailable models:\n{}", list_models()))?;
 
     let mut registry = ApiRegistry::new();
     providers::register_builtins(&mut registry);
@@ -97,13 +109,30 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
         builtin_tools(cwd.clone())
     };
 
-    let system_prompt = cli.system.or_else(|| Some(default_system_prompt(&cwd)));
+    let system_prompt = cli.system
+        .or(cfg.system_prompt)
+        .unwrap_or_else(|| build_system_prompt(&cwd));
 
-    let options = StreamOptions {
-        thinking: if cli.thinking { Some(ThinkingLevel::High) } else { None },
-        max_tokens: cli.max_tokens,
+    let thinking = cli.thinking || cfg.thinking.unwrap_or(false);
+    let max_tokens = cli.max_tokens.or(cfg.max_tokens);
+
+    let mut options = StreamOptions {
+        thinking: if thinking { Some(ThinkingLevel::High) } else { None },
+        max_tokens,
         ..Default::default()
     };
+
+    // apply api key from config if not in env
+    if let Some(ref key) = cfg.api_keys.anthropic
+        && std::env::var("ANTHROPIC_API_KEY").is_err()
+    {
+        options.api_key = Some(key.clone());
+    }
+    if let Some(ref key) = cfg.api_keys.openrouter
+        && std::env::var("OPENROUTER_API_KEY").is_err()
+    {
+        options.api_key = Some(key.clone());
+    }
 
     // session: resume or create new
     let store = SessionStore::new(SessionStore::default_dir());
@@ -124,7 +153,7 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
 
     let config = AgentConfig {
         model: &model,
-        system_prompt,
+        system_prompt: Some(system_prompt),
         tools: &tools,
         registry: &registry,
         options,
@@ -240,9 +269,9 @@ fn summarise_tool_args(tool_name: &str, args: &serde_json::Value) -> String {
     }
 }
 
-fn default_system_prompt(cwd: &std::path::Path) -> String {
+fn build_system_prompt(cwd: &std::path::Path) -> String {
     let cwd_str = cwd.display();
-    format!(
+    let mut prompt = format!(
         "You are a coding assistant. You help users by reading files, executing commands, \
          editing code, and writing new files.\n\n\
          Current working directory: {cwd_str}\n\n\
@@ -252,7 +281,25 @@ fn default_system_prompt(cwd: &std::path::Path) -> String {
          - Use edit for precise changes (old text must match exactly)\n\
          - Use write only for new files or complete rewrites\n\
          - Be concise in your responses"
-    )
+    );
+
+    // append AGENTS.md context
+    let context = loader::discover_project_context(cwd);
+    for agents in &context.agents_md {
+        prompt.push_str("\n\n# Project Context\n\n");
+        prompt.push_str(&agents.content);
+    }
+
+    // append available skills
+    if !context.skills.is_empty() {
+        prompt.push_str("\n\nThe following skills are available. ");
+        prompt.push_str("Use the read tool to load a skill's file when the task matches its description.\n\n");
+        for skill in &context.skills {
+            prompt.push_str(&format!("- **{}**: {} ({})\n", skill.name, skill.description, skill.path.display()));
+        }
+    }
+
+    prompt
 }
 
 fn list_models() -> String {
