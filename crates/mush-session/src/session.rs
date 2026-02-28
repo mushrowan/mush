@@ -3,7 +3,7 @@
 //! a session holds the conversation history and metadata for a single
 //! agent interaction. sessions can be persisted, resumed, and branched.
 
-use mush_ai::types::Message;
+use mush_ai::types::{Message, Timestamp};
 use serde::{Deserialize, Serialize};
 
 /// unique session identifier
@@ -14,7 +14,7 @@ impl SessionId {
     pub fn new() -> Self {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let time = timestamp_ms();
+        let time = Timestamp::now().as_ms();
         let count = COUNTER.fetch_add(1, Ordering::Relaxed);
         let pid = std::process::id() as u64;
         let id = time
@@ -43,8 +43,8 @@ pub struct SessionMeta {
     pub id: SessionId,
     pub title: Option<String>,
     pub model_id: String,
-    pub created_at: u64,
-    pub updated_at: u64,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
     pub message_count: usize,
     pub cwd: String,
 }
@@ -58,7 +58,7 @@ pub struct Session {
 
 impl Session {
     pub fn new(model_id: &str, cwd: &str) -> Self {
-        let now = timestamp_ms();
+        let now = Timestamp::now();
         let id = SessionId::new();
         Self {
             meta: SessionMeta {
@@ -77,7 +77,7 @@ impl Session {
     pub fn push_message(&mut self, message: Message) {
         self.messages.push(message);
         self.meta.message_count = self.messages.len();
-        self.meta.updated_at = timestamp_ms();
+        self.meta.updated_at = Timestamp::now();
     }
 
     /// set title from first user message if not already set
@@ -108,13 +108,6 @@ impl Session {
     }
 }
 
-fn timestamp_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,7 +126,7 @@ mod tests {
         let mut session = Session::new("test-model", "/tmp");
         session.push_message(Message::User(UserMessage {
             content: UserContent::Text("hi".into()),
-            timestamp_ms: 0,
+            timestamp_ms: Timestamp(0),
         }));
         assert_eq!(session.meta.message_count, 1);
         assert_eq!(session.messages.len(), 1);
@@ -144,7 +137,7 @@ mod tests {
         let mut session = Session::new("test-model", "/tmp");
         session.push_message(Message::User(UserMessage {
             content: UserContent::Text("explain how rust traits work".into()),
-            timestamp_ms: 0,
+            timestamp_ms: Timestamp(0),
         }));
         session.auto_title();
         assert_eq!(
@@ -159,7 +152,7 @@ mod tests {
         let long_text = "a".repeat(200);
         session.push_message(Message::User(UserMessage {
             content: UserContent::Text(long_text),
-            timestamp_ms: 0,
+            timestamp_ms: Timestamp(0),
         }));
         session.auto_title();
         let title = session.meta.title.unwrap();
@@ -179,7 +172,7 @@ mod tests {
         let mut session = Session::new("test-model", "/tmp/project");
         session.push_message(Message::User(UserMessage {
             content: UserContent::Text("hello".into()),
-            timestamp_ms: 1000,
+            timestamp_ms: Timestamp(1000),
         }));
 
         let json = serde_json::to_string(&session).unwrap();

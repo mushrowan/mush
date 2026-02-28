@@ -215,7 +215,7 @@ fn build_request_body(
         };
 
     RequestBody {
-        model: model.id.clone(),
+        model: model.id.0.clone(),
         messages: converted_messages,
         max_tokens: effective_max_tokens,
         stream: true,
@@ -310,8 +310,8 @@ fn convert_messages(messages: &[Message]) -> Vec<RequestMessage> {
                         }
                         AssistantContentPart::ToolCall(tc) => Some(serde_json::json!({
                             "type": "tool_use",
-                            "id": tc.id,
-                            "name": tc.name,
+                            "id": tc.id.as_str(),
+                            "name": tc.name.as_str(),
                             "input": tc.arguments,
                         })),
                     })
@@ -348,7 +348,7 @@ fn convert_messages(messages: &[Message]) -> Vec<RequestMessage> {
                     role: "user".into(),
                     content: serde_json::json!([{
                         "type": "tool_result",
-                        "tool_use_id": tr.tool_call_id,
+                        "tool_use_id": tr.tool_call_id.as_str(),
                         "content": content_blocks,
                         "is_error": tr.is_error,
                     }]),
@@ -483,7 +483,7 @@ enum BlockState {
 
 fn parse_sse_stream(
     response: reqwest::Response,
-    model_id: String,
+    model_id: ModelId,
     provider_name: String,
     api: Api,
 ) -> EventStream {
@@ -498,7 +498,7 @@ fn parse_sse_stream(
             usage: Usage::default(),
             stop_reason: StopReason::Stop,
             error_message: None,
-            timestamp_ms: timestamp_ms(),
+            timestamp_ms: Timestamp::now(),
         };
 
         let mut blocks: Vec<BlockState> = Vec::new();
@@ -648,8 +648,8 @@ fn process_sse_event(
                     output
                         .content
                         .push(AssistantContentPart::ToolCall(ToolCall {
-                            id,
-                            name,
+                            id: ToolCallId::from(id),
+                            name: ToolName::from(name),
                             arguments: serde_json::Value::Object(Default::default()),
                         }));
                     events.push(StreamEvent::ToolCallStart { content_index });
@@ -780,13 +780,6 @@ fn map_stop_reason(reason: &str) -> StopReason {
     }
 }
 
-fn timestamp_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -819,7 +812,7 @@ mod tests {
     fn convert_simple_user_message() {
         let messages = vec![Message::User(UserMessage {
             content: UserContent::Text("hello".into()),
-            timestamp_ms: 0,
+            timestamp_ms: Timestamp(0),
         })];
 
         let converted = convert_messages(&messages);
@@ -837,7 +830,7 @@ mod tests {
                 text: "file contents".into(),
             })],
             is_error: false,
-            timestamp_ms: 0,
+            timestamp_ms: Timestamp(0),
         })];
 
         let converted = convert_messages(&messages);
@@ -868,7 +861,7 @@ mod tests {
             usage: Usage::default(),
             stop_reason: StopReason::ToolUse,
             error_message: None,
-            timestamp_ms: 0,
+            timestamp_ms: Timestamp(0),
         })];
 
         let converted = convert_messages(&messages);
@@ -1097,7 +1090,7 @@ mod tests {
             usage: Usage::default(),
             stop_reason: StopReason::Stop,
             error_message: None,
-            timestamp_ms: 0,
+            timestamp_ms: Timestamp(0),
         }
     }
 }

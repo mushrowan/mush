@@ -193,13 +193,13 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
             .load(&sid)
             .map_err(|e| eyre!("failed to load session: {e}"))?
     } else {
-        Session::new(&model.id, &cwd_str)
+        Session::new(model.id.as_str(), &cwd_str)
     };
 
     // add the user message
     let user_msg = Message::User(UserMessage {
         content: UserContent::Text(prompt),
-        timestamp_ms: timestamp_ms_now(),
+        timestamp_ms: Timestamp::now(),
     });
     session.push_message(user_msg);
     session.auto_title();
@@ -250,7 +250,7 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
                     println!();
                     in_text = false;
                 }
-                let args_summary = summarise_tool_args(&tool_name, &args);
+                let args_summary = summarise_tool_args(tool_name.as_str(), &args);
                 eprintln!("\x1b[36m▶ {tool_name}\x1b[0m {args_summary}");
             }
             AgentEvent::ToolExecEnd {
@@ -481,7 +481,7 @@ fn list_sessions_cmd() -> Result<()> {
 
     for meta in &sessions {
         let title = meta.title.as_deref().unwrap_or("(untitled)");
-        let age = format_age(meta.updated_at);
+        let age = format_age(meta.updated_at.as_ms());
         println!(
             "  \x1b[2m{}\x1b[0m  {} \x1b[2m({}, {} msgs, {})\x1b[0m",
             &meta.id.0[..8],
@@ -496,7 +496,7 @@ fn list_sessions_cmd() -> Result<()> {
 }
 
 fn format_age(timestamp_ms: u64) -> String {
-    let now = timestamp_ms_now();
+    let now = Timestamp::now().as_ms();
     let elapsed = now.saturating_sub(timestamp_ms);
     let secs = elapsed / 1000;
     if secs < 60 {
@@ -508,13 +508,6 @@ fn format_age(timestamp_ms: u64) -> String {
     } else {
         format!("{}d ago", secs / 86400)
     }
-}
-
-fn timestamp_ms_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
 }
 
 async fn login_flow(provider_id: Option<String>) -> Result<()> {

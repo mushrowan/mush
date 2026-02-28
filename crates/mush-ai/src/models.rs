@@ -147,12 +147,12 @@ pub fn all_models() -> Vec<Model> {
 pub fn find_model(provider: &Provider, id: &str) -> Option<Model> {
     all_models()
         .into_iter()
-        .find(|m| &m.provider == provider && m.id == id)
+        .find(|m| &m.provider == provider && m.id.as_str() == id)
 }
 
 /// find a model by id alone (first match across providers)
 pub fn find_model_by_id(id: &str) -> Option<Model> {
-    all_models().into_iter().find(|m| m.id == id)
+    all_models().into_iter().find(|m| m.id.as_str() == id)
 }
 
 /// list all models for a provider

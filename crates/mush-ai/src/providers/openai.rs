@@ -184,10 +184,10 @@ fn build_request_body(
                     .iter()
                     .filter_map(|p| match p {
                         AssistantContentPart::ToolCall(tc) => Some(serde_json::json!({
-                            "id": tc.id,
+                            "id": tc.id.as_str(),
                             "type": "function",
                             "function": {
-                                "name": tc.name,
+                                "name": tc.name.as_str(),
                                 "arguments": serde_json::to_string(&tc.arguments).unwrap_or_default(),
                             }
                         })),
@@ -214,7 +214,7 @@ fn build_request_body(
 
                 all_messages.push(serde_json::json!({
                     "role": "tool",
-                    "tool_call_id": tr.tool_call_id,
+                    "tool_call_id": tr.tool_call_id.as_str(),
                     "content": text,
                 }));
             }
@@ -251,7 +251,7 @@ fn build_request_body(
     };
 
     RequestBody {
-        model: model.id.clone(),
+        model: model.id.0.clone(),
         messages: all_messages,
         stream: true,
         max_completion_tokens: options.max_tokens.or(Some(model.max_output_tokens)),
@@ -346,7 +346,7 @@ enum CurrentBlock {
 
 fn parse_sse_stream(
     response: reqwest::Response,
-    model_id: String,
+    model_id: ModelId,
     provider_name: String,
     api: Api,
 ) -> EventStream {
@@ -359,7 +359,7 @@ fn parse_sse_stream(
             usage: Usage::default(),
             stop_reason: StopReason::Stop,
             error_message: None,
-            timestamp_ms: timestamp_ms(),
+            timestamp_ms: Timestamp::now(),
         };
 
         let mut current: Option<CurrentBlock> = None;
@@ -552,8 +552,8 @@ fn process_chunk(
                 output
                     .content
                     .push(AssistantContentPart::ToolCall(ToolCall {
-                        id,
-                        name,
+                        id: ToolCallId::from(id),
+                        name: ToolName::from(name),
                         arguments: serde_json::Value::Object(Default::default()),
                     }));
                 events.push(StreamEvent::ToolCallStart { content_index });
@@ -644,13 +644,6 @@ fn map_stop_reason(reason: &str) -> StopReason {
     }
 }
 
-fn timestamp_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -674,13 +667,13 @@ mod tests {
             &Some("you are helpful".into()),
             &[Message::User(UserMessage {
                 content: UserContent::Text("hi".into()),
-                timestamp_ms: 0,
+                timestamp_ms: Timestamp(0),
             })],
             &[],
             &options,
         );
 
-        assert_eq!(body.model, model.id);
+        assert_eq!(body.model, model.id.as_str());
         assert!(body.stream);
         // system + user = 2 messages
         assert_eq!(body.messages.len(), 2);
@@ -741,7 +734,7 @@ mod tests {
                 usage: Usage::default(),
                 stop_reason: StopReason::ToolUse,
                 error_message: None,
-                timestamp_ms: 0,
+                timestamp_ms: Timestamp(0),
             }),
             Message::ToolResult(ToolResultMessage {
                 tool_call_id: "tc_1".into(),
@@ -750,7 +743,7 @@ mod tests {
                     text: "file contents here".into(),
                 })],
                 is_error: false,
-                timestamp_ms: 0,
+                timestamp_ms: Timestamp(0),
             }),
         ];
 
@@ -942,7 +935,7 @@ mod tests {
             usage: Usage::default(),
             stop_reason: StopReason::Stop,
             error_message: None,
-            timestamp_ms: 0,
+            timestamp_ms: Timestamp(0),
         }
     }
 }

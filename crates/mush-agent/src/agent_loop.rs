@@ -25,14 +25,14 @@ pub enum AgentEvent {
     MessageEnd { message: AssistantMessage },
     /// tool execution starting
     ToolExecStart {
-        tool_call_id: String,
-        tool_name: String,
+        tool_call_id: ToolCallId,
+        tool_name: ToolName,
         args: serde_json::Value,
     },
     /// tool execution finished
     ToolExecEnd {
-        tool_call_id: String,
-        tool_name: String,
+        tool_call_id: ToolCallId,
+        tool_name: ToolName,
         result: ToolResult,
     },
     /// turn finished
@@ -178,7 +178,7 @@ pub fn agent_loop(
                     tool_name: tc.name.clone(),
                     content: result.content,
                     is_error: result.is_error,
-                    timestamp_ms: timestamp_ms(),
+                    timestamp_ms: Timestamp::now(),
                 }));
             }
 
@@ -198,18 +198,11 @@ pub fn agent_loop(
 }
 
 async fn execute_tool(tools: &[Box<dyn AgentTool>], tool_call: &ToolCall) -> ToolResult {
-    let tool = tools.iter().find(|t| t.name() == tool_call.name);
+    let tool = tools.iter().find(|t| t.name() == tool_call.name.as_str());
     match tool {
         Some(t) => t.execute(tool_call.arguments.clone()).await,
         None => ToolResult::error(format!("tool not found: {}", tool_call.name)),
     }
-}
-
-fn timestamp_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
 }
 
 #[cfg(test)]
@@ -300,7 +293,7 @@ mod tests {
 
         let messages = vec![Message::User(UserMessage {
             content: UserContent::Text("hi".into()),
-            timestamp_ms: 0,
+            timestamp_ms: Timestamp(0),
         })];
 
         let rt = tokio::runtime::Runtime::new().unwrap();

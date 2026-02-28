@@ -42,7 +42,7 @@ pub async fn run_tui(
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(tui_config.model.id.clone());
+    let mut app = App::new(tui_config.model.id.0.clone());
     let mut pending_prompt: Option<String> = None;
     let mut conversation: Vec<Message> = Vec::new();
 
@@ -54,7 +54,7 @@ pub async fn run_tui(
         if let Some(prompt) = pending_prompt.take() {
             conversation.push(Message::User(UserMessage {
                 content: UserContent::Text(prompt),
-                timestamp_ms: timestamp_ms(),
+                timestamp_ms: Timestamp::now(),
             }));
 
             let config = AgentConfig {
@@ -158,13 +158,13 @@ fn handle_agent_event(
         AgentEvent::ToolExecStart {
             tool_name, args, ..
         } => {
-            let summary = summarise_tool_args(tool_name, args);
-            app.start_tool(tool_name, &summary);
+            let summary = summarise_tool_args(tool_name.as_str(), args);
+            app.start_tool(tool_name.as_str(), &summary);
         }
         AgentEvent::ToolExecEnd {
             tool_name, result, ..
         } => {
-            app.end_tool(tool_name, result.is_error);
+            app.end_tool(tool_name.as_str(), result.is_error);
         }
         AgentEvent::TurnStart { .. } if !app.is_streaming => {
             app.start_streaming();
@@ -225,11 +225,4 @@ pub fn summarise_tool_args(tool_name: &str, args: &serde_json::Value) -> String 
         "ls" => args["path"].as_str().unwrap_or(".").to_string(),
         _ => format!("{args}"),
     }
-}
-
-fn timestamp_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
 }

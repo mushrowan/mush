@@ -61,7 +61,7 @@ mod tests {
             usage: Usage::default(),
             stop_reason: StopReason::Stop,
             error_message: None,
-            timestamp_ms: 0,
+            timestamp_ms: Timestamp(0),
         };
 
         let _start = StreamEvent::Start {

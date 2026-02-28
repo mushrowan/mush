@@ -135,7 +135,7 @@ mod tests {
         let mut session = Session::new("test-model", "/tmp");
         session.push_message(Message::User(UserMessage {
             content: UserContent::Text("hello".into()),
-            timestamp_ms: 1000,
+            timestamp_ms: Timestamp(1000),
         }));
 
         store.save(&session).unwrap();
