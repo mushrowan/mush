@@ -46,6 +46,15 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
                 return None;
             }
             let text = app.take_input();
+
+            // check for slash commands
+            if let Some(rest) = text.strip_prefix('/') {
+                let parts: Vec<&str> = rest.splitn(2, ' ').collect();
+                let name = parts[0].to_string();
+                let args = parts.get(1).unwrap_or(&"").to_string();
+                return Some(AppEvent::SlashCommand { name, args });
+            }
+
             return Some(AppEvent::UserSubmit { text });
         }
 
@@ -225,6 +234,36 @@ mod tests {
         );
         assert!(event.is_none());
         assert_eq!(app.input, "a\n");
+    }
+
+    #[test]
+    fn slash_command_parsed() {
+        let mut app = App::new("test".into());
+        app.input = "/help".into();
+        app.cursor = 5;
+        let event = handle_key(&mut app, key(KeyCode::Enter));
+        match event {
+            Some(AppEvent::SlashCommand { name, args }) => {
+                assert_eq!(name, "help");
+                assert!(args.is_empty());
+            }
+            other => panic!("expected SlashCommand, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slash_command_with_args() {
+        let mut app = App::new("test".into());
+        app.input = "/review src/main.rs".into();
+        app.cursor = 19;
+        let event = handle_key(&mut app, key(KeyCode::Enter));
+        match event {
+            Some(AppEvent::SlashCommand { name, args }) => {
+                assert_eq!(name, "review");
+                assert_eq!(args, "src/main.rs");
+            }
+            other => panic!("expected SlashCommand, got {other:?}"),
+        }
     }
 
     #[test]

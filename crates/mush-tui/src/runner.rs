@@ -32,6 +32,8 @@ pub struct TuiConfig {
     pub max_turns: usize,
     /// initial conversation history (for session resume)
     pub initial_messages: Vec<Message>,
+    /// colour theme
+    pub theme: crate::theme::Theme,
 }
 
 /// run the interactive TUI
@@ -212,8 +214,21 @@ pub async fn run_tui(
                     app.start_streaming();
                     pending_prompt = Some(expanded);
                 }
+                AppEvent::SlashCommand { name, args } => {
+                    if let Some(prompt) =
+                        handle_slash_command(&mut app, &mut conversation, &name, &args)
+                    {
+                        // slash command produced a prompt to send
+                        app.start_streaming();
+                        pending_prompt = Some(prompt);
+                    }
+                }
                 _ => {}
             }
+        }
+
+        if app.should_quit {
+            break;
         }
 
         draw(&mut terminal, &app)?;
@@ -284,6 +299,67 @@ fn handle_agent_event(
             app.is_streaming = false;
         }
         _ => {}
+    }
+}
+
+/// handle a slash command, returning Some(prompt) if it should trigger the agent
+fn handle_slash_command(
+    app: &mut App,
+    conversation: &mut Vec<Message>,
+    name: &str,
+    args: &str,
+) -> Option<String> {
+    match name {
+        "help" => {
+            let mut help = String::from("available commands:\n");
+            help.push_str("  /help     - show this message\n");
+            help.push_str("  /clear    - clear conversation\n");
+            help.push_str("  /model    - show current model\n");
+            help.push_str("  /cost     - show session cost\n");
+            help.push_str("  /quit     - exit mush\n");
+            help.push_str("\ntip: type a prompt template name (e.g. /review file.rs) to expand it");
+            app.push_system_message(help);
+            None
+        }
+        "clear" => {
+            app.clear_messages();
+            conversation.clear();
+            app.status = Some("conversation cleared".into());
+            None
+        }
+        "model" => {
+            app.push_system_message(format!("model: {}", app.model_id));
+            None
+        }
+        "cost" => {
+            app.push_system_message(format!(
+                "session: {}tok, ${:.4}",
+                app.total_tokens, app.total_cost
+            ));
+            None
+        }
+        "quit" | "exit" | "q" => {
+            app.should_quit = true;
+            None
+        }
+        other => {
+            // try as a prompt template
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let templates = mush_ext::discover_templates(&cwd);
+            if let Some(tmpl) = mush_ext::find_template(&templates, other) {
+                let arg_list: Vec<&str> = if args.is_empty() {
+                    vec![]
+                } else {
+                    args.split_whitespace().collect()
+                };
+                let expanded = mush_ext::substitute_args(&tmpl.content, &arg_list);
+                app.push_user_message(expanded.clone());
+                Some(expanded)
+            } else {
+                app.push_system_message(format!("unknown command: /{other}  (try /help)"));
+                None
+            }
+        }
     }
 }
 

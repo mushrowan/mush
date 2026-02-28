@@ -12,6 +12,11 @@ pub enum AppEvent {
     UserSubmit {
         text: String,
     },
+    /// user executed a slash command
+    SlashCommand {
+        name: String,
+        args: String,
+    },
     /// user requested quit
     Quit,
     /// user requested abort of current operation
@@ -258,6 +263,29 @@ impl App {
     /// move cursor to end
     pub fn cursor_end(&mut self) {
         self.cursor = self.input.len();
+    }
+
+    /// clear all messages (for /clear command)
+    pub fn clear_messages(&mut self) {
+        self.messages.clear();
+        self.streaming_text.clear();
+        self.streaming_thinking.clear();
+        self.scroll_offset = 0;
+        self.total_cost = 0.0;
+        self.total_tokens = 0;
+    }
+
+    /// push a system message to the display
+    pub fn push_system_message(&mut self, text: String) {
+        self.messages.push(DisplayMessage {
+            role: MessageRole::System,
+            content: text,
+            tool_calls: vec![],
+            thinking: None,
+            thinking_expanded: false,
+            usage: None,
+            cost: None,
+        });
     }
 
     /// toggle thinking visibility for the last assistant message that has thinking
