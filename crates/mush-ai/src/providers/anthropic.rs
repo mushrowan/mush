@@ -3,11 +3,13 @@
 //! streams responses via SSE from the anthropic messages endpoint.
 //! supports extended thinking, tool use, and image inputs.
 
-use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, CONTENT_TYPE};
+use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 
 use crate::env::{anthropic_api_key, is_oauth_token};
-use crate::registry::{ApiProvider, EventStream, LlmContext, ProviderError, StreamResult, ToolDefinition};
+use crate::registry::{
+    ApiProvider, EventStream, LlmContext, ProviderError, StreamResult, ToolDefinition,
+};
 use crate::stream::StreamEvent;
 use crate::types::*;
 
@@ -21,12 +23,7 @@ impl ApiProvider for AnthropicProvider {
         Api::AnthropicMessages
     }
 
-    fn stream(
-        &self,
-        model: &Model,
-        context: &LlmContext,
-        options: &StreamOptions,
-    ) -> StreamResult {
+    fn stream(&self, model: &Model, context: &LlmContext, options: &StreamOptions) -> StreamResult {
         let model = model.clone();
         let context_messages = context.messages.clone();
         let system_prompt = context.system_prompt.clone();
@@ -55,13 +52,12 @@ impl ApiProvider for AnthropicProvider {
             let mut headers = HeaderMap::new();
             headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
             headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
-            headers.insert(
-                "anthropic-version",
-                HeaderValue::from_static(API_VERSION),
-            );
+            headers.insert("anthropic-version", HeaderValue::from_static(API_VERSION));
             headers.insert(
                 "anthropic-beta",
-                HeaderValue::from_static("fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14"),
+                HeaderValue::from_static(
+                    "fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14",
+                ),
             );
 
             if is_oauth {
@@ -211,11 +207,12 @@ fn build_request_body(
     };
 
     // when thinking is enabled, max_tokens must include the thinking budget
-    let effective_max_tokens = if let Some(ThinkingConfig::Enabled { budget_tokens, .. }) = &thinking {
-        max_tokens.max(*budget_tokens + 1024)
-    } else {
-        max_tokens
-    };
+    let effective_max_tokens =
+        if let Some(ThinkingConfig::Enabled { budget_tokens, .. }) = &thinking {
+            max_tokens.max(*budget_tokens + 1024)
+        } else {
+            max_tokens
+        };
 
     RequestBody {
         model: model.id.clone(),
@@ -311,14 +308,12 @@ fn convert_messages(messages: &[Message]) -> Vec<RequestMessage> {
                                 }))
                             }
                         }
-                        AssistantContentPart::ToolCall(tc) => {
-                            Some(serde_json::json!({
-                                "type": "tool_use",
-                                "id": tc.id,
-                                "name": tc.name,
-                                "input": tc.arguments,
-                            }))
-                        }
+                        AssistantContentPart::ToolCall(tc) => Some(serde_json::json!({
+                            "type": "tool_use",
+                            "id": tc.id,
+                            "name": tc.name,
+                            "input": tc.arguments,
+                        })),
                     })
                     .collect();
 
@@ -470,9 +465,20 @@ struct ErrorData {
 /// tracks state for a content block being streamed
 #[derive(Debug, Clone)]
 enum BlockState {
-    Text { text: String },
-    Thinking { thinking: String, signature: Option<String>, #[allow(dead_code)] redacted: bool },
-    ToolCall { id: String, name: String, json_buf: String },
+    Text {
+        text: String,
+    },
+    Thinking {
+        thinking: String,
+        signature: Option<String>,
+        #[allow(dead_code)]
+        redacted: bool,
+    },
+    ToolCall {
+        id: String,
+        name: String,
+        json_buf: String,
+    },
 }
 
 fn parse_sse_stream(
@@ -590,12 +596,17 @@ fn process_sse_event(
                 partial: output.clone(),
             });
         }
-        SseEvent::ContentBlockStart { index: _, content_block } => {
+        SseEvent::ContentBlockStart {
+            index: _,
+            content_block,
+        } => {
             let content_index = blocks.len();
             match content_block {
                 ContentBlockData::Text { text } => {
                     blocks.push(BlockState::Text { text: text.clone() });
-                    output.content.push(AssistantContentPart::Text(TextContent { text }));
+                    output
+                        .content
+                        .push(AssistantContentPart::Text(TextContent { text }));
                     events.push(StreamEvent::TextStart { content_index });
                 }
                 ContentBlockData::Thinking { thinking } => {
@@ -604,11 +615,13 @@ fn process_sse_event(
                         signature: None,
                         redacted: false,
                     });
-                    output.content.push(AssistantContentPart::Thinking(ThinkingContent {
-                        thinking,
-                        signature: None,
-                        redacted: false,
-                    }));
+                    output
+                        .content
+                        .push(AssistantContentPart::Thinking(ThinkingContent {
+                            thinking,
+                            signature: None,
+                            redacted: false,
+                        }));
                     events.push(StreamEvent::ThinkingStart { content_index });
                 }
                 ContentBlockData::RedactedThinking { data } => {
@@ -617,11 +630,13 @@ fn process_sse_event(
                         signature: Some(data.clone()),
                         redacted: true,
                     });
-                    output.content.push(AssistantContentPart::Thinking(ThinkingContent {
-                        thinking: "[reasoning redacted]".into(),
-                        signature: Some(data),
-                        redacted: true,
-                    }));
+                    output
+                        .content
+                        .push(AssistantContentPart::Thinking(ThinkingContent {
+                            thinking: "[reasoning redacted]".into(),
+                            signature: Some(data),
+                            redacted: true,
+                        }));
                     events.push(StreamEvent::ThinkingStart { content_index });
                 }
                 ContentBlockData::ToolUse { id, name } => {
@@ -630,11 +645,13 @@ fn process_sse_event(
                         name: name.clone(),
                         json_buf: String::new(),
                     });
-                    output.content.push(AssistantContentPart::ToolCall(ToolCall {
-                        id,
-                        name,
-                        arguments: serde_json::Value::Object(Default::default()),
-                    }));
+                    output
+                        .content
+                        .push(AssistantContentPart::ToolCall(ToolCall {
+                            id,
+                            name,
+                            arguments: serde_json::Value::Object(Default::default()),
+                        }));
                     events.push(StreamEvent::ToolCallStart { content_index });
                 }
             }
@@ -934,29 +951,44 @@ mod tests {
         let events = process_sse_event(
             SseEvent::ContentBlockStart {
                 index: 0,
-                content_block: ContentBlockData::Text { text: String::new() },
+                content_block: ContentBlockData::Text {
+                    text: String::new(),
+                },
             },
             &mut output,
             &mut blocks,
         );
-        assert!(matches!(events[0], StreamEvent::TextStart { content_index: 0 }));
+        assert!(matches!(
+            events[0],
+            StreamEvent::TextStart { content_index: 0 }
+        ));
 
         // delta
         let events = process_sse_event(
             SseEvent::ContentBlockDelta {
                 index: 0,
-                delta: DeltaData::TextDelta { text: "hello ".into() },
+                delta: DeltaData::TextDelta {
+                    text: "hello ".into(),
+                },
             },
             &mut output,
             &mut blocks,
         );
-        assert!(matches!(events[0], StreamEvent::TextDelta { content_index: 0, .. }));
+        assert!(matches!(
+            events[0],
+            StreamEvent::TextDelta {
+                content_index: 0,
+                ..
+            }
+        ));
 
         // another delta
         process_sse_event(
             SseEvent::ContentBlockDelta {
                 index: 0,
-                delta: DeltaData::TextDelta { text: "world".into() },
+                delta: DeltaData::TextDelta {
+                    text: "world".into(),
+                },
             },
             &mut output,
             &mut blocks,
@@ -1026,7 +1058,9 @@ mod tests {
         );
 
         match &events[0] {
-            StreamEvent::ToolCallEnd { name, arguments, .. } => {
+            StreamEvent::ToolCallEnd {
+                name, arguments, ..
+            } => {
                 assert_eq!(name, "read");
                 assert_eq!(arguments["path"], "foo.rs");
             }

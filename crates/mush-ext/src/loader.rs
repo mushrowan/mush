@@ -90,7 +90,9 @@ pub fn parse_skills_from_agents_md(content: &str) -> Vec<Skill> {
     let mut pos = 0;
     while let Some(skill_start) = block[pos..].find("<skill>") {
         let skill_start = pos + skill_start;
-        let Some(skill_end) = block[skill_start..].find("</skill>") else { break };
+        let Some(skill_end) = block[skill_start..].find("</skill>") else {
+            break;
+        };
         let skill_end = skill_start + skill_end + "</skill>".len();
         let skill_block = &block[skill_start..skill_end];
 

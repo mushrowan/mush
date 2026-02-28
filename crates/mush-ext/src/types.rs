@@ -63,7 +63,10 @@ pub trait Extension: Send + Sync {
         messages: Vec<Message>,
         system_prompt: Option<String>,
     ) -> TransformResult {
-        TransformResult { messages, system_prompt }
+        TransformResult {
+            messages,
+            system_prompt,
+        }
     }
 
     /// called after the agent completes a turn
@@ -131,11 +134,7 @@ mod tests {
             session_id: None,
         };
 
-        let result = ext.on_before_call(
-            &ctx,
-            vec![],
-            Some("original prompt".into()),
-        );
+        let result = ext.on_before_call(&ctx, vec![], Some("original prompt".into()));
         assert_eq!(result.system_prompt.as_deref(), Some("original prompt"));
         assert!(result.messages.is_empty());
     }

@@ -56,8 +56,8 @@ impl Widget for InputBox<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     #[test]
     fn input_box_renders_empty() {

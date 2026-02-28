@@ -18,8 +18,12 @@ impl GrepTool {
 }
 
 impl AgentTool for GrepTool {
-    fn name(&self) -> &str { "grep" }
-    fn label(&self) -> &str { "Grep" }
+    fn name(&self) -> &str {
+        "grep"
+    }
+    fn label(&self) -> &str {
+        "Grep"
+    }
     fn description(&self) -> &str {
         "Search file contents using ripgrep. Respects .gitignore. \
          Returns matching lines with file paths and line numbers."
@@ -59,7 +63,11 @@ impl AgentTool for GrepTool {
                 .as_str()
                 .map(|p| {
                     let path = std::path::Path::new(p);
-                    if path.is_absolute() { path.to_path_buf() } else { self.cwd.join(p) }
+                    if path.is_absolute() {
+                        path.to_path_buf()
+                    } else {
+                        self.cwd.join(p)
+                    }
                 })
                 .unwrap_or_else(|| self.cwd.clone());
 
@@ -128,14 +136,13 @@ mod tests {
     #[tokio::test]
     async fn grep_finds_pattern() {
         let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("test.rs"), "fn main() {\n    println!(\"hello\");\n}").unwrap();
+        fs::write(
+            dir.path().join("test.rs"),
+            "fn main() {\n    println!(\"hello\");\n}",
+        )
+        .unwrap();
 
-        let result = run_rg(
-            &dir.path().to_path_buf(),
-            "println",
-            dir.path(),
-            None,
-        ).await;
+        let result = run_rg(&dir.path().to_path_buf(), "println", dir.path(), None).await;
 
         assert!(!result.is_error);
         let text = extract_text(&result);
@@ -152,7 +159,8 @@ mod tests {
             "nonexistent_pattern_xyz",
             dir.path(),
             None,
-        ).await;
+        )
+        .await;
 
         let text = extract_text(&result);
         assert!(text.contains("no matches"));
@@ -164,12 +172,7 @@ mod tests {
         fs::write(dir.path().join("code.rs"), "fn hello()").unwrap();
         fs::write(dir.path().join("data.txt"), "fn hello()").unwrap();
 
-        let result = run_rg(
-            &dir.path().to_path_buf(),
-            "hello",
-            dir.path(),
-            Some("*.rs"),
-        ).await;
+        let result = run_rg(&dir.path().to_path_buf(), "hello", dir.path(), Some("*.rs")).await;
 
         let text = extract_text(&result);
         assert!(text.contains("code.rs"));

@@ -147,7 +147,10 @@ mod tests {
             timestamp_ms: 0,
         }));
         session.auto_title();
-        assert_eq!(session.meta.title.as_deref(), Some("explain how rust traits work"));
+        assert_eq!(
+            session.meta.title.as_deref(),
+            Some("explain how rust traits work")
+        );
     }
 
     #[test]

@@ -20,8 +20,12 @@ impl BashTool {
 }
 
 impl AgentTool for BashTool {
-    fn name(&self) -> &str { "bash" }
-    fn label(&self) -> &str { "Bash" }
+    fn name(&self) -> &str {
+        "bash"
+    }
+    fn label(&self) -> &str {
+        "Bash"
+    }
     fn description(&self) -> &str {
         "Execute a bash command in the current working directory. Returns stdout and stderr. \
          Output is truncated to last 2000 lines or 50KB (whichever is hit first). \
@@ -54,9 +58,7 @@ impl AgentTool for BashTool {
                 return ToolResult::error("missing required parameter: command");
             };
 
-            let timeout = args["timeout"]
-                .as_u64()
-                .unwrap_or(DEFAULT_TIMEOUT_SECS);
+            let timeout = args["timeout"].as_u64().unwrap_or(DEFAULT_TIMEOUT_SECS);
 
             run_command(&self.cwd, command, timeout).await
         })
@@ -125,7 +127,9 @@ async fn run_command(cwd: &PathBuf, command: &str, timeout_secs: u64) -> ToolRes
 
 async fn read_pipe(pipe: Option<tokio::process::ChildStdout>) -> String {
     use tokio::io::AsyncReadExt;
-    let Some(mut pipe) = pipe else { return String::new() };
+    let Some(mut pipe) = pipe else {
+        return String::new();
+    };
     let mut buf = Vec::new();
     let _ = pipe.read_to_end(&mut buf).await;
     String::from_utf8_lossy(&buf).to_string()
@@ -134,7 +138,9 @@ async fn read_pipe(pipe: Option<tokio::process::ChildStdout>) -> String {
 // overload for stderr pipe type
 async fn read_stderr_pipe(pipe: Option<tokio::process::ChildStderr>) -> String {
     use tokio::io::AsyncReadExt;
-    let Some(mut pipe) = pipe else { return String::new() };
+    let Some(mut pipe) = pipe else {
+        return String::new();
+    };
     let mut buf = Vec::new();
     let _ = pipe.read_to_end(&mut buf).await;
     String::from_utf8_lossy(&buf).to_string()

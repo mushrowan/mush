@@ -15,8 +15,12 @@ impl WriteTool {
 }
 
 impl AgentTool for WriteTool {
-    fn name(&self) -> &str { "write" }
-    fn label(&self) -> &str { "Write" }
+    fn name(&self) -> &str {
+        "write"
+    }
+    fn label(&self) -> &str {
+        "Write"
+    }
     fn description(&self) -> &str {
         "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. \
          Automatically creates parent directories."
@@ -65,9 +69,10 @@ impl AgentTool for WriteTool {
 fn write_file(path: &Path, content: &str) -> ToolResult {
     // create parent dirs
     if let Some(parent) = path.parent()
-        && let Err(e) = std::fs::create_dir_all(parent) {
-            return ToolResult::error(format!("failed to create directories: {e}"));
-        }
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        return ToolResult::error(format!("failed to create directories: {e}"));
+    }
 
     match std::fs::write(path, content) {
         Ok(()) => ToolResult::text(format!(

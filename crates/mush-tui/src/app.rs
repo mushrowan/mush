@@ -9,7 +9,9 @@ use mush_ai::types::*;
 #[derive(Debug, Clone)]
 pub enum AppEvent {
     /// user submitted a prompt
-    UserSubmit { text: String },
+    UserSubmit {
+        text: String,
+    },
     /// user requested quit
     Quit,
     /// user requested abort of current operation
@@ -152,7 +154,11 @@ impl App {
         if let Some(last) = self.messages.last_mut()
             && let Some(tc) = last.tool_calls.iter_mut().rfind(|t| t.name == name)
         {
-            tc.status = if is_error { ToolCallStatus::Error } else { ToolCallStatus::Done };
+            tc.status = if is_error {
+                ToolCallStatus::Error
+            } else {
+                ToolCallStatus::Done
+            };
         }
     }
 
@@ -321,11 +327,17 @@ mod tests {
         app.start_tool("bash", "ls -la");
         assert_eq!(app.active_tool.as_deref(), Some("bash"));
         assert_eq!(app.messages.last().unwrap().tool_calls.len(), 1);
-        assert_eq!(app.messages.last().unwrap().tool_calls[0].status, ToolCallStatus::Running);
+        assert_eq!(
+            app.messages.last().unwrap().tool_calls[0].status,
+            ToolCallStatus::Running
+        );
 
         app.end_tool("bash", false);
         assert!(app.active_tool.is_none());
-        assert_eq!(app.messages.last().unwrap().tool_calls[0].status, ToolCallStatus::Done);
+        assert_eq!(
+            app.messages.last().unwrap().tool_calls[0].status,
+            ToolCallStatus::Done
+        );
     }
 
     #[test]
@@ -376,14 +388,24 @@ mod tests {
         app.start_streaming();
         app.push_text_delta("a");
         app.finish_streaming(
-            Some(Usage { input_tokens: 100, output_tokens: 50, cache_read_tokens: 0, cache_write_tokens: 0 }),
+            Some(Usage {
+                input_tokens: 100,
+                output_tokens: 50,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            }),
             Some(0.005),
         );
 
         app.start_streaming();
         app.push_text_delta("b");
         app.finish_streaming(
-            Some(Usage { input_tokens: 200, output_tokens: 100, cache_read_tokens: 0, cache_write_tokens: 0 }),
+            Some(Usage {
+                input_tokens: 200,
+                output_tokens: 100,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            }),
             Some(0.01),
         );
 

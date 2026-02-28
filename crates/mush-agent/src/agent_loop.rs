@@ -24,11 +24,22 @@ pub enum AgentEvent {
     /// assistant message streaming finished
     MessageEnd { message: AssistantMessage },
     /// tool execution starting
-    ToolExecStart { tool_call_id: String, tool_name: String, args: serde_json::Value },
+    ToolExecStart {
+        tool_call_id: String,
+        tool_name: String,
+        args: serde_json::Value,
+    },
     /// tool execution finished
-    ToolExecEnd { tool_call_id: String, tool_name: String, result: ToolResult },
+    ToolExecEnd {
+        tool_call_id: String,
+        tool_name: String,
+        result: ToolResult,
+    },
     /// turn finished
-    TurnEnd { turn_index: usize, message: AssistantMessage },
+    TurnEnd {
+        turn_index: usize,
+        message: AssistantMessage,
+    },
     /// agent loop finished
     AgentEnd,
     /// error occurred
@@ -97,11 +108,9 @@ pub fn agent_loop(
 
             while let Some(event) = event_stream.next().await {
                 match &event {
-                    StreamEvent::Start { partial } => {
-                        if !started {
-                            yield AgentEvent::MessageStart { message: partial.clone() };
-                            started = true;
-                        }
+                    StreamEvent::Start { partial } if !started => {
+                        yield AgentEvent::MessageStart { message: partial.clone() };
+                        started = true;
                     }
                     StreamEvent::Done { message, .. } => {
                         final_message = Some(message.clone());
@@ -200,9 +209,15 @@ mod tests {
     struct CounterTool;
 
     impl AgentTool for CounterTool {
-        fn name(&self) -> &str { "counter" }
-        fn label(&self) -> &str { "Counter" }
-        fn description(&self) -> &str { "returns a count" }
+        fn name(&self) -> &str {
+            "counter"
+        }
+        fn label(&self) -> &str {
+            "Counter"
+        }
+        fn description(&self) -> &str {
+            "returns a count"
+        }
         fn parameters_schema(&self) -> serde_json::Value {
             serde_json::json!({"type": "object", "properties": {}})
         }
@@ -251,7 +266,12 @@ mod tests {
             base_url: "https://api.anthropic.com".into(),
             reasoning: false,
             input: vec![InputModality::Text],
-            cost: ModelCost { input: 0.0, output: 0.0, cache_read: 0.0, cache_write: 0.0 },
+            cost: ModelCost {
+                input: 0.0,
+                output: 0.0,
+                cache_read: 0.0,
+                cache_write: 0.0,
+            },
             context_window: 200_000,
             max_output_tokens: 8192,
         };

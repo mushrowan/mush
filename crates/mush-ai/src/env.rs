@@ -21,7 +21,11 @@ pub fn anthropic_api_key() -> Option<String> {
     std::env::var("ANTHROPIC_OAUTH_TOKEN")
         .ok()
         .filter(|v| !v.is_empty())
-        .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok().filter(|v| !v.is_empty()))
+        .or_else(|| {
+            std::env::var("ANTHROPIC_API_KEY")
+                .ok()
+                .filter(|v| !v.is_empty())
+        })
 }
 
 /// whether a key looks like an anthropic oauth token

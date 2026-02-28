@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 
-use crate::types::{Api, Model, StreamOptions};
 use crate::stream::StreamEvent;
+use crate::types::{Api, Model, StreamOptions};
 
 /// a boxed stream of events from an LLM provider
 pub type EventStream = Pin<Box<dyn futures::Stream<Item = StreamEvent> + Send>>;
@@ -54,12 +54,7 @@ pub struct ToolDefinition {
 pub trait ApiProvider: Send + Sync {
     fn api(&self) -> Api;
 
-    fn stream(
-        &self,
-        model: &Model,
-        context: &LlmContext,
-        options: &StreamOptions,
-    ) -> StreamResult;
+    fn stream(&self, model: &Model, context: &LlmContext, options: &StreamOptions) -> StreamResult;
 }
 
 /// registry holding all available api providers

@@ -18,8 +18,12 @@ impl EditTool {
 }
 
 impl AgentTool for EditTool {
-    fn name(&self) -> &str { "edit" }
-    fn label(&self) -> &str { "Edit" }
+    fn name(&self) -> &str {
+        "edit"
+    }
+    fn label(&self) -> &str {
+        "Edit"
+    }
     fn description(&self) -> &str {
         "Edit a file by replacing exact text. The oldText must match exactly (including whitespace). \
          Use this for precise, surgical edits."

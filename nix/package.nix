@@ -1,6 +1,8 @@
 {
   craneLib,
   src,
+  ripgrep,
+  fd,
 }: let
   commonArgs = {
     inherit src;
@@ -16,6 +18,7 @@ in {
   package = craneLib.buildPackage (commonArgs
     // {
       inherit cargoArtifacts;
+      nativeBuildInputs = [ripgrep fd];
     });
 
   clippy = craneLib.cargoClippy (commonArgs
@@ -27,6 +30,7 @@ in {
   test = craneLib.cargoNextest (commonArgs
     // {
       inherit cargoArtifacts;
+      nativeBuildInputs = [ripgrep fd];
     });
 
   fmt = craneLib.cargoFmt {

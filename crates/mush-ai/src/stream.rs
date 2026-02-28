@@ -6,46 +6,26 @@ use crate::types::{AssistantMessage, StopReason};
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
     /// stream started, initial partial message
-    Start {
-        partial: AssistantMessage,
-    },
+    Start { partial: AssistantMessage },
     /// new text content block started
-    TextStart {
-        content_index: usize,
-    },
+    TextStart { content_index: usize },
     /// incremental text
-    TextDelta {
-        content_index: usize,
-        delta: String,
-    },
+    TextDelta { content_index: usize, delta: String },
     /// text content block finished
-    TextEnd {
-        content_index: usize,
-        text: String,
-    },
+    TextEnd { content_index: usize, text: String },
     /// thinking block started
-    ThinkingStart {
-        content_index: usize,
-    },
+    ThinkingStart { content_index: usize },
     /// incremental thinking
-    ThinkingDelta {
-        content_index: usize,
-        delta: String,
-    },
+    ThinkingDelta { content_index: usize, delta: String },
     /// thinking block finished
     ThinkingEnd {
         content_index: usize,
         thinking: String,
     },
     /// tool call started
-    ToolCallStart {
-        content_index: usize,
-    },
+    ToolCallStart { content_index: usize },
     /// incremental tool call arguments
-    ToolCallDelta {
-        content_index: usize,
-        delta: String,
-    },
+    ToolCallDelta { content_index: usize, delta: String },
     /// tool call finished
     ToolCallEnd {
         content_index: usize,

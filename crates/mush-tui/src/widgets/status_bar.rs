@@ -21,7 +21,9 @@ impl<'a> StatusBar<'a> {
 
 impl Widget for StatusBar<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let dim = Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM);
+        let dim = Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::DIM);
 
         let mut spans = vec![
             Span::styled(" ", dim),
@@ -36,10 +38,7 @@ impl Widget for StatusBar<'_> {
         }
 
         if self.app.total_cost > 0.0 {
-            spans.push(Span::styled(
-                format!(" | ${:.4}", self.app.total_cost),
-                dim,
-            ));
+            spans.push(Span::styled(format!(" | ${:.4}", self.app.total_cost), dim));
         }
 
         if let Some(ref status) = self.app.status {
@@ -62,8 +61,8 @@ impl Widget for StatusBar<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     #[test]
     fn status_bar_shows_model() {

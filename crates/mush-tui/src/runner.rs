@@ -2,21 +2,21 @@
 
 use std::io;
 
+use crossterm::ExecutableCommand;
 use crossterm::event::{self, Event};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use crossterm::ExecutableCommand;
 use futures::StreamExt;
-use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 
+use mush_agent::tool::AgentTool;
 use mush_agent::{AgentConfig, AgentEvent, agent_loop};
 use mush_ai::models;
 use mush_ai::registry::ApiRegistry;
 use mush_ai::stream::StreamEvent;
 use mush_ai::types::*;
-use mush_agent::tool::AgentTool;
 
 use crate::app::{App, AppEvent};
 use crate::input::handle_key;
@@ -153,17 +153,19 @@ fn handle_agent_event(
             app.finish_streaming(Some(message.usage), Some(cost.total()));
             conversation.push(Message::Assistant(message.clone()));
         }
-        AgentEvent::ToolExecStart { tool_name, args, .. } => {
+        AgentEvent::ToolExecStart {
+            tool_name, args, ..
+        } => {
             let summary = summarise_tool_args(tool_name, args);
             app.start_tool(tool_name, &summary);
         }
-        AgentEvent::ToolExecEnd { tool_name, result, .. } => {
+        AgentEvent::ToolExecEnd {
+            tool_name, result, ..
+        } => {
             app.end_tool(tool_name, result.is_error);
         }
-        AgentEvent::TurnStart { .. } => {
-            if !app.is_streaming {
-                app.start_streaming();
-            }
+        AgentEvent::TurnStart { .. } if !app.is_streaming => {
+            app.start_streaming();
         }
         AgentEvent::Error { error } => {
             app.is_streaming = false;
@@ -176,10 +178,7 @@ fn handle_agent_event(
     }
 }
 
-fn draw(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    app: &App,
-) -> io::Result<()> {
+fn draw(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &App) -> io::Result<()> {
     terminal.draw(|frame| {
         let area = frame.area();
         let ui = Ui::new(app);
@@ -192,9 +191,7 @@ fn draw(
     Ok(())
 }
 
-fn cleanup(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-) -> io::Result<()> {
+fn cleanup(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
     disable_raw_mode()?;
     io::stdout().execute(LeaveAlternateScreen)?;
     terminal.show_cursor()?;
@@ -207,7 +204,11 @@ pub fn summarise_tool_args(tool_name: &str, args: &serde_json::Value) -> String 
         "read" | "write" | "edit" => args["path"].as_str().unwrap_or("").to_string(),
         "bash" => {
             let cmd = args["command"].as_str().unwrap_or("");
-            if cmd.len() > 60 { format!("{}...", &cmd[..57]) } else { cmd.to_string() }
+            if cmd.len() > 60 {
+                format!("{}...", &cmd[..57])
+            } else {
+                cmd.to_string()
+            }
         }
         "grep" => {
             let pattern = args["pattern"].as_str().unwrap_or("");

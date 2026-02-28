@@ -18,8 +18,12 @@ impl FindTool {
 }
 
 impl AgentTool for FindTool {
-    fn name(&self) -> &str { "find" }
-    fn label(&self) -> &str { "Find" }
+    fn name(&self) -> &str {
+        "find"
+    }
+    fn label(&self) -> &str {
+        "Find"
+    }
     fn description(&self) -> &str {
         "Search for files and directories by name using fd. Respects .gitignore. \
          Returns matching paths relative to the search directory."
@@ -60,7 +64,11 @@ impl AgentTool for FindTool {
                 .as_str()
                 .map(|p| {
                     let path = std::path::Path::new(p);
-                    if path.is_absolute() { path.to_path_buf() } else { self.cwd.join(p) }
+                    if path.is_absolute() {
+                        path.to_path_buf()
+                    } else {
+                        self.cwd.join(p)
+                    }
                 })
                 .unwrap_or_else(|| self.cwd.clone());
 
@@ -133,7 +141,8 @@ mod tests {
             r"\.rs$",
             dir.path(),
             Some("file"),
-        ).await;
+        )
+        .await;
 
         let text = extract_text(&result);
         assert!(text.contains("main.rs"));
@@ -151,7 +160,8 @@ mod tests {
             "nonexistent_xyz",
             dir.path(),
             None,
-        ).await;
+        )
+        .await;
 
         let text = extract_text(&result);
         assert!(text.contains("no files found"));

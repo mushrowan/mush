@@ -29,7 +29,9 @@ impl HookRunner {
         let mut merged = DiscoveredResources::default();
         for ext in &self.extensions {
             let resources = ext.on_discover(ctx);
-            merged.system_prompt_additions.extend(resources.system_prompt_additions);
+            merged
+                .system_prompt_additions
+                .extend(resources.system_prompt_additions);
             merged.tools.extend(resources.tools);
         }
         merged
@@ -42,7 +44,10 @@ impl HookRunner {
         messages: Vec<Message>,
         system_prompt: Option<String>,
     ) -> TransformResult {
-        let mut result = TransformResult { messages, system_prompt };
+        let mut result = TransformResult {
+            messages,
+            system_prompt,
+        };
         for ext in &self.extensions {
             result = ext.on_before_call(ctx, result.messages, result.system_prompt);
         }
@@ -74,8 +79,8 @@ impl Default for HookRunner {
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct PromptExt {
         meta: ExtensionMeta,
@@ -83,7 +88,9 @@ mod tests {
     }
 
     impl Extension for PromptExt {
-        fn meta(&self) -> &ExtensionMeta { &self.meta }
+        fn meta(&self) -> &ExtensionMeta {
+            &self.meta
+        }
 
         fn on_discover(&self, _ctx: &ExtensionContext) -> DiscoveredResources {
             DiscoveredResources {
@@ -99,7 +106,9 @@ mod tests {
     }
 
     impl Extension for CounterExt {
-        fn meta(&self) -> &ExtensionMeta { &self.meta }
+        fn meta(&self) -> &ExtensionMeta {
+            &self.meta
+        }
 
         fn on_turn_complete(&self, _ctx: &ExtensionContext, _messages: &[Message]) {
             self.turn_count.fetch_add(1, Ordering::Relaxed);
@@ -160,7 +169,9 @@ mod tests {
         }
 
         impl Extension for PrefixExt {
-            fn meta(&self) -> &ExtensionMeta { &self.meta }
+            fn meta(&self) -> &ExtensionMeta {
+                &self.meta
+            }
 
             fn on_before_call(
                 &self,
@@ -169,7 +180,10 @@ mod tests {
                 system_prompt: Option<String>,
             ) -> TransformResult {
                 let prompt = system_prompt.map(|p| format!("{}\n{}", self.prefix, p));
-                TransformResult { messages, system_prompt: prompt }
+                TransformResult {
+                    messages,
+                    system_prompt: prompt,
+                }
             }
         }
 
@@ -183,11 +197,7 @@ mod tests {
             prefix: "[B]".into(),
         }));
 
-        let result = runner.before_call(
-            &test_ctx(),
-            vec![],
-            Some("base".into()),
-        );
+        let result = runner.before_call(&test_ctx(), vec![], Some("base".into()));
         // [B] should wrap [A] which wraps base
         let prompt = result.system_prompt.unwrap();
         assert!(prompt.starts_with("[B]"));
@@ -198,11 +208,7 @@ mod tests {
     #[test]
     fn empty_runner_passes_through() {
         let runner = HookRunner::new();
-        let result = runner.before_call(
-            &test_ctx(),
-            vec![],
-            Some("unchanged".into()),
-        );
+        let result = runner.before_call(&test_ctx(), vec![], Some("unchanged".into()));
         assert_eq!(result.system_prompt.as_deref(), Some("unchanged"));
     }
 }

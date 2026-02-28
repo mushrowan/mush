@@ -31,13 +31,18 @@ impl Widget for MessageList<'_> {
         // streaming content
         if self.app.is_streaming {
             if !self.app.streaming_thinking.is_empty() {
-                lines.push(Line::from(vec![
-                    Span::styled("  thinking ", Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)),
-                ]));
+                lines.push(Line::from(vec![Span::styled(
+                    "  thinking ",
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::DIM),
+                )]));
                 for line in self.app.streaming_thinking.lines() {
                     lines.push(Line::styled(
                         format!("  {line}"),
-                        Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::DIM),
                     ));
                 }
                 lines.push(Line::raw(""));
@@ -77,8 +82,18 @@ impl Widget for MessageList<'_> {
 
 fn render_message(msg: &DisplayMessage, lines: &mut Vec<Line<'_>>) {
     let (label, label_style) = match msg.role {
-        MessageRole::User => ("you", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-        MessageRole::Assistant => ("mush", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
+        MessageRole::User => (
+            "you",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+        MessageRole::Assistant => (
+            "mush",
+            Style::default()
+                .fg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
+        ),
         MessageRole::System => ("system", Style::default().fg(Color::Yellow)),
     };
 
@@ -94,7 +109,12 @@ fn render_message(msg: &DisplayMessage, lines: &mut Vec<Line<'_>>) {
         };
         lines.push(Line::from(vec![
             Span::styled("  💭 ", Style::default().fg(Color::DarkGray)),
-            Span::styled(trimmed, Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)),
+            Span::styled(
+                trimmed,
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::DIM),
+            ),
         ]));
     }
 
@@ -126,7 +146,9 @@ fn render_message(msg: &DisplayMessage, lines: &mut Vec<Line<'_>>) {
                 "  in:{} out:{} cache:{}{}",
                 usage.input_tokens, usage.output_tokens, usage.cache_read_tokens, cost_str
             ),
-            Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
         ));
     }
 }
@@ -134,8 +156,8 @@ fn render_message(msg: &DisplayMessage, lines: &mut Vec<Line<'_>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     fn render_app(app: &App, width: u16, height: u16) -> Buffer {
         let backend = TestBackend::new(width, height);
@@ -226,7 +248,9 @@ mod tests {
             role: MessageRole::Assistant,
             content: "the answer is 42".into(),
             tool_calls: vec![],
-            thinking: Some("first i need to consider the question deeply and think about it".into()),
+            thinking: Some(
+                "first i need to consider the question deeply and think about it".into(),
+            ),
             usage: None,
             cost: None,
         });

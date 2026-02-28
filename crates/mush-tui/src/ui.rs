@@ -38,9 +38,9 @@ pub fn layout(area: Rect) -> LayoutRegions {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(1),     // messages
-            Constraint::Length(3),   // input
-            Constraint::Length(1),   // status bar
+            Constraint::Min(1),    // messages
+            Constraint::Length(3), // input
+            Constraint::Length(1), // status bar
         ])
         .split(area);
 
@@ -63,8 +63,8 @@ impl Widget for Ui<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     #[test]
     fn full_layout_renders() {

@@ -217,7 +217,11 @@ mod tests {
         let anthropic = models_for_provider(&Provider::Anthropic);
         let openrouter = models_for_provider(&Provider::OpenRouter);
         assert!(anthropic.iter().all(|m| m.provider == Provider::Anthropic));
-        assert!(openrouter.iter().all(|m| m.provider == Provider::OpenRouter));
+        assert!(
+            openrouter
+                .iter()
+                .all(|m| m.provider == Provider::OpenRouter)
+        );
     }
 
     #[test]

@@ -3,11 +3,13 @@
 //! supports the standard /v1/chat/completions endpoint used by openai,
 //! openrouter, xai, groq, and many other providers.
 
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 
 use crate::env::env_api_key;
-use crate::registry::{ApiProvider, EventStream, LlmContext, ProviderError, StreamResult, ToolDefinition};
+use crate::registry::{
+    ApiProvider, EventStream, LlmContext, ProviderError, StreamResult, ToolDefinition,
+};
 use crate::stream::StreamEvent;
 use crate::types::*;
 
@@ -18,12 +20,7 @@ impl ApiProvider for OpenaiCompletionsProvider {
         Api::OpenaiCompletions
     }
 
-    fn stream(
-        &self,
-        model: &Model,
-        context: &LlmContext,
-        options: &StreamOptions,
-    ) -> StreamResult {
+    fn stream(&self, model: &Model, context: &LlmContext, options: &StreamOptions) -> StreamResult {
         let model = model.clone();
         let context_messages = context.messages.clone();
         let system_prompt = context.system_prompt.clone();
@@ -38,7 +35,8 @@ impl ApiProvider for OpenaiCompletionsProvider {
                 .ok_or_else(|| ProviderError::MissingApiKey(model.provider.to_string()))?;
 
             let client = reqwest::Client::new();
-            let body = build_request_body(&model, &system_prompt, &context_messages, &tools, &options);
+            let body =
+                build_request_body(&model, &system_prompt, &context_messages, &tools, &options);
 
             let mut headers = HeaderMap::new();
             headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -51,7 +49,12 @@ impl ApiProvider for OpenaiCompletionsProvider {
             let base_url = &model.base_url;
             let url = format!("{base_url}/chat/completions");
 
-            let response = client.post(&url).headers(headers).json(&body).send().await?;
+            let response = client
+                .post(&url)
+                .headers(headers)
+                .json(&body)
+                .send()
+                .await?;
 
             if !response.status().is_success() {
                 let status = response.status();
@@ -162,7 +165,9 @@ fn build_request_body(
                     .content
                     .iter()
                     .filter_map(|p| match p {
-                        AssistantContentPart::Text(t) if !t.text.is_empty() => Some(t.text.as_str()),
+                        AssistantContentPart::Text(t) if !t.text.is_empty() => {
+                            Some(t.text.as_str())
+                        }
                         _ => None,
                     })
                     .collect();
@@ -250,10 +255,16 @@ fn build_request_body(
         messages: all_messages,
         stream: true,
         max_completion_tokens: options.max_tokens.or(Some(model.max_output_tokens)),
-        temperature: if reasoning_effort.is_none() { options.temperature } else { None },
+        temperature: if reasoning_effort.is_none() {
+            options.temperature
+        } else {
+            None
+        },
         tools: converted_tools,
         reasoning_effort,
-        stream_options: StreamOpts { include_usage: true },
+        stream_options: StreamOpts {
+            include_usage: true,
+        },
     }
 }
 
@@ -320,9 +331,17 @@ struct PromptTokenDetails {
 /// what kind of content block we're currently accumulating
 #[derive(Debug)]
 enum CurrentBlock {
-    Text { text: String },
-    Thinking { text: String },
-    ToolCall { id: String, name: String, args_buf: String },
+    Text {
+        text: String,
+    },
+    Thinking {
+        text: String,
+    },
+    ToolCall {
+        id: String,
+        name: String,
+        args_buf: String,
+    },
 }
 
 fn parse_sse_stream(
@@ -422,7 +441,10 @@ fn process_chunk(
 
     // handle usage
     if let Some(usage) = chunk.usage {
-        let cached = usage.prompt_tokens_details.as_ref().map_or(0, |d| d.cached_tokens);
+        let cached = usage
+            .prompt_tokens_details
+            .as_ref()
+            .map_or(0, |d| d.cached_tokens);
         output.usage = Usage {
             input_tokens: usage.prompt_tokens.saturating_sub(cached),
             output_tokens: usage.completion_tokens,
@@ -441,67 +463,73 @@ fn process_chunk(
 
     // handle reasoning/thinking content
     if let Some(reasoning) = choice.delta.reasoning_content
-        && !reasoning.is_empty() {
-            match current {
-                Some(CurrentBlock::Thinking { text }) => {
-                    text.push_str(&reasoning);
-                    let idx = output.content.len().saturating_sub(1);
-                    if let Some(AssistantContentPart::Thinking(tc)) = output.content.get_mut(idx) {
-                        tc.thinking.push_str(&reasoning);
-                    }
-                    events.push(StreamEvent::ThinkingDelta {
-                        content_index: idx,
-                        delta: reasoning,
-                    });
+        && !reasoning.is_empty()
+    {
+        match current {
+            Some(CurrentBlock::Thinking { text }) => {
+                text.push_str(&reasoning);
+                let idx = output.content.len().saturating_sub(1);
+                if let Some(AssistantContentPart::Thinking(tc)) = output.content.get_mut(idx) {
+                    tc.thinking.push_str(&reasoning);
                 }
-                _ => {
-                    let idx = finish_block_events(current, output, &mut events);
-                    let content_index = idx.unwrap_or(output.content.len());
-                    *current = Some(CurrentBlock::Thinking { text: reasoning.clone() });
-                    output.content.push(AssistantContentPart::Thinking(ThinkingContent {
+                events.push(StreamEvent::ThinkingDelta {
+                    content_index: idx,
+                    delta: reasoning,
+                });
+            }
+            _ => {
+                let idx = finish_block_events(current, output, &mut events);
+                let content_index = idx.unwrap_or(output.content.len());
+                *current = Some(CurrentBlock::Thinking {
+                    text: reasoning.clone(),
+                });
+                output
+                    .content
+                    .push(AssistantContentPart::Thinking(ThinkingContent {
                         thinking: reasoning.clone(),
                         signature: None,
                         redacted: false,
                     }));
-                    events.push(StreamEvent::ThinkingStart { content_index });
-                    events.push(StreamEvent::ThinkingDelta {
-                        content_index,
-                        delta: reasoning,
-                    });
-                }
+                events.push(StreamEvent::ThinkingStart { content_index });
+                events.push(StreamEvent::ThinkingDelta {
+                    content_index,
+                    delta: reasoning,
+                });
             }
         }
+    }
 
     // handle text content
     if let Some(text) = choice.delta.content
-        && !text.is_empty() {
-            match current {
-                Some(CurrentBlock::Text { text: buf }) => {
-                    buf.push_str(&text);
-                    let idx = output.content.len().saturating_sub(1);
-                    if let Some(AssistantContentPart::Text(tc)) = output.content.get_mut(idx) {
-                        tc.text.push_str(&text);
-                    }
-                    events.push(StreamEvent::TextDelta {
-                        content_index: idx,
-                        delta: text,
-                    });
+        && !text.is_empty()
+    {
+        match current {
+            Some(CurrentBlock::Text { text: buf }) => {
+                buf.push_str(&text);
+                let idx = output.content.len().saturating_sub(1);
+                if let Some(AssistantContentPart::Text(tc)) = output.content.get_mut(idx) {
+                    tc.text.push_str(&text);
                 }
-                _ => {
-                    let idx = finish_block_events(current, output, &mut events);
-                    let content_index = idx.unwrap_or(output.content.len());
-                    *current = Some(CurrentBlock::Text { text: text.clone() });
-                    output.content.push(AssistantContentPart::Text(TextContent {
-                        text: text.clone(),
-                    }));
-                    events.push(StreamEvent::TextStart { content_index });
-                    events.push(StreamEvent::TextDelta {
-                        content_index,
-                        delta: text,
-                    });
-                }
+                events.push(StreamEvent::TextDelta {
+                    content_index: idx,
+                    delta: text,
+                });
+            }
+            _ => {
+                let idx = finish_block_events(current, output, &mut events);
+                let content_index = idx.unwrap_or(output.content.len());
+                *current = Some(CurrentBlock::Text { text: text.clone() });
+                output.content.push(AssistantContentPart::Text(TextContent {
+                    text: text.clone(),
+                }));
+                events.push(StreamEvent::TextStart { content_index });
+                events.push(StreamEvent::TextDelta {
+                    content_index,
+                    delta: text,
+                });
             }
         }
+    }
 
     // handle tool calls
     if let Some(tool_calls) = choice.delta.tool_calls {
@@ -510,36 +538,43 @@ fn process_chunk(
             if new_tool {
                 finish_block_events(current, output, &mut events);
                 let id = tc.id.unwrap_or_default();
-                let name = tc.function.as_ref().and_then(|f| f.name.clone()).unwrap_or_default();
+                let name = tc
+                    .function
+                    .as_ref()
+                    .and_then(|f| f.name.clone())
+                    .unwrap_or_default();
                 let content_index = output.content.len();
                 *current = Some(CurrentBlock::ToolCall {
                     id: id.clone(),
                     name: name.clone(),
                     args_buf: String::new(),
                 });
-                output.content.push(AssistantContentPart::ToolCall(ToolCall {
-                    id,
-                    name,
-                    arguments: serde_json::Value::Object(Default::default()),
-                }));
+                output
+                    .content
+                    .push(AssistantContentPart::ToolCall(ToolCall {
+                        id,
+                        name,
+                        arguments: serde_json::Value::Object(Default::default()),
+                    }));
                 events.push(StreamEvent::ToolCallStart { content_index });
             }
 
             if let Some(func) = tc.function
                 && let Some(args) = func.arguments
-                    && let Some(CurrentBlock::ToolCall { args_buf, .. }) = current.as_mut() {
-                        args_buf.push_str(&args);
-                        let idx = output.content.len().saturating_sub(1);
-                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(args_buf)
-                            && let Some(AssistantContentPart::ToolCall(tc)) = output.content.get_mut(idx)
-                        {
-                            tc.arguments = parsed;
-                        }
-                        events.push(StreamEvent::ToolCallDelta {
-                            content_index: idx,
-                            delta: args,
-                        });
-                    }
+                && let Some(CurrentBlock::ToolCall { args_buf, .. }) = current.as_mut()
+            {
+                args_buf.push_str(&args);
+                let idx = output.content.len().saturating_sub(1);
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(args_buf)
+                    && let Some(AssistantContentPart::ToolCall(tc)) = output.content.get_mut(idx)
+                {
+                    tc.arguments = parsed;
+                }
+                events.push(StreamEvent::ToolCallDelta {
+                    content_index: idx,
+                    delta: args,
+                });
+            }
         }
     }
 
@@ -556,7 +591,10 @@ fn finish_block_events(
     let content_index = output.content.len().saturating_sub(1);
     match block {
         CurrentBlock::Text { text } => {
-            events.push(StreamEvent::TextEnd { content_index, text });
+            events.push(StreamEvent::TextEnd {
+                content_index,
+                text,
+            });
         }
         CurrentBlock::Thinking { text } => {
             events.push(StreamEvent::ThinkingEnd {
@@ -567,7 +605,8 @@ fn finish_block_events(
         CurrentBlock::ToolCall { id, name, args_buf } => {
             let arguments = serde_json::from_str(&args_buf)
                 .unwrap_or(serde_json::Value::Object(Default::default()));
-            if let Some(AssistantContentPart::ToolCall(tc)) = output.content.get_mut(content_index) {
+            if let Some(AssistantContentPart::ToolCall(tc)) = output.content.get_mut(content_index)
+            {
                 tc.arguments = arguments.clone();
             }
             events.push(StreamEvent::ToolCallEnd {
@@ -584,14 +623,15 @@ fn finish_block_events(
 /// finish the current block without producing events (for stream end)
 fn finish_block(current: &mut Option<CurrentBlock>, output: &mut AssistantMessage) {
     if let Some(block) = current.take()
-        && let CurrentBlock::ToolCall { args_buf, .. } = &block {
-            let idx = output.content.len().saturating_sub(1);
-            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(args_buf)
-                && let Some(AssistantContentPart::ToolCall(tc)) = output.content.get_mut(idx)
-            {
-                tc.arguments = parsed;
-            }
+        && let CurrentBlock::ToolCall { args_buf, .. } = &block
+    {
+        let idx = output.content.len().saturating_sub(1);
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(args_buf)
+            && let Some(AssistantContentPart::ToolCall(tc)) = output.content.get_mut(idx)
+        {
+            tc.arguments = parsed;
         }
+    }
 }
 
 fn map_stop_reason(reason: &str) -> StopReason {
@@ -777,8 +817,16 @@ mod tests {
         };
         let events = process_chunk(chunk, &mut output, &mut current);
         // should have ThinkingEnd, TextStart, TextDelta
-        assert!(events.iter().any(|e| matches!(e, StreamEvent::ThinkingEnd { .. })));
-        assert!(events.iter().any(|e| matches!(e, StreamEvent::TextStart { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, StreamEvent::ThinkingEnd { .. }))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, StreamEvent::TextStart { .. }))
+        );
         assert_eq!(output.content.len(), 2);
     }
 
@@ -805,7 +853,11 @@ mod tests {
             usage: None,
         };
         let events = process_chunk(chunk, &mut output, &mut current);
-        assert!(events.iter().any(|e| matches!(e, StreamEvent::ToolCallStart { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, StreamEvent::ToolCallStart { .. }))
+        );
 
         // tool call arg continuation
         let chunk = ChunkResponse {
@@ -831,7 +883,9 @@ mod tests {
         finish_block_events(&mut current, &mut output, &mut events);
 
         match &events[0] {
-            StreamEvent::ToolCallEnd { name, arguments, .. } => {
+            StreamEvent::ToolCallEnd {
+                name, arguments, ..
+            } => {
                 assert_eq!(name, "read");
                 assert_eq!(arguments["path"], "foo.rs");
             }
@@ -849,9 +903,7 @@ mod tests {
             usage: Some(ChunkUsage {
                 prompt_tokens: 150,
                 completion_tokens: 50,
-                prompt_tokens_details: Some(PromptTokenDetails {
-                    cached_tokens: 100,
-                }),
+                prompt_tokens_details: Some(PromptTokenDetails { cached_tokens: 100 }),
             }),
         };
 

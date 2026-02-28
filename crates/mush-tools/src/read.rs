@@ -20,8 +20,12 @@ impl ReadTool {
 }
 
 impl AgentTool for ReadTool {
-    fn name(&self) -> &str { "read" }
-    fn label(&self) -> &str { "Read" }
+    fn name(&self) -> &str {
+        "read"
+    }
+    fn label(&self) -> &str {
+        "Read"
+    }
     fn description(&self) -> &str {
         "Read the contents of a file. Supports text files and images (jpg, png, gif, webp). \
          For text files, output is truncated to 2000 lines or 50KB (whichever is hit first). \
@@ -216,7 +220,10 @@ mod tests {
     fn read_with_limit() {
         let dir = temp_dir();
         let file = dir.path().join("test.txt");
-        let content: String = (1..=100).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let content: String = (1..=100)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         fs::write(&file, &content).unwrap();
 
         let result = read_file(&file, None, Some(5));

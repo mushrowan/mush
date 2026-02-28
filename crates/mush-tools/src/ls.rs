@@ -15,8 +15,12 @@ impl LsTool {
 }
 
 impl AgentTool for LsTool {
-    fn name(&self) -> &str { "ls" }
-    fn label(&self) -> &str { "List" }
+    fn name(&self) -> &str {
+        "ls"
+    }
+    fn label(&self) -> &str {
+        "List"
+    }
     fn description(&self) -> &str {
         "List files and directories. Shows file sizes and types. \
          Defaults to the current working directory."
@@ -43,7 +47,11 @@ impl AgentTool for LsTool {
                 .as_str()
                 .map(|p| {
                     let path = Path::new(p);
-                    if path.is_absolute() { path.to_path_buf() } else { self.cwd.join(p) }
+                    if path.is_absolute() {
+                        path.to_path_buf()
+                    } else {
+                        self.cwd.join(p)
+                    }
                 })
                 .unwrap_or_else(|| self.cwd.clone());
 
@@ -62,9 +70,7 @@ fn list_dir(path: &Path) -> ToolResult {
     }
 
     let mut entries = match std::fs::read_dir(path) {
-        Ok(rd) => rd
-            .filter_map(|e| e.ok())
-            .collect::<Vec<_>>(),
+        Ok(rd) => rd.filter_map(|e| e.ok()).collect::<Vec<_>>(),
         Err(e) => return ToolResult::error(format!("failed to read directory: {e}")),
     };
 
@@ -72,7 +78,9 @@ fn list_dir(path: &Path) -> ToolResult {
     entries.sort_by(|a, b| {
         let a_dir = a.file_type().map(|t| t.is_dir()).unwrap_or(false);
         let b_dir = b.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        b_dir.cmp(&a_dir).then_with(|| a.file_name().cmp(&b.file_name()))
+        b_dir
+            .cmp(&a_dir)
+            .then_with(|| a.file_name().cmp(&b.file_name()))
     });
 
     if entries.is_empty() {

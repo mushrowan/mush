@@ -57,6 +57,7 @@
 
         craneOutputs = import ./nix/package.nix {
           inherit craneLib src;
+          inherit (pkgs) ripgrep fd;
         };
       in {
         packages.default = craneOutputs.package;

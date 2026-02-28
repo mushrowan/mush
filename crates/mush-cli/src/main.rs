@@ -91,8 +91,12 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
         cfg.model.unwrap_or_else(|| cli.model.clone())
     };
 
-    let model = models::find_model_by_id(&model_id)
-        .ok_or_else(|| eyre!("unknown model: {model_id}\n\navailable models:\n{}", list_models()))?;
+    let model = models::find_model_by_id(&model_id).ok_or_else(|| {
+        eyre!(
+            "unknown model: {model_id}\n\navailable models:\n{}",
+            list_models()
+        )
+    })?;
 
     let mut registry = ApiRegistry::new();
     providers::register_builtins(&mut registry);
@@ -106,7 +110,8 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
         builtin_tools(cwd.clone())
     };
 
-    let system_prompt = cli.system
+    let system_prompt = cli
+        .system
         .or(cfg.system_prompt)
         .unwrap_or_else(|| build_system_prompt(&cwd));
 
@@ -114,7 +119,11 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
     let max_tokens = cli.max_tokens.or(cfg.max_tokens);
 
     let mut options = StreamOptions {
-        thinking: if thinking { Some(ThinkingLevel::High) } else { None },
+        thinking: if thinking {
+            Some(ThinkingLevel::High)
+        } else {
+            None
+        },
         max_tokens,
         ..Default::default()
     };
@@ -135,7 +144,9 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
     let store = SessionStore::new(SessionStore::default_dir());
     let mut session = if let Some(ref id) = cli.resume {
         let sid = mush_session::SessionId(id.clone());
-        store.load(&sid).map_err(|e| eyre!("failed to load session: {e}"))?
+        store
+            .load(&sid)
+            .map_err(|e| eyre!("failed to load session: {e}"))?
     } else {
         Session::new(&model.id, &cwd_str)
     };
@@ -183,7 +194,9 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
                 }
                 _ => {}
             },
-            AgentEvent::ToolExecStart { tool_name, args, .. } => {
+            AgentEvent::ToolExecStart {
+                tool_name, args, ..
+            } => {
                 if in_text {
                     println!();
                     in_text = false;
@@ -191,7 +204,9 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
                 let args_summary = summarise_tool_args(&tool_name, &args);
                 eprintln!("\x1b[36m▶ {tool_name}\x1b[0m {args_summary}");
             }
-            AgentEvent::ToolExecEnd { tool_name, result, .. } => {
+            AgentEvent::ToolExecEnd {
+                tool_name, result, ..
+            } => {
                 if result.is_error {
                     eprintln!("\x1b[31m✗ {tool_name} failed\x1b[0m");
                 } else {
@@ -247,23 +262,36 @@ async fn tui_mode(cli: Cli) -> Result<()> {
         cfg.model.unwrap_or_else(|| cli.model.clone())
     };
 
-    let model = models::find_model_by_id(&model_id)
-        .ok_or_else(|| eyre!("unknown model: {model_id}\n\navailable models:\n{}", list_models()))?;
+    let model = models::find_model_by_id(&model_id).ok_or_else(|| {
+        eyre!(
+            "unknown model: {model_id}\n\navailable models:\n{}",
+            list_models()
+        )
+    })?;
 
     let mut registry = ApiRegistry::new();
     providers::register_builtins(&mut registry);
 
     let cwd = std::env::current_dir()?;
-    let tools = if cli.no_tools { vec![] } else { builtin_tools(cwd.clone()) };
+    let tools = if cli.no_tools {
+        vec![]
+    } else {
+        builtin_tools(cwd.clone())
+    };
 
-    let system_prompt = cli.system
+    let system_prompt = cli
+        .system
         .or(cfg.system_prompt)
         .unwrap_or_else(|| build_system_prompt(&cwd));
 
     let thinking = cli.thinking || cfg.thinking.unwrap_or(false);
 
     let mut options = StreamOptions {
-        thinking: if thinking { Some(ThinkingLevel::High) } else { None },
+        thinking: if thinking {
+            Some(ThinkingLevel::High)
+        } else {
+            None
+        },
         max_tokens: cli.max_tokens.or(cfg.max_tokens),
         ..Default::default()
     };
@@ -294,9 +322,7 @@ async fn tui_mode(cli: Cli) -> Result<()> {
 
 fn summarise_tool_args(tool_name: &str, args: &serde_json::Value) -> String {
     match tool_name {
-        "read" | "write" | "edit" => {
-            args["path"].as_str().unwrap_or("").to_string()
-        }
+        "read" | "write" | "edit" => args["path"].as_str().unwrap_or("").to_string(),
         "bash" => {
             let cmd = args["command"].as_str().unwrap_or("");
             if cmd.len() > 80 {
@@ -310,12 +336,8 @@ fn summarise_tool_args(tool_name: &str, args: &serde_json::Value) -> String {
             let path = args["path"].as_str().unwrap_or(".");
             format!("{pattern} in {path}")
         }
-        "find" => {
-            args["pattern"].as_str().unwrap_or("").to_string()
-        }
-        "ls" => {
-            args["path"].as_str().unwrap_or(".").to_string()
-        }
+        "find" => args["pattern"].as_str().unwrap_or("").to_string(),
+        "ls" => args["path"].as_str().unwrap_or(".").to_string(),
         _ => format!("{args}"),
     }
 }
@@ -344,9 +366,16 @@ fn build_system_prompt(cwd: &std::path::Path) -> String {
     // append available skills
     if !context.skills.is_empty() {
         prompt.push_str("\n\nThe following skills are available. ");
-        prompt.push_str("Use the read tool to load a skill's file when the task matches its description.\n\n");
+        prompt.push_str(
+            "Use the read tool to load a skill's file when the task matches its description.\n\n",
+        );
         for skill in &context.skills {
-            prompt.push_str(&format!("- **{}**: {} ({})\n", skill.name, skill.description, skill.path.display()));
+            prompt.push_str(&format!(
+                "- **{}**: {} ({})\n",
+                skill.name,
+                skill.description,
+                skill.path.display()
+            ));
         }
     }
 
