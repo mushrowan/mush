@@ -47,5 +47,9 @@ clap = { version = "4", features = ["derive"] }
 ignore = "0.4"
 globset = "0.4"
 
+# encoding
+base64 = "0.22"
+
 # testing
 pretty_assertions = "1"
+tempfile = "3"

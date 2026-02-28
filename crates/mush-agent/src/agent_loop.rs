@@ -4,7 +4,7 @@
 //! feeds results back, and repeats until the model stops or is aborted.
 
 use futures::StreamExt;
-use mush_ai::registry::{ApiRegistry, LlmContext, ProviderError, ToolDefinition};
+use mush_ai::registry::{ApiRegistry, LlmContext, ToolDefinition};
 use mush_ai::stream::StreamEvent;
 use mush_ai::types::*;
 

@@ -440,8 +440,8 @@ fn process_chunk(
     }
 
     // handle reasoning/thinking content
-    if let Some(reasoning) = choice.delta.reasoning_content {
-        if !reasoning.is_empty() {
+    if let Some(reasoning) = choice.delta.reasoning_content
+        && !reasoning.is_empty() {
             match current {
                 Some(CurrentBlock::Thinking { text }) => {
                     text.push_str(&reasoning);
@@ -471,11 +471,10 @@ fn process_chunk(
                 }
             }
         }
-    }
 
     // handle text content
-    if let Some(text) = choice.delta.content {
-        if !text.is_empty() {
+    if let Some(text) = choice.delta.content
+        && !text.is_empty() {
             match current {
                 Some(CurrentBlock::Text { text: buf }) => {
                     buf.push_str(&text);
@@ -503,7 +502,6 @@ fn process_chunk(
                 }
             }
         }
-    }
 
     // handle tool calls
     if let Some(tool_calls) = choice.delta.tool_calls {
@@ -527,9 +525,9 @@ fn process_chunk(
                 events.push(StreamEvent::ToolCallStart { content_index });
             }
 
-            if let Some(func) = tc.function {
-                if let Some(args) = func.arguments {
-                    if let Some(CurrentBlock::ToolCall { args_buf, .. }) = current.as_mut() {
+            if let Some(func) = tc.function
+                && let Some(args) = func.arguments
+                    && let Some(CurrentBlock::ToolCall { args_buf, .. }) = current.as_mut() {
                         args_buf.push_str(&args);
                         let idx = output.content.len().saturating_sub(1);
                         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(args_buf)
@@ -542,8 +540,6 @@ fn process_chunk(
                             delta: args,
                         });
                     }
-                }
-            }
         }
     }
 
@@ -587,8 +583,8 @@ fn finish_block_events(
 
 /// finish the current block without producing events (for stream end)
 fn finish_block(current: &mut Option<CurrentBlock>, output: &mut AssistantMessage) {
-    if let Some(block) = current.take() {
-        if let CurrentBlock::ToolCall { args_buf, .. } = &block {
+    if let Some(block) = current.take()
+        && let CurrentBlock::ToolCall { args_buf, .. } = &block {
             let idx = output.content.len().saturating_sub(1);
             if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(args_buf)
                 && let Some(AssistantContentPart::ToolCall(tc)) = output.content.get_mut(idx)
@@ -596,7 +592,6 @@ fn finish_block(current: &mut Option<CurrentBlock>, output: &mut AssistantMessag
                 tc.arguments = parsed;
             }
         }
-    }
 }
 
 fn map_stop_reason(reason: &str) -> StopReason {
