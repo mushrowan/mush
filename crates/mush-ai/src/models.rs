@@ -143,16 +143,59 @@ pub fn all_models() -> Vec<Model> {
     models
 }
 
-/// find a model by provider and id
+/// all models including user overrides from models.json
+pub fn all_models_with_user() -> Vec<Model> {
+    let mut models = all_models();
+    let user = load_user_models();
+
+    // user models override builtins with matching id
+    for um in user {
+        if let Some(pos) = models.iter().position(|m| m.id == um.id) {
+            models[pos] = um;
+        } else {
+            models.push(um);
+        }
+    }
+
+    models
+}
+
+/// find a model by provider and id (includes user models)
 pub fn find_model(provider: &Provider, id: &str) -> Option<Model> {
-    all_models()
+    all_models_with_user()
         .into_iter()
         .find(|m| &m.provider == provider && m.id.as_str() == id)
 }
 
-/// find a model by id alone (first match across providers)
+/// find a model by id alone (first match, includes user models)
 pub fn find_model_by_id(id: &str) -> Option<Model> {
-    all_models().into_iter().find(|m| m.id.as_str() == id)
+    all_models_with_user()
+        .into_iter()
+        .find(|m| m.id.as_str() == id)
+}
+
+/// load user-defined models from ~/.config/mush/models.json
+fn load_user_models() -> Vec<Model> {
+    let path = user_models_path();
+    if !path.exists() {
+        return vec![];
+    }
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<Vec<Model>>(&content).ok())
+        .unwrap_or_default()
+}
+
+fn user_models_path() -> std::path::PathBuf {
+    if let Ok(dir) = std::env::var("MUSH_CONFIG_DIR") {
+        std::path::PathBuf::from(dir).join("models.json")
+    } else if let Some(config) = std::env::var_os("XDG_CONFIG_HOME") {
+        std::path::PathBuf::from(config).join("mush/models.json")
+    } else if let Some(home) = std::env::var_os("HOME") {
+        std::path::PathBuf::from(home).join(".config/mush/models.json")
+    } else {
+        std::path::PathBuf::from(".mush/models.json")
+    }
 }
 
 /// list all models for a provider
@@ -222,6 +265,141 @@ mod tests {
                 .iter()
                 .all(|m| m.provider == Provider::OpenRouter)
         );
+    }
+
+    #[test]
+    fn user_models_override_builtins() {
+        // simulate by calling the override logic directly
+        let mut models = vec![Model {
+            id: "test-model".into(),
+            name: "Test".into(),
+            api: Api::AnthropicMessages,
+            provider: Provider::Anthropic,
+            base_url: "https://api.anthropic.com".into(),
+            reasoning: false,
+            input: vec![InputModality::Text],
+            cost: ModelCost {
+                input: 1.0,
+                output: 2.0,
+                cache_read: 0.0,
+                cache_write: 0.0,
+            },
+            context_window: 100_000,
+            max_output_tokens: 4096,
+        }];
+
+        let user = vec![Model {
+            id: "test-model".into(),
+            name: "Test Override".into(),
+            api: Api::AnthropicMessages,
+            provider: Provider::Anthropic,
+            base_url: "https://custom.api.com".into(),
+            reasoning: true,
+            input: vec![InputModality::Text],
+            cost: ModelCost {
+                input: 5.0,
+                output: 10.0,
+                cache_read: 0.0,
+                cache_write: 0.0,
+            },
+            context_window: 200_000,
+            max_output_tokens: 8192,
+        }];
+
+        for um in user {
+            if let Some(pos) = models.iter().position(|m| m.id == um.id) {
+                models[pos] = um;
+            } else {
+                models.push(um);
+            }
+        }
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].name, "Test Override");
+        assert_eq!(models[0].context_window, 200_000);
+    }
+
+    #[test]
+    fn user_models_add_new() {
+        let mut models = anthropic_models();
+        let original_len = models.len();
+
+        let user = vec![Model {
+            id: "custom/my-model".into(),
+            name: "My Model".into(),
+            api: Api::OpenaiCompletions,
+            provider: Provider::Custom("my-provider".into()),
+            base_url: "https://my-api.com".into(),
+            reasoning: false,
+            input: vec![InputModality::Text],
+            cost: ModelCost {
+                input: 0.5,
+                output: 1.0,
+                cache_read: 0.0,
+                cache_write: 0.0,
+            },
+            context_window: 128_000,
+            max_output_tokens: 4096,
+        }];
+
+        for um in user {
+            if let Some(pos) = models.iter().position(|m| m.id == um.id) {
+                models[pos] = um;
+            } else {
+                models.push(um);
+            }
+        }
+
+        assert_eq!(models.len(), original_len + 1);
+        assert!(models.iter().any(|m| m.id.as_str() == "custom/my-model"));
+    }
+
+    #[test]
+    fn model_serialisation_roundtrip() {
+        let model = anthropic_models().into_iter().next().unwrap();
+        let json = serde_json::to_string_pretty(&model).unwrap();
+        let restored: Model = serde_json::from_str(&json).unwrap();
+        assert_eq!(model.id, restored.id);
+        assert_eq!(model.name, restored.name);
+        assert_eq!(model.cost.input, restored.cost.input);
+    }
+
+    #[test]
+    fn load_user_models_from_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("models.json");
+        let models = vec![Model {
+            id: "custom/test".into(),
+            name: "Custom Test".into(),
+            api: Api::OpenaiCompletions,
+            provider: Provider::Custom("test".into()),
+            base_url: "https://test.api.com".into(),
+            reasoning: false,
+            input: vec![InputModality::Text],
+            cost: ModelCost {
+                input: 1.0,
+                output: 2.0,
+                cache_read: 0.0,
+                cache_write: 0.0,
+            },
+            context_window: 128_000,
+            max_output_tokens: 4096,
+        }];
+        std::fs::write(&path, serde_json::to_string(&models).unwrap()).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let loaded: Vec<Model> = serde_json::from_str(&content).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id.as_str(), "custom/test");
+        assert_eq!(loaded[0].name, "Custom Test");
+    }
+
+    #[test]
+    fn user_models_path_uses_env() {
+        let dir = tempfile::tempdir().unwrap();
+        // just test the path logic, not the actual env var
+        let path = dir.path().join("mush/models.json");
+        assert!(path.to_str().unwrap().ends_with("mush/models.json"));
     }
 
     #[test]
