@@ -1,4 +1,5 @@
 pub mod env;
+pub mod models;
 pub mod providers;
 pub mod registry;
 pub mod stream;

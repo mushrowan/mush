@@ -437,6 +437,7 @@ enum ContentBlockData {
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
+#[allow(clippy::enum_variant_names)]
 enum DeltaData {
     #[serde(rename = "text_delta")]
     TextDelta { text: String },
@@ -645,15 +646,13 @@ fn process_sse_event(
 
             match delta {
                 DeltaData::TextDelta { text } => {
-                    if let Some(block) = blocks.last_mut() {
-                        if let BlockState::Text { text: buf } = block {
-                            buf.push_str(&text);
-                        }
+                    if let Some(BlockState::Text { text: buf }) = blocks.last_mut() {
+                        buf.push_str(&text);
                     }
-                    if let Some(part) = output.content.get_mut(content_index) {
-                        if let AssistantContentPart::Text(tc) = part {
-                            tc.text.push_str(&text);
-                        }
+                    if let Some(AssistantContentPart::Text(tc)) =
+                        output.content.get_mut(content_index)
+                    {
+                        tc.text.push_str(&text);
                     }
                     events.push(StreamEvent::TextDelta {
                         content_index,
@@ -661,15 +660,13 @@ fn process_sse_event(
                     });
                 }
                 DeltaData::ThinkingDelta { thinking } => {
-                    if let Some(block) = blocks.last_mut() {
-                        if let BlockState::Thinking { thinking: buf, .. } = block {
-                            buf.push_str(&thinking);
-                        }
+                    if let Some(BlockState::Thinking { thinking: buf, .. }) = blocks.last_mut() {
+                        buf.push_str(&thinking);
                     }
-                    if let Some(part) = output.content.get_mut(content_index) {
-                        if let AssistantContentPart::Thinking(tc) = part {
-                            tc.thinking.push_str(&thinking);
-                        }
+                    if let Some(AssistantContentPart::Thinking(tc)) =
+                        output.content.get_mut(content_index)
+                    {
+                        tc.thinking.push_str(&thinking);
                     }
                     events.push(StreamEvent::ThinkingDelta {
                         content_index,
@@ -677,16 +674,13 @@ fn process_sse_event(
                     });
                 }
                 DeltaData::InputJsonDelta { partial_json } => {
-                    if let Some(block) = blocks.last_mut() {
-                        if let BlockState::ToolCall { json_buf, .. } = block {
-                            json_buf.push_str(&partial_json);
-                            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_buf) {
-                                if let Some(part) = output.content.get_mut(content_index) {
-                                    if let AssistantContentPart::ToolCall(tc) = part {
-                                        tc.arguments = parsed;
-                                    }
-                                }
-                            }
+                    if let Some(BlockState::ToolCall { json_buf, .. }) = blocks.last_mut() {
+                        json_buf.push_str(&partial_json);
+                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_buf)
+                            && let Some(AssistantContentPart::ToolCall(tc)) =
+                                output.content.get_mut(content_index)
+                        {
+                            tc.arguments = parsed;
                         }
                     }
                     events.push(StreamEvent::ToolCallDelta {
@@ -695,17 +689,15 @@ fn process_sse_event(
                     });
                 }
                 DeltaData::SignatureDelta { signature } => {
-                    if let Some(block) = blocks.last_mut() {
-                        if let BlockState::Thinking { signature: sig, .. } = block {
-                            let s = sig.get_or_insert_with(String::new);
-                            s.push_str(&signature);
-                        }
+                    if let Some(BlockState::Thinking { signature: sig, .. }) = blocks.last_mut() {
+                        sig.get_or_insert_with(String::new).push_str(&signature);
                     }
-                    if let Some(part) = output.content.get_mut(content_index) {
-                        if let AssistantContentPart::Thinking(tc) = part {
-                            let ts = tc.signature.get_or_insert_with(String::new);
-                            ts.push_str(&signature);
-                        }
+                    if let Some(AssistantContentPart::Thinking(tc)) =
+                        output.content.get_mut(content_index)
+                    {
+                        tc.signature
+                            .get_or_insert_with(String::new)
+                            .push_str(&signature);
                     }
                 }
             }
@@ -730,10 +722,10 @@ fn process_sse_event(
                         let arguments = serde_json::from_str(json_buf)
                             .unwrap_or(serde_json::Value::Object(Default::default()));
                         // update the output with final parsed args
-                        if let Some(part) = output.content.get_mut(content_index) {
-                            if let AssistantContentPart::ToolCall(tc) = part {
-                                tc.arguments = arguments.clone();
-                            }
+                        if let Some(AssistantContentPart::ToolCall(tc)) =
+                            output.content.get_mut(content_index)
+                        {
+                            tc.arguments = arguments.clone();
                         }
                         events.push(StreamEvent::ToolCallEnd {
                             content_index,
