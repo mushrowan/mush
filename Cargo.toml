@@ -47,6 +47,9 @@ clap = { version = "4", features = ["derive"] }
 ignore = "0.4"
 globset = "0.4"
 
+# terminal
+atty = "0.2"
+
 # encoding
 base64 = "0.22"
 

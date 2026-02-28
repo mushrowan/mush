@@ -10,6 +10,7 @@ use mush_ai::providers;
 use mush_ai::registry::ApiRegistry;
 use mush_ai::stream::StreamEvent;
 use mush_ai::types::*;
+use mush_session::{Session, SessionStore};
 use mush_tools::builtin_tools;
 
 #[derive(Parser)]
@@ -18,6 +19,10 @@ struct Cli {
     /// prompt to send (enables print mode, no TUI)
     #[arg(short, long)]
     prompt: Option<String>,
+
+    /// resume a previous session by id
+    #[arg(short = 'c', long = "continue")]
+    resume: Option<String>,
 
     /// model id to use
     #[arg(short, long, default_value = "claude-sonnet-4-20250514")]
@@ -38,6 +43,10 @@ struct Cli {
     /// disable tools (just chat)
     #[arg(long)]
     no_tools: bool,
+
+    /// don't save the session
+    #[arg(long)]
+    no_session: bool,
 }
 
 #[tokio::main]
@@ -45,10 +54,26 @@ async fn main() -> Result<()> {
     color_eyre::install()?;
     let cli = Cli::parse();
 
-    match cli.prompt.clone() {
+    // read from stdin if piped
+    let stdin_prompt = if !atty::is(atty::Stream::Stdin) {
+        let mut buf = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+        if buf.is_empty() { None } else { Some(buf) }
+    } else {
+        None
+    };
+
+    // combine stdin with -p flag
+    let prompt = match (cli.prompt.clone(), stdin_prompt) {
+        (Some(p), Some(stdin)) => Some(format!("{p}\n\n{stdin}")),
+        (Some(p), None) => Some(p),
+        (None, Some(stdin)) => Some(stdin),
+        (None, None) => None,
+    };
+
+    match prompt {
         Some(prompt) => print_mode(cli, prompt).await,
         None => {
-            // TODO: TUI mode
             eprintln!("mush v{}", env!("CARGO_PKG_VERSION"));
             eprintln!("TUI mode not yet implemented. use --prompt/-p for print mode");
             Ok(())
@@ -64,6 +89,8 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
     providers::register_builtins(&mut registry);
 
     let cwd = std::env::current_dir()?;
+    let cwd_str = cwd.display().to_string();
+
     let tools = if cli.no_tools {
         vec![]
     } else {
@@ -78,10 +105,22 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
         ..Default::default()
     };
 
-    let messages = vec![Message::User(UserMessage {
+    // session: resume or create new
+    let store = SessionStore::new(SessionStore::default_dir());
+    let mut session = if let Some(ref id) = cli.resume {
+        let sid = mush_session::SessionId(id.clone());
+        store.load(&sid).map_err(|e| eyre!("failed to load session: {e}"))?
+    } else {
+        Session::new(&model.id, &cwd_str)
+    };
+
+    // add the user message
+    let user_msg = Message::User(UserMessage {
         content: UserContent::Text(prompt),
         timestamp_ms: timestamp_ms(),
-    })];
+    });
+    session.push_message(user_msg);
+    session.auto_title();
 
     let config = AgentConfig {
         model: &model,
@@ -91,7 +130,7 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
         options,
     };
 
-    let mut stream = std::pin::pin!(agent_loop(config, messages));
+    let mut stream = std::pin::pin!(agent_loop(config, session.messages.clone()));
     let mut in_text = false;
 
     while let Some(event) = stream.next().await {
@@ -106,7 +145,6 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
                     std::io::stdout().flush().ok();
                 }
                 StreamEvent::ThinkingDelta { delta, .. } => {
-                    // dim thinking output
                     print!("\x1b[2m{delta}\x1b[0m");
                     use std::io::Write;
                     std::io::stdout().flush().ok();
@@ -134,6 +172,9 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
                     eprintln!("\x1b[32m✓ {tool_name}\x1b[0m");
                 }
             }
+            AgentEvent::MessageEnd { message } => {
+                session.push_message(Message::Assistant(message));
+            }
             AgentEvent::TurnEnd { message, .. } => {
                 if in_text {
                     println!();
@@ -151,10 +192,21 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
             }
             AgentEvent::Error { error } => {
                 eprintln!("\x1b[31merror: {error}\x1b[0m");
+                // save even on error so the session isn't lost
+                if !cli.no_session {
+                    store.save(&session).ok();
+                    eprintln!("\x1b[2msession: {}\x1b[0m", session.meta.id);
+                }
                 return Err(eyre!("{error}"));
             }
             _ => {}
         }
+    }
+
+    // persist session
+    if !cli.no_session {
+        store.save(&session)?;
+        eprintln!("\x1b[2msession: {}\x1b[0m", session.meta.id);
     }
 
     Ok(())
