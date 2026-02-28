@@ -1,5 +1,219 @@
-fn main() -> color_eyre::Result<()> {
+//! mush cli - minimal coding agent
+
+use clap::Parser;
+use color_eyre::eyre::{Result, eyre};
+use futures::StreamExt;
+
+use mush_agent::{AgentConfig, AgentEvent, agent_loop};
+use mush_ai::models;
+use mush_ai::providers;
+use mush_ai::registry::ApiRegistry;
+use mush_ai::stream::StreamEvent;
+use mush_ai::types::*;
+use mush_tools::builtin_tools;
+
+#[derive(Parser)]
+#[command(name = "mush", version, about = "minimal coding agent")]
+struct Cli {
+    /// prompt to send (enables print mode, no TUI)
+    #[arg(short, long)]
+    prompt: Option<String>,
+
+    /// model id to use
+    #[arg(short, long, default_value = "claude-sonnet-4-20250514")]
+    model: String,
+
+    /// enable extended thinking
+    #[arg(long)]
+    thinking: bool,
+
+    /// max output tokens
+    #[arg(long)]
+    max_tokens: Option<u64>,
+
+    /// system prompt override
+    #[arg(long)]
+    system: Option<String>,
+
+    /// disable tools (just chat)
+    #[arg(long)]
+    no_tools: bool,
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
     color_eyre::install()?;
-    println!("mush v{}", env!("CARGO_PKG_VERSION"));
+    let cli = Cli::parse();
+
+    match cli.prompt.clone() {
+        Some(prompt) => print_mode(cli, prompt).await,
+        None => {
+            // TODO: TUI mode
+            eprintln!("mush v{}", env!("CARGO_PKG_VERSION"));
+            eprintln!("TUI mode not yet implemented. use --prompt/-p for print mode");
+            Ok(())
+        }
+    }
+}
+
+async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
+    let model = models::find_model_by_id(&cli.model)
+        .ok_or_else(|| eyre!("unknown model: {}\n\navailable models:\n{}", cli.model, list_models()))?;
+
+    let mut registry = ApiRegistry::new();
+    providers::register_builtins(&mut registry);
+
+    let cwd = std::env::current_dir()?;
+    let tools = if cli.no_tools {
+        vec![]
+    } else {
+        builtin_tools(cwd.clone())
+    };
+
+    let system_prompt = cli.system.or_else(|| Some(default_system_prompt(&cwd)));
+
+    let options = StreamOptions {
+        thinking: if cli.thinking { Some(ThinkingLevel::High) } else { None },
+        max_tokens: cli.max_tokens,
+        ..Default::default()
+    };
+
+    let messages = vec![Message::User(UserMessage {
+        content: UserContent::Text(prompt),
+        timestamp_ms: timestamp_ms(),
+    })];
+
+    let config = AgentConfig {
+        model: &model,
+        system_prompt,
+        tools: &tools,
+        registry: &registry,
+        options,
+    };
+
+    let mut stream = std::pin::pin!(agent_loop(config, messages));
+    let mut in_text = false;
+
+    while let Some(event) = stream.next().await {
+        match event {
+            AgentEvent::StreamEvent { event } => match event {
+                StreamEvent::TextDelta { delta, .. } => {
+                    if !in_text {
+                        in_text = true;
+                    }
+                    print!("{delta}");
+                    use std::io::Write;
+                    std::io::stdout().flush().ok();
+                }
+                StreamEvent::ThinkingDelta { delta, .. } => {
+                    // dim thinking output
+                    print!("\x1b[2m{delta}\x1b[0m");
+                    use std::io::Write;
+                    std::io::stdout().flush().ok();
+                }
+                StreamEvent::TextEnd { .. } => {
+                    in_text = false;
+                }
+                StreamEvent::ThinkingEnd { .. } => {
+                    println!();
+                }
+                _ => {}
+            },
+            AgentEvent::ToolExecStart { tool_name, args, .. } => {
+                if in_text {
+                    println!();
+                    in_text = false;
+                }
+                let args_summary = summarise_tool_args(&tool_name, &args);
+                eprintln!("\x1b[36m▶ {tool_name}\x1b[0m {args_summary}");
+            }
+            AgentEvent::ToolExecEnd { tool_name, result, .. } => {
+                if result.is_error {
+                    eprintln!("\x1b[31m✗ {tool_name} failed\x1b[0m");
+                } else {
+                    eprintln!("\x1b[32m✓ {tool_name}\x1b[0m");
+                }
+            }
+            AgentEvent::TurnEnd { message, .. } => {
+                if in_text {
+                    println!();
+                    in_text = false;
+                }
+                let cost = models::calculate_cost(&model, &message.usage);
+                eprintln!(
+                    "\n\x1b[2m{} | in:{} out:{} cache:{} | ${:.4}\x1b[0m",
+                    message.model,
+                    message.usage.input_tokens,
+                    message.usage.output_tokens,
+                    message.usage.cache_read_tokens,
+                    cost.total(),
+                );
+            }
+            AgentEvent::Error { error } => {
+                eprintln!("\x1b[31merror: {error}\x1b[0m");
+                return Err(eyre!("{error}"));
+            }
+            _ => {}
+        }
+    }
+
     Ok(())
+}
+
+fn summarise_tool_args(tool_name: &str, args: &serde_json::Value) -> String {
+    match tool_name {
+        "read" | "write" | "edit" => {
+            args["path"].as_str().unwrap_or("").to_string()
+        }
+        "bash" => {
+            let cmd = args["command"].as_str().unwrap_or("");
+            if cmd.len() > 80 {
+                format!("{}...", &cmd[..77])
+            } else {
+                cmd.to_string()
+            }
+        }
+        "grep" => {
+            let pattern = args["pattern"].as_str().unwrap_or("");
+            let path = args["path"].as_str().unwrap_or(".");
+            format!("{pattern} in {path}")
+        }
+        "find" => {
+            args["pattern"].as_str().unwrap_or("").to_string()
+        }
+        "ls" => {
+            args["path"].as_str().unwrap_or(".").to_string()
+        }
+        _ => format!("{args}"),
+    }
+}
+
+fn default_system_prompt(cwd: &std::path::Path) -> String {
+    let cwd_str = cwd.display();
+    format!(
+        "You are a coding assistant. You help users by reading files, executing commands, \
+         editing code, and writing new files.\n\n\
+         Current working directory: {cwd_str}\n\n\
+         Guidelines:\n\
+         - Use bash for file operations like ls, grep, find\n\
+         - Use read to examine files before editing\n\
+         - Use edit for precise changes (old text must match exactly)\n\
+         - Use write only for new files or complete rewrites\n\
+         - Be concise in your responses"
+    )
+}
+
+fn list_models() -> String {
+    models::all_models()
+        .iter()
+        .map(|m| format!("  {} ({})", m.id, m.provider))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn timestamp_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
