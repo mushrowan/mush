@@ -6,13 +6,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-tokio.workspace = true
-tokio-stream.workspace = true
 futures.workspace = true
 async-stream.workspace = true
 reqwest.workspace = true
-reqwest-eventsource.workspace = true
-eventsource-stream.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

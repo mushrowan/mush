@@ -8,11 +8,6 @@ license.workspace = true
 [dependencies]
 mush-ai.workspace = true
 mush-agent.workspace = true
-tokio.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-thiserror.workspace = true
-miette.workspace = true
 
 [dev-dependencies]
 pretty_assertions.workspace = true

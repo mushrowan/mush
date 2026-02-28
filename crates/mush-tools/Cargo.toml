@@ -9,13 +9,8 @@ license.workspace = true
 mush-ai.workspace = true
 mush-agent.workspace = true
 tokio.workspace = true
-serde.workspace = true
 serde_json.workspace = true
-thiserror.workspace = true
-miette.workspace = true
 base64.workspace = true
-ignore.workspace = true
-globset.workspace = true
 
 [dev-dependencies]
 pretty_assertions.workspace = true
