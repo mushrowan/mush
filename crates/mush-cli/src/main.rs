@@ -43,6 +43,10 @@ struct Cli {
     #[arg(long)]
     max_tokens: Option<u64>,
 
+    /// max tool-calling turns before stopping
+    #[arg(long)]
+    max_turns: Option<usize>,
+
     /// system prompt override
     #[arg(long)]
     system: Option<String>,
@@ -200,6 +204,10 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
         tools: &tools,
         registry: &registry,
         options,
+        max_turns: cli
+            .max_turns
+            .or(cfg.max_turns)
+            .unwrap_or(mush_agent::DEFAULT_MAX_TURNS),
     };
 
     let mut stream = std::pin::pin!(agent_loop(config, session.messages.clone()));
@@ -265,6 +273,9 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
                     message.usage.cache_read_tokens,
                     cost.total(),
                 );
+            }
+            AgentEvent::MaxTurnsReached { max_turns } => {
+                eprintln!("\n\x1b[33m⚠ hit max turns limit ({max_turns})\x1b[0m");
             }
             AgentEvent::Error { error } => {
                 eprintln!("\x1b[31merror: {error}\x1b[0m");
@@ -355,6 +366,10 @@ async fn tui_mode(cli: Cli) -> Result<()> {
         model,
         system_prompt: Some(system_prompt),
         options,
+        max_turns: cli
+            .max_turns
+            .or(cfg.max_turns)
+            .unwrap_or(mush_agent::DEFAULT_MAX_TURNS),
     };
 
     mush_tui::run_tui(tui_config, &tools, &registry)

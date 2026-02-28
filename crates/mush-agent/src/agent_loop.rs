@@ -40,11 +40,16 @@ pub enum AgentEvent {
         turn_index: usize,
         message: AssistantMessage,
     },
+    /// agent hit max turns limit
+    MaxTurnsReached { max_turns: usize },
     /// agent loop finished
     AgentEnd,
     /// error occurred
     Error { error: String },
 }
+
+/// default max turns before the agent stops
+pub const DEFAULT_MAX_TURNS: usize = 30;
 
 /// configuration for running the agent loop
 pub struct AgentConfig<'a> {
@@ -53,6 +58,8 @@ pub struct AgentConfig<'a> {
     pub tools: &'a [Box<dyn AgentTool>],
     pub registry: &'a ApiRegistry,
     pub options: StreamOptions,
+    /// max tool-calling turns before forced stop (default 30)
+    pub max_turns: usize,
 }
 
 /// run the agent loop, yielding events as they happen
@@ -177,6 +184,11 @@ pub fn agent_loop(
 
             yield AgentEvent::TurnEnd { turn_index, message: assistant_msg };
             turn_index += 1;
+
+            if turn_index >= config.max_turns {
+                yield AgentEvent::MaxTurnsReached { max_turns: config.max_turns };
+                break;
+            }
         }
 
         yield AgentEvent::AgentEnd;
@@ -283,6 +295,7 @@ mod tests {
             tools: &tools,
             registry: &registry,
             options: StreamOptions::default(),
+            max_turns: DEFAULT_MAX_TURNS,
         };
 
         let messages = vec![Message::User(UserMessage {

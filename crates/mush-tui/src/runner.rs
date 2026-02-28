@@ -27,6 +27,7 @@ pub struct TuiConfig {
     pub model: Model,
     pub system_prompt: Option<String>,
     pub options: StreamOptions,
+    pub max_turns: usize,
 }
 
 /// run the interactive TUI
@@ -62,6 +63,7 @@ pub async fn run_tui(
                 tools,
                 registry,
                 options: tui_config.options.clone(),
+                max_turns: tui_config.max_turns,
             };
 
             let mut stream = std::pin::pin!(agent_loop(config, conversation.clone()));
@@ -166,6 +168,10 @@ fn handle_agent_event(
         }
         AgentEvent::TurnStart { .. } if !app.is_streaming => {
             app.start_streaming();
+        }
+        AgentEvent::MaxTurnsReached { max_turns } => {
+            app.is_streaming = false;
+            app.status = Some(format!("hit max turns limit ({max_turns})"));
         }
         AgentEvent::Error { error } => {
             app.is_streaming = false;

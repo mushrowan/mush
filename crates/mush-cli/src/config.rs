@@ -13,6 +13,7 @@ pub struct Config {
     pub model: Option<String>,
     pub thinking: Option<bool>,
     pub max_tokens: Option<u64>,
+    pub max_turns: Option<usize>,
     pub system_prompt: Option<String>,
     pub api_keys: ApiKeys,
 }
