@@ -142,6 +142,17 @@ fn render_message(msg: &DisplayMessage, lines: &mut Vec<Line<'_>>) {
             Span::raw(" "),
             Span::styled(tc.summary.clone(), Style::default().fg(Color::DarkGray)),
         ]));
+        // tool output preview (dim, indented)
+        if let Some(ref output) = tc.output_preview {
+            for line in output.lines() {
+                lines.push(Line::styled(
+                    format!("    {line}"),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::DIM),
+                ));
+            }
+        }
     }
 
     // usage line
@@ -238,11 +249,13 @@ mod tests {
                     name: "bash".into(),
                     summary: "ls -la".into(),
                     status: ToolCallStatus::Done,
+                    output_preview: Some("file1.txt\nfile2.txt".into()),
                 },
                 crate::app::DisplayToolCall {
                     name: "read".into(),
                     summary: "src/main.rs".into(),
                     status: ToolCallStatus::Error,
+                    output_preview: None,
                 },
             ],
             thinking: None,

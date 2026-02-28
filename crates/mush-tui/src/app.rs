@@ -46,6 +46,8 @@ pub struct DisplayToolCall {
     pub name: String,
     pub summary: String,
     pub status: ToolCallStatus,
+    /// truncated preview of tool output
+    pub output_preview: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,12 +146,13 @@ impl App {
                 name: name.to_string(),
                 summary: summary.to_string(),
                 status: ToolCallStatus::Running,
+                output_preview: None,
             });
         }
     }
 
-    /// mark the current tool as done
-    pub fn end_tool(&mut self, name: &str, is_error: bool) {
+    /// mark the current tool as done, with optional output preview
+    pub fn end_tool(&mut self, name: &str, is_error: bool, output: Option<&str>) {
         self.active_tool = None;
         if let Some(last) = self.messages.last_mut()
             && let Some(tc) = last.tool_calls.iter_mut().rfind(|t| t.name == name)
@@ -159,6 +162,7 @@ impl App {
             } else {
                 ToolCallStatus::Done
             };
+            tc.output_preview = output.map(truncate_output);
         }
     }
 
@@ -259,6 +263,32 @@ impl App {
     }
 }
 
+/// max lines to show in tool output preview
+const MAX_PREVIEW_LINES: usize = 5;
+/// max chars per preview line
+const MAX_PREVIEW_LINE_LEN: usize = 120;
+
+fn truncate_output(output: &str) -> String {
+    let lines: Vec<&str> = output.lines().collect();
+    let total = lines.len();
+    let preview: Vec<String> = lines
+        .into_iter()
+        .take(MAX_PREVIEW_LINES)
+        .map(|l| {
+            if l.len() > MAX_PREVIEW_LINE_LEN {
+                format!("{}...", &l[..MAX_PREVIEW_LINE_LEN])
+            } else {
+                l.to_string()
+            }
+        })
+        .collect();
+    let mut result = preview.join("\n");
+    if total > MAX_PREVIEW_LINES {
+        result.push_str(&format!("\n... ({} more lines)", total - MAX_PREVIEW_LINES));
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,7 +362,7 @@ mod tests {
             ToolCallStatus::Running
         );
 
-        app.end_tool("bash", false);
+        app.end_tool("bash", false, Some("file1.txt\nfile2.txt"));
         assert!(app.active_tool.is_none());
         assert_eq!(
             app.messages.last().unwrap().tool_calls[0].status,
@@ -411,5 +441,50 @@ mod tests {
 
         assert!((app.total_cost - 0.015).abs() < f64::EPSILON);
         assert_eq!(app.total_tokens, 450);
+    }
+
+    #[test]
+    fn truncate_short_output() {
+        let output = truncate_output("hello\nworld");
+        assert_eq!(output, "hello\nworld");
+    }
+
+    #[test]
+    fn truncate_long_output() {
+        let lines = (0..20)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let output = truncate_output(&lines);
+        assert!(output.contains("line 0"));
+        assert!(output.contains("line 4"));
+        assert!(output.contains("15 more lines"));
+        assert!(!output.contains("line 5\n"));
+    }
+
+    #[test]
+    fn truncate_long_line() {
+        let long = "x".repeat(200);
+        let output = truncate_output(&long);
+        assert!(output.len() < 200);
+        assert!(output.ends_with("..."));
+    }
+
+    #[test]
+    fn tool_output_stored() {
+        let mut app = App::new("test".into());
+        app.messages.push(DisplayMessage {
+            role: MessageRole::Assistant,
+            content: String::new(),
+            tool_calls: vec![],
+            thinking: None,
+            usage: None,
+            cost: None,
+        });
+        app.start_tool("read", "src/main.rs");
+        app.end_tool("read", false, Some("fn main() {}\n"));
+        let tc = &app.messages.last().unwrap().tool_calls[0];
+        assert!(tc.output_preview.is_some());
+        assert!(tc.output_preview.as_ref().unwrap().contains("fn main()"));
     }
 }

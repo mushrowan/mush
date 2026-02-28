@@ -164,7 +164,11 @@ fn handle_agent_event(
         AgentEvent::ToolExecEnd {
             tool_name, result, ..
         } => {
-            app.end_tool(tool_name.as_str(), result.is_error);
+            let output_text = result.content.iter().find_map(|p| match p {
+                ToolResultContentPart::Text(t) => Some(t.text.as_str()),
+                _ => None,
+            });
+            app.end_tool(tool_name.as_str(), result.is_error, output_text);
         }
         AgentEvent::TurnStart { .. } if !app.is_streaming => {
             app.start_streaming();
