@@ -102,23 +102,48 @@ fn render_message(msg: &DisplayMessage, lines: &mut Vec<Line<'_>>) {
 
     lines.push(Line::from(vec![Span::styled(label, label_style)]));
 
-    // thinking block (collapsed)
+    // thinking block
     if let Some(ref thinking) = msg.thinking {
-        let preview = thinking.lines().next().unwrap_or("...");
-        let trimmed = if preview.len() > 60 {
-            format!("{}...", &preview[..57])
+        if msg.thinking_expanded {
+            let line_count = thinking.lines().count();
+            lines.push(Line::from(vec![
+                Span::styled("  💭 ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("thinking ({line_count} lines) [ctrl+t to collapse]"),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+            for line in thinking.lines() {
+                lines.push(Line::styled(
+                    format!("  {line}"),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::DIM),
+                ));
+            }
         } else {
-            preview.to_string()
-        };
-        lines.push(Line::from(vec![
-            Span::styled("  💭 ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                trimmed,
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::DIM),
-            ),
-        ]));
+            let preview = thinking.lines().next().unwrap_or("...");
+            let trimmed = if preview.len() > 60 {
+                format!("{}...", &preview[..57])
+            } else {
+                preview.to_string()
+            };
+            lines.push(Line::from(vec![
+                Span::styled("  💭 ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    trimmed,
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::DIM),
+                ),
+                Span::styled(
+                    " [ctrl+t]",
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::DIM),
+                ),
+            ]));
+        }
     }
 
     // main content (markdown rendered)
@@ -259,6 +284,7 @@ mod tests {
                 },
             ],
             thinking: None,
+            thinking_expanded: false,
             usage: None,
             cost: None,
         });
@@ -278,6 +304,7 @@ mod tests {
             thinking: Some(
                 "first i need to consider the question deeply and think about it".into(),
             ),
+            thinking_expanded: false,
             usage: None,
             cost: None,
         });

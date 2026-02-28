@@ -34,6 +34,12 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     }
 
     match (key.modifiers, key.code) {
+        // multi-line: alt+enter or shift+enter inserts newline
+        (KeyModifiers::ALT | KeyModifiers::SHIFT, KeyCode::Enter) => {
+            app.input_char('\n');
+            return None;
+        }
+
         // submit
         (_, KeyCode::Enter) => {
             if app.input.trim().is_empty() {
@@ -50,6 +56,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         (_, KeyCode::Right) => app.cursor_right(),
         (_, KeyCode::Home) | (KeyModifiers::CONTROL, KeyCode::Char('a')) => app.cursor_home(),
         (_, KeyCode::End) | (KeyModifiers::CONTROL, KeyCode::Char('e')) => app.cursor_end(),
+
+        // toggle thinking
+        (KeyModifiers::CONTROL, KeyCode::Char('t')) => {
+            app.toggle_thinking();
+        }
 
         // clear line
         (KeyModifiers::CONTROL, KeyCode::Char('u')) => {
@@ -184,6 +195,36 @@ mod tests {
         let event = handle_key(&mut app, key(KeyCode::PageDown));
         assert!(matches!(event, Some(AppEvent::ScrollDown(10))));
         assert_eq!(app.scroll_offset, 0);
+    }
+
+    #[test]
+    fn ctrl_t_toggles_thinking() {
+        let mut app = App::new("test".into());
+        app.start_streaming();
+        app.push_thinking_delta("thoughts");
+        app.push_text_delta("text");
+        app.finish_streaming(None, None);
+
+        assert!(!app.messages[0].thinking_expanded);
+        handle_key(&mut app, ctrl(KeyCode::Char('t')));
+        assert!(app.messages[0].thinking_expanded);
+    }
+
+    #[test]
+    fn alt_enter_inserts_newline() {
+        let mut app = App::new("test".into());
+        app.input_char('a');
+        let event = handle_key(
+            &mut app,
+            KeyEvent {
+                code: KeyCode::Enter,
+                modifiers: KeyModifiers::ALT,
+                kind: KeyEventKind::Press,
+                state: KeyEventState::NONE,
+            },
+        );
+        assert!(event.is_none());
+        assert_eq!(app.input, "a\n");
     }
 
     #[test]

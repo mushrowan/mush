@@ -30,6 +30,8 @@ pub struct DisplayMessage {
     pub content: String,
     pub tool_calls: Vec<DisplayToolCall>,
     pub thinking: Option<String>,
+    /// whether thinking is expanded (visible)
+    pub thinking_expanded: bool,
     pub usage: Option<Usage>,
     pub cost: Option<f64>,
 }
@@ -113,6 +115,7 @@ impl App {
             content: text,
             tool_calls: vec![],
             thinking: None,
+            thinking_expanded: false,
             usage: None,
             cost: None,
         });
@@ -181,6 +184,7 @@ impl App {
             content: text,
             tool_calls: vec![],
             thinking,
+            thinking_expanded: false,
             usage,
             cost,
         });
@@ -254,6 +258,18 @@ impl App {
     /// move cursor to end
     pub fn cursor_end(&mut self) {
         self.cursor = self.input.len();
+    }
+
+    /// toggle thinking visibility for the last assistant message that has thinking
+    pub fn toggle_thinking(&mut self) {
+        if let Some(msg) = self
+            .messages
+            .iter_mut()
+            .rev()
+            .find(|m| m.role == MessageRole::Assistant && m.thinking.is_some())
+        {
+            msg.thinking_expanded = !msg.thinking_expanded;
+        }
     }
 
     /// take the input text and reset
@@ -350,6 +366,7 @@ mod tests {
             content: String::new(),
             tool_calls: vec![],
             thinking: None,
+            thinking_expanded: false,
             usage: None,
             cost: None,
         });
@@ -478,6 +495,7 @@ mod tests {
             content: String::new(),
             tool_calls: vec![],
             thinking: None,
+            thinking_expanded: false,
             usage: None,
             cost: None,
         });
@@ -486,5 +504,55 @@ mod tests {
         let tc = &app.messages.last().unwrap().tool_calls[0];
         assert!(tc.output_preview.is_some());
         assert!(tc.output_preview.as_ref().unwrap().contains("fn main()"));
+    }
+
+    #[test]
+    fn toggle_thinking() {
+        let mut app = App::new("test".into());
+        app.start_streaming();
+        app.push_thinking_delta("deep thoughts");
+        app.push_text_delta("answer");
+        app.finish_streaming(None, None);
+
+        // starts collapsed
+        assert!(!app.messages[0].thinking_expanded);
+
+        app.toggle_thinking();
+        assert!(app.messages[0].thinking_expanded);
+
+        app.toggle_thinking();
+        assert!(!app.messages[0].thinking_expanded);
+    }
+
+    #[test]
+    fn toggle_thinking_targets_last_assistant() {
+        let mut app = App::new("test".into());
+
+        // first assistant with thinking
+        app.start_streaming();
+        app.push_thinking_delta("old thoughts");
+        app.push_text_delta("first");
+        app.finish_streaming(None, None);
+
+        // second assistant with thinking
+        app.start_streaming();
+        app.push_thinking_delta("new thoughts");
+        app.push_text_delta("second");
+        app.finish_streaming(None, None);
+
+        app.toggle_thinking();
+        // should toggle the latest one
+        assert!(!app.messages[0].thinking_expanded);
+        assert!(app.messages[1].thinking_expanded);
+    }
+
+    #[test]
+    fn multi_line_input() {
+        let mut app = App::new("test".into());
+        app.input_char('a');
+        app.input_char('\n');
+        app.input_char('b');
+        assert_eq!(app.input, "a\nb");
+        assert_eq!(app.cursor, 3);
     }
 }
