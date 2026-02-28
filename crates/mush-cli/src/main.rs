@@ -78,6 +78,11 @@ enum Command {
     Sessions,
     /// show current configuration and auth status
     Status,
+    /// delete a saved session
+    Delete {
+        /// session id (prefix match)
+        id: String,
+    },
 }
 
 #[tokio::main]
@@ -109,6 +114,7 @@ async fn main() -> Result<()> {
         Some(Command::Models) => return list_models_cmd(),
         Some(Command::Sessions) => return list_sessions_cmd(),
         Some(Command::Status) => return status_cmd(),
+        Some(Command::Delete { id }) => return delete_session_cmd(&id),
         None => {}
     }
 
@@ -488,6 +494,37 @@ fn format_age(timestamp_ms: u64) -> String {
         format!("{}h ago", secs / 3600)
     } else {
         format!("{}d ago", secs / 86400)
+    }
+}
+
+fn delete_session_cmd(id: &str) -> Result<()> {
+    let store = SessionStore::new(SessionStore::default_dir());
+    let sessions = store
+        .list()
+        .map_err(|e| eyre!("failed to list sessions: {e}"))?;
+
+    // find by prefix match
+    let matches: Vec<_> = sessions.iter().filter(|s| s.id.0.starts_with(id)).collect();
+
+    match matches.len() {
+        0 => Err(eyre!("no session matching '{id}'")),
+        1 => {
+            let session = matches[0];
+            let title = session.title.as_deref().unwrap_or("(untitled)");
+            store
+                .delete(&session.id)
+                .map_err(|e| eyre!("failed to delete: {e}"))?;
+            eprintln!("\x1b[32m✓ deleted session: {title}\x1b[0m");
+            Ok(())
+        }
+        n => {
+            eprintln!("'{id}' matches {n} sessions:");
+            for s in matches {
+                let title = s.title.as_deref().unwrap_or("(untitled)");
+                eprintln!("  {} - {title}", &s.id.0[..8]);
+            }
+            Err(eyre!("ambiguous prefix, be more specific"))
+        }
     }
 }
 
