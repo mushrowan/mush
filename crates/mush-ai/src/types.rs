@@ -71,7 +71,7 @@ pub enum ToolResultContentPart {
 
 // -- usage --
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
 pub struct Usage {
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -85,7 +85,7 @@ impl Usage {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
 pub struct Cost {
     pub input: f64,
     pub output: f64,
