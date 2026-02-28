@@ -15,6 +15,7 @@ use mush_ai::types::*;
 use mush_ext::loader;
 use mush_session::{Session, SessionStore};
 use mush_tools::builtin_tools;
+use mush_tui::TuiConfig;
 
 #[derive(Parser)]
 #[command(name = "mush", version, about = "minimal coding agent")]
@@ -76,11 +77,7 @@ async fn main() -> Result<()> {
 
     match prompt {
         Some(prompt) => print_mode(cli, prompt).await,
-        None => {
-            eprintln!("mush v{}", env!("CARGO_PKG_VERSION"));
-            eprintln!("TUI mode not yet implemented. use --prompt/-p for print mode");
-            Ok(())
-        }
+        None => tui_mode(cli).await,
     }
 }
 
@@ -237,6 +234,60 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
         store.save(&session)?;
         eprintln!("\x1b[2msession: {}\x1b[0m", session.meta.id);
     }
+
+    Ok(())
+}
+
+async fn tui_mode(cli: Cli) -> Result<()> {
+    let cfg = config::load_config();
+
+    let model_id = if cli.model != "claude-sonnet-4-20250514" {
+        cli.model.clone()
+    } else {
+        cfg.model.unwrap_or_else(|| cli.model.clone())
+    };
+
+    let model = models::find_model_by_id(&model_id)
+        .ok_or_else(|| eyre!("unknown model: {model_id}\n\navailable models:\n{}", list_models()))?;
+
+    let mut registry = ApiRegistry::new();
+    providers::register_builtins(&mut registry);
+
+    let cwd = std::env::current_dir()?;
+    let tools = if cli.no_tools { vec![] } else { builtin_tools(cwd.clone()) };
+
+    let system_prompt = cli.system
+        .or(cfg.system_prompt)
+        .unwrap_or_else(|| build_system_prompt(&cwd));
+
+    let thinking = cli.thinking || cfg.thinking.unwrap_or(false);
+
+    let mut options = StreamOptions {
+        thinking: if thinking { Some(ThinkingLevel::High) } else { None },
+        max_tokens: cli.max_tokens.or(cfg.max_tokens),
+        ..Default::default()
+    };
+
+    if let Some(ref key) = cfg.api_keys.anthropic
+        && std::env::var("ANTHROPIC_API_KEY").is_err()
+    {
+        options.api_key = Some(key.clone());
+    }
+    if let Some(ref key) = cfg.api_keys.openrouter
+        && std::env::var("OPENROUTER_API_KEY").is_err()
+    {
+        options.api_key = Some(key.clone());
+    }
+
+    let tui_config = TuiConfig {
+        model,
+        system_prompt: Some(system_prompt),
+        options,
+    };
+
+    mush_tui::run_tui(tui_config, &tools, &registry)
+        .await
+        .map_err(|e| eyre!("TUI error: {e}"))?;
 
     Ok(())
 }

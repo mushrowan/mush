@@ -1198,6 +1198,7 @@ name = "mush-tui"
 version = "0.1.0"
 dependencies = [
  "crossterm",
+ "futures",
  "mush-agent",
  "mush-ai",
  "mush-ext",
@@ -1205,6 +1206,7 @@ dependencies = [
  "pretty_assertions",
  "ratatui",
  "serde",
+ "serde_json",
  "tokio",
 ]
 
