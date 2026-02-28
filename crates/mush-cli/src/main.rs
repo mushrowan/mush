@@ -20,6 +20,9 @@ use mush_tui::TuiConfig;
 #[derive(Parser)]
 #[command(name = "mush", version, about = "minimal coding agent")]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// prompt to send (enables print mode, no TUI)
     #[arg(short, long)]
     prompt: Option<String>,
@@ -53,6 +56,14 @@ struct Cli {
     no_session: bool,
 }
 
+#[derive(clap::Subcommand)]
+enum Command {
+    /// log in to claude.ai via oauth
+    Login,
+    /// log out (remove stored oauth credentials)
+    Logout,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     color_eyre::install()?;
@@ -74,6 +85,13 @@ async fn main() -> Result<()> {
         (None, Some(stdin)) => Some(stdin),
         (None, None) => None,
     };
+
+    // handle subcommands first
+    match cli.command {
+        Some(Command::Login) => return login_flow().await,
+        Some(Command::Logout) => return logout_flow(),
+        None => {}
+    }
 
     match prompt {
         Some(prompt) => print_mode(cli, prompt).await,
@@ -128,16 +146,27 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
         ..Default::default()
     };
 
-    // apply api key from config if not in env
-    if let Some(ref key) = cfg.api_keys.anthropic
-        && std::env::var("ANTHROPIC_API_KEY").is_err()
-    {
-        options.api_key = Some(key.clone());
+    // api key resolution: env > config > oauth
+    if options.api_key.is_none() {
+        if let Some(ref key) = cfg.api_keys.anthropic
+            && std::env::var("ANTHROPIC_API_KEY").is_err()
+        {
+            options.api_key = Some(key.clone());
+        }
+        if let Some(ref key) = cfg.api_keys.openrouter
+            && std::env::var("OPENROUTER_API_KEY").is_err()
+        {
+            options.api_key = Some(key.clone());
+        }
     }
-    if let Some(ref key) = cfg.api_keys.openrouter
-        && std::env::var("OPENROUTER_API_KEY").is_err()
+
+    // try oauth if no key found and using anthropic
+    if options.api_key.is_none()
+        && std::env::var("ANTHROPIC_API_KEY").is_err()
+        && model.provider == Provider::Anthropic
+        && let Ok(Some(token)) = mush_ai::oauth::get_anthropic_oauth_token().await
     {
-        options.api_key = Some(key.clone());
+        options.api_key = Some(token);
     }
 
     // session: resume or create new
@@ -307,6 +336,15 @@ async fn tui_mode(cli: Cli) -> Result<()> {
         options.api_key = Some(key.clone());
     }
 
+    // try oauth if no key found and using anthropic
+    if options.api_key.is_none()
+        && std::env::var("ANTHROPIC_API_KEY").is_err()
+        && model.provider == Provider::Anthropic
+        && let Ok(Some(token)) = mush_ai::oauth::get_anthropic_oauth_token().await
+    {
+        options.api_key = Some(token);
+    }
+
     let tui_config = TuiConfig {
         model,
         system_prompt: Some(system_prompt),
@@ -388,6 +426,55 @@ fn list_models() -> String {
         .map(|m| format!("  {} ({})", m.id, m.provider))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+async fn login_flow() -> Result<()> {
+    use mush_ai::oauth;
+
+    eprintln!("logging in to claude.ai...\n");
+
+    let pkce = oauth::generate_pkce();
+    let url = oauth::build_auth_url(&pkce);
+
+    eprintln!("open this URL in your browser:\n");
+    eprintln!("  {url}\n");
+    eprintln!("after authorising, paste the code here (format: code#state):");
+
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    let input = input.trim();
+
+    if input.is_empty() {
+        return Err(eyre!("no code provided"));
+    }
+
+    let creds = oauth::exchange_code(input, &pkce.verifier)
+        .await
+        .map_err(|e| eyre!("login failed: {e}"))?;
+
+    let mut store =
+        oauth::load_credentials().map_err(|e| eyre!("failed to load credentials: {e}"))?;
+    store.providers.insert("anthropic".into(), creds);
+    oauth::save_credentials(&store).map_err(|e| eyre!("failed to save credentials: {e}"))?;
+
+    eprintln!("\n\x1b[32m✓ logged in to claude.ai\x1b[0m");
+    Ok(())
+}
+
+fn logout_flow() -> Result<()> {
+    use mush_ai::oauth;
+
+    let mut store =
+        oauth::load_credentials().map_err(|e| eyre!("failed to load credentials: {e}"))?;
+
+    if store.providers.remove("anthropic").is_some() {
+        oauth::save_credentials(&store).map_err(|e| eyre!("failed to save credentials: {e}"))?;
+        eprintln!("\x1b[32m✓ logged out from claude.ai\x1b[0m");
+    } else {
+        eprintln!("not logged in");
+    }
+
+    Ok(())
 }
 
 fn timestamp_ms() -> u64 {
