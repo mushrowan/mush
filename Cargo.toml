@@ -20,6 +20,7 @@ mush-tui = { path = "crates/mush-tui" }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 futures = "0.3"
+async-stream = "0.3"
 
 # http + streaming
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }

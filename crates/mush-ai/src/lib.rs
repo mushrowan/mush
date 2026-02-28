@@ -1,3 +1,5 @@
+pub mod env;
+pub mod providers;
 pub mod registry;
 pub mod stream;
 pub mod types;
