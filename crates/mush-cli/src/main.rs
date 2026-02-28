@@ -122,8 +122,37 @@ async fn main() -> Result<()> {
     }
 
     match prompt {
-        Some(prompt) => print_mode(cli, prompt).await,
+        Some(prompt) => {
+            let prompt = expand_template(&prompt);
+            print_mode(cli, prompt).await
+        }
         None => tui_mode(cli).await,
+    }
+}
+
+/// expand /template_name args... into template content
+fn expand_template(prompt: &str) -> String {
+    if !prompt.starts_with('/') {
+        return prompt.to_string();
+    }
+
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let templates = mush_ext::discover_templates(&cwd);
+
+    let parts: Vec<&str> = prompt[1..].splitn(2, ' ').collect();
+    let name = parts[0];
+    let args_str = parts.get(1).unwrap_or(&"");
+
+    if let Some(tmpl) = mush_ext::find_template(&templates, name) {
+        let args: Vec<&str> = if args_str.is_empty() {
+            vec![]
+        } else {
+            args_str.split_whitespace().collect()
+        };
+        mush_ext::substitute_args(&tmpl.content, &args)
+    } else {
+        // not a template, return as-is
+        prompt.to_string()
     }
 }
 
