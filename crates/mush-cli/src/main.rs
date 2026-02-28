@@ -6,7 +6,7 @@ use clap::Parser;
 use color_eyre::eyre::{Result, eyre};
 use futures::StreamExt;
 
-use mush_agent::{AgentConfig, AgentEvent, agent_loop};
+use mush_agent::{AgentConfig, AgentEvent, agent_loop, summarise_tool_args};
 use mush_ai::models;
 use mush_ai::providers;
 use mush_ai::registry::ApiRegistry;
@@ -383,28 +383,6 @@ async fn tui_mode(cli: Cli) -> Result<()> {
         .map_err(|e| eyre!("TUI error: {e}"))?;
 
     Ok(())
-}
-
-fn summarise_tool_args(tool_name: &str, args: &serde_json::Value) -> String {
-    match tool_name {
-        "read" | "write" | "edit" => args["path"].as_str().unwrap_or("").to_string(),
-        "bash" => {
-            let cmd = args["command"].as_str().unwrap_or("");
-            if cmd.len() > 80 {
-                format!("{}...", &cmd[..77])
-            } else {
-                cmd.to_string()
-            }
-        }
-        "grep" => {
-            let pattern = args["pattern"].as_str().unwrap_or("");
-            let path = args["path"].as_str().unwrap_or(".");
-            format!("{pattern} in {path}")
-        }
-        "find" => args["pattern"].as_str().unwrap_or("").to_string(),
-        "ls" => args["path"].as_str().unwrap_or(".").to_string(),
-        _ => format!("{args}"),
-    }
 }
 
 fn build_system_prompt(cwd: &std::path::Path) -> String {

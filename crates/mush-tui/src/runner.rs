@@ -12,7 +12,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
 use mush_agent::tool::AgentTool;
-use mush_agent::{AgentConfig, AgentEvent, agent_loop};
+use mush_agent::{AgentConfig, AgentEvent, agent_loop, summarise_tool_args};
 use mush_ai::models;
 use mush_ai::registry::ApiRegistry;
 use mush_ai::stream::StreamEvent;
@@ -206,27 +206,4 @@ fn cleanup(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
     io::stdout().execute(LeaveAlternateScreen)?;
     terminal.show_cursor()?;
     Ok(())
-}
-
-/// summarise tool args for display (shared with print mode)
-pub fn summarise_tool_args(tool_name: &str, args: &serde_json::Value) -> String {
-    match tool_name {
-        "read" | "write" | "edit" => args["path"].as_str().unwrap_or("").to_string(),
-        "bash" => {
-            let cmd = args["command"].as_str().unwrap_or("");
-            if cmd.len() > 60 {
-                format!("{}...", &cmd[..57])
-            } else {
-                cmd.to_string()
-            }
-        }
-        "grep" => {
-            let pattern = args["pattern"].as_str().unwrap_or("");
-            let path = args["path"].as_str().unwrap_or(".");
-            format!("{pattern} in {path}")
-        }
-        "find" => args["pattern"].as_str().unwrap_or("").to_string(),
-        "ls" => args["path"].as_str().unwrap_or(".").to_string(),
-        _ => format!("{args}"),
-    }
 }
