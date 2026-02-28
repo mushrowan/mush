@@ -47,7 +47,11 @@ impl Widget for StatusBar<'_> {
 
         // right-align hint
         let left_len: usize = spans.iter().map(|s| s.content.len()).sum();
-        let hint = "ctrl+c quit | esc abort";
+        let hint = if self.app.is_streaming {
+            "esc abort | ctrl+c quit"
+        } else {
+            "enter send | alt+↵ newline | ctrl+t think | ctrl+c quit"
+        };
         let padding = (area.width as usize).saturating_sub(left_len + hint.len() + 1);
         if padding > 0 {
             spans.push(Span::styled(" ".repeat(padding), dim));

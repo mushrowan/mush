@@ -346,7 +346,7 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
                 eprintln!("\n\x1b[33m⚠ hit max turns limit ({max_turns})\x1b[0m");
             }
             AgentEvent::Error { error } => {
-                eprintln!("\x1b[31merror: {error}\x1b[0m");
+                eprintln!("\x1b[31merror: {}\x1b[0m", format_error(&error));
                 // save even on error so the session isn't lost
                 if !cli.no_session {
                     store.save(&session).ok();
@@ -430,6 +430,34 @@ async fn tui_mode(cli: Cli) -> Result<()> {
         options.api_key = Some(token);
     }
 
+    // load initial messages if resuming a session
+    let initial_messages = if let Some(ref resume_id) = cli.resume {
+        let store = SessionStore::new(SessionStore::default_dir());
+        let sessions = store
+            .list()
+            .map_err(|e| eyre!("failed to list sessions: {e}"))?;
+        let matches: Vec<_> = sessions
+            .iter()
+            .filter(|s| s.id.0.starts_with(resume_id.as_str()))
+            .collect();
+        match matches.len() {
+            0 => return Err(eyre!("no session matching '{resume_id}'")),
+            1 => {
+                let session = store
+                    .load(&matches[0].id)
+                    .map_err(|e| eyre!("failed to load session: {e}"))?;
+                session.messages
+            }
+            n => {
+                return Err(eyre!(
+                    "'{resume_id}' matches {n} sessions, be more specific"
+                ));
+            }
+        }
+    } else {
+        vec![]
+    };
+
     let tui_config = TuiConfig {
         model,
         system_prompt: Some(system_prompt),
@@ -438,6 +466,7 @@ async fn tui_mode(cli: Cli) -> Result<()> {
             .max_turns
             .or(cfg.max_turns)
             .unwrap_or(mush_agent::DEFAULT_MAX_TURNS),
+        initial_messages,
     };
 
     mush_tui::run_tui(tui_config, &tools, &registry)
@@ -472,6 +501,22 @@ fn auto_compact(messages: Vec<Message>, context_window: usize) -> Vec<Message> {
         result.messages.len()
     );
     result.messages
+}
+
+/// enrich error messages with actionable suggestions
+fn format_error(error: &str) -> String {
+    if error.contains("missing api key") {
+        format!(
+            "{error}\n\n\
+             hint: set ANTHROPIC_API_KEY or OPENROUTER_API_KEY, or run:\n  \
+             mush login anthropic\n  \
+             mush config  (to add api_keys in config.toml)"
+        )
+    } else if error.contains("no provider registered") {
+        format!("{error}\n\nhint: the model's api type has no registered provider")
+    } else {
+        error.to_string()
+    }
 }
 
 fn build_system_prompt(cwd: &std::path::Path) -> String {

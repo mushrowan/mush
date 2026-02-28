@@ -30,6 +30,8 @@ pub struct TuiConfig {
     pub system_prompt: Option<String>,
     pub options: StreamOptions,
     pub max_turns: usize,
+    /// initial conversation history (for session resume)
+    pub initial_messages: Vec<Message>,
 }
 
 /// run the interactive TUI
@@ -47,6 +49,55 @@ pub async fn run_tui(
     let mut app = App::new(tui_config.model.id.0.clone());
     let mut pending_prompt: Option<String> = None;
     let mut conversation: Vec<Message> = Vec::new();
+
+    // load initial messages (session resume)
+    if !tui_config.initial_messages.is_empty() {
+        for msg in &tui_config.initial_messages {
+            match msg {
+                Message::User(u) => {
+                    let text = match &u.content {
+                        UserContent::Text(t) => t.clone(),
+                        UserContent::Parts(p) => p
+                            .iter()
+                            .filter_map(|part| match part {
+                                UserContentPart::Text(t) => Some(t.text.clone()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                    };
+                    app.push_user_message(text);
+                }
+                Message::Assistant(a) => {
+                    let text: String = a
+                        .content
+                        .iter()
+                        .filter_map(|p| match p {
+                            AssistantContentPart::Text(t) => Some(t.text.clone()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("");
+                    let thinking: Option<String> = a.content.iter().find_map(|p| match p {
+                        AssistantContentPart::Thinking(t) => Some(t.thinking.clone()),
+                        _ => None,
+                    });
+                    app.messages.push(crate::app::DisplayMessage {
+                        role: crate::app::MessageRole::Assistant,
+                        content: text,
+                        tool_calls: vec![],
+                        thinking,
+                        thinking_expanded: false,
+                        usage: Some(a.usage),
+                        cost: None,
+                    });
+                }
+                _ => {} // tool results displayed inline with their tool calls
+            }
+        }
+        conversation = tui_config.initial_messages.clone();
+        app.status = Some(format!("resumed session ({} messages)", conversation.len()));
+    }
 
     // shared steering queue: user can type while agent is running
     let steering_queue: Arc<Mutex<Vec<Message>>> = Arc::new(Mutex::new(Vec::new()));
