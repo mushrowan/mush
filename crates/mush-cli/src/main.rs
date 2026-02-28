@@ -58,10 +58,16 @@ struct Cli {
 
 #[derive(clap::Subcommand)]
 enum Command {
-    /// log in to claude.ai via oauth
-    Login,
-    /// log out (remove stored oauth credentials)
-    Logout,
+    /// log in to an oauth provider (e.g. mush login anthropic)
+    Login {
+        /// provider to log in to (e.g. anthropic)
+        provider: Option<String>,
+    },
+    /// log out from an oauth provider
+    Logout {
+        /// provider to log out from (e.g. anthropic)
+        provider: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -88,8 +94,8 @@ async fn main() -> Result<()> {
 
     // handle subcommands first
     match cli.command {
-        Some(Command::Login) => return login_flow().await,
-        Some(Command::Logout) => return logout_flow(),
+        Some(Command::Login { provider }) => return login_flow(provider).await,
+        Some(Command::Logout { provider }) => return logout_flow(provider),
         None => {}
     }
 
@@ -428,50 +434,75 @@ fn list_models() -> String {
         .join("\n")
 }
 
-async fn login_flow() -> Result<()> {
+async fn login_flow(provider_id: Option<String>) -> Result<()> {
     use mush_ai::oauth;
 
-    eprintln!("logging in to claude.ai...\n");
+    let provider_id = match provider_id {
+        Some(id) => id,
+        None => {
+            let providers = oauth::list_providers();
+            if providers.len() == 1 {
+                providers[0].0.to_string()
+            } else {
+                eprintln!("available providers:");
+                for (id, name) in &providers {
+                    eprintln!("  {id} - {name}");
+                }
+                return Err(eyre!("specify a provider: mush login <provider>"));
+            }
+        }
+    };
 
-    let pkce = oauth::generate_pkce();
-    let url = oauth::build_auth_url(&pkce);
+    let provider = oauth::get_provider(&provider_id).ok_or_else(|| {
+        let available = oauth::list_providers()
+            .iter()
+            .map(|(id, _)| id.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        eyre!("unknown provider: {provider_id}\navailable: {available}")
+    })?;
 
+    eprintln!("logging in to {}...\n", provider.name());
+
+    let (prompt, pkce) = provider.begin_login();
     eprintln!("open this URL in your browser:\n");
-    eprintln!("  {url}\n");
-    eprintln!("after authorising, paste the code here (format: code#state):");
+    eprintln!("  {}\n", prompt.url);
+    eprintln!("{}", prompt.instructions);
 
     let mut input = String::new();
     std::io::stdin().read_line(&mut input)?;
     let input = input.trim();
-
     if input.is_empty() {
         return Err(eyre!("no code provided"));
     }
 
-    let creds = oauth::exchange_code(input, &pkce.verifier)
+    let creds = provider
+        .exchange_code(input, &pkce)
         .await
         .map_err(|e| eyre!("login failed: {e}"))?;
 
     let mut store =
         oauth::load_credentials().map_err(|e| eyre!("failed to load credentials: {e}"))?;
-    store.providers.insert("anthropic".into(), creds);
+    store.providers.insert(provider_id, creds);
     oauth::save_credentials(&store).map_err(|e| eyre!("failed to save credentials: {e}"))?;
 
-    eprintln!("\n\x1b[32m✓ logged in to claude.ai\x1b[0m");
+    eprintln!("\n\x1b[32m✓ logged in to {}\x1b[0m", provider.name());
     Ok(())
 }
 
-fn logout_flow() -> Result<()> {
+fn logout_flow(provider_id: Option<String>) -> Result<()> {
     use mush_ai::oauth;
+
+    let provider_id = provider_id.unwrap_or_else(|| "anthropic".into());
 
     let mut store =
         oauth::load_credentials().map_err(|e| eyre!("failed to load credentials: {e}"))?;
 
-    if store.providers.remove("anthropic").is_some() {
+    if store.providers.remove(&provider_id).is_some() {
         oauth::save_credentials(&store).map_err(|e| eyre!("failed to save credentials: {e}"))?;
-        eprintln!("\x1b[32m✓ logged out from claude.ai\x1b[0m");
+        eprintln!("\x1b[32m✓ logged out from {provider_id}\x1b[0m");
     } else {
-        eprintln!("not logged in");
+        eprintln!("not logged in to {provider_id}");
     }
 
     Ok(())
