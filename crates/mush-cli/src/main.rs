@@ -76,6 +76,8 @@ enum Command {
     Models,
     /// list saved sessions
     Sessions,
+    /// show current configuration and auth status
+    Status,
 }
 
 #[tokio::main]
@@ -106,6 +108,7 @@ async fn main() -> Result<()> {
         Some(Command::Logout { provider }) => return logout_flow(provider),
         Some(Command::Models) => return list_models_cmd(),
         Some(Command::Sessions) => return list_sessions_cmd(),
+        Some(Command::Status) => return status_cmd(),
         None => {}
     }
 
@@ -486,6 +489,73 @@ fn format_age(timestamp_ms: u64) -> String {
     } else {
         format!("{}d ago", secs / 86400)
     }
+}
+
+fn status_cmd() -> Result<()> {
+    let cfg = config::load_config();
+
+    println!("\x1b[1mmush status\x1b[0m\n");
+
+    // config
+    let config_path = config::config_dir().join("config.toml");
+    if config_path.exists() {
+        println!("  config: {}", config_path.display());
+    } else {
+        println!("  config: \x1b[2m(none, using defaults)\x1b[0m");
+    }
+
+    // model
+    let model_id = cfg.model.as_deref().unwrap_or("claude-sonnet-4-20250514");
+    println!("  model:  {model_id}");
+
+    // thinking
+    let thinking = cfg.thinking.unwrap_or(false);
+    println!("  thinking: {thinking}");
+
+    // max turns
+    let max_turns = cfg.max_turns.unwrap_or(mush_agent::DEFAULT_MAX_TURNS);
+    println!("  max turns: {max_turns}");
+
+    // auth status
+    println!("\n\x1b[1mauth\x1b[0m\n");
+
+    // env keys
+    let has_anthropic_env = std::env::var("ANTHROPIC_API_KEY").is_ok();
+    let has_openrouter_env = std::env::var("OPENROUTER_API_KEY").is_ok();
+    let has_anthropic_cfg = cfg.api_keys.anthropic.is_some();
+    let has_openrouter_cfg = cfg.api_keys.openrouter.is_some();
+
+    // oauth
+    let oauth_store = mush_ai::oauth::load_credentials().unwrap_or_default();
+    let has_anthropic_oauth = oauth_store.providers.contains_key("anthropic");
+
+    print!("  anthropic:   ");
+    if has_anthropic_env {
+        println!("\x1b[32m✓ env var\x1b[0m");
+    } else if has_anthropic_cfg {
+        println!("\x1b[32m✓ config file\x1b[0m");
+    } else if has_anthropic_oauth {
+        println!("\x1b[32m✓ oauth\x1b[0m");
+    } else {
+        println!("\x1b[31m✗ not configured\x1b[0m");
+    }
+
+    print!("  openrouter:  ");
+    if has_openrouter_env {
+        println!("\x1b[32m✓ env var\x1b[0m");
+    } else if has_openrouter_cfg {
+        println!("\x1b[32m✓ config file\x1b[0m");
+    } else {
+        println!("\x1b[2m- not configured\x1b[0m");
+    }
+
+    // sessions
+    let store = SessionStore::new(SessionStore::default_dir());
+    let session_count = store.list().map(|s| s.len()).unwrap_or(0);
+    println!("\n\x1b[1msessions\x1b[0m\n");
+    println!("  {session_count} saved");
+
+    Ok(())
 }
 
 async fn login_flow(provider_id: Option<String>) -> Result<()> {
