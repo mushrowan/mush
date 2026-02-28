@@ -458,6 +458,8 @@ async fn tui_mode(cli: Cli) -> Result<()> {
         vec![]
     };
 
+    let theme = mush_tui::Theme::from_config(&cfg.theme);
+
     let tui_config = TuiConfig {
         model,
         system_prompt: Some(system_prompt),
@@ -467,6 +469,7 @@ async fn tui_mode(cli: Cli) -> Result<()> {
             .or(cfg.max_turns)
             .unwrap_or(mush_agent::DEFAULT_MAX_TURNS),
         initial_messages,
+        theme,
     };
 
     mush_tui::run_tui(tui_config, &tools, &registry)

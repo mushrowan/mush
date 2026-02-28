@@ -16,6 +16,7 @@ pub struct Config {
     pub max_turns: Option<usize>,
     pub system_prompt: Option<String>,
     pub api_keys: ApiKeys,
+    pub theme: mush_tui::ThemeConfig,
 }
 
 /// api key overrides from config file
