@@ -30,6 +30,12 @@ impl Widget for MessageList<'_> {
 
         // streaming content
         if self.app.is_streaming {
+            lines.push(Line::from(vec![Span::styled(
+                "mush",
+                Style::default()
+                    .fg(Color::Blue)
+                    .add_modifier(Modifier::BOLD),
+            )]));
             if !self.app.streaming_thinking.is_empty() {
                 lines.push(Line::from(vec![Span::styled(
                     "  thinking ",
