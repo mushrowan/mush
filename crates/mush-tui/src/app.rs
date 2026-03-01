@@ -4,6 +4,7 @@
 //! streaming status, and scroll position.
 
 use mush_ai::types::*;
+use throbber_widgets_tui::ThrobberState;
 
 /// events that flow between the TUI and the agent
 #[derive(Debug, Clone)]
@@ -92,6 +93,8 @@ pub struct App {
     pub status: Option<String>,
     /// current tool being executed
     pub active_tool: Option<String>,
+    /// spinner state for animations
+    pub throbber_state: ThrobberState,
 }
 
 impl App {
@@ -110,7 +113,13 @@ impl App {
             should_quit: false,
             status: None,
             active_tool: None,
+            throbber_state: ThrobberState::default(),
         }
+    }
+
+    /// advance the spinner state (call each frame)
+    pub fn tick(&mut self) {
+        self.throbber_state.calc_next();
     }
 
     /// add a user message to the display

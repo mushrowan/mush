@@ -194,6 +194,7 @@ pub async fn run_tui(
                     }
                 }
 
+                app.tick();
                 draw(&mut terminal, &app)?;
             }
 

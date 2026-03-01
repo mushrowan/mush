@@ -6,6 +6,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Paragraph, Widget, Wrap};
 
+use throbber_widgets_tui::{BRAILLE_SIX, Throbber, WhichUse};
+
 use crate::app::{App, DisplayMessage, MessageRole, ToolCallStatus};
 
 /// renders the full message list including any active stream
@@ -30,26 +32,30 @@ impl Widget for MessageList<'_> {
 
         // streaming content
         if self.app.is_streaming {
+            let dim = Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM);
+            let throbber = Throbber::default()
+                .throbber_set(BRAILLE_SIX)
+                .use_type(WhichUse::Spin);
+            let spinner_span =
+                throbber.to_symbol_span(&self.app.throbber_state);
+
             lines.push(Line::from(vec![Span::styled(
                 "mush",
                 Style::default()
                     .fg(Color::Blue)
                     .add_modifier(Modifier::BOLD),
             )]));
+
             if !self.app.streaming_thinking.is_empty() {
-                lines.push(Line::from(vec![Span::styled(
-                    "  thinking ",
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .add_modifier(Modifier::DIM),
-                )]));
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    spinner_span.clone().style(dim),
+                    Span::styled(" thinking", dim),
+                ]));
                 for line in self.app.streaming_thinking.lines() {
-                    lines.push(Line::styled(
-                        format!("  {line}"),
-                        Style::default()
-                            .fg(Color::DarkGray)
-                            .add_modifier(Modifier::DIM),
-                    ));
+                    lines.push(Line::styled(format!("  {line}"), dim));
                 }
                 lines.push(Line::raw(""));
             }
@@ -62,14 +68,25 @@ impl Widget for MessageList<'_> {
                 }
             }
             if self.app.streaming_text.is_empty() && self.app.streaming_thinking.is_empty() {
-                lines.push(Line::styled("  ...", Style::default().fg(Color::DarkGray)));
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    spinner_span.clone().style(dim),
+                    Span::styled(" working", dim),
+                ]));
             }
         }
 
         // active tool indicator
         if let Some(ref tool) = self.app.active_tool {
+            let throbber = Throbber::default()
+                .throbber_set(BRAILLE_SIX)
+                .use_type(WhichUse::Spin);
+            let spinner_span =
+                throbber.to_symbol_span(&self.app.throbber_state);
             lines.push(Line::from(vec![
-                Span::styled("  ▶ ", Style::default().fg(Color::Cyan)),
+                Span::raw("  "),
+                spinner_span.style(Style::default().fg(Color::Cyan)),
+                Span::raw(" "),
                 Span::styled(tool.as_str(), Style::default().fg(Color::Cyan)),
             ]));
         }
