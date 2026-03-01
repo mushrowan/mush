@@ -27,6 +27,9 @@ const CLAUDE_CODE_TOOLS: &[&str] = &[
     "Bash",
     "Grep",
     "Glob",
+    "Find",
+    "Ls",
+    "Batch",
     "AskUserQuestion",
     "EnterPlanMode",
     "ExitPlanMode",
@@ -42,10 +45,11 @@ const CLAUDE_CODE_TOOLS: &[&str] = &[
 
 /// convert tool name to claude code canonical casing if it matches (case-insensitive)
 fn to_claude_code_name(name: &str) -> String {
-    let lower = name.to_lowercase();
+    // strip underscores for comparison (web_search → websearch → WebSearch)
+    let normalised = name.to_lowercase().replace('_', "");
     CLAUDE_CODE_TOOLS
         .iter()
-        .find(|t| t.to_lowercase() == lower)
+        .find(|t| t.to_lowercase() == normalised)
         .map(|t| t.to_string())
         .unwrap_or_else(|| name.to_string())
 }
@@ -107,9 +111,7 @@ impl ApiProvider for AnthropicProvider {
                 );
                 headers.insert(
                     "user-agent",
-                    HeaderValue::from_static(
-                        concat!("claude-cli/", "2.1.62"),
-                    ),
+                    HeaderValue::from_static(concat!("claude-cli/", "2.1.62")),
                 );
                 headers.insert("x-app", HeaderValue::from_static("cli"));
                 headers.insert(
@@ -156,7 +158,8 @@ impl ApiProvider for AnthropicProvider {
             let model_id = model.id.clone();
             let provider_name = model.provider.to_string();
             let api = model.api;
-            let sse_stream = parse_sse_stream(response, model_id, provider_name, api, is_oauth, tools);
+            let sse_stream =
+                parse_sse_stream(response, model_id, provider_name, api, is_oauth, tools);
 
             Ok(sse_stream)
         })
@@ -1177,8 +1180,10 @@ mod tests {
         assert_eq!(to_claude_code_name("bash"), "Bash");
         assert_eq!(to_claude_code_name("webfetch"), "WebFetch");
         assert_eq!(to_claude_code_name("websearch"), "WebSearch");
-        // underscored names don't match claude code names, passed through as-is
-        assert_eq!(to_claude_code_name("web_fetch"), "web_fetch");
+        // underscored names normalised to match claude code names
+        assert_eq!(to_claude_code_name("web_fetch"), "WebFetch");
+        assert_eq!(to_claude_code_name("web_search"), "WebSearch");
+        // unknown tools passed through as-is
         assert_eq!(to_claude_code_name("custom_tool"), "custom_tool");
     }
 
@@ -1205,14 +1210,7 @@ mod tests {
     fn oauth_system_prompt_has_identity() {
         let model = test_model();
         let options = StreamOptions::default();
-        let body = build_request_body(
-            &model,
-            &Some("be helpful".into()),
-            &[],
-            &[],
-            &options,
-            true,
-        );
+        let body = build_request_body(&model, &Some("be helpful".into()), &[], &[], &options, true);
         let system = body.system.unwrap();
         assert_eq!(system.len(), 2);
         assert!(system[0].text.contains("Claude Code"));
@@ -1245,14 +1243,7 @@ mod tests {
             description: "read files".into(),
             parameters: serde_json::json!({"type": "object"}),
         }];
-        let body = build_request_body(
-            &model,
-            &None,
-            &[],
-            &tools,
-            &options,
-            true,
-        );
+        let body = build_request_body(&model, &None, &[], &tools, &options, true);
         let tools = body.tools.unwrap();
         assert_eq!(tools[0].name, "Read");
     }

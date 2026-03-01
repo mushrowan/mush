@@ -4,10 +4,15 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::app::{App, AppEvent};
+use crate::app::{App, AppEvent, AppMode};
 
 /// handle a key event, mutating the app and optionally producing an event
 pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
+    // session picker mode has its own key handling
+    if app.mode == AppMode::SessionPicker {
+        return handle_picker_key(app, key);
+    }
+
     // global bindings (work even while streaming)
     match (key.modifiers, key.code) {
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => return Some(AppEvent::Quit),
@@ -86,6 +91,59 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     }
 
     None
+}
+
+/// handle keys in session picker mode
+fn handle_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
+    match (key.modifiers, key.code) {
+        (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
+            app.close_session_picker();
+            None
+        }
+        (_, KeyCode::Enter) => {
+            // select session — return a slash command that the runner handles
+            if let Some(meta) = app.selected_session() {
+                let id = meta.id.0.clone();
+                app.close_session_picker();
+                Some(AppEvent::SlashCommand {
+                    name: "resume".into(),
+                    args: id,
+                })
+            } else {
+                None
+            }
+        }
+        (_, KeyCode::Up) => {
+            if let Some(ref mut picker) = app.session_picker {
+                picker.selected = picker.selected.saturating_sub(1);
+            }
+            None
+        }
+        (_, KeyCode::Down) => {
+            if let Some(ref mut picker) = app.session_picker {
+                let filtered_len = crate::app::filtered_sessions(picker).len();
+                if picker.selected + 1 < filtered_len {
+                    picker.selected += 1;
+                }
+            }
+            None
+        }
+        (_, KeyCode::Backspace) => {
+            if let Some(ref mut picker) = app.session_picker {
+                picker.filter.pop();
+                picker.selected = 0;
+            }
+            None
+        }
+        (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
+            if let Some(ref mut picker) = app.session_picker {
+                picker.filter.push(c);
+                picker.selected = 0;
+            }
+            None
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]

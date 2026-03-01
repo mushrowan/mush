@@ -3,6 +3,7 @@
 //! a session holds the conversation history and metadata for a single
 //! agent interaction. sessions can be persisted, resumed, and branched.
 
+use crate::tree::SessionTree;
 use mush_ai::types::{Message, Timestamp};
 use serde::{Deserialize, Serialize};
 
@@ -49,11 +50,14 @@ pub struct SessionMeta {
     pub cwd: String,
 }
 
-/// a full session with messages
+/// a full session with messages and tree structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub meta: SessionMeta,
     pub messages: Vec<Message>,
+    /// tree structure for branching (optional for backwards compat)
+    #[serde(default)]
+    pub tree: SessionTree,
 }
 
 impl Session {
@@ -71,13 +75,25 @@ impl Session {
                 cwd: cwd.into(),
             },
             messages: vec![],
+            tree: SessionTree::new(),
         }
     }
 
     pub fn push_message(&mut self, message: Message) {
+        self.tree.append_message(message.clone());
         self.messages.push(message);
         self.meta.message_count = self.messages.len();
         self.meta.updated_at = Timestamp::now();
+    }
+
+    /// get the conversation for the current branch (what the LLM sees)
+    pub fn context(&self) -> Vec<Message> {
+        if self.tree.is_empty() {
+            // backwards compat: old sessions without tree
+            self.messages.clone()
+        } else {
+            self.tree.build_context()
+        }
     }
 
     /// set title from first user message if not already set

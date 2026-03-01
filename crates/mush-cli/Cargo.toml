@@ -5,6 +5,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["embeddings"]
+embeddings = ["mush-ext/embeddings"]
+
 [[bin]]
 name = "mush"
 path = "src/main.rs"
@@ -15,6 +19,7 @@ mush-agent.workspace = true
 mush-tools.workspace = true
 mush-session.workspace = true
 mush-ext.workspace = true
+mush-mcp.workspace = true
 mush-tui.workspace = true
 tokio.workspace = true
 clap.workspace = true

@@ -25,8 +25,9 @@ impl AgentTool for GrepTool {
         "Grep"
     }
     fn description(&self) -> &str {
-        "Search file contents using ripgrep. Respects .gitignore. \
-         Returns matching lines with file paths and line numbers."
+        "Search file contents using ripgrep (rg). Respects .gitignore. \
+         Returns matching lines with file paths and line numbers. \
+         Use this for searching code, config, and text files by content pattern."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

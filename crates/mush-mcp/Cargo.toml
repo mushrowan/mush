@@ -1,0 +1,24 @@
+[package]
+name = "mush-mcp"
+description = "MCP (Model Context Protocol) client for mush"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mush-agent.workspace = true
+mush-ai.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+futures.workspace = true
+thiserror.workspace = true
+rmcp = { version = "0.17", default-features = false, features = [
+  "client",
+  "transport-child-process",
+  "transport-streamable-http-client-reqwest",
+] }
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+toml.workspace = true

@@ -2,11 +2,9 @@
 
 /// summarise tool arguments for compact display
 pub fn summarise_tool_args(tool_name: &str, args: &serde_json::Value) -> String {
-    match tool_name {
-        "Read" | "Write" | "Edit" | "read" | "write" | "edit" => {
-            args["path"].as_str().unwrap_or("").to_string()
-        }
-        "Bash" | "bash" => {
+    match tool_name.to_lowercase().replace('_', "").as_str() {
+        "read" | "write" | "edit" => args["path"].as_str().unwrap_or("").to_string(),
+        "bash" => {
             let cmd = args["command"].as_str().unwrap_or("");
             if cmd.len() > 60 {
                 format!("{}...", &cmd[..57])
@@ -14,13 +12,26 @@ pub fn summarise_tool_args(tool_name: &str, args: &serde_json::Value) -> String 
                 cmd.to_string()
             }
         }
-        "Grep" | "grep" => {
+        "grep" => {
             let pattern = args["pattern"].as_str().unwrap_or("");
             let path = args["path"].as_str().unwrap_or(".");
             format!("{pattern} in {path}")
         }
-        "Glob" | "Find" | "find" => args["pattern"].as_str().unwrap_or("").to_string(),
-        "Ls" | "ls" => args["path"].as_str().unwrap_or(".").to_string(),
+        "glob" | "find" => args["pattern"].as_str().unwrap_or("").to_string(),
+        "ls" => args["path"].as_str().unwrap_or(".").to_string(),
+        "websearch" => {
+            let query = args["query"].as_str().unwrap_or("");
+            if query.len() > 60 {
+                format!("{}...", &query[..57])
+            } else {
+                query.to_string()
+            }
+        }
+        "webfetch" => args["url"].as_str().unwrap_or("").to_string(),
+        "batch" => {
+            let count = args["tool_calls"].as_array().map(|a| a.len()).unwrap_or(0);
+            format!("{count} tool calls")
+        }
         _ => {
             let s = args.to_string();
             if s.len() > 60 {
@@ -66,5 +77,38 @@ mod tests {
         let args = serde_json::json!({"key": "val"});
         let summary = summarise_tool_args("custom", &args);
         assert!(summary.contains("key"));
+    }
+
+    #[test]
+    fn web_search_shows_query() {
+        let args = serde_json::json!({"query": "rust async runtime"});
+        assert_eq!(
+            summarise_tool_args("web_search", &args),
+            "rust async runtime"
+        );
+        assert_eq!(
+            summarise_tool_args("WebSearch", &args),
+            "rust async runtime"
+        );
+    }
+
+    #[test]
+    fn web_fetch_shows_url() {
+        let args = serde_json::json!({"url": "https://docs.rs/tokio"});
+        assert_eq!(
+            summarise_tool_args("web_fetch", &args),
+            "https://docs.rs/tokio"
+        );
+    }
+
+    #[test]
+    fn batch_shows_count() {
+        let args = serde_json::json!({
+            "tool_calls": [
+                {"tool": "read", "parameters": {"path": "a.rs"}},
+                {"tool": "read", "parameters": {"path": "b.rs"}},
+            ]
+        });
+        assert_eq!(summarise_tool_args("batch", &args), "2 tool calls");
     }
 }

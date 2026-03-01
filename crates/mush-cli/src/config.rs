@@ -6,6 +6,19 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
+/// how to inject skill relevance hints
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HintMode {
+    /// prepend hint to user message (evaluated once per message)
+    #[default]
+    Message,
+    /// inject via context transform (re-evaluated before each LLM call)
+    Transform,
+    /// no hint (all skills still loaded in system prompt)
+    None,
+}
+
 /// top-level config
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
@@ -15,8 +28,12 @@ pub struct Config {
     pub max_tokens: Option<u64>,
     pub max_turns: Option<usize>,
     pub system_prompt: Option<String>,
+    pub hint_mode: HintMode,
     pub api_keys: ApiKeys,
     pub theme: mush_tui::ThemeConfig,
+    /// MCP server configurations keyed by name
+    #[serde(default)]
+    pub mcp: std::collections::HashMap<String, mush_mcp::McpServerConfig>,
 }
 
 /// api key overrides from config file
@@ -74,7 +91,7 @@ mod tests {
     #[test]
     fn parse_full_config() {
         let toml = r#"
-model = "claude-sonnet-4-20250514"
+model = "claude-opus-4-6"
 thinking = true
 max_tokens = 8192
 system_prompt = "you are helpful"
@@ -85,7 +102,7 @@ openrouter = "sk-or-test"
 "#;
 
         let config: Config = toml::from_str(toml).unwrap();
-        assert_eq!(config.model.as_deref(), Some("claude-sonnet-4-20250514"));
+        assert_eq!(config.model.as_deref(), Some("claude-opus-4-6"));
         assert_eq!(config.thinking, Some(true));
         assert_eq!(config.max_tokens, Some(8192));
         assert_eq!(config.api_keys.anthropic.as_deref(), Some("sk-ant-test"));
@@ -106,9 +123,47 @@ openrouter = "sk-or-test"
     }
 
     #[test]
+    fn parse_hint_mode() {
+        let config: Config = toml::from_str(r#"hint_mode = "transform""#).unwrap();
+        assert_eq!(config.hint_mode, HintMode::Transform);
+
+        let config: Config = toml::from_str(r#"hint_mode = "none""#).unwrap();
+        assert_eq!(config.hint_mode, HintMode::None);
+
+        let config: Config = toml::from_str(r#"hint_mode = "message""#).unwrap();
+        assert_eq!(config.hint_mode, HintMode::Message);
+    }
+
+    #[test]
+    fn hint_mode_defaults_to_message() {
+        let config: Config = toml::from_str("").unwrap();
+        assert_eq!(config.hint_mode, HintMode::Message);
+    }
+
+    #[test]
     fn load_missing_config_returns_default() {
         // set config dir to a temp path that doesn't exist
         let config = Config::default();
         assert!(config.model.is_none());
+    }
+
+    #[test]
+    fn parse_mcp_config() {
+        let toml = r#"
+[mcp.git]
+type = "local"
+command = ["uvx", "mcp-server-git"]
+
+[mcp.remote-api]
+type = "remote"
+url = "https://mcp.example.com/sse"
+timeout = 60
+enabled = false
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.mcp.len(), 2);
+        assert!(config.mcp.contains_key("git"));
+        assert!(config.mcp.contains_key("remote-api"));
+        assert!(!config.mcp["remote-api"].enabled);
     }
 }

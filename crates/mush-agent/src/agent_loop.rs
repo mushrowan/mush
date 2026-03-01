@@ -75,7 +75,8 @@ pub type MessageCallback<'a> = Box<
 pub type ContextTransform<'a> = Box<
     dyn Fn(
             Vec<Message>,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<Message>> + Send>>
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<Message>> + Send + 'a>>
         + Send
         + Sync
         + 'a,

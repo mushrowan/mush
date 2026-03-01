@@ -57,7 +57,7 @@
 
         craneOutputs = import ./nix/package.nix {
           inherit craneLib src;
-          inherit (pkgs) ripgrep fd;
+          inherit (pkgs) ripgrep fd onnxruntime pkg-config openssl;
         };
       in {
         packages.default = craneOutputs.package;

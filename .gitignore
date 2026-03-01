@@ -11,3 +11,4 @@ opencode/
 
 # direnv
 .direnv/
+.fastembed_cache/

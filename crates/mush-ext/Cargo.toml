@@ -5,9 +5,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+embeddings = ["dep:fastembed"]
+
 [dependencies]
 mush-ai.workspace = true
 mush-agent.workspace = true
+thiserror.workspace = true
+fastembed = { version = "5", optional = true }
 
 [dev-dependencies]
 pretty_assertions.workspace = true

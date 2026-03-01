@@ -16,6 +16,19 @@ crossterm.workspace = true
 futures.workspace = true
 serde.workspace = true
 throbber-widgets-tui = { version = "0.11.0", default-features = false }
+syntect = { version = "5.3.0", default-features = false, features = [
+  "default-syntaxes",
+  "default-themes",
+  "regex-fancy",
+] }
+base64.workspace = true
+image.workspace = true
+notify.workspace = true
+toml.workspace = true
+ratatui-image = { version = "10.0.6", default-features = false, features = [
+  "crossterm",
+  "image-defaults",
+] }
 
 [dev-dependencies]
 pretty_assertions.workspace = true

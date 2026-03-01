@@ -7,6 +7,59 @@ use crate::types::*;
 /// all built-in anthropic models
 pub fn anthropic_models() -> Vec<Model> {
     vec![
+        // current generation
+        Model {
+            id: "claude-opus-4-6".into(),
+            name: "Claude Opus 4.6".into(),
+            api: Api::AnthropicMessages,
+            provider: Provider::Anthropic,
+            base_url: "https://api.anthropic.com".into(),
+            reasoning: true,
+            input: vec![InputModality::Text, InputModality::Image],
+            cost: ModelCost {
+                input: 5.0,
+                output: 25.0,
+                cache_read: 0.5,
+                cache_write: 6.25,
+            },
+            context_window: 200_000,
+            max_output_tokens: 128_000,
+        },
+        Model {
+            id: "claude-sonnet-4-6".into(),
+            name: "Claude Sonnet 4.6".into(),
+            api: Api::AnthropicMessages,
+            provider: Provider::Anthropic,
+            base_url: "https://api.anthropic.com".into(),
+            reasoning: true,
+            input: vec![InputModality::Text, InputModality::Image],
+            cost: ModelCost {
+                input: 3.0,
+                output: 15.0,
+                cache_read: 0.3,
+                cache_write: 3.75,
+            },
+            context_window: 200_000,
+            max_output_tokens: 64_000,
+        },
+        Model {
+            id: "claude-haiku-4-5".into(),
+            name: "Claude Haiku 4.5".into(),
+            api: Api::AnthropicMessages,
+            provider: Provider::Anthropic,
+            base_url: "https://api.anthropic.com".into(),
+            reasoning: true,
+            input: vec![InputModality::Text, InputModality::Image],
+            cost: ModelCost {
+                input: 1.0,
+                output: 5.0,
+                cache_read: 0.1,
+                cache_write: 1.25,
+            },
+            context_window: 200_000,
+            max_output_tokens: 64_000,
+        },
+        // legacy
         Model {
             id: "claude-sonnet-4-20250514".into(),
             name: "Claude Sonnet 4".into(),
@@ -22,7 +75,7 @@ pub fn anthropic_models() -> Vec<Model> {
                 cache_write: 3.75,
             },
             context_window: 200_000,
-            max_output_tokens: 16384,
+            max_output_tokens: 64_000,
         },
         Model {
             id: "claude-opus-4-20250514".into(),
@@ -40,23 +93,6 @@ pub fn anthropic_models() -> Vec<Model> {
             },
             context_window: 200_000,
             max_output_tokens: 32768,
-        },
-        Model {
-            id: "claude-haiku-3-5-20241022".into(),
-            name: "Claude 3.5 Haiku".into(),
-            api: Api::AnthropicMessages,
-            provider: Provider::Anthropic,
-            base_url: "https://api.anthropic.com".into(),
-            reasoning: false,
-            input: vec![InputModality::Text, InputModality::Image],
-            cost: ModelCost {
-                input: 0.8,
-                output: 4.0,
-                cache_read: 0.08,
-                cache_write: 1.0,
-            },
-            context_window: 200_000,
-            max_output_tokens: 8192,
         },
     ]
 }
@@ -404,6 +440,7 @@ mod tests {
 
     #[test]
     fn calculate_cost_works() {
+        // opus 4.6: $5/MTok input, $25/MTok output
         let model = anthropic_models().into_iter().next().unwrap();
         let usage = Usage {
             input_tokens: 1_000_000,
@@ -412,8 +449,8 @@ mod tests {
             cache_write_tokens: 50_000,
         };
         let cost = calculate_cost(&model, &usage);
-        assert!((cost.input - 3.0).abs() < f64::EPSILON);
-        assert!((cost.output - 7.5).abs() < f64::EPSILON);
+        assert!((cost.input - 5.0).abs() < f64::EPSILON);
+        assert!((cost.output - 12.5).abs() < f64::EPSILON);
         assert!(cost.total() > 0.0);
     }
 }

@@ -25,8 +25,9 @@ impl AgentTool for FindTool {
         "Find"
     }
     fn description(&self) -> &str {
-        "Search for files and directories by name using fd. Respects .gitignore. \
-         Returns matching paths relative to the search directory."
+        "Search for files and directories by name pattern using fd (regex). Respects .gitignore. \
+         Returns matching paths relative to the search directory. \
+         For glob patterns like '**/*.rs', use the glob tool instead."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

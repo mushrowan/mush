@@ -38,8 +38,7 @@ impl Widget for MessageList<'_> {
             let throbber = Throbber::default()
                 .throbber_set(BRAILLE_SIX)
                 .use_type(WhichUse::Spin);
-            let spinner_span =
-                throbber.to_symbol_span(&self.app.throbber_state);
+            let spinner_span = throbber.to_symbol_span(&self.app.throbber_state);
 
             lines.push(Line::from(vec![Span::styled(
                 "mush",
@@ -76,13 +75,28 @@ impl Widget for MessageList<'_> {
             }
         }
 
-        // active tool indicator
+        // streaming tool args (model is building tool call, not yet executing)
+        if self.app.active_tool.is_none() && !self.app.streaming_tool_args.is_empty() {
+            let throbber = Throbber::default()
+                .throbber_set(BRAILLE_SIX)
+                .use_type(WhichUse::Spin);
+            let spinner_span = throbber.to_symbol_span(&self.app.throbber_state);
+            // show a truncated preview of the args being built
+            let preview = truncate_line(&self.app.streaming_tool_args, 60);
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                spinner_span.style(Style::default().fg(Color::DarkGray)),
+                Span::styled(" building ", Style::default().fg(Color::DarkGray)),
+                Span::styled(preview, Style::default().fg(Color::DarkGray)),
+            ]));
+        }
+
+        // active tool indicator (executing)
         if let Some(ref tool) = self.app.active_tool {
             let throbber = Throbber::default()
                 .throbber_set(BRAILLE_SIX)
                 .use_type(WhichUse::Spin);
-            let spinner_span =
-                throbber.to_symbol_span(&self.app.throbber_state);
+            let spinner_span = throbber.to_symbol_span(&self.app.throbber_state);
             lines.push(Line::from(vec![
                 Span::raw("  "),
                 spinner_span.style(Style::default().fg(Color::Cyan)),
@@ -190,6 +204,19 @@ fn render_message(msg: &DisplayMessage, lines: &mut Vec<Line<'_>>) {
             Span::raw(" "),
             Span::styled(tc.summary.clone(), Style::default().fg(Color::DarkGray)),
         ]));
+        // image indicator
+        if tc.image_data.is_some() {
+            lines.push(Line::from(vec![
+                Span::styled("    ", Style::default()),
+                Span::styled("📷 ", Style::default()),
+                Span::styled(
+                    "[image attached]",
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::ITALIC),
+                ),
+            ]));
+        }
         // tool output preview (dim, indented)
         if let Some(ref output) = tc.output_preview {
             for line in output.lines() {
@@ -215,6 +242,17 @@ fn render_message(msg: &DisplayMessage, lines: &mut Vec<Line<'_>>) {
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::DIM),
         ));
+    }
+}
+
+/// truncate a string to a max length, adding ellipsis
+fn truncate_line(s: &str, max: usize) -> String {
+    // take first line, strip whitespace
+    let line = s.lines().next().unwrap_or(s).trim();
+    if line.len() <= max {
+        line.to_string()
+    } else {
+        format!("{}…", &line[..max])
     }
 }
 
@@ -298,12 +336,14 @@ mod tests {
                     summary: "ls -la".into(),
                     status: ToolCallStatus::Done,
                     output_preview: Some("file1.txt\nfile2.txt".into()),
+                    image_data: None,
                 },
                 crate::app::DisplayToolCall {
                     name: "read".into(),
                     summary: "src/main.rs".into(),
                     status: ToolCallStatus::Error,
                     output_preview: None,
+                    image_data: None,
                 },
             ],
             thinking: None,

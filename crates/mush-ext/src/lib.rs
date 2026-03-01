@@ -4,6 +4,9 @@ pub mod prompts;
 pub mod skills;
 pub mod types;
 
+#[cfg(feature = "embeddings")]
+pub mod context;
+
 pub use hook::*;
 pub use loader::*;
 pub use prompts::*;

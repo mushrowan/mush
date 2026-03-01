@@ -4,6 +4,7 @@
 //! streaming status, and scroll position.
 
 use mush_ai::types::*;
+use mush_session::SessionMeta;
 use throbber_widgets_tui::ThrobberState;
 
 /// events that flow between the TUI and the agent
@@ -27,6 +28,21 @@ pub enum AppEvent {
     ScrollDown(u16),
     /// resize
     Resize(u16, u16),
+}
+
+/// which UI mode the app is in
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppMode {
+    Normal,
+    SessionPicker,
+}
+
+/// state for the session picker overlay
+#[derive(Debug, Clone)]
+pub struct SessionPickerState {
+    pub sessions: Vec<SessionMeta>,
+    pub selected: usize,
+    pub filter: String,
 }
 
 /// a displayable message block in the conversation
@@ -56,6 +72,8 @@ pub struct DisplayToolCall {
     pub status: ToolCallStatus,
     /// truncated preview of tool output
     pub output_preview: Option<String>,
+    /// raw image bytes from tool result (for inline rendering)
+    pub image_data: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,8 +111,14 @@ pub struct App {
     pub status: Option<String>,
     /// current tool being executed
     pub active_tool: Option<String>,
+    /// tool args streaming in (partial JSON from ToolCallDelta)
+    pub streaming_tool_args: String,
     /// spinner state for animations
     pub throbber_state: ThrobberState,
+    /// which UI mode we're in
+    pub mode: AppMode,
+    /// session picker state (when mode == SessionPicker)
+    pub session_picker: Option<SessionPickerState>,
 }
 
 impl App {
@@ -113,7 +137,10 @@ impl App {
             should_quit: false,
             status: None,
             active_tool: None,
+            streaming_tool_args: String::new(),
             throbber_state: ThrobberState::default(),
+            mode: AppMode::Normal,
+            session_picker: None,
         }
     }
 
@@ -154,9 +181,15 @@ impl App {
         self.streaming_thinking.push_str(delta);
     }
 
+    /// accumulate streaming tool call arguments
+    pub fn push_tool_args_delta(&mut self, delta: &str) {
+        self.streaming_tool_args.push_str(delta);
+    }
+
     /// mark a tool as being executed
     pub fn start_tool(&mut self, name: &str, summary: &str) {
         self.active_tool = Some(name.to_string());
+        self.streaming_tool_args.clear();
         // add to the last message's tool calls if we have one in progress
         if let Some(last) = self.messages.last_mut() {
             last.tool_calls.push(DisplayToolCall {
@@ -164,12 +197,19 @@ impl App {
                 summary: summary.to_string(),
                 status: ToolCallStatus::Running,
                 output_preview: None,
+                image_data: None,
             });
         }
     }
 
     /// mark the current tool as done, with optional output preview
-    pub fn end_tool(&mut self, name: &str, is_error: bool, output: Option<&str>) {
+    pub fn end_tool(
+        &mut self,
+        name: &str,
+        is_error: bool,
+        output: Option<&str>,
+        image_data: Option<Vec<u8>>,
+    ) {
         self.active_tool = None;
         if let Some(last) = self.messages.last_mut()
             && let Some(tc) = last.tool_calls.iter_mut().rfind(|t| t.name == name)
@@ -180,6 +220,7 @@ impl App {
                 ToolCallStatus::Done
             };
             tc.output_preview = output.map(truncate_output);
+            tc.image_data = image_data;
         }
     }
 
@@ -314,6 +355,50 @@ impl App {
         self.cursor = 0;
         std::mem::take(&mut self.input)
     }
+
+    /// open the session picker with the given sessions
+    pub fn open_session_picker(&mut self, sessions: Vec<SessionMeta>) {
+        self.session_picker = Some(SessionPickerState {
+            sessions,
+            selected: 0,
+            filter: String::new(),
+        });
+        self.mode = AppMode::SessionPicker;
+    }
+
+    /// close the session picker
+    pub fn close_session_picker(&mut self) {
+        self.session_picker = None;
+        self.mode = AppMode::Normal;
+    }
+
+    /// get the currently selected session id (if picker is open)
+    pub fn selected_session(&self) -> Option<&SessionMeta> {
+        let picker = self.session_picker.as_ref()?;
+        let filtered = filtered_sessions(picker);
+        filtered.get(picker.selected).copied()
+    }
+}
+
+/// get sessions matching the current filter
+pub fn filtered_sessions(picker: &SessionPickerState) -> Vec<&SessionMeta> {
+    if picker.filter.is_empty() {
+        picker.sessions.iter().collect()
+    } else {
+        let filter_lower = picker.filter.to_lowercase();
+        picker
+            .sessions
+            .iter()
+            .filter(|s| {
+                s.title
+                    .as_deref()
+                    .unwrap_or("")
+                    .to_lowercase()
+                    .contains(&filter_lower)
+                    || s.id.0.contains(&filter_lower)
+            })
+            .collect()
+    }
 }
 
 /// max lines to show in tool output preview
@@ -416,7 +501,7 @@ mod tests {
             ToolCallStatus::Running
         );
 
-        app.end_tool("bash", false, Some("file1.txt\nfile2.txt"));
+        app.end_tool("bash", false, Some("file1.txt\nfile2.txt"), None);
         assert!(app.active_tool.is_none());
         assert_eq!(
             app.messages.last().unwrap().tool_calls[0].status,
@@ -537,7 +622,7 @@ mod tests {
             cost: None,
         });
         app.start_tool("read", "src/main.rs");
-        app.end_tool("read", false, Some("fn main() {}\n"));
+        app.end_tool("read", false, Some("fn main() {}\n"), None);
         let tc = &app.messages.last().unwrap().tool_calls[0];
         assert!(tc.output_preview.is_some());
         assert!(tc.output_preview.as_ref().unwrap().contains("fn main()"));
@@ -591,5 +676,74 @@ mod tests {
         app.input_char('b');
         assert_eq!(app.input, "a\nb");
         assert_eq!(app.cursor, 3);
+    }
+
+    #[test]
+    fn session_picker_open_close() {
+        let mut app = App::new("test".into());
+        assert_eq!(app.mode, AppMode::Normal);
+
+        let sessions = vec![SessionMeta {
+            id: mush_session::SessionId("abc".into()),
+            title: Some("test session".into()),
+            model_id: "claude-sonnet".into(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
+            message_count: 5,
+            cwd: "/tmp".into(),
+        }];
+
+        app.open_session_picker(sessions);
+        assert_eq!(app.mode, AppMode::SessionPicker);
+        assert!(app.session_picker.is_some());
+
+        app.close_session_picker();
+        assert_eq!(app.mode, AppMode::Normal);
+        assert!(app.session_picker.is_none());
+    }
+
+    #[test]
+    fn session_picker_filter() {
+        let sessions = vec![
+            SessionMeta {
+                id: mush_session::SessionId("a".into()),
+                title: Some("rust project".into()),
+                model_id: "m".into(),
+                created_at: Timestamp::now(),
+                updated_at: Timestamp::now(),
+                message_count: 1,
+                cwd: "/tmp".into(),
+            },
+            SessionMeta {
+                id: mush_session::SessionId("b".into()),
+                title: Some("python script".into()),
+                model_id: "m".into(),
+                created_at: Timestamp::now(),
+                updated_at: Timestamp::now(),
+                message_count: 2,
+                cwd: "/tmp".into(),
+            },
+        ];
+
+        let mut app = App::new("test".into());
+        app.open_session_picker(sessions);
+
+        let picker = app.session_picker.as_mut().unwrap();
+        picker.filter = "rust".into();
+        let filtered = filtered_sessions(picker);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].title.as_deref(), Some("rust project"));
+    }
+
+    #[test]
+    fn streaming_tool_args_accumulate() {
+        let mut app = App::new("test".into());
+        app.push_tool_args_delta("{\"path\":");
+        app.push_tool_args_delta("\"src/");
+        assert_eq!(app.streaming_tool_args, "{\"path\":\"src/");
+
+        // start_tool clears the buffer
+        app.start_tool("read", "src/main.rs");
+        assert!(app.streaming_tool_args.is_empty());
     }
 }

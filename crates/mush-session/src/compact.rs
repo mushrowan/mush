@@ -3,7 +3,12 @@
 //! when a conversation gets too long, older messages are replaced
 //! with a summary while keeping recent context intact. the summary
 //! is injected as a user message at the start of the compacted history.
+//!
+//! supports both structured (no LLM) and LLM-based summarisation.
 
+use futures::StreamExt;
+use mush_ai::registry::{ApiRegistry, LlmContext};
+use mush_ai::stream::StreamEvent;
 use mush_ai::types::*;
 
 /// how many recent messages to keep uncompacted
@@ -179,6 +184,114 @@ pub fn compact_with_summary(
     }
 }
 
+const COMPACTION_PROMPT: &str = "\
+You are a conversation compactor. Your job is to produce a concise summary of the \
+conversation history that preserves all critical context needed to continue the conversation.
+
+Preserve:
+- The user's original goal and any sub-goals
+- Key decisions made and their rationale
+- Important constraints or preferences stated by the user
+- File paths, variable names, and technical details that were discussed
+- What has been completed vs what remains
+- Any errors encountered and how they were resolved
+- The current state of whatever is being worked on
+
+Omit:
+- Verbatim tool output (summarise what was found/changed instead)
+- Redundant back-and-forth
+- Thinking/reasoning traces
+- Pleasantries
+
+Output a structured summary in markdown. Be thorough but concise. \
+The summary will replace the compacted messages, so anything not included is lost forever.";
+
+/// check whether compaction is needed (estimated tokens > 75% of context window)
+pub fn needs_compaction(messages: &[Message], context_window: usize) -> bool {
+    let threshold = context_window * 3 / 4;
+    messages.len() > DEFAULT_KEEP_RECENT && estimate_tokens(messages) > threshold
+}
+
+/// compact messages using an LLM to generate the summary.
+/// falls back to structured compaction if the LLM call fails.
+pub async fn llm_compact(
+    messages: Vec<Message>,
+    registry: &ApiRegistry,
+    model: &Model,
+    options: &StreamOptions,
+    keep_recent: Option<usize>,
+) -> CompactionResult {
+    let keep = keep_recent.unwrap_or(DEFAULT_KEEP_RECENT);
+
+    if messages.len() <= keep {
+        return CompactionResult {
+            summarised_count: 0,
+            summary: String::new(),
+            messages,
+        };
+    }
+
+    let split_at = messages.len() - keep;
+    let old_messages = &messages[..split_at];
+
+    // build the prompt for the LLM
+    let conversation_dump = build_compaction_prompt(old_messages);
+
+    let context = LlmContext {
+        system_prompt: Some(COMPACTION_PROMPT.to_string()),
+        messages: vec![Message::User(UserMessage {
+            content: UserContent::Text(format!(
+                "Summarise this conversation history:\n\n{conversation_dump}"
+            )),
+            timestamp_ms: Timestamp::now(),
+        })],
+        tools: vec![],
+    };
+
+    // use reduced max_tokens for the summary, no thinking
+    let mut compact_options = options.clone();
+    compact_options.max_tokens = Some(4096);
+    compact_options.thinking = None;
+
+    let summary = match call_for_text(registry, model, &context, &compact_options).await {
+        Some(text) => text,
+        None => {
+            // fallback: structured dump (no LLM)
+            let prompt = build_compaction_prompt(old_messages);
+            format!(
+                "## Summary of earlier conversation\n\n\
+                 The following is a condensed summary of the conversation so far:\n\n\
+                 {prompt}"
+            )
+        }
+    };
+
+    compact_with_summary(messages, &summary, keep_recent)
+}
+
+/// make a simple LLM call and collect the text response
+async fn call_for_text(
+    registry: &ApiRegistry,
+    model: &Model,
+    context: &LlmContext,
+    options: &StreamOptions,
+) -> Option<String> {
+    let stream_future = registry.stream(model, context, options).ok()?;
+    let mut stream = stream_future.await.ok()?;
+
+    let mut text = String::new();
+    while let Some(event) = stream.next().await {
+        match event {
+            StreamEvent::TextDelta { delta, .. } => text.push_str(&delta),
+            StreamEvent::Done { .. } => break,
+            StreamEvent::Error { .. } => return None,
+            _ => {}
+        }
+    }
+
+    if text.is_empty() { None } else { Some(text) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,5 +402,77 @@ mod tests {
                 panic!("expected text");
             }
         }
+    }
+
+    #[test]
+    fn needs_compaction_below_threshold() {
+        let msgs = vec![user_msg("hi"), assistant_msg("hello")];
+        // small messages, huge window — no compaction needed
+        assert!(!needs_compaction(&msgs, 200_000));
+    }
+
+    #[test]
+    fn needs_compaction_above_threshold() {
+        // each message ~250 tokens (1000 chars / 4), 20 messages = ~5000 tokens
+        let msgs: Vec<Message> = (0..20)
+            .map(|i| {
+                if i % 2 == 0 {
+                    user_msg(&"x".repeat(1000))
+                } else {
+                    assistant_msg(&"y".repeat(1000))
+                }
+            })
+            .collect();
+        // context window of 4000 tokens, 75% threshold = 3000
+        // 20 msgs * 250 tokens = 5000, which exceeds 3000
+        assert!(needs_compaction(&msgs, 4000));
+    }
+
+    #[test]
+    fn needs_compaction_too_few_messages() {
+        // even if tokens are high, don't compact if <= keep_recent (10)
+        let msgs: Vec<Message> = (0..8).map(|_| user_msg(&"x".repeat(10_000))).collect();
+        assert!(!needs_compaction(&msgs, 100));
+    }
+
+    #[tokio::test]
+    async fn llm_compact_fallback_on_no_provider() {
+        // with an empty registry, the LLM call will fail and it should
+        // fall back to structured compaction
+        let registry = ApiRegistry::new();
+        let model = Model {
+            id: "test".into(),
+            name: "test".into(),
+            api: Api::AnthropicMessages,
+            provider: Provider::Anthropic,
+            base_url: "https://api.anthropic.com".into(),
+            reasoning: false,
+            input: vec![InputModality::Text],
+            cost: ModelCost {
+                input: 0.0,
+                output: 0.0,
+                cache_read: 0.0,
+                cache_write: 0.0,
+            },
+            context_window: 200_000,
+            max_output_tokens: 8192,
+        };
+        let options = StreamOptions::default();
+
+        let msgs: Vec<Message> = (0..20)
+            .map(|i| {
+                if i % 2 == 0 {
+                    user_msg(&format!("question {i}"))
+                } else {
+                    assistant_msg(&format!("answer {i}"))
+                }
+            })
+            .collect();
+
+        let result = llm_compact(msgs, &registry, &model, &options, Some(5)).await;
+        // should fall back to structured summary
+        assert_eq!(result.summarised_count, 15);
+        assert_eq!(result.messages.len(), 6); // 1 summary + 5 kept
+        assert!(result.summary.contains("Summary of earlier conversation"));
     }
 }

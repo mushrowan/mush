@@ -32,7 +32,7 @@ struct Cli {
     resume: Option<String>,
 
     /// model id to use
-    #[arg(short, long, default_value = "claude-sonnet-4-20250514")]
+    #[arg(short, long, default_value = "claude-opus-4-6")]
     model: String,
 
     /// enable extended thinking
@@ -160,7 +160,7 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
     let cfg = config::load_config();
 
     // CLI args override config file
-    let model_id = if cli.model != "claude-sonnet-4-20250514" {
+    let model_id = if cli.model != "claude-opus-4-6" {
         cli.model.clone()
     } else {
         cfg.model.unwrap_or_else(|| cli.model.clone())
@@ -179,16 +179,33 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let cwd_str = cwd.display().to_string();
 
-    let tools = if cli.no_tools {
+    let mut tools: Vec<Box<dyn mush_agent::tool::AgentTool>> = if cli.no_tools {
         vec![]
     } else {
         builtin_tools(cwd.clone())
     };
 
+    // connect to MCP servers and add their tools
+    if !cli.no_tools && !cfg.mcp.is_empty() {
+        let (_mcp_manager, mcp_tools) = mush_mcp::McpManager::connect_all(&cfg.mcp).await;
+        tools.extend(mcp_tools);
+    }
+
     let system_prompt = cli
         .system
         .or(cfg.system_prompt)
         .unwrap_or_else(|| build_system_prompt(&cwd));
+
+    // in print mode, hint is always prepended to the message (one-shot, no transform loop)
+    let enricher = build_prompt_enricher(&cwd);
+    let prompt = if cfg.hint_mode != config::HintMode::None
+        && let Some(ref enricher) = enricher
+        && let Some(hint) = enricher(&prompt)
+    {
+        format!("{hint}\n\n{prompt}")
+    } else {
+        prompt
+    };
 
     let thinking = cli.thinking || cfg.thinking.unwrap_or(false);
     let max_tokens = cli.max_tokens.or(cfg.max_tokens);
@@ -247,8 +264,13 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
 
     // auto-compact when approaching context limit
     let context_window = model.context_window as usize;
+    let compact_model = model.clone();
+    let compact_options = options.clone();
+    let reg_ref = &registry;
     let transform: Option<mush_agent::ContextTransform<'_>> = Some(Box::new(move |msgs| {
-        Box::pin(async move { auto_compact(msgs, context_window) })
+        let m = compact_model.clone();
+        let o = compact_options.clone();
+        Box::pin(async move { auto_compact(msgs, context_window, reg_ref, &m, &o).await })
     }));
 
     let config = AgentConfig {
@@ -370,7 +392,7 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
 async fn tui_mode(cli: Cli) -> Result<()> {
     let cfg = config::load_config();
 
-    let model_id = if cli.model != "claude-sonnet-4-20250514" {
+    let model_id = if cli.model != "claude-opus-4-6" {
         cli.model.clone()
     } else {
         cfg.model.unwrap_or_else(|| cli.model.clone())
@@ -387,11 +409,17 @@ async fn tui_mode(cli: Cli) -> Result<()> {
     providers::register_builtins(&mut registry);
 
     let cwd = std::env::current_dir()?;
-    let tools = if cli.no_tools {
+    let mut tools: Vec<Box<dyn mush_agent::tool::AgentTool>> = if cli.no_tools {
         vec![]
     } else {
         builtin_tools(cwd.clone())
     };
+
+    // connect to MCP servers and add their tools
+    if !cli.no_tools && !cfg.mcp.is_empty() {
+        let (_mcp_manager, mcp_tools) = mush_mcp::McpManager::connect_all(&cfg.mcp).await;
+        tools.extend(mcp_tools);
+    }
 
     let system_prompt = cli
         .system
@@ -459,7 +487,15 @@ async fn tui_mode(cli: Cli) -> Result<()> {
     };
 
     let theme = mush_tui::Theme::from_config(&cfg.theme);
+    let prompt_enricher = build_prompt_enricher(&cwd);
 
+    let hint_mode = match cfg.hint_mode {
+        config::HintMode::Message => mush_tui::HintMode::Message,
+        config::HintMode::Transform => mush_tui::HintMode::Transform,
+        config::HintMode::None => mush_tui::HintMode::None,
+    };
+
+    let config_file = config::config_dir().join("config.toml");
     let tui_config = TuiConfig {
         model,
         system_prompt: Some(system_prompt),
@@ -470,6 +506,13 @@ async fn tui_mode(cli: Cli) -> Result<()> {
             .unwrap_or(mush_agent::DEFAULT_MAX_TURNS),
         initial_messages,
         theme,
+        prompt_enricher,
+        hint_mode,
+        config_path: if config_file.exists() {
+            Some(config_file)
+        } else {
+            None
+        },
     };
 
     mush_tui::run_tui(tui_config, &tools, &registry)
@@ -479,25 +522,23 @@ async fn tui_mode(cli: Cli) -> Result<()> {
     Ok(())
 }
 
-/// compact messages if estimated tokens exceed 75% of context window
-fn auto_compact(messages: Vec<Message>, context_window: usize) -> Vec<Message> {
+/// compact messages using LLM summarisation when approaching context limit
+async fn auto_compact(
+    messages: Vec<Message>,
+    context_window: usize,
+    registry: &ApiRegistry,
+    model: &Model,
+    options: &StreamOptions,
+) -> Vec<Message> {
     use mush_session::compact;
 
-    let estimated = compact::estimate_tokens(&messages);
-    let threshold = context_window * 3 / 4;
-
-    if estimated <= threshold || messages.len() <= 10 {
+    if !compact::needs_compaction(&messages, context_window) {
         return messages;
     }
 
-    let prompt = compact::build_compaction_prompt(&messages[..messages.len() - 10]);
-    let summary = format!(
-        "## Summary of earlier conversation\n\n\
-         The following is a condensed summary of the conversation so far:\n\n\
-         {prompt}"
-    );
+    eprintln!("\x1b[2m(compacting conversation...)\x1b[0m");
 
-    let result = compact::compact_with_summary(messages, &summary, Some(10));
+    let result = compact::llm_compact(messages, registry, model, options, Some(10)).await;
     eprintln!(
         "\x1b[2m(compacted: {} messages summarised, {} kept)\x1b[0m",
         result.summarised_count,
@@ -543,23 +584,64 @@ fn build_system_prompt(cwd: &std::path::Path) -> String {
         prompt.push_str(&agents.content);
     }
 
-    // append available skills
+    // load all skill content into system prompt (stable prefix for prompt caching).
+    // loading everything avoids KV-cache invalidation from dynamic injection.
     if !context.skills.is_empty() {
-        prompt.push_str("\n\nThe following skills are available. ");
         prompt.push_str(
-            "Use the read tool to load a skill's file when the task matches its description.\n\n",
+            "\n\nThe following skills provide specialized instructions for specific tasks.\n\
+             When a skill is relevant to the request, follow its instructions.\n",
         );
         for skill in &context.skills {
-            prompt.push_str(&format!(
-                "- **{}**: {} ({})\n",
-                skill.name,
-                skill.description,
-                skill.path.display()
-            ));
+            if let Ok(content) = std::fs::read_to_string(&skill.path) {
+                prompt.push_str(&format!(
+                    "\n### {}\n{}\n\n{}\n",
+                    skill.name, skill.description, content,
+                ));
+            }
         }
     }
 
     prompt
+}
+
+/// build a prompt enricher that returns a relevance hint for the user message.
+/// all skill content is already in the system prompt (stable for caching).
+/// the enricher just nudges the model toward the most relevant skills.
+#[cfg(feature = "embeddings")]
+fn build_prompt_enricher(cwd: &std::path::Path) -> Option<mush_tui::PromptEnricher> {
+    use mush_ext::context;
+    use std::sync::Arc;
+
+    let project = loader::discover_project_context(cwd);
+    let docs = context::build_skill_documents(&project.skills);
+    if docs.is_empty() {
+        return None;
+    }
+
+    let doc_count = docs.len();
+    match context::ContextIndex::build(docs) {
+        Ok(index) => {
+            let index = Arc::new(index);
+            eprintln!("\x1b[2mindexed {doc_count} skills for auto-context\x1b[0m");
+            Some(Arc::new(move |query: &str| {
+                let matches = index.search(query, 3, 0.35);
+                if matches.is_empty() {
+                    None
+                } else {
+                    Some(context::format_relevance_hint(&matches))
+                }
+            }))
+        }
+        Err(e) => {
+            eprintln!("\x1b[33mwarning: failed to build context index: {e}\x1b[0m");
+            None
+        }
+    }
+}
+
+#[cfg(not(feature = "embeddings"))]
+fn build_prompt_enricher(_cwd: &std::path::Path) -> Option<mush_tui::PromptEnricher> {
+    None
 }
 
 fn list_models_short() -> String {
@@ -667,7 +749,7 @@ fn config_cmd() -> Result<()> {
         std::fs::write(
             &path,
             "# mush configuration\n\
-             # model = \"claude-sonnet-4-20250514\"\n\
+             # model = \"claude-opus-4-6\"\n\
              # thinking = false\n\
              # max_tokens = 16384\n\
              # max_turns = 30\n\
@@ -703,7 +785,7 @@ fn status_cmd() -> Result<()> {
     }
 
     // model
-    let model_id = cfg.model.as_deref().unwrap_or("claude-sonnet-4-20250514");
+    let model_id = cfg.model.as_deref().unwrap_or("claude-opus-4-6");
     println!("  model:  {model_id}");
 
     // thinking
