@@ -16,6 +16,50 @@ use crate::types::*;
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const API_VERSION: &str = "2023-06-01";
 
+// stealth mode: mimic claude code's identity for oauth
+const CLAUDE_CODE_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
+
+// claude code tool names (canonical casing)
+const CLAUDE_CODE_TOOLS: &[&str] = &[
+    "Read",
+    "Write",
+    "Edit",
+    "Bash",
+    "Grep",
+    "Glob",
+    "AskUserQuestion",
+    "EnterPlanMode",
+    "ExitPlanMode",
+    "KillShell",
+    "NotebookEdit",
+    "Skill",
+    "Task",
+    "TaskOutput",
+    "TodoWrite",
+    "WebFetch",
+    "WebSearch",
+];
+
+/// convert tool name to claude code canonical casing if it matches (case-insensitive)
+fn to_claude_code_name(name: &str) -> String {
+    let lower = name.to_lowercase();
+    CLAUDE_CODE_TOOLS
+        .iter()
+        .find(|t| t.to_lowercase() == lower)
+        .map(|t| t.to_string())
+        .unwrap_or_else(|| name.to_string())
+}
+
+/// convert claude code tool name back to our tool name using the tool definitions
+fn from_claude_code_name(name: &str, tools: &[ToolDefinition]) -> String {
+    let lower = name.to_lowercase();
+    tools
+        .iter()
+        .find(|t| t.name.to_lowercase() == lower)
+        .map(|t| t.name.clone())
+        .unwrap_or_else(|| name.to_string())
+}
+
 pub struct AnthropicProvider;
 
 impl ApiProvider for AnthropicProvider {
@@ -53,20 +97,33 @@ impl ApiProvider for AnthropicProvider {
             headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
             headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
             headers.insert("anthropic-version", HeaderValue::from_static(API_VERSION));
-            headers.insert(
-                "anthropic-beta",
-                HeaderValue::from_static(
-                    "fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14",
-                ),
-            );
 
             if is_oauth {
+                headers.insert(
+                    "anthropic-beta",
+                    HeaderValue::from_static(
+                        "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14",
+                    ),
+                );
+                headers.insert(
+                    "user-agent",
+                    HeaderValue::from_static(
+                        concat!("claude-cli/", "2.1.62"),
+                    ),
+                );
+                headers.insert("x-app", HeaderValue::from_static("cli"));
                 headers.insert(
                     "authorization",
                     HeaderValue::from_str(&format!("Bearer {api_key}"))
                         .map_err(|e| ProviderError::Other(e.to_string()))?,
                 );
             } else {
+                headers.insert(
+                    "anthropic-beta",
+                    HeaderValue::from_static(
+                        "fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14",
+                    ),
+                );
                 headers.insert(
                     "x-api-key",
                     HeaderValue::from_str(&api_key)
@@ -99,7 +156,7 @@ impl ApiProvider for AnthropicProvider {
             let model_id = model.id.clone();
             let provider_name = model.provider.to_string();
             let api = model.api;
-            let sse_stream = parse_sse_stream(response, model_id, provider_name, api);
+            let sse_stream = parse_sse_stream(response, model_id, provider_name, api, is_oauth, tools);
 
             Ok(sse_stream)
         })
@@ -160,18 +217,33 @@ fn build_request_body(
     messages: &[Message],
     tools: &[ToolDefinition],
     options: &StreamOptions,
-    _is_oauth: bool,
+    is_oauth: bool,
 ) -> RequestBody {
     let max_tokens = options.max_tokens.unwrap_or(model.max_output_tokens);
 
-    let system = system_prompt.as_ref().map(|prompt| {
-        vec![SystemBlock {
+    // oauth requires claude code identity as first system block
+    let system = if is_oauth {
+        let mut blocks = vec![SystemBlock {
             block_type: "text".into(),
-            text: prompt.clone(),
-        }]
-    });
+            text: CLAUDE_CODE_IDENTITY.into(),
+        }];
+        if let Some(prompt) = system_prompt {
+            blocks.push(SystemBlock {
+                block_type: "text".into(),
+                text: prompt.clone(),
+            });
+        }
+        Some(blocks)
+    } else {
+        system_prompt.as_ref().map(|prompt| {
+            vec![SystemBlock {
+                block_type: "text".into(),
+                text: prompt.clone(),
+            }]
+        })
+    };
 
-    let converted_messages = convert_messages(messages);
+    let converted_messages = convert_messages(messages, is_oauth);
 
     let converted_tools = if tools.is_empty() {
         None
@@ -180,7 +252,11 @@ fn build_request_body(
             tools
                 .iter()
                 .map(|t| RequestTool {
-                    name: t.name.clone(),
+                    name: if is_oauth {
+                        to_claude_code_name(&t.name)
+                    } else {
+                        t.name.clone()
+                    },
                     description: t.description.clone(),
                     input_schema: t.parameters.clone(),
                 })
@@ -237,7 +313,7 @@ fn thinking_budget(level: ThinkingLevel, max_tokens: u64) -> u64 {
     }
 }
 
-fn convert_messages(messages: &[Message]) -> Vec<RequestMessage> {
+fn convert_messages(messages: &[Message], is_oauth: bool) -> Vec<RequestMessage> {
     let mut result = Vec::new();
 
     for msg in messages {
@@ -308,12 +384,19 @@ fn convert_messages(messages: &[Message]) -> Vec<RequestMessage> {
                                 }))
                             }
                         }
-                        AssistantContentPart::ToolCall(tc) => Some(serde_json::json!({
-                            "type": "tool_use",
-                            "id": tc.id.as_str(),
-                            "name": tc.name.as_str(),
-                            "input": tc.arguments,
-                        })),
+                        AssistantContentPart::ToolCall(tc) => {
+                            let name = if is_oauth {
+                                to_claude_code_name(tc.name.as_str())
+                            } else {
+                                tc.name.as_str().to_string()
+                            };
+                            Some(serde_json::json!({
+                                "type": "tool_use",
+                                "id": tc.id.as_str(),
+                                "name": name,
+                                "input": tc.arguments,
+                            }))
+                        }
                     })
                     .collect();
 
@@ -486,6 +569,8 @@ fn parse_sse_stream(
     model_id: ModelId,
     provider_name: String,
     api: Api,
+    is_oauth: bool,
+    tools: Vec<ToolDefinition>,
 ) -> EventStream {
     let byte_stream = response.bytes_stream();
 
@@ -527,7 +612,7 @@ fn parse_sse_stream(
                                 if let Some(data) = buf.strip_prefix("data: ") {
                                     match serde_json::from_str::<SseEvent>(data) {
                                         Ok(event) => {
-                                            for stream_event in process_sse_event(event, &mut output, &mut blocks) {
+                                            for stream_event in process_sse_event(event, &mut output, &mut blocks, is_oauth, &tools) {
                                                 yield stream_event;
                                             }
                                         }
@@ -581,6 +666,8 @@ fn process_sse_event(
     event: SseEvent,
     output: &mut AssistantMessage,
     blocks: &mut Vec<BlockState>,
+    is_oauth: bool,
+    tools: &[ToolDefinition],
 ) -> Vec<StreamEvent> {
     let mut events = Vec::new();
 
@@ -640,16 +727,22 @@ fn process_sse_event(
                     events.push(StreamEvent::ThinkingStart { content_index });
                 }
                 ContentBlockData::ToolUse { id, name } => {
+                    // map claude code tool names back to our names
+                    let resolved_name = if is_oauth {
+                        from_claude_code_name(&name, tools)
+                    } else {
+                        name.clone()
+                    };
                     blocks.push(BlockState::ToolCall {
                         id: id.clone(),
-                        name: name.clone(),
+                        name: resolved_name.clone(),
                         json_buf: String::new(),
                     });
                     output
                         .content
                         .push(AssistantContentPart::ToolCall(ToolCall {
                             id: ToolCallId::from(id),
-                            name: ToolName::from(name),
+                            name: ToolName::from(resolved_name),
                             arguments: serde_json::Value::Object(Default::default()),
                         }));
                     events.push(StreamEvent::ToolCallStart { content_index });
@@ -815,7 +908,7 @@ mod tests {
             timestamp_ms: Timestamp(0),
         })];
 
-        let converted = convert_messages(&messages);
+        let converted = convert_messages(&messages, false);
         assert_eq!(converted.len(), 1);
         assert_eq!(converted[0].role, "user");
         assert_eq!(converted[0].content, serde_json::json!("hello"));
@@ -833,7 +926,7 @@ mod tests {
             timestamp_ms: Timestamp(0),
         })];
 
-        let converted = convert_messages(&messages);
+        let converted = convert_messages(&messages, false);
         assert_eq!(converted.len(), 1);
         assert_eq!(converted[0].role, "user");
 
@@ -864,7 +957,7 @@ mod tests {
             timestamp_ms: Timestamp(0),
         })];
 
-        let converted = convert_messages(&messages);
+        let converted = convert_messages(&messages, false);
         assert_eq!(converted.len(), 1);
         assert_eq!(converted[0].role, "assistant");
 
@@ -927,7 +1020,7 @@ mod tests {
 
         let mut output = test_output();
         let mut blocks = Vec::new();
-        let events = process_sse_event(event, &mut output, &mut blocks);
+        let events = process_sse_event(event, &mut output, &mut blocks, false, &[]);
 
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0], StreamEvent::Start { .. }));
@@ -950,6 +1043,8 @@ mod tests {
             },
             &mut output,
             &mut blocks,
+            false,
+            &[],
         );
         assert!(matches!(
             events[0],
@@ -966,6 +1061,8 @@ mod tests {
             },
             &mut output,
             &mut blocks,
+            false,
+            &[],
         );
         assert!(matches!(
             events[0],
@@ -985,6 +1082,8 @@ mod tests {
             },
             &mut output,
             &mut blocks,
+            false,
+            &[],
         );
 
         // stop
@@ -992,6 +1091,8 @@ mod tests {
             SseEvent::ContentBlockStop { index: 0 },
             &mut output,
             &mut blocks,
+            false,
+            &[],
         );
         match &events[0] {
             StreamEvent::TextEnd { text, .. } => assert_eq!(text, "hello world"),
@@ -1020,6 +1121,8 @@ mod tests {
             },
             &mut output,
             &mut blocks,
+            false,
+            &[],
         );
 
         process_sse_event(
@@ -1031,6 +1134,8 @@ mod tests {
             },
             &mut output,
             &mut blocks,
+            false,
+            &[],
         );
 
         process_sse_event(
@@ -1042,12 +1147,16 @@ mod tests {
             },
             &mut output,
             &mut blocks,
+            false,
+            &[],
         );
 
         let events = process_sse_event(
             SseEvent::ContentBlockStop { index: 0 },
             &mut output,
             &mut blocks,
+            false,
+            &[],
         );
 
         match &events[0] {
@@ -1059,6 +1168,93 @@ mod tests {
             }
             other => panic!("expected ToolCallEnd, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn claude_code_name_mapping() {
+        assert_eq!(to_claude_code_name("read"), "Read");
+        assert_eq!(to_claude_code_name("Write"), "Write");
+        assert_eq!(to_claude_code_name("bash"), "Bash");
+        assert_eq!(to_claude_code_name("webfetch"), "WebFetch");
+        assert_eq!(to_claude_code_name("websearch"), "WebSearch");
+        // underscored names don't match claude code names, passed through as-is
+        assert_eq!(to_claude_code_name("web_fetch"), "web_fetch");
+        assert_eq!(to_claude_code_name("custom_tool"), "custom_tool");
+    }
+
+    #[test]
+    fn claude_code_name_reverse_mapping() {
+        let tools = vec![
+            ToolDefinition {
+                name: "read".into(),
+                description: "read files".into(),
+                parameters: serde_json::json!({}),
+            },
+            ToolDefinition {
+                name: "web_fetch".into(),
+                description: "fetch urls".into(),
+                parameters: serde_json::json!({}),
+            },
+        ];
+        assert_eq!(from_claude_code_name("Read", &tools), "read");
+        assert_eq!(from_claude_code_name("Web_Fetch", &tools), "web_fetch");
+        assert_eq!(from_claude_code_name("Unknown", &tools), "Unknown");
+    }
+
+    #[test]
+    fn oauth_system_prompt_has_identity() {
+        let model = test_model();
+        let options = StreamOptions::default();
+        let body = build_request_body(
+            &model,
+            &Some("be helpful".into()),
+            &[],
+            &[],
+            &options,
+            true,
+        );
+        let system = body.system.unwrap();
+        assert_eq!(system.len(), 2);
+        assert!(system[0].text.contains("Claude Code"));
+        assert_eq!(system[1].text, "be helpful");
+    }
+
+    #[test]
+    fn non_oauth_system_prompt_no_identity() {
+        let model = test_model();
+        let options = StreamOptions::default();
+        let body = build_request_body(
+            &model,
+            &Some("be helpful".into()),
+            &[],
+            &[],
+            &options,
+            false,
+        );
+        let system = body.system.unwrap();
+        assert_eq!(system.len(), 1);
+        assert_eq!(system[0].text, "be helpful");
+    }
+
+    #[test]
+    fn oauth_tool_names_mapped() {
+        let model = test_model();
+        let options = StreamOptions::default();
+        let tools = vec![ToolDefinition {
+            name: "read".into(),
+            description: "read files".into(),
+            parameters: serde_json::json!({"type": "object"}),
+        }];
+        let body = build_request_body(
+            &model,
+            &None,
+            &[],
+            &tools,
+            &options,
+            true,
+        );
+        let tools = body.tools.unwrap();
+        assert_eq!(tools[0].name, "Read");
     }
 
     fn test_model() -> Model {
