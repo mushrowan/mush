@@ -26,7 +26,7 @@ impl Widget for MessageList<'_> {
         let mut lines: Vec<Line<'_>> = Vec::new();
 
         for msg in &self.app.messages {
-            render_message(msg, &mut lines);
+            render_message(msg, &mut lines, &self.app.tool_output_live);
             lines.push(Line::raw(""));
         }
 
@@ -140,7 +140,11 @@ fn truncate_model_id(id: &str) -> &str {
     if id.len() > 20 { &id[..20] } else { id }
 }
 
-fn render_message(msg: &DisplayMessage, lines: &mut Vec<Line<'_>>) {
+fn render_message(
+    msg: &DisplayMessage,
+    lines: &mut Vec<Line<'_>>,
+    live_tool_output: &Option<String>,
+) {
     let (label, label_style) = match msg.role {
         MessageRole::User => (
             "you".to_string(),
@@ -231,6 +235,15 @@ fn render_message(msg: &DisplayMessage, lines: &mut Vec<Line<'_>>) {
             Span::raw(" "),
             Span::styled(tc.summary.clone(), Style::default().fg(Color::DarkGray)),
         ]));
+        // live output from running tool
+        if tc.status == ToolCallStatus::Running {
+            if let Some(live) = live_tool_output {
+                lines.push(Line::styled(
+                    format!("    {live}"),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+        }
         // image indicator
         if tc.image_data.is_some() {
             lines.push(Line::from(vec![

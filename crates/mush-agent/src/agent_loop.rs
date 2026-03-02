@@ -32,6 +32,12 @@ pub enum AgentEvent {
         tool_name: ToolName,
         args: serde_json::Value,
     },
+    /// partial output from a running tool (e.g. bash streaming stdout)
+    ToolOutput {
+        tool_call_id: ToolCallId,
+        tool_name: ToolName,
+        output: String,
+    },
     /// tool execution finished
     ToolExecEnd {
         tool_call_id: ToolCallId,
@@ -82,6 +88,27 @@ pub type ContextTransform<'a> = Box<
         + 'a,
 >;
 
+/// result of a tool confirmation check
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfirmAction {
+    /// execute the tool
+    Allow,
+    /// skip this tool call, return error message to the model
+    Deny,
+}
+
+/// callback for tool confirmation. receives tool name and args, returns allow/deny.
+pub type ConfirmCallback<'a> = Box<
+    dyn Fn(
+            &str,
+            &serde_json::Value,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = ConfirmAction> + Send>>
+        + Send
+        + Sync
+        + 'a,
+>;
+
 /// configuration for running the agent loop
 pub struct AgentConfig<'a> {
     pub model: &'a Model,
@@ -101,6 +128,8 @@ pub struct AgentConfig<'a> {
     /// transform the message context before each LLM call.
     /// use for compaction, filtering, or other context management.
     pub transform_context: Option<ContextTransform<'a>>,
+    /// confirm before executing a tool. if None, all tools run without confirmation.
+    pub confirm_tool: Option<ConfirmCallback<'a>>,
 }
 
 /// run the agent loop, yielding events as they happen
@@ -234,6 +263,26 @@ pub fn agent_loop(
                 // execute tool calls, checking for steering between each
                 let mut steered = false;
                 for tc in &tool_calls {
+                    // check confirmation before executing
+                    if let Some(ref confirm) = config.confirm_tool {
+                        if confirm(tc.name.as_str(), &tc.arguments).await == ConfirmAction::Deny {
+                            let result = ToolResult::error("tool call denied by user".to_string());
+                            yield AgentEvent::ToolExecEnd {
+                                tool_call_id: tc.id.clone(),
+                                tool_name: tc.name.clone(),
+                                result: result.clone(),
+                            };
+                            messages.push(Message::ToolResult(ToolResultMessage {
+                                tool_call_id: tc.id.clone(),
+                                tool_name: tc.name.clone(),
+                                content: result.content,
+                                is_error: true,
+                                timestamp_ms: Timestamp::now(),
+                            }));
+                            continue;
+                        }
+                    }
+
                     yield AgentEvent::ToolExecStart {
                         tool_call_id: tc.id.clone(),
                         tool_name: tc.name.clone(),
@@ -413,6 +462,7 @@ mod tests {
             get_steering: None,
             get_follow_up: None,
             transform_context: None,
+            confirm_tool: None,
         };
 
         let messages = vec![Message::User(UserMessage {
@@ -458,6 +508,7 @@ mod tests {
             get_steering: None,
             get_follow_up: None,
             transform_context: Some(transform),
+            confirm_tool: None,
         };
 
         let messages = vec![Message::User(UserMessage {

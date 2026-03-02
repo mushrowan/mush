@@ -4,7 +4,7 @@ use std::io;
 use std::sync::Arc;
 
 use crossterm::ExecutableCommand;
-use crossterm::event::{self, Event, MouseEvent, MouseEventKind};
+use crossterm::event::{self, Event, KeyCode, MouseEvent, MouseEventKind};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
@@ -74,6 +74,10 @@ pub struct TuiConfig {
     pub save_thinking_prefs: Option<ThinkingPrefsSaver>,
     /// callback to auto-save session after each agent turn
     pub save_session: Option<SessionSaver>,
+    /// prompt for confirmation before executing tools (off by default)
+    pub confirm_tools: bool,
+    /// shared live tool output (updated by bash sink, read by TUI)
+    pub tool_output_live: Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
 }
 
 /// run the interactive TUI
@@ -100,7 +104,7 @@ pub async fn run_tui(
     // populate tab completions
     let slash_cmds = [
         "/help", "/clear", "/model", "/sessions", "/branch", "/tree",
-        "/compact", "/export", "/cost", "/quit",
+        "/compact", "/export", "/undo", "/cost", "/quit",
     ];
     app.completions = slash_cmds.iter().map(|s| s.to_string()).collect();
     // add prompt template names as slash commands
@@ -244,6 +248,34 @@ pub async fn run_tui(
                 })
             }));
 
+            // tool confirmation: agent sends (prompt, reply_tx), TUI answers y/n
+            type ConfirmRequest = (String, tokio::sync::oneshot::Sender<bool>);
+            let (confirm_req_tx, mut confirm_req_rx) =
+                tokio::sync::mpsc::channel::<ConfirmRequest>(1);
+
+            let confirm: Option<mush_agent::ConfirmCallback<'_>> = if tui_config.confirm_tools {
+                Some(Box::new(move |name: &str, args: &serde_json::Value| {
+                    let tx = confirm_req_tx.clone();
+                    let summary = mush_agent::summarise_tool_args(name, args);
+                    let prompt = format!("{name} {summary}");
+                    Box::pin(async move {
+                        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+                        if tx.send((prompt, resp_tx)).await.is_err() {
+                            return mush_agent::ConfirmAction::Allow;
+                        }
+                        match resp_rx.await {
+                            Ok(true) => mush_agent::ConfirmAction::Allow,
+                            _ => mush_agent::ConfirmAction::Deny,
+                        }
+                    })
+                }))
+            } else {
+                None
+            };
+            // stash receiver for the tick handler to pick up pending confirms
+            let confirm_reply: Arc<Mutex<Option<tokio::sync::oneshot::Sender<bool>>>> =
+                Arc::new(Mutex::new(None));
+
             let config = AgentConfig {
                 model: &tui_config.model,
                 system_prompt: tui_config.system_prompt.clone(),
@@ -254,6 +286,7 @@ pub async fn run_tui(
                 get_steering: steering,
                 get_follow_up: None,
                 transform_context: transform,
+                confirm_tool: confirm,
             };
 
             let mut stream = std::pin::pin!(agent_loop(config, conversation.clone()));
@@ -276,11 +309,42 @@ pub async fn run_tui(
                         }
                     }
                     _ = tick => {
+                        // check for pending tool confirmation requests
+                        if let Ok((prompt, reply_tx)) = confirm_req_rx.try_recv() {
+                            app.mode = app::AppMode::ToolConfirm;
+                            app.confirm_prompt = Some(prompt);
+                            *confirm_reply.lock().await = Some(reply_tx);
+                        }
+
+                        // poll live tool output from bash sink
+                        if let Some(ref live) = tui_config.tool_output_live {
+                            if let Ok(guard) = live.lock() {
+                                app.tool_output_live = guard.clone();
+                            }
+                        }
+
                         // check for terminal input during streaming
                         if event::poll(std::time::Duration::ZERO)? {
                             match event::read()? {
                                 Event::Key(key) => {
-                                    if let Some(app_event) = handle_key(&mut app, key) {
+                                    // handle tool confirmation y/n
+                                    if app.mode == app::AppMode::ToolConfirm {
+                                        let answer = match key.code {
+                                            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => Some(true),
+                                            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Some(false),
+                                            _ => None,
+                                        };
+                                        if let Some(allowed) = answer {
+                                            if let Some(tx) = confirm_reply.lock().await.take() {
+                                                let _ = tx.send(allowed);
+                                            }
+                                            app.mode = app::AppMode::Normal;
+                                            app.confirm_prompt = None;
+                                            if !allowed {
+                                                app.status = Some("tool denied".into());
+                                            }
+                                        }
+                                    } else if let Some(app_event) = handle_key(&mut app, key) {
                                         match app_event {
                                             AppEvent::Quit => {
                                                 cleanup(&mut terminal)?;
@@ -323,6 +387,25 @@ pub async fn run_tui(
             // auto-save after each agent turn
             if let Some(ref saver) = tui_config.save_session {
                 saver(&conversation, &session_tree, &app.model_id);
+            }
+
+            // auto-compact when approaching context limit
+            if mush_session::compact::needs_compaction(
+                &conversation,
+                tui_config.model.context_window as usize,
+            ) {
+                handle_compact(
+                    &mut app,
+                    &mut conversation,
+                    &mut session_tree,
+                    &tui_config,
+                    registry,
+                )
+                .await;
+                // save again after compaction
+                if let Some(ref saver) = tui_config.save_session {
+                    saver(&conversation, &session_tree, &app.model_id);
+                }
             }
 
             draw(&mut terminal, &app, &mut image_protos)?;
@@ -507,6 +590,7 @@ fn handle_slash_command(
             help.push_str("  /tree          - show conversation tree\n");
             help.push_str("  /compact       - summarise old messages to free context\n");
             help.push_str("  /export [file] - save conversation as markdown\n");
+            help.push_str("  /undo          - revert last turn\n");
             help.push_str("  /cost          - show session cost\n");
             help.push_str("  /quit          - exit mush\n");
             help.push_str("\ntip: type a prompt template name (e.g. /review file.rs) to expand it");
@@ -687,6 +771,28 @@ fn handle_slash_command(
                 "session: {}tok, ${:.4}",
                 app.total_tokens, app.total_cost
             ));
+            None
+        }
+        "undo" => {
+            let parent = session_tree
+                .user_messages_in_branch()
+                .last()
+                .map(|e| e.parent_id.clone());
+            match parent {
+                None => app.push_system_message("nothing to undo".into()),
+                Some(None) => {
+                    session_tree.reset_leaf();
+                    *conversation = session_tree.build_context();
+                    rebuild_display(app, conversation);
+                    app.status = Some("undid last turn".into());
+                }
+                Some(Some(pid)) => {
+                    session_tree.branch(&pid);
+                    *conversation = session_tree.build_context();
+                    rebuild_display(app, conversation);
+                    app.status = Some("undid last turn".into());
+                }
+            }
             None
         }
         "quit" | "exit" | "q" => {

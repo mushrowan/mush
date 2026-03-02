@@ -31,6 +31,8 @@ pub struct Config {
     pub max_turns: Option<usize>,
     pub system_prompt: Option<String>,
     pub hint_mode: HintMode,
+    /// prompt for confirmation before executing tools (off by default)
+    pub confirm_tools: Option<bool>,
     pub api_keys: ApiKeys,
     pub theme: mush_tui::ThemeConfig,
     /// MCP server configurations keyed by name

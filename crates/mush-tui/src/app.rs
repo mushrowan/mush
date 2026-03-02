@@ -37,6 +37,8 @@ pub enum AppEvent {
 pub enum AppMode {
     Normal,
     SessionPicker,
+    /// waiting for user to confirm a tool call (y/n)
+    ToolConfirm,
 }
 
 /// state for the session picker overlay
@@ -115,6 +117,8 @@ pub struct App {
     pub status: Option<String>,
     /// current tool being executed
     pub active_tool: Option<String>,
+    /// live output from the currently running tool (last line)
+    pub tool_output_live: Option<String>,
     /// tool args streaming in (partial JSON from ToolCallDelta)
     pub streaming_tool_args: String,
     /// spinner state for animations
@@ -133,6 +137,8 @@ pub struct App {
     tab_state: Option<TabState>,
     /// new messages arrived while scrolled up
     pub has_unread: bool,
+    /// tool confirmation prompt (shown when mode == ToolConfirm)
+    pub confirm_prompt: Option<String>,
 }
 
 /// tracks an in-progress tab completion cycle
@@ -162,6 +168,7 @@ impl App {
             should_quit: false,
             status: None,
             active_tool: None,
+            tool_output_live: None,
             streaming_tool_args: String::new(),
             throbber_state: ThrobberState::default(),
             tick_count: 0,
@@ -171,6 +178,7 @@ impl App {
             completions: Vec::new(),
             tab_state: None,
             has_unread: false,
+            confirm_prompt: None,
         }
     }
 
@@ -223,6 +231,7 @@ impl App {
     /// mark a tool as being executed
     pub fn start_tool(&mut self, name: &str, summary: &str) {
         self.active_tool = Some(name.to_string());
+        self.tool_output_live = None;
         self.streaming_tool_args.clear();
         // add to the last message's tool calls if we have one in progress
         if let Some(last) = self.messages.last_mut() {

@@ -14,7 +14,7 @@ use mush_ai::stream::StreamEvent;
 use mush_ai::types::*;
 use mush_ext::loader;
 use mush_session::{Session, SessionStore};
-use mush_tools::builtin_tools;
+use mush_tools::{builtin_tools, builtin_tools_with_sink};
 use mush_tui::TuiConfig;
 
 #[derive(Parser)]
@@ -297,6 +297,7 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
         get_steering: None,
         get_follow_up: None,
         transform_context: transform,
+        confirm_tool: None,
     };
 
     let mut stream = std::pin::pin!(agent_loop(config, session.messages.clone()));
@@ -420,10 +421,20 @@ async fn tui_mode(cli: Cli) -> Result<()> {
     providers::register_builtins(&mut registry);
 
     let cwd = std::env::current_dir()?;
+
+    // shared state for streaming bash output to the TUI
+    let tool_output_live = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+    let sink_state = tool_output_live.clone();
+    let output_sink: mush_tools::bash::OutputSink = std::sync::Arc::new(move |line: &str| {
+        if let Ok(mut guard) = sink_state.lock() {
+            *guard = Some(line.to_string());
+        }
+    });
+
     let mut tools: Vec<Box<dyn mush_agent::tool::AgentTool>> = if cli.no_tools {
         vec![]
     } else {
-        builtin_tools(cwd.clone())
+        builtin_tools_with_sink(cwd.clone(), Some(output_sink))
     };
 
     // connect to MCP servers and add their tools
@@ -550,6 +561,8 @@ async fn tui_mode(cli: Cli) -> Result<()> {
                 store.save(&session).ok();
             }))
         },
+        confirm_tools: cfg.confirm_tools.unwrap_or(false),
+        tool_output_live: Some(tool_output_live),
     };
 
     mush_tui::run_tui(tui_config, &tools, &registry)

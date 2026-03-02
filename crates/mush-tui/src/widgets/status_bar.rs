@@ -74,15 +74,28 @@ impl Widget for StatusBar<'_> {
 
         // right-align hint
         let left_len: usize = spans.iter().map(|s| s.content.len()).sum();
-        let hint = if self.app.is_streaming {
+        let confirm_hint;
+        let hint = if self.app.mode == crate::app::AppMode::ToolConfirm {
+            confirm_hint = if let Some(ref prompt) = self.app.confirm_prompt {
+                format!("run {prompt}? (y/n)")
+            } else {
+                "confirm tool? (y/n)".to_string()
+            };
+            confirm_hint.as_str()
+        } else if self.app.is_streaming {
             "esc abort | ctrl+c quit"
         } else {
             "enter send | ctrl+t thinking | ctrl+o expand | ctrl+c quit"
         };
+        let hint_style = if self.app.mode == crate::app::AppMode::ToolConfirm {
+            Style::default().fg(Color::Yellow)
+        } else {
+            dim
+        };
         let padding = (area.width as usize).saturating_sub(left_len + hint.len() + 1);
         if padding > 0 {
             spans.push(Span::styled(" ".repeat(padding), dim));
-            spans.push(Span::styled(hint, dim));
+            spans.push(Span::styled(hint, hint_style));
         }
 
         Paragraph::new(Line::from(spans)).render(area, buf);

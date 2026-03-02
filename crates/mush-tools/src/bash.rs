@@ -9,13 +9,26 @@ const DEFAULT_TIMEOUT_SECS: u64 = 120;
 const MAX_OUTPUT_BYTES: usize = 50 * 1024;
 const MAX_OUTPUT_LINES: usize = 2000;
 
+/// sender for streaming partial output lines from bash
+pub type OutputSink = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
+
 pub struct BashTool {
     cwd: PathBuf,
+    /// optional callback for streaming output lines as they arrive
+    output_sink: Option<OutputSink>,
 }
 
 impl BashTool {
     pub fn new(cwd: PathBuf) -> Self {
-        Self { cwd }
+        Self {
+            cwd,
+            output_sink: None,
+        }
+    }
+
+    pub fn with_output_sink(mut self, sink: OutputSink) -> Self {
+        self.output_sink = Some(sink);
+        self
     }
 }
 
@@ -60,12 +73,17 @@ impl AgentTool for BashTool {
 
             let timeout = args["timeout"].as_u64().unwrap_or(DEFAULT_TIMEOUT_SECS);
 
-            run_command(&self.cwd, command, timeout).await
+            run_command(&self.cwd, command, timeout, self.output_sink.as_ref()).await
         })
     }
 }
 
-async fn run_command(cwd: &PathBuf, command: &str, timeout_secs: u64) -> ToolResult {
+async fn run_command(
+    cwd: &PathBuf,
+    command: &str,
+    timeout_secs: u64,
+    output_sink: Option<&OutputSink>,
+) -> ToolResult {
     let mut child = match tokio::process::Command::new("bash")
         .arg("-c")
         .arg(command)
@@ -80,6 +98,13 @@ async fn run_command(cwd: &PathBuf, command: &str, timeout_secs: u64) -> ToolRes
 
     let timeout = tokio::time::Duration::from_secs(timeout_secs);
 
+    // stream stdout and stderr concurrently, forwarding lines to sink
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+
+    let stdout_handle = tokio::spawn(stream_pipe(stdout_pipe, output_sink.cloned()));
+    let stderr_handle = tokio::spawn(stream_pipe_stderr(stderr_pipe, output_sink.cloned()));
+
     // wait for the process, or kill on timeout
     let status = match tokio::time::timeout(timeout, child.wait()).await {
         Ok(Ok(status)) => status,
@@ -90,9 +115,8 @@ async fn run_command(cwd: &PathBuf, command: &str, timeout_secs: u64) -> ToolRes
         }
     };
 
-    // read stdout/stderr after process has exited
-    let stdout = read_pipe(child.stdout.take()).await;
-    let stderr = read_stderr_pipe(child.stderr.take()).await;
+    let stdout = stdout_handle.await.unwrap_or_default();
+    let stderr = stderr_handle.await.unwrap_or_default();
     let exit_code = status.code().unwrap_or(-1);
 
     let mut text = String::new();
@@ -125,25 +149,75 @@ async fn run_command(cwd: &PathBuf, command: &str, timeout_secs: u64) -> ToolRes
     }
 }
 
-async fn read_pipe(pipe: Option<tokio::process::ChildStdout>) -> String {
-    use tokio::io::AsyncReadExt;
-    let Some(mut pipe) = pipe else {
+/// read stdout pipe line-by-line, forwarding to sink with throttling
+async fn stream_pipe(
+    pipe: Option<tokio::process::ChildStdout>,
+    sink: Option<OutputSink>,
+) -> String {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let Some(pipe) = pipe else {
         return String::new();
     };
-    let mut buf = Vec::new();
-    let _ = pipe.read_to_end(&mut buf).await;
-    String::from_utf8_lossy(&buf).to_string()
+    let mut reader = BufReader::new(pipe);
+    let mut output = String::new();
+    let mut line = String::new();
+    let mut last_emit = std::time::Instant::now();
+
+    loop {
+        line.clear();
+        match reader.read_line(&mut line).await {
+            Ok(0) => break, // EOF
+            Ok(_) => {
+                output.push_str(&line);
+                // throttle sink to avoid flooding the TUI (~10 updates/sec)
+                if let Some(ref sink) = sink {
+                    if last_emit.elapsed() >= std::time::Duration::from_millis(100) {
+                        sink(line.trim_end());
+                        last_emit = std::time::Instant::now();
+                    }
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    output
 }
 
-// overload for stderr pipe type
-async fn read_stderr_pipe(pipe: Option<tokio::process::ChildStderr>) -> String {
-    use tokio::io::AsyncReadExt;
-    let Some(mut pipe) = pipe else {
+/// same as stream_pipe but for stderr
+async fn stream_pipe_stderr(
+    pipe: Option<tokio::process::ChildStderr>,
+    sink: Option<OutputSink>,
+) -> String {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let Some(pipe) = pipe else {
         return String::new();
     };
-    let mut buf = Vec::new();
-    let _ = pipe.read_to_end(&mut buf).await;
-    String::from_utf8_lossy(&buf).to_string()
+    let mut reader = BufReader::new(pipe);
+    let mut output = String::new();
+    let mut line = String::new();
+    let mut last_emit = std::time::Instant::now();
+
+    loop {
+        line.clear();
+        match reader.read_line(&mut line).await {
+            Ok(0) => break,
+            Ok(_) => {
+                output.push_str(&line);
+                if let Some(ref sink) = sink {
+                    if last_emit.elapsed() >= std::time::Duration::from_millis(100) {
+                        sink(line.trim_end());
+                        last_emit = std::time::Instant::now();
+                    }
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    output
 }
 
 fn truncate_output(output: &str) -> String {
@@ -202,7 +276,7 @@ mod tests {
     #[tokio::test]
     async fn run_echo_command() {
         let cwd = std::env::current_dir().unwrap();
-        let result = run_command(&cwd, "echo hello", 10).await;
+        let result = run_command(&cwd, "echo hello", 10, None).await;
         assert!(!result.is_error);
         let text = extract_text(&result);
         assert!(text.contains("hello"));
@@ -211,7 +285,7 @@ mod tests {
     #[tokio::test]
     async fn run_failing_command() {
         let cwd = std::env::current_dir().unwrap();
-        let result = run_command(&cwd, "exit 1", 10).await;
+        let result = run_command(&cwd, "exit 1", 10, None).await;
         assert!(result.is_error);
         let text = extract_text(&result);
         assert!(text.contains("exited with code 1"));
@@ -220,7 +294,7 @@ mod tests {
     #[tokio::test]
     async fn run_command_with_stderr() {
         let cwd = std::env::current_dir().unwrap();
-        let result = run_command(&cwd, "echo error >&2", 10).await;
+        let result = run_command(&cwd, "echo error >&2", 10, None).await;
         let text = extract_text(&result);
         assert!(text.contains("error"));
     }
@@ -228,7 +302,7 @@ mod tests {
     #[tokio::test]
     async fn run_command_timeout() {
         let cwd = std::env::current_dir().unwrap();
-        let result = run_command(&cwd, "sleep 30", 1).await;
+        let result = run_command(&cwd, "sleep 30", 1, None).await;
         assert!(result.is_error);
         let text = extract_text(&result);
         assert!(text.contains("timed out"));

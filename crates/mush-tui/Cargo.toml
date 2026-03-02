@@ -15,6 +15,7 @@ ratatui.workspace = true
 crossterm.workspace = true
 futures.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 throbber-widgets-tui = { version = "0.11.0", default-features = false }
 syntect = { version = "5.3.0", default-features = false, features = [
   "default-syntaxes",

@@ -2560,6 +2560,7 @@ dependencies = [
  "ratatui",
  "ratatui-image",
  "serde",
+ "serde_json",
  "syntect",
  "throbber-widgets-tui",
  "tokio",
