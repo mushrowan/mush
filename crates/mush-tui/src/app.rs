@@ -117,6 +117,8 @@ pub struct App {
     pub streaming_tool_args: String,
     /// spinner state for animations
     pub throbber_state: ThrobberState,
+    /// frame counter for throttling spinner speed
+    tick_count: u8,
     /// current thinking level
     pub thinking_level: ThinkingLevel,
     /// which UI mode we're in
@@ -143,15 +145,19 @@ impl App {
             active_tool: None,
             streaming_tool_args: String::new(),
             throbber_state: ThrobberState::default(),
+            tick_count: 0,
             thinking_level: ThinkingLevel::Off,
             mode: AppMode::Normal,
             session_picker: None,
         }
     }
 
-    /// advance the spinner state (call each frame)
+    /// advance the spinner state (throttled to ~8fps from ~60fps frame rate)
     pub fn tick(&mut self) {
-        self.throbber_state.calc_next();
+        self.tick_count = self.tick_count.wrapping_add(1);
+        if self.tick_count % 8 == 0 {
+            self.throbber_state.calc_next();
+        }
     }
 
     /// add a user message to the display
