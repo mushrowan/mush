@@ -28,6 +28,8 @@ pub enum AppEvent {
     ScrollDown(u16),
     /// resize
     Resize(u16, u16),
+    /// user cycled thinking level
+    CycleThinkingLevel,
 }
 
 /// which UI mode the app is in
@@ -115,6 +117,8 @@ pub struct App {
     pub streaming_tool_args: String,
     /// spinner state for animations
     pub throbber_state: ThrobberState,
+    /// current thinking level
+    pub thinking_level: ThinkingLevel,
     /// which UI mode we're in
     pub mode: AppMode,
     /// session picker state (when mode == SessionPicker)
@@ -139,6 +143,7 @@ impl App {
             active_tool: None,
             streaming_tool_args: String::new(),
             throbber_state: ThrobberState::default(),
+            thinking_level: ThinkingLevel::Off,
             mode: AppMode::Normal,
             session_picker: None,
         }
@@ -338,8 +343,8 @@ impl App {
         });
     }
 
-    /// toggle thinking visibility for the last assistant message that has thinking
-    pub fn toggle_thinking(&mut self) {
+    /// toggle thinking text visibility for the last assistant message
+    pub fn toggle_thinking_expanded(&mut self) {
         if let Some(msg) = self
             .messages
             .iter_mut()
@@ -348,6 +353,17 @@ impl App {
         {
             msg.thinking_expanded = !msg.thinking_expanded;
         }
+    }
+
+    /// cycle to the next thinking level
+    pub fn cycle_thinking_level(&mut self) {
+        self.thinking_level = match self.thinking_level {
+            ThinkingLevel::Off => ThinkingLevel::Minimal,
+            ThinkingLevel::Minimal => ThinkingLevel::Low,
+            ThinkingLevel::Low => ThinkingLevel::Medium,
+            ThinkingLevel::Medium => ThinkingLevel::High,
+            ThinkingLevel::High => ThinkingLevel::Off,
+        };
     }
 
     /// take the input text and reset
@@ -639,10 +655,10 @@ mod tests {
         // starts collapsed
         assert!(!app.messages[0].thinking_expanded);
 
-        app.toggle_thinking();
+        app.toggle_thinking_expanded();
         assert!(app.messages[0].thinking_expanded);
 
-        app.toggle_thinking();
+        app.toggle_thinking_expanded();
         assert!(!app.messages[0].thinking_expanded);
     }
 
@@ -662,7 +678,7 @@ mod tests {
         app.push_text_delta("second");
         app.finish_streaming(None, None);
 
-        app.toggle_thinking();
+        app.toggle_thinking_expanded();
         // should toggle the latest one
         assert!(!app.messages[0].thinking_expanded);
         assert!(app.messages[1].thinking_expanded);

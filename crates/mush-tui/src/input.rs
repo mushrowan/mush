@@ -71,9 +71,15 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         (_, KeyCode::Home) | (KeyModifiers::CONTROL, KeyCode::Char('a')) => app.cursor_home(),
         (_, KeyCode::End) | (KeyModifiers::CONTROL, KeyCode::Char('e')) => app.cursor_end(),
 
-        // toggle thinking
+        // cycle thinking level
         (KeyModifiers::CONTROL, KeyCode::Char('t')) => {
-            app.toggle_thinking();
+            app.cycle_thinking_level();
+            return Some(AppEvent::CycleThinkingLevel);
+        }
+
+        // toggle thinking text visibility
+        (KeyModifiers::CONTROL, KeyCode::Char('o')) => {
+            app.toggle_thinking_expanded();
         }
 
         // clear line
@@ -150,6 +156,7 @@ fn handle_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+    use mush_ai::types::ThinkingLevel;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent {
@@ -265,7 +272,20 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_t_toggles_thinking() {
+    fn ctrl_t_cycles_thinking_level() {
+        let mut app = App::new("test".into());
+        assert_eq!(app.thinking_level, ThinkingLevel::Off);
+
+        let event = handle_key(&mut app, ctrl(KeyCode::Char('t')));
+        assert!(matches!(event, Some(AppEvent::CycleThinkingLevel)));
+        assert_eq!(app.thinking_level, ThinkingLevel::Minimal);
+
+        handle_key(&mut app, ctrl(KeyCode::Char('t')));
+        assert_eq!(app.thinking_level, ThinkingLevel::Low);
+    }
+
+    #[test]
+    fn ctrl_o_toggles_thinking_expanded() {
         let mut app = App::new("test".into());
         app.start_streaming();
         app.push_thinking_delta("thoughts");
@@ -273,7 +293,7 @@ mod tests {
         app.finish_streaming(None, None);
 
         assert!(!app.messages[0].thinking_expanded);
-        handle_key(&mut app, ctrl(KeyCode::Char('t')));
+        handle_key(&mut app, ctrl(KeyCode::Char('o')));
         assert!(app.messages[0].thinking_expanded);
     }
 

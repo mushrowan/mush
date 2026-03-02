@@ -80,6 +80,10 @@ pub async fn run_tui(
     }
 
     let mut app = App::new(tui_config.model.id.0.clone());
+    app.thinking_level = tui_config
+        .options
+        .thinking
+        .unwrap_or(ThinkingLevel::Off);
     let mut pending_prompt: Option<String> = None;
     let mut conversation: Vec<Message> = Vec::new();
     let mut session_tree = SessionTree::new();
@@ -265,6 +269,9 @@ pub async fn run_tui(
                                     app.push_user_message(text);
                                     app.status = Some("steering message queued".into());
                                 }
+                                AppEvent::CycleThinkingLevel => {
+                                    tui_config.options.thinking = Some(app.thinking_level);
+                                }
                                 _ => {}
                             }
                         }
@@ -305,6 +312,9 @@ pub async fn run_tui(
                         app.start_streaming();
                         pending_prompt = Some(prompt);
                     }
+                }
+                AppEvent::CycleThinkingLevel => {
+                    tui_config.options.thinking = Some(app.thinking_level);
                 }
                 _ => {}
             }

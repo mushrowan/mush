@@ -146,7 +146,7 @@ fn render_message(msg: &DisplayMessage, lines: &mut Vec<Line<'_>>) {
             lines.push(Line::from(vec![
                 Span::styled("  💭 ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
-                    format!("thinking ({line_count} lines) [ctrl+t to collapse]"),
+                    format!("thinking ({line_count} lines) [ctrl+o to collapse]"),
                     Style::default().fg(Color::DarkGray),
                 ),
             ]));
@@ -174,7 +174,7 @@ fn render_message(msg: &DisplayMessage, lines: &mut Vec<Line<'_>>) {
                         .add_modifier(Modifier::DIM),
                 ),
                 Span::styled(
-                    " [ctrl+t]",
+                    " [ctrl+o]",
                     Style::default()
                         .fg(Color::DarkGray)
                         .add_modifier(Modifier::DIM),

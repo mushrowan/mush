@@ -6,6 +6,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
+use mush_ai::types::ThinkingLevel;
+
 use crate::app::App;
 
 /// renders the status bar
@@ -25,9 +27,26 @@ impl Widget for StatusBar<'_> {
             .fg(Color::DarkGray)
             .add_modifier(Modifier::DIM);
 
+        let thinking_label = match self.app.thinking_level {
+            ThinkingLevel::Off => "off",
+            ThinkingLevel::Minimal => "minimal",
+            ThinkingLevel::Low => "low",
+            ThinkingLevel::Medium => "medium",
+            ThinkingLevel::High => "high",
+        };
+
         let mut spans = vec![
             Span::styled(" ", dim),
             Span::styled(&self.app.model_id, Style::default().fg(Color::Cyan)),
+            Span::styled(" • ", dim),
+            Span::styled(
+                format!("thinking {thinking_label}"),
+                if self.app.thinking_level == ThinkingLevel::Off {
+                    dim
+                } else {
+                    Style::default().fg(Color::Cyan)
+                },
+            ),
         ];
 
         if self.app.total_tokens > 0 {
@@ -50,7 +69,7 @@ impl Widget for StatusBar<'_> {
         let hint = if self.app.is_streaming {
             "esc abort | ctrl+c quit"
         } else {
-            "enter send | alt+↵ newline | ctrl+t think | ctrl+c quit"
+            "enter send | ctrl+t thinking | ctrl+o expand | ctrl+c quit"
         };
         let padding = (area.width as usize).saturating_sub(left_len + hint.len() + 1);
         if padding > 0 {
@@ -90,9 +109,18 @@ mod tests {
     #[test]
     fn status_bar_shows_hint() {
         let app = App::new("test".into());
-        let buf = render_status(&app, 80, 1);
+        let buf = render_status(&app, 120, 1);
         let content = buffer_to_string(&buf);
         assert!(content.contains("ctrl+c"));
+    }
+
+    #[test]
+    fn status_bar_shows_thinking_level() {
+        let mut app = App::new("test".into());
+        app.thinking_level = ThinkingLevel::High;
+        let buf = render_status(&app, 120, 1);
+        let content = buffer_to_string(&buf);
+        assert!(content.contains("thinking high"));
     }
 
     fn render_status(app: &App, width: u16, height: u16) -> Buffer {
