@@ -47,6 +47,11 @@ pub enum HintMode {
 pub type ThinkingPrefsSaver =
     std::sync::Arc<dyn Fn(&std::collections::HashMap<String, ThinkingLevel>) + Send + Sync>;
 
+/// callback to persist session state (messages + tree + model_id)
+pub type SessionSaver = std::sync::Arc<
+    dyn Fn(&[Message], &SessionTree, &str) + Send + Sync,
+>;
+
 /// configuration for the TUI runner (owned, 'static-friendly)
 pub struct TuiConfig {
     pub model: Model,
@@ -67,6 +72,8 @@ pub struct TuiConfig {
     pub thinking_prefs: std::collections::HashMap<String, ThinkingLevel>,
     /// callback to save thinking prefs when they change
     pub save_thinking_prefs: Option<ThinkingPrefsSaver>,
+    /// callback to auto-save session after each agent turn
+    pub save_session: Option<SessionSaver>,
 }
 
 /// run the interactive TUI
@@ -93,6 +100,21 @@ pub async fn run_tui(
         .options
         .thinking
         .unwrap_or(ThinkingLevel::Off);
+    // populate tab completions
+    let slash_cmds = [
+        "/help", "/clear", "/model", "/sessions", "/branch", "/tree", "/cost", "/quit",
+    ];
+    app.completions = slash_cmds.iter().map(|s| s.to_string()).collect();
+    // add prompt template names as slash commands
+    let cwd = std::env::current_dir().unwrap_or_default();
+    for tmpl in mush_ext::discover_templates(&cwd) {
+        app.completions.push(format!("/{}", tmpl.name));
+    }
+    // add model ids for /model completion
+    for m in models::all_models_with_user() {
+        app.completions.push(m.id.0.clone());
+    }
+
     // pull prefs out so we can mutate them without borrowing tui_config
     let mut thinking_prefs = std::mem::take(&mut tui_config.thinking_prefs);
     let thinking_saver = tui_config.save_thinking_prefs.clone();
@@ -297,6 +319,11 @@ pub async fn run_tui(
 
                 app.tick();
                 draw(&mut terminal, &app, &mut image_protos)?;
+            }
+
+            // auto-save after each agent turn
+            if let Some(ref saver) = tui_config.save_session {
+                saver(&conversation, &session_tree, &app.model_id);
             }
 
             draw(&mut terminal, &app, &mut image_protos)?;

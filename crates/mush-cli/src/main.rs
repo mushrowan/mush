@@ -475,8 +475,9 @@ async fn tui_mode(cli: Cli) -> Result<()> {
         options.api_key = Some(token);
     }
 
-    // load initial messages if resuming a session
-    let initial_messages = if let Some(ref resume_id) = cli.resume {
+    // create or resume a session
+    let cwd_str = cwd.display().to_string();
+    let session = if let Some(ref resume_id) = cli.resume {
         let store = SessionStore::new(SessionStore::default_dir());
         let sessions = store
             .list()
@@ -487,12 +488,9 @@ async fn tui_mode(cli: Cli) -> Result<()> {
             .collect();
         match matches.len() {
             0 => return Err(eyre!("no session matching '{resume_id}'")),
-            1 => {
-                let session = store
-                    .load(&matches[0].id)
-                    .map_err(|e| eyre!("failed to load session: {e}"))?;
-                session.messages
-            }
+            1 => store
+                .load(&matches[0].id)
+                .map_err(|e| eyre!("failed to load session: {e}"))?,
             n => {
                 return Err(eyre!(
                     "'{resume_id}' matches {n} sessions, be more specific"
@@ -500,8 +498,10 @@ async fn tui_mode(cli: Cli) -> Result<()> {
             }
         }
     } else {
-        vec![]
+        Session::new(model.id.as_str(), &cwd_str)
     };
+    let initial_messages = session.messages.clone();
+    let session_id = session.meta.id.clone();
 
     let theme = mush_tui::Theme::from_config(&cfg.theme);
     let prompt_enricher = build_prompt_enricher(&cwd);
@@ -534,6 +534,22 @@ async fn tui_mode(cli: Cli) -> Result<()> {
         save_thinking_prefs: Some(std::sync::Arc::new(|prefs| {
             config::save_thinking_prefs(prefs);
         })),
+        save_session: if cli.no_session {
+            None
+        } else {
+            let sid = session_id;
+            let cwd_s = cwd_str.clone();
+            Some(std::sync::Arc::new(move |msgs, tree, model_id| {
+                let store = SessionStore::new(SessionStore::default_dir());
+                let mut session = Session::new(model_id, &cwd_s);
+                session.meta.id = sid.clone();
+                session.messages = msgs.to_vec();
+                session.tree = tree.clone();
+                session.meta.message_count = msgs.len();
+                session.auto_title();
+                store.save(&session).ok();
+            }))
+        },
     };
 
     mush_tui::run_tui(tui_config, &tools, &registry)
