@@ -107,8 +107,8 @@ impl Widget for MessageList<'_> {
 
         let text = Text::from(lines);
 
-        // scroll: show from bottom, offset by scroll_offset
-        let total_lines = text.lines.len() as u16;
+        // scroll: account for line wrapping so resize keeps the bottom visible
+        let total_lines = wrapped_line_count(&text, area.width);
         let visible = area.height;
         let max_scroll = total_lines.saturating_sub(visible);
         let scroll = max_scroll.saturating_sub(self.app.scroll_offset);
@@ -118,6 +118,21 @@ impl Widget for MessageList<'_> {
             .scroll((scroll, 0))
             .render(area, buf);
     }
+}
+
+/// count visual lines after wrapping (each source line wraps to ceil(width/area_width))
+fn wrapped_line_count(text: &Text<'_>, width: u16) -> u16 {
+    if width == 0 {
+        return 0;
+    }
+    let w = width as usize;
+    text.lines
+        .iter()
+        .map(|line| {
+            let lw = line.width();
+            if lw <= w { 1u16 } else { ((lw + w - 1) / w) as u16 }
+        })
+        .sum()
 }
 
 fn render_message(msg: &DisplayMessage, lines: &mut Vec<Line<'_>>) {

@@ -4,7 +4,7 @@ use std::io;
 use std::sync::Arc;
 
 use crossterm::ExecutableCommand;
-use crossterm::event::{self, Event};
+use crossterm::event::{self, Event, MouseEvent, MouseEventKind};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
@@ -70,6 +70,7 @@ pub async fn run_tui(
     // set up terminal
     enable_raw_mode()?;
     io::stdout().execute(EnterAlternateScreen)?;
+    io::stdout().execute(crossterm::event::EnableMouseCapture)?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
@@ -244,34 +245,38 @@ pub async fn run_tui(
                     }
                     _ = tick => {
                         // check for terminal input during streaming
-                        if event::poll(std::time::Duration::ZERO)?
-                            && let Event::Key(key) = event::read()?
-                            && let Some(app_event) = handle_key(&mut app, key)
-                        {
-                            match app_event {
-                                AppEvent::Quit => {
-                                    cleanup(&mut terminal)?;
-                                    return Ok(());
+                        if event::poll(std::time::Duration::ZERO)? {
+                            match event::read()? {
+                                Event::Key(key) => {
+                                    if let Some(app_event) = handle_key(&mut app, key) {
+                                        match app_event {
+                                            AppEvent::Quit => {
+                                                cleanup(&mut terminal)?;
+                                                return Ok(());
+                                            }
+                                            AppEvent::Abort => {
+                                                app.is_streaming = false;
+                                                app.active_tool = None;
+                                                app.status = Some("aborted".into());
+                                                break;
+                                            }
+                                            AppEvent::UserSubmit { text } => {
+                                                let msg = Message::User(UserMessage {
+                                                    content: UserContent::Text(text.clone()),
+                                                    timestamp_ms: Timestamp::now(),
+                                                });
+                                                steering_queue.lock().await.push(msg);
+                                                app.push_user_message(text);
+                                                app.status = Some("steering message queued".into());
+                                            }
+                                            AppEvent::CycleThinkingLevel => {
+                                                tui_config.options.thinking = Some(app.thinking_level);
+                                            }
+                                            _ => {}
+                                        }
+                                    }
                                 }
-                                AppEvent::Abort => {
-                                    app.is_streaming = false;
-                                    app.active_tool = None;
-                                    app.status = Some("aborted".into());
-                                    break;
-                                }
-                                AppEvent::UserSubmit { text } => {
-                                    // queue as steering message
-                                    let msg = Message::User(UserMessage {
-                                        content: UserContent::Text(text.clone()),
-                                        timestamp_ms: Timestamp::now(),
-                                    });
-                                    steering_queue.lock().await.push(msg);
-                                    app.push_user_message(text);
-                                    app.status = Some("steering message queued".into());
-                                }
-                                AppEvent::CycleThinkingLevel => {
-                                    tui_config.options.thinking = Some(app.thinking_level);
-                                }
+                                Event::Mouse(mouse) => handle_mouse(&mut app, mouse),
                                 _ => {}
                             }
                         }
@@ -287,35 +292,39 @@ pub async fn run_tui(
         }
 
         // idle: wait for terminal input
-        if event::poll(std::time::Duration::from_millis(50))?
-            && let Event::Key(key) = event::read()?
-            && let Some(app_event) = handle_key(&mut app, key)
-        {
-            match app_event {
-                AppEvent::Quit => break,
-                AppEvent::UserSubmit { text } => {
-                    let expanded = expand_template(&text);
-                    app.push_user_message(expanded.clone());
-                    app.start_streaming();
-                    pending_prompt = Some(expanded);
-                }
-                AppEvent::SlashCommand { name, args } => {
-                    if let Some(prompt) = handle_slash_command(
-                        &mut app,
-                        &mut conversation,
-                        &mut session_tree,
-                        &mut tui_config,
-                        &name,
-                        &args,
-                    ) {
-                        // slash command produced a prompt to send
-                        app.start_streaming();
-                        pending_prompt = Some(prompt);
+        if event::poll(std::time::Duration::from_millis(50))? {
+            match event::read()? {
+                Event::Key(key) => {
+                    if let Some(app_event) = handle_key(&mut app, key) {
+                        match app_event {
+                            AppEvent::Quit => break,
+                            AppEvent::UserSubmit { text } => {
+                                let expanded = expand_template(&text);
+                                app.push_user_message(expanded.clone());
+                                app.start_streaming();
+                                pending_prompt = Some(expanded);
+                            }
+                            AppEvent::SlashCommand { name, args } => {
+                                if let Some(prompt) = handle_slash_command(
+                                    &mut app,
+                                    &mut conversation,
+                                    &mut session_tree,
+                                    &mut tui_config,
+                                    &name,
+                                    &args,
+                                ) {
+                                    app.start_streaming();
+                                    pending_prompt = Some(prompt);
+                                }
+                            }
+                            AppEvent::CycleThinkingLevel => {
+                                tui_config.options.thinking = Some(app.thinking_level);
+                            }
+                            _ => {}
+                        }
                     }
                 }
-                AppEvent::CycleThinkingLevel => {
-                    tui_config.options.thinking = Some(app.thinking_level);
-                }
+                Event::Mouse(mouse) => handle_mouse(&mut app, mouse),
                 _ => {}
             }
         }
@@ -790,8 +799,23 @@ fn draw(
     Ok(())
 }
 
+/// handle mouse scroll events
+fn handle_mouse(app: &mut App, mouse: MouseEvent) {
+    const SCROLL_LINES: u16 = 3;
+    match mouse.kind {
+        MouseEventKind::ScrollUp => {
+            app.scroll_offset = app.scroll_offset.saturating_add(SCROLL_LINES);
+        }
+        MouseEventKind::ScrollDown => {
+            app.scroll_offset = app.scroll_offset.saturating_sub(SCROLL_LINES);
+        }
+        _ => {}
+    }
+}
+
 fn cleanup(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
     disable_raw_mode()?;
+    io::stdout().execute(crossterm::event::DisableMouseCapture)?;
     io::stdout().execute(LeaveAlternateScreen)?;
     terminal.show_cursor()?;
     Ok(())
