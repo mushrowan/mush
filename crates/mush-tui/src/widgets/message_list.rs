@@ -40,8 +40,9 @@ impl Widget for MessageList<'_> {
                 .use_type(WhichUse::Spin);
             let spinner_span = throbber.to_symbol_span(&self.app.throbber_state);
 
+            let stream_label = truncate_model_id(&self.app.model_id);
             lines.push(Line::from(vec![Span::styled(
-                "mush",
+                stream_label.to_string(),
                 Style::default()
                     .fg(Color::Blue)
                     .add_modifier(Modifier::BOLD),
@@ -135,21 +136,32 @@ fn wrapped_line_count(text: &Text<'_>, width: u16) -> u16 {
         .sum()
 }
 
+fn truncate_model_id(id: &str) -> &str {
+    if id.len() > 20 { &id[..20] } else { id }
+}
+
 fn render_message(msg: &DisplayMessage, lines: &mut Vec<Line<'_>>) {
     let (label, label_style) = match msg.role {
         MessageRole::User => (
-            "you",
+            "you".to_string(),
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         ),
-        MessageRole::Assistant => (
-            "mush",
-            Style::default()
-                .fg(Color::Blue)
-                .add_modifier(Modifier::BOLD),
-        ),
-        MessageRole::System => ("system", Style::default().fg(Color::Yellow)),
+        MessageRole::Assistant => {
+            let name = msg
+                .model_id
+                .as_deref()
+                .map(truncate_model_id)
+                .unwrap_or("mush");
+            (
+                name.to_string(),
+                Style::default()
+                    .fg(Color::Blue)
+                    .add_modifier(Modifier::BOLD),
+            )
+        }
+        MessageRole::System => ("system".to_string(), Style::default().fg(Color::Yellow)),
     };
 
     lines.push(Line::from(vec![Span::styled(label, label_style)]));
@@ -324,7 +336,8 @@ mod tests {
         app.finish_streaming(None, None);
         let buf = render_app(&app, 40, 10);
         let content = buffer_to_string(&buf);
-        assert!(content.contains("mush"));
+        // model_id is "test" (from App::new)
+        assert!(content.contains("test"));
         assert!(content.contains("i can help"));
     }
 
@@ -365,6 +378,7 @@ mod tests {
             thinking_expanded: false,
             usage: None,
             cost: None,
+            model_id: None,
         });
         let buf = render_app(&app, 50, 15);
         let content = buffer_to_string(&buf);
@@ -385,6 +399,7 @@ mod tests {
             thinking_expanded: false,
             usage: None,
             cost: None,
+            model_id: None,
         });
         let buf = render_app(&app, 60, 10);
         let content = buffer_to_string(&buf);

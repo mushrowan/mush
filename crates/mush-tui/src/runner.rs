@@ -168,12 +168,13 @@ pub async fn run_tui(
                     });
                     app.messages.push(crate::app::DisplayMessage {
                         role: crate::app::MessageRole::Assistant,
-                        content: text,
+                        content: text.trim_start_matches('\n').to_string(),
                         tool_calls: vec![],
                         thinking,
                         thinking_expanded: false,
                         usage: Some(a.usage),
                         cost: None,
+                        model_id: Some(a.model.0.clone()),
                     });
                 }
                 _ => {} // tool results displayed inline with their tool calls

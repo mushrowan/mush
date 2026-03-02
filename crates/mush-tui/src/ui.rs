@@ -79,9 +79,9 @@ mod tests {
 
         assert!(content.contains("you"));
         assert!(content.contains("what is rust"));
-        assert!(content.contains("mush"));
-        assert!(content.contains("systems programming"));
+        // model id shown as label instead of "mush"
         assert!(content.contains("claude-sonnet-4"));
+        assert!(content.contains("systems programming"));
         assert!(content.contains("> "));
     }
 

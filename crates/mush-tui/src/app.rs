@@ -58,6 +58,8 @@ pub struct DisplayMessage {
     pub thinking_expanded: bool,
     pub usage: Option<Usage>,
     pub cost: Option<f64>,
+    /// model id for assistant messages
+    pub model_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -187,6 +189,7 @@ impl App {
             thinking_expanded: false,
             usage: None,
             cost: None,
+            model_id: None,
         });
         self.scroll_offset = 0;
     }
@@ -264,12 +267,13 @@ impl App {
 
         self.messages.push(DisplayMessage {
             role: MessageRole::Assistant,
-            content: text,
+            content: text.trim_start_matches('\n').to_string(),
             tool_calls: vec![],
             thinking,
             thinking_expanded: false,
             usage,
             cost,
+            model_id: Some(self.model_id.clone()),
         });
 
         if let Some(c) = cost {
@@ -473,6 +477,7 @@ impl App {
             thinking_expanded: false,
             usage: None,
             cost: None,
+            model_id: None,
         });
     }
 
@@ -680,6 +685,7 @@ mod tests {
             thinking_expanded: false,
             usage: None,
             cost: None,
+            model_id: None,
         });
 
         app.start_tool("bash", "ls -la");
@@ -809,6 +815,7 @@ mod tests {
             thinking_expanded: false,
             usage: None,
             cost: None,
+            model_id: None,
         });
         app.start_tool("read", "src/main.rs");
         app.end_tool("read", false, Some("fn main() {}\n"), None);
