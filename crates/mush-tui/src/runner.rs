@@ -82,18 +82,15 @@ pub async fn run_tui(
     tools: &[Box<dyn AgentTool>],
     registry: &ApiRegistry,
 ) -> io::Result<()> {
+    // detect image protocol before entering alternate screen to avoid probe artifacts
+    let _image_picker = ratatui_image::picker::Picker::from_query_stdio().ok();
+
     // set up terminal
     enable_raw_mode()?;
     io::stdout().execute(EnterAlternateScreen)?;
     io::stdout().execute(crossterm::event::EnableMouseCapture)?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
-
-    // detect terminal image protocol (must be after entering alternate screen)
-    let image_picker = ratatui_image::picker::Picker::from_query_stdio().ok();
-    if let Some(ref p) = image_picker {
-        eprintln!("\x1b[2mimage: {:?}\x1b[0m", p.protocol_type());
-    }
 
     let mut app = App::new(tui_config.model.id.0.clone());
     app.thinking_level = tui_config
