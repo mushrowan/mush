@@ -18,14 +18,14 @@ use mush_tools::builtin_tools;
 use mush_tui::TuiConfig;
 
 #[derive(Parser)]
-#[command(name = "mush", version, about = "minimal coding agent")]
+#[command(name = "mush", version, about = "minimal coding agent", trailing_var_arg = true)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
 
     /// prompt to send (enables print mode, no TUI)
-    #[arg(short, long)]
-    prompt: Option<String>,
+    #[arg(short, long, num_args = 1.., trailing_var_arg = true)]
+    prompt: Vec<String>,
 
     /// resume a previous session by id
     #[arg(short = 'c', long = "continue")]
@@ -102,7 +102,12 @@ async fn main() -> Result<()> {
     };
 
     // combine stdin with -p flag
-    let prompt = match (cli.prompt.clone(), stdin_prompt) {
+    let cli_prompt = if cli.prompt.is_empty() {
+        None
+    } else {
+        Some(cli.prompt.join(" "))
+    };
+    let prompt = match (cli_prompt, stdin_prompt) {
         (Some(p), Some(stdin)) => Some(format!("{p}\n\n{stdin}")),
         (Some(p), None) => Some(p),
         (None, Some(stdin)) => Some(stdin),
