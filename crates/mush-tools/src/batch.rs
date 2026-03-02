@@ -17,7 +17,10 @@ impl BatchTool {
     }
 
     fn find_tool(&self, name: &str) -> Option<&dyn AgentTool> {
-        self.tools.iter().find(|t| t.name() == name).map(|t| &**t)
+        self.tools
+            .iter()
+            .find(|t| t.name().eq_ignore_ascii_case(name))
+            .map(|t| &**t)
     }
 }
 
@@ -90,7 +93,7 @@ impl AgentTool for BatchTool {
                 .map(|(i, call)| async move {
                     let tool_name = call["tool"].as_str().unwrap_or("unknown");
 
-                    if tool_name == "batch" {
+                    if tool_name.eq_ignore_ascii_case("batch") {
                         return (
                             i,
                             tool_name.to_string(),
@@ -196,6 +199,25 @@ mod tests {
             _ => panic!("expected text"),
         };
         assert!(text.contains("unknown tool"));
+    }
+
+    #[tokio::test]
+    async fn tool_lookup_is_case_insensitive() {
+        // models sometimes send capitalised tool names (e.g. "Grep" instead of "grep")
+        let tool = BatchTool::new(vec![]);
+        let result = tool
+            .execute(serde_json::json!({
+                "tool_calls": [
+                    {"tool": "Batch", "parameters": {"tool_calls": []}}
+                ]
+            }))
+            .await;
+        let text = match &result.content[0] {
+            ToolResultContentPart::Text(t) => &t.text,
+            _ => panic!("expected text"),
+        };
+        // should find "batch" even when called as "Batch"
+        assert!(text.contains("cannot nest batch"));
     }
 
     #[tokio::test]
