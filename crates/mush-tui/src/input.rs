@@ -39,6 +39,12 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     }
 
     match (key.modifiers, key.code) {
+        // tab completion
+        (_, KeyCode::Tab) | (KeyModifiers::SHIFT, KeyCode::BackTab) => {
+            app.tab_complete();
+            return None;
+        }
+
         // multi-line: alt+enter or shift+enter inserts newline
         (KeyModifiers::ALT | KeyModifiers::SHIFT, KeyCode::Enter) => {
             app.input_char('\n');
@@ -404,5 +410,75 @@ mod tests {
         app.is_streaming = true;
         handle_key(&mut app, key(KeyCode::Char('x')));
         assert!(app.input.is_empty()); // typing ignored
+    }
+
+    #[test]
+    fn tab_completes_slash_commands() {
+        let mut app = App::new("test".into());
+        app.completions = vec![
+            "/help".into(),
+            "/history".into(),
+            "/clear".into(),
+        ];
+        app.input = "/h".into();
+        app.cursor = 2;
+        handle_key(&mut app, key(KeyCode::Tab));
+        assert_eq!(app.input, "/help");
+
+        // second tab cycles to next match
+        handle_key(&mut app, key(KeyCode::Tab));
+        assert_eq!(app.input, "/history");
+
+        // wraps around
+        handle_key(&mut app, key(KeyCode::Tab));
+        assert_eq!(app.input, "/help");
+    }
+
+    #[test]
+    fn tab_completes_model_ids() {
+        let mut app = App::new("test".into());
+        app.completions = vec![
+            "/model".into(),
+            "claude-opus-4-6".into(),
+            "claude-sonnet-4-20250514".into(),
+        ];
+        app.input = "/model claude-o".into();
+        app.cursor = 15;
+        handle_key(&mut app, key(KeyCode::Tab));
+        assert_eq!(app.input, "/model claude-opus-4-6");
+    }
+
+    #[test]
+    fn tab_no_match_does_nothing() {
+        let mut app = App::new("test".into());
+        app.completions = vec!["/help".into()];
+        app.input = "/zzz".into();
+        app.cursor = 4;
+        handle_key(&mut app, key(KeyCode::Tab));
+        assert_eq!(app.input, "/zzz");
+    }
+
+    #[test]
+    fn tab_resets_on_typing() {
+        let mut app = App::new("test".into());
+        app.completions = vec!["/help".into(), "/history".into()];
+        app.input = "/h".into();
+        app.cursor = 2;
+        handle_key(&mut app, key(KeyCode::Tab));
+        assert_eq!(app.input, "/help");
+
+        // typing resets completion state
+        handle_key(&mut app, key(KeyCode::Char('x')));
+        assert_eq!(app.input, "/helpx");
+    }
+
+    #[test]
+    fn tab_ignored_for_non_slash_input() {
+        let mut app = App::new("test".into());
+        app.completions = vec!["/help".into()];
+        app.input = "hello".into();
+        app.cursor = 5;
+        handle_key(&mut app, key(KeyCode::Tab));
+        assert_eq!(app.input, "hello"); // unchanged
     }
 }

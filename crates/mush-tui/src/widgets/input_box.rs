@@ -36,10 +36,15 @@ impl Widget for InputBox<'_> {
             Style::default()
         };
 
-        let text = Line::from(vec![
+        let mut spans = vec![
             Span::styled(prompt, Style::default().fg(Color::Cyan)),
             Span::styled(self.app.input.as_str(), style),
-        ]);
+        ];
+        // ghost completion hint
+        if let Some(ghost) = self.app.ghost_text() {
+            spans.push(Span::styled(ghost, Style::default().fg(Color::DarkGray)));
+        }
+        let text = Line::from(spans);
 
         let block = Block::default()
             .borders(Borders::ALL)
@@ -97,6 +102,18 @@ mod tests {
         // x: 0 (area.x) + 1 (border) + 2 ("> ") + 3 (cursor) = 6
         assert_eq!(x, 6);
         assert_eq!(y, 11);
+    }
+
+    #[test]
+    fn input_box_shows_ghost_completion() {
+        let mut app = App::new("test".into());
+        app.completions = vec!["/help".into(), "/history".into()];
+        app.input = "/h".into();
+        app.cursor = 2;
+        let buf = render_input(&app, 40, 3);
+        let content = buffer_to_string(&buf);
+        // should show "/h" + ghost "elp"
+        assert!(content.contains("/help"));
     }
 
     fn render_input(app: &App, width: u16, height: u16) -> Buffer {

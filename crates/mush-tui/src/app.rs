@@ -125,6 +125,21 @@ pub struct App {
     pub mode: AppMode,
     /// session picker state (when mode == SessionPicker)
     pub session_picker: Option<SessionPickerState>,
+    /// available completions (slash commands, model ids, etc)
+    pub completions: Vec<String>,
+    /// current tab-completion state
+    tab_state: Option<TabState>,
+}
+
+/// tracks an in-progress tab completion cycle
+#[derive(Debug, Clone)]
+struct TabState {
+    /// the text prefix being completed
+    prefix: String,
+    /// matching candidates
+    matches: Vec<String>,
+    /// which match we're showing (cycles on repeated tab)
+    index: usize,
 }
 
 impl App {
@@ -149,6 +164,8 @@ impl App {
             thinking_level: ThinkingLevel::Off,
             mode: AppMode::Normal,
             session_picker: None,
+            completions: Vec::new(),
+            tab_state: None,
         }
     }
 
@@ -265,6 +282,7 @@ impl App {
 
     /// insert a character at the cursor
     pub fn input_char(&mut self, c: char) {
+        self.tab_state = None;
         self.input.insert(self.cursor, c);
         self.cursor += c.len_utf8();
     }
@@ -358,6 +376,81 @@ impl App {
     pub fn delete_to_start(&mut self) {
         self.input.drain(..self.cursor);
         self.cursor = 0;
+    }
+
+    /// cycle through tab completions for the current input
+    pub fn tab_complete(&mut self) {
+        if let Some(ref mut state) = self.tab_state {
+            // already completing: cycle to next match
+            state.index = (state.index + 1) % state.matches.len();
+            let replacement = &state.matches[state.index];
+            self.input = replacement.clone();
+            self.cursor = self.input.len();
+            return;
+        }
+
+        // start a new completion
+        let input = self.input.as_str();
+        let matches: Vec<String> = if let Some(rest) = input.strip_prefix("/model ") {
+            // complete model ids
+            self.completions
+                .iter()
+                .filter(|c| !c.starts_with('/'))
+                .filter(|c| c.starts_with(rest))
+                .map(|c| format!("/model {c}"))
+                .collect()
+        } else if input.starts_with('/') {
+            // complete slash commands
+            self.completions
+                .iter()
+                .filter(|c| c.starts_with(input))
+                .cloned()
+                .collect()
+        } else {
+            return;
+        };
+
+        if matches.is_empty() {
+            return;
+        }
+
+        let first = matches[0].clone();
+        self.tab_state = Some(TabState {
+            prefix: input.to_string(),
+            matches,
+            index: 0,
+        });
+        self.input = first;
+        self.cursor = self.input.len();
+    }
+
+    /// return ghost completion suffix for inline hint (dimmed text after cursor).
+    /// only shown when cursor is at end and no active tab cycle.
+    pub fn ghost_text(&self) -> Option<&str> {
+        // don't show ghost while actively cycling completions
+        if self.tab_state.is_some() {
+            return None;
+        }
+        // only when cursor is at the end
+        if self.cursor != self.input.len() || self.input.is_empty() {
+            return None;
+        }
+        let input = self.input.as_str();
+        let candidate = if let Some(rest) = input.strip_prefix("/model ") {
+            self.completions
+                .iter()
+                .filter(|c| !c.starts_with('/'))
+                .find(|c| c.starts_with(rest))
+                .map(|c| &c[rest.len()..])
+        } else if input.starts_with('/') {
+            self.completions
+                .iter()
+                .find(|c| c.starts_with(input) && c.len() > input.len())
+                .map(|c| &c[input.len()..])
+        } else {
+            None
+        };
+        candidate.filter(|s| !s.is_empty())
     }
 
     /// clear all messages (for /clear command)
