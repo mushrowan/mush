@@ -12,7 +12,7 @@ craneLib.devShell {
     cargo-machete
     cargo-watch
     cargo-nextest
-    jj
+    jujutsu
     gh
     pkg-config
     openssl
