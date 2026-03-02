@@ -31,6 +31,13 @@
     flake-parts.lib.mkFlake {inherit inputs;} {
       systems = ["x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin"];
 
+      flake.homeManagerModules = let
+        mod = import ./nix/module.nix inputs.self;
+      in {
+        mush = mod;
+        default = mod;
+      };
+
       imports = [
         inputs.treefmt-nix.flakeModule
         inputs.git-hooks.flakeModule
