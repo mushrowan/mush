@@ -185,26 +185,46 @@ pub fn compact_with_summary(
 }
 
 const COMPACTION_PROMPT: &str = "\
-You are a conversation compactor. Your job is to produce a concise summary of the \
-conversation history that preserves all critical context needed to continue the conversation.
+You are a context summarisation assistant. Your task is to read a conversation between \
+a user and an AI coding assistant, then produce a structured summary following the exact \
+format specified.
 
-Preserve:
-- The user's original goal and any sub-goals
-- Key decisions made and their rationale
-- Important constraints or preferences stated by the user
-- File paths, variable names, and technical details that were discussed
-- What has been completed vs what remains
-- Any errors encountered and how they were resolved
-- The current state of whatever is being worked on
+Do NOT continue the conversation. Do NOT respond to any questions in the conversation. \
+ONLY output the structured summary.";
 
-Omit:
-- Verbatim tool output (summarise what was found/changed instead)
-- Redundant back-and-forth
-- Thinking/reasoning traces
-- Pleasantries
+const SUMMARISATION_INSTRUCTIONS: &str = "\
+Create a structured context checkpoint summary that another LLM will use to continue the work.
 
-Output a structured summary in markdown. Be thorough but concise. \
-The summary will replace the compacted messages, so anything not included is lost forever.";
+Use this EXACT format:
+
+## Goal
+[What is the user trying to accomplish? Can be multiple items if the session covers different tasks.]
+
+## Constraints & Preferences
+- [Any constraints, preferences, or requirements mentioned by user]
+- [Or \"(none)\" if none were mentioned]
+
+## Progress
+### Done
+- [x] [Completed tasks/changes]
+
+### In Progress
+- [ ] [Current work]
+
+### Blocked
+- [Issues preventing progress, if any]
+
+## Key Decisions
+- **[Decision]**: [Brief rationale]
+
+## Next Steps
+1. [Ordered list of what should happen next]
+
+## Critical Context
+- [Any data, examples, or references needed to continue]
+- [Or \"(none)\" if not applicable]
+
+Keep each section concise. Preserve exact file paths, function names, and error messages.";
 
 /// check whether compaction is needed (estimated tokens > 75% of context window)
 pub fn needs_compaction(messages: &[Message], context_window: usize) -> bool {
@@ -241,7 +261,7 @@ pub async fn llm_compact(
         system_prompt: Some(COMPACTION_PROMPT.to_string()),
         messages: vec![Message::User(UserMessage {
             content: UserContent::Text(format!(
-                "Summarise this conversation history:\n\n{conversation_dump}"
+                "<conversation>\n{conversation_dump}\n</conversation>\n\n{SUMMARISATION_INSTRUCTIONS}"
             )),
             timestamp_ms: Timestamp::now(),
         })],
