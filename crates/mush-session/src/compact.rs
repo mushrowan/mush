@@ -189,8 +189,8 @@ You are a context summarisation assistant. Your task is to read a conversation b
 a user and an AI coding assistant, then produce a structured summary following the exact \
 format specified.
 
-Do NOT continue the conversation. Do NOT respond to any questions in the conversation. \
-ONLY output the structured summary.";
+Do not continue the conversation. Do not respond to any questions in the conversation. \
+Only output the structured summary.";
 
 const SUMMARISATION_INSTRUCTIONS: &str = "\
 Create a structured context checkpoint summary that another LLM will use to continue the work.
