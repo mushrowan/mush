@@ -246,6 +246,7 @@ fn build_request_body(
             ThinkingLevel::Low => "low".into(),
             ThinkingLevel::Medium => "medium".into(),
             ThinkingLevel::High => "high".into(),
+            ThinkingLevel::Xhigh => "high".into(),
         }),
         _ => None,
     };

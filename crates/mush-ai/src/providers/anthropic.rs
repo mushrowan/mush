@@ -199,6 +199,10 @@ enum ThinkingConfig {
         config_type: String,
         budget_tokens: u64,
     },
+    Adaptive {
+        #[serde(rename = "type")]
+        config_type: String,
+    },
 }
 
 #[derive(Serialize)]
@@ -269,11 +273,17 @@ fn build_request_body(
 
     let thinking = match options.thinking {
         Some(level) if level != ThinkingLevel::Off && model.reasoning => {
-            let budget = thinking_budget(level, max_tokens);
-            Some(ThinkingConfig::Enabled {
-                config_type: "enabled".into(),
-                budget_tokens: budget,
-            })
+            if supports_adaptive_thinking(&model.id.0) {
+                Some(ThinkingConfig::Adaptive {
+                    config_type: "adaptive".into(),
+                })
+            } else {
+                let budget = thinking_budget(level, max_tokens);
+                Some(ThinkingConfig::Enabled {
+                    config_type: "enabled".into(),
+                    budget_tokens: budget,
+                })
+            }
         }
         _ => None,
     };
@@ -285,7 +295,7 @@ fn build_request_body(
         None
     };
 
-    // when thinking is enabled, max_tokens must include the thinking budget
+    // when thinking is enabled with budget, max_tokens must include the budget
     let effective_max_tokens =
         if let Some(ThinkingConfig::Enabled { budget_tokens, .. }) = &thinking {
             max_tokens.max(*budget_tokens + 1024)
@@ -305,6 +315,14 @@ fn build_request_body(
     }
 }
 
+/// opus 4.6 and sonnet 4.6 use adaptive thinking instead of budget tokens
+fn supports_adaptive_thinking(model_id: &str) -> bool {
+    model_id.contains("opus-4-6")
+        || model_id.contains("opus-4.6")
+        || model_id.contains("sonnet-4-6")
+        || model_id.contains("sonnet-4.6")
+}
+
 fn thinking_budget(level: ThinkingLevel, max_tokens: u64) -> u64 {
     let base = max_tokens.max(4096);
     match level {
@@ -313,6 +331,7 @@ fn thinking_budget(level: ThinkingLevel, max_tokens: u64) -> u64 {
         ThinkingLevel::Low => base / 4,
         ThinkingLevel::Medium => base / 2,
         ThinkingLevel::High => base,
+        ThinkingLevel::Xhigh => base * 2,
     }
 }
 

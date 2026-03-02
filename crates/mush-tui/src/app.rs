@@ -310,6 +310,16 @@ impl App {
         }
     }
 
+    /// move cursor one word left
+    pub fn cursor_word_left(&mut self) {
+        self.cursor = word_boundary_left(&self.input, self.cursor);
+    }
+
+    /// move cursor one word right
+    pub fn cursor_word_right(&mut self) {
+        self.cursor = word_boundary_right(&self.input, self.cursor);
+    }
+
     /// move cursor to start
     pub fn cursor_home(&mut self) {
         self.cursor = 0;
@@ -318,6 +328,30 @@ impl App {
     /// move cursor to end
     pub fn cursor_end(&mut self) {
         self.cursor = self.input.len();
+    }
+
+    /// delete word before cursor
+    pub fn delete_word_backward(&mut self) {
+        let boundary = word_boundary_left(&self.input, self.cursor);
+        self.input.drain(boundary..self.cursor);
+        self.cursor = boundary;
+    }
+
+    /// delete word after cursor
+    pub fn delete_word_forward(&mut self) {
+        let boundary = word_boundary_right(&self.input, self.cursor);
+        self.input.drain(self.cursor..boundary);
+    }
+
+    /// delete from cursor to end of line
+    pub fn delete_to_end(&mut self) {
+        self.input.truncate(self.cursor);
+    }
+
+    /// delete from cursor to start of line
+    pub fn delete_to_start(&mut self) {
+        self.input.drain(..self.cursor);
+        self.cursor = 0;
     }
 
     /// clear all messages (for /clear command)
@@ -362,7 +396,8 @@ impl App {
             ThinkingLevel::Minimal => ThinkingLevel::Low,
             ThinkingLevel::Low => ThinkingLevel::Medium,
             ThinkingLevel::Medium => ThinkingLevel::High,
-            ThinkingLevel::High => ThinkingLevel::Off,
+            ThinkingLevel::High => ThinkingLevel::Xhigh,
+            ThinkingLevel::Xhigh => ThinkingLevel::Off,
         };
     }
 
@@ -415,6 +450,45 @@ pub fn filtered_sessions(picker: &SessionPickerState) -> Vec<&SessionMeta> {
             })
             .collect()
     }
+}
+
+/// find the byte offset of the previous word boundary
+fn word_boundary_left(s: &str, cursor: usize) -> usize {
+    let before = &s[..cursor];
+    // skip whitespace/punctuation, then skip word chars
+    let trimmed = before.trim_end();
+    if trimmed.is_empty() {
+        return 0;
+    }
+    let end = trimmed.len();
+    // find start of current word
+    trimmed
+        .char_indices()
+        .rev()
+        .find(|(_, c)| !c.is_alphanumeric() && *c != '_')
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(0)
+        .min(end)
+}
+
+/// find the byte offset of the next word boundary
+fn word_boundary_right(s: &str, cursor: usize) -> usize {
+    let after = &s[cursor..];
+    // skip current word chars, then skip whitespace
+    let mut chars = after.char_indices();
+    // skip word chars
+    let word_end = chars
+        .by_ref()
+        .find(|(_, c)| !c.is_alphanumeric() && *c != '_')
+        .map(|(i, _)| i)
+        .unwrap_or(after.len());
+    // skip whitespace/punctuation
+    let past_ws = after[word_end..]
+        .char_indices()
+        .find(|(_, c)| c.is_alphanumeric() || *c == '_')
+        .map(|(i, _)| word_end + i)
+        .unwrap_or(after.len());
+    cursor + past_ws
 }
 
 /// max lines to show in tool output preview

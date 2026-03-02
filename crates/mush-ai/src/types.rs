@@ -304,6 +304,7 @@ pub enum ThinkingLevel {
     Low,
     Medium,
     High,
+    Xhigh,
 }
 
 // -- stream options --

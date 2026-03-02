@@ -63,13 +63,39 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             return Some(AppEvent::UserSubmit { text });
         }
 
+        // word deletion
+        (KeyModifiers::CONTROL, KeyCode::Backspace)
+        | (KeyModifiers::ALT, KeyCode::Backspace)
+        | (KeyModifiers::CONTROL, KeyCode::Char('w')) => app.delete_word_backward(),
+        (KeyModifiers::ALT, KeyCode::Char('d')) => app.delete_word_forward(),
+
         // editing
         (_, KeyCode::Backspace) => app.input_backspace(),
+        (KeyModifiers::CONTROL, KeyCode::Char('d')) => {
+            if app.input.is_empty() {
+                return Some(AppEvent::Quit);
+            }
+            app.input_delete();
+        }
         (_, KeyCode::Delete) => app.input_delete(),
+
+        // cursor movement
+        (KeyModifiers::CONTROL, KeyCode::Char('b')) => app.cursor_left(),
         (_, KeyCode::Left) => app.cursor_left(),
+        (KeyModifiers::CONTROL, KeyCode::Char('f')) => app.cursor_right(),
         (_, KeyCode::Right) => app.cursor_right(),
+        (KeyModifiers::ALT, KeyCode::Left)
+        | (KeyModifiers::CONTROL, KeyCode::Left)
+        | (KeyModifiers::ALT, KeyCode::Char('b')) => app.cursor_word_left(),
+        (KeyModifiers::ALT, KeyCode::Right)
+        | (KeyModifiers::CONTROL, KeyCode::Right)
+        | (KeyModifiers::ALT, KeyCode::Char('f')) => app.cursor_word_right(),
         (_, KeyCode::Home) | (KeyModifiers::CONTROL, KeyCode::Char('a')) => app.cursor_home(),
         (_, KeyCode::End) | (KeyModifiers::CONTROL, KeyCode::Char('e')) => app.cursor_end(),
+
+        // line editing
+        (KeyModifiers::CONTROL, KeyCode::Char('u')) => app.delete_to_start(),
+        (KeyModifiers::CONTROL, KeyCode::Char('k')) => app.delete_to_end(),
 
         // cycle thinking level
         (KeyModifiers::CONTROL, KeyCode::Char('t')) => {
@@ -80,12 +106,6 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         // toggle thinking text visibility
         (KeyModifiers::CONTROL, KeyCode::Char('o')) => {
             app.toggle_thinking_expanded();
-        }
-
-        // clear line
-        (KeyModifiers::CONTROL, KeyCode::Char('u')) => {
-            app.input.clear();
-            app.cursor = 0;
         }
 
         // regular character
@@ -342,6 +362,40 @@ mod tests {
             }
             other => panic!("expected SlashCommand, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn ctrl_w_deletes_word_backward() {
+        let mut app = App::new("test".into());
+        app.input = "hello world".into();
+        app.cursor = 11;
+        handle_key(&mut app, ctrl(KeyCode::Char('w')));
+        assert_eq!(app.input, "hello ");
+    }
+
+    #[test]
+    fn ctrl_k_deletes_to_end() {
+        let mut app = App::new("test".into());
+        app.input = "hello world".into();
+        app.cursor = 5;
+        handle_key(&mut app, ctrl(KeyCode::Char('k')));
+        assert_eq!(app.input, "hello");
+    }
+
+    #[test]
+    fn ctrl_d_on_empty_quits() {
+        let mut app = App::new("test".into());
+        let event = handle_key(&mut app, ctrl(KeyCode::Char('d')));
+        assert!(matches!(event, Some(AppEvent::Quit)));
+    }
+
+    #[test]
+    fn ctrl_d_with_input_deletes_char() {
+        let mut app = App::new("test".into());
+        app.input = "abc".into();
+        app.cursor = 1;
+        handle_key(&mut app, ctrl(KeyCode::Char('d')));
+        assert_eq!(app.input, "ac");
     }
 
     #[test]

@@ -33,6 +33,7 @@ impl Widget for StatusBar<'_> {
             ThinkingLevel::Low => "low",
             ThinkingLevel::Medium => "medium",
             ThinkingLevel::High => "high",
+            ThinkingLevel::Xhigh => "xhigh",
         };
 
         let mut spans = vec![
