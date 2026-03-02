@@ -212,15 +212,21 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
         prompt
     };
 
-    let thinking = cli.thinking || cfg.thinking.unwrap_or(false);
+    // thinking level priority: --thinking flag > saved per-model pref > config default
+    let thinking_prefs = config::load_thinking_prefs();
+    let thinking_level = if cli.thinking {
+        Some(ThinkingLevel::High)
+    } else if let Some(&level) = thinking_prefs.get(model.id.0.as_str()) {
+        Some(level)
+    } else if cfg.thinking.unwrap_or(false) {
+        Some(ThinkingLevel::High)
+    } else {
+        None
+    };
     let max_tokens = cli.max_tokens.or(cfg.max_tokens);
 
     let mut options = StreamOptions {
-        thinking: if thinking {
-            Some(ThinkingLevel::High)
-        } else {
-            None
-        },
+        thinking: thinking_level,
         max_tokens,
         ..Default::default()
     };
@@ -431,14 +437,20 @@ async fn tui_mode(cli: Cli) -> Result<()> {
         .or(cfg.system_prompt)
         .unwrap_or_else(|| build_system_prompt(&cwd));
 
-    let thinking = cli.thinking || cfg.thinking.unwrap_or(false);
+    // thinking level priority: --thinking flag > saved per-model pref > config default
+    let thinking_prefs = config::load_thinking_prefs();
+    let thinking_level = if cli.thinking {
+        Some(ThinkingLevel::High)
+    } else if let Some(&level) = thinking_prefs.get(model.id.0.as_str()) {
+        Some(level)
+    } else if cfg.thinking.unwrap_or(false) {
+        Some(ThinkingLevel::High)
+    } else {
+        None
+    };
 
     let mut options = StreamOptions {
-        thinking: if thinking {
-            Some(ThinkingLevel::High)
-        } else {
-            None
-        },
+        thinking: thinking_level,
         max_tokens: cli.max_tokens.or(cfg.max_tokens),
         ..Default::default()
     };
@@ -518,6 +530,10 @@ async fn tui_mode(cli: Cli) -> Result<()> {
         } else {
             None
         },
+        thinking_prefs,
+        save_thinking_prefs: Some(std::sync::Arc::new(|prefs| {
+            config::save_thinking_prefs(prefs);
+        })),
     };
 
     mush_tui::run_tui(tui_config, &tools, &registry)

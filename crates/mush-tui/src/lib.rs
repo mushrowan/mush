@@ -8,5 +8,5 @@ pub mod ui;
 pub mod widgets;
 
 pub use app::{App, AppEvent};
-pub use runner::{HintMode, PromptEnricher, TuiConfig, run_tui};
+pub use runner::{HintMode, PromptEnricher, ThinkingPrefsSaver, TuiConfig, run_tui};
 pub use theme::{Theme, ThemeConfig};

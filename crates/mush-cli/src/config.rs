@@ -2,8 +2,10 @@
 //!
 //! reads from ~/.config/mush/config.toml (or $MUSH_CONFIG_DIR)
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
+use mush_ai::types::ThinkingLevel;
 use serde::Deserialize;
 
 /// how to inject skill relevance hints
@@ -81,6 +83,45 @@ pub fn load_config() -> Config {
             eprintln!("\x1b[33mwarning: failed to read config: {e}\x1b[0m");
             Config::default()
         }
+    }
+}
+
+// -- per-model thinking level persistence --
+
+fn data_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("MUSH_DATA_DIR") {
+        PathBuf::from(dir)
+    } else if let Some(data) = std::env::var_os("XDG_DATA_HOME") {
+        PathBuf::from(data).join("mush")
+    } else if let Some(home) = std::env::var_os("HOME") {
+        PathBuf::from(home).join(".local/share/mush")
+    } else {
+        PathBuf::from(".mush")
+    }
+}
+
+fn thinking_prefs_path() -> PathBuf {
+    data_dir().join("thinking.json")
+}
+
+pub fn load_thinking_prefs() -> HashMap<String, ThinkingLevel> {
+    let path = thinking_prefs_path();
+    if !path.exists() {
+        return HashMap::new();
+    }
+    match std::fs::read_to_string(&path) {
+        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+        Err(_) => HashMap::new(),
+    }
+}
+
+pub fn save_thinking_prefs(prefs: &HashMap<String, ThinkingLevel>) {
+    let path = thinking_prefs_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    if let Ok(json) = serde_json::to_string_pretty(prefs) {
+        std::fs::write(&path, json).ok();
     }
 }
 
@@ -165,5 +206,20 @@ enabled = false
         assert!(config.mcp.contains_key("git"));
         assert!(config.mcp.contains_key("remote-api"));
         assert!(!config.mcp["remote-api"].enabled);
+    }
+
+    #[test]
+    fn thinking_prefs_round_trip() {
+        let json = r#"{"claude-opus-4-6":"high","claude-sonnet-4-20250514":"medium"}"#;
+        let prefs: HashMap<String, ThinkingLevel> = serde_json::from_str(json).unwrap();
+        assert_eq!(prefs.get("claude-opus-4-6"), Some(&ThinkingLevel::High));
+        assert_eq!(
+            prefs.get("claude-sonnet-4-20250514"),
+            Some(&ThinkingLevel::Medium)
+        );
+        // round-trip
+        let serialised = serde_json::to_string(&prefs).unwrap();
+        let prefs2: HashMap<String, ThinkingLevel> = serde_json::from_str(&serialised).unwrap();
+        assert_eq!(prefs, prefs2);
     }
 }

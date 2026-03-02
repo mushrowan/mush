@@ -43,6 +43,10 @@ pub enum HintMode {
     None,
 }
 
+/// callback to persist per-model thinking level
+pub type ThinkingPrefsSaver =
+    std::sync::Arc<dyn Fn(&std::collections::HashMap<String, ThinkingLevel>) + Send + Sync>;
+
 /// configuration for the TUI runner (owned, 'static-friendly)
 pub struct TuiConfig {
     pub model: Model,
@@ -59,6 +63,10 @@ pub struct TuiConfig {
     pub hint_mode: HintMode,
     /// path to config file for hot-reload
     pub config_path: Option<std::path::PathBuf>,
+    /// per-model thinking level prefs (loaded from disk at startup)
+    pub thinking_prefs: std::collections::HashMap<String, ThinkingLevel>,
+    /// callback to save thinking prefs when they change
+    pub save_thinking_prefs: Option<ThinkingPrefsSaver>,
 }
 
 /// run the interactive TUI
@@ -85,6 +93,9 @@ pub async fn run_tui(
         .options
         .thinking
         .unwrap_or(ThinkingLevel::Off);
+    // pull prefs out so we can mutate them without borrowing tui_config
+    let mut thinking_prefs = std::mem::take(&mut tui_config.thinking_prefs);
+    let thinking_saver = tui_config.save_thinking_prefs.clone();
     let mut pending_prompt: Option<String> = None;
     let mut conversation: Vec<Message> = Vec::new();
     let mut session_tree = SessionTree::new();
@@ -271,6 +282,7 @@ pub async fn run_tui(
                                             }
                                             AppEvent::CycleThinkingLevel => {
                                                 tui_config.options.thinking = Some(app.thinking_level);
+                                                save_thinking_pref(&mut thinking_prefs, &thinking_saver, &app.model_id, app.thinking_level);
                                             }
                                             _ => {}
                                         }
@@ -310,6 +322,7 @@ pub async fn run_tui(
                                     &mut conversation,
                                     &mut session_tree,
                                     &mut tui_config,
+                                    &thinking_prefs,
                                     &name,
                                     &args,
                                 ) {
@@ -319,6 +332,7 @@ pub async fn run_tui(
                             }
                             AppEvent::CycleThinkingLevel => {
                                 tui_config.options.thinking = Some(app.thinking_level);
+                                save_thinking_pref(&mut thinking_prefs, &thinking_saver, &app.model_id, app.thinking_level);
                             }
                             _ => {}
                         }
@@ -441,6 +455,7 @@ fn handle_slash_command(
     conversation: &mut Vec<Message>,
     session_tree: &mut SessionTree,
     tui_config: &mut TuiConfig,
+    thinking_prefs: &std::collections::HashMap<String, ThinkingLevel>,
     name: &str,
     args: &str,
 ) -> Option<String> {
@@ -609,7 +624,15 @@ fn handle_slash_command(
             if let Some(new_model) = models::find_model_by_id(id) {
                 tui_config.model = new_model;
                 app.model_id = id.to_string();
-                app.push_system_message(format!("switched to {id}"));
+                // restore saved thinking level for this model
+                let level = thinking_prefs
+                    .get(id)
+                    .copied()
+                    .unwrap_or(ThinkingLevel::Off);
+                app.thinking_level = level;
+                tui_config.options.thinking = Some(level);
+                let thinking_str = format!("{level:?}").to_lowercase();
+                app.push_system_message(format!("switched to {id} (thinking: {thinking_str})"));
             } else {
                 let available = models::all_models_with_user()
                     .iter()
@@ -797,6 +820,19 @@ fn draw(
         }
     })?;
     Ok(())
+}
+
+/// persist a thinking level change for the current model
+fn save_thinking_pref(
+    prefs: &mut std::collections::HashMap<String, ThinkingLevel>,
+    saver: &Option<ThinkingPrefsSaver>,
+    model_id: &str,
+    level: ThinkingLevel,
+) {
+    prefs.insert(model_id.to_string(), level);
+    if let Some(saver) = saver {
+        saver(prefs);
+    }
 }
 
 /// handle mouse scroll events

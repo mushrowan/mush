@@ -2478,6 +2478,7 @@ dependencies = [
  "mush-tui",
  "pretty_assertions",
  "serde",
+ "serde_json",
  "tokio",
  "toml",
 ]

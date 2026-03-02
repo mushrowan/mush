@@ -24,6 +24,7 @@ mush-tui.workspace = true
 tokio.workspace = true
 clap.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 futures.workspace = true
 color-eyre.workspace = true
 toml.workspace = true
