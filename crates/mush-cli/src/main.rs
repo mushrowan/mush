@@ -1,4 +1,4 @@
-//! mush cli - minimal coding agent
+//! mush cli - fast little robot harness 🍄
 
 mod config;
 
@@ -18,7 +18,7 @@ use mush_tools::builtin_tools;
 use mush_tui::TuiConfig;
 
 #[derive(Parser)]
-#[command(name = "mush", version, about = "minimal coding agent", trailing_var_arg = true)]
+#[command(name = "mush", version, about = "fast little robot harness 🍄", trailing_var_arg = true)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
