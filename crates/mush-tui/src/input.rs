@@ -17,6 +17,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     match (key.modifiers, key.code) {
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => return Some(AppEvent::Quit),
         (_, KeyCode::Esc) if app.is_streaming => return Some(AppEvent::Abort),
+        (_, KeyCode::Esc) if app.scroll_offset > 0 => {
+            app.scroll_to_bottom();
+            return None;
+        }
         _ => {}
     }
 
@@ -28,6 +32,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         }
         KeyCode::PageDown => {
             app.scroll_offset = app.scroll_offset.saturating_sub(10);
+            if app.scroll_offset == 0 {
+                app.has_unread = false;
+            }
             return Some(AppEvent::ScrollDown(10));
         }
         _ => {}

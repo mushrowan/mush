@@ -65,6 +65,13 @@ impl Widget for StatusBar<'_> {
             spans.push(Span::styled(format!(" | {status}"), dim));
         }
 
+        if self.app.has_unread {
+            spans.push(Span::styled(
+                " | ↓ new messages (esc)",
+                Style::default().fg(Color::Blue),
+            ));
+        }
+
         // right-align hint
         let left_len: usize = spans.iter().map(|s| s.content.len()).sum();
         let hint = if self.app.is_streaming {

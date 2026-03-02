@@ -131,6 +131,8 @@ pub struct App {
     pub completions: Vec<String>,
     /// current tab-completion state
     tab_state: Option<TabState>,
+    /// new messages arrived while scrolled up
+    pub has_unread: bool,
 }
 
 /// tracks an in-progress tab completion cycle
@@ -168,6 +170,7 @@ impl App {
             session_picker: None,
             completions: Vec::new(),
             tab_state: None,
+            has_unread: false,
         }
     }
 
@@ -281,6 +284,9 @@ impl App {
         }
         if let Some(ref u) = usage {
             self.total_tokens += u.total_tokens();
+        }
+        if self.scroll_offset > 0 {
+            self.has_unread = true;
         }
     }
 
@@ -426,6 +432,12 @@ impl App {
         });
         self.input = first;
         self.cursor = self.input.len();
+    }
+
+    /// jump to bottom of conversation and clear unread indicator
+    pub fn scroll_to_bottom(&mut self) {
+        self.scroll_offset = 0;
+        self.has_unread = false;
     }
 
     /// return ghost completion suffix for inline hint (dimmed text after cursor).

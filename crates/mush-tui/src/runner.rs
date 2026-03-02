@@ -99,7 +99,8 @@ pub async fn run_tui(
         .unwrap_or(ThinkingLevel::Off);
     // populate tab completions
     let slash_cmds = [
-        "/help", "/clear", "/model", "/sessions", "/branch", "/tree", "/cost", "/quit",
+        "/help", "/clear", "/model", "/sessions", "/branch", "/tree",
+        "/compact", "/export", "/cost", "/quit",
     ];
     app.completions = slash_cmds.iter().map(|s| s.to_string()).collect();
     // add prompt template names as slash commands
@@ -342,7 +343,18 @@ pub async fn run_tui(
                                 pending_prompt = Some(expanded);
                             }
                             AppEvent::SlashCommand { name, args } => {
-                                if let Some(prompt) = handle_slash_command(
+                                if name == "compact" {
+                                    handle_compact(
+                                        &mut app,
+                                        &mut conversation,
+                                        &mut session_tree,
+                                        &tui_config,
+                                        registry,
+                                    )
+                                    .await;
+                                } else if name == "export" {
+                                    handle_export(&mut app, &conversation, &args);
+                                } else if let Some(prompt) = handle_slash_command(
                                     &mut app,
                                     &mut conversation,
                                     &mut session_tree,
@@ -493,6 +505,8 @@ fn handle_slash_command(
             help.push_str("  /sessions      - browse and resume sessions\n");
             help.push_str("  /branch [n]    - branch from nth user message\n");
             help.push_str("  /tree          - show conversation tree\n");
+            help.push_str("  /compact       - summarise old messages to free context\n");
+            help.push_str("  /export [file] - save conversation as markdown\n");
             help.push_str("  /cost          - show session cost\n");
             help.push_str("  /quit          - exit mush\n");
             help.push_str("\ntip: type a prompt template name (e.g. /review file.rs) to expand it");
@@ -847,6 +861,107 @@ fn draw(
     Ok(())
 }
 
+/// run LLM compaction on the conversation
+async fn handle_compact(
+    app: &mut App,
+    conversation: &mut Vec<Message>,
+    session_tree: &mut SessionTree,
+    tui_config: &TuiConfig,
+    registry: &ApiRegistry,
+) {
+    use mush_session::compact;
+
+    let before = conversation.len();
+    if before <= 4 {
+        app.push_system_message("conversation too short to compact".into());
+        return;
+    }
+
+    app.status = Some("compacting...".into());
+    let result = compact::llm_compact(
+        conversation.clone(),
+        registry,
+        &tui_config.model,
+        &tui_config.options,
+        Some(10),
+    )
+    .await;
+
+    *conversation = result.messages;
+    // rebuild tree from compacted conversation
+    *session_tree = SessionTree::new();
+    for msg in conversation.iter() {
+        session_tree.append_message(msg.clone());
+    }
+    rebuild_display(app, conversation);
+    app.status = Some(format!(
+        "compacted: {before} → {} messages ({} summarised)",
+        conversation.len(),
+        result.summarised_count,
+    ));
+}
+
+/// export conversation to a markdown file
+fn handle_export(app: &mut App, conversation: &[Message], args: &str) {
+    let path = if args.trim().is_empty() {
+        "conversation.md".to_string()
+    } else {
+        args.trim().to_string()
+    };
+
+    let mut md = String::new();
+    for msg in conversation {
+        match msg {
+            Message::User(u) => {
+                let text = match &u.content {
+                    UserContent::Text(t) => t.as_str(),
+                    _ => "(parts)",
+                };
+                md.push_str(&format!("## you\n\n{text}\n\n"));
+            }
+            Message::Assistant(a) => {
+                let model = &a.model.0;
+                let text: String = a
+                    .content
+                    .iter()
+                    .filter_map(|p| match p {
+                        AssistantContentPart::Text(t) => Some(t.text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                md.push_str(&format!("## {model}\n\n{text}\n\n"));
+            }
+            Message::ToolResult(tr) => {
+                let output: String = tr
+                    .content
+                    .iter()
+                    .filter_map(|p| match p {
+                        ToolResultContentPart::Text(t) => Some(t.text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                let preview = if output.len() > 200 {
+                    format!("{}...", &output[..197])
+                } else {
+                    output
+                };
+                md.push_str(&format!(
+                    "**{}** `{}`\n\n```\n{preview}\n```\n\n",
+                    if tr.is_error { "✗" } else { "✓" },
+                    tr.tool_name,
+                ));
+            }
+        }
+    }
+
+    match std::fs::write(&path, &md) {
+        Ok(()) => app.push_system_message(format!("exported to {path} ({} bytes)", md.len())),
+        Err(e) => app.push_system_message(format!("export failed: {e}")),
+    }
+}
+
 /// persist a thinking level change for the current model
 fn save_thinking_pref(
     prefs: &mut std::collections::HashMap<String, ThinkingLevel>,
@@ -869,6 +984,9 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
         }
         MouseEventKind::ScrollDown => {
             app.scroll_offset = app.scroll_offset.saturating_sub(SCROLL_LINES);
+            if app.scroll_offset == 0 {
+                app.has_unread = false;
+            }
         }
         _ => {}
     }
