@@ -324,6 +324,8 @@ pub struct StreamOptions {
     pub thinking: Option<ThinkingLevel>,
     /// stable session identifier for provider-side prompt caching
     pub session_id: Option<String>,
+    /// optional account id for providers that need account-scoped headers
+    pub account_id: Option<String>,
     /// prompt cache retention preference for providers that support it
     pub cache_retention: Option<CacheRetention>,
 }
