@@ -12,3 +12,6 @@ opencode/
 # direnv
 .direnv/
 .fastembed_cache/
+
+# local reports
+/report.md

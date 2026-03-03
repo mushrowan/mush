@@ -194,6 +194,12 @@ pub async fn run_tui(
                         cost: None,
                         model_id: Some(a.model.0.clone()),
                     });
+                    app.total_tokens += a.usage.total_tokens();
+                    app.total_input_tokens += a.usage.input_tokens;
+                    app.total_output_tokens += a.usage.output_tokens;
+                    app.total_cache_read_tokens += a.usage.cache_read_tokens;
+                    app.total_cache_write_tokens += a.usage.cache_write_tokens;
+                    app.context_tokens = a.usage.total_input_tokens();
                 }
                 _ => {} // tool results displayed inline with their tool calls
             }
@@ -237,8 +243,19 @@ pub async fn run_tui(
                 ));
             }
 
-            if let Some(preview) = injection_preview {
-                app.push_system_message(preview);
+            if app.show_prompt_injection {
+                if let Some(preview) = injection_preview {
+                    app.push_system_message(preview);
+                } else {
+                    let note = match tui_config.hint_mode {
+                        HintMode::None => "no injection (hint mode is none)",
+                        _ if tui_config.prompt_enricher.is_none() => {
+                            "no injection (enricher unavailable)"
+                        }
+                        _ => "no injection hint matched",
+                    };
+                    app.push_system_message(note.into());
+                }
             }
 
             let user_message = Message::User(UserMessage {
@@ -888,15 +905,31 @@ fn handle_slash_command(
                 String::new()
             };
             app.push_system_message(format!(
-                "{}cumulative: {}tok, ${:.4}",
-                ctx, app.total_tokens, app.total_cost
+                "{}cumulative: ↑{} ↓{} R{} W{} | {}tok, ${:.4}",
+                ctx,
+                app.total_input_tokens,
+                app.total_output_tokens,
+                app.total_cache_read_tokens,
+                app.total_cache_write_tokens,
+                app.total_tokens,
+                app.total_cost
             ));
             None
         }
         "injection" => {
             app.show_prompt_injection = !app.show_prompt_injection;
+            let mode = match tui_config.hint_mode {
+                HintMode::Message => "message",
+                HintMode::Transform => "transform",
+                HintMode::None => "none",
+            };
+            let enricher = if tui_config.prompt_enricher.is_some() {
+                "ready"
+            } else {
+                "unavailable"
+            };
             app.push_system_message(format!(
-                "prompt injection preview: {}",
+                "prompt injection preview: {} (mode: {mode}, enricher: {enricher})",
                 if app.show_prompt_injection {
                     "on"
                 } else {

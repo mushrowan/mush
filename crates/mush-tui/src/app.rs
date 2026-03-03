@@ -127,6 +127,14 @@ pub struct App {
     pub total_cost: f64,
     /// total tokens used (cumulative across all API calls)
     pub total_tokens: u64,
+    /// cumulative uncached input tokens
+    pub total_input_tokens: u64,
+    /// cumulative output tokens
+    pub total_output_tokens: u64,
+    /// cumulative cache-read tokens
+    pub total_cache_read_tokens: u64,
+    /// cumulative cache-write tokens
+    pub total_cache_write_tokens: u64,
     /// last call's input tokens (actual context size)
     pub context_tokens: u64,
     /// model's context window size
@@ -210,6 +218,10 @@ impl App {
             model_id,
             total_cost: 0.0,
             total_tokens: 0,
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            total_cache_read_tokens: 0,
+            total_cache_write_tokens: 0,
             context_tokens: 0,
             context_window,
             should_quit: false,
@@ -360,6 +372,10 @@ impl App {
         }
         if let Some(ref u) = usage {
             self.total_tokens += u.total_tokens();
+            self.total_input_tokens += u.input_tokens;
+            self.total_output_tokens += u.output_tokens;
+            self.total_cache_read_tokens += u.cache_read_tokens;
+            self.total_cache_write_tokens += u.cache_write_tokens;
             self.context_tokens = u.total_input_tokens();
         }
         if self.scroll_offset > 0 {
@@ -571,6 +587,10 @@ impl App {
         self.scroll_offset = 0;
         self.total_cost = 0.0;
         self.total_tokens = 0;
+        self.total_input_tokens = 0;
+        self.total_output_tokens = 0;
+        self.total_cache_read_tokens = 0;
+        self.total_cache_write_tokens = 0;
         self.context_tokens = 0;
     }
 
@@ -883,6 +903,11 @@ mod tests {
 
         assert!((app.total_cost - 0.015).abs() < f64::EPSILON);
         assert_eq!(app.total_tokens, 450);
+        assert_eq!(app.total_input_tokens, 300);
+        assert_eq!(app.total_output_tokens, 150);
+        assert_eq!(app.total_cache_read_tokens, 0);
+        assert_eq!(app.total_cache_write_tokens, 0);
+        assert_eq!(app.context_tokens, 200);
     }
 
     #[test]
