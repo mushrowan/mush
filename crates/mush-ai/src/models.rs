@@ -171,11 +171,93 @@ pub fn openrouter_models() -> Vec<Model> {
     ]
 }
 
+/// all built-in openai api-key models (responses API)
+pub fn openai_models() -> Vec<Model> {
+    vec![
+        Model {
+            id: "gpt-5.2".into(),
+            name: "GPT-5.2".into(),
+            api: Api::OpenaiResponses,
+            provider: Provider::Custom("openai".into()),
+            base_url: "https://api.openai.com/v1".into(),
+            reasoning: true,
+            input: vec![InputModality::Text, InputModality::Image],
+            cost: ModelCost {
+                input: 1.25,
+                output: 10.0,
+                cache_read: 0.125,
+                cache_write: 1.5625,
+            },
+            context_window: 400_000,
+            max_output_tokens: 128_000,
+        },
+        Model {
+            id: "gpt-5.2-mini".into(),
+            name: "GPT-5.2 Mini".into(),
+            api: Api::OpenaiResponses,
+            provider: Provider::Custom("openai".into()),
+            base_url: "https://api.openai.com/v1".into(),
+            reasoning: true,
+            input: vec![InputModality::Text, InputModality::Image],
+            cost: ModelCost {
+                input: 0.25,
+                output: 2.0,
+                cache_read: 0.025,
+                cache_write: 0.3125,
+            },
+            context_window: 400_000,
+            max_output_tokens: 64_000,
+        },
+    ]
+}
+
+/// all built-in openai codex subscription models (chatgpt oauth)
+pub fn openai_codex_models() -> Vec<Model> {
+    vec![
+        Model {
+            id: "gpt-5.3-codex".into(),
+            name: "GPT-5.3 Codex (ChatGPT subscription)".into(),
+            api: Api::OpenaiResponses,
+            provider: Provider::Custom("openai-codex".into()),
+            base_url: "https://chatgpt.com/backend-api".into(),
+            reasoning: true,
+            input: vec![InputModality::Text, InputModality::Image],
+            cost: ModelCost {
+                input: 0.0,
+                output: 0.0,
+                cache_read: 0.0,
+                cache_write: 0.0,
+            },
+            context_window: 400_000,
+            max_output_tokens: 128_000,
+        },
+        Model {
+            id: "gpt-5.2-codex".into(),
+            name: "GPT-5.2 Codex (ChatGPT subscription)".into(),
+            api: Api::OpenaiResponses,
+            provider: Provider::Custom("openai-codex".into()),
+            base_url: "https://chatgpt.com/backend-api".into(),
+            reasoning: true,
+            input: vec![InputModality::Text, InputModality::Image],
+            cost: ModelCost {
+                input: 0.0,
+                output: 0.0,
+                cache_read: 0.0,
+                cache_write: 0.0,
+            },
+            context_window: 400_000,
+            max_output_tokens: 128_000,
+        },
+    ]
+}
+
 /// all built-in models across all providers
 pub fn all_models() -> Vec<Model> {
     let mut models = Vec::new();
     models.extend(anthropic_models());
     models.extend(openrouter_models());
+    models.extend(openai_models());
+    models.extend(openai_codex_models());
     models
 }
 
@@ -270,6 +352,30 @@ mod tests {
         assert!(!models.is_empty());
         assert!(models.iter().all(|m| m.provider == Provider::OpenRouter));
         assert!(models.iter().all(|m| m.api == Api::OpenaiCompletions));
+    }
+
+    #[test]
+    fn openai_models_exist() {
+        let models = openai_models();
+        assert!(!models.is_empty());
+        assert!(models.iter().all(|m| m.api == Api::OpenaiResponses));
+        assert!(
+            models
+                .iter()
+                .all(|m| m.provider == Provider::Custom("openai".into()))
+        );
+    }
+
+    #[test]
+    fn openai_codex_models_exist() {
+        let models = openai_codex_models();
+        assert!(!models.is_empty());
+        assert!(models.iter().all(|m| m.api == Api::OpenaiResponses));
+        assert!(
+            models
+                .iter()
+                .all(|m| m.provider == Provider::Custom("openai-codex".into()))
+        );
     }
 
     #[test]

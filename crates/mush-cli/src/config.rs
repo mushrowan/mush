@@ -30,6 +30,7 @@ pub struct Config {
     pub max_tokens: Option<u64>,
     pub max_turns: Option<usize>,
     pub cache_retention: Option<mush_ai::types::CacheRetention>,
+    pub debug_cache: Option<bool>,
     pub system_prompt: Option<String>,
     pub hint_mode: HintMode,
     /// prompt for confirmation before executing tools (off by default)
@@ -47,6 +48,7 @@ pub struct Config {
 pub struct ApiKeys {
     pub anthropic: Option<String>,
     pub openrouter: Option<String>,
+    pub openai: Option<String>,
 }
 
 /// find the config directory
@@ -140,10 +142,12 @@ thinking = true
 max_tokens = 8192
 system_prompt = "you are helpful"
 cache_retention = "long"
+debug_cache = true
 
 [api_keys]
 anthropic = "sk-ant-test"
 openrouter = "sk-or-test"
+openai = "sk-openai-test"
 "#;
 
         let config: Config = toml::from_str(toml).unwrap();
@@ -154,7 +158,9 @@ openrouter = "sk-or-test"
             config.cache_retention,
             Some(mush_ai::types::CacheRetention::Long)
         );
+        assert_eq!(config.debug_cache, Some(true));
         assert_eq!(config.api_keys.anthropic.as_deref(), Some("sk-ant-test"));
+        assert_eq!(config.api_keys.openai.as_deref(), Some("sk-openai-test"));
     }
 
     #[test]

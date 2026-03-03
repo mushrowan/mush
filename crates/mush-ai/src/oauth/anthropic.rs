@@ -107,6 +107,7 @@ async fn exchange_code_impl(
         access_token: data.access_token,
         refresh_token: data.refresh_token,
         expires_at: timestamp_ms() + data.expires_in * 1000 - EXPIRY_BUFFER_MS,
+        account_id: None,
     })
 }
 
@@ -132,6 +133,7 @@ async fn refresh_token_impl(refresh_token: &str) -> Result<OAuthCredentials, OAu
         access_token: data.access_token,
         refresh_token: data.refresh_token,
         expires_at: timestamp_ms() + data.expires_in * 1000 - EXPIRY_BUFFER_MS,
+        account_id: None,
     })
 }
 

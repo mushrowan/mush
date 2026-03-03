@@ -37,8 +37,8 @@ struct Cli {
     resume: Option<String>,
 
     /// model id to use
-    #[arg(short, long, default_value = "claude-opus-4-6")]
-    model: String,
+    #[arg(short, long)]
+    model: Option<String>,
 
     /// enable extended thinking
     #[arg(long)]
@@ -51,6 +51,10 @@ struct Cli {
     /// max tool-calling turns before stopping
     #[arg(long)]
     max_turns: Option<usize>,
+
+    /// print cache-read/write debug lines when available
+    #[arg(long)]
+    debug_cache: bool,
 
     /// system prompt override
     #[arg(long)]
@@ -168,13 +172,10 @@ fn expand_template(prompt: &str) -> String {
 
 async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
     let cfg = config::load_config();
+    let debug_cache = cli.debug_cache || cfg.debug_cache.unwrap_or(false);
 
     // CLI args override config file
-    let model_id = if cli.model != "claude-opus-4-6" {
-        cli.model.clone()
-    } else {
-        cfg.model.unwrap_or_else(|| cli.model.clone())
-    };
+    let model_id = cli.model.clone().unwrap_or_else(|| default_model_id(&cfg));
 
     let model = models::find_model_by_id(&model_id).ok_or_else(|| {
         eyre!(
@@ -203,7 +204,7 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
 
     let system_prompt = cli
         .system
-        .or(cfg.system_prompt)
+        .or(cfg.system_prompt.clone())
         .unwrap_or_else(|| build_system_prompt(&cwd));
 
     // in print mode, hint is always prepended to the message (one-shot, no transform loop)
@@ -238,24 +239,16 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
     };
 
     // api key resolution: env > config > oauth
-    if options.api_key.is_none() {
-        if let Some(ref key) = cfg.api_keys.anthropic
-            && std::env::var("ANTHROPIC_API_KEY").is_err()
-        {
-            options.api_key = Some(key.clone());
-        }
-        if let Some(ref key) = cfg.api_keys.openrouter
-            && std::env::var("OPENROUTER_API_KEY").is_err()
-        {
-            options.api_key = Some(key.clone());
-        }
+    if options.api_key.is_none()
+        && !provider_env_key_is_set(&model.provider)
+        && let Some(key) = config_api_key_for_provider(&cfg, &model.provider)
+    {
+        options.api_key = Some(key);
     }
 
-    // try oauth if no key found and using anthropic
     if options.api_key.is_none()
-        && std::env::var("ANTHROPIC_API_KEY").is_err()
-        && model.provider == Provider::Anthropic
-        && let Ok(Some(token)) = mush_ai::oauth::get_anthropic_oauth_token().await
+        && let Some(provider_id) = oauth_provider_id_for_model(&model)
+        && let Ok(Some(token)) = mush_ai::oauth::get_oauth_token(provider_id).await
     {
         options.api_key = Some(token);
     }
@@ -270,6 +263,7 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
     } else {
         Session::new(model.id.as_str(), &cwd_str)
     };
+    options.session_id = Some(session.meta.id.0.clone());
 
     // add the user message
     let user_msg = Message::User(UserMessage {
@@ -369,6 +363,12 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
                     message.usage.cache_read_tokens,
                     cost.total(),
                 );
+                if debug_cache && message.usage.cache_read_tokens > 0 {
+                    eprintln!(
+                        "\x1b[36mcache read detected: {} tokens\x1b[0m",
+                        message.usage.cache_read_tokens
+                    );
+                }
             }
             AgentEvent::ContextTransformed {
                 before_count,
@@ -409,12 +409,9 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
 
 async fn tui_mode(cli: Cli) -> Result<()> {
     let cfg = config::load_config();
+    let debug_cache = cli.debug_cache || cfg.debug_cache.unwrap_or(false);
 
-    let model_id = if cli.model != "claude-opus-4-6" {
-        cli.model.clone()
-    } else {
-        cfg.model.unwrap_or_else(|| cli.model.clone())
-    };
+    let model_id = cli.model.clone().unwrap_or_else(|| default_model_id(&cfg));
 
     let model = models::find_model_by_id(&model_id).ok_or_else(|| {
         eyre!(
@@ -451,7 +448,7 @@ async fn tui_mode(cli: Cli) -> Result<()> {
 
     let system_prompt = cli
         .system
-        .or(cfg.system_prompt)
+        .or(cfg.system_prompt.clone())
         .unwrap_or_else(|| build_system_prompt(&cwd));
 
     // thinking level priority: --thinking flag > saved per-model pref > config default
@@ -473,22 +470,16 @@ async fn tui_mode(cli: Cli) -> Result<()> {
         ..Default::default()
     };
 
-    if let Some(ref key) = cfg.api_keys.anthropic
-        && std::env::var("ANTHROPIC_API_KEY").is_err()
+    if options.api_key.is_none()
+        && !provider_env_key_is_set(&model.provider)
+        && let Some(key) = config_api_key_for_provider(&cfg, &model.provider)
     {
-        options.api_key = Some(key.clone());
-    }
-    if let Some(ref key) = cfg.api_keys.openrouter
-        && std::env::var("OPENROUTER_API_KEY").is_err()
-    {
-        options.api_key = Some(key.clone());
+        options.api_key = Some(key);
     }
 
-    // try oauth if no key found and using anthropic
     if options.api_key.is_none()
-        && std::env::var("ANTHROPIC_API_KEY").is_err()
-        && model.provider == Provider::Anthropic
-        && let Ok(Some(token)) = mush_ai::oauth::get_anthropic_oauth_token().await
+        && let Some(provider_id) = oauth_provider_id_for_model(&model)
+        && let Ok(Some(token)) = mush_ai::oauth::get_oauth_token(provider_id).await
     {
         options.api_key = Some(token);
     }
@@ -520,6 +511,7 @@ async fn tui_mode(cli: Cli) -> Result<()> {
     };
     let initial_messages = session.messages.clone();
     let session_id = session.meta.id.clone();
+    options.session_id = Some(session_id.0.clone());
 
     let theme = mush_tui::Theme::from_config(&cfg.theme);
     let prompt_enricher = build_prompt_enricher(&cwd);
@@ -569,6 +561,7 @@ async fn tui_mode(cli: Cli) -> Result<()> {
             }))
         },
         confirm_tools: cfg.confirm_tools.unwrap_or(false),
+        debug_cache,
         tool_output_live: Some(tool_output_live),
     };
 
@@ -609,8 +602,9 @@ fn format_error(error: &str) -> String {
     if error.contains("missing api key") {
         format!(
             "{error}\n\n\
-             hint: set ANTHROPIC_API_KEY or OPENROUTER_API_KEY, or run:\n  \
+             hint: set ANTHROPIC_API_KEY, OPENROUTER_API_KEY, or OPENAI_API_KEY, or run:\n  \
              mush login anthropic\n  \
+             mush login openai-codex\n  \
              mush config  (to add api_keys in config.toml)"
         )
     } else if error.contains("no provider registered") {
@@ -704,6 +698,52 @@ fn build_prompt_enricher(cwd: &std::path::Path) -> Option<mush_tui::PromptEnrich
 #[cfg(not(feature = "embeddings"))]
 fn build_prompt_enricher(_cwd: &std::path::Path) -> Option<mush_tui::PromptEnricher> {
     None
+}
+
+fn config_api_key_for_provider(cfg: &config::Config, provider: &Provider) -> Option<String> {
+    match provider {
+        Provider::Anthropic => cfg.api_keys.anthropic.clone(),
+        Provider::OpenRouter => cfg.api_keys.openrouter.clone(),
+        Provider::Custom(name) if name == "openai" => cfg.api_keys.openai.clone(),
+        _ => None,
+    }
+}
+
+fn provider_env_key_is_set(provider: &Provider) -> bool {
+    mush_ai::env::env_api_key(provider).is_some()
+}
+
+fn oauth_provider_id_for_model(model: &Model) -> Option<&'static str> {
+    match &model.provider {
+        Provider::Anthropic => Some("anthropic"),
+        Provider::Custom(name) if name == "openai-codex" => Some("openai-codex"),
+        _ => None,
+    }
+}
+
+fn default_model_id(cfg: &config::Config) -> String {
+    if let Some(model) = &cfg.model {
+        return model.clone();
+    }
+
+    let oauth_store = mush_ai::oauth::load_credentials().unwrap_or_default();
+
+    let has_anthropic_auth = cfg.api_keys.anthropic.is_some()
+        || std::env::var("ANTHROPIC_API_KEY").is_ok()
+        || std::env::var("ANTHROPIC_OAUTH_TOKEN").is_ok()
+        || oauth_store.providers.contains_key("anthropic");
+
+    let has_openai_codex_auth = oauth_store.providers.contains_key("openai-codex");
+
+    if has_anthropic_auth {
+        return "claude-opus-4-6".into();
+    }
+
+    if has_openai_codex_auth {
+        return "gpt-5.3-codex".into();
+    }
+
+    "claude-opus-4-6".into()
 }
 
 fn list_models_short() -> String {
@@ -811,16 +851,18 @@ fn config_cmd() -> Result<()> {
         std::fs::write(
             &path,
             "# mush configuration\n\
-             # model = \"claude-opus-4-6\"\n\
+             # model = \"gpt-5.3-codex\"  # optional, auto-default depends on auth\n\
              # thinking = false\n\
              # max_tokens = 16384\n\
              # max_turns = 30\n\
              # cache_retention = \"short\"  # none | short | long\n\
+             # debug_cache = false\n\
              # system_prompt = \"\"\n\
              \n\
              # [api_keys]\n\
              # anthropic = \"sk-...\"\n\
-             # openrouter = \"sk-or-...\"\n",
+             # openrouter = \"sk-or-...\"\n\
+             # openai = \"sk-proj-...\"\n",
         )?;
     }
 
@@ -848,7 +890,7 @@ fn status_cmd() -> Result<()> {
     }
 
     // model
-    let model_id = cfg.model.as_deref().unwrap_or("claude-opus-4-6");
+    let model_id = default_model_id(&cfg);
     println!("  model:  {model_id}");
 
     // thinking
@@ -867,6 +909,7 @@ fn status_cmd() -> Result<()> {
         CacheRetention::Long => "long",
     };
     println!("  cache retention: {cache_retention}");
+    println!("  debug cache: {}", cfg.debug_cache.unwrap_or(false));
 
     // auth status
     println!("\n\x1b[1mauth\x1b[0m\n");
@@ -874,12 +917,15 @@ fn status_cmd() -> Result<()> {
     // env keys
     let has_anthropic_env = std::env::var("ANTHROPIC_API_KEY").is_ok();
     let has_openrouter_env = std::env::var("OPENROUTER_API_KEY").is_ok();
+    let has_openai_env = std::env::var("OPENAI_API_KEY").is_ok();
     let has_anthropic_cfg = cfg.api_keys.anthropic.is_some();
     let has_openrouter_cfg = cfg.api_keys.openrouter.is_some();
+    let has_openai_cfg = cfg.api_keys.openai.is_some();
 
     // oauth
     let oauth_store = mush_ai::oauth::load_credentials().unwrap_or_default();
     let has_anthropic_oauth = oauth_store.providers.contains_key("anthropic");
+    let has_openai_codex_oauth = oauth_store.providers.contains_key("openai-codex");
 
     print!("  anthropic:   ");
     if has_anthropic_env {
@@ -899,6 +945,22 @@ fn status_cmd() -> Result<()> {
         println!("\x1b[32m✓ config file\x1b[0m");
     } else {
         println!("\x1b[2m- not configured\x1b[0m");
+    }
+
+    print!("  openai:      ");
+    if has_openai_env {
+        println!("\x1b[32m✓ env var\x1b[0m");
+    } else if has_openai_cfg {
+        println!("\x1b[32m✓ config file\x1b[0m");
+    } else {
+        println!("\x1b[2m- not configured\x1b[0m");
+    }
+
+    print!("  openai-codex:");
+    if has_openai_codex_oauth {
+        println!("\x1b[32m ✓ oauth\x1b[0m");
+    } else {
+        println!("\x1b[2m - not configured\x1b[0m");
     }
 
     // sessions

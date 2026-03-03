@@ -74,6 +74,8 @@ pub struct TuiConfig {
     pub save_session: Option<SessionSaver>,
     /// prompt for confirmation before executing tools (off by default)
     pub confirm_tools: bool,
+    /// emit system messages when cache reads are observed
+    pub debug_cache: bool,
     /// shared live tool output (updated by bash sink, read by TUI)
     pub tool_output_live: Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
 }
@@ -337,7 +339,16 @@ pub async fn run_tui(
                     agent_event = stream.next() => {
                         match agent_event {
                             Some(event) => {
-                                handle_agent_event(&mut app, &mut conversation, &mut session_tree, &event, &tui_config.model, &image_picker, &mut image_protos);
+                                handle_agent_event(
+                                    &mut app,
+                                    &mut conversation,
+                                    &mut session_tree,
+                                    &event,
+                                    &tui_config.model,
+                                    tui_config.debug_cache,
+                                    &image_picker,
+                                    &mut image_protos,
+                                );
                                 if matches!(event, AgentEvent::AgentEnd) {
                                     break;
                                 }
@@ -545,6 +556,7 @@ fn handle_agent_event(
     session_tree: &mut SessionTree,
     event: &AgentEvent,
     model: &Model,
+    debug_cache: bool,
     image_picker: &Option<ratatui_image::picker::Picker>,
     image_protos: &mut std::collections::HashMap<
         (usize, usize),
@@ -561,6 +573,12 @@ fn handle_agent_event(
         AgentEvent::MessageEnd { message } => {
             let cost = models::calculate_cost(model, &message.usage);
             app.finish_streaming(Some(message.usage), Some(cost.total()));
+            if debug_cache && message.usage.cache_read_tokens > 0 {
+                app.push_system_message(format!(
+                    "cache read detected: {} tokens",
+                    message.usage.cache_read_tokens
+                ));
+            }
             let msg = Message::Assistant(message.clone());
             session_tree.append_message(msg.clone());
             conversation.push(msg);
