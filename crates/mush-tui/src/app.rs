@@ -3,8 +3,11 @@
 //! the app holds all TUI state: messages being displayed, current input,
 //! streaming status, and scroll position.
 
+use std::cell::RefCell;
+
 use mush_ai::types::*;
 use mush_session::SessionMeta;
+use ratatui::layout::Rect;
 use throbber_widgets_tui::ThrobberState;
 
 /// events that flow between the TUI and the agent
@@ -147,6 +150,16 @@ pub struct App {
     pub selected_message: Option<usize>,
     /// search state
     pub search: SearchState,
+    /// image render positions (populated by MessageList during render)
+    pub image_render_areas: RefCell<Vec<ImageRenderArea>>,
+}
+
+/// position computed during render for inline image overlay
+#[derive(Debug, Clone)]
+pub struct ImageRenderArea {
+    pub msg_idx: usize,
+    pub tc_idx: usize,
+    pub area: Rect,
 }
 
 /// state for the conversation search popup
@@ -198,6 +211,7 @@ impl App {
             confirm_prompt: None,
             selected_message: None,
             search: SearchState::default(),
+            image_render_areas: RefCell::new(Vec::new()),
         }
     }
 

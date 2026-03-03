@@ -87,7 +87,7 @@ pub async fn run_tui(
     registry: &ApiRegistry,
 ) -> io::Result<()> {
     // detect image protocol before entering alternate screen to avoid probe artifacts
-    let _image_picker = ratatui_image::picker::Picker::from_query_stdio().ok();
+    let image_picker = ratatui_image::picker::Picker::from_query_stdio().ok();
 
     // set up terminal
     enable_raw_mode()?;
@@ -300,7 +300,7 @@ pub async fn run_tui(
                     agent_event = stream.next() => {
                         match agent_event {
                             Some(event) => {
-                                handle_agent_event(&mut app, &mut conversation, &mut session_tree, &event, &tui_config.model);
+                                handle_agent_event(&mut app, &mut conversation, &mut session_tree, &event, &tui_config.model, &image_picker, &mut image_protos);
                                 if matches!(event, AgentEvent::AgentEnd) {
                                     break;
                                 }
@@ -491,6 +491,11 @@ fn handle_agent_event(
     session_tree: &mut SessionTree,
     event: &AgentEvent,
     model: &Model,
+    image_picker: &Option<ratatui_image::picker::Picker>,
+    image_protos: &mut std::collections::HashMap<
+        (usize, usize),
+        ratatui_image::protocol::StatefulProtocol,
+    >,
 ) {
     match event {
         AgentEvent::StreamEvent { event } => match event {
@@ -531,6 +536,18 @@ fn handle_agent_event(
                 }
                 _ => None,
             });
+            // create image protocol for inline rendering
+            if let Some(ref data) = image_data
+                && let Some(picker) = image_picker
+                && let Ok(dyn_image) = image::load_from_memory(data)
+            {
+                let msg_idx = app.messages.len().saturating_sub(1);
+                let tc_idx = app.messages.last()
+                    .map(|m| m.tool_calls.len())
+                    .unwrap_or(0);
+                let proto = picker.new_resize_protocol(dyn_image);
+                image_protos.insert((msg_idx, tc_idx), proto);
+            }
             app.end_tool(tool_name.as_str(), result.is_error, output_text, image_data);
             session_tree.append_message(Message::ToolResult(ToolResultMessage {
                 tool_call_id: tool_call_id.clone(),
@@ -953,15 +970,14 @@ fn draw(
         if !app.is_streaming && app.mode == app::AppMode::Normal {
             frame.set_cursor_position((cx, cy));
         }
-        // render inline images (after main UI so they overlay correctly)
-        // images are rendered in the tool output area
-        for (key, proto) in image_protos.iter_mut() {
-            let (msg_idx, _tc_idx) = *key;
-            // find approximate position for this image
-            // for now, render at a fixed area near bottom of message list
-            // (a proper implementation would track exact positions from layout)
-            let _ = (msg_idx, proto);
-            // TODO: track image positions from message_list layout and render here
+        // render inline images at positions computed by MessageList
+        let render_areas = app.image_render_areas.borrow().clone();
+        for img_area in &render_areas {
+            if let Some(proto) = image_protos.get_mut(&(img_area.msg_idx, img_area.tc_idx)) {
+                let widget = ratatui_image::StatefulImage::new()
+                    .resize(ratatui_image::Resize::Fit(None));
+                frame.render_stateful_widget(widget, img_area.area, proto);
+            }
         }
         // session picker overlay
         if let Some(ref picker) = app.session_picker {

@@ -8,7 +8,7 @@ use ratatui::widgets::{Paragraph, Widget, Wrap};
 
 use throbber_widgets_tui::{BRAILLE_SIX, Throbber, WhichUse};
 
-use crate::app::{App, DisplayMessage, MessageRole, ToolCallStatus};
+use crate::app::{App, DisplayMessage, ImageRenderArea, MessageRole, ToolCallStatus};
 
 /// renders the full message list including any active stream
 pub struct MessageList<'a> {
@@ -24,11 +24,12 @@ impl<'a> MessageList<'a> {
 impl Widget for MessageList<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let mut lines: Vec<Line<'_>> = Vec::new();
+        let mut image_placeholders: Vec<ImagePlaceholder> = Vec::new();
 
         let in_scroll_mode = self.app.mode == crate::app::AppMode::Scroll;
         for (i, msg) in self.app.messages.iter().enumerate() {
             let selected = in_scroll_mode && self.app.selected_message == Some(i);
-            render_message(msg, &mut lines, &self.app.tool_output_live, selected);
+            render_message(msg, i, &mut lines, &self.app.tool_output_live, selected, &mut image_placeholders);
             lines.push(Line::raw(""));
         }
 
@@ -116,6 +117,41 @@ impl Widget for MessageList<'_> {
         let max_scroll = total_lines.saturating_sub(visible);
         let scroll = max_scroll.saturating_sub(self.app.scroll_offset);
 
+        // compute image render areas based on scroll position
+        let mut render_areas = Vec::new();
+        if !image_placeholders.is_empty() && area.width > 0 {
+            let w = area.width as usize;
+            for ph in &image_placeholders {
+                // count wrapped lines before this placeholder
+                let y_before: u16 = text.lines[..ph.line_idx]
+                    .iter()
+                    .map(|line| {
+                        let lw = line.width();
+                        if lw <= w { 1u16 } else { lw.div_ceil(w) as u16 }
+                    })
+                    .sum();
+                // skip the label line, image starts on the line after
+                let img_y = y_before.saturating_add(1).saturating_sub(scroll);
+                let img_height = IMAGE_HEIGHT.saturating_sub(1); // minus the label
+                // check if visible
+                if img_y < visible && img_y + img_height > 0 {
+                    let visible_y = area.y + img_y;
+                    let visible_h = img_height.min(visible.saturating_sub(img_y));
+                    // indent 4 chars, leave some right margin
+                    let img_x = area.x + 4;
+                    let img_w = area.width.saturating_sub(8); // 4 left + 4 right margin
+                    if img_w > 0 && visible_h > 0 {
+                        render_areas.push(ImageRenderArea {
+                            msg_idx: ph.msg_idx,
+                            tc_idx: ph.tc_idx,
+                            area: Rect::new(img_x, visible_y, img_w, visible_h),
+                        });
+                    }
+                }
+            }
+        }
+        *self.app.image_render_areas.borrow_mut() = render_areas;
+
         Paragraph::new(text)
             .wrap(Wrap { trim: false })
             .scroll((scroll, 0))
@@ -142,11 +178,24 @@ fn truncate_model_id(id: &str) -> &str {
     if id.len() > 20 { &id[..20] } else { id }
 }
 
+/// height reserved for inline image rendering (in lines)
+const IMAGE_HEIGHT: u16 = 12;
+
+/// tracks where an image placeholder starts in the lines vec
+struct ImagePlaceholder {
+    msg_idx: usize,
+    tc_idx: usize,
+    /// line index in the lines vec where the placeholder starts
+    line_idx: usize,
+}
+
 fn render_message(
     msg: &DisplayMessage,
+    msg_idx: usize,
     lines: &mut Vec<Line<'_>>,
     live_tool_output: &Option<String>,
     selected: bool,
+    image_placeholders: &mut Vec<ImagePlaceholder>,
 ) {
     let (label, label_style) = match msg.role {
         MessageRole::User => (
@@ -237,7 +286,7 @@ fn render_message(
     }
 
     // tool calls
-    for tc in &msg.tool_calls {
+    for (tc_idx, tc) in msg.tool_calls.iter().enumerate() {
         let (icon, colour) = match tc.status {
             ToolCallStatus::Running => ("▶", Color::Cyan),
             ToolCallStatus::Done => ("✓", Color::Green),
@@ -257,18 +306,27 @@ fn render_message(
                     Style::default().fg(Color::DarkGray),
                 ));
             }
-        // image indicator
+        // image: reserve space for inline rendering
         if tc.image_data.is_some() {
+            image_placeholders.push(ImagePlaceholder {
+                msg_idx,
+                tc_idx,
+                line_idx: lines.len(),
+            });
+            // first line: label
             lines.push(Line::from(vec![
-                Span::styled("    ", Style::default()),
-                Span::styled("📷 ", Style::default()),
+                Span::styled("    📷 ", Style::default()),
                 Span::styled(
-                    "[image attached]",
+                    "image",
                     Style::default()
                         .fg(Color::Magenta)
                         .add_modifier(Modifier::ITALIC),
                 ),
             ]));
+            // remaining lines: blank space for the image overlay
+            for _ in 1..IMAGE_HEIGHT {
+                lines.push(Line::raw(""));
+            }
         }
         // tool output preview (dim, indented)
         if let Some(ref output) = tc.output_preview {
@@ -438,6 +496,40 @@ mod tests {
         let content = buffer_to_string(&buf);
         // should show the thinking emoji indicator
         assert!(content.contains("💭"));
+    }
+
+    #[test]
+    fn image_reserves_space_and_produces_render_area() {
+        let mut app = App::new("test".into());
+        app.messages.push(DisplayMessage {
+            role: MessageRole::Assistant,
+            content: "here is the image".into(),
+            tool_calls: vec![crate::app::DisplayToolCall {
+                name: "read".into(),
+                summary: "photo.png".into(),
+                status: ToolCallStatus::Done,
+                output_preview: None,
+                image_data: Some(vec![0u8; 100]), // dummy bytes
+            }],
+            thinking: None,
+            thinking_expanded: false,
+            usage: None,
+            cost: None,
+            model_id: None,
+        });
+        let buf = render_app(&app, 60, 30);
+        let content = buffer_to_string(&buf);
+        // should show the image label
+        assert!(content.contains("📷"));
+        assert!(content.contains("image"));
+        // should have produced a render area
+        let areas = app.image_render_areas.borrow();
+        assert_eq!(areas.len(), 1);
+        assert_eq!(areas[0].msg_idx, 0);
+        assert_eq!(areas[0].tc_idx, 0);
+        // area should have reasonable dimensions
+        assert!(areas[0].area.height > 0);
+        assert!(areas[0].area.width > 0);
     }
 
     /// helper: convert buffer to string for assertions
