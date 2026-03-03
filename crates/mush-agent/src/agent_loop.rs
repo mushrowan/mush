@@ -264,8 +264,8 @@ pub fn agent_loop(
                 let mut steered = false;
                 for tc in &tool_calls {
                     // check confirmation before executing
-                    if let Some(ref confirm) = config.confirm_tool {
-                        if confirm(tc.name.as_str(), &tc.arguments).await == ConfirmAction::Deny {
+                    if let Some(ref confirm) = config.confirm_tool
+                        && confirm(tc.name.as_str(), &tc.arguments).await == ConfirmAction::Deny {
                             let result = ToolResult::error("tool call denied by user".to_string());
                             yield AgentEvent::ToolExecEnd {
                                 tool_call_id: tc.id.clone(),
@@ -281,7 +281,6 @@ pub fn agent_loop(
                             }));
                             continue;
                         }
-                    }
 
                     yield AgentEvent::ToolExecStart {
                         tool_call_id: tc.id.clone(),

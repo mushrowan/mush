@@ -133,7 +133,7 @@ fn wrapped_line_count(text: &Text<'_>, width: u16) -> u16 {
         .iter()
         .map(|line| {
             let lw = line.width();
-            if lw <= w { 1u16 } else { ((lw + w - 1) / w) as u16 }
+            if lw <= w { 1u16 } else { lw.div_ceil(w) as u16 }
         })
         .sum()
 }
@@ -250,14 +250,13 @@ fn render_message(
             Span::styled(tc.summary.clone(), Style::default().fg(Color::DarkGray)),
         ]));
         // live output from running tool
-        if tc.status == ToolCallStatus::Running {
-            if let Some(live) = live_tool_output {
+        if tc.status == ToolCallStatus::Running
+            && let Some(live) = live_tool_output {
                 lines.push(Line::styled(
                     format!("    {live}"),
                     Style::default().fg(Color::DarkGray),
                 ));
             }
-        }
         // image indicator
         if tc.image_data.is_some() {
             lines.push(Line::from(vec![
