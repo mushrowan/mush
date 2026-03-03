@@ -18,7 +18,12 @@ use mush_tools::{builtin_tools, builtin_tools_with_sink};
 use mush_tui::TuiConfig;
 
 #[derive(Parser)]
-#[command(name = "mush", version, about = "fast little robot harness 🍄", trailing_var_arg = true)]
+#[command(
+    name = "mush",
+    version,
+    about = "fast little robot harness 🍄",
+    trailing_var_arg = true
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -228,6 +233,7 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
     let mut options = StreamOptions {
         thinking: thinking_level,
         max_tokens,
+        cache_retention: cfg.cache_retention,
         ..Default::default()
     };
 
@@ -463,6 +469,7 @@ async fn tui_mode(cli: Cli) -> Result<()> {
     let mut options = StreamOptions {
         thinking: thinking_level,
         max_tokens: cli.max_tokens.or(cfg.max_tokens),
+        cache_retention: cfg.cache_retention,
         ..Default::default()
     };
 
@@ -616,7 +623,8 @@ fn format_error(error: &str) -> String {
 fn build_system_prompt(cwd: &std::path::Path) -> String {
     let cwd_str = cwd.display();
     let mut prompt = format!(
-        "You are a coding assistant. You help users by reading files, executing commands, \
+        "You are running inside mush, a minimal coding agent harness. \
+         You help users by reading files, executing commands, \
          editing code, and writing new files.\n\n\
          Current working directory: {cwd_str}\n\n\
          Guidelines:\n\
@@ -624,7 +632,11 @@ fn build_system_prompt(cwd: &std::path::Path) -> String {
          - Use read to examine files before editing\n\
          - Use edit for precise changes (old text must match exactly)\n\
          - Use write only for new files or complete rewrites\n\
-         - Be concise in your responses"
+         - Be concise in your responses\n\
+         - Batch independent operations: when you need to read, edit, or operate on \
+         multiple files that don't depend on each other, use the Batch tool to do them \
+         all in a single call. This saves round-trips and helps you reason about \
+         related changes holistically before making them"
     );
 
     // append AGENTS.md context
@@ -803,6 +815,7 @@ fn config_cmd() -> Result<()> {
              # thinking = false\n\
              # max_tokens = 16384\n\
              # max_turns = 30\n\
+             # cache_retention = \"short\"  # none | short | long\n\
              # system_prompt = \"\"\n\
              \n\
              # [api_keys]\n\
@@ -845,6 +858,15 @@ fn status_cmd() -> Result<()> {
     // max turns
     let max_turns = cfg.max_turns.unwrap_or(mush_agent::DEFAULT_MAX_TURNS);
     println!("  max turns: {max_turns}");
+
+    // cache retention
+    let cache_retention = cfg.cache_retention.unwrap_or(CacheRetention::Short);
+    let cache_retention = match cache_retention {
+        CacheRetention::None => "none",
+        CacheRetention::Short => "short",
+        CacheRetention::Long => "long",
+    };
+    println!("  cache retention: {cache_retention}");
 
     // auth status
     println!("\n\x1b[1mauth\x1b[0m\n");

@@ -4,7 +4,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Widget};
+use ratatui::widgets::{Block, Borders, Paragraph, Widget, Wrap};
 
 use crate::app::App;
 
@@ -20,10 +20,21 @@ impl<'a> InputBox<'a> {
 
     /// the cursor position within the input box (for terminal cursor placement)
     pub fn cursor_position(&self, area: Rect) -> (u16, u16) {
-        // +1 for border, +2 for "> " prefix
-        let x = area.x + 1 + 2 + self.app.cursor as u16;
-        let y = area.y + 1;
-        (x.min(area.x + area.width - 2), y)
+        // available content width: area - 2 (borders) - 2 ("> " prefix)
+        let content_width = area.width.saturating_sub(4) as usize;
+        if content_width == 0 {
+            return (area.x + 1, area.y + 1);
+        }
+        // cursor offset includes the prompt prefix
+        let cursor_offset = self.app.cursor + 2;
+        let cursor_line = cursor_offset / content_width;
+        let cursor_col = cursor_offset % content_width;
+        let x = area.x + 1 + cursor_col as u16;
+        let y = area.y + 1 + cursor_line as u16;
+        (
+            x.min(area.x + area.width - 2),
+            y.min(area.y + area.height - 2),
+        )
     }
 }
 
@@ -54,7 +65,10 @@ impl Widget for InputBox<'_> {
                 Color::Cyan
             }));
 
-        Paragraph::new(text).block(block).render(area, buf);
+        Paragraph::new(text)
+            .block(block)
+            .wrap(Wrap { trim: false })
+            .render(area, buf);
     }
 }
 
@@ -66,7 +80,7 @@ mod tests {
 
     #[test]
     fn input_box_renders_empty() {
-        let app = App::new("test".into());
+        let app = App::new("test".into(), 200_000);
         let buf = render_input(&app, 40, 3);
         let content = buffer_to_string(&buf);
         assert!(content.contains("> "));
@@ -74,7 +88,7 @@ mod tests {
 
     #[test]
     fn input_box_renders_text() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         app.input = "hello world".into();
         app.cursor = 11;
         let buf = render_input(&app, 40, 3);
@@ -84,7 +98,7 @@ mod tests {
 
     #[test]
     fn input_box_streaming_shows_dots() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         app.is_streaming = true;
         let buf = render_input(&app, 40, 3);
         let content = buffer_to_string(&buf);
@@ -93,20 +107,39 @@ mod tests {
 
     #[test]
     fn cursor_position_calculation() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         app.input = "hello".into();
         app.cursor = 3;
         let input_box = InputBox::new(&app);
         let area = Rect::new(0, 10, 40, 3);
         let (x, y) = input_box.cursor_position(area);
-        // x: 0 (area.x) + 1 (border) + 2 ("> ") + 3 (cursor) = 6
+        // content_width = 40 - 4 = 36
+        // cursor_offset = 3 + 2 = 5
+        // cursor_line = 5 / 36 = 0, cursor_col = 5 % 36 = 5
+        // x: 0 + 1 + 5 = 6
         assert_eq!(x, 6);
         assert_eq!(y, 11);
     }
 
     #[test]
+    fn cursor_position_wraps() {
+        let mut app = App::new("test".into(), 200_000);
+        // 44 chars in a 20-wide box: content_width = 16, wraps to 3 lines
+        app.input = "this is a long prompt that wraps around!!!".into();
+        app.cursor = 42;
+        let input_box = InputBox::new(&app);
+        let area = Rect::new(0, 0, 20, 6);
+        let (x, y) = input_box.cursor_position(area);
+        // cursor_offset = 42 + 2 = 44
+        // content_width = 20 - 4 = 16
+        // cursor_line = 44 / 16 = 2, cursor_col = 44 % 16 = 12
+        assert_eq!(x, 1 + 12); // border + col
+        assert_eq!(y, 1 + 2); // border + line
+    }
+
+    #[test]
     fn input_box_shows_ghost_completion() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         app.completions = vec!["/help".into(), "/history".into()];
         app.input = "/h".into();
         app.cursor = 2;

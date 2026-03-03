@@ -154,6 +154,16 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             app.toggle_thinking_expanded();
         }
 
+        // toggle prompt injection visibility
+        (KeyModifiers::CONTROL, KeyCode::Char('i')) => {
+            app.show_prompt_injection = !app.show_prompt_injection;
+            app.status = Some(if app.show_prompt_injection {
+                "prompt injection visible".into()
+            } else {
+                "prompt injection hidden".into()
+            });
+        }
+
         // regular character
         (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
             app.input_char(c);
@@ -223,9 +233,10 @@ fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             }
             // move selection down
             if let Some(sel) = app.selected_message
-                && sel + 1 < app.messages.len() {
-                    app.selected_message = Some(sel + 1);
-                }
+                && sel + 1 < app.messages.len()
+            {
+                app.selected_message = Some(sel + 1);
+            }
         }
         (_, KeyCode::Char('k')) | (_, KeyCode::Up) => {
             app.scroll_offset = app.scroll_offset.saturating_add(3);
@@ -248,14 +259,15 @@ fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         (_, KeyCode::Char('y')) => {
             // copy selected message content to clipboard
             if let Some(sel) = app.selected_message
-                && let Some(msg) = app.messages.get(sel) {
-                    let text = &msg.content;
-                    if copy_to_clipboard(text) {
-                        app.status = Some("copied to clipboard".into());
-                    } else {
-                        app.status = Some("clipboard copy failed".into());
-                    }
+                && let Some(msg) = app.messages.get(sel)
+            {
+                let text = &msg.content;
+                if copy_to_clipboard(text) {
+                    app.status = Some("copied to clipboard".into());
+                } else {
+                    app.status = Some("clipboard copy failed".into());
                 }
+            }
         }
         _ => {}
     }
@@ -269,8 +281,8 @@ fn copy_to_clipboard(text: &str) -> bool {
 
     // try each clipboard tool in order
     let tools: &[&[&str]] = &[
-        &["pbcopy"],             // macOS
-        &["wl-copy"],            // wayland
+        &["pbcopy"],                           // macOS
+        &["wl-copy"],                          // wayland
         &["xclip", "-selection", "clipboard"], // x11
         &["xsel", "--clipboard", "--input"],   // x11 alt
     ];
@@ -283,10 +295,11 @@ fn copy_to_clipboard(text: &str) -> bool {
             .stderr(Stdio::null())
             .spawn()
             && let Some(mut stdin) = child.stdin.take()
-                && stdin.write_all(text.as_bytes()).is_ok() {
-                    drop(stdin);
-                    return child.wait().map(|s| s.success()).unwrap_or(false);
-                }
+            && stdin.write_all(text.as_bytes()).is_ok()
+        {
+            drop(stdin);
+            return child.wait().map(|s| s.success()).unwrap_or(false);
+        }
     }
     false
 }
@@ -369,14 +382,14 @@ mod tests {
 
     #[test]
     fn ctrl_c_quits() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         let event = handle_key(&mut app, ctrl(KeyCode::Char('c')));
         assert!(matches!(event, Some(AppEvent::Quit)));
     }
 
     #[test]
     fn escape_aborts_when_streaming() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         app.is_streaming = true;
         let event = handle_key(&mut app, key(KeyCode::Esc));
         assert!(matches!(event, Some(AppEvent::Abort)));
@@ -384,14 +397,14 @@ mod tests {
 
     #[test]
     fn escape_does_nothing_when_idle() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         let event = handle_key(&mut app, key(KeyCode::Esc));
         assert!(event.is_none());
     }
 
     #[test]
     fn typing_characters() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         handle_key(&mut app, key(KeyCode::Char('h')));
         handle_key(&mut app, key(KeyCode::Char('i')));
         assert_eq!(app.input, "hi");
@@ -400,7 +413,7 @@ mod tests {
 
     #[test]
     fn enter_submits_input() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         app.input = "hello".into();
         app.cursor = 5;
         let event = handle_key(&mut app, key(KeyCode::Enter));
@@ -413,14 +426,14 @@ mod tests {
 
     #[test]
     fn enter_on_empty_does_nothing() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         let event = handle_key(&mut app, key(KeyCode::Enter));
         assert!(event.is_none());
     }
 
     #[test]
     fn backspace_deletes() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         app.input = "abc".into();
         app.cursor = 3;
         handle_key(&mut app, key(KeyCode::Backspace));
@@ -429,7 +442,7 @@ mod tests {
 
     #[test]
     fn ctrl_u_clears_line() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         app.input = "long text here".into();
         app.cursor = 14;
         handle_key(&mut app, ctrl(KeyCode::Char('u')));
@@ -439,7 +452,7 @@ mod tests {
 
     #[test]
     fn home_end_navigation() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         app.input = "hello".into();
         app.cursor = 3;
 
@@ -452,7 +465,7 @@ mod tests {
 
     #[test]
     fn page_up_down_scrolls() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         let event = handle_key(&mut app, key(KeyCode::PageUp));
         assert!(matches!(event, Some(AppEvent::ScrollUp(10))));
         assert_eq!(app.scroll_offset, 10);
@@ -464,7 +477,7 @@ mod tests {
 
     #[test]
     fn ctrl_t_cycles_thinking_level() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         assert_eq!(app.thinking_level, ThinkingLevel::Off);
 
         let event = handle_key(&mut app, ctrl(KeyCode::Char('t')));
@@ -477,7 +490,7 @@ mod tests {
 
     #[test]
     fn ctrl_o_toggles_thinking_expanded() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         app.start_streaming();
         app.push_thinking_delta("thoughts");
         app.push_text_delta("text");
@@ -489,8 +502,21 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_i_toggles_prompt_injection_preview() {
+        let mut app = App::new("test".into(), 200_000);
+        assert!(!app.show_prompt_injection);
+        handle_key(&mut app, ctrl(KeyCode::Char('i')));
+        assert!(app.show_prompt_injection);
+        assert_eq!(app.status.as_deref(), Some("prompt injection visible"));
+
+        handle_key(&mut app, ctrl(KeyCode::Char('i')));
+        assert!(!app.show_prompt_injection);
+        assert_eq!(app.status.as_deref(), Some("prompt injection hidden"));
+    }
+
+    #[test]
     fn alt_enter_inserts_newline() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         app.input_char('a');
         let event = handle_key(
             &mut app,
@@ -507,7 +533,7 @@ mod tests {
 
     #[test]
     fn slash_command_parsed() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         app.input = "/help".into();
         app.cursor = 5;
         let event = handle_key(&mut app, key(KeyCode::Enter));
@@ -522,7 +548,7 @@ mod tests {
 
     #[test]
     fn slash_command_with_args() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         app.input = "/review src/main.rs".into();
         app.cursor = 19;
         let event = handle_key(&mut app, key(KeyCode::Enter));
@@ -537,7 +563,7 @@ mod tests {
 
     #[test]
     fn ctrl_w_deletes_word_backward() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         app.input = "hello world".into();
         app.cursor = 11;
         handle_key(&mut app, ctrl(KeyCode::Char('w')));
@@ -546,7 +572,7 @@ mod tests {
 
     #[test]
     fn ctrl_k_deletes_to_end() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         app.input = "hello world".into();
         app.cursor = 5;
         handle_key(&mut app, ctrl(KeyCode::Char('k')));
@@ -555,14 +581,14 @@ mod tests {
 
     #[test]
     fn ctrl_d_on_empty_quits() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         let event = handle_key(&mut app, ctrl(KeyCode::Char('d')));
         assert!(matches!(event, Some(AppEvent::Quit)));
     }
 
     #[test]
     fn ctrl_d_with_input_deletes_char() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         app.input = "abc".into();
         app.cursor = 1;
         handle_key(&mut app, ctrl(KeyCode::Char('d')));
@@ -571,7 +597,7 @@ mod tests {
 
     #[test]
     fn input_blocked_while_streaming() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         app.is_streaming = true;
         handle_key(&mut app, key(KeyCode::Char('x')));
         assert!(app.input.is_empty()); // typing ignored
@@ -579,12 +605,8 @@ mod tests {
 
     #[test]
     fn tab_completes_slash_commands() {
-        let mut app = App::new("test".into());
-        app.completions = vec![
-            "/help".into(),
-            "/history".into(),
-            "/clear".into(),
-        ];
+        let mut app = App::new("test".into(), 200_000);
+        app.completions = vec!["/help".into(), "/history".into(), "/clear".into()];
         app.input = "/h".into();
         app.cursor = 2;
         handle_key(&mut app, key(KeyCode::Tab));
@@ -601,7 +623,7 @@ mod tests {
 
     #[test]
     fn tab_completes_model_ids() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         app.completions = vec![
             "/model".into(),
             "claude-opus-4-6".into(),
@@ -615,7 +637,7 @@ mod tests {
 
     #[test]
     fn tab_no_match_does_nothing() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         app.completions = vec!["/help".into()];
         app.input = "/zzz".into();
         app.cursor = 4;
@@ -625,7 +647,7 @@ mod tests {
 
     #[test]
     fn tab_resets_on_typing() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         app.completions = vec!["/help".into(), "/history".into()];
         app.input = "/h".into();
         app.cursor = 2;
@@ -639,7 +661,7 @@ mod tests {
 
     #[test]
     fn tab_ignored_for_non_slash_input() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         app.completions = vec!["/help".into()];
         app.input = "hello".into();
         app.cursor = 5;

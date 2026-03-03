@@ -29,6 +29,7 @@ pub struct Config {
     pub thinking: Option<bool>,
     pub max_tokens: Option<u64>,
     pub max_turns: Option<usize>,
+    pub cache_retention: Option<mush_ai::types::CacheRetention>,
     pub system_prompt: Option<String>,
     pub hint_mode: HintMode,
     /// prompt for confirmation before executing tools (off by default)
@@ -138,6 +139,7 @@ model = "claude-opus-4-6"
 thinking = true
 max_tokens = 8192
 system_prompt = "you are helpful"
+cache_retention = "long"
 
 [api_keys]
 anthropic = "sk-ant-test"
@@ -148,6 +150,10 @@ openrouter = "sk-or-test"
         assert_eq!(config.model.as_deref(), Some("claude-opus-4-6"));
         assert_eq!(config.thinking, Some(true));
         assert_eq!(config.max_tokens, Some(8192));
+        assert_eq!(
+            config.cache_retention,
+            Some(mush_ai::types::CacheRetention::Long)
+        );
         assert_eq!(config.api_keys.anthropic.as_deref(), Some("sk-ant-test"));
     }
 

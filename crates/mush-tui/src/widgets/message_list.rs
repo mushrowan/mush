@@ -29,7 +29,14 @@ impl Widget for MessageList<'_> {
         let in_scroll_mode = self.app.mode == crate::app::AppMode::Scroll;
         for (i, msg) in self.app.messages.iter().enumerate() {
             let selected = in_scroll_mode && self.app.selected_message == Some(i);
-            render_message(msg, i, &mut lines, &self.app.tool_output_live, selected, &mut image_placeholders);
+            render_message(
+                msg,
+                i,
+                &mut lines,
+                &self.app.tool_output_live,
+                selected,
+                &mut image_placeholders,
+            );
             lines.push(Line::raw(""));
         }
 
@@ -80,7 +87,7 @@ impl Widget for MessageList<'_> {
         }
 
         // streaming tool args (model is building tool call, not yet executing)
-        if self.app.active_tool.is_none() && !self.app.streaming_tool_args.is_empty() {
+        if self.app.active_tools.is_empty() && !self.app.streaming_tool_args.is_empty() {
             let throbber = Throbber::default()
                 .throbber_set(BRAILLE_SIX)
                 .use_type(WhichUse::Spin);
@@ -96,7 +103,7 @@ impl Widget for MessageList<'_> {
         }
 
         // active tool indicator (executing)
-        if let Some(ref tool) = self.app.active_tool {
+        for tool in &self.app.active_tools {
             let throbber = Throbber::default()
                 .throbber_set(BRAILLE_SIX)
                 .use_type(WhichUse::Spin);
@@ -105,8 +112,17 @@ impl Widget for MessageList<'_> {
                 Span::raw("  "),
                 spinner_span.style(Style::default().fg(Color::Cyan)),
                 Span::raw(" "),
-                Span::styled(tool.as_str(), Style::default().fg(Color::Cyan)),
+                Span::styled(tool.name.as_str(), Style::default().fg(Color::Cyan)),
+                Span::raw(" "),
+                Span::styled(tool.summary.as_str(), Style::default().fg(Color::DarkGray)),
             ]));
+
+            if let Some(ref live) = tool.live_output {
+                lines.push(Line::styled(
+                    format!("    {live}"),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
         }
 
         let text = Text::from(lines);
@@ -300,12 +316,13 @@ fn render_message(
         ]));
         // live output from running tool
         if tc.status == ToolCallStatus::Running
-            && let Some(live) = live_tool_output {
-                lines.push(Line::styled(
-                    format!("    {live}"),
-                    Style::default().fg(Color::DarkGray),
-                ));
-            }
+            && let Some(live) = live_tool_output
+        {
+            lines.push(Line::styled(
+                format!("    {live}"),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
         // image: reserve space for inline rendering
         if tc.image_data.is_some() {
             image_placeholders.push(ImagePlaceholder {
@@ -347,7 +364,8 @@ fn render_message(
         if total > 0 {
             let mut parts = vec![format!("  {total}tok")];
             if usage.cache_read_tokens > 0 {
-                let pct = (usage.cache_read_tokens as f64 / usage.input_tokens.max(1) as f64 * 100.0) as u32;
+                let pct = (usage.cache_read_tokens as f64 / usage.input_tokens.max(1) as f64
+                    * 100.0) as u32;
                 parts.push(format!("{pct}% cached"));
             }
             if let Some(c) = msg.cost {
@@ -402,7 +420,7 @@ mod tests {
 
     #[test]
     fn empty_app_renders() {
-        let app = App::new("test".into());
+        let app = App::new("test".into(), 200_000);
         let buf = render_app(&app, 40, 10);
         // should be mostly empty
         let content = buffer_to_string(&buf);
@@ -411,7 +429,7 @@ mod tests {
 
     #[test]
     fn user_message_renders() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         app.push_user_message("hello world".into());
         let buf = render_app(&app, 40, 10);
         let content = buffer_to_string(&buf);
@@ -421,7 +439,7 @@ mod tests {
 
     #[test]
     fn assistant_message_renders() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         app.start_streaming();
         app.push_text_delta("i can help");
         app.finish_streaming(None, None);
@@ -434,7 +452,7 @@ mod tests {
 
     #[test]
     fn streaming_shows_partial_text() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         app.start_streaming();
         app.push_text_delta("partial");
         // don't finish - still streaming
@@ -445,7 +463,7 @@ mod tests {
 
     #[test]
     fn tool_calls_render() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         app.messages.push(DisplayMessage {
             role: MessageRole::Assistant,
             content: "let me check".into(),
@@ -479,7 +497,7 @@ mod tests {
 
     #[test]
     fn thinking_shows_collapsed() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         app.messages.push(DisplayMessage {
             role: MessageRole::Assistant,
             content: "the answer is 42".into(),
@@ -500,7 +518,7 @@ mod tests {
 
     #[test]
     fn image_reserves_space_and_produces_render_area() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         app.messages.push(DisplayMessage {
             role: MessageRole::Assistant,
             content: "here is the image".into(),

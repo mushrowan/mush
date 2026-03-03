@@ -9,6 +9,7 @@ use crate::widgets::input_box::InputBox;
 use crate::widgets::message_list::MessageList;
 use crate::widgets::search_popup::SearchPopup;
 use crate::widgets::status_bar::StatusBar;
+use crate::widgets::tool_panels::{ToolPanels, tool_panels_height};
 
 /// the full TUI layout, composing all widgets
 pub struct Ui<'a> {
@@ -22,7 +23,9 @@ impl<'a> Ui<'a> {
 
     /// get the cursor position for the terminal
     pub fn cursor_position(&self, area: Rect) -> (u16, u16) {
-        let chunks = layout(area);
+        let input_h = input_height(&self.app.input, area.width);
+        let tools_h = tool_panels_height(self.app.active_tools.len(), area.width);
+        let chunks = layout(area, input_h, tools_h);
         InputBox::new(self.app).cursor_position(chunks.input)
     }
 }
@@ -30,32 +33,72 @@ impl<'a> Ui<'a> {
 /// named layout regions
 pub struct LayoutRegions {
     pub messages: Rect,
+    pub tools: Option<Rect>,
     pub input: Rect,
     pub status: Rect,
 }
 
-/// compute the main layout
-pub fn layout(area: Rect) -> LayoutRegions {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(1),    // messages
-            Constraint::Length(3), // input
-            Constraint::Length(1), // status bar
-        ])
-        .split(area);
+/// compute wrapped line count for input text
+pub fn input_height(input: &str, area_width: u16) -> u16 {
+    // available width: total - 2 (borders) - 2 ("> " prompt)
+    let content_width = area_width.saturating_sub(4) as usize;
+    if content_width == 0 {
+        return 3;
+    }
+    let text_len = input.len().max(1);
+    let lines = ((text_len - 1) / content_width) + 1;
+    // +2 for borders, no cap (messages area has Min(1) so it'll shrink)
+    lines as u16 + 2
+}
 
-    LayoutRegions {
-        messages: chunks[0],
-        input: chunks[1],
-        status: chunks[2],
+/// compute the main layout
+pub fn layout(area: Rect, input_h: u16, tools_h: u16) -> LayoutRegions {
+    if tools_h > 0 {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(1),          // messages
+                Constraint::Length(tools_h), // tool panels
+                Constraint::Length(input_h), // input
+                Constraint::Length(1),       // status bar
+            ])
+            .split(area);
+
+        LayoutRegions {
+            messages: chunks[0],
+            tools: Some(chunks[1]),
+            input: chunks[2],
+            status: chunks[3],
+        }
+    } else {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(1),          // messages
+                Constraint::Length(input_h), // input
+                Constraint::Length(1),       // status bar
+            ])
+            .split(area);
+
+        LayoutRegions {
+            messages: chunks[0],
+            tools: None,
+            input: chunks[1],
+            status: chunks[2],
+        }
     }
 }
 
 impl Widget for Ui<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let regions = layout(area);
+        let input_h = input_height(&self.app.input, area.width);
+        let tools_h = tool_panels_height(self.app.active_tools.len(), area.width);
+        let regions = layout(area, input_h, tools_h);
         MessageList::new(self.app).render(regions.messages, buf);
+        if let Some(tools_area) = regions.tools {
+            ToolPanels::new(&self.app.active_tools, &self.app.throbber_state)
+                .render(tools_area, buf);
+        }
         InputBox::new(self.app).render(regions.input, buf);
         StatusBar::new(self.app).render(regions.status, buf);
 
@@ -73,8 +116,28 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     #[test]
+    fn input_height_short_text() {
+        // "hi" in an 80-wide box: 1 line + 2 borders = 3
+        assert_eq!(input_height("hi", 80), 3);
+    }
+
+    #[test]
+    fn input_height_wrapping() {
+        // 100 chars in a 20-wide box: content_width=16, ceil(100/16)=7 lines + 2 = 9
+        let text = "a".repeat(100);
+        assert_eq!(input_height(&text, 20), 9);
+    }
+
+    #[test]
+    fn input_height_grows_unbounded() {
+        // 1000 chars in a 20-wide box: content_width=16, ceil(1000/16)=63 lines + 2 = 65
+        let text = "a".repeat(1000);
+        assert_eq!(input_height(&text, 20), 65);
+    }
+
+    #[test]
     fn full_layout_renders() {
-        let mut app = App::new("claude-sonnet-4".into());
+        let mut app = App::new("claude-sonnet-4".into(), 200_000);
         app.push_user_message("what is rust?".into());
         app.start_streaming();
         app.push_text_delta("rust is a systems programming language");
@@ -94,15 +157,16 @@ mod tests {
     #[test]
     fn layout_regions_are_correct() {
         let area = Rect::new(0, 0, 80, 24);
-        let regions = layout(area);
+        let regions = layout(area, 3, 0);
         assert_eq!(regions.status.height, 1);
         assert_eq!(regions.input.height, 3);
         assert_eq!(regions.messages.height, 20); // 24 - 3 - 1
+        assert!(regions.tools.is_none());
     }
 
     #[test]
     fn cursor_position_in_layout() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         app.input = "hello".into();
         app.cursor = 5;
         let ui = Ui::new(&app);

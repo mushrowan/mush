@@ -10,6 +10,17 @@ use mush_ai::types::ThinkingLevel;
 
 use crate::app::App;
 
+/// format token count as human-readable (e.g. 45k, 200k, 1.2m)
+fn format_tokens(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}m", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 1_000 {
+        format!("{}k", tokens / 1_000)
+    } else {
+        format!("{tokens}")
+    }
+}
+
 /// renders the status bar
 pub struct StatusBar<'a> {
     app: &'a App,
@@ -50,11 +61,22 @@ impl Widget for StatusBar<'_> {
             ),
         ];
 
-        if self.app.total_tokens > 0 {
-            spans.push(Span::styled(
-                format!(" | {}tok", self.app.total_tokens),
-                dim,
-            ));
+        if self.app.context_tokens > 0 {
+            let ctx = format_tokens(self.app.context_tokens);
+            let window = format_tokens(self.app.context_window);
+            let pct = if self.app.context_window > 0 {
+                (self.app.context_tokens as f64 / self.app.context_window as f64 * 100.0) as u64
+            } else {
+                0
+            };
+            let ctx_style = if pct > 75 {
+                Style::default().fg(Color::Red)
+            } else if pct > 50 {
+                Style::default().fg(Color::Yellow)
+            } else {
+                dim
+            };
+            spans.push(Span::styled(format!(" | {ctx}/{window}"), ctx_style));
         }
 
         if self.app.total_cost > 0.0 {
@@ -87,7 +109,7 @@ impl Widget for StatusBar<'_> {
         } else if self.app.is_streaming {
             "esc abort | ctrl+c quit"
         } else {
-            "enter send | ctrl+s scroll | ctrl+t thinking | ctrl+c quit"
+            "enter send | ctrl+s scroll | ctrl+t thinking | ctrl+i injection | ctrl+c quit"
         };
         let hint_style = if self.app.mode == crate::app::AppMode::ToolConfirm {
             Style::default().fg(Color::Yellow)
@@ -112,34 +134,35 @@ mod tests {
 
     #[test]
     fn status_bar_shows_model() {
-        let app = App::new("claude-sonnet-4".into());
+        let app = App::new("claude-sonnet-4".into(), 200_000);
         let buf = render_status(&app, 80, 1);
         let content = buffer_to_string(&buf);
         assert!(content.contains("claude-sonnet-4"));
     }
 
     #[test]
-    fn status_bar_shows_cost_and_tokens() {
-        let mut app = App::new("test-model".into());
+    fn status_bar_shows_cost_and_context() {
+        let mut app = App::new("test-model".into(), 200_000);
         app.total_cost = 0.0123;
-        app.total_tokens = 5000;
+        app.context_tokens = 45_000;
         let buf = render_status(&app, 80, 1);
         let content = buffer_to_string(&buf);
-        assert!(content.contains("5000tok"));
+        assert!(content.contains("45k/200k"));
         assert!(content.contains("$0.0123"));
     }
 
     #[test]
     fn status_bar_shows_hint() {
-        let app = App::new("test".into());
+        let app = App::new("test".into(), 200_000);
         let buf = render_status(&app, 120, 1);
         let content = buffer_to_string(&buf);
+        assert!(content.contains("ctrl+i injection"));
         assert!(content.contains("ctrl+c"));
     }
 
     #[test]
     fn status_bar_shows_thinking_level() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         app.thinking_level = ThinkingLevel::High;
         let buf = render_status(&app, 120, 1);
         let content = buffer_to_string(&buf);

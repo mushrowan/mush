@@ -22,7 +22,9 @@ impl<'a> SearchPopup<'a> {
 impl Widget for SearchPopup<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         // centre the popup, 60% width, up to 14 lines tall
-        let width = (area.width * 3 / 5).max(30).min(area.width.saturating_sub(4));
+        let width = (area.width * 3 / 5)
+            .max(30)
+            .min(area.width.saturating_sub(4));
         let height = 14.min(area.height.saturating_sub(4));
         let x = (area.width.saturating_sub(width)) / 2;
         let y = (area.height.saturating_sub(height)) / 2;
@@ -65,7 +67,10 @@ impl Widget for SearchPopup<'_> {
         let divider_text = if self.app.search.query.is_empty() {
             "type to search".to_string()
         } else {
-            format!("{match_count} match{}", if match_count == 1 { "" } else { "es" })
+            format!(
+                "{match_count} match{}",
+                if match_count == 1 { "" } else { "es" }
+            )
         };
         Paragraph::new(Line::styled(
             divider_text,
@@ -102,7 +107,9 @@ impl Widget for SearchPopup<'_> {
 
                 let selected = i == self.app.search.selected;
                 let style = if selected {
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
                 };
