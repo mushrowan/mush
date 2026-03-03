@@ -283,18 +283,25 @@ fn render_message(
         }
     }
 
-    // usage line
+    // usage line (compact: total tokens + cost, with cache hit % if relevant)
     if let Some(ref usage) = msg.usage {
-        let cost_str = msg.cost.map(|c| format!(" | ${c:.4}")).unwrap_or_default();
-        lines.push(Line::styled(
-            format!(
-                "  in:{} out:{} cache:{}{}",
-                usage.input_tokens, usage.output_tokens, usage.cache_read_tokens, cost_str
-            ),
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::DIM),
-        ));
+        let total = usage.total_tokens();
+        if total > 0 {
+            let mut parts = vec![format!("  {total}tok")];
+            if usage.cache_read_tokens > 0 {
+                let pct = (usage.cache_read_tokens as f64 / usage.input_tokens.max(1) as f64 * 100.0) as u32;
+                parts.push(format!("{pct}% cached"));
+            }
+            if let Some(c) = msg.cost {
+                parts.push(format!("${c:.4}"));
+            }
+            lines.push(Line::styled(
+                parts.join(" | "),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::DIM),
+            ));
+        }
     }
 }
 
