@@ -525,6 +525,17 @@ async fn tui_mode(cli: Cli) -> Result<()> {
     };
 
     let config_file = config::config_dir().join("config.toml");
+    let mut provider_api_keys = std::collections::HashMap::new();
+    if let Some(key) = cfg.api_keys.anthropic.clone() {
+        provider_api_keys.insert("anthropic".into(), key);
+    }
+    if let Some(key) = cfg.api_keys.openrouter.clone() {
+        provider_api_keys.insert("openrouter".into(), key);
+    }
+    if let Some(key) = cfg.api_keys.openai.clone() {
+        provider_api_keys.insert("openai".into(), key);
+    }
+
     let tui_config = TuiConfig {
         model,
         system_prompt: Some(system_prompt),
@@ -542,6 +553,7 @@ async fn tui_mode(cli: Cli) -> Result<()> {
         } else {
             None
         },
+        provider_api_keys,
         thinking_prefs,
         save_thinking_prefs: Some(std::sync::Arc::new(|prefs| {
             config::save_thinking_prefs(prefs);
@@ -724,9 +736,12 @@ fn oauth_provider_id_for_model(model: &Model) -> Option<&'static str> {
 }
 
 fn oauth_account_id(provider_id: &str) -> Option<String> {
-    mush_ai::oauth::load_credentials()
-        .ok()
-        .and_then(|store| store.providers.get(provider_id).and_then(|c| c.account_id.clone()))
+    mush_ai::oauth::load_credentials().ok().and_then(|store| {
+        store
+            .providers
+            .get(provider_id)
+            .and_then(|c| c.account_id.clone())
+    })
 }
 
 fn default_model_id(cfg: &config::Config) -> String {

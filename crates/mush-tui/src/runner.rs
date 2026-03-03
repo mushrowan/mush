@@ -66,6 +66,8 @@ pub struct TuiConfig {
     pub hint_mode: HintMode,
     /// path to config file for hot-reload
     pub config_path: Option<std::path::PathBuf>,
+    /// per-provider api keys from config
+    pub provider_api_keys: std::collections::HashMap<String, String>,
     /// per-model thinking level prefs (loaded from disk at startup)
     pub thinking_prefs: std::collections::HashMap<String, ThinkingLevel>,
     /// callback to save thinking prefs when they change
@@ -315,12 +317,18 @@ pub async fn run_tui(
             let confirm_reply: Arc<Mutex<Option<tokio::sync::oneshot::Sender<bool>>>> =
                 Arc::new(Mutex::new(None));
 
+            let mut call_options = tui_config.options.clone();
+            let (api_key, account_id) =
+                resolve_auth_for_model(&tui_config.model, &tui_config.provider_api_keys).await;
+            call_options.api_key = api_key;
+            call_options.account_id = account_id;
+
             let config = AgentConfig {
                 model: &tui_config.model,
                 system_prompt: tui_config.system_prompt.clone(),
                 tools,
                 registry,
-                options: tui_config.options.clone(),
+                options: call_options,
                 max_turns: tui_config.max_turns,
                 get_steering: steering,
                 get_follow_up: follow_up,
@@ -1037,6 +1045,48 @@ fn inject_hint(msgs: &mut [Message], enricher: &(dyn Fn(&str) -> Option<String> 
             timestamp_ms: user_msg.timestamp_ms,
         });
     }
+}
+
+async fn resolve_auth_for_model(
+    model: &Model,
+    provider_api_keys: &std::collections::HashMap<String, String>,
+) -> (Option<String>, Option<String>) {
+    if let Some(key) = mush_ai::env::env_api_key(&model.provider) {
+        return (Some(key), None);
+    }
+
+    let provider_name = model.provider.to_string();
+    if let Some(key) = provider_api_keys.get(&provider_name) {
+        return (Some(key.clone()), None);
+    }
+
+    match &model.provider {
+        Provider::Anthropic => {
+            let token = mush_ai::oauth::get_oauth_token("anthropic")
+                .await
+                .ok()
+                .flatten();
+            (token, None)
+        }
+        Provider::Custom(name) if name == "openai-codex" => {
+            let token = mush_ai::oauth::get_oauth_token("openai-codex")
+                .await
+                .ok()
+                .flatten();
+            let account_id = oauth_account_id("openai-codex");
+            (token, account_id)
+        }
+        _ => (None, None),
+    }
+}
+
+fn oauth_account_id(provider_id: &str) -> Option<String> {
+    mush_ai::oauth::load_credentials().ok().and_then(|store| {
+        store
+            .providers
+            .get(provider_id)
+            .and_then(|c| c.account_id.clone())
+    })
 }
 
 async fn auto_compact(
