@@ -336,6 +336,12 @@ fn thinking_budget(level: ThinkingLevel, max_tokens: u64) -> u64 {
 }
 
 fn convert_messages(messages: &[Message], is_oauth: bool) -> Vec<RequestMessage> {
+    let converted = convert_messages_raw(messages, is_oauth);
+    fix_orphaned_tool_calls(converted)
+}
+
+/// raw conversion without orphan fixing
+fn convert_messages_raw(messages: &[Message], is_oauth: bool) -> Vec<RequestMessage> {
     let mut result = Vec::new();
 
     for msg in messages {
@@ -463,6 +469,93 @@ fn convert_messages(messages: &[Message], is_oauth: bool) -> Vec<RequestMessage>
     }
 
     result
+}
+
+/// ensure every tool_use block in an assistant message has a matching tool_result.
+/// inserts synthetic error results for orphaned tool calls (from aborts, steering,
+/// compaction, etc) so the API doesn't reject the conversation.
+fn fix_orphaned_tool_calls(messages: Vec<RequestMessage>) -> Vec<RequestMessage> {
+    let mut result: Vec<RequestMessage> = Vec::new();
+    let mut pending_tool_ids: Vec<String> = Vec::new();
+    let mut seen_result_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for msg in messages {
+        if msg.role == "assistant" {
+            // flush any orphaned tool calls from a previous assistant message
+            inject_synthetic_results(&mut result, &pending_tool_ids, &seen_result_ids);
+            pending_tool_ids.clear();
+            seen_result_ids.clear();
+
+            // collect tool_use IDs from this assistant message
+            if let serde_json::Value::Array(ref blocks) = msg.content {
+                for block in blocks {
+                    if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
+                        if let Some(id) = block.get("id").and_then(|i| i.as_str()) {
+                            pending_tool_ids.push(id.to_string());
+                        }
+                    }
+                }
+            }
+            result.push(msg);
+        } else if msg.role == "user" {
+            // check if this is a tool_result
+            if let serde_json::Value::Array(ref blocks) = msg.content {
+                for block in blocks {
+                    if block.get("type").and_then(|t| t.as_str()) == Some("tool_result") {
+                        if let Some(id) = block.get("tool_use_id").and_then(|i| i.as_str()) {
+                            seen_result_ids.insert(id.to_string());
+                        }
+                    }
+                }
+            }
+
+            // if this is a plain user message (not tool_result), flush orphans first
+            let is_tool_result = msg
+                .content
+                .as_array()
+                .map(|blocks| {
+                    blocks
+                        .iter()
+                        .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
+                })
+                .unwrap_or(false);
+
+            if !is_tool_result && !pending_tool_ids.is_empty() {
+                inject_synthetic_results(&mut result, &pending_tool_ids, &seen_result_ids);
+                pending_tool_ids.clear();
+                seen_result_ids.clear();
+            }
+
+            result.push(msg);
+        } else {
+            result.push(msg);
+        }
+    }
+
+    // flush any remaining orphans at the end
+    inject_synthetic_results(&mut result, &pending_tool_ids, &seen_result_ids);
+
+    result
+}
+
+fn inject_synthetic_results(
+    result: &mut Vec<RequestMessage>,
+    pending_ids: &[String],
+    seen_ids: &std::collections::HashSet<String>,
+) {
+    for id in pending_ids {
+        if !seen_ids.contains(id) {
+            result.push(RequestMessage {
+                role: "user".into(),
+                content: serde_json::json!([{
+                    "type": "tool_result",
+                    "tool_use_id": id,
+                    "content": [{"type": "text", "text": "no result provided"}],
+                    "is_error": true,
+                }]),
+            });
+        }
+    }
 }
 
 // -- SSE parsing --
@@ -980,7 +1073,8 @@ mod tests {
         })];
 
         let converted = convert_messages(&messages, false);
-        assert_eq!(converted.len(), 1);
+        // assistant + synthetic tool_result for the orphaned tool_use
+        assert_eq!(converted.len(), 2);
         assert_eq!(converted[0].role, "assistant");
 
         let blocks = converted[0].content.as_array().unwrap();
@@ -988,6 +1082,86 @@ mod tests {
         assert_eq!(blocks[0]["type"], "text");
         assert_eq!(blocks[1]["type"], "tool_use");
         assert_eq!(blocks[1]["id"], "tc_1");
+
+        // synthetic result
+        assert_eq!(converted[1].role, "user");
+        assert_eq!(converted[1].content[0]["type"], "tool_result");
+        assert_eq!(converted[1].content[0]["tool_use_id"], "tc_1");
+        assert_eq!(converted[1].content[0]["is_error"], true);
+    }
+
+    #[test]
+    fn tool_use_with_matching_result_no_synthetic() {
+        let messages = vec![
+            Message::Assistant(AssistantMessage {
+                content: vec![AssistantContentPart::ToolCall(ToolCall {
+                    id: "tc_1".into(),
+                    name: "bash".into(),
+                    arguments: serde_json::json!({"command": "echo hi"}),
+                })],
+                model: "test".into(),
+                provider: "test".into(),
+                api: Api::AnthropicMessages,
+                usage: Usage::default(),
+                stop_reason: StopReason::ToolUse,
+                error_message: None,
+                timestamp_ms: Timestamp(0),
+            }),
+            Message::ToolResult(ToolResultMessage {
+                tool_call_id: "tc_1".into(),
+                tool_name: "bash".into(),
+                content: vec![ToolResultContentPart::Text(TextContent {
+                    text: "hi".into(),
+                })],
+                is_error: false,
+                timestamp_ms: Timestamp(0),
+            }),
+        ];
+
+        let converted = convert_messages(&messages, false);
+        // assistant + real tool_result, no synthetic
+        assert_eq!(converted.len(), 2);
+        assert_eq!(converted[0].role, "assistant");
+        assert_eq!(converted[1].role, "user");
+        assert_eq!(converted[1].content[0]["tool_use_id"], "tc_1");
+        // the real result, not synthetic error
+        assert_eq!(converted[1].content[0]["is_error"], false);
+    }
+
+    #[test]
+    fn orphaned_tool_use_gets_synthetic_result() {
+        // assistant with tool_use followed by a user message (steering) - no tool_result
+        let messages = vec![
+            Message::Assistant(AssistantMessage {
+                content: vec![AssistantContentPart::ToolCall(ToolCall {
+                    id: "tc_orphan".into(),
+                    name: "bash".into(),
+                    arguments: serde_json::json!({"command": "rm -rf /"}),
+                })],
+                model: "test".into(),
+                provider: "test".into(),
+                api: Api::AnthropicMessages,
+                usage: Usage::default(),
+                stop_reason: StopReason::ToolUse,
+                error_message: None,
+                timestamp_ms: Timestamp(0),
+            }),
+            Message::User(UserMessage {
+                content: UserContent::Text("stop! undo that".into()),
+                timestamp_ms: Timestamp(0),
+            }),
+        ];
+
+        let converted = convert_messages(&messages, false);
+        // assistant + synthetic tool_result + user
+        assert_eq!(converted.len(), 3);
+        assert_eq!(converted[0].role, "assistant");
+        assert_eq!(converted[1].role, "user");
+        assert_eq!(converted[1].content[0]["type"], "tool_result");
+        assert_eq!(converted[1].content[0]["tool_use_id"], "tc_orphan");
+        assert_eq!(converted[1].content[0]["is_error"], true);
+        assert_eq!(converted[2].role, "user");
+        assert_eq!(converted[2].content, serde_json::json!("stop! undo that"));
     }
 
     #[test]
