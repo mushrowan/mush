@@ -4,9 +4,10 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::widgets::Widget;
 
-use crate::app::App;
+use crate::app::{App, AppMode};
 use crate::widgets::input_box::InputBox;
 use crate::widgets::message_list::MessageList;
+use crate::widgets::search_popup::SearchPopup;
 use crate::widgets::status_bar::StatusBar;
 
 /// the full TUI layout, composing all widgets
@@ -57,6 +58,11 @@ impl Widget for Ui<'_> {
         MessageList::new(self.app).render(regions.messages, buf);
         InputBox::new(self.app).render(regions.input, buf);
         StatusBar::new(self.app).render(regions.status, buf);
+
+        // floating popups
+        if self.app.mode == AppMode::Search {
+            SearchPopup::new(self.app).render(area, buf);
+        }
     }
 }
 

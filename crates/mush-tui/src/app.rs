@@ -41,6 +41,8 @@ pub enum AppMode {
     ToolConfirm,
     /// scroll mode: j/k scroll, y copies message, esc exits
     Scroll,
+    /// search mode: type to filter messages, enter to jump
+    Search,
 }
 
 /// state for the session picker overlay
@@ -143,6 +145,19 @@ pub struct App {
     pub confirm_prompt: Option<String>,
     /// selected message index in scroll mode (for copy)
     pub selected_message: Option<usize>,
+    /// search state
+    pub search: SearchState,
+}
+
+/// state for the conversation search popup
+#[derive(Debug, Clone, Default)]
+pub struct SearchState {
+    /// current search query
+    pub query: String,
+    /// indices of matching messages
+    pub matches: Vec<usize>,
+    /// which match is currently selected
+    pub selected: usize,
 }
 
 /// tracks an in-progress tab completion cycle
@@ -182,6 +197,7 @@ impl App {
             has_unread: false,
             confirm_prompt: None,
             selected_message: None,
+            search: SearchState::default(),
         }
     }
 
@@ -449,6 +465,27 @@ impl App {
     pub fn scroll_to_bottom(&mut self) {
         self.scroll_offset = 0;
         self.has_unread = false;
+    }
+
+    /// update search matches based on current query
+    pub fn update_search(&mut self) {
+        let q = self.search.query.to_lowercase();
+        self.search.matches = if q.is_empty() {
+            Vec::new()
+        } else {
+            self.messages
+                .iter()
+                .enumerate()
+                .filter(|(_, m)| m.content.to_lowercase().contains(&q))
+                .map(|(i, _)| i)
+                .collect()
+        };
+        // clamp selection
+        if self.search.matches.is_empty() {
+            self.search.selected = 0;
+        } else if self.search.selected >= self.search.matches.len() {
+            self.search.selected = self.search.matches.len() - 1;
+        }
     }
 
     /// return ghost completion suffix for inline hint (dimmed text after cursor).

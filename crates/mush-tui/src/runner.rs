@@ -104,7 +104,7 @@ pub async fn run_tui(
     // populate tab completions
     let slash_cmds = [
         "/help", "/clear", "/model", "/sessions", "/branch", "/tree",
-        "/compact", "/export", "/undo", "/cost", "/quit",
+        "/compact", "/export", "/undo", "/search", "/cost", "/quit",
     ];
     app.completions = slash_cmds.iter().map(|s| s.to_string()).collect();
     // add prompt template names as slash commands
@@ -425,7 +425,11 @@ pub async fn run_tui(
                                 pending_prompt = Some(expanded);
                             }
                             AppEvent::SlashCommand { name, args } => {
-                                if name == "compact" {
+                                if name == "search" {
+                                    app.mode = app::AppMode::Search;
+                                    app.search.query = args.to_string();
+                                    app.update_search();
+                                } else if name == "compact" {
                                     handle_compact(
                                         &mut app,
                                         &mut conversation,
@@ -590,6 +594,7 @@ fn handle_slash_command(
             help.push_str("  /compact       - summarise old messages to free context\n");
             help.push_str("  /export [file] - save conversation as markdown\n");
             help.push_str("  /undo          - revert last turn\n");
+            help.push_str("  /search [text] - search conversation (or ctrl+f)\n");
             help.push_str("  /cost          - show session cost\n");
             help.push_str("  /quit          - exit mush\n");
             help.push_str("\ntip: type a prompt template name (e.g. /review file.rs) to expand it");

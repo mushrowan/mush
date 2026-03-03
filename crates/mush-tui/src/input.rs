@@ -18,6 +18,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         return handle_scroll_mode(app, key);
     }
 
+    // search mode
+    if app.mode == AppMode::Search {
+        return handle_search_mode(app, key);
+    }
+
     // global bindings (work even while streaming)
     match (key.modifiers, key.code) {
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => return Some(AppEvent::Quit),
@@ -51,6 +56,15 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     }
 
     match (key.modifiers, key.code) {
+        // search
+        (KeyModifiers::CONTROL, KeyCode::Char('f')) => {
+            app.mode = AppMode::Search;
+            app.search.query.clear();
+            app.search.matches.clear();
+            app.search.selected = 0;
+            return None;
+        }
+
         // scroll/copy mode
         (KeyModifiers::CONTROL, KeyCode::Char('s')) => {
             app.mode = AppMode::Scroll;
@@ -73,8 +87,13 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             return None;
         }
 
-        // submit
+        // submit (accept ghost text if present)
         (_, KeyCode::Enter) => {
+            // accept ghost completion before submitting
+            if let Some(suffix) = app.ghost_text().map(|s| s.to_string()) {
+                app.input.push_str(&suffix);
+                app.cursor = app.input.len();
+            }
             if app.input.trim().is_empty() {
                 return None;
             }
@@ -116,7 +135,6 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         | (KeyModifiers::ALT, KeyCode::Char('f')) => app.cursor_word_right(),
         (KeyModifiers::CONTROL, KeyCode::Char('b')) => app.cursor_left(),
         (_, KeyCode::Left) => app.cursor_left(),
-        (KeyModifiers::CONTROL, KeyCode::Char('f')) => app.cursor_right(),
         (_, KeyCode::Right) => app.cursor_right(),
         (_, KeyCode::Home) | (KeyModifiers::CONTROL, KeyCode::Char('a')) => app.cursor_home(),
         (_, KeyCode::End) | (KeyModifiers::CONTROL, KeyCode::Char('e')) => app.cursor_end(),
@@ -148,6 +166,49 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
 }
 
 /// handle keys in session picker mode
+fn handle_search_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
+    match (key.modifiers, key.code) {
+        (KeyModifiers::CONTROL, KeyCode::Char('c')) => return Some(AppEvent::Quit),
+        (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('f')) => {
+            app.mode = AppMode::Normal;
+            app.search.query.clear();
+            app.search.matches.clear();
+        }
+        (_, KeyCode::Enter) => {
+            // jump to selected match and enter scroll mode
+            if let Some(&idx) = app.search.matches.get(app.search.selected) {
+                app.mode = AppMode::Scroll;
+                app.selected_message = Some(idx);
+                app.search.query.clear();
+                app.search.matches.clear();
+            } else {
+                app.mode = AppMode::Normal;
+            }
+        }
+        (_, KeyCode::Up) | (KeyModifiers::CONTROL, KeyCode::Char('p'))
+            if !app.search.matches.is_empty() =>
+        {
+            app.search.selected = app.search.selected.saturating_sub(1);
+        }
+        (_, KeyCode::Down) | (KeyModifiers::CONTROL, KeyCode::Char('n'))
+            if !app.search.matches.is_empty()
+                && app.search.selected + 1 < app.search.matches.len() =>
+        {
+            app.search.selected += 1;
+        }
+        (_, KeyCode::Backspace) => {
+            app.search.query.pop();
+            app.update_search();
+        }
+        (_, KeyCode::Char(c)) => {
+            app.search.query.push(c);
+            app.update_search();
+        }
+        _ => {}
+    }
+    None
+}
+
 fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     match (key.modifiers, key.code) {
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => return Some(AppEvent::Quit),
