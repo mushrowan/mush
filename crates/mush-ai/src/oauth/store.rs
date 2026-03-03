@@ -14,6 +14,8 @@ pub struct OAuthCredentials {
     pub refresh_token: String,
     /// epoch ms when the access token expires
     pub expires_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
 }
 
 impl OAuthCredentials {
@@ -80,6 +82,7 @@ mod tests {
             access_token: "test".into(),
             refresh_token: "test".into(),
             expires_at: 0,
+            account_id: None,
         };
         assert!(creds.is_expired());
 
@@ -87,6 +90,7 @@ mod tests {
             access_token: "test".into(),
             refresh_token: "test".into(),
             expires_at: timestamp_ms() + 60_000,
+            account_id: None,
         };
         assert!(!creds.is_expired());
     }
@@ -100,6 +104,7 @@ mod tests {
                 access_token: "acc".into(),
                 refresh_token: "ref".into(),
                 expires_at: 12345,
+                account_id: None,
             },
         );
 
@@ -120,6 +125,7 @@ mod tests {
                 access_token: "token".into(),
                 refresh_token: "refresh".into(),
                 expires_at: 99999,
+                account_id: None,
             },
         );
 

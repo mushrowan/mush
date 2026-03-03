@@ -322,6 +322,8 @@ pub struct StreamOptions {
     pub max_tokens: Option<u64>,
     pub api_key: Option<String>,
     pub thinking: Option<ThinkingLevel>,
+    /// stable session identifier for provider-side prompt caching
+    pub session_id: Option<String>,
     /// prompt cache retention preference for providers that support it
     pub cache_retention: Option<CacheRetention>,
 }

@@ -5,6 +5,7 @@
 //! persisted to ~/.config/mush/oauth.json.
 
 pub mod anthropic;
+pub mod openai_codex;
 mod pkce;
 mod store;
 
@@ -78,7 +79,10 @@ pub trait OAuthProvider: Send + Sync {
 // -- built-in provider registry --
 
 fn builtin_providers() -> Vec<Box<dyn OAuthProvider>> {
-    vec![Box::new(anthropic::AnthropicOAuth)]
+    vec![
+        Box::new(anthropic::AnthropicOAuth),
+        Box::new(openai_codex::OpenaiCodexOAuth),
+    ]
 }
 
 /// get a provider by id
@@ -88,7 +92,10 @@ pub fn get_provider(id: &str) -> Option<Box<dyn OAuthProvider>> {
 
 /// list all available provider ids and names
 pub fn list_providers() -> Vec<(&'static str, &'static str)> {
-    vec![("anthropic", "Anthropic (Claude Pro/Max)")]
+    vec![
+        ("anthropic", "Anthropic (Claude Pro/Max)"),
+        ("openai-codex", "ChatGPT Plus/Pro (Codex subscription)"),
+    ]
 }
 
 fn available_provider_names() -> Vec<String> {
@@ -126,4 +133,26 @@ pub async fn get_oauth_token(provider_id: &str) -> Result<Option<String>, OAuthE
 /// convenience: get anthropic oauth token
 pub async fn get_anthropic_oauth_token() -> Result<Option<String>, OAuthError> {
     get_oauth_token("anthropic").await
+}
+
+/// convenience: get openai codex oauth token
+pub async fn get_openai_codex_oauth_token() -> Result<Option<String>, OAuthError> {
+    get_oauth_token("openai-codex").await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_providers_includes_openai_codex() {
+        let providers = list_providers();
+        assert!(providers.iter().any(|(id, _)| *id == "openai-codex"));
+    }
+
+    #[test]
+    fn get_provider_resolves_openai_codex() {
+        let provider = get_provider("openai-codex");
+        assert!(provider.is_some());
+    }
 }
