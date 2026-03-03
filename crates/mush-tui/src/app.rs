@@ -39,6 +39,8 @@ pub enum AppMode {
     SessionPicker,
     /// waiting for user to confirm a tool call (y/n)
     ToolConfirm,
+    /// scroll mode: j/k scroll, y copies message, esc exits
+    Scroll,
 }
 
 /// state for the session picker overlay
@@ -139,6 +141,8 @@ pub struct App {
     pub has_unread: bool,
     /// tool confirmation prompt (shown when mode == ToolConfirm)
     pub confirm_prompt: Option<String>,
+    /// selected message index in scroll mode (for copy)
+    pub selected_message: Option<usize>,
 }
 
 /// tracks an in-progress tab completion cycle
@@ -179,6 +183,7 @@ impl App {
             tab_state: None,
             has_unread: false,
             confirm_prompt: None,
+            selected_message: None,
         }
     }
 
