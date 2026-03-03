@@ -171,12 +171,11 @@ async fn stream_pipe(
             Ok(_) => {
                 output.push_str(&line);
                 // throttle sink to avoid flooding the TUI (~10 updates/sec)
-                if let Some(ref sink) = sink {
-                    if last_emit.elapsed() >= std::time::Duration::from_millis(100) {
+                if let Some(ref sink) = sink
+                    && last_emit.elapsed() >= std::time::Duration::from_millis(100) {
                         sink(line.trim_end());
                         last_emit = std::time::Instant::now();
                     }
-                }
             }
             Err(_) => break,
         }
@@ -206,12 +205,11 @@ async fn stream_pipe_stderr(
             Ok(0) => break,
             Ok(_) => {
                 output.push_str(&line);
-                if let Some(ref sink) = sink {
-                    if last_emit.elapsed() >= std::time::Duration::from_millis(100) {
+                if let Some(ref sink) = sink
+                    && last_emit.elapsed() >= std::time::Duration::from_millis(100) {
                         sink(line.trim_end());
                         last_emit = std::time::Instant::now();
                     }
-                }
             }
             Err(_) => break,
         }

@@ -489,11 +489,10 @@ fn fix_orphaned_tool_calls(messages: Vec<RequestMessage>) -> Vec<RequestMessage>
             // collect tool_use IDs from this assistant message
             if let serde_json::Value::Array(ref blocks) = msg.content {
                 for block in blocks {
-                    if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
-                        if let Some(id) = block.get("id").and_then(|i| i.as_str()) {
+                    if block.get("type").and_then(|t| t.as_str()) == Some("tool_use")
+                        && let Some(id) = block.get("id").and_then(|i| i.as_str()) {
                             pending_tool_ids.push(id.to_string());
                         }
-                    }
                 }
             }
             result.push(msg);
@@ -501,11 +500,10 @@ fn fix_orphaned_tool_calls(messages: Vec<RequestMessage>) -> Vec<RequestMessage>
             // check if this is a tool_result
             if let serde_json::Value::Array(ref blocks) = msg.content {
                 for block in blocks {
-                    if block.get("type").and_then(|t| t.as_str()) == Some("tool_result") {
-                        if let Some(id) = block.get("tool_use_id").and_then(|i| i.as_str()) {
+                    if block.get("type").and_then(|t| t.as_str()) == Some("tool_result")
+                        && let Some(id) = block.get("tool_use_id").and_then(|i| i.as_str()) {
                             seen_result_ids.insert(id.to_string());
                         }
-                    }
                 }
             }
 

@@ -107,17 +107,17 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         }
         (_, KeyCode::Delete) => app.input_delete(),
 
-        // cursor movement
-        (KeyModifiers::CONTROL, KeyCode::Char('b')) => app.cursor_left(),
-        (_, KeyCode::Left) => app.cursor_left(),
-        (KeyModifiers::CONTROL, KeyCode::Char('f')) => app.cursor_right(),
-        (_, KeyCode::Right) => app.cursor_right(),
+        // cursor movement (specific modifiers before wildcards)
         (KeyModifiers::ALT, KeyCode::Left)
         | (KeyModifiers::CONTROL, KeyCode::Left)
         | (KeyModifiers::ALT, KeyCode::Char('b')) => app.cursor_word_left(),
         (KeyModifiers::ALT, KeyCode::Right)
         | (KeyModifiers::CONTROL, KeyCode::Right)
         | (KeyModifiers::ALT, KeyCode::Char('f')) => app.cursor_word_right(),
+        (KeyModifiers::CONTROL, KeyCode::Char('b')) => app.cursor_left(),
+        (_, KeyCode::Left) => app.cursor_left(),
+        (KeyModifiers::CONTROL, KeyCode::Char('f')) => app.cursor_right(),
+        (_, KeyCode::Right) => app.cursor_right(),
         (_, KeyCode::Home) | (KeyModifiers::CONTROL, KeyCode::Char('a')) => app.cursor_home(),
         (_, KeyCode::End) | (KeyModifiers::CONTROL, KeyCode::Char('e')) => app.cursor_end(),
 
@@ -161,11 +161,10 @@ fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
                 app.has_unread = false;
             }
             // move selection down
-            if let Some(sel) = app.selected_message {
-                if sel + 1 < app.messages.len() {
+            if let Some(sel) = app.selected_message
+                && sel + 1 < app.messages.len() {
                     app.selected_message = Some(sel + 1);
                 }
-            }
         }
         (_, KeyCode::Char('k')) | (_, KeyCode::Up) => {
             app.scroll_offset = app.scroll_offset.saturating_add(3);
@@ -187,8 +186,8 @@ fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         }
         (_, KeyCode::Char('y')) => {
             // copy selected message content to clipboard
-            if let Some(sel) = app.selected_message {
-                if let Some(msg) = app.messages.get(sel) {
+            if let Some(sel) = app.selected_message
+                && let Some(msg) = app.messages.get(sel) {
                     let text = &msg.content;
                     if copy_to_clipboard(text) {
                         app.status = Some("copied to clipboard".into());
@@ -196,7 +195,6 @@ fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
                         app.status = Some("clipboard copy failed".into());
                     }
                 }
-            }
         }
         _ => {}
     }
@@ -223,14 +221,11 @@ fn copy_to_clipboard(text: &str) -> bool {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-        {
-            if let Some(mut stdin) = child.stdin.take() {
-                if stdin.write_all(text.as_bytes()).is_ok() {
+            && let Some(mut stdin) = child.stdin.take()
+                && stdin.write_all(text.as_bytes()).is_ok() {
                     drop(stdin);
                     return child.wait().map(|s| s.success()).unwrap_or(false);
                 }
-            }
-        }
     }
     false
 }

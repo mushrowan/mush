@@ -317,11 +317,10 @@ pub async fn run_tui(
                         }
 
                         // poll live tool output from bash sink
-                        if let Some(ref live) = tui_config.tool_output_live {
-                            if let Ok(guard) = live.lock() {
+                        if let Some(ref live) = tui_config.tool_output_live
+                            && let Ok(guard) = live.lock() {
                                 app.tool_output_live = guard.clone();
                             }
-                        }
 
                         // check for terminal input during streaming
                         if event::poll(std::time::Duration::ZERO)? {
@@ -1082,8 +1081,6 @@ fn save_thinking_pref(
 }
 
 /// handle mouse scroll events
-
-
 fn handle_mouse(app: &mut App, mouse: MouseEvent) {
     const SCROLL_LINES: u16 = 3;
     match mouse.kind {

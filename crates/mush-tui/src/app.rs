@@ -148,8 +148,6 @@ pub struct App {
 /// tracks an in-progress tab completion cycle
 #[derive(Debug, Clone)]
 struct TabState {
-    /// the text prefix being completed
-    prefix: String,
     /// matching candidates
     matches: Vec<String>,
     /// which match we're showing (cycles on repeated tab)
@@ -190,7 +188,7 @@ impl App {
     /// advance the spinner state (throttled to ~8fps from ~60fps frame rate)
     pub fn tick(&mut self) {
         self.tick_count = self.tick_count.wrapping_add(1);
-        if self.tick_count % 8 == 0 {
+        if self.tick_count.is_multiple_of(8) {
             self.throbber_state.calc_next();
         }
     }
@@ -440,7 +438,6 @@ impl App {
 
         let first = matches[0].clone();
         self.tab_state = Some(TabState {
-            prefix: input.to_string(),
             matches,
             index: 0,
         });
