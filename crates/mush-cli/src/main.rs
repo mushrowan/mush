@@ -934,6 +934,11 @@ fn status_cmd() -> Result<()> {
     println!("  cache retention: {cache_retention}");
     println!("  debug cache: {}", cfg.debug_cache.unwrap_or(false));
 
+    #[cfg(feature = "embeddings")]
+    println!("  embeddings: enabled");
+    #[cfg(not(feature = "embeddings"))]
+    println!("  embeddings: disabled");
+
     // auth status
     println!("\n\x1b[1mauth\x1b[0m\n");
 

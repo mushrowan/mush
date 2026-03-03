@@ -61,6 +61,31 @@ impl Widget for StatusBar<'_> {
             ),
         ];
 
+        if self.app.total_input_tokens > 0 {
+            spans.push(Span::styled(
+                format!(" | ↑{}", format_tokens(self.app.total_input_tokens)),
+                dim,
+            ));
+        }
+        if self.app.total_output_tokens > 0 {
+            spans.push(Span::styled(
+                format!(" ↓{}", format_tokens(self.app.total_output_tokens)),
+                dim,
+            ));
+        }
+        if self.app.total_cache_read_tokens > 0 {
+            spans.push(Span::styled(
+                format!(" R{}", format_tokens(self.app.total_cache_read_tokens)),
+                dim,
+            ));
+        }
+        if self.app.total_cache_write_tokens > 0 {
+            spans.push(Span::styled(
+                format!(" W{}", format_tokens(self.app.total_cache_write_tokens)),
+                dim,
+            ));
+        }
+
         if self.app.context_tokens > 0 {
             let ctx = format_tokens(self.app.context_tokens);
             let window = format_tokens(self.app.context_window);
@@ -144,9 +169,17 @@ mod tests {
     fn status_bar_shows_cost_and_context() {
         let mut app = App::new("test-model".into(), 200_000);
         app.total_cost = 0.0123;
+        app.total_input_tokens = 45_000;
+        app.total_output_tokens = 12_000;
+        app.total_cache_read_tokens = 8_000;
+        app.total_cache_write_tokens = 2_000;
         app.context_tokens = 45_000;
-        let buf = render_status(&app, 80, 1);
+        let buf = render_status(&app, 120, 1);
         let content = buffer_to_string(&buf);
+        assert!(content.contains("↑45k"));
+        assert!(content.contains("↓12k"));
+        assert!(content.contains("R8k"));
+        assert!(content.contains("W2k"));
         assert!(content.contains("45k/200k"));
         assert!(content.contains("$0.0123"));
     }
