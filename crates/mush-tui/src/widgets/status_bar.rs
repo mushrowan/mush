@@ -75,7 +75,9 @@ impl Widget for StatusBar<'_> {
         // right-align hint
         let left_len: usize = spans.iter().map(|s| s.content.len()).sum();
         let confirm_hint;
-        let hint = if self.app.mode == crate::app::AppMode::ToolConfirm {
+        let hint = if self.app.mode == crate::app::AppMode::Scroll {
+            "j/k scroll | g/G top/bottom | y copy | esc exit"
+        } else if self.app.mode == crate::app::AppMode::ToolConfirm {
             confirm_hint = if let Some(ref prompt) = self.app.confirm_prompt {
                 format!("run {prompt}? (y/n)")
             } else {
@@ -85,7 +87,7 @@ impl Widget for StatusBar<'_> {
         } else if self.app.is_streaming {
             "esc abort | ctrl+c quit"
         } else {
-            "enter send | ctrl+t thinking | ctrl+o expand | ctrl+c quit"
+            "enter send | ctrl+s scroll | ctrl+t thinking | ctrl+c quit"
         };
         let hint_style = if self.app.mode == crate::app::AppMode::ToolConfirm {
             Style::default().fg(Color::Yellow)

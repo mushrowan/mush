@@ -25,8 +25,10 @@ impl Widget for MessageList<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let mut lines: Vec<Line<'_>> = Vec::new();
 
-        for msg in &self.app.messages {
-            render_message(msg, &mut lines, &self.app.tool_output_live);
+        let in_scroll_mode = self.app.mode == crate::app::AppMode::Scroll;
+        for (i, msg) in self.app.messages.iter().enumerate() {
+            let selected = in_scroll_mode && self.app.selected_message == Some(i);
+            render_message(msg, &mut lines, &self.app.tool_output_live, selected);
             lines.push(Line::raw(""));
         }
 
@@ -144,6 +146,7 @@ fn render_message(
     msg: &DisplayMessage,
     lines: &mut Vec<Line<'_>>,
     live_tool_output: &Option<String>,
+    selected: bool,
 ) {
     let (label, label_style) = match msg.role {
         MessageRole::User => (
@@ -168,7 +171,18 @@ fn render_message(
         MessageRole::System => ("system".to_string(), Style::default().fg(Color::Yellow)),
     };
 
-    lines.push(Line::from(vec![Span::styled(label, label_style)]));
+    let mut label_spans = Vec::new();
+    if selected {
+        label_spans.push(Span::styled("▌ ", Style::default().fg(Color::Cyan)));
+    }
+    label_spans.push(Span::styled(label, label_style));
+    if selected {
+        label_spans.push(Span::styled(
+            " (y to copy)",
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    lines.push(Line::from(label_spans));
 
     // thinking block
     if let Some(ref thinking) = msg.thinking {

@@ -13,6 +13,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         return handle_picker_key(app, key);
     }
 
+    // scroll mode: j/k scroll, y copies selected message, esc exits
+    if app.mode == AppMode::Scroll {
+        return handle_scroll_mode(app, key);
+    }
+
     // global bindings (work even while streaming)
     match (key.modifiers, key.code) {
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => return Some(AppEvent::Quit),
@@ -46,6 +51,16 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     }
 
     match (key.modifiers, key.code) {
+        // scroll/copy mode
+        (KeyModifiers::CONTROL, KeyCode::Char('s')) => {
+            app.mode = AppMode::Scroll;
+            // select the last message by default
+            if !app.messages.is_empty() {
+                app.selected_message = Some(app.messages.len() - 1);
+            }
+            return None;
+        }
+
         // tab completion
         (_, KeyCode::Tab) | (KeyModifiers::SHIFT, KeyCode::BackTab) => {
             app.tab_complete();
@@ -133,6 +148,93 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
 }
 
 /// handle keys in session picker mode
+fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
+    match (key.modifiers, key.code) {
+        (KeyModifiers::CONTROL, KeyCode::Char('c')) => return Some(AppEvent::Quit),
+        (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('s')) => {
+            app.mode = AppMode::Normal;
+            app.selected_message = None;
+        }
+        (_, KeyCode::Char('j')) | (_, KeyCode::Down) => {
+            app.scroll_offset = app.scroll_offset.saturating_sub(3);
+            if app.scroll_offset == 0 {
+                app.has_unread = false;
+            }
+            // move selection down
+            if let Some(sel) = app.selected_message {
+                if sel + 1 < app.messages.len() {
+                    app.selected_message = Some(sel + 1);
+                }
+            }
+        }
+        (_, KeyCode::Char('k')) | (_, KeyCode::Up) => {
+            app.scroll_offset = app.scroll_offset.saturating_add(3);
+            // move selection up
+            if let Some(sel) = app.selected_message {
+                app.selected_message = Some(sel.saturating_sub(1));
+            }
+        }
+        (_, KeyCode::Char('G')) => {
+            app.scroll_to_bottom();
+            if !app.messages.is_empty() {
+                app.selected_message = Some(app.messages.len() - 1);
+            }
+        }
+        (_, KeyCode::Char('g')) => {
+            // scroll to top
+            app.scroll_offset = u16::MAX;
+            app.selected_message = Some(0);
+        }
+        (_, KeyCode::Char('y')) => {
+            // copy selected message content to clipboard
+            if let Some(sel) = app.selected_message {
+                if let Some(msg) = app.messages.get(sel) {
+                    let text = &msg.content;
+                    if copy_to_clipboard(text) {
+                        app.status = Some("copied to clipboard".into());
+                    } else {
+                        app.status = Some("clipboard copy failed".into());
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    None
+}
+
+/// copy text to system clipboard using platform tools
+fn copy_to_clipboard(text: &str) -> bool {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    // try each clipboard tool in order
+    let tools: &[&[&str]] = &[
+        &["pbcopy"],             // macOS
+        &["wl-copy"],            // wayland
+        &["xclip", "-selection", "clipboard"], // x11
+        &["xsel", "--clipboard", "--input"],   // x11 alt
+    ];
+
+    for tool in tools {
+        if let Ok(mut child) = Command::new(tool[0])
+            .args(&tool[1..])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            if let Some(mut stdin) = child.stdin.take() {
+                if stdin.write_all(text.as_bytes()).is_ok() {
+                    drop(stdin);
+                    return child.wait().map(|s| s.success()).unwrap_or(false);
+                }
+            }
+        }
+    }
+    false
+}
+
 fn handle_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     match (key.modifiers, key.code) {
         (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
