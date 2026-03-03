@@ -683,8 +683,20 @@ fn build_prompt_enricher(cwd: &std::path::Path) -> Option<mush_tui::PromptEnrich
     use std::sync::Arc;
 
     let project = loader::discover_project_context(cwd);
+    if project.skills.is_empty() {
+        eprintln!("\x1b[2mno skills discovered, enricher disabled\x1b[0m");
+        return None;
+    }
+    eprintln!(
+        "\x1b[2mfound {} skills, building index...\x1b[0m",
+        project.skills.len()
+    );
     let docs = context::build_skill_documents(&project.skills);
     if docs.is_empty() {
+        eprintln!(
+            "\x1b[33mwarning: {} skills found but none readable, enricher disabled\x1b[0m",
+            project.skills.len()
+        );
         return None;
     }
 
