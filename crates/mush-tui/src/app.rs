@@ -96,6 +96,15 @@ pub enum ToolCallStatus {
     Error,
 }
 
+/// state for a currently executing tool (shown in the tool panels)
+#[derive(Debug, Clone)]
+pub struct ActiveToolState {
+    pub tool_call_id: String,
+    pub name: String,
+    pub summary: String,
+    pub live_output: Option<String>,
+}
+
 /// the main app state
 pub struct App {
     /// conversation messages for display
@@ -116,15 +125,19 @@ pub struct App {
     pub model_id: String,
     /// total cost so far
     pub total_cost: f64,
-    /// total tokens used
+    /// total tokens used (cumulative across all API calls)
     pub total_tokens: u64,
+    /// last call's input tokens (actual context size)
+    pub context_tokens: u64,
+    /// model's context window size
+    pub context_window: u64,
     /// whether we should quit
     pub should_quit: bool,
     /// status message (bottom bar)
     pub status: Option<String>,
-    /// current tool being executed
-    pub active_tool: Option<String>,
-    /// live output from the currently running tool (last line)
+    /// currently executing tools (for side-by-side panel display)
+    pub active_tools: Vec<ActiveToolState>,
+    /// latest live output line from running tools
     pub tool_output_live: Option<String>,
     /// tool args streaming in (partial JSON from ToolCallDelta)
     pub streaming_tool_args: String,
@@ -146,6 +159,8 @@ pub struct App {
     pub has_unread: bool,
     /// tool confirmation prompt (shown when mode == ToolConfirm)
     pub confirm_prompt: Option<String>,
+    /// whether to show prompt injection previews in the chat
+    pub show_prompt_injection: bool,
     /// selected message index in scroll mode (for copy)
     pub selected_message: Option<usize>,
     /// search state
@@ -183,7 +198,7 @@ struct TabState {
 }
 
 impl App {
-    pub fn new(model_id: String) -> Self {
+    pub fn new(model_id: String, context_window: u64) -> Self {
         Self {
             messages: Vec::new(),
             streaming_text: String::new(),
@@ -195,9 +210,11 @@ impl App {
             model_id,
             total_cost: 0.0,
             total_tokens: 0,
+            context_tokens: 0,
+            context_window,
             should_quit: false,
             status: None,
-            active_tool: None,
+            active_tools: Vec::new(),
             tool_output_live: None,
             streaming_tool_args: String::new(),
             throbber_state: ThrobberState::default(),
@@ -209,6 +226,7 @@ impl App {
             tab_state: None,
             has_unread: false,
             confirm_prompt: None,
+            show_prompt_injection: false,
             selected_message: None,
             search: SearchState::default(),
             image_render_areas: RefCell::new(Vec::new()),
@@ -262,9 +280,13 @@ impl App {
     }
 
     /// mark a tool as being executed
-    pub fn start_tool(&mut self, name: &str, summary: &str) {
-        self.active_tool = Some(name.to_string());
-        self.tool_output_live = None;
+    pub fn start_tool(&mut self, tool_call_id: &str, name: &str, summary: &str) {
+        self.active_tools.push(ActiveToolState {
+            tool_call_id: tool_call_id.to_string(),
+            name: name.to_string(),
+            summary: summary.to_string(),
+            live_output: None,
+        });
         self.streaming_tool_args.clear();
         // add to the last message's tool calls if we have one in progress
         if let Some(last) = self.messages.last_mut() {
@@ -278,15 +300,16 @@ impl App {
         }
     }
 
-    /// mark the current tool as done, with optional output preview
+    /// mark a tool as done, with optional output preview
     pub fn end_tool(
         &mut self,
+        tool_call_id: &str,
         name: &str,
         is_error: bool,
         output: Option<&str>,
         image_data: Option<Vec<u8>>,
     ) {
-        self.active_tool = None;
+        self.active_tools.retain(|t| t.tool_call_id != tool_call_id);
         if let Some(last) = self.messages.last_mut()
             && let Some(tc) = last.tool_calls.iter_mut().rfind(|t| t.name == name)
         {
@@ -297,6 +320,17 @@ impl App {
             };
             tc.output_preview = output.map(truncate_output);
             tc.image_data = image_data;
+        }
+    }
+
+    /// update live output for an active tool
+    pub fn push_tool_output(&mut self, tool_call_id: &str, output: &str) {
+        if let Some(tool) = self
+            .active_tools
+            .iter_mut()
+            .find(|t| t.tool_call_id == tool_call_id)
+        {
+            tool.live_output = Some(output.to_string());
         }
     }
 
@@ -326,6 +360,7 @@ impl App {
         }
         if let Some(ref u) = usage {
             self.total_tokens += u.total_tokens();
+            self.context_tokens = u.total_input_tokens();
         }
         if self.scroll_offset > 0 {
             self.has_unread = true;
@@ -467,10 +502,7 @@ impl App {
         }
 
         let first = matches[0].clone();
-        self.tab_state = Some(TabState {
-            matches,
-            index: 0,
-        });
+        self.tab_state = Some(TabState { matches, index: 0 });
         self.input = first;
         self.cursor = self.input.len();
     }
@@ -539,6 +571,7 @@ impl App {
         self.scroll_offset = 0;
         self.total_cost = 0.0;
         self.total_tokens = 0;
+        self.context_tokens = 0;
     }
 
     /// push a system message to the display
@@ -701,7 +734,7 @@ mod tests {
 
     #[test]
     fn new_app_is_empty() {
-        let app = App::new("test-model".into());
+        let app = App::new("test-model".into(), 200_000);
         assert!(app.messages.is_empty());
         assert!(!app.is_streaming);
         assert!(app.input.is_empty());
@@ -710,7 +743,7 @@ mod tests {
 
     #[test]
     fn push_user_message() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         app.push_user_message("hello".into());
         assert_eq!(app.messages.len(), 1);
         assert_eq!(app.messages[0].role, MessageRole::User);
@@ -719,7 +752,7 @@ mod tests {
 
     #[test]
     fn streaming_lifecycle() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         app.start_streaming();
         assert!(app.is_streaming);
 
@@ -736,7 +769,7 @@ mod tests {
 
     #[test]
     fn streaming_with_thinking() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         app.start_streaming();
         app.push_thinking_delta("let me think...");
         app.push_text_delta("answer");
@@ -748,7 +781,7 @@ mod tests {
 
     #[test]
     fn tool_lifecycle() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         app.push_user_message("do something".into());
         // simulate assistant message already pushed by finish_streaming
         app.messages.push(DisplayMessage {
@@ -762,16 +795,17 @@ mod tests {
             model_id: None,
         });
 
-        app.start_tool("bash", "ls -la");
-        assert_eq!(app.active_tool.as_deref(), Some("bash"));
+        app.start_tool("tc_1", "bash", "ls -la");
+        assert_eq!(app.active_tools.len(), 1);
+        assert_eq!(app.active_tools[0].name, "bash");
         assert_eq!(app.messages.last().unwrap().tool_calls.len(), 1);
         assert_eq!(
             app.messages.last().unwrap().tool_calls[0].status,
             ToolCallStatus::Running
         );
 
-        app.end_tool("bash", false, Some("file1.txt\nfile2.txt"), None);
-        assert!(app.active_tool.is_none());
+        app.end_tool("tc_1", "bash", false, Some("file1.txt\nfile2.txt"), None);
+        assert!(app.active_tools.is_empty());
         assert_eq!(
             app.messages.last().unwrap().tool_calls[0].status,
             ToolCallStatus::Done
@@ -780,7 +814,7 @@ mod tests {
 
     #[test]
     fn input_editing() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         app.input_char('h');
         app.input_char('i');
         assert_eq!(app.input, "hi");
@@ -802,7 +836,7 @@ mod tests {
 
     #[test]
     fn input_delete() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         app.input = "abc".into();
         app.cursor = 1;
         app.input_delete();
@@ -811,7 +845,7 @@ mod tests {
 
     #[test]
     fn take_input_resets() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         app.input = "hello".into();
         app.cursor = 3;
         let text = app.take_input();
@@ -822,7 +856,7 @@ mod tests {
 
     #[test]
     fn cost_accumulates() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         app.start_streaming();
         app.push_text_delta("a");
         app.finish_streaming(
@@ -880,7 +914,7 @@ mod tests {
 
     #[test]
     fn tool_output_stored() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         app.messages.push(DisplayMessage {
             role: MessageRole::Assistant,
             content: String::new(),
@@ -891,8 +925,8 @@ mod tests {
             cost: None,
             model_id: None,
         });
-        app.start_tool("read", "src/main.rs");
-        app.end_tool("read", false, Some("fn main() {}\n"), None);
+        app.start_tool("tc_1", "read", "src/main.rs");
+        app.end_tool("tc_1", "read", false, Some("fn main() {}\n"), None);
         let tc = &app.messages.last().unwrap().tool_calls[0];
         assert!(tc.output_preview.is_some());
         assert!(tc.output_preview.as_ref().unwrap().contains("fn main()"));
@@ -900,7 +934,7 @@ mod tests {
 
     #[test]
     fn toggle_thinking() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         app.start_streaming();
         app.push_thinking_delta("deep thoughts");
         app.push_text_delta("answer");
@@ -918,7 +952,7 @@ mod tests {
 
     #[test]
     fn toggle_thinking_targets_last_assistant() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
 
         // first assistant with thinking
         app.start_streaming();
@@ -940,7 +974,7 @@ mod tests {
 
     #[test]
     fn multi_line_input() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         app.input_char('a');
         app.input_char('\n');
         app.input_char('b');
@@ -950,7 +984,7 @@ mod tests {
 
     #[test]
     fn session_picker_open_close() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         assert_eq!(app.mode, AppMode::Normal);
 
         let sessions = vec![SessionMeta {
@@ -995,7 +1029,7 @@ mod tests {
             },
         ];
 
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         app.open_session_picker(sessions);
 
         let picker = app.session_picker.as_mut().unwrap();
@@ -1007,13 +1041,13 @@ mod tests {
 
     #[test]
     fn streaming_tool_args_accumulate() {
-        let mut app = App::new("test".into());
+        let mut app = App::new("test".into(), 200_000);
         app.push_tool_args_delta("{\"path\":");
         app.push_tool_args_delta("\"src/");
         assert_eq!(app.streaming_tool_args, "{\"path\":\"src/");
 
         // start_tool clears the buffer
-        app.start_tool("read", "src/main.rs");
+        app.start_tool("tc_1", "read", "src/main.rs");
         assert!(app.streaming_tool_args.is_empty());
     }
 }

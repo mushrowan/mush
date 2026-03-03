@@ -15,6 +15,7 @@ use crate::types::*;
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const API_VERSION: &str = "2023-06-01";
+const ANTHROPIC_DIRECT_API: &str = "api.anthropic.com";
 
 // stealth mode: mimic claude code's identity for oauth
 const CLAUDE_CODE_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
@@ -182,6 +183,8 @@ struct RequestBody {
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<ThinkingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<CacheControl>,
 }
 
 #[derive(Serialize)]
@@ -189,6 +192,16 @@ struct SystemBlock {
     #[serde(rename = "type")]
     block_type: String,
     text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<CacheControl>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CacheControl {
+    #[serde(rename = "type")]
+    control_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ttl: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -227,17 +240,20 @@ fn build_request_body(
     is_oauth: bool,
 ) -> RequestBody {
     let max_tokens = options.max_tokens.unwrap_or(model.max_output_tokens);
+    let cache_control = anthropic_cache_control(model.base_url.as_str(), options.cache_retention);
 
     // oauth requires claude code identity as first system block
     let system = if is_oauth {
         let mut blocks = vec![SystemBlock {
             block_type: "text".into(),
             text: CLAUDE_CODE_IDENTITY.into(),
+            cache_control: cache_control.clone(),
         }];
         if let Some(prompt) = system_prompt {
             blocks.push(SystemBlock {
                 block_type: "text".into(),
                 text: prompt.clone(),
+                cache_control: cache_control.clone(),
             });
         }
         Some(blocks)
@@ -246,11 +262,12 @@ fn build_request_body(
             vec![SystemBlock {
                 block_type: "text".into(),
                 text: prompt.clone(),
+                cache_control: cache_control.clone(),
             }]
         })
     };
 
-    let converted_messages = convert_messages(messages, is_oauth);
+    let converted_messages = convert_messages(messages, is_oauth, cache_control.clone());
 
     let converted_tools = if tools.is_empty() {
         None
@@ -312,7 +329,30 @@ fn build_request_body(
         tools: converted_tools,
         temperature,
         thinking,
+        cache_control,
     }
+}
+
+fn anthropic_cache_control(
+    base_url: &str,
+    retention: Option<CacheRetention>,
+) -> Option<CacheControl> {
+    let retention = retention.unwrap_or(CacheRetention::Short);
+    if retention == CacheRetention::None {
+        return None;
+    }
+
+    let allow_ttl = base_url.contains(ANTHROPIC_DIRECT_API);
+    let ttl = if retention == CacheRetention::Long && allow_ttl {
+        Some("1h".to_string())
+    } else {
+        None
+    };
+
+    Some(CacheControl {
+        control_type: "ephemeral".into(),
+        ttl,
+    })
 }
 
 /// opus 4.6 and sonnet 4.6 use adaptive thinking instead of budget tokens
@@ -335,9 +375,15 @@ fn thinking_budget(level: ThinkingLevel, max_tokens: u64) -> u64 {
     }
 }
 
-fn convert_messages(messages: &[Message], is_oauth: bool) -> Vec<RequestMessage> {
+fn convert_messages(
+    messages: &[Message],
+    is_oauth: bool,
+    cache_control: Option<CacheControl>,
+) -> Vec<RequestMessage> {
     let converted = convert_messages_raw(messages, is_oauth);
-    fix_orphaned_tool_calls(converted)
+    let mut fixed = fix_orphaned_tool_calls(converted);
+    apply_cache_control_to_last_user_message(&mut fixed, cache_control);
+    fixed
 }
 
 /// raw conversion without orphan fixing
@@ -455,14 +501,15 @@ fn convert_messages_raw(messages: &[Message], is_oauth: bool) -> Vec<RequestMess
                     })
                     .collect();
 
+                let content = serde_json::json!([{
+                    "type": "tool_result",
+                    "tool_use_id": tr.tool_call_id.as_str(),
+                    "content": content_blocks,
+                    "is_error": tr.is_error,
+                }]);
                 result.push(RequestMessage {
                     role: "user".into(),
-                    content: serde_json::json!([{
-                        "type": "tool_result",
-                        "tool_use_id": tr.tool_call_id.as_str(),
-                        "content": content_blocks,
-                        "is_error": tr.is_error,
-                    }]),
+                    content,
                 });
             }
         }
@@ -490,9 +537,10 @@ fn fix_orphaned_tool_calls(messages: Vec<RequestMessage>) -> Vec<RequestMessage>
             if let serde_json::Value::Array(ref blocks) = msg.content {
                 for block in blocks {
                     if block.get("type").and_then(|t| t.as_str()) == Some("tool_use")
-                        && let Some(id) = block.get("id").and_then(|i| i.as_str()) {
-                            pending_tool_ids.push(id.to_string());
-                        }
+                        && let Some(id) = block.get("id").and_then(|i| i.as_str())
+                    {
+                        pending_tool_ids.push(id.to_string());
+                    }
                 }
             }
             result.push(msg);
@@ -501,9 +549,10 @@ fn fix_orphaned_tool_calls(messages: Vec<RequestMessage>) -> Vec<RequestMessage>
             if let serde_json::Value::Array(ref blocks) = msg.content {
                 for block in blocks {
                     if block.get("type").and_then(|t| t.as_str()) == Some("tool_result")
-                        && let Some(id) = block.get("tool_use_id").and_then(|i| i.as_str()) {
-                            seen_result_ids.insert(id.to_string());
-                        }
+                        && let Some(id) = block.get("tool_use_id").and_then(|i| i.as_str())
+                    {
+                        seen_result_ids.insert(id.to_string());
+                    }
                 }
             }
 
@@ -534,6 +583,41 @@ fn fix_orphaned_tool_calls(messages: Vec<RequestMessage>) -> Vec<RequestMessage>
     inject_synthetic_results(&mut result, &pending_tool_ids, &seen_result_ids);
 
     result
+}
+
+/// apply cache control to the last cacheable block in a user message.
+/// this mirrors anthropic automatic caching semantics for multi-turn chat.
+fn apply_cache_control_to_last_user_message(
+    messages: &mut [RequestMessage],
+    cache_control: Option<CacheControl>,
+) {
+    let Some(cache) = cache_control else {
+        return;
+    };
+
+    let Some(last_user) = messages.iter_mut().rfind(|m| m.role == "user") else {
+        return;
+    };
+
+    match &mut last_user.content {
+        serde_json::Value::String(text) => {
+            let text = std::mem::take(text);
+            last_user.content = serde_json::json!([{
+                "type": "text",
+                "text": text,
+                "cache_control": cache,
+            }]);
+        }
+        serde_json::Value::Array(blocks) => {
+            if let Some(last) = blocks.last_mut()
+                && let Some(obj) = last.as_object_mut()
+                && let Ok(cache_json) = serde_json::to_value(cache)
+            {
+                obj.insert("cache_control".into(), cache_json);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn inject_synthetic_results(
@@ -1021,7 +1105,7 @@ mod tests {
             timestamp_ms: Timestamp(0),
         })];
 
-        let converted = convert_messages(&messages, false);
+        let converted = convert_messages(&messages, false, None);
         assert_eq!(converted.len(), 1);
         assert_eq!(converted[0].role, "user");
         assert_eq!(converted[0].content, serde_json::json!("hello"));
@@ -1039,7 +1123,7 @@ mod tests {
             timestamp_ms: Timestamp(0),
         })];
 
-        let converted = convert_messages(&messages, false);
+        let converted = convert_messages(&messages, false, None);
         assert_eq!(converted.len(), 1);
         assert_eq!(converted[0].role, "user");
 
@@ -1070,7 +1154,7 @@ mod tests {
             timestamp_ms: Timestamp(0),
         })];
 
-        let converted = convert_messages(&messages, false);
+        let converted = convert_messages(&messages, false, None);
         // assistant + synthetic tool_result for the orphaned tool_use
         assert_eq!(converted.len(), 2);
         assert_eq!(converted[0].role, "assistant");
@@ -1116,7 +1200,7 @@ mod tests {
             }),
         ];
 
-        let converted = convert_messages(&messages, false);
+        let converted = convert_messages(&messages, false, None);
         // assistant + real tool_result, no synthetic
         assert_eq!(converted.len(), 2);
         assert_eq!(converted[0].role, "assistant");
@@ -1150,7 +1234,7 @@ mod tests {
             }),
         ];
 
-        let converted = convert_messages(&messages, false);
+        let converted = convert_messages(&messages, false, None);
         // assistant + synthetic tool_result + user
         assert_eq!(converted.len(), 3);
         assert_eq!(converted[0].role, "assistant");
@@ -1406,6 +1490,44 @@ mod tests {
         assert_eq!(system.len(), 2);
         assert!(system[0].text.contains("Claude Code"));
         assert_eq!(system[1].text, "be helpful");
+    }
+
+    #[test]
+    fn anthropic_cache_control_defaults_to_short() {
+        let cc = anthropic_cache_control("https://api.anthropic.com", None).unwrap();
+        assert_eq!(cc.control_type, "ephemeral");
+        assert!(cc.ttl.is_none());
+    }
+
+    #[test]
+    fn anthropic_cache_control_long_only_on_direct_api() {
+        let direct =
+            anthropic_cache_control("https://api.anthropic.com", Some(CacheRetention::Long))
+                .unwrap();
+        assert_eq!(direct.ttl.as_deref(), Some("1h"));
+
+        let proxied =
+            anthropic_cache_control("https://openrouter.ai/api/v1", Some(CacheRetention::Long))
+                .unwrap();
+        assert!(proxied.ttl.is_none());
+    }
+
+    #[test]
+    fn convert_user_message_adds_cache_control_block() {
+        let cache = Some(CacheControl {
+            control_type: "ephemeral".into(),
+            ttl: None,
+        });
+        let messages = vec![Message::User(UserMessage {
+            content: UserContent::Text("hello".into()),
+            timestamp_ms: Timestamp(0),
+        })];
+
+        let converted = convert_messages(&messages, false, cache);
+        let blocks = converted[0].content.as_array().unwrap();
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[0]["text"], "hello");
+        assert_eq!(blocks[0]["cache_control"]["type"], "ephemeral");
     }
 
     #[test]

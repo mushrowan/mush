@@ -102,8 +102,7 @@ pub type ConfirmCallback<'a> = Box<
     dyn Fn(
             &str,
             &serde_json::Value,
-        )
-            -> std::pin::Pin<Box<dyn std::future::Future<Output = ConfirmAction> + Send>>
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ConfirmAction> + Send>>
         + Send
         + Sync
         + 'a,
@@ -260,10 +259,10 @@ pub fn agent_loop(
                     break; // no tools, exit inner loop
                 }
 
-                // execute tool calls, checking for steering between each
-                let mut steered = false;
+                // execute tool calls in parallel
+                // confirmations are checked sequentially (needs user interaction)
+                let mut confirmed: Vec<&ToolCall> = Vec::new();
                 for tc in &tool_calls {
-                    // check confirmation before executing
                     if let Some(ref confirm) = config.confirm_tool
                         && confirm(tc.name.as_str(), &tc.arguments).await == ConfirmAction::Deny {
                             let result = ToolResult::error("tool call denied by user".to_string());
@@ -281,36 +280,47 @@ pub fn agent_loop(
                             }));
                             continue;
                         }
+                    confirmed.push(tc);
+                }
 
-                    yield AgentEvent::ToolExecStart {
-                        tool_call_id: tc.id.clone(),
-                        tool_name: tc.name.clone(),
-                        args: tc.arguments.clone(),
-                    };
+                if !confirmed.is_empty() {
+                    // emit start events for all confirmed tools
+                    for tc in &confirmed {
+                        yield AgentEvent::ToolExecStart {
+                            tool_call_id: tc.id.clone(),
+                            tool_name: tc.name.clone(),
+                            args: tc.arguments.clone(),
+                        };
+                    }
 
-                    let result = execute_tool(config.tools, tc).await;
+                    // execute all confirmed tools concurrently
+                    let futs: Vec<_> = confirmed
+                        .iter()
+                        .map(|tc| execute_tool(config.tools, tc))
+                        .collect();
+                    let results = futures::future::join_all(futs).await;
 
-                    yield AgentEvent::ToolExecEnd {
-                        tool_call_id: tc.id.clone(),
-                        tool_name: tc.name.clone(),
-                        result: result.clone(),
-                    };
+                    // emit results and push to messages
+                    for (tc, result) in confirmed.iter().zip(results) {
+                        yield AgentEvent::ToolExecEnd {
+                            tool_call_id: tc.id.clone(),
+                            tool_name: tc.name.clone(),
+                            result: result.clone(),
+                        };
+                        messages.push(Message::ToolResult(ToolResultMessage {
+                            tool_call_id: tc.id.clone(),
+                            tool_name: tc.name.clone(),
+                            content: result.content,
+                            is_error: result.is_error,
+                            timestamp_ms: Timestamp::now(),
+                        }));
+                    }
 
-                    messages.push(Message::ToolResult(ToolResultMessage {
-                        tool_call_id: tc.id.clone(),
-                        tool_name: tc.name.clone(),
-                        content: result.content,
-                        is_error: result.is_error,
-                        timestamp_ms: Timestamp::now(),
-                    }));
-
-                    // check steering between tool calls
+                    // check steering after all tools complete
                     if let Some(ref get) = config.get_steering {
                         let steering = get().await;
                         if !steering.is_empty() {
                             pending = steering;
-                            steered = true;
-                            break; // skip remaining tool calls
                         }
                     }
                 }
@@ -323,8 +333,8 @@ pub fn agent_loop(
                     break 'outer;
                 }
 
-                // if not steered, check for steering after the turn
-                if !steered && let Some(ref get) = config.get_steering {
+                // if no pending steering, check for more
+                if pending.is_empty() && let Some(ref get) = config.get_steering {
                     pending = get().await;
                 }
 
@@ -344,11 +354,6 @@ pub fn agent_loop(
                     let count = follow_up.len();
                     pending = follow_up;
                     yield AgentEvent::FollowUpInjected { count };
-                    turn_index += 1;
-                    if turn_index >= config.max_turns {
-                        yield AgentEvent::MaxTurnsReached { max_turns: config.max_turns };
-                        break;
-                    }
                     continue 'outer;
                 }
             }
@@ -521,6 +526,132 @@ mod tests {
 
         // transform was called even though LLM will error (no provider)
         assert!(called.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn follow_up_injection_does_not_consume_turn_budget() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct ScriptedProvider {
+            calls: Arc<AtomicUsize>,
+        }
+
+        impl mush_ai::registry::ApiProvider for ScriptedProvider {
+            fn api(&self) -> Api {
+                Api::AnthropicMessages
+            }
+
+            fn stream(
+                &self,
+                model: &Model,
+                _context: &mush_ai::registry::LlmContext,
+                _options: &StreamOptions,
+            ) -> mush_ai::registry::StreamResult {
+                let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                let msg = AssistantMessage {
+                    content: if call == 0 {
+                        vec![AssistantContentPart::Text(TextContent {
+                            text: "first".into(),
+                        })]
+                    } else {
+                        vec![AssistantContentPart::ToolCall(ToolCall {
+                            id: "tc_1".into(),
+                            name: "counter".into(),
+                            arguments: serde_json::json!({}),
+                        })]
+                    },
+                    model: model.id.clone(),
+                    provider: model.provider.to_string(),
+                    api: model.api,
+                    usage: Usage::default(),
+                    stop_reason: if call == 0 {
+                        StopReason::Stop
+                    } else {
+                        StopReason::ToolUse
+                    },
+                    error_message: None,
+                    timestamp_ms: Timestamp(0),
+                };
+
+                Box::pin(async move {
+                    let s = async_stream::stream! {
+                        yield StreamEvent::Start {
+                            partial: msg.clone(),
+                        };
+                        yield StreamEvent::Done {
+                            reason: msg.stop_reason,
+                            message: msg,
+                        };
+                    };
+                    Ok(Box::pin(s) as mush_ai::registry::EventStream)
+                })
+            }
+        }
+
+        let mut registry = ApiRegistry::new();
+        registry.register(Box::new(ScriptedProvider {
+            calls: Arc::new(AtomicUsize::new(0)),
+        }));
+
+        let model = test_model();
+        let tools: Vec<Box<dyn AgentTool>> = vec![Box::new(CounterTool)];
+
+        let follow_up_calls = Arc::new(AtomicUsize::new(0));
+        let follow_up_calls_clone = follow_up_calls.clone();
+
+        let get_follow_up: MessageCallback<'_> = Box::new(move || {
+            let calls = follow_up_calls_clone.clone();
+            Box::pin(async move {
+                let n = calls.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    vec![Message::User(UserMessage {
+                        content: UserContent::Text("queued follow-up".into()),
+                        timestamp_ms: Timestamp(0),
+                    })]
+                } else {
+                    vec![]
+                }
+            })
+        });
+
+        let config = AgentConfig {
+            model: &model,
+            system_prompt: None,
+            tools: &tools,
+            registry: &registry,
+            options: StreamOptions::default(),
+            max_turns: 1,
+            get_steering: None,
+            get_follow_up: Some(get_follow_up),
+            transform_context: None,
+            confirm_tool: None,
+        };
+
+        let messages = vec![Message::User(UserMessage {
+            content: UserContent::Text("hi".into()),
+            timestamp_ms: Timestamp(0),
+        })];
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let events: Vec<AgentEvent> =
+            rt.block_on(async { agent_loop(config, messages).collect().await });
+
+        let follow_up_count = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::FollowUpInjected { count: 1 }))
+            .count();
+        assert_eq!(follow_up_count, 1);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ToolExecStart { .. }))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::MaxTurnsReached { max_turns: 1 }))
+        );
     }
 
     #[test]

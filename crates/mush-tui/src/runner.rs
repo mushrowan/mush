@@ -48,9 +48,7 @@ pub type ThinkingPrefsSaver =
     std::sync::Arc<dyn Fn(&std::collections::HashMap<String, ThinkingLevel>) + Send + Sync>;
 
 /// callback to persist session state (messages + tree + model_id)
-pub type SessionSaver = std::sync::Arc<
-    dyn Fn(&[Message], &SessionTree, &str) + Send + Sync,
->;
+pub type SessionSaver = std::sync::Arc<dyn Fn(&[Message], &SessionTree, &str) + Send + Sync>;
 
 /// configuration for the TUI runner (owned, 'static-friendly)
 pub struct TuiConfig {
@@ -96,15 +94,26 @@ pub async fn run_tui(
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(tui_config.model.id.0.clone());
-    app.thinking_level = tui_config
-        .options
-        .thinking
-        .unwrap_or(ThinkingLevel::Off);
+    let mut app = App::new(
+        tui_config.model.id.0.clone(),
+        tui_config.model.context_window,
+    );
+    app.thinking_level = tui_config.options.thinking.unwrap_or(ThinkingLevel::Off);
     // populate tab completions
     let slash_cmds = [
-        "/help", "/clear", "/model", "/sessions", "/branch", "/tree",
-        "/compact", "/export", "/undo", "/search", "/cost", "/quit",
+        "/help",
+        "/clear",
+        "/model",
+        "/sessions",
+        "/branch",
+        "/tree",
+        "/compact",
+        "/export",
+        "/undo",
+        "/search",
+        "/cost",
+        "/injection",
+        "/quit",
     ];
     app.completions = slash_cmds.iter().map(|s| s.to_string()).collect();
     // add prompt template names as slash commands
@@ -198,15 +207,35 @@ pub async fn run_tui(
     loop {
         // if there's a pending prompt and we're not streaming, start the agent
         if let Some(prompt) = pending_prompt.take() {
+            let prompt_preview = prompt.clone();
+
             // in Message mode, prepend hint to user message (evaluated once)
+            let mut injection_preview: Option<String> = None;
             let user_text = if tui_config.hint_mode == HintMode::Message
                 && let Some(ref enricher) = tui_config.prompt_enricher
                 && let Some(hint) = enricher(&prompt)
             {
+                if app.show_prompt_injection {
+                    injection_preview = Some(format!("message hint\n{hint}"));
+                }
                 format!("{hint}\n\n{prompt}")
             } else {
                 prompt
             };
+
+            if app.show_prompt_injection
+                && tui_config.hint_mode == HintMode::Transform
+                && let Some(ref enricher) = tui_config.prompt_enricher
+                && let Some(hint) = enricher(&prompt_preview)
+            {
+                injection_preview = Some(format!(
+                    "transform hint\n{hint}\n\n(applied before each llm call)"
+                ));
+            }
+
+            if let Some(preview) = injection_preview {
+                app.push_system_message(preview);
+            }
 
             let user_message = Message::User(UserMessage {
                 content: UserContent::Text(user_text),
@@ -248,7 +277,15 @@ pub async fn run_tui(
                 })
             }));
 
-            // tool confirmation: agent sends (prompt, reply_tx), TUI answers y/n
+            // follow-up callback: picks up any remaining queued messages after agent finishes
+            let sq_follow = steering_queue.clone();
+            let follow_up: Option<mush_agent::MessageCallback<'_>> = Some(Box::new(move || {
+                let sq = sq_follow.clone();
+                Box::pin(async move {
+                    let mut q = sq.lock().await;
+                    q.drain(..).collect()
+                })
+            }));
             type ConfirmRequest = (String, tokio::sync::oneshot::Sender<bool>);
             let (confirm_req_tx, mut confirm_req_rx) =
                 tokio::sync::mpsc::channel::<ConfirmRequest>(1);
@@ -284,7 +321,7 @@ pub async fn run_tui(
                 options: tui_config.options.clone(),
                 max_turns: tui_config.max_turns,
                 get_steering: steering,
-                get_follow_up: None,
+                get_follow_up: follow_up,
                 transform_context: transform,
                 confirm_tool: confirm,
             };
@@ -318,12 +355,15 @@ pub async fn run_tui(
 
                         // poll live tool output from bash sink
                         if let Some(ref live) = tui_config.tool_output_live
-                            && let Ok(guard) = live.lock() {
-                                app.tool_output_live = guard.clone();
-                            }
+                            && let Ok(guard) = live.lock()
+                            && let Some(last) = guard.as_ref()
+                            && let Some(active) = app.active_tools.last().map(|t| t.tool_call_id.clone())
+                        {
+                            app.push_tool_output(active.as_str(), last);
+                        }
 
                         // check for terminal input during streaming
-                        if event::poll(std::time::Duration::ZERO)? {
+                        while event::poll(std::time::Duration::ZERO)? {
                             match event::read()? {
                                 Event::Key(key) => {
                                     // handle tool confirmation y/n
@@ -351,7 +391,7 @@ pub async fn run_tui(
                                             }
                                             AppEvent::Abort => {
                                                 app.is_streaming = false;
-                                                app.active_tool = None;
+                                                app.active_tools.clear();
                                                 app.status = Some("aborted".into());
                                                 break;
                                             }
@@ -413,56 +453,70 @@ pub async fn run_tui(
 
         // idle: wait for terminal input
         if event::poll(std::time::Duration::from_millis(50))? {
-            match event::read()? {
-                Event::Key(key) => {
-                    if let Some(app_event) = handle_key(&mut app, key) {
-                        match app_event {
-                            AppEvent::Quit => break,
-                            AppEvent::UserSubmit { text } => {
-                                let expanded = expand_template(&text);
-                                app.push_user_message(expanded.clone());
-                                app.start_streaming();
-                                pending_prompt = Some(expanded);
-                            }
-                            AppEvent::SlashCommand { name, args } => {
-                                if name == "search" {
-                                    app.mode = app::AppMode::Search;
-                                    app.search.query = args.to_string();
-                                    app.update_search();
-                                } else if name == "compact" {
-                                    handle_compact(
+            loop {
+                match event::read()? {
+                    Event::Key(key) => {
+                        if let Some(app_event) = handle_key(&mut app, key) {
+                            match app_event {
+                                AppEvent::Quit => {
+                                    app.should_quit = true;
+                                    break;
+                                }
+                                AppEvent::UserSubmit { text } => {
+                                    let expanded = expand_template(&text);
+                                    app.push_user_message(expanded.clone());
+                                    app.start_streaming();
+                                    pending_prompt = Some(expanded);
+                                }
+                                AppEvent::SlashCommand { name, args } => {
+                                    if name == "search" {
+                                        app.mode = app::AppMode::Search;
+                                        app.search.query = args.to_string();
+                                        app.update_search();
+                                    } else if name == "compact" {
+                                        handle_compact(
+                                            &mut app,
+                                            &mut conversation,
+                                            &mut session_tree,
+                                            &tui_config,
+                                            registry,
+                                        )
+                                        .await;
+                                    } else if name == "export" {
+                                        handle_export(&mut app, &conversation, &args);
+                                    } else if let Some(prompt) = handle_slash_command(
                                         &mut app,
                                         &mut conversation,
                                         &mut session_tree,
-                                        &tui_config,
-                                        registry,
-                                    )
-                                    .await;
-                                } else if name == "export" {
-                                    handle_export(&mut app, &conversation, &args);
-                                } else if let Some(prompt) = handle_slash_command(
-                                    &mut app,
-                                    &mut conversation,
-                                    &mut session_tree,
-                                    &mut tui_config,
-                                    &thinking_prefs,
-                                    &name,
-                                    &args,
-                                ) {
-                                    app.start_streaming();
-                                    pending_prompt = Some(prompt);
+                                        &mut tui_config,
+                                        &thinking_prefs,
+                                        &name,
+                                        &args,
+                                    ) {
+                                        app.start_streaming();
+                                        pending_prompt = Some(prompt);
+                                    }
                                 }
+                                AppEvent::CycleThinkingLevel => {
+                                    tui_config.options.thinking = Some(app.thinking_level);
+                                    save_thinking_pref(
+                                        &mut thinking_prefs,
+                                        &thinking_saver,
+                                        &app.model_id,
+                                        app.thinking_level,
+                                    );
+                                }
+                                _ => {}
                             }
-                            AppEvent::CycleThinkingLevel => {
-                                tui_config.options.thinking = Some(app.thinking_level);
-                                save_thinking_pref(&mut thinking_prefs, &thinking_saver, &app.model_id, app.thinking_level);
-                            }
-                            _ => {}
                         }
                     }
+                    Event::Mouse(mouse) => handle_mouse(&mut app, mouse),
+                    _ => {}
                 }
-                Event::Mouse(mouse) => handle_mouse(&mut app, mouse),
-                _ => {}
+
+                if !event::poll(std::time::Duration::ZERO)? {
+                    break;
+                }
             }
         }
 
@@ -512,10 +566,12 @@ fn handle_agent_event(
             conversation.push(msg);
         }
         AgentEvent::ToolExecStart {
-            tool_name, args, ..
+            tool_call_id,
+            tool_name,
+            args,
         } => {
             let summary = summarise_tool_args(tool_name.as_str(), args);
-            app.start_tool(tool_name.as_str(), &summary);
+            app.start_tool(tool_call_id.as_str(), tool_name.as_str(), &summary);
         }
         AgentEvent::ToolExecEnd {
             tool_call_id,
@@ -542,13 +598,17 @@ fn handle_agent_event(
                 && let Ok(dyn_image) = image::load_from_memory(data)
             {
                 let msg_idx = app.messages.len().saturating_sub(1);
-                let tc_idx = app.messages.last()
-                    .map(|m| m.tool_calls.len())
-                    .unwrap_or(0);
+                let tc_idx = app.messages.last().map(|m| m.tool_calls.len()).unwrap_or(0);
                 let proto = picker.new_resize_protocol(dyn_image);
                 image_protos.insert((msg_idx, tc_idx), proto);
             }
-            app.end_tool(tool_name.as_str(), result.is_error, output_text, image_data);
+            app.end_tool(
+                tool_call_id.as_str(),
+                tool_name.as_str(),
+                result.is_error,
+                output_text,
+                image_data,
+            );
             session_tree.append_message(Message::ToolResult(ToolResultMessage {
                 tool_call_id: tool_call_id.clone(),
                 tool_name: tool_name.clone(),
@@ -613,6 +673,7 @@ fn handle_slash_command(
             help.push_str("  /undo          - revert last turn\n");
             help.push_str("  /search [text] - search conversation (or ctrl+f)\n");
             help.push_str("  /cost          - show session cost\n");
+            help.push_str("  /injection     - toggle prompt injection preview\n");
             help.push_str("  /quit          - exit mush\n");
             help.push_str("\ntip: type a prompt template name (e.g. /review file.rs) to expand it");
             app.push_system_message(help);
@@ -768,6 +829,7 @@ fn handle_slash_command(
             if let Some(new_model) = models::find_model_by_id(id) {
                 tui_config.model = new_model;
                 app.model_id = id.to_string();
+                app.context_window = tui_config.model.context_window;
                 // restore saved thinking level for this model
                 let level = thinking_prefs
                     .get(id)
@@ -788,9 +850,32 @@ fn handle_slash_command(
             None
         }
         "cost" => {
+            let ctx = if app.context_tokens > 0 {
+                let pct = (app.context_tokens as f64 / app.context_window as f64 * 100.0) as u64;
+                format!(
+                    "context: {}k/{}k ({}%)\n",
+                    app.context_tokens / 1000,
+                    app.context_window / 1000,
+                    pct
+                )
+            } else {
+                String::new()
+            };
             app.push_system_message(format!(
-                "session: {}tok, ${:.4}",
-                app.total_tokens, app.total_cost
+                "{}cumulative: {}tok, ${:.4}",
+                ctx, app.total_tokens, app.total_cost
+            ));
+            None
+        }
+        "injection" => {
+            app.show_prompt_injection = !app.show_prompt_injection;
+            app.push_system_message(format!(
+                "prompt injection preview: {}",
+                if app.show_prompt_injection {
+                    "on"
+                } else {
+                    "off"
+                }
             ));
             None
         }
@@ -967,15 +1052,17 @@ fn draw(
         let ui = Ui::new(app);
         let (cx, cy) = ui.cursor_position(area);
         frame.render_widget(ui, area);
-        if !app.is_streaming && app.mode == app::AppMode::Normal {
+        if app.mode == app::AppMode::Normal
+            || (app.is_streaming && app.mode != app::AppMode::ToolConfirm)
+        {
             frame.set_cursor_position((cx, cy));
         }
         // render inline images at positions computed by MessageList
         let render_areas = app.image_render_areas.borrow().clone();
         for img_area in &render_areas {
             if let Some(proto) = image_protos.get_mut(&(img_area.msg_idx, img_area.tc_idx)) {
-                let widget = ratatui_image::StatefulImage::new()
-                    .resize(ratatui_image::Resize::Fit(None));
+                let widget =
+                    ratatui_image::StatefulImage::new().resize(ratatui_image::Resize::Fit(None));
                 frame.render_stateful_widget(widget, img_area.area, proto);
             }
         }

@@ -160,8 +160,15 @@ pub struct Usage {
 }
 
 impl Usage {
+    /// total tokens processed in this API call (all categories)
     pub fn total_tokens(&self) -> u64 {
         self.input_tokens + self.output_tokens + self.cache_read_tokens + self.cache_write_tokens
+    }
+
+    /// total input tokens (context size for this call).
+    /// for anthropic: input_tokens is non-cached, cache_read + cache_write are the rest
+    pub fn total_input_tokens(&self) -> u64 {
+        self.input_tokens + self.cache_read_tokens + self.cache_write_tokens
     }
 }
 
@@ -315,6 +322,16 @@ pub struct StreamOptions {
     pub max_tokens: Option<u64>,
     pub api_key: Option<String>,
     pub thinking: Option<ThinkingLevel>,
+    /// prompt cache retention preference for providers that support it
+    pub cache_retention: Option<CacheRetention>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheRetention {
+    None,
+    Short,
+    Long,
 }
 
 #[cfg(test)]
@@ -330,6 +347,18 @@ mod tests {
             cache_write_tokens: 10,
         };
         assert_eq!(usage.total_tokens(), 185);
+    }
+
+    #[test]
+    fn usage_total_input_tokens() {
+        let usage = Usage {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_read_tokens: 25,
+            cache_write_tokens: 10,
+        };
+        // input + cache_read + cache_write, excludes output
+        assert_eq!(usage.total_input_tokens(), 135);
     }
 
     #[test]
