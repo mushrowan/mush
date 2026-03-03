@@ -251,6 +251,7 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
         && let Ok(Some(token)) = mush_ai::oauth::get_oauth_token(provider_id).await
     {
         options.api_key = Some(token);
+        options.account_id = oauth_account_id(provider_id);
     }
 
     // session: resume or create new
@@ -482,6 +483,7 @@ async fn tui_mode(cli: Cli) -> Result<()> {
         && let Ok(Some(token)) = mush_ai::oauth::get_oauth_token(provider_id).await
     {
         options.api_key = Some(token);
+        options.account_id = oauth_account_id(provider_id);
     }
 
     // create or resume a session
@@ -719,6 +721,12 @@ fn oauth_provider_id_for_model(model: &Model) -> Option<&'static str> {
         Provider::Custom(name) if name == "openai-codex" => Some("openai-codex"),
         _ => None,
     }
+}
+
+fn oauth_account_id(provider_id: &str) -> Option<String> {
+    mush_ai::oauth::load_credentials()
+        .ok()
+        .and_then(|store| store.providers.get(provider_id).and_then(|c| c.account_id.clone()))
 }
 
 fn default_model_id(cfg: &config::Config) -> String {

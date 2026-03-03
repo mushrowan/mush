@@ -400,17 +400,18 @@ fn build_headers(
     );
 
     if is_codex {
-        let account_id = extract_account_id(api_key).ok_or_else(|| {
-            ProviderError::Other(
-                "openai codex token missing chatgpt account id, run `mush login openai-codex`"
-                    .into(),
-            )
-        })?;
+        let account_id = options
+            .account_id
+            .clone()
+            .or_else(|| extract_account_id(api_key));
 
-        headers.insert(
-            HeaderName::from_static("chatgpt-account-id"),
-            HeaderValue::from_str(&account_id).map_err(|e| ProviderError::Other(e.to_string()))?,
-        );
+        if let Some(account_id) = account_id {
+            headers.insert(
+                HeaderName::from_static("chatgpt-account-id"),
+                HeaderValue::from_str(&account_id)
+                    .map_err(|e| ProviderError::Other(e.to_string()))?,
+            );
+        }
         headers.insert(
             HeaderName::from_static("openai-beta"),
             HeaderValue::from_static("responses=experimental"),
@@ -1029,6 +1030,13 @@ mod tests {
         let token = format!("header.{payload_b64}.sig");
 
         assert_eq!(extract_account_id(&token), Some("acc_123".into()));
+    }
+
+    #[test]
+    fn codex_headers_allow_missing_account_id() {
+        let options = StreamOptions::default();
+        let headers = build_headers("not-a-jwt", &options, true).expect("headers should build");
+        assert!(headers.get("chatgpt-account-id").is_none());
     }
 
     #[test]

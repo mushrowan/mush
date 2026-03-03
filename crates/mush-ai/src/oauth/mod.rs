@@ -118,7 +118,11 @@ pub async fn get_oauth_token(provider_id: &str) -> Result<Option<String>, OAuthE
     };
 
     let updated = if creds.is_expired() {
-        provider.refresh_token(&creds.refresh_token).await?
+        let mut refreshed = provider.refresh_token(&creds.refresh_token).await?;
+        if refreshed.account_id.is_none() {
+            refreshed.account_id = creds.account_id.clone();
+        }
+        refreshed
     } else {
         creds.clone()
     };
