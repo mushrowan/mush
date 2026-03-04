@@ -364,15 +364,18 @@ pub async fn run_tui(
                     agent_event = stream.next() => {
                         match agent_event {
                             Some(event) => {
+                                let mut ctx = EventCtx {
+                                    app: &mut app,
+                                    conversation: &mut conversation,
+                                    session_tree: &mut session_tree,
+                                    image_protos: &mut image_protos,
+                                };
                                 handle_agent_event(
-                                    &mut app,
-                                    &mut conversation,
-                                    &mut session_tree,
+                                    &mut ctx,
                                     &event,
                                     &tui_config.model,
                                     tui_config.debug_cache,
                                     &image_picker,
-                                    &mut image_protos,
                                 );
                                 if matches!(event, AgentEvent::AgentEnd) {
                                     break;
@@ -575,19 +578,30 @@ pub async fn run_tui(
     Ok(())
 }
 
+/// mutable state shared across the event loop
+struct EventCtx<'a> {
+    app: &'a mut App,
+    conversation: &'a mut Vec<Message>,
+    session_tree: &'a mut SessionTree,
+    image_protos: &'a mut std::collections::HashMap<
+        (usize, usize),
+        ratatui_image::protocol::StatefulProtocol,
+    >,
+}
+
 fn handle_agent_event(
-    app: &mut App,
-    conversation: &mut Vec<Message>,
-    session_tree: &mut SessionTree,
+    ctx: &mut EventCtx<'_>,
     event: &AgentEvent,
     model: &Model,
     debug_cache: bool,
     image_picker: &Option<ratatui_image::picker::Picker>,
-    image_protos: &mut std::collections::HashMap<
-        (usize, usize),
-        ratatui_image::protocol::StatefulProtocol,
-    >,
 ) {
+    let EventCtx {
+        app,
+        conversation,
+        session_tree,
+        image_protos,
+    } = ctx;
     match event {
         AgentEvent::StreamEvent { event } => match event {
             StreamEvent::TextDelta { delta, .. } => app.push_text_delta(delta),
@@ -1083,14 +1097,14 @@ fn inject_hint(msgs: &mut [Message], enricher: &(dyn Fn(&str) -> Option<String> 
 async fn resolve_auth_for_model(
     model: &Model,
     provider_api_keys: &std::collections::HashMap<String, String>,
-) -> (Option<String>, Option<String>) {
+) -> (Option<ApiKey>, Option<String>) {
     if let Some(key) = mush_ai::env::env_api_key(&model.provider) {
         return (Some(key), None);
     }
 
     let provider_name = model.provider.to_string();
     if let Some(key) = provider_api_keys.get(&provider_name) {
-        return (Some(key.clone()), None);
+        return (ApiKey::new(key.clone()), None);
     }
 
     match &model.provider {
@@ -1098,14 +1112,16 @@ async fn resolve_auth_for_model(
             let token = mush_ai::oauth::get_oauth_token("anthropic")
                 .await
                 .ok()
-                .flatten();
+                .flatten()
+                .and_then(ApiKey::new);
             (token, None)
         }
         Provider::Custom(name) if name == "openai-codex" => {
             let token = mush_ai::oauth::get_oauth_token("openai-codex")
                 .await
                 .ok()
-                .flatten();
+                .flatten()
+                .and_then(ApiKey::new);
             let account_id = oauth_account_id("openai-codex");
             (token, account_id)
         }

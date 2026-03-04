@@ -99,13 +99,12 @@ impl McpConnection {
         name: String,
         args: serde_json::Value,
     ) -> Result<rmcp::model::CallToolResult, McpError> {
+        let mut params = CallToolRequestParams::new(name);
+        if let Some(obj) = args.as_object().cloned() {
+            params = params.with_arguments(obj);
+        }
         self.service
-            .call_tool(CallToolRequestParams {
-                meta: None,
-                name: name.into(),
-                arguments: args.as_object().cloned(),
-                task: None,
-            })
+            .call_tool(params)
             .await
             .map_err(|e| McpError::ToolCall(e.to_string()))
     }
