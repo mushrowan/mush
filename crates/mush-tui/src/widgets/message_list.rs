@@ -102,8 +102,11 @@ impl Widget for MessageList<'_> {
             ]));
         }
 
-        // active tool indicator (executing)
+        // active tool indicator (executing, not yet done)
         for tool in &self.app.active_tools {
+            if tool.status != ToolCallStatus::Running {
+                continue;
+            }
             let throbber = Throbber::default()
                 .throbber_set(BRAILLE_SIX)
                 .use_type(WhichUse::Spin);
@@ -345,15 +348,19 @@ fn render_message(
                 lines.push(Line::raw(""));
             }
         }
-        // tool output preview (dim, indented)
+        // tool output preview with diff colouring
         if let Some(ref output) = tc.output_preview {
             for line in output.lines() {
-                lines.push(Line::styled(
-                    format!("    {line}"),
+                let style = if line.starts_with("+ ") {
+                    Style::default().fg(Color::Green)
+                } else if line.starts_with("- ") {
+                    Style::default().fg(Color::Red)
+                } else {
                     Style::default()
                         .fg(Color::DarkGray)
-                        .add_modifier(Modifier::DIM),
-                ));
+                        .add_modifier(Modifier::DIM)
+                };
+                lines.push(Line::styled(format!("    {line}"), style));
             }
         }
     }
