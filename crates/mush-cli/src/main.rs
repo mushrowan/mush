@@ -415,6 +415,7 @@ async fn tui_mode(cli: Cli) -> Result<()> {
             }))
         },
         confirm_tools: setup.cfg.confirm_tools,
+        show_cost: setup.cfg.show_cost,
         debug_cache: setup.debug_cache,
         tool_output_live: Some(tool_output_live),
     };

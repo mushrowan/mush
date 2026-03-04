@@ -103,6 +103,9 @@ pub struct ActiveToolState {
     pub name: String,
     pub summary: String,
     pub live_output: Option<String>,
+    pub status: ToolCallStatus,
+    /// output text (set when tool completes)
+    pub output: Option<String>,
 }
 
 /// the main app state
@@ -169,6 +172,8 @@ pub struct App {
     pub confirm_prompt: Option<String>,
     /// whether to show prompt injection previews in the chat
     pub show_prompt_injection: bool,
+    /// whether to show dollar cost in status bar
+    pub show_cost: bool,
     /// selected message index in scroll mode (for copy)
     pub selected_message: Option<usize>,
     /// search state
@@ -239,6 +244,7 @@ impl App {
             has_unread: false,
             confirm_prompt: None,
             show_prompt_injection: false,
+            show_cost: false,
             selected_message: None,
             search: SearchState::default(),
             image_render_areas: RefCell::new(Vec::new()),
@@ -274,6 +280,9 @@ impl App {
         self.streaming_text.clear();
         self.streaming_thinking.clear();
         self.scroll_offset = 0;
+        // clear completed tools from panels (running tools stay)
+        self.active_tools
+            .retain(|t| t.status == ToolCallStatus::Running);
     }
 
     /// append text delta to the current stream
@@ -298,6 +307,8 @@ impl App {
             name: name.to_string(),
             summary: summary.to_string(),
             live_output: None,
+            status: ToolCallStatus::Running,
+            output: None,
         });
         self.streaming_tool_args.clear();
         // add to the last message's tool calls if we have one in progress
@@ -321,15 +332,25 @@ impl App {
         output: Option<&str>,
         image_data: Option<Vec<u8>>,
     ) {
-        self.active_tools.retain(|t| t.tool_call_id != tool_call_id);
+        let status = if outcome.is_error() {
+            ToolCallStatus::Error
+        } else {
+            ToolCallStatus::Done
+        };
+        // mark done in active_tools (panel persists until next turn)
+        if let Some(tool) = self
+            .active_tools
+            .iter_mut()
+            .find(|t| t.tool_call_id == tool_call_id)
+        {
+            tool.status = status.clone();
+            tool.output = output.map(truncate_output);
+            tool.live_output = None;
+        }
         if let Some(last) = self.messages.last_mut()
             && let Some(tc) = last.tool_calls.iter_mut().rfind(|t| t.name == name)
         {
-            tc.status = if outcome.is_error() {
-                ToolCallStatus::Error
-            } else {
-                ToolCallStatus::Done
-            };
+            tc.status = status;
             tc.output_preview = output.map(truncate_output);
             tc.image_data = image_data;
         }
@@ -723,7 +744,7 @@ fn word_boundary_right(s: &str, cursor: usize) -> usize {
 }
 
 /// max lines to show in tool output preview
-const MAX_PREVIEW_LINES: usize = 5;
+const MAX_PREVIEW_LINES: usize = 12;
 /// max chars per preview line
 const MAX_PREVIEW_LINE_LEN: usize = 120;
 
@@ -832,11 +853,17 @@ mod tests {
             Some("file1.txt\nfile2.txt"),
             None,
         );
-        assert!(app.active_tools.is_empty());
+        // tool stays in active_tools as done (panel persists)
+        assert_eq!(app.active_tools.len(), 1);
+        assert_eq!(app.active_tools[0].status, ToolCallStatus::Done);
         assert_eq!(
             app.messages.last().unwrap().tool_calls[0].status,
             ToolCallStatus::Done
         );
+
+        // cleared on next streaming turn
+        app.start_streaming();
+        assert!(app.active_tools.is_empty());
     }
 
     #[test]
@@ -931,9 +958,9 @@ mod tests {
             .join("\n");
         let output = truncate_output(&lines);
         assert!(output.contains("line 0"));
-        assert!(output.contains("line 4"));
-        assert!(output.contains("15 more lines"));
-        assert!(!output.contains("line 5\n"));
+        assert!(output.contains("line 11"));
+        assert!(output.contains("8 more lines"));
+        assert!(!output.contains("line 12\n"));
     }
 
     #[test]

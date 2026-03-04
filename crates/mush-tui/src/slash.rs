@@ -98,6 +98,7 @@ pub fn handle(
             None
         }
         "cost" => {
+            app.show_cost = !app.show_cost;
             show_cost(app);
             None
         }

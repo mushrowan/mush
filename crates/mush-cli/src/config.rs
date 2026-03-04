@@ -44,6 +44,8 @@ pub struct Config {
     pub hint_mode: HintMode,
     /// prompt for confirmation before executing tools (off by default)
     pub confirm_tools: bool,
+    /// show dollar cost in status bar (off by default, toggle with /cost)
+    pub show_cost: bool,
     pub api_keys: ApiKeys,
     pub theme: mush_tui::ThemeConfig,
     /// MCP server configurations keyed by name
