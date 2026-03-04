@@ -118,13 +118,6 @@ fn left_spans(app: &App) -> Vec<Span<'static>> {
         spans.push(Span::styled(format!(" | {status}"), dim));
     }
 
-    if app.has_unread {
-        spans.push(Span::styled(
-            " | ↓ new messages (esc)",
-            Style::default().fg(Color::Blue),
-        ));
-    }
-
     spans
 }
 
