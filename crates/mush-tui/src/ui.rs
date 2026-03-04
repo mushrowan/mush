@@ -40,7 +40,8 @@ pub struct LayoutRegions {
 
 /// compute wrapped line count for input text, accounting for newlines
 pub fn input_height(input: &str, area_width: u16) -> u16 {
-    let content_width = area_width.saturating_sub(4) as usize;
+    // inner width of the bordered block (left + right border = 2 columns)
+    let content_width = area_width.saturating_sub(2) as usize;
     if content_width == 0 {
         return 3;
     }
@@ -131,9 +132,9 @@ mod tests {
 
     #[test]
     fn input_height_wrapping() {
-        // 100 chars in a 20-wide box: content_width=16, ceil(100/16)=7 lines + 2 = 9
+        // 100 chars in a 20-wide box: content_width=18, effective=102, ceil(102/18)+1=6+2=8
         let text = "a".repeat(100);
-        assert_eq!(input_height(&text, 20), 9);
+        assert_eq!(input_height(&text, 20), 8);
     }
 
     #[test]
