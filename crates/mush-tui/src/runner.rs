@@ -112,6 +112,20 @@ pub async fn run_tui(
         KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
     ));
     let _ = io::stdout().execute(SetCursorStyle::BlinkingBar);
+
+    // install panic hook that restores the terminal so a crash doesn't leave
+    // the user's shell in raw mode / alternate screen
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = io::stdout().execute(PopKeyboardEnhancementFlags);
+        let _ = io::stdout().execute(SetCursorStyle::DefaultUserShape);
+        let _ = disable_raw_mode();
+        let _ = io::stdout().execute(crossterm::event::DisableMouseCapture);
+        let _ = io::stdout().execute(LeaveAlternateScreen);
+        let _ = crossterm::cursor::Show;
+        prev_hook(info);
+    }));
+
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
@@ -684,6 +698,11 @@ fn handle_agent_event(
             tool_name,
             result,
         } => {
+            // re-apply raw mode after external tool execution in case the child
+            // process modified terminal settings (e.g. via /dev/tty)
+            if tool_name.as_str() == "bash" {
+                let _ = enable_raw_mode();
+            }
             let output_text = result.content.iter().find_map(|p| match p {
                 ToolResultContentPart::Text(t) => Some(t.text.as_str()),
                 _ => None,
