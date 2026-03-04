@@ -56,7 +56,7 @@ mod tests {
         let msg = AssistantMessage {
             content: vec![],
             model: "test".into(),
-            provider: "test".into(),
+            provider: Provider::Custom("test".into()),
             api: Api::AnthropicMessages,
             usage: Usage::default(),
             stop_reason: StopReason::Stop,

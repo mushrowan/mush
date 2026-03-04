@@ -72,10 +72,10 @@ impl ApiProvider for OpenaiResponsesProvider {
             }
 
             let model_id = model.id.clone();
-            let provider_name = model.provider.to_string();
+            let provider = model.provider.clone();
             let api = model.api;
 
-            Ok(parse_sse_stream(response, model_id, provider_name, api))
+            Ok(parse_sse_stream(response, model_id, provider, api))
         })
     }
 }
@@ -199,7 +199,7 @@ fn build_request_body(
         store: false,
         max_output_tokens: options.max_tokens.or(Some(model.max_output_tokens)),
         temperature: if reasoning.is_none() {
-            options.temperature
+            options.temperature.map(|t| t.value())
         } else {
             None
         },
@@ -387,7 +387,7 @@ fn resolve_url(model: &Model, is_codex: bool) -> String {
 }
 
 fn build_headers(
-    api_key: &str,
+    api_key: &ApiKey,
     options: &StreamOptions,
     is_codex: bool,
 ) -> Result<HeaderMap, ProviderError> {
@@ -498,7 +498,7 @@ struct ActiveBlock {
 fn parse_sse_stream(
     response: reqwest::Response,
     model_id: ModelId,
-    provider_name: String,
+    provider_name: Provider,
     api: Api,
 ) -> EventStream {
     let event_stream = async_stream::stream! {
@@ -1035,7 +1035,8 @@ mod tests {
     #[test]
     fn codex_headers_allow_missing_account_id() {
         let options = StreamOptions::default();
-        let headers = build_headers("not-a-jwt", &options, true).expect("headers should build");
+        let key = ApiKey::new("not-a-jwt").unwrap();
+        let headers = build_headers(&key, &options, true).expect("headers should build");
         assert!(headers.get("chatgpt-account-id").is_none());
     }
 

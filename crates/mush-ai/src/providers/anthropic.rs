@@ -6,7 +6,7 @@
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 
-use crate::env::{anthropic_api_key, is_oauth_token};
+use crate::env::anthropic_api_key;
 use crate::registry::{
     ApiProvider, EventStream, LlmContext, ProviderError, StreamResult, ToolDefinition,
 };
@@ -86,7 +86,7 @@ impl ApiProvider for AnthropicProvider {
                 .or_else(anthropic_api_key)
                 .ok_or_else(|| ProviderError::MissingApiKey("anthropic".into()))?;
 
-            let is_oauth = is_oauth_token(&api_key);
+            let is_oauth = api_key.is_oauth_token();
             let client = reqwest::Client::new();
 
             let body = build_request_body(
@@ -157,7 +157,7 @@ impl ApiProvider for AnthropicProvider {
             }
 
             let model_id = model.id.clone();
-            let provider_name = model.provider.to_string();
+            let provider_name = model.provider.clone();
             let api = model.api;
             let sse_stream =
                 parse_sse_stream(response, model_id, provider_name, api, is_oauth, tools);
@@ -307,7 +307,7 @@ fn build_request_body(
 
     // temperature is incompatible with thinking
     let temperature = if thinking.is_none() {
-        options.temperature
+        options.temperature.map(|t| t.value())
     } else {
         None
     };
@@ -764,7 +764,7 @@ enum BlockState {
 fn parse_sse_stream(
     response: reqwest::Response,
     model_id: ModelId,
-    provider_name: String,
+    provider_name: Provider,
     api: Api,
     is_oauth: bool,
     tools: Vec<ToolDefinition>,
@@ -1146,7 +1146,7 @@ mod tests {
                 }),
             ],
             model: "test".into(),
-            provider: "test".into(),
+            provider: Provider::Custom("test".into()),
             api: Api::AnthropicMessages,
             usage: Usage::default(),
             stop_reason: StopReason::ToolUse,
@@ -1182,7 +1182,7 @@ mod tests {
                     arguments: serde_json::json!({"command": "echo hi"}),
                 })],
                 model: "test".into(),
-                provider: "test".into(),
+                provider: Provider::Custom("test".into()),
                 api: Api::AnthropicMessages,
                 usage: Usage::default(),
                 stop_reason: StopReason::ToolUse,
@@ -1221,7 +1221,7 @@ mod tests {
                     arguments: serde_json::json!({"command": "rm -rf /"}),
                 })],
                 model: "test".into(),
-                provider: "test".into(),
+                provider: Provider::Custom("test".into()),
                 api: Api::AnthropicMessages,
                 usage: Usage::default(),
                 stop_reason: StopReason::ToolUse,
@@ -1585,7 +1585,7 @@ mod tests {
         AssistantMessage {
             content: vec![],
             model: "test".into(),
-            provider: "test".into(),
+            provider: Provider::Custom("test".into()),
             api: Api::AnthropicMessages,
             usage: Usage::default(),
             stop_reason: StopReason::Stop,

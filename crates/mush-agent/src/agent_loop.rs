@@ -562,7 +562,7 @@ mod tests {
                         })]
                     },
                     model: model.id.clone(),
-                    provider: model.provider.to_string(),
+                    provider: model.provider.clone(),
                     api: model.api,
                     usage: Usage::default(),
                     stop_reason: if call == 0 {

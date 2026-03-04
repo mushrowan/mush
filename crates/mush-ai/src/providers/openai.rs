@@ -33,6 +33,7 @@ impl ApiProvider for OpenaiCompletionsProvider {
                 .clone()
                 .or_else(|| env_api_key(&model.provider))
                 .ok_or_else(|| ProviderError::MissingApiKey(model.provider.to_string()))?;
+            let api_key_str: &str = &api_key;
 
             let client = reqwest::Client::new();
             let body =
@@ -42,7 +43,7 @@ impl ApiProvider for OpenaiCompletionsProvider {
             headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
             headers.insert(
                 AUTHORIZATION,
-                HeaderValue::from_str(&format!("Bearer {api_key}"))
+                HeaderValue::from_str(&format!("Bearer {api_key_str}"))
                     .map_err(|e| ProviderError::Other(e.to_string()))?,
             );
 
@@ -65,10 +66,10 @@ impl ApiProvider for OpenaiCompletionsProvider {
             }
 
             let model_id = model.id.clone();
-            let provider_name = model.provider.to_string();
+            let provider = model.provider.clone();
             let api = model.api;
 
-            Ok(parse_sse_stream(response, model_id, provider_name, api))
+            Ok(parse_sse_stream(response, model_id, provider, api))
         })
     }
 }
@@ -257,7 +258,7 @@ fn build_request_body(
         stream: true,
         max_completion_tokens: options.max_tokens.or(Some(model.max_output_tokens)),
         temperature: if reasoning_effort.is_none() {
-            options.temperature
+            options.temperature.map(|t| t.value())
         } else {
             None
         },
@@ -348,7 +349,7 @@ enum CurrentBlock {
 fn parse_sse_stream(
     response: reqwest::Response,
     model_id: ModelId,
-    provider_name: String,
+    provider_name: Provider,
     api: Api,
 ) -> EventStream {
     let event_stream = async_stream::stream! {
@@ -730,7 +731,7 @@ mod tests {
                     arguments: serde_json::json!({"path": "foo.rs"}),
                 })],
                 model: "test".into(),
-                provider: "test".into(),
+                provider: Provider::Custom("test".into()),
                 api: Api::OpenaiCompletions,
                 usage: Usage::default(),
                 stop_reason: StopReason::ToolUse,
@@ -931,7 +932,7 @@ mod tests {
         AssistantMessage {
             content: vec![],
             model: "test".into(),
-            provider: "test".into(),
+            provider: Provider::Custom("test".into()),
             api: Api::OpenaiCompletions,
             usage: Usage::default(),
             stop_reason: StopReason::Stop,

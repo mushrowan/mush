@@ -317,7 +317,7 @@ mod tests {
                 text: text.into(),
             })],
             model: "test".into(),
-            provider: "test".into(),
+            provider: Provider::Custom("test".into()),
             api: Api::AnthropicMessages,
             usage: Usage::default(),
             stop_reason: StopReason::Stop,
