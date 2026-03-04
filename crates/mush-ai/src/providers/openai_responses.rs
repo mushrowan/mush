@@ -391,11 +391,12 @@ fn build_headers(
     options: &StreamOptions,
     is_codex: bool,
 ) -> Result<HeaderMap, ProviderError> {
+    let key: &str = api_key;
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     headers.insert(
         AUTHORIZATION,
-        HeaderValue::from_str(&format!("Bearer {api_key}"))
+        HeaderValue::from_str(&format!("Bearer {key}"))
             .map_err(|e| ProviderError::Other(e.to_string()))?,
     );
 
@@ -1030,6 +1031,15 @@ mod tests {
         let token = format!("header.{payload_b64}.sig");
 
         assert_eq!(extract_account_id(&token), Some("acc_123".into()));
+    }
+
+    #[test]
+    fn auth_header_contains_actual_key() {
+        let options = StreamOptions::default();
+        let key = ApiKey::new("sk-test-secret-key-123").unwrap();
+        let headers = build_headers(&key, &options, false).expect("headers should build");
+        let auth = headers.get("authorization").unwrap().to_str().unwrap();
+        assert_eq!(auth, "Bearer sk-test-secret-key-123");
     }
 
     #[test]

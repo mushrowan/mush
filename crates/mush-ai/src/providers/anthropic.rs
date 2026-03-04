@@ -115,12 +115,14 @@ impl ApiProvider for AnthropicProvider {
                     HeaderValue::from_static(concat!("claude-cli/", "2.1.62")),
                 );
                 headers.insert("x-app", HeaderValue::from_static("cli"));
+                let key: &str = &api_key;
                 headers.insert(
                     "authorization",
-                    HeaderValue::from_str(&format!("Bearer {api_key}"))
+                    HeaderValue::from_str(&format!("Bearer {key}"))
                         .map_err(|e| ProviderError::Other(e.to_string()))?,
                 );
             } else {
+                let key: &str = &api_key;
                 headers.insert(
                     "anthropic-beta",
                     HeaderValue::from_static(
@@ -129,7 +131,7 @@ impl ApiProvider for AnthropicProvider {
                 );
                 headers.insert(
                     "x-api-key",
-                    HeaderValue::from_str(&api_key)
+                    HeaderValue::from_str(key)
                         .map_err(|e| ProviderError::Other(e.to_string()))?,
                 );
             }
