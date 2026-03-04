@@ -20,7 +20,9 @@ impl<'a> InputBox<'a> {
 
     /// the cursor position within the input box (for terminal cursor placement)
     pub fn cursor_position(&self, area: Rect) -> (u16, u16) {
-        let content_width = area.width.saturating_sub(4) as usize;
+        // inner width of the block (left + right border = 2 columns)
+        // the "> " prompt is part of text content, not the wrap boundary
+        let content_width = area.width.saturating_sub(2) as usize;
         if content_width == 0 {
             return (area.x + 1, area.y + 1);
         }
@@ -149,9 +151,8 @@ mod tests {
         let input_box = InputBox::new(&app);
         let area = Rect::new(0, 10, 40, 3);
         let (x, y) = input_box.cursor_position(area);
-        // content_width = 40 - 4 = 36
-        // cursor_offset = 3 + 2 = 5
-        // cursor_line = 5 / 36 = 0, cursor_col = 5 % 36 = 5
+        // content_width = 40 - 2 = 38 (borders only)
+        // col = 2 (prompt) + 3 = 5, no wrapping
         // x: 0 + 1 + 5 = 6
         assert_eq!(x, 6);
         assert_eq!(y, 11);
@@ -160,16 +161,17 @@ mod tests {
     #[test]
     fn cursor_position_wraps() {
         let mut app = App::new("test".into(), 200_000);
-        // 44 chars in a 20-wide box: content_width = 16, wraps to 3 lines
+        // 42 chars + 2 prompt in a 20-wide box: content_width = 18
         app.input = "this is a long prompt that wraps around!!!".into();
         app.cursor = 42;
         let input_box = InputBox::new(&app);
         let area = Rect::new(0, 0, 20, 6);
         let (x, y) = input_box.cursor_position(area);
-        // cursor_offset = 42 + 2 = 44
-        // content_width = 20 - 4 = 16
-        // cursor_line = 44 / 16 = 2, cursor_col = 44 % 16 = 12
-        assert_eq!(x, 1 + 12); // border + col
+        // content_width = 20 - 2 = 18
+        // col=2, +16 chars -> col=18 -> wrap: line=1, col=0
+        // +18 chars -> col=18 -> wrap: line=2, col=0
+        // +8 remaining chars -> col=8
+        assert_eq!(x, 1 + 8); // border + col
         assert_eq!(y, 1 + 2); // border + line
     }
 
