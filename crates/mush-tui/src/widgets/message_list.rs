@@ -67,13 +67,15 @@ impl Widget for MessageList<'_> {
                     spinner_span.clone().style(dim),
                     Span::styled(" thinking", dim),
                 ]));
-                for line in self.app.streaming_thinking.lines() {
+                let visible_thinking = self.app.visible_streaming_thinking();
+                for line in visible_thinking.lines() {
                     lines.push(Line::styled(format!("  {line}"), dim));
                 }
                 lines.push(Line::raw(""));
             }
             if !self.app.streaming_text.is_empty() {
-                let md_text = render_markdown(&self.app.streaming_text);
+                let visible_text = self.app.visible_streaming_text();
+                let md_text = render_markdown(visible_text);
                 for line in md_text.lines {
                     let mut spans: Vec<Span<'_>> = vec![Span::raw("  ")];
                     spans.extend(line.spans);
@@ -556,6 +558,10 @@ mod tests {
         let mut app = App::new("test".into(), 200_000);
         app.start_streaming();
         app.push_text_delta("partial");
+        // tick several times to let typewriter catch up
+        for _ in 0..10 {
+            app.tick();
+        }
         // don't finish - still streaming
         let buf = render_app(&app, 40, 10);
         let content = buffer_to_string(&buf);
