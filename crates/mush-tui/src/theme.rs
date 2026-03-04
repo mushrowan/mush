@@ -40,9 +40,7 @@ impl Default for Theme {
                 .fg(Color::Blue)
                 .add_modifier(Modifier::BOLD),
             system_label: Style::default().fg(Color::Yellow),
-            thinking: Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::DIM),
+            thinking: Style::default().fg(Color::DarkGray),
             thinking_label: Style::default().fg(Color::DarkGray),
             code_block: Style::default().fg(Color::White),
             inline_code: Style::default().fg(Color::Yellow),
@@ -102,7 +100,7 @@ impl Theme {
             theme.system_label = Style::default().fg(c);
         }
         if let Some(c) = config.thinking.as_deref().and_then(parse_colour) {
-            theme.thinking = Style::default().fg(c).add_modifier(Modifier::DIM);
+            theme.thinking = Style::default().fg(c);
             theme.thinking_label = Style::default().fg(c);
         }
         if let Some(c) = config.code.as_deref().and_then(parse_colour) {
