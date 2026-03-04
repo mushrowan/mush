@@ -841,7 +841,29 @@ fn parse_sse_stream(
                 }
                 Ok(None) => break,
                 Err(e) => {
-                    tracing::error!(error = %e, "SSE stream read error");
+                    // log whatever context we have about the failure
+                    let partial_buf = if chunk_buf.is_empty() {
+                        "(empty)".to_string()
+                    } else {
+                        let preview = String::from_utf8_lossy(
+                            &chunk_buf[..chunk_buf.len().min(512)]
+                        );
+                        format!("({} bytes) {preview}", chunk_buf.len())
+                    };
+                    // walk the error source chain for deeper diagnostics
+                    let mut sources = String::new();
+                    let mut source = std::error::Error::source(&e);
+                    while let Some(s) = source {
+                        sources.push_str(&format!(" -> {s}"));
+                        source = std::error::Error::source(s);
+                    }
+                    tracing::error!(
+                        error = %e,
+                        error_chain = %sources,
+                        buffered_data = %partial_buf,
+                        sse_buf = %buf,
+                        "SSE stream read error"
+                    );
                     output.stop_reason = StopReason::Error;
                     output.error_message = Some(e.to_string());
                     yield StreamEvent::Error {
