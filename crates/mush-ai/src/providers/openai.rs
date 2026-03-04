@@ -669,7 +669,7 @@ mod tests {
             &Some("you are helpful".into()),
             &[Message::User(UserMessage {
                 content: UserContent::Text("hi".into()),
-                timestamp_ms: Timestamp(0),
+                timestamp_ms: Timestamp::zero(),
             })],
             &[],
             &options,
@@ -736,7 +736,7 @@ mod tests {
                 usage: Usage::default(),
                 stop_reason: StopReason::ToolUse,
                 error_message: None,
-                timestamp_ms: Timestamp(0),
+                timestamp_ms: Timestamp::zero(),
             }),
             Message::ToolResult(ToolResultMessage {
                 tool_call_id: "tc_1".into(),
@@ -745,7 +745,7 @@ mod tests {
                     text: "file contents here".into(),
                 })],
                 is_error: false,
-                timestamp_ms: Timestamp(0),
+                timestamp_ms: Timestamp::zero(),
             }),
         ];
 
@@ -937,7 +937,7 @@ mod tests {
             usage: Usage::default(),
             stop_reason: StopReason::Stop,
             error_message: None,
-            timestamp_ms: Timestamp(0),
+            timestamp_ms: Timestamp::zero(),
         }
     }
 }

@@ -1102,7 +1102,7 @@ mod tests {
     fn convert_simple_user_message() {
         let messages = vec![Message::User(UserMessage {
             content: UserContent::Text("hello".into()),
-            timestamp_ms: Timestamp(0),
+            timestamp_ms: Timestamp::zero(),
         })];
 
         let converted = convert_messages(&messages, false, None);
@@ -1120,7 +1120,7 @@ mod tests {
                 text: "file contents".into(),
             })],
             is_error: false,
-            timestamp_ms: Timestamp(0),
+            timestamp_ms: Timestamp::zero(),
         })];
 
         let converted = convert_messages(&messages, false, None);
@@ -1151,7 +1151,7 @@ mod tests {
             usage: Usage::default(),
             stop_reason: StopReason::ToolUse,
             error_message: None,
-            timestamp_ms: Timestamp(0),
+            timestamp_ms: Timestamp::zero(),
         })];
 
         let converted = convert_messages(&messages, false, None);
@@ -1187,7 +1187,7 @@ mod tests {
                 usage: Usage::default(),
                 stop_reason: StopReason::ToolUse,
                 error_message: None,
-                timestamp_ms: Timestamp(0),
+                timestamp_ms: Timestamp::zero(),
             }),
             Message::ToolResult(ToolResultMessage {
                 tool_call_id: "tc_1".into(),
@@ -1196,7 +1196,7 @@ mod tests {
                     text: "hi".into(),
                 })],
                 is_error: false,
-                timestamp_ms: Timestamp(0),
+                timestamp_ms: Timestamp::zero(),
             }),
         ];
 
@@ -1226,11 +1226,11 @@ mod tests {
                 usage: Usage::default(),
                 stop_reason: StopReason::ToolUse,
                 error_message: None,
-                timestamp_ms: Timestamp(0),
+                timestamp_ms: Timestamp::zero(),
             }),
             Message::User(UserMessage {
                 content: UserContent::Text("stop! undo that".into()),
-                timestamp_ms: Timestamp(0),
+                timestamp_ms: Timestamp::zero(),
             }),
         ];
 
@@ -1520,7 +1520,7 @@ mod tests {
         });
         let messages = vec![Message::User(UserMessage {
             content: UserContent::Text("hello".into()),
-            timestamp_ms: Timestamp(0),
+            timestamp_ms: Timestamp::zero(),
         })];
 
         let converted = convert_messages(&messages, false, cache);
@@ -1590,7 +1590,7 @@ mod tests {
             usage: Usage::default(),
             stop_reason: StopReason::Stop,
             error_message: None,
-            timestamp_ms: Timestamp(0),
+            timestamp_ms: Timestamp::zero(),
         }
     }
 }

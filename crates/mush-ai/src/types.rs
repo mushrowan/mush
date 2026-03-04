@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 #[derive(
     Debug, Clone, PartialEq, Eq, Hash, Display, From, Deref, AsRef, Serialize, Deserialize,
 )]
-pub struct ModelId(pub String);
+pub struct ModelId(String);
 
 impl From<&str> for ModelId {
     fn from(s: &str) -> Self {
@@ -21,7 +21,7 @@ impl From<&str> for ModelId {
 #[derive(
     Debug, Clone, PartialEq, Eq, Hash, Display, From, Deref, AsRef, Serialize, Deserialize,
 )]
-pub struct ToolCallId(pub String);
+pub struct ToolCallId(String);
 
 impl From<&str> for ToolCallId {
     fn from(s: &str) -> Self {
@@ -33,7 +33,7 @@ impl From<&str> for ToolCallId {
 #[derive(
     Debug, Clone, PartialEq, Eq, Hash, Display, From, Deref, AsRef, Serialize, Deserialize,
 )]
-pub struct ToolName(pub String);
+pub struct ToolName(String);
 
 impl From<&str> for ToolName {
     fn from(s: &str) -> Self {
@@ -56,9 +56,17 @@ impl From<&str> for ToolName {
     Serialize,
     Deserialize,
 )]
-pub struct Timestamp(pub u64);
+pub struct Timestamp(u64);
 
 impl Timestamp {
+    pub const fn zero() -> Self {
+        Self(0)
+    }
+
+    pub const fn from_ms(ms: u64) -> Self {
+        Self(ms)
+    }
+
     pub fn now() -> Self {
         Self(
             std::time::SystemTime::now()
@@ -479,7 +487,7 @@ mod tests {
     fn message_serialisation_roundtrip() {
         let msg = Message::User(UserMessage {
             content: UserContent::Text("hello".into()),
-            timestamp_ms: Timestamp(1234567890),
+            timestamp_ms: Timestamp::from_ms(1234567890),
         });
         let json = serde_json::to_string(&msg).unwrap();
         let back: Message = serde_json::from_str(&json).unwrap();

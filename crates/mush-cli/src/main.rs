@@ -214,7 +214,7 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
     // session: resume or create new
     let store = SessionStore::new(SessionStore::default_dir());
     let mut session = if let Some(ref id) = cli.resume {
-        let sid = mush_session::SessionId(id.clone());
+        let sid = mush_session::SessionId::from(id.clone());
         store
             .load(&sid)
             .map_err(|e| eyre!("failed to load session: {e}"))?

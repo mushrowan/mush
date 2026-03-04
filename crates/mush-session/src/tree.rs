@@ -11,7 +11,13 @@ use serde::{Deserialize, Serialize};
 
 /// unique entry identifier (8 hex chars)
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Display, Serialize, Deserialize)]
-pub struct EntryId(pub String);
+pub struct EntryId(String);
+
+impl From<&str> for EntryId {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
 
 impl std::ops::Deref for EntryId {
     type Target = str;
@@ -309,7 +315,7 @@ mod tests {
     fn user_msg(text: &str) -> Message {
         Message::User(UserMessage {
             content: UserContent::Text(text.into()),
-            timestamp_ms: Timestamp(0),
+            timestamp_ms: Timestamp::zero(),
         })
     }
 
@@ -324,7 +330,7 @@ mod tests {
             usage: Usage::default(),
             stop_reason: StopReason::Stop,
             error_message: None,
-            timestamp_ms: Timestamp(0),
+            timestamp_ms: Timestamp::zero(),
         })
     }
 
@@ -431,7 +437,7 @@ mod tests {
     #[test]
     fn branch_nonexistent_returns_false() {
         let mut tree = SessionTree::new();
-        assert!(!tree.branch(&EntryId("nope".into())));
+        assert!(!tree.branch(&EntryId::from("nope")));
     }
 
     #[test]

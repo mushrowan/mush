@@ -471,7 +471,7 @@ mod tests {
 
         let messages = vec![Message::User(UserMessage {
             content: UserContent::Text("hi".into()),
-            timestamp_ms: Timestamp(0),
+            timestamp_ms: Timestamp::zero(),
         })];
 
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -517,7 +517,7 @@ mod tests {
 
         let messages = vec![Message::User(UserMessage {
             content: UserContent::Text("hi".into()),
-            timestamp_ms: Timestamp(0),
+            timestamp_ms: Timestamp::zero(),
         })];
 
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -571,7 +571,7 @@ mod tests {
                         StopReason::ToolUse
                     },
                     error_message: None,
-                    timestamp_ms: Timestamp(0),
+                    timestamp_ms: Timestamp::zero(),
                 };
 
                 Box::pin(async move {
@@ -607,7 +607,7 @@ mod tests {
                 if n == 0 {
                     vec![Message::User(UserMessage {
                         content: UserContent::Text("queued follow-up".into()),
-                        timestamp_ms: Timestamp(0),
+                        timestamp_ms: Timestamp::zero(),
                     })]
                 } else {
                     vec![]
@@ -630,7 +630,7 @@ mod tests {
 
         let messages = vec![Message::User(UserMessage {
             content: UserContent::Text("hi".into()),
-            timestamp_ms: Timestamp(0),
+            timestamp_ms: Timestamp::zero(),
         })];
 
         let rt = tokio::runtime::Runtime::new().unwrap();
