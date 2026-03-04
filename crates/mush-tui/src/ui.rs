@@ -8,7 +8,7 @@ use crate::app::{App, AppMode};
 use crate::widgets::input_box::InputBox;
 use crate::widgets::message_list::MessageList;
 use crate::widgets::search_popup::SearchPopup;
-use crate::widgets::status_bar::StatusBar;
+use crate::widgets::status_bar::{StatusBar, status_bar_height};
 use crate::widgets::tool_panels::{ToolPanels, tool_panels_height};
 
 /// the full TUI layout, composing all widgets
@@ -23,9 +23,14 @@ impl<'a> Ui<'a> {
 
     /// get the cursor position for the terminal
     pub fn cursor_position(&self, area: Rect) -> (u16, u16) {
-        let input_h = input_height(&self.app.input, area.width);
+        let input_h = input_height(
+            &self.app.input,
+            area.width,
+            self.app.pending_images.len(),
+        );
         let tools_h = tool_panels_height(&self.app.active_tools, area.width);
-        let chunks = layout(area, input_h, tools_h);
+        let status_h = status_bar_height(self.app, area.width);
+        let chunks = layout(area, input_h, tools_h, status_h);
         InputBox::new(self.app).cursor_position(chunks.input)
     }
 }
@@ -38,38 +43,36 @@ pub struct LayoutRegions {
     pub status: Rect,
 }
 
-/// compute wrapped line count for input text, accounting for newlines
-pub fn input_height(input: &str, area_width: u16) -> u16 {
+/// compute wrapped line count for input text, accounting for newlines and images
+pub fn input_height(input: &str, area_width: u16, image_count: usize) -> u16 {
     // inner width of the bordered block (left + right border = 2 columns)
     let content_width = area_width.saturating_sub(2) as usize;
     if content_width == 0 {
         return 3;
     }
-    // each line in the input (split by \n) wraps independently
-    // the first line also has the "> " prompt (2 chars)
+    // use the same word-wrap algorithm as the input box renderer
     let mut total_lines: usize = 0;
     for (i, line) in input.split('\n').enumerate() {
-        let effective_len = if i == 0 {
-            line.len() + 2 // "> " prefix
-        } else {
-            line.len()
-        };
-        total_lines += (effective_len / content_width) + 1;
+        let indent = if i == 0 { 2 } else { 0 }; // "> " prompt
+        let segments = crate::widgets::input_box::word_wrap_segments(line, content_width, indent);
+        total_lines += segments.len();
     }
-    // +2 for borders, cap at 10 lines so it doesn't eat the whole screen
+    // 1 line per image attachment label
+    total_lines += image_count;
+    // +2 for borders, cap at 12 lines so it doesn't eat the whole screen
     (total_lines as u16 + 2).min(12)
 }
 
 /// compute the main layout
-pub fn layout(area: Rect, input_h: u16, tools_h: u16) -> LayoutRegions {
+pub fn layout(area: Rect, input_h: u16, tools_h: u16, status_h: u16) -> LayoutRegions {
     if tools_h > 0 {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(1),          // messages
-                Constraint::Length(tools_h), // tool panels
-                Constraint::Length(input_h), // input
-                Constraint::Length(1),       // status bar
+                Constraint::Min(1),            // messages
+                Constraint::Length(tools_h),   // tool panels
+                Constraint::Length(input_h),   // input
+                Constraint::Length(status_h),  // status bar
             ])
             .split(area);
 
@@ -83,9 +86,9 @@ pub fn layout(area: Rect, input_h: u16, tools_h: u16) -> LayoutRegions {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(1),          // messages
-                Constraint::Length(input_h), // input
-                Constraint::Length(1),       // status bar
+                Constraint::Min(1),            // messages
+                Constraint::Length(input_h),   // input
+                Constraint::Length(status_h),  // status bar
             ])
             .split(area);
 
@@ -100,9 +103,14 @@ pub fn layout(area: Rect, input_h: u16, tools_h: u16) -> LayoutRegions {
 
 impl Widget for Ui<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let input_h = input_height(&self.app.input, area.width);
+        let input_h = input_height(
+            &self.app.input,
+            area.width,
+            self.app.pending_images.len(),
+        );
         let tools_h = tool_panels_height(&self.app.active_tools, area.width);
-        let regions = layout(area, input_h, tools_h);
+        let status_h = status_bar_height(self.app, area.width);
+        let regions = layout(area, input_h, tools_h, status_h);
         MessageList::new(self.app).render(regions.messages, buf);
         if let Some(tools_area) = regions.tools {
             ToolPanels::new(&self.app.active_tools, &self.app.throbber_state)
@@ -127,29 +135,37 @@ mod tests {
     #[test]
     fn input_height_short_text() {
         // "hi" in an 80-wide box: 1 line + 2 borders = 3
-        assert_eq!(input_height("hi", 80), 3);
+        assert_eq!(input_height("hi", 80, 0), 3);
     }
 
     #[test]
     fn input_height_wrapping() {
         // 100 chars in a 20-wide box: content_width=18, effective=102, ceil(102/18)+1=6+2=8
         let text = "a".repeat(100);
-        assert_eq!(input_height(&text, 20), 8);
+        assert_eq!(input_height(&text, 20, 0), 8);
     }
 
     #[test]
     fn input_height_capped() {
         // 1000 chars in a 20-wide box would be 65 lines, but capped at 12
         let text = "a".repeat(1000);
-        assert_eq!(input_height(&text, 20), 12);
+        assert_eq!(input_height(&text, 20, 0), 12);
     }
 
     #[test]
     fn input_height_multiline() {
         // "hello\nworld" in a 40-wide box: 2 lines + 2 borders = 4
-        assert_eq!(input_height("hello\nworld", 40), 4);
+        assert_eq!(input_height("hello\nworld", 40, 0), 4);
         // three newlines = 4 lines + 2 borders = 6
-        assert_eq!(input_height("a\nb\nc\nd", 40), 6);
+        assert_eq!(input_height("a\nb\nc\nd", 40, 0), 6);
+    }
+
+    #[test]
+    fn input_height_with_images() {
+        // 1 image = 1 extra line: "hi" = 1 line + 1 image + 2 borders = 4
+        assert_eq!(input_height("hi", 80, 1), 4);
+        // 2 images = 2 extra lines
+        assert_eq!(input_height("hi", 80, 2), 5);
     }
 
     #[test]
@@ -174,7 +190,7 @@ mod tests {
     #[test]
     fn layout_regions_are_correct() {
         let area = Rect::new(0, 0, 80, 24);
-        let regions = layout(area, 3, 0);
+        let regions = layout(area, 3, 0, 1);
         assert_eq!(regions.status.height, 1);
         assert_eq!(regions.input.height, 3);
         assert_eq!(regions.messages.height, 20); // 24 - 3 - 1
@@ -187,7 +203,8 @@ mod tests {
         app.input = "hello".into();
         app.cursor = 5;
         let ui = Ui::new(&app);
-        let area = Rect::new(0, 0, 80, 24);
+        // use wide area so status bar fits on 1 line
+        let area = Rect::new(0, 0, 200, 24);
         let (x, y) = ui.cursor_position(area);
         // input at y=20 (messages 0-19), cursor inside input: y=21 (border+1)
         assert_eq!(y, 21);
