@@ -36,6 +36,7 @@ impl Widget for MessageList<'_> {
                 &self.app.tool_output_live,
                 selected,
                 &mut image_placeholders,
+                area.width,
             );
             lines.push(Line::raw(""));
         }
@@ -58,7 +59,9 @@ impl Widget for MessageList<'_> {
                     .add_modifier(Modifier::BOLD),
             )]));
 
-            if !self.app.streaming_thinking.is_empty() {
+            if !self.app.streaming_thinking.is_empty()
+                && self.app.thinking_display != crate::app::ThinkingDisplay::Hidden
+            {
                 lines.push(Line::from(vec![
                     Span::raw("  "),
                     spinner_span.clone().style(dim),
@@ -215,8 +218,15 @@ fn render_message(
     live_tool_output: &Option<String>,
     selected: bool,
     image_placeholders: &mut Vec<ImagePlaceholder>,
+    width: u16,
 ) {
     let (label, label_style) = match msg.role {
+        MessageRole::User if msg.queued => (
+            "you (queued)".to_string(),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        ),
         MessageRole::User => (
             "you".to_string(),
             Style::default()
@@ -255,14 +265,6 @@ fn render_message(
     // thinking block
     if let Some(ref thinking) = msg.thinking {
         if msg.thinking_expanded {
-            let line_count = thinking.lines().count();
-            lines.push(Line::from(vec![
-                Span::styled("  💭 ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    format!("thinking ({line_count} lines) [ctrl+o to collapse]"),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]));
             for line in thinking.lines() {
                 lines.push(Line::styled(
                     format!("  {line}"),
@@ -297,11 +299,20 @@ fn render_message(
     }
 
     // main content (markdown rendered)
-    let md_text = render_markdown(&msg.content);
-    for line in md_text.lines {
-        let mut spans: Vec<Span<'_>> = vec![Span::raw("  ")];
-        spans.extend(line.spans);
-        lines.push(Line::from(spans));
+    if msg.queued {
+        let dim = Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::DIM);
+        for line in msg.content.lines() {
+            lines.push(Line::styled(format!("  {line}"), dim));
+        }
+    } else {
+        let md_text = render_markdown(&msg.content);
+        for line in md_text.lines {
+            let mut spans: Vec<Span<'_>> = vec![Span::raw("  ")];
+            spans.extend(line.spans);
+            lines.push(Line::from(spans));
+        }
     }
 
     // tool calls
@@ -350,18 +361,7 @@ fn render_message(
         }
         // tool output preview with diff colouring
         if let Some(ref output) = tc.output_preview {
-            for line in output.lines() {
-                let style = if line.starts_with("+ ") {
-                    Style::default().fg(Color::Green)
-                } else if line.starts_with("- ") {
-                    Style::default().fg(Color::Red)
-                } else {
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .add_modifier(Modifier::DIM)
-                };
-                lines.push(Line::styled(format!("    {line}"), style));
-            }
+            render_diff_output(output, lines, width);
         }
     }
 
@@ -405,6 +405,100 @@ fn render_markdown(source: &str) -> Text<'static> {
         return Text::default();
     }
     crate::markdown::render(source)
+}
+
+/// minimum usable width for side-by-side diff (indent + two panels + separator)
+const SIDE_BY_SIDE_MIN_WIDTH: u16 = 60;
+
+/// render tool output, using side-by-side layout for diffs when wide enough
+fn render_diff_output(output: &str, lines: &mut Vec<Line<'_>>, width: u16) {
+    let indent = 4;
+    let all_lines: Vec<&str> = output.lines().collect();
+
+    // check if this looks like a diff (has + or - prefixed lines)
+    let has_removed = all_lines.iter().any(|l| l.starts_with("- "));
+    let has_added = all_lines.iter().any(|l| l.starts_with("+ "));
+    let is_diff = has_removed && has_added;
+
+    if !is_diff || width < SIDE_BY_SIDE_MIN_WIDTH {
+        // fall back to unified diff / plain output
+        for line in &all_lines {
+            let style = if line.starts_with("+ ") {
+                Style::default().fg(Color::Green)
+            } else if line.starts_with("- ") {
+                Style::default().fg(Color::Red)
+            } else {
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::DIM)
+            };
+            lines.push(Line::styled(format!("{:indent$}{line}", ""), style));
+        }
+        return;
+    }
+
+    // collect removed and added lines
+    let removed: Vec<&str> = all_lines
+        .iter()
+        .filter(|l| l.starts_with("- "))
+        .map(|l| l.strip_prefix("- ").unwrap_or(l))
+        .collect();
+    let added: Vec<&str> = all_lines
+        .iter()
+        .filter(|l| l.starts_with("+ "))
+        .map(|l| l.strip_prefix("+ ").unwrap_or(l))
+        .collect();
+
+    // also pass through any non-diff lines (e.g. "edited path/to/file") first
+    for line in &all_lines {
+        if !line.starts_with("+ ") && !line.starts_with("- ") {
+            lines.push(Line::styled(
+                format!("{:indent$}{line}", ""),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::DIM),
+            ));
+        }
+    }
+
+    // each panel gets half the available width (minus indent, separator)
+    let usable = (width as usize).saturating_sub(indent + 3); // 3 for " │ "
+    let half = usable / 2;
+    let row_count = removed.len().max(added.len());
+
+    let red = Style::default().fg(Color::Red);
+    let green = Style::default().fg(Color::Green);
+    let dim = Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM);
+
+    for i in 0..row_count {
+        let left = removed.get(i).copied().unwrap_or("");
+        let right = added.get(i).copied().unwrap_or("");
+
+        // truncate to fit panel width
+        let left_display = if left.len() > half {
+            format!("{}…", &left[..half.saturating_sub(1)])
+        } else {
+            left.to_string()
+        };
+        let right_display = if right.len() > half {
+            format!("{}…", &right[..half.saturating_sub(1)])
+        } else {
+            right.to_string()
+        };
+
+        let left_style = if left.is_empty() { dim } else { red };
+        let right_style = if right.is_empty() { dim } else { green };
+
+        let pad_left = half.saturating_sub(left_display.len());
+        let spans = vec![
+            Span::raw(" ".repeat(indent)),
+            Span::styled(left_display, left_style),
+            Span::raw(" ".repeat(pad_left)),
+            Span::styled(" │ ", dim),
+            Span::styled(right_display, right_style),
+        ];
+        lines.push(Line::from(spans));
+    }
 }
 
 #[cfg(test)]
@@ -495,6 +589,7 @@ mod tests {
             usage: None,
             cost: None,
             model_id: None,
+        queued: false,
         });
         let buf = render_app(&app, 50, 15);
         let content = buffer_to_string(&buf);
@@ -516,6 +611,7 @@ mod tests {
             usage: None,
             cost: None,
             model_id: None,
+        queued: false,
         });
         let buf = render_app(&app, 60, 10);
         let content = buffer_to_string(&buf);
@@ -541,6 +637,7 @@ mod tests {
             usage: None,
             cost: None,
             model_id: None,
+        queued: false,
         });
         let buf = render_app(&app, 60, 30);
         let content = buffer_to_string(&buf);
