@@ -180,16 +180,21 @@ impl Widget for InputBox<'_> {
 
         let content_width = area.width.saturating_sub(2) as usize;
 
-        // flash border between cyan and blue when there are unread messages
-        let border_colour = if !streaming_idle && self.app.has_unread {
-            // tick runs at ~60fps, flash at ~1hz (every 30 ticks)
-            if self.app.unread_flash_on() {
-                Color::Blue
-            } else {
-                Color::Cyan
-            }
-        } else if streaming_idle {
+        // border colour signals unread messages
+        let border_colour = if streaming_idle {
             Color::DarkGray
+        } else if self.app.has_unread {
+            if self.app.input.is_empty() {
+                // empty input + unread: blink between blue and default
+                if self.app.unread_flash_on() {
+                    Color::Blue
+                } else {
+                    Color::Cyan
+                }
+            } else {
+                // typing + unread: solid blue (distinct from normal cyan)
+                Color::Blue
+            }
         } else {
             Color::Cyan
         };
