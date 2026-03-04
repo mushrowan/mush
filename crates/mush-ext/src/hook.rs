@@ -7,13 +7,15 @@ use crate::types::*;
 use mush_ai::types::Message;
 
 /// manages and invokes extensions
+#[derive(Default)]
 pub struct HookRunner {
     extensions: Vec<Box<dyn Extension>>,
 }
 
 impl HookRunner {
+    #[must_use]
     pub fn new() -> Self {
-        Self { extensions: vec![] }
+        Self::default()
     }
 
     pub fn register(&mut self, ext: Box<dyn Extension>) {
@@ -66,12 +68,6 @@ impl HookRunner {
         for ext in &self.extensions {
             ext.on_session_end(ctx);
         }
-    }
-}
-
-impl Default for HookRunner {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

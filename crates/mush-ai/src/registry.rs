@@ -19,6 +19,7 @@ pub type StreamResult = Pin<Box<dyn Future<Output = Result<EventStream, Provider
 
 /// errors from provider operations
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
+#[non_exhaustive]
 pub enum ProviderError {
     #[error("no provider registered for api: {0:?}")]
     #[diagnostic(help("register a provider for this api type before streaming"))]
@@ -26,10 +27,21 @@ pub enum ProviderError {
 
     #[error("missing api key for provider: {0}")]
     #[diagnostic(help("set the appropriate env var or pass an api key in options"))]
-    MissingApiKey(String),
+    MissingApiKey(crate::types::Provider),
 
     #[error("request failed: {0}")]
     Request(#[from] reqwest::Error),
+
+    #[error("invalid header value: {0}")]
+    InvalidHeader(#[from] reqwest::header::InvalidHeaderValue),
+
+    #[error("{api} returned {status}: {body}")]
+    #[diagnostic(help("check your api key and model id"))]
+    ApiError {
+        api: &'static str,
+        status: reqwest::StatusCode,
+        body: String,
+    },
 
     #[error("{0}")]
     Other(String),
@@ -58,15 +70,15 @@ pub trait ApiProvider: Send + Sync {
 }
 
 /// registry holding all available api providers
+#[derive(Default)]
 pub struct ApiRegistry {
     providers: HashMap<Api, Box<dyn ApiProvider>>,
 }
 
 impl ApiRegistry {
+    #[must_use]
     pub fn new() -> Self {
-        Self {
-            providers: HashMap::new(),
-        }
+        Self::default()
     }
 
     pub fn register(&mut self, provider: Box<dyn ApiProvider>) {
@@ -88,12 +100,6 @@ impl ApiRegistry {
             .get(model.api)
             .ok_or(ProviderError::NoProvider(model.api))?;
         Ok(provider.stream(model, context, options))
-    }
-}
-
-impl Default for ApiRegistry {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
