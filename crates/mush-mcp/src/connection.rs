@@ -142,6 +142,7 @@ impl McpManager {
                 }
                 Err(McpError::Disabled) => {}
                 Err(e) => {
+                    tracing::warn!(server = %name, error = %e, "MCP server connection failed");
                     eprintln!("\x1b[33mmcp: {name} failed: {e}\x1b[0m");
                 }
             }

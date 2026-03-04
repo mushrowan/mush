@@ -2,6 +2,7 @@
 
 mod commands;
 mod config;
+mod logging;
 mod setup;
 
 use clap::Parser;
@@ -101,6 +102,8 @@ enum Command {
 #[tokio::main]
 async fn main() -> Result<()> {
     color_eyre::install()?;
+    let (_log_guard, log_buffer) = logging::init_logging();
+    tracing::info!("mush starting");
     let cli = Cli::parse();
 
     // read from stdin if piped
@@ -142,7 +145,7 @@ async fn main() -> Result<()> {
             let prompt = expand_template(&prompt);
             print_mode(cli, prompt).await
         }
-        None => tui_mode(cli).await,
+        None => tui_mode(cli, log_buffer).await,
     }
 }
 
@@ -320,7 +323,7 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
     Ok(())
 }
 
-async fn tui_mode(cli: Cli) -> Result<()> {
+async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
     // shared state for streaming bash output to the TUI
     let tool_output_live = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
     let sink_state = tool_output_live.clone();
@@ -418,6 +421,10 @@ async fn tui_mode(cli: Cli) -> Result<()> {
         show_cost: setup.cfg.show_cost,
         debug_cache: setup.debug_cache,
         tool_output_live: Some(tool_output_live),
+        log_buffer: Some({
+            let buf = log_buffer.clone();
+            std::sync::Arc::new(move |n| buf.tail(n))
+        }),
     };
 
     mush_tui::run_tui(tui_config, &setup.tools, &setup.registry)
