@@ -24,7 +24,7 @@ impl<'a> Ui<'a> {
     /// get the cursor position for the terminal
     pub fn cursor_position(&self, area: Rect) -> (u16, u16) {
         let input_h = input_height(&self.app.input, area.width);
-        let tools_h = tool_panels_height(self.app.active_tools.len(), area.width);
+        let tools_h = tool_panels_height(&self.app.active_tools, area.width);
         let chunks = layout(area, input_h, tools_h);
         InputBox::new(self.app).cursor_position(chunks.input)
     }
@@ -38,17 +38,25 @@ pub struct LayoutRegions {
     pub status: Rect,
 }
 
-/// compute wrapped line count for input text
+/// compute wrapped line count for input text, accounting for newlines
 pub fn input_height(input: &str, area_width: u16) -> u16 {
-    // available width: total - 2 (borders) - 2 ("> " prompt)
     let content_width = area_width.saturating_sub(4) as usize;
     if content_width == 0 {
         return 3;
     }
-    let text_len = input.len().max(1);
-    let lines = ((text_len - 1) / content_width) + 1;
-    // +2 for borders, no cap (messages area has Min(1) so it'll shrink)
-    lines as u16 + 2
+    // each line in the input (split by \n) wraps independently
+    // the first line also has the "> " prompt (2 chars)
+    let mut total_lines: usize = 0;
+    for (i, line) in input.split('\n').enumerate() {
+        let effective_len = if i == 0 {
+            line.len() + 2 // "> " prefix
+        } else {
+            line.len()
+        };
+        total_lines += (effective_len / content_width) + 1;
+    }
+    // +2 for borders, cap at 10 lines so it doesn't eat the whole screen
+    (total_lines as u16 + 2).min(12)
 }
 
 /// compute the main layout
@@ -92,7 +100,7 @@ pub fn layout(area: Rect, input_h: u16, tools_h: u16) -> LayoutRegions {
 impl Widget for Ui<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let input_h = input_height(&self.app.input, area.width);
-        let tools_h = tool_panels_height(self.app.active_tools.len(), area.width);
+        let tools_h = tool_panels_height(&self.app.active_tools, area.width);
         let regions = layout(area, input_h, tools_h);
         MessageList::new(self.app).render(regions.messages, buf);
         if let Some(tools_area) = regions.tools {
@@ -129,10 +137,18 @@ mod tests {
     }
 
     #[test]
-    fn input_height_grows_unbounded() {
-        // 1000 chars in a 20-wide box: content_width=16, ceil(1000/16)=63 lines + 2 = 65
+    fn input_height_capped() {
+        // 1000 chars in a 20-wide box would be 65 lines, but capped at 12
         let text = "a".repeat(1000);
-        assert_eq!(input_height(&text, 20), 65);
+        assert_eq!(input_height(&text, 20), 12);
+    }
+
+    #[test]
+    fn input_height_multiline() {
+        // "hello\nworld" in a 40-wide box: 2 lines + 2 borders = 4
+        assert_eq!(input_height("hello\nworld", 40), 4);
+        // three newlines = 4 lines + 2 borders = 6
+        assert_eq!(input_height("a\nb\nc\nd", 40), 6);
     }
 
     #[test]
