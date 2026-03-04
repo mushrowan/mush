@@ -364,6 +364,8 @@ pub async fn run_tui(
 
             let mut stream = std::pin::pin!(agent_loop(config, conversation.clone()));
 
+            let mut aborted = false;
+
             // inner loop: process agent events while also handling terminal input
             loop {
                 let tick = tokio::time::sleep(std::time::Duration::from_millis(16));
@@ -441,6 +443,7 @@ pub async fn run_tui(
                                                 app.is_streaming = false;
                                                 app.active_tools.clear();
                                                 app.status = Some("aborted".into());
+                                                aborted = true;
                                                 break;
                                             }
                                             AppEvent::UserSubmit { text } => {
@@ -469,6 +472,11 @@ pub async fn run_tui(
 
                 app.tick();
                 draw(&mut terminal, &app, &mut image_protos)?;
+
+                if aborted {
+                    // drop the stream, cancelling any in-flight agent work
+                    break;
+                }
             }
 
             // auto-save after each agent turn
