@@ -371,8 +371,8 @@ fn render_message(
         if total > 0 {
             let mut parts = vec![format!("  {total}tok")];
             if usage.cache_read_tokens > 0 {
-                let pct = (usage.cache_read_tokens as f64 / usage.input_tokens.max(1) as f64
-                    * 100.0) as u32;
+                let total_input = usage.total_input_tokens().max(1) as f64;
+                let pct = (usage.cache_read_tokens as f64 / total_input * 100.0) as u32;
                 parts.push(format!("{pct}% cached"));
             }
             if let Some(c) = msg.cost {
