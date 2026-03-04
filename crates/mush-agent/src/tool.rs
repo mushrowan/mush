@@ -1,12 +1,15 @@
 //! agent tool trait and result types
 
-use mush_ai::types::{ImageContent, TextContent, ToolResultContentPart};
+use mush_ai::types::{
+    ImageContent, ImageMimeType, TextContent, ToolOutcome, ToolResultContentPart,
+};
 
 /// result of executing an agent tool
 #[derive(Debug, Clone)]
+#[must_use]
 pub struct ToolResult {
     pub content: Vec<ToolResultContentPart>,
-    pub is_error: bool,
+    pub outcome: ToolOutcome,
 }
 
 impl ToolResult {
@@ -16,7 +19,7 @@ impl ToolResult {
             content: vec![ToolResultContentPart::Text(TextContent {
                 text: text.into(),
             })],
-            is_error: false,
+            outcome: ToolOutcome::Success,
         }
     }
 
@@ -26,18 +29,18 @@ impl ToolResult {
             content: vec![ToolResultContentPart::Text(TextContent {
                 text: text.into(),
             })],
-            is_error: true,
+            outcome: ToolOutcome::Error,
         }
     }
 
     /// convenience constructor for an image result
-    pub fn image(data: String, mime_type: String) -> Self {
+    pub fn image(data: String, mime_type: ImageMimeType) -> Self {
         Self {
             content: vec![ToolResultContentPart::Image(ImageContent {
                 data,
                 mime_type,
             })],
-            is_error: false,
+            outcome: ToolOutcome::Success,
         }
     }
 }
@@ -73,7 +76,7 @@ mod tests {
     #[test]
     fn tool_result_text() {
         let result = ToolResult::text("hello");
-        assert!(!result.is_error);
+        assert!(result.outcome.is_success());
         assert_eq!(result.content.len(), 1);
         match &result.content[0] {
             ToolResultContentPart::Text(t) => assert_eq!(t.text, "hello"),
@@ -84,7 +87,7 @@ mod tests {
     #[test]
     fn tool_result_error() {
         let result = ToolResult::error("something went wrong");
-        assert!(result.is_error);
+        assert!(result.outcome.is_error());
     }
 
     struct EchoTool;
@@ -121,7 +124,7 @@ mod tests {
     async fn echo_tool_works() {
         let tool = EchoTool;
         let result = tool.execute(serde_json::json!({"text": "hello"})).await;
-        assert!(!result.is_error);
+        assert!(result.outcome.is_success());
         match &result.content[0] {
             ToolResultContentPart::Text(t) => assert_eq!(t.text, "hello"),
             _ => panic!("expected text"),

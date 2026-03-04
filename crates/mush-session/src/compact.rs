@@ -47,7 +47,7 @@ fn estimate_message_tokens(msg: &Message) -> usize {
             .iter()
             .map(|p| match p {
                 AssistantContentPart::Text(t) => t.text.len(),
-                AssistantContentPart::Thinking(t) => t.thinking.len(),
+                AssistantContentPart::Thinking(t) => t.text().len(),
                 AssistantContentPart::ToolCall(tc) => {
                     tc.name.as_str().len() + tc.arguments.to_string().len()
                 }
@@ -134,7 +134,11 @@ pub fn build_compaction_prompt(messages: &[Message]) -> String {
                 } else {
                     text
                 };
-                let status = if tr.is_error { " (error)" } else { "" };
+                let status = if tr.outcome.is_error() {
+                    " (error)"
+                } else {
+                    ""
+                };
                 parts.push(format!(
                     "[{i}] tool_result({}){status}: {truncated}",
                     tr.tool_name

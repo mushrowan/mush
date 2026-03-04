@@ -66,7 +66,9 @@ impl AgentTool for ReadTool {
             let offset = args["offset"].as_u64().map(|n| n as usize);
             let limit = args["limit"].as_u64().map(|n| n as usize);
 
-            read_file(&path, offset, limit)
+            tokio::task::spawn_blocking(move || read_file(&path, offset, limit))
+                .await
+                .unwrap_or_else(|e| ToolResult::error(format!("task join error: {e}")))
         })
     }
 }
@@ -163,20 +165,14 @@ fn read_image(path: &Path) -> ToolResult {
         .unwrap_or("png")
         .to_lowercase();
 
-    let mime_type = match ext.as_str() {
-        "jpg" | "jpeg" => "image/jpeg",
-        "png" => "image/png",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        _ => "image/png",
-    };
+    let mime_type = mush_ai::types::ImageMimeType::from_extension(&ext);
 
     ToolResult {
         content: vec![ToolResultContentPart::Image(ImageContent {
             data: encoded,
-            mime_type: mime_type.into(),
+            mime_type,
         })],
-        is_error: false,
+        outcome: mush_ai::types::ToolOutcome::Success,
     }
 }
 
@@ -196,7 +192,7 @@ mod tests {
         fs::write(&file, "line 1\nline 2\nline 3").unwrap();
 
         let result = read_file(&file, None, None);
-        assert!(!result.is_error);
+        assert!(result.outcome.is_success());
         let text = extract_text(&result);
         assert!(text.contains("line 1"));
         assert!(text.contains("line 3"));
@@ -237,14 +233,14 @@ mod tests {
     #[test]
     fn read_nonexistent_file() {
         let result = read_file(Path::new("/nonexistent/file.txt"), None, None);
-        assert!(result.is_error);
+        assert!(result.outcome.is_error());
     }
 
     #[test]
     fn read_directory_returns_error() {
         let dir = temp_dir();
         let result = read_file(dir.path(), None, None);
-        assert!(result.is_error);
+        assert!(result.outcome.is_error());
     }
 
     #[test]

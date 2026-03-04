@@ -142,7 +142,7 @@ async fn run_command(
             content: vec![mush_ai::types::ToolResultContentPart::Text(
                 mush_ai::types::TextContent { text },
             )],
-            is_error: true,
+            outcome: mush_ai::types::ToolOutcome::Error,
         }
     } else {
         ToolResult::text(text)
@@ -277,7 +277,7 @@ mod tests {
     async fn run_echo_command() {
         let cwd = std::env::current_dir().unwrap();
         let result = run_command(&cwd, "echo hello", 10, None).await;
-        assert!(!result.is_error);
+        assert!(result.outcome.is_success());
         let text = extract_text(&result);
         assert!(text.contains("hello"));
     }
@@ -286,7 +286,7 @@ mod tests {
     async fn run_failing_command() {
         let cwd = std::env::current_dir().unwrap();
         let result = run_command(&cwd, "exit 1", 10, None).await;
-        assert!(result.is_error);
+        assert!(result.outcome.is_error());
         let text = extract_text(&result);
         assert!(text.contains("exited with code 1"));
     }
@@ -303,7 +303,7 @@ mod tests {
     async fn run_command_timeout() {
         let cwd = std::env::current_dir().unwrap();
         let result = run_command(&cwd, "sleep 30", 1, None).await;
-        assert!(result.is_error);
+        assert!(result.outcome.is_error());
         let text = extract_text(&result);
         assert!(text.contains("timed out"));
     }

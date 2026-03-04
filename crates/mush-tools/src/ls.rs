@@ -55,7 +55,9 @@ impl AgentTool for LsTool {
                 })
                 .unwrap_or_else(|| self.cwd.clone());
 
-            list_dir(&path)
+            tokio::task::spawn_blocking(move || list_dir(&path))
+                .await
+                .unwrap_or_else(|e| ToolResult::error(format!("task join error: {e}")))
         })
     }
 }
@@ -139,7 +141,7 @@ mod tests {
         fs::create_dir(dir.path().join("subdir")).unwrap();
 
         let result = list_dir(dir.path());
-        assert!(!result.is_error);
+        assert!(result.outcome.is_success());
         let text = extract_text(&result);
         assert!(text.contains("subdir/"));
         assert!(text.contains("file.txt"));
@@ -156,7 +158,7 @@ mod tests {
     #[test]
     fn list_nonexistent() {
         let result = list_dir(Path::new("/nonexistent/path"));
-        assert!(result.is_error);
+        assert!(result.outcome.is_error());
     }
 
     #[test]
@@ -165,7 +167,7 @@ mod tests {
         let file = dir.path().join("file.txt");
         fs::write(&file, "hello").unwrap();
         let result = list_dir(&file);
-        assert!(result.is_error);
+        assert!(result.outcome.is_error());
     }
 
     #[test]

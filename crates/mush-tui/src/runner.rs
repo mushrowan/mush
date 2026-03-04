@@ -33,7 +33,8 @@ use crate::widgets;
 pub type PromptEnricher = std::sync::Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
 /// how to inject skill relevance hints into the conversation
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum HintMode {
     /// prepend hint to user message (evaluated once per message)
     #[default]
@@ -179,7 +180,7 @@ pub async fn run_tui(
                         .collect::<Vec<_>>()
                         .join("");
                     let thinking: Option<String> = a.content.iter().find_map(|p| match p {
-                        AssistantContentPart::Thinking(t) => Some(t.thinking.clone()),
+                        AssistantContentPart::Thinking(t) => Some(t.text().to_string()),
                         _ => None,
                     });
                     app.messages.push(crate::app::DisplayMessage {
@@ -252,7 +253,7 @@ pub async fn run_tui(
                         }
                         _ => "no injection hint matched",
                     };
-                    app.push_system_message(note.into());
+                    app.push_system_message(note);
                 }
             }
 
@@ -660,7 +661,7 @@ fn handle_agent_event(
             app.end_tool(
                 tool_call_id.as_str(),
                 tool_name.as_str(),
-                result.is_error,
+                result.outcome,
                 output_text,
                 image_data,
             );
@@ -668,7 +669,7 @@ fn handle_agent_event(
                 tool_call_id: tool_call_id.clone(),
                 tool_name: tool_name.clone(),
                 content: result.content.clone(),
-                is_error: result.is_error,
+                outcome: result.outcome,
                 timestamp_ms: Timestamp::now(),
             }));
         }

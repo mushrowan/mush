@@ -131,7 +131,7 @@ mod tests {
         let result = tool
             .execute(serde_json::json!({"pattern": "Cargo.toml"}))
             .await;
-        assert!(!result.is_error);
+        assert!(result.outcome.is_success());
         let text = match &result.content[0] {
             mush_ai::types::ToolResultContentPart::Text(t) => &t.text,
             _ => panic!("expected text"),
@@ -145,7 +145,7 @@ mod tests {
         let result = tool
             .execute(serde_json::json!({"pattern": "*.nonexistent_extension_xyz"}))
             .await;
-        assert!(!result.is_error);
+        assert!(result.outcome.is_success());
         let text = match &result.content[0] {
             mush_ai::types::ToolResultContentPart::Text(t) => &t.text,
             _ => panic!("expected text"),

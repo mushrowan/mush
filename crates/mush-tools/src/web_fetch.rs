@@ -217,6 +217,6 @@ mod tests {
         let result = tool
             .execute(serde_json::json!({"url": "ftp://example.com"}))
             .await;
-        assert!(result.is_error);
+        assert!(result.outcome.is_error());
     }
 }

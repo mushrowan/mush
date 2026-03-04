@@ -430,7 +430,7 @@ mod tests {
     #[test]
     fn user_message_renders() {
         let mut app = App::new("test".into(), 200_000);
-        app.push_user_message("hello world".into());
+        app.push_user_message("hello world");
         let buf = render_app(&app, 40, 10);
         let content = buffer_to_string(&buf);
         assert!(content.contains("you"));

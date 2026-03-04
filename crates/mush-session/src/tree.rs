@@ -115,7 +115,11 @@ impl SessionTree {
     }
 
     /// branch with a summary of the abandoned path
-    pub fn branch_with_summary(&mut self, from_id: &EntryId, summary: String) -> Option<EntryId> {
+    pub fn branch_with_summary(
+        &mut self,
+        from_id: &EntryId,
+        summary: impl Into<String>,
+    ) -> Option<EntryId> {
         self.by_id(from_id)?;
         let old_leaf = self.leaf_id.clone().unwrap_or_else(|| from_id.clone());
         self.leaf_id = Some(from_id.clone());
@@ -125,7 +129,7 @@ impl SessionTree {
             parent_id: Some(from_id.clone()),
             timestamp: Timestamp::now(),
             kind: EntryKind::BranchSummary {
-                summary,
+                summary: summary.into(),
                 from_id: old_leaf,
             },
         };
@@ -390,7 +394,7 @@ mod tests {
         tree.append_message(assistant_msg("about topic A..."));
 
         let summary_id = tree
-            .branch_with_summary(&u1, "discussed topic A briefly".into())
+            .branch_with_summary(&u1, "discussed topic A briefly")
             .unwrap();
 
         // leaf should be the summary entry

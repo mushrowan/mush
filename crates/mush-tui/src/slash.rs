@@ -56,8 +56,7 @@ pub fn handle(
         }
         "branch" => {
             app.push_system_message(
-                "usage: /branch <n> — branch from nth user message\ntry /tree to see messages"
-                    .into(),
+                "usage: /branch <n> — branch from nth user message\ntry /tree to see messages",
             );
             None
         }
@@ -66,7 +65,7 @@ pub fn handle(
             match store.list() {
                 Ok(sessions) => {
                     if sessions.is_empty() {
-                        app.push_system_message("no saved sessions".into());
+                        app.push_system_message("no saved sessions");
                     } else {
                         app.open_session_picker(sessions);
                     }
@@ -151,7 +150,7 @@ fn show_tree(app: &mut App, session_tree: &SessionTree) {
         .collect();
 
     if user_msgs.is_empty() {
-        app.push_system_message("no messages yet".into());
+        app.push_system_message("no messages yet");
         return;
     }
 
@@ -196,7 +195,7 @@ fn handle_branch(
     args: &str,
 ) {
     let Ok(n) = args.trim().parse::<usize>() else {
-        app.push_system_message("usage: /branch <number> (try /tree first)".into());
+        app.push_system_message("usage: /branch <number> (try /tree first)");
         return;
     };
 
@@ -228,7 +227,6 @@ fn handle_branch(
         } else {
             session_tree.reset_leaf();
         }
-
         *conversation = session_tree.build_context();
         rebuild_display(app, conversation);
         app.status = Some(format!("branched before: {preview}"));
@@ -294,7 +292,7 @@ fn handle_undo(app: &mut App, conversation: &mut Vec<Message>, session_tree: &mu
         .last()
         .map(|e| e.parent_id.clone());
     match parent {
-        None => app.push_system_message("nothing to undo".into()),
+        None => app.push_system_message("nothing to undo"),
         Some(None) => {
             session_tree.reset_leaf();
             *conversation = session_tree.build_context();
@@ -439,7 +437,7 @@ pub fn handle_export(app: &mut App, conversation: &[Message], args: &str) {
                 };
                 md.push_str(&format!(
                     "**{}** `{}`\n\n```\n{preview}\n```\n\n",
-                    if tr.is_error { "✗" } else { "✓" },
+                    if tr.outcome.is_error() { "✗" } else { "✓" },
                     tr.tool_name,
                 ));
             }
@@ -464,7 +462,7 @@ pub async fn handle_compact(
 
     let before = conversation.len();
     if before <= 4 {
-        app.push_system_message("conversation too short to compact".into());
+        app.push_system_message("conversation too short to compact");
         return;
     }
 
