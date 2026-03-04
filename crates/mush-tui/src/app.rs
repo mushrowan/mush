@@ -180,6 +180,10 @@ pub struct App {
     pub tool_output_live: Option<String>,
     /// tool args streaming in (partial JSON from ToolCallDelta)
     pub streaming_tool_args: String,
+    /// chars of streaming_text currently visible (typewriter effect)
+    visible_text_chars: usize,
+    /// chars of streaming_thinking currently visible (typewriter effect)
+    visible_thinking_chars: usize,
     /// spinner state for animations
     pub throbber_state: ThrobberState,
     /// frame counter for throttling spinner speed
@@ -266,6 +270,8 @@ impl App {
             active_tools: Vec::new(),
             tool_output_live: None,
             streaming_tool_args: String::new(),
+            visible_text_chars: 0,
+            visible_thinking_chars: 0,
             throbber_state: ThrobberState::default(),
             tick_count: 0,
             thinking_level: ThinkingLevel::Off,
@@ -290,6 +296,19 @@ impl App {
         self.tick_count = self.tick_count.wrapping_add(1);
         if self.tick_count.is_multiple_of(8) {
             self.throbber_state.calc_next();
+        }
+        // typewriter: advance visible chars towards full buffer using exponential ease
+        if self.is_streaming {
+            let text_total = self.streaming_text.chars().count();
+            if self.visible_text_chars < text_total {
+                let remaining = text_total - self.visible_text_chars;
+                self.visible_text_chars += remaining.div_ceil(2).max(1);
+            }
+            let think_total = self.streaming_thinking.chars().count();
+            if self.visible_thinking_chars < think_total {
+                let remaining = think_total - self.visible_thinking_chars;
+                self.visible_thinking_chars += remaining.div_ceil(2).max(1);
+            }
         }
     }
 
@@ -345,6 +364,8 @@ impl App {
         self.is_streaming = true;
         self.streaming_text.clear();
         self.streaming_thinking.clear();
+        self.visible_text_chars = 0;
+        self.visible_thinking_chars = 0;
         self.scroll_offset = 0;
     }
 
@@ -356,6 +377,16 @@ impl App {
     /// append thinking delta to the current stream
     pub fn push_thinking_delta(&mut self, delta: &str) {
         self.streaming_thinking.push_str(delta);
+    }
+
+    /// visible portion of streaming text (typewriter effect)
+    pub fn visible_streaming_text(&self) -> &str {
+        char_prefix(&self.streaming_text, self.visible_text_chars)
+    }
+
+    /// visible portion of streaming thinking (typewriter effect)
+    pub fn visible_streaming_thinking(&self) -> &str {
+        char_prefix(&self.streaming_thinking, self.visible_thinking_chars)
     }
 
     /// accumulate streaming tool call arguments
@@ -679,6 +710,8 @@ impl App {
         self.messages.clear();
         self.streaming_text.clear();
         self.streaming_thinking.clear();
+        self.visible_text_chars = 0;
+        self.visible_thinking_chars = 0;
         self.scroll_offset = 0;
         self.total_cost = 0.0;
         self.total_tokens = 0;
@@ -872,6 +905,13 @@ fn truncate_output(output: &str) -> String {
     result
 }
 
+/// return the first `n` chars of `s` as a str slice
+fn char_prefix(s: &str, n: usize) -> &str {
+    s.char_indices()
+        .nth(n)
+        .map_or(s, |(byte_pos, _)| &s[..byte_pos])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -922,6 +962,54 @@ mod tests {
 
         assert_eq!(app.messages[0].thinking.as_deref(), Some("let me think..."));
         assert_eq!(app.messages[0].content, "answer");
+    }
+
+    #[test]
+    fn char_prefix_slices_correctly() {
+        assert_eq!(char_prefix("hello", 0), "");
+        assert_eq!(char_prefix("hello", 3), "hel");
+        assert_eq!(char_prefix("hello", 5), "hello");
+        assert_eq!(char_prefix("hello", 100), "hello");
+        // multi-byte chars
+        assert_eq!(char_prefix("café", 3), "caf");
+        assert_eq!(char_prefix("café", 4), "café");
+    }
+
+    #[test]
+    fn typewriter_advances_with_ticks() {
+        let mut app = App::new("test".into(), 200_000);
+        app.start_streaming();
+        app.push_text_delta("hello world");
+
+        // before any tick, nothing visible
+        assert_eq!(app.visible_streaming_text(), "");
+
+        // one tick advances partway (exponential ease)
+        app.tick();
+        let visible = app.visible_streaming_text();
+        assert!(!visible.is_empty());
+        assert!(visible.len() < "hello world".len());
+
+        // enough ticks catch up fully
+        for _ in 0..20 {
+            app.tick();
+        }
+        assert_eq!(app.visible_streaming_text(), "hello world");
+    }
+
+    #[test]
+    fn typewriter_resets_on_new_stream() {
+        let mut app = App::new("test".into(), 200_000);
+        app.start_streaming();
+        app.push_text_delta("first");
+        for _ in 0..20 {
+            app.tick();
+        }
+        assert_eq!(app.visible_streaming_text(), "first");
+
+        // new stream resets
+        app.start_streaming();
+        assert_eq!(app.visible_streaming_text(), "");
     }
 
     #[test]
