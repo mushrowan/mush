@@ -47,4 +47,9 @@ in {
     inherit src;
     pname = "mush";
   };
+
+  deny = craneLib.cargoDeny (commonArgs
+    // {
+      inherit cargoArtifacts;
+    });
 }

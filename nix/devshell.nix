@@ -12,6 +12,7 @@ craneLib.devShell {
     cargo-machete
     cargo-watch
     cargo-nextest
+    cargo-deny
     jujutsu
     gh
     pkg-config

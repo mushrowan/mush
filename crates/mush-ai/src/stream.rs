@@ -4,6 +4,7 @@ use crate::types::{AssistantMessage, StopReason};
 
 /// events emitted during assistant message streaming
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum StreamEvent {
     /// stream started, initial partial message
     Start { partial: AssistantMessage },
