@@ -1,36 +1,31 @@
 //! api key resolution from environment variables
 
-use crate::types::Provider;
+use crate::types::{ApiKey, Provider};
 
 /// resolve an api key for a provider from environment variables
-pub fn env_api_key(provider: &Provider) -> Option<String> {
+pub fn env_api_key(provider: &Provider) -> Option<ApiKey> {
     let var_name = match provider {
         Provider::Anthropic => "ANTHROPIC_API_KEY",
         Provider::OpenRouter => "OPENROUTER_API_KEY",
         Provider::Custom(name) => {
             // convention: PROVIDER_NAME_API_KEY (uppercase, hyphens to underscores)
             let var = format!("{}_API_KEY", name.to_uppercase().replace('-', "_"));
-            return std::env::var(var).ok().filter(|v| !v.is_empty());
+            return std::env::var(var).ok().and_then(ApiKey::new);
         }
     };
-    std::env::var(var_name).ok().filter(|v| !v.is_empty())
+    std::env::var(var_name).ok().and_then(ApiKey::new)
 }
 
 /// check for anthropic oauth token (takes precedence over api key)
-pub fn anthropic_api_key() -> Option<String> {
+pub fn anthropic_api_key() -> Option<ApiKey> {
     std::env::var("ANTHROPIC_OAUTH_TOKEN")
         .ok()
-        .filter(|v| !v.is_empty())
+        .and_then(ApiKey::new)
         .or_else(|| {
             std::env::var("ANTHROPIC_API_KEY")
                 .ok()
-                .filter(|v| !v.is_empty())
+                .and_then(ApiKey::new)
         })
-}
-
-/// whether a key looks like an anthropic oauth token
-pub fn is_oauth_token(key: &str) -> bool {
-    key.contains("sk-ant-oat")
 }
 
 #[cfg(test)]
@@ -48,9 +43,10 @@ mod tests {
 
     #[test]
     fn is_oauth_token_detection() {
-        assert!(is_oauth_token("sk-ant-oat-abc123"));
-        assert!(!is_oauth_token("sk-ant-api-abc123"));
-        assert!(!is_oauth_token("some-random-key"));
+        let oauth = ApiKey::new("sk-ant-oat-abc123").unwrap();
+        assert!(oauth.is_oauth_token());
+        let regular = ApiKey::new("sk-ant-api-abc123").unwrap();
+        assert!(!regular.is_oauth_token());
     }
 
     #[test]

@@ -250,7 +250,7 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
         && let Some(provider_id) = oauth_provider_id_for_model(&model)
         && let Ok(Some(token)) = mush_ai::oauth::get_oauth_token(provider_id).await
     {
-        options.api_key = Some(token);
+        options.api_key = ApiKey::new(token);
         options.account_id = oauth_account_id(provider_id);
     }
 
@@ -482,7 +482,7 @@ async fn tui_mode(cli: Cli) -> Result<()> {
         && let Some(provider_id) = oauth_provider_id_for_model(&model)
         && let Ok(Some(token)) = mush_ai::oauth::get_oauth_token(provider_id).await
     {
-        options.api_key = Some(token);
+        options.api_key = ApiKey::new(token);
         options.account_id = oauth_account_id(provider_id);
     }
 
@@ -726,13 +726,14 @@ fn build_prompt_enricher(_cwd: &std::path::Path) -> Option<mush_tui::PromptEnric
     None
 }
 
-fn config_api_key_for_provider(cfg: &config::Config, provider: &Provider) -> Option<String> {
-    match provider {
+fn config_api_key_for_provider(cfg: &config::Config, provider: &Provider) -> Option<ApiKey> {
+    let raw = match provider {
         Provider::Anthropic => cfg.api_keys.anthropic.clone(),
         Provider::OpenRouter => cfg.api_keys.openrouter.clone(),
         Provider::Custom(name) if name == "openai" => cfg.api_keys.openai.clone(),
         _ => None,
-    }
+    };
+    raw.and_then(ApiKey::new)
 }
 
 fn provider_env_key_is_set(provider: &Provider) -> bool {
