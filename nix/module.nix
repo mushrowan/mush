@@ -106,8 +106,8 @@ self: {
 
   tomlSettings = clean (
     {
-      model = cfg.model;
-      thinking = cfg.thinking;
+      inherit (cfg) model;
+      inherit (cfg) thinking;
       max_tokens = cfg.maxTokens;
       max_turns = cfg.maxTurns;
       system_prompt = cfg.systemPrompt;
@@ -135,7 +135,7 @@ in {
 
     package = lib.mkOption {
       type = lib.types.package;
-      default = self.packages.${pkgs.system}.default;
+      inherit (self.packages.${pkgs.system}) default;
       description = "the mush package to install";
     };
 
@@ -249,7 +249,7 @@ in {
     };
 
     settings = lib.mkOption {
-      type = tomlFormat.type;
+      inherit (tomlFormat) type;
       default = {};
       description = ''
         additional settings merged into config.toml. use this for options
