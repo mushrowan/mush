@@ -15,6 +15,7 @@ use crate::tool::{AgentTool, ToolResult};
 
 /// events emitted by the agent loop for UI consumption
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum AgentEvent {
     /// agent loop started
     AgentStart,
@@ -275,7 +276,7 @@ pub fn agent_loop(
                                 tool_call_id: tc.id.clone(),
                                 tool_name: tc.name.clone(),
                                 content: result.content,
-                                is_error: true,
+                                outcome: ToolOutcome::Error,
                                 timestamp_ms: Timestamp::now(),
                             }));
                             continue;
@@ -311,7 +312,7 @@ pub fn agent_loop(
                             tool_call_id: tc.id.clone(),
                             tool_name: tc.name.clone(),
                             content: result.content,
-                            is_error: result.is_error,
+                            outcome: result.outcome,
                             timestamp_ms: Timestamp::now(),
                         }));
                     }
@@ -434,7 +435,7 @@ mod tests {
         };
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(execute_tool(&tools, &tc));
-        assert!(result.is_error);
+        assert!(result.outcome.is_error());
     }
 
     #[test]
@@ -447,7 +448,7 @@ mod tests {
         };
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(execute_tool(&tools, &tc));
-        assert!(!result.is_error);
+        assert!(result.outcome.is_success());
     }
 
     #[test]

@@ -70,7 +70,7 @@
         packages.default = craneOutputs.package;
 
         checks = {
-          inherit (craneOutputs) package clippy test fmt;
+          inherit (craneOutputs) package clippy test fmt deny;
         };
 
         devShells.default = import ./nix/devshell.nix {
