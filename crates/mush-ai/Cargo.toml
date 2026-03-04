@@ -18,6 +18,7 @@ base64.workspace = true
 urlencoding.workspace = true
 thiserror.workspace = true
 miette.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 pretty_assertions.workspace = true

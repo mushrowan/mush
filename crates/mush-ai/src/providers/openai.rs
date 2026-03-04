@@ -49,6 +49,8 @@ impl ApiProvider for OpenaiCompletionsProvider {
             let base_url = &model.base_url;
             let url = format!("{base_url}/chat/completions");
 
+            tracing::debug!(model = %model.id, %url, "sending openai completions request");
+
             let response = client
                 .post(&url)
                 .headers(headers)
@@ -59,6 +61,7 @@ impl ApiProvider for OpenaiCompletionsProvider {
             if !response.status().is_success() {
                 let status = response.status();
                 let text = response.text().await.unwrap_or_default();
+                tracing::error!(%status, body = %text, "openai completions API error");
                 return Err(ProviderError::ApiError {
                     api: "openai completions",
                     status,

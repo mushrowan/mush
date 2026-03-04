@@ -55,6 +55,8 @@ impl ApiProvider for OpenaiResponsesProvider {
             let url = resolve_url(&model, is_codex);
             let headers = build_headers(&api_key, &options, is_codex)?;
 
+            tracing::debug!(model = %model.id, %url, codex = is_codex, "sending openai responses request");
+
             let client = reqwest::Client::new();
             let response = client
                 .post(&url)
@@ -66,6 +68,7 @@ impl ApiProvider for OpenaiResponsesProvider {
             if !response.status().is_success() {
                 let status = response.status();
                 let text = response.text().await.unwrap_or_default();
+                tracing::error!(%status, body = %text, "openai responses API error");
                 return Err(ProviderError::ApiError {
                     api: "openai responses",
                     status,

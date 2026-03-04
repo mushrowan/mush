@@ -33,6 +33,7 @@ pub fn handle(
             help.push_str("  /undo          - revert last turn\n");
             help.push_str("  /search [text] - search conversation (or ctrl+f)\n");
             help.push_str("  /cost          - show session cost\n");
+            help.push_str("  /logs [n]      - show last n log entries (default 50)\n");
             help.push_str("  /injection     - toggle prompt injection preview\n");
             help.push_str("  /quit          - exit mush\n");
             help.push_str("\ntip: type a prompt template name (e.g. /review file.rs) to expand it");
@@ -100,6 +101,20 @@ pub fn handle(
         "cost" => {
             app.show_cost = !app.show_cost;
             show_cost(app);
+            None
+        }
+        "logs" => {
+            let n = args.trim().parse::<usize>().unwrap_or(50);
+            if let Some(ref buf) = tui_config.log_buffer {
+                let entries = buf(n);
+                if entries.is_empty() {
+                    app.push_system_message("no log entries yet");
+                } else {
+                    app.push_system_message(entries.join("\n"));
+                }
+            } else {
+                app.push_system_message("logging not available");
+            }
             None
         }
         "injection" => {

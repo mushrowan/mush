@@ -87,6 +87,8 @@ pub struct TuiConfig {
     pub debug_cache: bool,
     /// shared live tool output (updated by bash sink, read by TUI)
     pub tool_output_live: Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
+    /// callback to get recent log entries (returns last N lines)
+    pub log_buffer: Option<std::sync::Arc<dyn Fn(usize) -> Vec<String> + Send + Sync>>,
 }
 
 /// run the interactive TUI
@@ -125,6 +127,7 @@ pub async fn run_tui(
         "/undo",
         "/search",
         "/cost",
+        "/logs",
         "/injection",
         "/quit",
     ];
@@ -716,6 +719,7 @@ fn handle_agent_event(
         }
         AgentEvent::Error { error } => {
             app.is_streaming = false;
+            tracing::error!(%error, "agent error");
             app.status = Some(format!("error: {error}"));
         }
         AgentEvent::AgentEnd => {

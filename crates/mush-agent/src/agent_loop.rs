@@ -196,17 +196,20 @@ pub fn agent_loop(
                 };
 
                 // stream the assistant response
+                tracing::debug!(turn = turn_index, model = %config.model.id, "streaming LLM response");
                 let stream_result = config.registry.stream(config.model, &context, &config.options);
                 let mut event_stream = match stream_result {
                     Ok(fut) => match fut.await {
                         Ok(s) => s,
                         Err(e) => {
+                            tracing::error!(error = %e, "LLM stream init failed");
                             yield AgentEvent::Error { error: e.to_string() };
                             yield AgentEvent::AgentEnd;
                             return;
                         }
                     },
                     Err(e) => {
+                        tracing::error!(error = %e, "no provider for model");
                         yield AgentEvent::Error { error: e.to_string() };
                         yield AgentEvent::AgentEnd;
                         return;
@@ -227,6 +230,7 @@ pub fn agent_loop(
                         }
                         StreamEvent::Error { message, .. } => {
                             let error_msg = message.error_message.clone().unwrap_or_else(|| "unknown error".into());
+                            tracing::error!(error = %error_msg, "LLM stream error");
                             yield AgentEvent::Error { error: error_msg };
                             yield AgentEvent::AgentEnd;
                             return;
@@ -371,8 +375,18 @@ pub fn agent_loop(
 async fn execute_tool(tools: &[Box<dyn AgentTool>], tool_call: &ToolCall) -> ToolResult {
     let tool = tools.iter().find(|t| t.name() == tool_call.name.as_str());
     match tool {
-        Some(t) => t.execute(tool_call.arguments.clone()).await,
-        None => ToolResult::error(format!("tool not found: {}", tool_call.name)),
+        Some(t) => {
+            tracing::debug!(tool = %tool_call.name, "executing tool");
+            let result = t.execute(tool_call.arguments.clone()).await;
+            if result.outcome.is_error() {
+                tracing::warn!(tool = %tool_call.name, "tool returned error");
+            }
+            result
+        }
+        None => {
+            tracing::error!(tool = %tool_call.name, "tool not found");
+            ToolResult::error(format!("tool not found: {}", tool_call.name))
+        }
     }
 }
 

@@ -278,8 +278,12 @@ pub async fn llm_compact(
     compact_options.thinking = None;
 
     let summary = match call_for_text(registry, model, &context, &compact_options).await {
-        Some(text) => text,
+        Some(text) => {
+            tracing::info!(chars = text.len(), "LLM compaction succeeded");
+            text
+        }
         None => {
+            tracing::warn!("LLM compaction failed, using structured fallback");
             // fallback: structured dump (no LLM)
             let prompt = build_compaction_prompt(old_messages);
             format!(

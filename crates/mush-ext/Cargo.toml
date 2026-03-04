@@ -13,6 +13,7 @@ embeddings = ["dep:fastembed"]
 mush-ai.workspace = true
 mush-agent.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 fastembed = { version = "5", optional = true }
 
 [dev-dependencies]
