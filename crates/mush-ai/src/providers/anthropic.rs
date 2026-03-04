@@ -57,10 +57,11 @@ fn to_claude_code_name(name: &str) -> String {
 
 /// convert claude code tool name back to our tool name using the tool definitions
 fn from_claude_code_name(name: &str, tools: &[ToolDefinition]) -> String {
-    let lower = name.to_lowercase();
+    // strip underscores for comparison (WebSearch → websearch, web_search → websearch)
+    let normalised = name.to_lowercase().replace('_', "");
     tools
         .iter()
-        .find(|t| t.name.to_lowercase() == lower)
+        .find(|t| t.name.to_lowercase().replace('_', "") == normalised)
         .map(|t| t.name.clone())
         .unwrap_or_else(|| name.to_string())
 }
@@ -138,6 +139,8 @@ impl ApiProvider for AnthropicProvider {
             };
             let url = format!("{base_url}/v1/messages");
 
+            tracing::debug!(model = %model.id, %url, oauth = is_oauth, "sending anthropic request");
+
             let response = client
                 .post(&url)
                 .headers(headers)
@@ -148,6 +151,7 @@ impl ApiProvider for AnthropicProvider {
             if !response.status().is_success() {
                 let status = response.status();
                 let text = response.text().await.unwrap_or_default();
+                tracing::error!(%status, body = %text, "anthropic API error");
                 return Err(ProviderError::ApiError {
                     api: "anthropic",
                     status,
@@ -837,6 +841,7 @@ fn parse_sse_stream(
                 }
                 Ok(None) => break,
                 Err(e) => {
+                    tracing::error!(error = %e, "SSE stream read error");
                     output.stop_reason = StopReason::Error;
                     output.error_message = Some(e.to_string());
                     yield StreamEvent::Error {
@@ -1047,6 +1052,7 @@ fn process_sse_event(
         SseEvent::MessageStop => {}
         SseEvent::Ping => {}
         SseEvent::Error { error } => {
+            tracing::error!(error = %error.message, "anthropic SSE error event");
             output.stop_reason = StopReason::Error;
             output.error_message = Some(error.message);
         }
@@ -1469,9 +1475,15 @@ mod tests {
                 description: "fetch urls".into(),
                 parameters: serde_json::json!({}),
             },
+            ToolDefinition {
+                name: "web_search".into(),
+                description: "search web".into(),
+                parameters: serde_json::json!({}),
+            },
         ];
         assert_eq!(from_claude_code_name("Read", &tools), "read");
-        assert_eq!(from_claude_code_name("Web_Fetch", &tools), "web_fetch");
+        assert_eq!(from_claude_code_name("WebFetch", &tools), "web_fetch");
+        assert_eq!(from_claude_code_name("WebSearch", &tools), "web_search");
         assert_eq!(from_claude_code_name("Unknown", &tools), "Unknown");
     }
 
