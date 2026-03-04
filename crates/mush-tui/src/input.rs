@@ -50,8 +50,56 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         _ => {}
     }
 
-    // don't accept input while streaming
+    // while streaming, allow typing + submission (queued as steering messages
+    // by the runner) but block mode switches and slash commands
     if app.is_streaming {
+        match (key.modifiers, key.code) {
+            // multi-line
+            (KeyModifiers::ALT | KeyModifiers::SHIFT, KeyCode::Enter) => {
+                app.input_char('\n');
+            }
+            // submit to steering queue (slash commands blocked during streaming)
+            (_, KeyCode::Enter) => {
+                if app.input.trim().is_empty() {
+                    return None;
+                }
+                let text = app.take_input();
+                if text.starts_with('/') {
+                    app.input = text;
+                    app.cursor = app.input.len();
+                    app.status = Some("slash commands unavailable while streaming".into());
+                    return None;
+                }
+                return Some(AppEvent::UserSubmit { text });
+            }
+            // editing
+            (KeyModifiers::CONTROL, KeyCode::Backspace)
+            | (KeyModifiers::ALT, KeyCode::Backspace)
+            | (KeyModifiers::CONTROL, KeyCode::Char('w')) => app.delete_word_backward(),
+            (KeyModifiers::ALT, KeyCode::Char('d')) => app.delete_word_forward(),
+            (_, KeyCode::Backspace) => app.input_backspace(),
+            (_, KeyCode::Delete) => app.input_delete(),
+            // cursor movement
+            (KeyModifiers::ALT, KeyCode::Left)
+            | (KeyModifiers::CONTROL, KeyCode::Left)
+            | (KeyModifiers::ALT, KeyCode::Char('b')) => app.cursor_word_left(),
+            (KeyModifiers::ALT, KeyCode::Right)
+            | (KeyModifiers::CONTROL, KeyCode::Right)
+            | (KeyModifiers::ALT, KeyCode::Char('f')) => app.cursor_word_right(),
+            (KeyModifiers::CONTROL, KeyCode::Char('b')) => app.cursor_left(),
+            (_, KeyCode::Left) => app.cursor_left(),
+            (_, KeyCode::Right) => app.cursor_right(),
+            (_, KeyCode::Home) | (KeyModifiers::CONTROL, KeyCode::Char('a')) => app.cursor_home(),
+            (_, KeyCode::End) | (KeyModifiers::CONTROL, KeyCode::Char('e')) => app.cursor_end(),
+            // line editing
+            (KeyModifiers::CONTROL, KeyCode::Char('u')) => app.delete_to_start(),
+            (KeyModifiers::CONTROL, KeyCode::Char('k')) => app.delete_to_end(),
+            // regular character
+            (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
+                app.input_char(c);
+            }
+            _ => {}
+        }
         return None;
     }
 
@@ -596,11 +644,41 @@ mod tests {
     }
 
     #[test]
-    fn input_blocked_while_streaming() {
+    fn typing_allowed_while_streaming() {
         let mut app = App::new("test".into(), 200_000);
         app.is_streaming = true;
-        handle_key(&mut app, key(KeyCode::Char('x')));
-        assert!(app.input.is_empty()); // typing ignored
+        handle_key(&mut app, key(KeyCode::Char('h')));
+        handle_key(&mut app, key(KeyCode::Char('i')));
+        assert_eq!(app.input, "hi");
+    }
+
+    #[test]
+    fn submit_allowed_while_streaming() {
+        let mut app = App::new("test".into(), 200_000);
+        app.is_streaming = true;
+        app.input = "steer this".into();
+        app.cursor = 10;
+        let event = handle_key(&mut app, key(KeyCode::Enter));
+        match event {
+            Some(AppEvent::UserSubmit { text }) => assert_eq!(text, "steer this"),
+            other => panic!("expected UserSubmit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slash_commands_blocked_while_streaming() {
+        let mut app = App::new("test".into(), 200_000);
+        app.is_streaming = true;
+        app.input = "/clear".into();
+        app.cursor = 6;
+        let event = handle_key(&mut app, key(KeyCode::Enter));
+        assert!(event.is_none());
+        // input preserved so user can submit after streaming ends
+        assert_eq!(app.input, "/clear");
+        assert_eq!(
+            app.status.as_deref(),
+            Some("slash commands unavailable while streaming")
+        );
     }
 
     #[test]
