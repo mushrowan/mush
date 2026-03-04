@@ -32,8 +32,8 @@ impl ApiProvider for OpenaiCompletionsProvider {
                 .api_key
                 .clone()
                 .or_else(|| env_api_key(&model.provider))
-                .ok_or_else(|| ProviderError::MissingApiKey(model.provider.to_string()))?;
-            let api_key_str: &str = &api_key;
+                .ok_or_else(|| ProviderError::MissingApiKey(model.provider.clone()))?;
+            let api_key_str = api_key.expose();
 
             let client = reqwest::Client::new();
             let body =
@@ -43,8 +43,7 @@ impl ApiProvider for OpenaiCompletionsProvider {
             headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
             headers.insert(
                 AUTHORIZATION,
-                HeaderValue::from_str(&format!("Bearer {api_key_str}"))
-                    .map_err(|e| ProviderError::Other(e.to_string()))?,
+                HeaderValue::from_str(&format!("Bearer {api_key_str}"))?,
             );
 
             let base_url = &model.base_url;
@@ -60,9 +59,11 @@ impl ApiProvider for OpenaiCompletionsProvider {
             if !response.status().is_success() {
                 let status = response.status();
                 let text = response.text().await.unwrap_or_default();
-                return Err(ProviderError::Other(format!(
-                    "openai completions API returned {status}: {text}"
-                )));
+                return Err(ProviderError::ApiError {
+                    api: "openai completions",
+                    status,
+                    body: text,
+                });
             }
 
             let model_id = model.id.clone();
@@ -471,8 +472,10 @@ fn process_chunk(
             Some(CurrentBlock::Thinking { text }) => {
                 text.push_str(&reasoning);
                 let idx = output.content.len().saturating_sub(1);
-                if let Some(AssistantContentPart::Thinking(tc)) = output.content.get_mut(idx) {
-                    tc.thinking.push_str(&reasoning);
+                if let Some(AssistantContentPart::Thinking(tc)) = output.content.get_mut(idx)
+                    && let Some(buf) = tc.text_mut()
+                {
+                    buf.push_str(&reasoning);
                 }
                 events.push(StreamEvent::ThinkingDelta {
                     content_index: idx,
@@ -487,10 +490,9 @@ fn process_chunk(
                 });
                 output
                     .content
-                    .push(AssistantContentPart::Thinking(ThinkingContent {
+                    .push(AssistantContentPart::Thinking(ThinkingContent::Thinking {
                         thinking: reasoning.clone(),
                         signature: None,
-                        redacted: false,
                     }));
                 events.push(StreamEvent::ThinkingStart { content_index });
                 events.push(StreamEvent::ThinkingDelta {
@@ -744,7 +746,7 @@ mod tests {
                 content: vec![ToolResultContentPart::Text(TextContent {
                     text: "file contents here".into(),
                 })],
-                is_error: false,
+                outcome: ToolOutcome::Success,
                 timestamp_ms: Timestamp::zero(),
             }),
         ];

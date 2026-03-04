@@ -1,7 +1,7 @@
 //! core message, model, and provider types
 
 use derive_more::{AsRef, Deref, Display, From};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 // -- string newtypes --
 
@@ -88,16 +88,19 @@ impl Timestamp {
 pub struct BaseUrl(String);
 
 impl BaseUrl {
+    #[must_use]
     pub fn new(url: impl Into<String>) -> Self {
         let s = url.into();
         Self(s.trim_end_matches('/').to_string())
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
     /// append a path segment to the base URL
+    #[must_use]
     pub fn join(&self, path: &str) -> String {
         format!("{}/{}", self.0, path.trim_start_matches('/'))
     }
@@ -120,16 +123,23 @@ impl From<String> for BaseUrl {
 pub struct ApiKey(String);
 
 impl ApiKey {
+    #[must_use]
     pub fn new(key: impl Into<String>) -> Option<Self> {
         let s = key.into();
         if s.is_empty() { None } else { Some(Self(s)) }
     }
 
-    pub fn as_str(&self) -> &str {
+    /// explicitly access the raw secret value
+    ///
+    /// use this only when you genuinely need the key (auth headers,
+    /// token inspection). Display and Debug are redacted by design
+    #[must_use]
+    pub fn expose(&self) -> &str {
         &self.0
     }
 
     /// whether this looks like an anthropic oauth token
+    #[must_use]
     pub fn is_oauth_token(&self) -> bool {
         self.0.contains("sk-ant-oat")
     }
@@ -151,13 +161,6 @@ impl std::fmt::Display for ApiKey {
     }
 }
 
-impl std::ops::Deref for ApiKey {
-    type Target = str;
-    fn deref(&self) -> &str {
-        &self.0
-    }
-}
-
 impl PartialEq for ApiKey {
     fn eq(&self, other: &Self) -> bool {
         self.0 == other.0
@@ -174,10 +177,12 @@ impl Temperature {
     pub const MIN: f32 = 0.0;
     pub const MAX: f32 = 2.0;
 
+    #[must_use]
     pub fn new(value: f32) -> Self {
         Self(value.clamp(Self::MIN, Self::MAX))
     }
 
+    #[must_use]
     pub fn value(self) -> f32 {
         self.0
     }
@@ -196,22 +201,154 @@ pub struct TextContent {
     pub text: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ThinkingContent {
-    pub thinking: String,
-    /// opaque signature for multi-turn continuity
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub signature: Option<String>,
-    #[serde(default)]
-    pub redacted: bool,
+/// thinking block in an assistant message
+#[derive(Debug, Clone, PartialEq)]
+pub enum ThinkingContent {
+    /// normal thinking with text and optional signature for multi-turn continuity
+    Thinking {
+        thinking: String,
+        signature: Option<String>,
+    },
+    /// redacted thinking, opaque signature only
+    Redacted { data: String },
+}
+
+impl ThinkingContent {
+    /// the thinking text, or a placeholder for redacted blocks
+    pub fn text(&self) -> &str {
+        match self {
+            Self::Thinking { thinking, .. } => thinking,
+            Self::Redacted { .. } => "[reasoning redacted]",
+        }
+    }
+
+    /// mutable access to the thinking text (only for non-redacted)
+    pub fn text_mut(&mut self) -> Option<&mut String> {
+        match self {
+            Self::Thinking { thinking, .. } => Some(thinking),
+            Self::Redacted { .. } => None,
+        }
+    }
+
+    /// the signature, if any
+    pub fn signature(&self) -> Option<&str> {
+        match self {
+            Self::Thinking { signature, .. } => signature.as_deref(),
+            Self::Redacted { data } => Some(data),
+        }
+    }
+
+    /// mutable access to the signature slot (only for non-redacted)
+    pub fn signature_mut(&mut self) -> Option<&mut Option<String>> {
+        match self {
+            Self::Thinking { signature, .. } => Some(signature),
+            Self::Redacted { .. } => None,
+        }
+    }
+
+    pub fn is_redacted(&self) -> bool {
+        matches!(self, Self::Redacted { .. })
+    }
+}
+
+impl Serialize for ThinkingContent {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        match self {
+            Self::Thinking {
+                thinking,
+                signature,
+            } => {
+                let len = 2 + signature.is_some() as usize;
+                let mut map = serializer.serialize_map(Some(len))?;
+                map.serialize_entry("thinking", thinking)?;
+                map.serialize_entry("redacted", &false)?;
+                if let Some(sig) = signature {
+                    map.serialize_entry("signature", sig)?;
+                }
+                map.end()
+            }
+            Self::Redacted { data } => {
+                let mut map = serializer.serialize_map(Some(3))?;
+                map.serialize_entry("thinking", "[reasoning redacted]")?;
+                map.serialize_entry("redacted", &true)?;
+                map.serialize_entry("signature", data)?;
+                map.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ThinkingContent {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Raw {
+            thinking: String,
+            #[serde(default)]
+            redacted: bool,
+            signature: Option<String>,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        if raw.redacted {
+            Ok(Self::Redacted {
+                data: raw.signature.unwrap_or_default(),
+            })
+        } else {
+            Ok(Self::Thinking {
+                thinking: raw.thinking,
+                signature: raw.signature,
+            })
+        }
+    }
+}
+
+/// supported image mime types
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ImageMimeType {
+    #[serde(rename = "image/jpeg")]
+    Jpeg,
+    #[serde(rename = "image/png")]
+    Png,
+    #[serde(rename = "image/gif")]
+    Gif,
+    #[serde(rename = "image/webp")]
+    Webp,
+}
+
+impl ImageMimeType {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Jpeg => "image/jpeg",
+            Self::Png => "image/png",
+            Self::Gif => "image/gif",
+            Self::Webp => "image/webp",
+        }
+    }
+
+    /// parse from file extension (defaults to png)
+    #[must_use]
+    pub fn from_extension(ext: &str) -> Self {
+        match ext.to_lowercase().as_str() {
+            "jpg" | "jpeg" => Self::Jpeg,
+            "gif" => Self::Gif,
+            "webp" => Self::Webp,
+            _ => Self::Png,
+        }
+    }
+}
+
+impl std::fmt::Display for ImageMimeType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ImageContent {
     /// base64 encoded image data
     pub data: String,
-    /// eg "image/png", "image/jpeg"
-    pub mime_type: String,
+    pub mime_type: ImageMimeType,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -297,6 +434,7 @@ impl Cost {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum StopReason {
     Stop,
     Length,
@@ -326,12 +464,54 @@ pub struct AssistantMessage {
     pub timestamp_ms: Timestamp,
 }
 
+/// whether a tool execution succeeded or failed
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[must_use]
+pub enum ToolOutcome {
+    Success,
+    Error,
+}
+
+impl ToolOutcome {
+    #[must_use]
+    pub fn is_error(self) -> bool {
+        self == Self::Error
+    }
+
+    #[must_use]
+    pub fn is_success(self) -> bool {
+        self == Self::Success
+    }
+}
+
+impl From<bool> for ToolOutcome {
+    fn from(is_error: bool) -> Self {
+        if is_error { Self::Error } else { Self::Success }
+    }
+}
+
+/// deserialise from either `"outcome": "success"` or legacy `"is_error": true`
+fn deserialise_outcome<'de, D: Deserializer<'de>>(d: D) -> Result<ToolOutcome, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Raw {
+        Enum(ToolOutcome),
+        Bool(bool),
+    }
+    match Raw::deserialize(d)? {
+        Raw::Enum(o) => Ok(o),
+        Raw::Bool(b) => Ok(ToolOutcome::from(b)),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ToolResultMessage {
     pub tool_call_id: ToolCallId,
     pub tool_name: ToolName,
     pub content: Vec<ToolResultContentPart>,
-    pub is_error: bool,
+    #[serde(alias = "is_error", deserialize_with = "deserialise_outcome")]
+    pub outcome: ToolOutcome,
     pub timestamp_ms: Timestamp,
 }
 
@@ -556,5 +736,103 @@ mod tests {
     fn temperature_from_f32() {
         let t: Temperature = 0.5.into();
         assert_eq!(t.value(), 0.5);
+    }
+
+    #[test]
+    fn tool_outcome_serialises_as_enum() {
+        let json = serde_json::to_string(&ToolOutcome::Error).unwrap();
+        assert_eq!(json, r#""error""#);
+        let json = serde_json::to_string(&ToolOutcome::Success).unwrap();
+        assert_eq!(json, r#""success""#);
+    }
+
+    #[test]
+    fn tool_result_message_deserialises_legacy_is_error() {
+        let json = r#"{
+            "tool_call_id": "tc_1",
+            "tool_name": "bash",
+            "content": [],
+            "is_error": true,
+            "timestamp_ms": 0
+        }"#;
+        let msg: ToolResultMessage = serde_json::from_str(json).unwrap();
+        assert!(msg.outcome.is_error());
+
+        let json = r#"{
+            "tool_call_id": "tc_2",
+            "tool_name": "read",
+            "content": [],
+            "is_error": false,
+            "timestamp_ms": 0
+        }"#;
+        let msg: ToolResultMessage = serde_json::from_str(json).unwrap();
+        assert!(msg.outcome.is_success());
+    }
+
+    #[test]
+    fn tool_result_message_deserialises_new_outcome() {
+        let json = r#"{
+            "tool_call_id": "tc_1",
+            "tool_name": "bash",
+            "content": [],
+            "outcome": "error",
+            "timestamp_ms": 0
+        }"#;
+        let msg: ToolResultMessage = serde_json::from_str(json).unwrap();
+        assert!(msg.outcome.is_error());
+    }
+
+    #[test]
+    fn tool_outcome_from_bool() {
+        assert_eq!(ToolOutcome::from(true), ToolOutcome::Error);
+        assert_eq!(ToolOutcome::from(false), ToolOutcome::Success);
+    }
+
+    #[test]
+    fn thinking_content_serde_roundtrip() {
+        let normal = ThinkingContent::Thinking {
+            thinking: "let me think".into(),
+            signature: Some("sig123".into()),
+        };
+        let json = serde_json::to_string(&normal).unwrap();
+        let back: ThinkingContent = serde_json::from_str(&json).unwrap();
+        assert_eq!(normal, back);
+        assert!(!back.is_redacted());
+        assert_eq!(back.text(), "let me think");
+        assert_eq!(back.signature(), Some("sig123"));
+    }
+
+    #[test]
+    fn thinking_content_redacted_serde_roundtrip() {
+        let redacted = ThinkingContent::Redacted {
+            data: "opaque_data".into(),
+        };
+        let json = serde_json::to_string(&redacted).unwrap();
+        let back: ThinkingContent = serde_json::from_str(&json).unwrap();
+        assert_eq!(redacted, back);
+        assert!(back.is_redacted());
+        assert_eq!(back.text(), "[reasoning redacted]");
+        assert_eq!(back.signature(), Some("opaque_data"));
+    }
+
+    #[test]
+    fn thinking_content_deserialises_legacy_format() {
+        // legacy format with redacted: false
+        let json = r#"{"thinking": "hello", "signature": "sig", "redacted": false}"#;
+        let tc: ThinkingContent = serde_json::from_str(json).unwrap();
+        assert!(!tc.is_redacted());
+        assert_eq!(tc.text(), "hello");
+
+        // legacy format with redacted: true
+        let json = r#"{"thinking": "[reasoning redacted]", "signature": "data", "redacted": true}"#;
+        let tc: ThinkingContent = serde_json::from_str(json).unwrap();
+        assert!(tc.is_redacted());
+        assert_eq!(tc.signature(), Some("data"));
+
+        // legacy format without redacted field (defaults to false)
+        let json = r#"{"thinking": "no redacted field"}"#;
+        let tc: ThinkingContent = serde_json::from_str(json).unwrap();
+        assert!(!tc.is_redacted());
+        assert_eq!(tc.text(), "no redacted field");
     }
 }

@@ -70,8 +70,12 @@ impl AgentTool for EditTool {
             } else {
                 self.cwd.join(path_str)
             };
+            let old_text = old_text.to_string();
+            let new_text = new_text.to_string();
 
-            edit_file(&path, old_text, new_text)
+            tokio::task::spawn_blocking(move || edit_file(&path, &old_text, &new_text))
+                .await
+                .unwrap_or_else(|e| ToolResult::error(format!("task join error: {e}")))
         })
     }
 }
@@ -120,7 +124,7 @@ mod tests {
         fs::write(&path, "fn main() {\n    println!(\"hello\");\n}").unwrap();
 
         let result = edit_file(&path, "println!(\"hello\")", "println!(\"world\")");
-        assert!(!result.is_error);
+        assert!(result.outcome.is_success());
 
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("println!(\"world\")"));
@@ -134,7 +138,7 @@ mod tests {
         fs::write(&path, "fn main() {}").unwrap();
 
         let result = edit_file(&path, "nonexistent text", "replacement");
-        assert!(result.is_error);
+        assert!(result.outcome.is_error());
     }
 
     #[test]
@@ -144,13 +148,13 @@ mod tests {
         fs::write(&path, "foo bar foo bar").unwrap();
 
         let result = edit_file(&path, "foo", "baz");
-        assert!(result.is_error);
+        assert!(result.outcome.is_error());
     }
 
     #[test]
     fn edit_nonexistent_file() {
         let result = edit_file(Path::new("/nonexistent/file.rs"), "old", "new");
-        assert!(result.is_error);
+        assert!(result.outcome.is_error());
     }
 
     #[test]
@@ -160,7 +164,7 @@ mod tests {
         fs::write(&path, "before\ntarget line\nafter").unwrap();
 
         let result = edit_file(&path, "target line", "replaced line");
-        assert!(!result.is_error);
+        assert!(result.outcome.is_success());
 
         let content = fs::read_to_string(&path).unwrap();
         assert_eq!(content, "before\nreplaced line\nafter");

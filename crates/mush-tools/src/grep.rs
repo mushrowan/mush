@@ -145,7 +145,7 @@ mod tests {
 
         let result = run_rg(&dir.path().to_path_buf(), "println", dir.path(), None).await;
 
-        assert!(!result.is_error);
+        assert!(result.outcome.is_success());
         let text = extract_text(&result);
         assert!(text.contains("println"));
     }

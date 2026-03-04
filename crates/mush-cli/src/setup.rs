@@ -1,12 +1,110 @@
 //! shared setup helpers for both print and TUI modes
 
+use color_eyre::eyre::{Result, eyre};
 use mush_ai::models;
+use mush_ai::providers;
 use mush_ai::registry::ApiRegistry;
 use mush_ai::types::*;
 use mush_ext::loader;
 use mush_session::compact;
 
 use crate::config;
+
+/// shared state built from CLI args + config, used by both print and TUI modes
+pub struct AppSetup {
+    pub cfg: config::Config,
+    pub model: Model,
+    pub registry: ApiRegistry,
+    pub cwd: std::path::PathBuf,
+    pub system_prompt: String,
+    pub options: StreamOptions,
+    pub thinking_prefs: std::collections::HashMap<String, ThinkingLevel>,
+    pub tools: Vec<Box<dyn mush_agent::tool::AgentTool>>,
+    pub debug_cache: bool,
+    pub max_turns: usize,
+}
+
+/// CLI args needed for shared setup (avoids depending on clap struct)
+pub struct SetupArgs {
+    pub model: Option<String>,
+    pub thinking: bool,
+    pub max_tokens: Option<u64>,
+    pub max_turns: Option<usize>,
+    pub system: Option<String>,
+    pub no_tools: bool,
+    pub debug_cache: bool,
+    pub output_sink: Option<mush_tools::bash::OutputSink>,
+}
+
+impl AppSetup {
+    /// build shared state from CLI args
+    pub async fn init(args: SetupArgs) -> Result<Self> {
+        let cfg = config::load_config();
+        let debug_cache = args.debug_cache || cfg.debug_cache;
+
+        let model_id = args.model.unwrap_or_else(|| default_model_id(&cfg));
+
+        let model = models::find_model_by_id(&model_id).ok_or_else(|| {
+            eyre!(
+                "unknown model: {model_id}\n\navailable models:\n{}",
+                list_models_short()
+            )
+        })?;
+
+        let mut registry = ApiRegistry::new();
+        providers::register_builtins(&mut registry);
+
+        let cwd = std::env::current_dir()?;
+
+        let mut tools: Vec<Box<dyn mush_agent::tool::AgentTool>> = if args.no_tools {
+            vec![]
+        } else if let Some(sink) = args.output_sink {
+            mush_tools::builtin_tools_with_sink(cwd.clone(), Some(sink))
+        } else {
+            mush_tools::builtin_tools(cwd.clone())
+        };
+
+        if !args.no_tools && !cfg.mcp.is_empty() {
+            let (_mcp_manager, mcp_tools) = mush_mcp::McpManager::connect_all(&cfg.mcp).await;
+            tools.extend(mcp_tools);
+        }
+
+        let system_prompt = args
+            .system
+            .or(cfg.system_prompt.clone())
+            .unwrap_or_else(|| build_system_prompt(&cwd));
+
+        let thinking_prefs = config::load_thinking_prefs();
+        let thinking_level = resolve_thinking(args.thinking, &model, &thinking_prefs, &cfg);
+
+        let mut options = StreamOptions {
+            thinking: thinking_level,
+            max_tokens: args.max_tokens.or(cfg.max_tokens),
+            cache_retention: cfg.cache_retention,
+            ..Default::default()
+        };
+
+        resolve_api_key(&mut options, &model, &cfg).await;
+
+        let max_turns = args
+            .max_turns
+            .or(cfg.max_turns)
+            .unwrap_or(mush_agent::DEFAULT_MAX_TURNS);
+
+        Ok(Self {
+            cfg,
+            model,
+            registry,
+            cwd,
+            system_prompt,
+            options,
+            thinking_prefs,
+            tools,
+            debug_cache,
+            max_turns,
+        })
+    }
+}
 
 /// expand /template_name args... into template content
 pub fn expand_template(prompt: &str) -> String {
@@ -163,14 +261,12 @@ pub fn resolve_thinking(
     cfg: &config::Config,
 ) -> Option<ThinkingLevel> {
     if cli_thinking {
-        Some(ThinkingLevel::High)
-    } else if let Some(&level) = thinking_prefs.get(model.id.as_ref()) {
-        Some(level)
-    } else if cfg.thinking.unwrap_or(false) {
-        Some(ThinkingLevel::High)
-    } else {
-        None
+        return Some(ThinkingLevel::High);
     }
+    thinking_prefs
+        .get(model.id.as_ref())
+        .copied()
+        .or(cfg.thinking)
 }
 
 /// resolve API key for a model: env > config > oauth

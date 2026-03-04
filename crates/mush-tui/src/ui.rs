@@ -138,7 +138,7 @@ mod tests {
     #[test]
     fn full_layout_renders() {
         let mut app = App::new("claude-sonnet-4".into(), 200_000);
-        app.push_user_message("what is rust?".into());
+        app.push_user_message("what is rust?");
         app.start_streaming();
         app.push_text_delta("rust is a systems programming language");
         app.finish_streaming(None, Some(0.003));

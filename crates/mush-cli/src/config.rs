@@ -6,35 +6,44 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use mush_ai::types::ThinkingLevel;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
-/// how to inject skill relevance hints
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum HintMode {
-    /// prepend hint to user message (evaluated once per message)
-    #[default]
-    Message,
-    /// inject via context transform (re-evaluated before each LLM call)
-    Transform,
-    /// no hint (all skills still loaded in system prompt)
-    None,
+/// deserialise thinking from bool (legacy) or ThinkingLevel string
+fn deserialise_thinking<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<Option<ThinkingLevel>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Raw {
+        Bool(bool),
+        Level(ThinkingLevel),
+    }
+    Option::<Raw>::deserialize(d).map(|opt| {
+        opt.map(|raw| match raw {
+            Raw::Bool(true) => ThinkingLevel::High,
+            Raw::Bool(false) => ThinkingLevel::Off,
+            Raw::Level(l) => l,
+        })
+    })
 }
+
+pub use mush_tui::HintMode;
 
 /// top-level config
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub model: Option<String>,
-    pub thinking: Option<bool>,
+    #[serde(default, deserialize_with = "deserialise_thinking")]
+    pub thinking: Option<ThinkingLevel>,
     pub max_tokens: Option<u64>,
     pub max_turns: Option<usize>,
     pub cache_retention: Option<mush_ai::types::CacheRetention>,
-    pub debug_cache: Option<bool>,
+    pub debug_cache: bool,
     pub system_prompt: Option<String>,
     pub hint_mode: HintMode,
     /// prompt for confirmation before executing tools (off by default)
-    pub confirm_tools: Option<bool>,
+    pub confirm_tools: bool,
     pub api_keys: ApiKeys,
     pub theme: mush_tui::ThemeConfig,
     /// MCP server configurations keyed by name
@@ -49,6 +58,24 @@ pub struct ApiKeys {
     pub anthropic: Option<String>,
     pub openrouter: Option<String>,
     pub openai: Option<String>,
+}
+
+impl ApiKeys {
+    /// collect non-None keys into a provider → key map for the TUI
+    #[must_use]
+    pub fn to_map(&self) -> HashMap<String, String> {
+        let mut map = HashMap::new();
+        if let Some(key) = &self.anthropic {
+            map.insert("anthropic".into(), key.clone());
+        }
+        if let Some(key) = &self.openrouter {
+            map.insert("openrouter".into(), key.clone());
+        }
+        if let Some(key) = &self.openai {
+            map.insert("openai".into(), key.clone());
+        }
+        map
+    }
 }
 
 /// find the config directory
@@ -123,10 +150,10 @@ pub fn load_thinking_prefs() -> HashMap<String, ThinkingLevel> {
 pub fn save_thinking_prefs(prefs: &HashMap<String, ThinkingLevel>) {
     let path = thinking_prefs_path();
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).ok();
+        let _ = std::fs::create_dir_all(parent);
     }
     if let Ok(json) = serde_json::to_string_pretty(prefs) {
-        std::fs::write(&path, json).ok();
+        let _ = std::fs::write(&path, json);
     }
 }
 
@@ -152,13 +179,13 @@ openai = "sk-openai-test"
 
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.model.as_deref(), Some("claude-opus-4-6"));
-        assert_eq!(config.thinking, Some(true));
+        assert_eq!(config.thinking, Some(ThinkingLevel::High));
         assert_eq!(config.max_tokens, Some(8192));
         assert_eq!(
             config.cache_retention,
             Some(mush_ai::types::CacheRetention::Long)
         );
-        assert_eq!(config.debug_cache, Some(true));
+        assert!(config.debug_cache);
         assert_eq!(config.api_keys.anthropic.as_deref(), Some("sk-ant-test"));
         assert_eq!(config.api_keys.openai.as_deref(), Some("sk-openai-test"));
     }
@@ -193,6 +220,24 @@ openai = "sk-openai-test"
     fn hint_mode_defaults_to_message() {
         let config: Config = toml::from_str("").unwrap();
         assert_eq!(config.hint_mode, HintMode::Message);
+    }
+
+    #[test]
+    fn thinking_config_accepts_level_string() {
+        let config: Config = toml::from_str(r#"thinking = "medium""#).unwrap();
+        assert_eq!(config.thinking, Some(ThinkingLevel::Medium));
+    }
+
+    #[test]
+    fn thinking_config_accepts_bool_false() {
+        let config: Config = toml::from_str("thinking = false").unwrap();
+        assert_eq!(config.thinking, Some(ThinkingLevel::Off));
+    }
+
+    #[test]
+    fn thinking_config_defaults_to_none() {
+        let config: Config = toml::from_str("").unwrap();
+        assert_eq!(config.thinking, None);
     }
 
     #[test]

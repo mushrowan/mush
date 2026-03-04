@@ -129,7 +129,7 @@ impl AgentTool for BatchTool {
                 output.push_str(&format!("--- [{i}] {tool_name} ---\n"));
                 match result {
                     Ok(r) => {
-                        if r.is_error {
+                        if r.outcome.is_error() {
                             error_count += 1;
                             output.push_str("ERROR: ");
                         } else {
@@ -180,7 +180,7 @@ mod tests {
     async fn empty_calls_returns_error() {
         let tool = BatchTool::new(vec![]);
         let result = tool.execute(serde_json::json!({"tool_calls": []})).await;
-        assert!(result.is_error);
+        assert!(result.outcome.is_error());
     }
 
     #[tokio::test]
@@ -193,7 +193,7 @@ mod tests {
                 ]
             }))
             .await;
-        assert!(!result.is_error); // partial results are non-error
+        assert!(result.outcome.is_success()); // partial results are non-error
         let text = match &result.content[0] {
             ToolResultContentPart::Text(t) => &t.text,
             _ => panic!("expected text"),

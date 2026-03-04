@@ -40,7 +40,7 @@ impl ApiProvider for OpenaiResponsesProvider {
                 .api_key
                 .clone()
                 .or_else(|| env_api_key(&model.provider))
-                .ok_or_else(|| ProviderError::MissingApiKey(model.provider.to_string()))?;
+                .ok_or_else(|| ProviderError::MissingApiKey(model.provider.clone()))?;
 
             let is_codex = is_codex_provider(&model);
             let body = build_request_body(
@@ -66,9 +66,11 @@ impl ApiProvider for OpenaiResponsesProvider {
             if !response.status().is_success() {
                 let status = response.status();
                 let text = response.text().await.unwrap_or_default();
-                return Err(ProviderError::Other(format!(
-                    "openai responses API returned {status}: {text}"
-                )));
+                return Err(ProviderError::ApiError {
+                    api: "openai responses",
+                    status,
+                    body: text,
+                });
             }
 
             let model_id = model.id.clone();
@@ -391,26 +393,24 @@ fn build_headers(
     options: &StreamOptions,
     is_codex: bool,
 ) -> Result<HeaderMap, ProviderError> {
-    let key: &str = api_key;
+    let key = api_key.expose();
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     headers.insert(
         AUTHORIZATION,
-        HeaderValue::from_str(&format!("Bearer {key}"))
-            .map_err(|e| ProviderError::Other(e.to_string()))?,
+        HeaderValue::from_str(&format!("Bearer {key}"))?,
     );
 
     if is_codex {
         let account_id = options
             .account_id
             .clone()
-            .or_else(|| extract_account_id(api_key));
+            .or_else(|| extract_account_id(api_key.expose()));
 
         if let Some(account_id) = account_id {
             headers.insert(
                 HeaderName::from_static("chatgpt-account-id"),
-                HeaderValue::from_str(&account_id)
-                    .map_err(|e| ProviderError::Other(e.to_string()))?,
+                HeaderValue::from_str(&account_id)?,
             );
         }
         headers.insert(
@@ -430,8 +430,7 @@ fn build_headers(
         if let Some(session_id) = &options.session_id {
             headers.insert(
                 HeaderName::from_static("session_id"),
-                HeaderValue::from_str(session_id)
-                    .map_err(|e| ProviderError::Other(e.to_string()))?,
+                HeaderValue::from_str(session_id)?,
             );
         }
     }
@@ -650,13 +649,12 @@ fn process_sse_event(
                 }
                 Some("reasoning") => {
                     let content_index = output.content.len();
-                    output
-                        .content
-                        .push(AssistantContentPart::Thinking(ThinkingContent {
+                    output.content.push(AssistantContentPart::Thinking(
+                        ThinkingContent::Thinking {
                             thinking: String::new(),
                             signature: None,
-                            redacted: false,
-                        }));
+                        },
+                    ));
                     active.insert(
                         output_index,
                         ActiveBlock {
@@ -755,8 +753,9 @@ fn process_sse_event(
                 text.push_str(&delta);
                 if let Some(AssistantContentPart::Thinking(content)) =
                     output.content.get_mut(active_block.content_index)
+                    && let Some(buf) = content.text_mut()
                 {
-                    content.thinking.push_str(&delta);
+                    buf.push_str(&delta);
                 }
                 events.push(StreamEvent::ThinkingDelta {
                     content_index: active_block.content_index,
@@ -826,11 +825,12 @@ fn process_sse_event(
                     };
                 }
 
-                let status = response
-                    .get("status")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("completed");
-                output.stop_reason = map_response_status(status);
+                output.stop_reason = map_response_status(
+                    response
+                        .get("status")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("completed"),
+                );
             }
         }
         "response.incomplete" => {
@@ -892,8 +892,9 @@ fn finish_block(
         CurrentBlock::Thinking { text } => {
             if let Some(AssistantContentPart::Thinking(content)) =
                 output.content.get_mut(active_block.content_index)
+                && let Some(buf) = content.text_mut()
             {
-                content.thinking = text.clone();
+                *buf = text.clone();
             }
 
             events.push(StreamEvent::ThinkingEnd {

@@ -60,8 +60,11 @@ impl AgentTool for WriteTool {
             } else {
                 self.cwd.join(path_str)
             };
+            let content = content.to_string();
 
-            write_file(&path, content)
+            tokio::task::spawn_blocking(move || write_file(&path, &content))
+                .await
+                .unwrap_or_else(|e| ToolResult::error(format!("task join error: {e}")))
         })
     }
 }
@@ -95,7 +98,7 @@ mod tests {
         let path = dir.path().join("new.txt");
 
         let result = write_file(&path, "hello world");
-        assert!(!result.is_error);
+        assert!(result.outcome.is_success());
         assert_eq!(fs::read_to_string(&path).unwrap(), "hello world");
     }
 
@@ -105,7 +108,7 @@ mod tests {
         let path = dir.path().join("a/b/c/deep.txt");
 
         let result = write_file(&path, "nested");
-        assert!(!result.is_error);
+        assert!(result.outcome.is_success());
         assert_eq!(fs::read_to_string(&path).unwrap(), "nested");
     }
 
@@ -116,7 +119,7 @@ mod tests {
         fs::write(&path, "old content").unwrap();
 
         let result = write_file(&path, "new content");
-        assert!(!result.is_error);
+        assert!(result.outcome.is_success());
         assert_eq!(fs::read_to_string(&path).unwrap(), "new content");
     }
 }

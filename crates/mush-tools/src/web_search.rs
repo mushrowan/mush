@@ -191,14 +191,14 @@ mod tests {
     fn parse_sse_with_content() {
         let sse = r#"data: {"jsonrpc":"2.0","result":{"content":[{"type":"text","text":"search results here"}]}}"#;
         let result = parse_sse_response(sse).unwrap();
-        assert!(!result.is_error);
+        assert!(result.outcome.is_success());
     }
 
     #[test]
     fn parse_sse_with_error() {
         let sse = r#"data: {"jsonrpc":"2.0","error":{"code":-1,"message":"rate limited"}}"#;
         let result = parse_sse_response(sse).unwrap();
-        assert!(result.is_error);
+        assert!(result.outcome.is_error());
     }
 
     #[test]

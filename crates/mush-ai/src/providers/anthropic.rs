@@ -84,7 +84,7 @@ impl ApiProvider for AnthropicProvider {
                 .api_key
                 .clone()
                 .or_else(anthropic_api_key)
-                .ok_or_else(|| ProviderError::MissingApiKey("anthropic".into()))?;
+                .ok_or_else(|| ProviderError::MissingApiKey(Provider::Anthropic))?;
 
             let is_oauth = api_key.is_oauth_token();
             let client = reqwest::Client::new();
@@ -115,25 +115,20 @@ impl ApiProvider for AnthropicProvider {
                     HeaderValue::from_static(concat!("claude-cli/", "2.1.62")),
                 );
                 headers.insert("x-app", HeaderValue::from_static("cli"));
-                let key: &str = &api_key;
+                let key = api_key.expose();
                 headers.insert(
                     "authorization",
-                    HeaderValue::from_str(&format!("Bearer {key}"))
-                        .map_err(|e| ProviderError::Other(e.to_string()))?,
+                    HeaderValue::from_str(&format!("Bearer {key}"))?,
                 );
             } else {
-                let key: &str = &api_key;
+                let key = api_key.expose();
                 headers.insert(
                     "anthropic-beta",
                     HeaderValue::from_static(
                         "fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14",
                     ),
                 );
-                headers.insert(
-                    "x-api-key",
-                    HeaderValue::from_str(key)
-                        .map_err(|e| ProviderError::Other(e.to_string()))?,
-                );
+                headers.insert("x-api-key", HeaderValue::from_str(key)?);
             }
 
             let base_url = if model.base_url.is_empty() {
@@ -153,9 +148,11 @@ impl ApiProvider for AnthropicProvider {
             if !response.status().is_success() {
                 let status = response.status();
                 let text = response.text().await.unwrap_or_default();
-                return Err(ProviderError::Other(format!(
-                    "anthropic API returned {status}: {text}"
-                )));
+                return Err(ProviderError::ApiError {
+                    api: "anthropic",
+                    status,
+                    body: text,
+                });
             }
 
             let model_id = model.id.clone();
@@ -438,28 +435,32 @@ fn convert_messages_raw(messages: &[Message], is_oauth: bool) -> Vec<RequestMess
                                 }))
                             }
                         }
-                        AssistantContentPart::Thinking(t) => {
-                            if t.thinking.is_empty() {
-                                None
-                            } else if t.redacted {
-                                Some(serde_json::json!({
-                                    "type": "redacted_thinking",
-                                    "data": t.signature.as_deref().unwrap_or(""),
-                                }))
-                            } else if let Some(sig) = &t.signature {
-                                Some(serde_json::json!({
-                                    "type": "thinking",
-                                    "thinking": t.thinking,
-                                    "signature": sig,
-                                }))
-                            } else {
-                                // no signature (eg aborted stream), send as text
-                                Some(serde_json::json!({
-                                    "type": "text",
-                                    "text": t.thinking,
-                                }))
+                        AssistantContentPart::Thinking(t) => match t {
+                            ThinkingContent::Redacted { data } => Some(serde_json::json!({
+                                "type": "redacted_thinking",
+                                "data": data,
+                            })),
+                            ThinkingContent::Thinking {
+                                thinking,
+                                signature,
+                            } => {
+                                if thinking.is_empty() {
+                                    None
+                                } else if let Some(sig) = signature {
+                                    Some(serde_json::json!({
+                                        "type": "thinking",
+                                        "thinking": thinking,
+                                        "signature": sig,
+                                    }))
+                                } else {
+                                    // no signature (eg aborted stream), send as text
+                                    Some(serde_json::json!({
+                                        "type": "text",
+                                        "text": thinking,
+                                    }))
+                                }
                             }
-                        }
+                        },
                         AssistantContentPart::ToolCall(tc) => {
                             let name = if is_oauth {
                                 to_claude_code_name(tc.name.as_str())
@@ -507,7 +508,7 @@ fn convert_messages_raw(messages: &[Message], is_oauth: bool) -> Vec<RequestMess
                     "type": "tool_result",
                     "tool_use_id": tr.tool_call_id.as_str(),
                     "content": content_blocks,
-                    "is_error": tr.is_error,
+                    "is_error": tr.outcome.is_error(),
                 }]);
                 result.push(RequestMessage {
                     role: "user".into(),
@@ -647,7 +648,7 @@ fn inject_synthetic_results(
 /// raw SSE event from the anthropic stream
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
-#[allow(dead_code)]
+#[expect(dead_code)]
 enum SseEvent {
     #[serde(rename = "message_start")]
     MessageStart { message: MessageStartData },
@@ -714,7 +715,7 @@ enum ContentBlockData {
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
-#[allow(clippy::enum_variant_names)]
+#[expect(clippy::enum_variant_names)]
 enum DeltaData {
     #[serde(rename = "text_delta")]
     TextDelta { text: String },
@@ -753,8 +754,6 @@ enum BlockState {
     Thinking {
         thinking: String,
         signature: Option<String>,
-        #[allow(dead_code)]
-        redacted: bool,
     },
     ToolCall {
         id: String,
@@ -899,30 +898,23 @@ fn process_sse_event(
                     blocks.push(BlockState::Thinking {
                         thinking: thinking.clone(),
                         signature: None,
-                        redacted: false,
                     });
-                    output
-                        .content
-                        .push(AssistantContentPart::Thinking(ThinkingContent {
+                    output.content.push(AssistantContentPart::Thinking(
+                        ThinkingContent::Thinking {
                             thinking,
                             signature: None,
-                            redacted: false,
-                        }));
+                        },
+                    ));
                     events.push(StreamEvent::ThinkingStart { content_index });
                 }
                 ContentBlockData::RedactedThinking { data } => {
                     blocks.push(BlockState::Thinking {
                         thinking: "[reasoning redacted]".into(),
                         signature: Some(data.clone()),
-                        redacted: true,
                     });
-                    output
-                        .content
-                        .push(AssistantContentPart::Thinking(ThinkingContent {
-                            thinking: "[reasoning redacted]".into(),
-                            signature: Some(data),
-                            redacted: true,
-                        }));
+                    output.content.push(AssistantContentPart::Thinking(
+                        ThinkingContent::Redacted { data },
+                    ));
                     events.push(StreamEvent::ThinkingStart { content_index });
                 }
                 ContentBlockData::ToolUse { id, name } => {
@@ -974,8 +966,9 @@ fn process_sse_event(
                     }
                     if let Some(AssistantContentPart::Thinking(tc)) =
                         output.content.get_mut(content_index)
+                        && let Some(buf) = tc.text_mut()
                     {
-                        tc.thinking.push_str(&thinking);
+                        buf.push_str(&thinking);
                     }
                     events.push(StreamEvent::ThinkingDelta {
                         content_index,
@@ -1003,10 +996,9 @@ fn process_sse_event(
                     }
                     if let Some(AssistantContentPart::Thinking(tc)) =
                         output.content.get_mut(content_index)
+                        && let Some(sig) = tc.signature_mut()
                     {
-                        tc.signature
-                            .get_or_insert_with(String::new)
-                            .push_str(&signature);
+                        sig.get_or_insert_with(String::new).push_str(&signature);
                     }
                 }
             }
@@ -1121,7 +1113,7 @@ mod tests {
             content: vec![ToolResultContentPart::Text(TextContent {
                 text: "file contents".into(),
             })],
-            is_error: false,
+            outcome: ToolOutcome::Success,
             timestamp_ms: Timestamp::zero(),
         })];
 
@@ -1197,7 +1189,7 @@ mod tests {
                 content: vec![ToolResultContentPart::Text(TextContent {
                     text: "hi".into(),
                 })],
-                is_error: false,
+                outcome: ToolOutcome::Success,
                 timestamp_ms: Timestamp::zero(),
             }),
         ];

@@ -254,10 +254,10 @@ impl App {
     }
 
     /// add a user message to the display
-    pub fn push_user_message(&mut self, text: String) {
+    pub fn push_user_message(&mut self, text: impl Into<String>) {
         self.messages.push(DisplayMessage {
             role: MessageRole::User,
-            content: text,
+            content: text.into(),
             tool_calls: vec![],
             thinking: None,
             thinking_expanded: false,
@@ -317,7 +317,7 @@ impl App {
         &mut self,
         tool_call_id: &str,
         name: &str,
-        is_error: bool,
+        outcome: mush_ai::types::ToolOutcome,
         output: Option<&str>,
         image_data: Option<Vec<u8>>,
     ) {
@@ -325,7 +325,7 @@ impl App {
         if let Some(last) = self.messages.last_mut()
             && let Some(tc) = last.tool_calls.iter_mut().rfind(|t| t.name == name)
         {
-            tc.status = if is_error {
+            tc.status = if outcome.is_error() {
                 ToolCallStatus::Error
             } else {
                 ToolCallStatus::Done
@@ -595,10 +595,10 @@ impl App {
     }
 
     /// push a system message to the display
-    pub fn push_system_message(&mut self, text: String) {
+    pub fn push_system_message(&mut self, text: impl Into<String>) {
         self.messages.push(DisplayMessage {
             role: MessageRole::System,
-            content: text,
+            content: text.into(),
             tool_calls: vec![],
             thinking: None,
             thinking_expanded: false,
@@ -751,6 +751,7 @@ fn truncate_output(output: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mush_ai::types::ToolOutcome;
 
     #[test]
     fn new_app_is_empty() {
@@ -764,7 +765,7 @@ mod tests {
     #[test]
     fn push_user_message() {
         let mut app = App::new("test".into(), 200_000);
-        app.push_user_message("hello".into());
+        app.push_user_message("hello");
         assert_eq!(app.messages.len(), 1);
         assert_eq!(app.messages[0].role, MessageRole::User);
         assert_eq!(app.messages[0].content, "hello");
@@ -802,7 +803,7 @@ mod tests {
     #[test]
     fn tool_lifecycle() {
         let mut app = App::new("test".into(), 200_000);
-        app.push_user_message("do something".into());
+        app.push_user_message("do something");
         // simulate assistant message already pushed by finish_streaming
         app.messages.push(DisplayMessage {
             role: MessageRole::Assistant,
@@ -824,7 +825,13 @@ mod tests {
             ToolCallStatus::Running
         );
 
-        app.end_tool("tc_1", "bash", false, Some("file1.txt\nfile2.txt"), None);
+        app.end_tool(
+            "tc_1",
+            "bash",
+            ToolOutcome::Success,
+            Some("file1.txt\nfile2.txt"),
+            None,
+        );
         assert!(app.active_tools.is_empty());
         assert_eq!(
             app.messages.last().unwrap().tool_calls[0].status,
@@ -951,7 +958,13 @@ mod tests {
             model_id: None,
         });
         app.start_tool("tc_1", "read", "src/main.rs");
-        app.end_tool("tc_1", "read", false, Some("fn main() {}\n"), None);
+        app.end_tool(
+            "tc_1",
+            "read",
+            ToolOutcome::Success,
+            Some("fn main() {}\n"),
+            None,
+        );
         let tc = &app.messages.last().unwrap().tool_calls[0];
         assert!(tc.output_preview.is_some());
         assert!(tc.output_preview.as_ref().unwrap().contains("fn main()"));

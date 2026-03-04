@@ -132,7 +132,10 @@ pub fn status() -> Result<()> {
     println!("  model:  {model_id}");
 
     // thinking
-    let thinking = cfg.thinking.unwrap_or(false);
+    let thinking = cfg
+        .thinking
+        .map(|l| format!("{l:?}").to_lowercase())
+        .unwrap_or_else(|| "off".into());
     println!("  thinking: {thinking}");
 
     // max turns
@@ -147,7 +150,7 @@ pub fn status() -> Result<()> {
         CacheRetention::Long => "long",
     };
     println!("  cache retention: {cache_retention}");
-    println!("  debug cache: {}", cfg.debug_cache.unwrap_or(false));
+    println!("  debug cache: {}", cfg.debug_cache);
 
     #[cfg(feature = "embeddings")]
     println!("  embeddings: enabled");
