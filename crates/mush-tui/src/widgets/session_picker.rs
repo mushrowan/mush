@@ -143,28 +143,28 @@ mod tests {
     #[test]
     fn format_age_seconds() {
         let now = Timestamp::now().as_ms();
-        let ts = Timestamp(now - 30_000);
+        let ts = Timestamp::from_ms(now - 30_000);
         assert_eq!(format_age(ts), "30s ago");
     }
 
     #[test]
     fn format_age_minutes() {
         let now = Timestamp::now().as_ms();
-        let ts = Timestamp(now - 300_000);
+        let ts = Timestamp::from_ms(now - 300_000);
         assert_eq!(format_age(ts), "5m ago");
     }
 
     #[test]
     fn format_age_hours() {
         let now = Timestamp::now().as_ms();
-        let ts = Timestamp(now - 7_200_000);
+        let ts = Timestamp::from_ms(now - 7_200_000);
         assert_eq!(format_age(ts), "2h ago");
     }
 
     #[test]
     fn format_age_days() {
         let now = Timestamp::now().as_ms();
-        let ts = Timestamp(now - 172_800_000);
+        let ts = Timestamp::from_ms(now - 172_800_000);
         assert_eq!(format_age(ts), "2d ago");
     }
 }

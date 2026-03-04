@@ -319,7 +319,7 @@ mod tests {
     fn user_msg(text: &str) -> Message {
         Message::User(UserMessage {
             content: UserContent::Text(text.into()),
-            timestamp_ms: Timestamp(0),
+            timestamp_ms: Timestamp::zero(),
         })
     }
 
@@ -334,7 +334,7 @@ mod tests {
             usage: Usage::default(),
             stop_reason: StopReason::Stop,
             error_message: None,
-            timestamp_ms: Timestamp(0),
+            timestamp_ms: Timestamp::zero(),
         })
     }
 

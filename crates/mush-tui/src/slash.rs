@@ -77,7 +77,7 @@ pub fn handle(
         }
         "resume" if !args.is_empty() => {
             let store = mush_session::SessionStore::new(mush_session::SessionStore::default_dir());
-            let id = mush_session::SessionId(args.trim().to_string());
+            let id = mush_session::SessionId::from(args.trim());
             match store.load(&id) {
                 Ok(session) => {
                     *conversation = session.messages.clone();

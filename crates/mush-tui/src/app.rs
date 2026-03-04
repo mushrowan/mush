@@ -1013,7 +1013,7 @@ mod tests {
         assert_eq!(app.mode, AppMode::Normal);
 
         let sessions = vec![SessionMeta {
-            id: mush_session::SessionId("abc".into()),
+            id: mush_session::SessionId::from("abc"),
             title: Some("test session".into()),
             model_id: "claude-sonnet".into(),
             created_at: Timestamp::now(),
@@ -1035,7 +1035,7 @@ mod tests {
     fn session_picker_filter() {
         let sessions = vec![
             SessionMeta {
-                id: mush_session::SessionId("a".into()),
+                id: mush_session::SessionId::from("a"),
                 title: Some("rust project".into()),
                 model_id: "m".into(),
                 created_at: Timestamp::now(),
@@ -1044,7 +1044,7 @@ mod tests {
                 cwd: "/tmp".into(),
             },
             SessionMeta {
-                id: mush_session::SessionId("b".into()),
+                id: mush_session::SessionId::from("b"),
                 title: Some("python script".into()),
                 model_id: "m".into(),
                 created_at: Timestamp::now(),

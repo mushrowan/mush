@@ -10,7 +10,19 @@ use serde::{Deserialize, Serialize};
 
 /// unique session identifier
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Display, Serialize, Deserialize)]
-pub struct SessionId(pub String);
+pub struct SessionId(String);
+
+impl From<String> for SessionId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for SessionId {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
 
 impl std::ops::Deref for SessionId {
     type Target = str;
@@ -144,7 +156,7 @@ mod tests {
         let mut session = Session::new("test-model", "/tmp");
         session.push_message(Message::User(UserMessage {
             content: UserContent::Text("hi".into()),
-            timestamp_ms: Timestamp(0),
+            timestamp_ms: Timestamp::zero(),
         }));
         assert_eq!(session.meta.message_count, 1);
         assert_eq!(session.messages.len(), 1);
@@ -155,7 +167,7 @@ mod tests {
         let mut session = Session::new("test-model", "/tmp");
         session.push_message(Message::User(UserMessage {
             content: UserContent::Text("explain how rust traits work".into()),
-            timestamp_ms: Timestamp(0),
+            timestamp_ms: Timestamp::zero(),
         }));
         session.auto_title();
         assert_eq!(
@@ -170,7 +182,7 @@ mod tests {
         let long_text = "a".repeat(200);
         session.push_message(Message::User(UserMessage {
             content: UserContent::Text(long_text),
-            timestamp_ms: Timestamp(0),
+            timestamp_ms: Timestamp::zero(),
         }));
         session.auto_title();
         let title = session.meta.title.unwrap();
@@ -190,7 +202,7 @@ mod tests {
         let mut session = Session::new("test-model", "/tmp/project");
         session.push_message(Message::User(UserMessage {
             content: UserContent::Text("hello".into()),
-            timestamp_ms: Timestamp(1000),
+            timestamp_ms: Timestamp::from_ms(1000),
         }));
 
         let json = serde_json::to_string(&session).unwrap();
