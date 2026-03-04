@@ -107,9 +107,45 @@ fn edit_file(path: &Path, old_text: &str, new_text: &str) -> ToolResult {
 
     let new_content = content.replacen(old_text, new_text, 1);
     match std::fs::write(path, &new_content) {
-        Ok(()) => ToolResult::text(format!("Successfully replaced text in {}.", path.display())),
+        Ok(()) => {
+            let diff = format_edit_diff(old_text, new_text);
+            ToolResult::text(format!("edited {}\n{diff}", path.display()))
+        }
         Err(e) => ToolResult::error(format!("failed to write file: {e}")),
     }
+}
+
+/// format a diff between old and new text for display
+fn format_edit_diff(old_text: &str, new_text: &str) -> String {
+    // addition-only: new text contains all of old text with extra content
+    if let Some(added) = new_text.strip_prefix(old_text)
+        && !added.trim().is_empty() {
+            return added
+                .lines()
+                .filter(|l| !l.is_empty())
+                .map(|l| format!("+ {l}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+        }
+    if let Some(added) = new_text.strip_suffix(old_text)
+        && !added.trim().is_empty() {
+            return added
+                .lines()
+                .filter(|l| !l.is_empty())
+                .map(|l| format!("+ {l}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+        }
+
+    // show old lines as removed, new lines as added
+    let mut result = String::new();
+    for line in old_text.lines() {
+        result.push_str(&format!("- {line}\n"));
+    }
+    for line in new_text.lines() {
+        result.push_str(&format!("+ {line}\n"));
+    }
+    result.trim_end().to_string()
 }
 
 #[cfg(test)]
@@ -129,6 +165,18 @@ mod tests {
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("println!(\"world\")"));
         assert!(!content.contains("println!(\"hello\")"));
+
+        // output should contain diff
+        let output = result
+            .content
+            .iter()
+            .find_map(|p| match p {
+                mush_ai::types::ToolResultContentPart::Text(t) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(output.contains("- "));
+        assert!(output.contains("+ "));
     }
 
     #[test]
@@ -168,5 +216,36 @@ mod tests {
 
         let content = fs::read_to_string(&path).unwrap();
         assert_eq!(content, "before\nreplaced line\nafter");
+    }
+
+    #[test]
+    fn diff_shows_additions_only_when_appending() {
+        let diff = format_edit_diff("existing line", "existing line\nnew line");
+        assert!(diff.contains("+ new line"));
+        assert!(!diff.contains("- "));
+    }
+
+    #[test]
+    fn diff_shows_additions_only_when_prepending() {
+        let diff = format_edit_diff("existing line", "new line\nexisting line");
+        assert!(diff.contains("+ new line"));
+        assert!(!diff.contains("- "));
+    }
+
+    #[test]
+    fn diff_shows_both_for_replacement() {
+        let diff = format_edit_diff("old line", "new line");
+        assert!(diff.contains("- old line"));
+        assert!(diff.contains("+ new line"));
+    }
+
+    #[test]
+    fn diff_multiline_replacement() {
+        let diff = format_edit_diff("line 1\nline 2", "line A\nline B\nline C");
+        assert!(diff.contains("- line 1"));
+        assert!(diff.contains("- line 2"));
+        assert!(diff.contains("+ line A"));
+        assert!(diff.contains("+ line B"));
+        assert!(diff.contains("+ line C"));
     }
 }
