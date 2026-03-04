@@ -4,7 +4,10 @@ use std::io;
 use std::sync::Arc;
 
 use crossterm::ExecutableCommand;
-use crossterm::event::{self, Event, KeyCode, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    self, Event, KeyCode, KeyboardEnhancementFlags, MouseEvent, MouseEventKind,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
@@ -97,6 +100,10 @@ pub async fn run_tui(
     enable_raw_mode()?;
     io::stdout().execute(EnterAlternateScreen)?;
     io::stdout().execute(crossterm::event::EnableMouseCapture)?;
+    // enable kitty keyboard protocol so shift+enter is distinguishable
+    let _ = io::stdout().execute(PushKeyboardEnhancementFlags(
+        KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
+    ));
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
@@ -865,6 +872,7 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
 }
 
 fn cleanup(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
+    let _ = io::stdout().execute(PopKeyboardEnhancementFlags);
     disable_raw_mode()?;
     io::stdout().execute(crossterm::event::DisableMouseCapture)?;
     io::stdout().execute(LeaveAlternateScreen)?;
