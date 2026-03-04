@@ -180,10 +180,8 @@ impl Widget for InputBox<'_> {
 
         let content_width = area.width.saturating_sub(2) as usize;
 
-        // border colour signals unread messages
-        let border_colour = if streaming_idle {
-            Color::DarkGray
-        } else if self.app.has_unread {
+        // border colour signals whose turn it is and whether there are unread messages
+        let border_colour = if self.app.has_unread && !streaming_idle {
             if self.app.input.is_empty() {
                 // empty input + unread: blink between blue and default
                 if self.app.unread_flash_on() {
@@ -195,7 +193,11 @@ impl Widget for InputBox<'_> {
                 // typing + unread: solid blue (distinct from normal cyan)
                 Color::Blue
             }
+        } else if self.app.is_busy() {
+            // agent's turn: muted border whether idle or typing
+            Color::DarkGray
         } else {
+            // our turn, no unread: normal
             Color::Cyan
         };
 
