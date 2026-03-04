@@ -420,6 +420,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         confirm_tools: setup.cfg.confirm_tools,
         show_cost: setup.cfg.show_cost,
         debug_cache: setup.debug_cache,
+        thinking_display: setup.cfg.thinking_display,
         tool_output_live: Some(tool_output_live),
         log_buffer: Some({
             let buf = log_buffer.clone();

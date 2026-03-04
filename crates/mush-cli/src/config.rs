@@ -42,6 +42,8 @@ pub struct Config {
     pub debug_cache: bool,
     pub system_prompt: Option<String>,
     pub hint_mode: HintMode,
+    /// how to display thinking text (hidden, collapse, expanded)
+    pub thinking_display: mush_tui::ThinkingDisplay,
     /// prompt for confirmation before executing tools (off by default)
     pub confirm_tools: bool,
     /// show dollar cost in status bar (off by default, toggle with /cost)
