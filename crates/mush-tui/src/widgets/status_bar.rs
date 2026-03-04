@@ -104,7 +104,7 @@ impl Widget for StatusBar<'_> {
             spans.push(Span::styled(format!(" | {ctx}/{window}"), ctx_style));
         }
 
-        if self.app.total_cost > 0.0 {
+        if self.app.show_cost && self.app.total_cost > 0.0 {
             spans.push(Span::styled(format!(" | ${:.4}", self.app.total_cost), dim));
         }
 
@@ -169,6 +169,7 @@ mod tests {
     fn status_bar_shows_cost_and_context() {
         let mut app = App::new("test-model".into(), 200_000);
         app.total_cost = 0.0123;
+        app.show_cost = true;
         app.total_input_tokens = 45_000;
         app.total_output_tokens = 12_000;
         app.total_cache_read_tokens = 8_000;

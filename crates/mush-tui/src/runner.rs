@@ -81,6 +81,8 @@ pub struct TuiConfig {
     pub save_session: Option<SessionSaver>,
     /// prompt for confirmation before executing tools (off by default)
     pub confirm_tools: bool,
+    /// show dollar cost in status bar (off by default, toggle with /cost)
+    pub show_cost: bool,
     /// emit system messages when cache reads are observed
     pub debug_cache: bool,
     /// shared live tool output (updated by bash sink, read by TUI)
@@ -109,6 +111,7 @@ pub async fn run_tui(
 
     let mut app = App::new(tui_config.model.id.clone(), tui_config.model.context_window);
     app.thinking_level = tui_config.options.thinking.unwrap_or(ThinkingLevel::Off);
+    app.show_cost = tui_config.show_cost;
     // populate tab completions
     let slash_cmds = [
         "/help",
@@ -672,13 +675,15 @@ fn handle_agent_event(
                 output_text,
                 image_data,
             );
-            session_tree.append_message(Message::ToolResult(ToolResultMessage {
+            let msg = Message::ToolResult(ToolResultMessage {
                 tool_call_id: tool_call_id.clone(),
                 tool_name: tool_name.clone(),
                 content: result.content.clone(),
                 outcome: result.outcome,
                 timestamp_ms: Timestamp::now(),
-            }));
+            });
+            session_tree.append_message(msg.clone());
+            conversation.push(msg);
         }
         AgentEvent::TurnStart { .. } if !app.is_streaming => {
             app.start_streaming();
