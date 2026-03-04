@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use mush_agent::tool::AgentTool;
-use mush_ai::types::Message;
+use mush_ai::types::{Message, ModelId};
 
 /// metadata about a loaded extension
 #[derive(Debug, Clone)]
@@ -22,7 +22,7 @@ pub struct ExtensionMeta {
 /// context available to extensions during lifecycle events
 pub struct ExtensionContext {
     pub cwd: PathBuf,
-    pub model_id: String,
+    pub model_id: ModelId,
     pub session_id: Option<String>,
 }
 

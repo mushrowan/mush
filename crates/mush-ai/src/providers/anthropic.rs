@@ -290,7 +290,7 @@ fn build_request_body(
 
     let thinking = match options.thinking {
         Some(level) if level != ThinkingLevel::Off && model.reasoning => {
-            if supports_adaptive_thinking(&model.id.0) {
+            if supports_adaptive_thinking(&model.id) {
                 Some(ThinkingConfig::Adaptive {
                     config_type: "adaptive".into(),
                 })
@@ -321,7 +321,7 @@ fn build_request_body(
         };
 
     RequestBody {
-        model: model.id.0.clone(),
+        model: model.id.to_string(),
         messages: converted_messages,
         max_tokens: effective_max_tokens,
         stream: true,

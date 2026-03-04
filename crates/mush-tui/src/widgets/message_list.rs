@@ -224,7 +224,7 @@ fn render_message(
             let name = msg
                 .model_id
                 .as_deref()
-                .map(truncate_model_id)
+                .map(|id| truncate_model_id(id))
                 .unwrap_or("mush");
             (
                 name.to_string(),

@@ -98,10 +98,7 @@ pub async fn run_tui(
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(
-        tui_config.model.id.0.clone(),
-        tui_config.model.context_window,
-    );
+    let mut app = App::new(tui_config.model.id.clone(), tui_config.model.context_window);
     app.thinking_level = tui_config.options.thinking.unwrap_or(ThinkingLevel::Off);
     // populate tab completions
     let slash_cmds = [
@@ -127,7 +124,7 @@ pub async fn run_tui(
     }
     // add model ids for /model completion
     for m in models::all_models_with_user() {
-        app.completions.push(m.id.0.clone());
+        app.completions.push(m.id.to_string());
     }
 
     // pull prefs out so we can mutate them without borrowing tui_config
@@ -192,7 +189,7 @@ pub async fn run_tui(
                         thinking_expanded: false,
                         usage: Some(a.usage),
                         cost: None,
-                        model_id: Some(a.model.0.clone()),
+                        model_id: Some(a.model.clone()),
                     });
                     app.total_tokens += a.usage.total_tokens();
                     app.total_input_tokens += a.usage.input_tokens;
@@ -885,7 +882,7 @@ fn handle_slash_command(
             let id = args.trim();
             if let Some(new_model) = models::find_model_by_id(id) {
                 tui_config.model = new_model;
-                app.model_id = id.to_string();
+                app.model_id = id.into();
                 app.context_window = tui_config.model.context_window;
                 // restore saved thinking level for this model
                 let level = thinking_prefs
@@ -1250,7 +1247,7 @@ fn handle_export(app: &mut App, conversation: &[Message], args: &str) {
                 md.push_str(&format!("## you\n\n{text}\n\n"));
             }
             Message::Assistant(a) => {
-                let model = &a.model.0;
+                let model = a.model.as_ref();
                 let text: String = a
                     .content
                     .iter()
