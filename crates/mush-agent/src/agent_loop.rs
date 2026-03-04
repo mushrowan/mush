@@ -67,8 +67,8 @@ pub enum AgentEvent {
     Error { error: String },
 }
 
-/// default max turns before the agent stops
-pub const DEFAULT_MAX_TURNS: usize = 30;
+/// default max turns before the agent stops (effectively unlimited)
+pub const DEFAULT_MAX_TURNS: usize = usize::MAX;
 
 /// callback type for steering and follow-up messages
 pub type MessageCallback<'a> = Box<
@@ -116,7 +116,7 @@ pub struct AgentConfig<'a> {
     pub tools: &'a [Box<dyn AgentTool>],
     pub registry: &'a ApiRegistry,
     pub options: StreamOptions,
-    /// max tool-calling turns before forced stop (default 30)
+    /// max tool-calling turns before forced stop (default: unlimited)
     pub max_turns: usize,
     /// check for steering messages between tool calls.
     /// if messages are returned, remaining tool calls are skipped and
@@ -657,6 +657,6 @@ mod tests {
 
     #[test]
     fn config_defaults_are_sensible() {
-        assert_eq!(DEFAULT_MAX_TURNS, 30);
+        assert_eq!(DEFAULT_MAX_TURNS, usize::MAX);
     }
 }

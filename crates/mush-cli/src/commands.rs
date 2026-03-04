@@ -92,9 +92,10 @@ pub fn open_config() -> Result<()> {
              # model = \"gpt-5.3-codex\"  # optional, auto-default depends on auth\n\
              # thinking = false\n\
              # max_tokens = 16384\n\
-             # max_turns = 30\n\
+             # max_turns = 200  # default: unlimited\n\
              # cache_retention = \"short\"  # none | short | long\n\
              # debug_cache = false\n\
+             # show_cost = false  # toggle with /cost\n\
              # system_prompt = \"\"\n\
              \n\
              # [api_keys]\n\
