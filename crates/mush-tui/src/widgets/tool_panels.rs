@@ -8,7 +8,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Widget, Wrap};
 
 use throbber_widgets_tui::{BRAILLE_SIX, Throbber, ThrobberState, WhichUse};
 
-use crate::app::ActiveToolState;
+use crate::app::{ActiveToolState, ToolCallStatus};
 
 /// minimum width per tool panel before stacking vertically
 const MIN_PANEL_WIDTH: u16 = 30;
@@ -64,19 +64,35 @@ fn render_panel(
     area: Rect,
     buf: &mut Buffer,
 ) {
-    let throbber = Throbber::default()
-        .throbber_set(BRAILLE_SIX)
-        .use_type(WhichUse::Spin);
-    let spinner = throbber.to_symbol_span(throbber_state);
+    let (icon_span, border_colour) = match tool.status {
+        ToolCallStatus::Running => {
+            let throbber = Throbber::default()
+                .throbber_set(BRAILLE_SIX)
+                .use_type(WhichUse::Spin);
+            let spinner = throbber.to_symbol_span(throbber_state);
+            (
+                spinner.style(Style::default().fg(Color::Cyan)),
+                Color::DarkGray,
+            )
+        }
+        ToolCallStatus::Done => (
+            Span::styled("✓", Style::default().fg(Color::Green)),
+            Color::Green,
+        ),
+        ToolCallStatus::Error => (
+            Span::styled("✗", Style::default().fg(Color::Red)),
+            Color::Red,
+        ),
+    };
 
     let title = Line::from(vec![
         Span::raw(" "),
-        spinner.style(Style::default().fg(Color::Cyan)),
+        icon_span,
         Span::raw(" "),
         Span::styled(
             tool.name.as_str(),
             Style::default()
-                .fg(Color::Cyan)
+                .fg(border_colour)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
@@ -85,7 +101,7 @@ fn render_panel(
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
-        .border_style(Style::default().fg(Color::DarkGray));
+        .border_style(Style::default().fg(border_colour));
 
     let inner = block.inner(area);
     block.render(area, buf);
@@ -103,10 +119,23 @@ fn render_panel(
     // summary line (args)
     lines.push(Line::styled(tool.summary.as_str(), dim));
 
-    // live output
-    if let Some(ref output) = tool.live_output {
+    // show output: live output for running, final output for done
+    let output = match tool.status {
+        ToolCallStatus::Running => tool.live_output.as_deref(),
+        _ => tool.output.as_deref(),
+    };
+    if let Some(text) = output {
         lines.push(Line::raw(""));
-        lines.push(Line::styled(output.as_str(), dim));
+        for line in text.lines() {
+            let style = if line.starts_with("+ ") {
+                Style::default().fg(Color::Green)
+            } else if line.starts_with("- ") {
+                Style::default().fg(Color::Red)
+            } else {
+                dim
+            };
+            lines.push(Line::styled(line, style));
+        }
     }
 
     Paragraph::new(lines)
@@ -115,16 +144,20 @@ fn render_panel(
 }
 
 /// compute the height needed for the tool panels area
-pub fn tool_panels_height(active_count: usize, area_width: u16) -> u16 {
-    if active_count == 0 {
+pub fn tool_panels_height(tools: &[ActiveToolState], area_width: u16) -> u16 {
+    if tools.is_empty() {
         return 0;
     }
-    let side_by_side = area_width / active_count as u16 >= MIN_PANEL_WIDTH;
+    let n = tools.len();
+    let has_output = tools
+        .iter()
+        .any(|t| t.output.is_some() || t.live_output.is_some());
+    let side_by_side = area_width / n as u16 >= MIN_PANEL_WIDTH;
+    let base = if has_output { 8 } else { 5 };
     if side_by_side {
-        5 // single row of panels
+        base
     } else {
-        // stacked: 4 lines each (border + summary + blank + output)
-        (active_count as u16 * 4).min(12)
+        (n as u16 * (base - 1)).min(12)
     }
 }
 
@@ -165,6 +198,8 @@ mod tests {
             name: "Read".into(),
             summary: "src/main.rs".into(),
             live_output: None,
+            status: ToolCallStatus::Running,
+            output: None,
         }];
         let buf = render_panels(&tools, 60, 5);
         let content = buffer_to_string(&buf);
@@ -180,12 +215,16 @@ mod tests {
                 name: "Read".into(),
                 summary: "src/main.rs".into(),
                 live_output: None,
+                status: ToolCallStatus::Running,
+                output: None,
             },
             ActiveToolState {
                 tool_call_id: "tc2".into(),
                 name: "Grep".into(),
                 summary: "pattern: TODO".into(),
                 live_output: None,
+                status: ToolCallStatus::Running,
+                output: None,
             },
         ];
         // 80 wide: 40 each, > MIN_PANEL_WIDTH
@@ -203,12 +242,16 @@ mod tests {
                 name: "Read".into(),
                 summary: "file1".into(),
                 live_output: None,
+                status: ToolCallStatus::Running,
+                output: None,
             },
             ActiveToolState {
                 tool_call_id: "tc2".into(),
                 name: "Grep".into(),
                 summary: "file2".into(),
                 live_output: None,
+                status: ToolCallStatus::Running,
+                output: None,
             },
         ];
         // 40 wide: 20 each, < MIN_PANEL_WIDTH, should stack
@@ -219,18 +262,91 @@ mod tests {
     }
 
     #[test]
+    fn done_tool_shows_checkmark() {
+        let tools = vec![ActiveToolState {
+            tool_call_id: "tc1".into(),
+            name: "Edit".into(),
+            summary: "src/main.rs".into(),
+            live_output: None,
+            status: ToolCallStatus::Done,
+            output: Some("- old line\n+ new line".into()),
+        }];
+        let buf = render_panels(&tools, 60, 8);
+        let content = buffer_to_string(&buf);
+        assert!(content.contains("✓"));
+        assert!(content.contains("Edit"));
+    }
+
+    #[test]
     fn tool_panels_height_empty() {
-        assert_eq!(tool_panels_height(0, 80), 0);
+        assert_eq!(tool_panels_height(&[], 80), 0);
     }
 
     #[test]
     fn tool_panels_height_side_by_side() {
-        assert_eq!(tool_panels_height(2, 80), 5);
+        let tools = vec![
+            ActiveToolState {
+                tool_call_id: "tc1".into(),
+                name: "a".into(),
+                summary: "".into(),
+                live_output: None,
+                status: ToolCallStatus::Running,
+                output: None,
+            },
+            ActiveToolState {
+                tool_call_id: "tc2".into(),
+                name: "b".into(),
+                summary: "".into(),
+                live_output: None,
+                status: ToolCallStatus::Running,
+                output: None,
+            },
+        ];
+        assert_eq!(tool_panels_height(&tools, 80), 5);
+    }
+
+    #[test]
+    fn tool_panels_height_with_output() {
+        let tools = vec![ActiveToolState {
+            tool_call_id: "tc1".into(),
+            name: "a".into(),
+            summary: "".into(),
+            live_output: None,
+            status: ToolCallStatus::Done,
+            output: Some("result".into()),
+        }];
+        assert_eq!(tool_panels_height(&tools, 80), 8);
     }
 
     #[test]
     fn tool_panels_height_stacked() {
+        let tools = vec![
+            ActiveToolState {
+                tool_call_id: "tc1".into(),
+                name: "a".into(),
+                summary: "".into(),
+                live_output: None,
+                status: ToolCallStatus::Running,
+                output: None,
+            },
+            ActiveToolState {
+                tool_call_id: "tc2".into(),
+                name: "b".into(),
+                summary: "".into(),
+                live_output: None,
+                status: ToolCallStatus::Running,
+                output: None,
+            },
+            ActiveToolState {
+                tool_call_id: "tc3".into(),
+                name: "c".into(),
+                summary: "".into(),
+                live_output: None,
+                status: ToolCallStatus::Running,
+                output: None,
+            },
+        ];
         // 3 tools on a 40-wide screen: 40/3 = 13 < 30, stacks
-        assert_eq!(tool_panels_height(3, 40), 12);
+        assert_eq!(tool_panels_height(&tools, 40), 12);
     }
 }
