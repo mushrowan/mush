@@ -2517,6 +2517,7 @@ dependencies = [
 name = "mush-session"
 version = "0.1.0"
 dependencies = [
+ "derive_more",
  "futures",
  "miette",
  "mush-ai",

@@ -361,7 +361,7 @@ fn handle_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         (_, KeyCode::Enter) => {
             // select session — return a slash command that the runner handles
             if let Some(meta) = app.selected_session() {
-                let id = meta.id.0.clone();
+                let id = meta.id.to_string();
                 app.close_session_picker();
                 Some(AppEvent::SlashCommand {
                     name: "resume".into(),

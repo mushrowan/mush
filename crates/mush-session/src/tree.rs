@@ -5,12 +5,20 @@
 //! moves the leaf to an earlier entry, so the next append starts a new branch.
 //! existing entries are never modified or deleted.
 
+use derive_more::Display;
 use mush_ai::types::*;
 use serde::{Deserialize, Serialize};
 
 /// unique entry identifier (8 hex chars)
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Display, Serialize, Deserialize)]
 pub struct EntryId(pub String);
+
+impl std::ops::Deref for EntryId {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
 
 impl EntryId {
     pub fn new() -> Self {
@@ -26,12 +34,6 @@ impl EntryId {
 impl Default for EntryId {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl std::fmt::Display for EntryId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
     }
 }
 
@@ -143,7 +145,7 @@ impl SessionTree {
         let mut path = Vec::new();
         let mut current = self.leaf_id.as_ref();
         while let Some(id) = current {
-            if let Some(entry) = index.get(id.0.as_str()) {
+            if let Some(entry) = index.get(&**id) {
                 path.push(*entry);
                 current = entry.parent_id.as_ref();
             } else {
@@ -290,7 +292,7 @@ impl SessionTree {
     }
 
     fn build_index(&self) -> std::collections::HashMap<&str, &SessionEntry> {
-        self.entries.iter().map(|e| (e.id.0.as_str(), e)).collect()
+        self.entries.iter().map(|e| (&*e.id, e)).collect()
     }
 }
 

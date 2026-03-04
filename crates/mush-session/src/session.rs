@@ -4,12 +4,20 @@
 //! agent interaction. sessions can be persisted, resumed, and branched.
 
 use crate::tree::SessionTree;
-use mush_ai::types::{Message, Timestamp};
+use derive_more::Display;
+use mush_ai::types::{Message, ModelId, Timestamp};
 use serde::{Deserialize, Serialize};
 
 /// unique session identifier
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Display, Serialize, Deserialize)]
 pub struct SessionId(pub String);
+
+impl std::ops::Deref for SessionId {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
 
 impl SessionId {
     pub fn new() -> Self {
@@ -32,18 +40,12 @@ impl Default for SessionId {
     }
 }
 
-impl std::fmt::Display for SessionId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
 /// metadata about a session
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMeta {
     pub id: SessionId,
     pub title: Option<String>,
-    pub model_id: String,
+    pub model_id: ModelId,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
     pub message_count: usize,

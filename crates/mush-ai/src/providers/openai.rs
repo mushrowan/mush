@@ -253,7 +253,7 @@ fn build_request_body(
     };
 
     RequestBody {
-        model: model.id.0.clone(),
+        model: model.id.to_string(),
         messages: all_messages,
         stream: true,
         max_completion_tokens: options.max_tokens.or(Some(model.max_output_tokens)),

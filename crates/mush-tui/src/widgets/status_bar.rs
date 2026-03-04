@@ -49,7 +49,7 @@ impl Widget for StatusBar<'_> {
 
         let mut spans = vec![
             Span::styled(" ", dim),
-            Span::styled(&self.app.model_id, Style::default().fg(Color::Cyan)),
+            Span::styled(self.app.model_id.as_ref(), Style::default().fg(Color::Cyan)),
             Span::styled(" • ", dim),
             Span::styled(
                 format!("thinking {thinking_label}"),

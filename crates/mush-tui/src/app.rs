@@ -68,7 +68,7 @@ pub struct DisplayMessage {
     pub usage: Option<Usage>,
     pub cost: Option<f64>,
     /// model id for assistant messages
-    pub model_id: Option<String>,
+    pub model_id: Option<ModelId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,7 +122,7 @@ pub struct App {
     /// vertical scroll offset (lines from bottom)
     pub scroll_offset: u16,
     /// model id being used
-    pub model_id: String,
+    pub model_id: ModelId,
     /// total cost so far
     pub total_cost: f64,
     /// total tokens used (cumulative across all API calls)
@@ -206,7 +206,7 @@ struct TabState {
 }
 
 impl App {
-    pub fn new(model_id: String, context_window: u64) -> Self {
+    pub fn new(model_id: ModelId, context_window: u64) -> Self {
         Self {
             messages: Vec::new(),
             streaming_text: String::new(),
@@ -677,7 +677,7 @@ pub fn filtered_sessions(picker: &SessionPickerState) -> Vec<&SessionMeta> {
                     .unwrap_or("")
                     .to_lowercase()
                     .contains(&filter_lower)
-                    || s.id.0.contains(&filter_lower)
+                    || s.id.contains(&filter_lower)
             })
             .collect()
     }

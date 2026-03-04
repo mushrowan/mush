@@ -222,7 +222,7 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
     let thinking_prefs = config::load_thinking_prefs();
     let thinking_level = if cli.thinking {
         Some(ThinkingLevel::High)
-    } else if let Some(&level) = thinking_prefs.get(model.id.0.as_str()) {
+    } else if let Some(&level) = thinking_prefs.get(model.id.as_ref()) {
         Some(level)
     } else if cfg.thinking.unwrap_or(false) {
         Some(ThinkingLevel::High)
@@ -264,7 +264,7 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
     } else {
         Session::new(model.id.as_str(), &cwd_str)
     };
-    options.session_id = Some(session.meta.id.0.clone());
+    options.session_id = Some(session.meta.id.to_string());
 
     // add the user message
     let user_msg = Message::User(UserMessage {
@@ -456,7 +456,7 @@ async fn tui_mode(cli: Cli) -> Result<()> {
     let thinking_prefs = config::load_thinking_prefs();
     let thinking_level = if cli.thinking {
         Some(ThinkingLevel::High)
-    } else if let Some(&level) = thinking_prefs.get(model.id.0.as_str()) {
+    } else if let Some(&level) = thinking_prefs.get(model.id.as_ref()) {
         Some(level)
     } else if cfg.thinking.unwrap_or(false) {
         Some(ThinkingLevel::High)
@@ -495,7 +495,7 @@ async fn tui_mode(cli: Cli) -> Result<()> {
             .map_err(|e| eyre!("failed to list sessions: {e}"))?;
         let matches: Vec<_> = sessions
             .iter()
-            .filter(|s| s.id.0.starts_with(resume_id.as_str()))
+            .filter(|s| s.id.starts_with(resume_id.as_str()))
             .collect();
         match matches.len() {
             0 => return Err(eyre!("no session matching '{resume_id}'")),
@@ -513,7 +513,7 @@ async fn tui_mode(cli: Cli) -> Result<()> {
     };
     let initial_messages = session.messages.clone();
     let session_id = session.meta.id.clone();
-    options.session_id = Some(session_id.0.clone());
+    options.session_id = Some(session_id.to_string());
 
     let theme = mush_tui::Theme::from_config(&cfg.theme);
     let prompt_enricher = build_prompt_enricher(&cwd);
@@ -819,7 +819,7 @@ fn list_sessions_cmd() -> Result<()> {
         let age = format_age(meta.updated_at.as_ms());
         println!(
             "  \x1b[2m{}\x1b[0m  {} \x1b[2m({}, {} msgs, {})\x1b[0m",
-            &meta.id.0[..8],
+            &meta.id[..8],
             title,
             meta.model_id,
             meta.message_count,
@@ -852,7 +852,7 @@ fn delete_session_cmd(id: &str) -> Result<()> {
         .map_err(|e| eyre!("failed to list sessions: {e}"))?;
 
     // find by prefix match
-    let matches: Vec<_> = sessions.iter().filter(|s| s.id.0.starts_with(id)).collect();
+    let matches: Vec<_> = sessions.iter().filter(|s| s.id.starts_with(id)).collect();
 
     match matches.len() {
         0 => Err(eyre!("no session matching '{id}'")),
@@ -869,7 +869,7 @@ fn delete_session_cmd(id: &str) -> Result<()> {
             eprintln!("'{id}' matches {n} sessions:");
             for s in matches {
                 let title = s.title.as_deref().unwrap_or("(untitled)");
-                eprintln!("  {} - {title}", &s.id.0[..8]);
+                eprintln!("  {} - {title}", &s.id[..8]);
             }
             Err(eyre!("ambiguous prefix, be more specific"))
         }
