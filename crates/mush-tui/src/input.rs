@@ -212,6 +212,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             });
         }
 
+        // paste image from clipboard
+        (KeyModifiers::CONTROL, KeyCode::Char('v')) => {
+            return Some(AppEvent::PasteImage);
+        }
+
         // regular character
         (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
             app.input_char(c);
@@ -544,9 +549,10 @@ mod tests {
         app.push_text_delta("text");
         app.finish_streaming(None, None);
 
-        assert!(!app.messages[0].thinking_expanded);
-        handle_key(&mut app, ctrl(KeyCode::Char('o')));
+        // starts expanded (default ThinkingDisplay::Expanded)
         assert!(app.messages[0].thinking_expanded);
+        handle_key(&mut app, ctrl(KeyCode::Char('o')));
+        assert!(!app.messages[0].thinking_expanded);
     }
 
     #[test]

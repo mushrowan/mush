@@ -10,6 +10,17 @@ use mush_session::SessionMeta;
 use ratatui::layout::Rect;
 use throbber_widgets_tui::ThrobberState;
 
+use crate::clipboard::ClipboardImage;
+
+/// an image attached to the next user message (not yet sent)
+#[derive(Debug, Clone)]
+pub struct PendingImage {
+    pub data: Vec<u8>,
+    pub mime_type: ImageMimeType,
+    /// image dimensions (width, height) if decoded
+    pub dimensions: Option<(u32, u32)>,
+}
+
 /// events that flow between the TUI and the agent
 #[derive(Debug, Clone)]
 pub enum AppEvent {
@@ -33,6 +44,21 @@ pub enum AppEvent {
     Resize(u16, u16),
     /// user cycled thinking level
     CycleThinkingLevel,
+    /// user triggered clipboard image paste
+    PasteImage,
+}
+
+/// controls how thinking text is displayed
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThinkingDisplay {
+    /// never show thinking text
+    Hidden,
+    /// show while streaming, collapse to one-line preview when done
+    Collapse,
+    /// always show thinking text expanded
+    #[default]
+    Expanded,
 }
 
 /// which UI mode the app is in
@@ -69,6 +95,8 @@ pub struct DisplayMessage {
     pub cost: Option<f64>,
     /// model id for assistant messages
     pub model_id: Option<ModelId>,
+    /// whether this message is queued (steering) and hasn't been processed yet
+    pub queued: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,6 +186,8 @@ pub struct App {
     tick_count: u8,
     /// current thinking level
     pub thinking_level: ThinkingLevel,
+    /// how to display thinking text
+    pub thinking_display: ThinkingDisplay,
     /// which UI mode we're in
     pub mode: AppMode,
     /// session picker state (when mode == SessionPicker)
@@ -180,6 +210,8 @@ pub struct App {
     pub search: SearchState,
     /// image render positions (populated by MessageList during render)
     pub image_render_areas: RefCell<Vec<ImageRenderArea>>,
+    /// images attached to the next user message (not yet sent)
+    pub pending_images: Vec<PendingImage>,
 }
 
 /// position computed during render for inline image overlay
@@ -237,6 +269,7 @@ impl App {
             throbber_state: ThrobberState::default(),
             tick_count: 0,
             thinking_level: ThinkingLevel::Off,
+            thinking_display: ThinkingDisplay::default(),
             mode: AppMode::Normal,
             session_picker: None,
             completions: Vec::new(),
@@ -248,6 +281,7 @@ impl App {
             selected_message: None,
             search: SearchState::default(),
             image_render_areas: RefCell::new(Vec::new()),
+            pending_images: Vec::new(),
         }
     }
 
@@ -257,6 +291,21 @@ impl App {
         if self.tick_count.is_multiple_of(8) {
             self.throbber_state.calc_next();
         }
+    }
+
+    /// whether the unread flash indicator is in the "on" phase
+    /// cycles at ~1hz (30 ticks on, 30 off at ~60fps)
+    pub fn unread_flash_on(&self) -> bool {
+        self.tick_count % 60 < 30
+    }
+
+    /// whether the agent is currently active (streaming or executing tools)
+    pub fn is_busy(&self) -> bool {
+        self.is_streaming
+            || self
+                .active_tools
+                .iter()
+                .any(|t| t.status == ToolCallStatus::Running)
     }
 
     /// add a user message to the display
@@ -270,6 +319,23 @@ impl App {
             usage: None,
             cost: None,
             model_id: None,
+            queued: false,
+        });
+        self.scroll_offset = 0;
+    }
+
+    /// add a queued steering message (shown dimmed until processed)
+    pub fn push_queued_message(&mut self, text: impl Into<String>) {
+        self.messages.push(DisplayMessage {
+            role: MessageRole::User,
+            content: text.into(),
+            tool_calls: vec![],
+            thinking: None,
+            thinking_expanded: false,
+            usage: None,
+            cost: None,
+            model_id: None,
+            queued: true,
         });
         self.scroll_offset = 0;
     }
@@ -280,9 +346,6 @@ impl App {
         self.streaming_text.clear();
         self.streaming_thinking.clear();
         self.scroll_offset = 0;
-        // clear completed tools from panels (running tools stay)
-        self.active_tools
-            .retain(|t| t.status == ToolCallStatus::Running);
     }
 
     /// append text delta to the current stream
@@ -377,16 +440,27 @@ impl App {
         };
         let text = std::mem::take(&mut self.streaming_text);
 
-        self.messages.push(DisplayMessage {
+        let assistant_msg = DisplayMessage {
             role: MessageRole::Assistant,
             content: text.trim_start_matches('\n').to_string(),
             tool_calls: vec![],
             thinking,
-            thinking_expanded: false,
+            thinking_expanded: self.thinking_display == ThinkingDisplay::Expanded,
             usage,
             cost,
             model_id: Some(self.model_id.clone()),
-        });
+            queued: false,
+        };
+
+        // insert before any trailing queued (steering) messages so the
+        // assistant reply appears above steering input in the message list
+        let insert_pos = self
+            .messages
+            .iter()
+            .rposition(|m| !m.queued)
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        self.messages.insert(insert_pos, assistant_msg);
 
         if let Some(c) = cost {
             self.total_cost += c;
@@ -626,6 +700,7 @@ impl App {
             usage: None,
             cost: None,
             model_id: None,
+        queued: false,
         });
     }
 
@@ -657,6 +732,28 @@ impl App {
     pub fn take_input(&mut self) -> String {
         self.cursor = 0;
         std::mem::take(&mut self.input)
+    }
+
+    /// add a clipboard image to pending attachments
+    pub fn add_image(&mut self, image: ClipboardImage) {
+        let dimensions = image::load_from_memory(&image.bytes)
+            .ok()
+            .map(|img| (img.width(), img.height()));
+        self.pending_images.push(PendingImage {
+            data: image.bytes,
+            mime_type: image.mime_type,
+            dimensions,
+        });
+    }
+
+    /// take pending images (clearing them from the app)
+    pub fn take_images(&mut self) -> Vec<PendingImage> {
+        std::mem::take(&mut self.pending_images)
+    }
+
+    /// remove the last pending image
+    pub fn remove_last_image(&mut self) {
+        self.pending_images.pop();
     }
 
     /// open the session picker with the given sessions
@@ -707,20 +804,26 @@ pub fn filtered_sessions(picker: &SessionPickerState) -> Vec<&SessionMeta> {
 /// find the byte offset of the previous word boundary
 fn word_boundary_left(s: &str, cursor: usize) -> usize {
     let before = &s[..cursor];
-    // skip whitespace/punctuation, then skip word chars
-    let trimmed = before.trim_end();
-    if trimmed.is_empty() {
+    if before.is_empty() {
         return 0;
     }
-    let end = trimmed.len();
-    // find start of current word
-    trimmed
+    // skip trailing whitespace and punctuation (non-word chars)
+    let skip_end = before
+        .char_indices()
+        .rev()
+        .find(|(_, c)| c.is_alphanumeric() || *c == '_')
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(0);
+    if skip_end == 0 {
+        return 0;
+    }
+    // now find start of the word
+    before[..skip_end]
         .char_indices()
         .rev()
         .find(|(_, c)| !c.is_alphanumeric() && *c != '_')
         .map(|(i, c)| i + c.len_utf8())
         .unwrap_or(0)
-        .min(end)
 }
 
 /// find the byte offset of the next word boundary
@@ -835,6 +938,7 @@ mod tests {
             usage: None,
             cost: None,
             model_id: None,
+        queued: false,
         });
 
         app.start_tool("tc_1", "bash", "ls -la");
@@ -861,8 +965,13 @@ mod tests {
             ToolCallStatus::Done
         );
 
-        // cleared on next streaming turn
+        // tools persist through streaming turns (cleared on new user submit)
         app.start_streaming();
+        assert_eq!(app.active_tools.len(), 1);
+        assert_eq!(app.active_tools[0].status, ToolCallStatus::Done);
+
+        // explicitly clearing simulates user submitting new prompt
+        app.active_tools.clear();
         assert!(app.active_tools.is_empty());
     }
 
@@ -983,6 +1092,7 @@ mod tests {
             usage: None,
             cost: None,
             model_id: None,
+        queued: false,
         });
         app.start_tool("tc_1", "read", "src/main.rs");
         app.end_tool(
@@ -1005,14 +1115,14 @@ mod tests {
         app.push_text_delta("answer");
         app.finish_streaming(None, None);
 
-        // starts collapsed
-        assert!(!app.messages[0].thinking_expanded);
-
-        app.toggle_thinking_expanded();
+        // starts expanded (default ThinkingDisplay::Expanded)
         assert!(app.messages[0].thinking_expanded);
 
         app.toggle_thinking_expanded();
         assert!(!app.messages[0].thinking_expanded);
+
+        app.toggle_thinking_expanded();
+        assert!(app.messages[0].thinking_expanded);
     }
 
     #[test]
@@ -1032,9 +1142,33 @@ mod tests {
         app.finish_streaming(None, None);
 
         app.toggle_thinking_expanded();
-        // should toggle the latest one
+        // should toggle the latest one (was expanded, now collapsed)
+        assert!(app.messages[0].thinking_expanded);
+        assert!(!app.messages[1].thinking_expanded);
+    }
+
+    #[test]
+    fn thinking_display_collapse_starts_collapsed() {
+        let mut app = App::new("test".into(), 200_000);
+        app.thinking_display = ThinkingDisplay::Collapse;
+        app.start_streaming();
+        app.push_thinking_delta("deep thoughts");
+        app.push_text_delta("answer");
+        app.finish_streaming(None, None);
+
         assert!(!app.messages[0].thinking_expanded);
-        assert!(app.messages[1].thinking_expanded);
+    }
+
+    #[test]
+    fn thinking_display_hidden_starts_collapsed() {
+        let mut app = App::new("test".into(), 200_000);
+        app.thinking_display = ThinkingDisplay::Hidden;
+        app.start_streaming();
+        app.push_thinking_delta("deep thoughts");
+        app.push_text_delta("answer");
+        app.finish_streaming(None, None);
+
+        assert!(!app.messages[0].thinking_expanded);
     }
 
     #[test]
@@ -1114,5 +1248,48 @@ mod tests {
         // start_tool clears the buffer
         app.start_tool("tc_1", "read", "src/main.rs");
         assert!(app.streaming_tool_args.is_empty());
+    }
+
+    #[test]
+    fn word_boundary_left_skips_punctuation() {
+        // cursor after "hello." should delete back to start of "hello"
+        assert_eq!(word_boundary_left("hello.", 6), 0);
+        assert_eq!(word_boundary_left("foo hello.", 10), 4);
+        assert_eq!(word_boundary_left("hello world.", 12), 6);
+    }
+
+    #[test]
+    fn word_boundary_left_skips_asterisks() {
+        assert_eq!(word_boundary_left("hello**", 7), 0);
+        assert_eq!(word_boundary_left("one two**", 9), 4);
+    }
+
+    #[test]
+    fn word_boundary_left_normal_words() {
+        assert_eq!(word_boundary_left("hello world", 11), 6);
+        assert_eq!(word_boundary_left("hello world  ", 13), 6);
+        assert_eq!(word_boundary_left("hello", 5), 0);
+    }
+
+    #[test]
+    fn word_boundary_left_all_punctuation() {
+        assert_eq!(word_boundary_left("...", 3), 0);
+    }
+
+    #[test]
+    fn steering_message_ordered_after_assistant() {
+        let mut app = App::new("test".into(), 200_000);
+        app.start_streaming();
+        app.push_text_delta("assistant reply");
+        // user sends steering while streaming
+        app.push_queued_message("steer");
+        // assistant finishes
+        app.finish_streaming(None, None);
+
+        assert_eq!(app.messages.len(), 2);
+        assert_eq!(app.messages[0].role, MessageRole::Assistant);
+        assert_eq!(app.messages[0].content, "assistant reply");
+        assert_eq!(app.messages[1].role, MessageRole::User);
+        assert_eq!(app.messages[1].content, "steer");
     }
 }

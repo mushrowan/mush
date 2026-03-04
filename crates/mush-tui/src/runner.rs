@@ -4,6 +4,7 @@ use std::io;
 use std::sync::Arc;
 
 use crossterm::ExecutableCommand;
+use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{
     self, Event, KeyCode, KeyboardEnhancementFlags, MouseEvent, MouseEventKind,
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
@@ -85,6 +86,8 @@ pub struct TuiConfig {
     pub show_cost: bool,
     /// emit system messages when cache reads are observed
     pub debug_cache: bool,
+    /// how to display thinking text (hidden, collapse, expanded)
+    pub thinking_display: crate::app::ThinkingDisplay,
     /// shared live tool output (updated by bash sink, read by TUI)
     pub tool_output_live: Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
     /// callback to get recent log entries (returns last N lines)
@@ -108,11 +111,13 @@ pub async fn run_tui(
     let _ = io::stdout().execute(PushKeyboardEnhancementFlags(
         KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
     ));
+    let _ = io::stdout().execute(SetCursorStyle::BlinkingBar);
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new(tui_config.model.id.clone(), tui_config.model.context_window);
     app.thinking_level = tui_config.options.thinking.unwrap_or(ThinkingLevel::Off);
+    app.thinking_display = tui_config.thinking_display;
     app.show_cost = tui_config.show_cost;
     // populate tab completions
     let slash_cmds = [
@@ -201,10 +206,12 @@ pub async fn run_tui(
                         content: text.trim_start_matches('\n').to_string(),
                         tool_calls: vec![],
                         thinking,
-                        thinking_expanded: false,
+                        thinking_expanded: app.thinking_display
+                            == crate::app::ThinkingDisplay::Expanded,
                         usage: Some(a.usage),
                         cost: None,
                         model_id: Some(a.model.clone()),
+                    queued: false,
                     });
                     app.total_tokens += a.usage.total_tokens();
                     app.total_input_tokens += a.usage.input_tokens;
@@ -271,7 +278,22 @@ pub async fn run_tui(
             }
 
             let user_message = Message::User(UserMessage {
-                content: UserContent::Text(user_text),
+                content: if app.pending_images.is_empty() {
+                    UserContent::Text(user_text)
+                } else {
+                    let images = app.take_images();
+                    let mut parts: Vec<UserContentPart> = vec![
+                        UserContentPart::Text(TextContent { text: user_text }),
+                    ];
+                    for img in images {
+                        use base64::Engine;
+                        parts.push(UserContentPart::Image(ImageContent {
+                            data: base64::engine::general_purpose::STANDARD.encode(&img.data),
+                            mime_type: img.mime_type,
+                        }));
+                    }
+                    UserContent::Parts(parts)
+                },
                 timestamp_ms: Timestamp::now(),
             });
             session_tree.append_message(user_message.clone());
@@ -455,12 +477,15 @@ pub async fn run_tui(
                                                     timestamp_ms: Timestamp::now(),
                                                 });
                                                 steering_queue.lock().await.push(msg);
-                                                app.push_user_message(text);
+                                                app.push_queued_message(text);
                                                 app.status = Some("steering message queued".into());
                                             }
                                             AppEvent::CycleThinkingLevel => {
                                                 tui_config.options.thinking = Some(app.thinking_level);
                                                 save_thinking_pref(&mut thinking_prefs, &thinking_saver, &app.model_id, app.thinking_level);
+                                            }
+                                            AppEvent::PasteImage => {
+                                                paste_clipboard_image(&mut app).await;
                                             }
                                             _ => {}
                                         }
@@ -524,6 +549,7 @@ pub async fn run_tui(
                                 AppEvent::UserSubmit { text } => {
                                     let expanded = slash::expand_template(&text);
                                     app.push_user_message(expanded.clone());
+                                    app.active_tools.clear();
                                     app.start_streaming();
                                     pending_prompt = Some(expanded);
                                 }
@@ -564,6 +590,9 @@ pub async fn run_tui(
                                         &app.model_id,
                                         app.thinking_level,
                                     );
+                                }
+                                AppEvent::PasteImage => {
+                                    paste_clipboard_image(&mut app).await;
                                 }
                                 _ => {}
                             }
@@ -696,10 +725,18 @@ fn handle_agent_event(
             session_tree.append_message(msg.clone());
             conversation.push(msg);
         }
-        AgentEvent::TurnStart { .. } if !app.is_streaming => {
-            app.start_streaming();
+        AgentEvent::TurnStart { .. } => {
+            // clear previous turn's tool panels (results are already inline in messages)
+            app.active_tools.clear();
+            if !app.is_streaming {
+                app.start_streaming();
+            }
         }
         AgentEvent::SteeringInjected { count } => {
+            // mark queued display messages as no longer pending
+            for msg in app.messages.iter_mut().rev().take(*count) {
+                msg.queued = false;
+            }
             app.status = Some(format!("steering: {count} messages injected"));
         }
         AgentEvent::FollowUpInjected { count } => {
@@ -724,6 +761,7 @@ fn handle_agent_event(
         }
         AgentEvent::AgentEnd => {
             app.is_streaming = false;
+            app.active_tools.clear();
         }
         _ => {}
     }
@@ -836,8 +874,10 @@ fn draw(
         let ui = Ui::new(app);
         let (cx, cy) = ui.cursor_position(area);
         frame.render_widget(ui, area);
-        if app.mode == app::AppMode::Normal
-            || (app.is_streaming && app.mode != app::AppMode::ToolConfirm)
+        let streaming_idle = app.is_busy() && app.input.is_empty();
+        if !streaming_idle
+            && (app.mode == app::AppMode::Normal
+                || (app.is_streaming && app.mode != app::AppMode::ToolConfirm))
         {
             frame.set_cursor_position((cx, cy));
         }
@@ -856,6 +896,27 @@ fn draw(
         }
     })?;
     Ok(())
+}
+
+/// read a clipboard image in a background thread and add it to the app
+async fn paste_clipboard_image(app: &mut App) {
+    app.status = Some("reading clipboard...".into());
+    match tokio::task::spawn_blocking(crate::clipboard::read_clipboard_image).await {
+        Ok(Some(image)) => {
+            let mime = image.mime_type.as_str();
+            let size = image.bytes.len();
+            app.add_image(image);
+            let n = app.pending_images.len();
+            let kb = size / 1024;
+            app.status = Some(format!("{n} image(s) attached ({mime}, {kb}kb)"));
+        }
+        Ok(None) => {
+            app.status = Some("no image in clipboard".into());
+        }
+        Err(_) => {
+            app.status = Some("failed to read clipboard".into());
+        }
+    }
 }
 
 /// persist a thinking level change for the current model
@@ -890,6 +951,7 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
 
 fn cleanup(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
     let _ = io::stdout().execute(PopKeyboardEnhancementFlags);
+    let _ = io::stdout().execute(SetCursorStyle::DefaultUserShape);
     disable_raw_mode()?;
     io::stdout().execute(crossterm::event::DisableMouseCapture)?;
     io::stdout().execute(LeaveAlternateScreen)?;
