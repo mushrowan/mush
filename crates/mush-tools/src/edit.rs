@@ -117,23 +117,25 @@ fn edit_file(path: &Path, old_text: &str, new_text: &str) -> ToolResult {
 fn format_edit_diff(old_text: &str, new_text: &str) -> String {
     // addition-only: new text contains all of old text with extra content
     if let Some(added) = new_text.strip_prefix(old_text)
-        && !added.trim().is_empty() {
-            return added
-                .lines()
-                .filter(|l| !l.is_empty())
-                .map(|l| format!("+ {l}"))
-                .collect::<Vec<_>>()
-                .join("\n");
-        }
+        && !added.trim().is_empty()
+    {
+        return added
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| format!("+ {l}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
     if let Some(added) = new_text.strip_suffix(old_text)
-        && !added.trim().is_empty() {
-            return added
-                .lines()
-                .filter(|l| !l.is_empty())
-                .map(|l| format!("+ {l}"))
-                .collect::<Vec<_>>()
-                .join("\n");
-        }
+        && !added.trim().is_empty()
+    {
+        return added
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| format!("+ {l}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
 
     // show old lines as removed, new lines as added
     let mut result = String::new();

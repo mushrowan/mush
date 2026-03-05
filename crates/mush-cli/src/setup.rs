@@ -312,6 +312,12 @@ pub fn default_model_id(cfg: &config::Config) -> String {
         return model.clone();
     }
 
+    if let Some(model) = config::load_last_model()
+        && models::find_model_by_id(&model).is_some()
+    {
+        return model;
+    }
+
     let oauth_store = mush_ai::oauth::load_credentials().unwrap_or_default();
 
     let has_anthropic_auth = cfg.api_keys.anthropic.is_some()

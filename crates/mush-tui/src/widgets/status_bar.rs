@@ -107,7 +107,10 @@ fn left_spans(app: &App) -> Vec<Span<'static>> {
     }
 
     if app.show_cost && app.stats.total_cost > 0.0 {
-        spans.push(Span::styled(format!(" | ${:.4}", app.stats.total_cost), dim));
+        spans.push(Span::styled(
+            format!(" | ${:.4}", app.stats.total_cost),
+            dim,
+        ));
     }
 
     if let Some(ref status) = app.status {

@@ -123,13 +123,7 @@ mod tests {
         fs::write(dir.path().join("lib.rs"), "").unwrap();
         fs::write(dir.path().join("readme.md"), "").unwrap();
 
-        let result = run_fd(
-            dir.path(),
-            r"\.rs$",
-            dir.path(),
-            Some("file"),
-        )
-        .await;
+        let result = run_fd(dir.path(), r"\.rs$", dir.path(), Some("file")).await;
 
         let text = extract_text(&result);
         assert!(text.contains("main.rs"));
@@ -142,13 +136,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("test.txt"), "").unwrap();
 
-        let result = run_fd(
-            dir.path(),
-            "nonexistent_xyz",
-            dir.path(),
-            None,
-        )
-        .await;
+        let result = run_fd(dir.path(), "nonexistent_xyz", dir.path(), None).await;
 
         let text = extract_text(&result);
         assert!(text.contains("no files found"));

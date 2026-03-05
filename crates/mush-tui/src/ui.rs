@@ -8,8 +8,8 @@ use crate::app::{App, AppMode};
 use crate::widgets::input_box::InputBox;
 use crate::widgets::message_list::MessageList;
 use crate::widgets::search_popup::SearchPopup;
-pub use crate::widgets::status_bar::status_bar_height;
 use crate::widgets::status_bar::StatusBar;
+pub use crate::widgets::status_bar::status_bar_height;
 use crate::widgets::tool_panels::{ToolPanels, tool_panels_height};
 
 /// the full TUI layout, composing all widgets
@@ -24,14 +24,11 @@ impl<'a> Ui<'a> {
 
     /// get the cursor position for the terminal
     pub fn cursor_position(&self, area: Rect) -> (u16, u16) {
-        let input_h = input_height(
-            &self.app.input,
-            area.width,
-            &self.app.pending_images,
-        );
+        let input_h = input_height(&self.app.input, area.width, &self.app.pending_images);
         let tools_h = tool_panels_height(&self.app.active_tools, area.width);
         let status_h = status_bar_height(self.app, area.width);
         let chunks = layout(area, input_h, tools_h, status_h);
+        self.app.input_area.set(chunks.input);
         InputBox::new(self.app).cursor_position(chunks.input)
     }
 }
@@ -52,8 +49,7 @@ pub fn input_height(input: &str, area_width: u16, images: &[crate::app::PendingI
         return 3;
     }
     // expand image placeholders so wrapping accounts for token width
-    let expanded =
-        crate::widgets::input_box::expand_input(input, 0, images);
+    let expanded = crate::widgets::input_box::expand_input(input, 0, images);
     // use the same word-wrap algorithm as the input box renderer
     let mut total_lines: usize = 0;
     for (i, line) in expanded.text.split('\n').enumerate() {
@@ -71,10 +67,10 @@ pub fn layout(area: Rect, input_h: u16, tools_h: u16, status_h: u16) -> LayoutRe
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(1),            // messages
-                Constraint::Length(tools_h),   // tool panels
-                Constraint::Length(input_h),   // input
-                Constraint::Length(status_h),  // status bar
+                Constraint::Min(1),           // messages
+                Constraint::Length(tools_h),  // tool panels
+                Constraint::Length(input_h),  // input
+                Constraint::Length(status_h), // status bar
             ])
             .split(area);
 
@@ -88,9 +84,9 @@ pub fn layout(area: Rect, input_h: u16, tools_h: u16, status_h: u16) -> LayoutRe
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(1),            // messages
-                Constraint::Length(input_h),   // input
-                Constraint::Length(status_h),  // status bar
+                Constraint::Min(1),           // messages
+                Constraint::Length(input_h),  // input
+                Constraint::Length(status_h), // status bar
             ])
             .split(area);
 
@@ -105,14 +101,11 @@ pub fn layout(area: Rect, input_h: u16, tools_h: u16, status_h: u16) -> LayoutRe
 
 impl Widget for Ui<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let input_h = input_height(
-            &self.app.input,
-            area.width,
-            &self.app.pending_images,
-        );
+        let input_h = input_height(&self.app.input, area.width, &self.app.pending_images);
         let tools_h = tool_panels_height(&self.app.active_tools, area.width);
         let status_h = status_bar_height(self.app, area.width);
         let regions = layout(area, input_h, tools_h, status_h);
+        self.app.input_area.set(regions.input);
         MessageList::new(self.app).render(regions.messages, buf);
         if let Some(tools_area) = regions.tools {
             ToolPanels::new(&self.app.active_tools, &self.app.throbber_state)
@@ -175,6 +168,17 @@ mod tests {
         let input = format!("hi{IMAGE_PLACEHOLDER}");
         // "hi[📷 100x200]" = ~16 chars, fits in 80-wide box = 1 line + 2 borders = 3
         assert_eq!(input_height(&input, 80, &[img]), 3);
+    }
+
+    #[test]
+    fn ui_sets_input_area_for_mouse_routing() {
+        let app = App::new("test".into(), 200_000);
+        let ui = Ui::new(&app);
+        let area = Rect::new(0, 0, 80, 24);
+        let _ = ui.cursor_position(area);
+        let input = app.input_area.get();
+        assert!(input.height > 0);
+        assert!(input.y > 0);
     }
 
     #[test]

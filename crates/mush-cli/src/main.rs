@@ -14,6 +14,7 @@ use mush_ai::models;
 use mush_ai::stream::StreamEvent;
 use mush_ai::types::*;
 use mush_session::{Session, SessionStore};
+
 use mush_tui::TuiConfig;
 
 use setup::{
@@ -401,6 +402,9 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         thinking_prefs: setup.thinking_prefs,
         save_thinking_prefs: Some(std::sync::Arc::new(|prefs| {
             config::save_thinking_prefs(prefs);
+        })),
+        save_last_model: Some(std::sync::Arc::new(|model_id| {
+            config::save_last_model(model_id);
         })),
         save_session: if cli.no_session {
             None

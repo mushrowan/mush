@@ -253,6 +253,8 @@ pub struct App {
     pub slash_menu: Option<SlashMenuState>,
     /// registered slash commands with descriptions
     pub slash_commands: Vec<SlashCommand>,
+    /// available models for /model menu
+    pub model_completions: Vec<ModelCompletion>,
     /// available completions (slash commands, model ids, etc)
     pub completions: Vec<String>,
     /// current tab-completion state
@@ -279,6 +281,14 @@ pub struct App {
     pub total_content_lines: Cell<u16>,
     /// visible area height (set during render by MessageList)
     pub visible_area_height: Cell<u16>,
+    /// current input scroll offset (lines from top)
+    pub input_scroll: Cell<u16>,
+    /// total wrapped input lines (set during render by InputBox)
+    pub input_total_lines: Cell<u16>,
+    /// visible input lines excluding borders (set during render by InputBox)
+    pub input_visible_lines: Cell<u16>,
+    /// latest input area rect (set during render by Ui)
+    pub input_area: Cell<Rect>,
 }
 
 /// position computed during render for inline image overlay
@@ -289,11 +299,18 @@ pub struct ImageRenderArea {
     pub area: Rect,
 }
 
-/// a slash command with its description
+/// slash command menu item
 #[derive(Debug, Clone)]
 pub struct SlashCommand {
     pub name: String,
     pub description: String,
+}
+
+/// model completion menu item
+#[derive(Debug, Clone)]
+pub struct ModelCompletion {
+    pub id: String,
+    pub name: String,
 }
 
 /// state for the slash command completion menu
@@ -301,6 +318,10 @@ pub struct SlashCommand {
 pub struct SlashMenuState {
     /// filtered commands matching current input
     pub matches: Vec<SlashCommand>,
+    /// filtered models matching current /model query
+    pub model_matches: Vec<ModelCompletion>,
+    /// whether this menu is showing models
+    pub model_mode: bool,
     /// which match is selected
     pub selected: usize,
 }
@@ -351,6 +372,7 @@ impl App {
             session_picker: None,
             slash_menu: None,
             slash_commands: Vec::new(),
+            model_completions: Vec::new(),
             completions: Vec::new(),
             tab_state: None,
             has_unread: false,
@@ -373,6 +395,10 @@ impl App {
             },
             total_content_lines: Cell::new(0),
             visible_area_height: Cell::new(0),
+            input_scroll: Cell::new(0),
+            input_total_lines: Cell::new(0),
+            input_visible_lines: Cell::new(0),
+            input_area: Cell::new(Rect::default()),
         }
     }
 
@@ -593,6 +619,7 @@ impl App {
         self.tab_state = None;
         self.input.insert(self.cursor, c);
         self.cursor += c.len_utf8();
+        self.ensure_cursor_visible();
     }
 
     /// delete character before cursor
@@ -606,6 +633,7 @@ impl App {
             self.remove_images_in_range(prev, self.cursor);
             self.input.drain(prev..self.cursor);
             self.cursor = prev;
+            self.ensure_cursor_visible();
         }
     }
 
@@ -619,6 +647,7 @@ impl App {
                 .unwrap_or(self.input.len());
             self.remove_images_in_range(self.cursor, next);
             self.input.drain(self.cursor..next);
+            self.ensure_cursor_visible();
         }
     }
 
@@ -630,6 +659,7 @@ impl App {
                 .next_back()
                 .map(|(i, _)| i)
                 .unwrap_or(0);
+            self.ensure_cursor_visible();
         }
     }
 
@@ -641,27 +671,32 @@ impl App {
                 .nth(1)
                 .map(|(i, _)| self.cursor + i)
                 .unwrap_or(self.input.len());
+            self.ensure_cursor_visible();
         }
     }
 
     /// move cursor one word left
     pub fn cursor_word_left(&mut self) {
         self.cursor = word_boundary_left(&self.input, self.cursor);
+        self.ensure_cursor_visible();
     }
 
     /// move cursor one word right
     pub fn cursor_word_right(&mut self) {
         self.cursor = word_boundary_right(&self.input, self.cursor);
+        self.ensure_cursor_visible();
     }
 
     /// move cursor to start
     pub fn cursor_home(&mut self) {
         self.cursor = 0;
+        self.ensure_cursor_visible();
     }
 
     /// move cursor to end
     pub fn cursor_end(&mut self) {
         self.cursor = self.input.len();
+        self.ensure_cursor_visible();
     }
 
     /// delete word before cursor
@@ -670,6 +705,7 @@ impl App {
         self.remove_images_in_range(boundary, self.cursor);
         self.input.drain(boundary..self.cursor);
         self.cursor = boundary;
+        self.ensure_cursor_visible();
     }
 
     /// delete word after cursor
@@ -677,12 +713,14 @@ impl App {
         let boundary = word_boundary_right(&self.input, self.cursor);
         self.remove_images_in_range(self.cursor, boundary);
         self.input.drain(self.cursor..boundary);
+        self.ensure_cursor_visible();
     }
 
     /// delete from cursor to end of line
     pub fn delete_to_end(&mut self) {
         self.remove_images_in_range(self.cursor, self.input.len());
         self.input.truncate(self.cursor);
+        self.ensure_cursor_visible();
     }
 
     /// delete from cursor to start of line
@@ -690,6 +728,7 @@ impl App {
         self.remove_images_in_range(0, self.cursor);
         self.input.drain(..self.cursor);
         self.cursor = 0;
+        self.ensure_cursor_visible();
     }
 
     /// cycle through tab completions for the current input
@@ -700,6 +739,7 @@ impl App {
             let replacement = &state.matches[state.index];
             self.input = replacement.clone();
             self.cursor = self.input.len();
+            self.ensure_cursor_visible();
             return;
         }
 
@@ -732,11 +772,36 @@ impl App {
         self.tab_state = Some(TabState { matches, index: 0 });
         self.input = first;
         self.cursor = self.input.len();
+        self.ensure_cursor_visible();
     }
 
     /// open the slash command completion menu, filtering by current input
     pub fn open_slash_menu(&mut self) {
         let prefix = self.input.as_str();
+
+        if let Some(rest) = prefix.strip_prefix("/model ") {
+            let query = rest.to_lowercase();
+            let model_matches: Vec<ModelCompletion> = self
+                .model_completions
+                .iter()
+                .filter(|m| m.id.starts_with(rest) || m.name.to_lowercase().contains(&query))
+                .cloned()
+                .collect();
+
+            if model_matches.is_empty() {
+                return;
+            }
+
+            self.slash_menu = Some(SlashMenuState {
+                matches: Vec::new(),
+                model_matches,
+                model_mode: true,
+                selected: 0,
+            });
+            self.mode = AppMode::SlashComplete;
+            return;
+        }
+
         let matches: Vec<SlashCommand> = self
             .slash_commands
             .iter()
@@ -753,6 +818,8 @@ impl App {
 
         self.slash_menu = Some(SlashMenuState {
             matches,
+            model_matches: Vec::new(),
+            model_mode: false,
             selected: 0,
         });
         self.mode = AppMode::SlashComplete;
@@ -762,6 +829,28 @@ impl App {
     pub fn update_slash_menu(&mut self) {
         if let Some(ref mut menu) = self.slash_menu {
             let prefix = self.input.as_str();
+
+            if let Some(rest) = prefix.strip_prefix("/model ") {
+                let query = rest.to_lowercase();
+                menu.model_mode = true;
+                menu.model_matches = self
+                    .model_completions
+                    .iter()
+                    .filter(|m| m.id.starts_with(rest) || m.name.to_lowercase().contains(&query))
+                    .cloned()
+                    .collect();
+                menu.matches.clear();
+                menu.selected = menu
+                    .selected
+                    .min(menu.model_matches.len().saturating_sub(1));
+
+                if menu.model_matches.is_empty() {
+                    self.close_slash_menu();
+                }
+                return;
+            }
+
+            menu.model_mode = false;
             menu.matches = self
                 .slash_commands
                 .iter()
@@ -771,6 +860,7 @@ impl App {
                 })
                 .cloned()
                 .collect();
+            menu.model_matches.clear();
             menu.selected = menu.selected.min(menu.matches.len().saturating_sub(1));
 
             if menu.matches.is_empty() {
@@ -865,10 +955,7 @@ impl App {
             .filter(|c| *c == IMAGE_PLACEHOLDER)
             .count();
         // count how many placeholders are in the range, remove in reverse
-        let count = range
-            .chars()
-            .filter(|c| *c == IMAGE_PLACEHOLDER)
-            .count();
+        let count = range.chars().filter(|c| *c == IMAGE_PLACEHOLDER).count();
         for i in (0..count).rev() {
             let idx = prior + i;
             if idx < self.pending_images.len() {
@@ -888,7 +975,7 @@ impl App {
             usage: None,
             cost: None,
             model_id: None,
-        queued: false,
+            queued: false,
         });
     }
 
@@ -919,6 +1006,7 @@ impl App {
     /// take the input text and reset (strips image placeholders)
     pub fn take_input(&mut self) -> String {
         self.cursor = 0;
+        self.input_scroll.set(0);
         let input = std::mem::take(&mut self.input);
         input.replace(IMAGE_PLACEHOLDER, "")
     }
@@ -936,6 +1024,7 @@ impl App {
         });
         self.input.insert(self.cursor, IMAGE_PLACEHOLDER);
         self.cursor += IMAGE_PLACEHOLDER.len_utf8();
+        self.ensure_cursor_visible();
     }
 
     /// take pending images (clearing them from the app)
@@ -953,6 +1042,7 @@ impl App {
             if self.cursor > pos {
                 self.cursor = self.cursor.saturating_sub(IMAGE_PLACEHOLDER.len_utf8());
             }
+            self.ensure_cursor_visible();
         }
     }
 
@@ -979,6 +1069,55 @@ impl App {
         let picker = self.session_picker.as_ref()?;
         let filtered = filtered_sessions(picker);
         filtered.get(picker.selected).copied()
+    }
+
+    /// ensure input scroll keeps the cursor visible
+    pub fn ensure_cursor_visible(&self) {
+        let content_width = self.input_area.get().width.saturating_sub(2);
+        let visible_lines = self.input_visible_lines.get();
+        if content_width == 0 || visible_lines == 0 {
+            self.input_scroll.set(0);
+            return;
+        }
+
+        let expanded =
+            crate::widgets::input_box::expand_input(&self.input, self.cursor, &self.pending_images);
+        let cursor_line = crate::widgets::input_box::cursor_visual_line(
+            &expanded.text,
+            expanded.cursor,
+            content_width as usize,
+        ) as u16;
+
+        let mut scroll = self.input_scroll.get();
+        if cursor_line < scroll {
+            scroll = cursor_line;
+        } else {
+            let bottom = scroll.saturating_add(visible_lines.saturating_sub(1));
+            if cursor_line > bottom {
+                scroll = cursor_line.saturating_sub(visible_lines.saturating_sub(1));
+            }
+        }
+
+        let total = self.input_total_lines.get();
+        let max_scroll = total.saturating_sub(visible_lines);
+        self.input_scroll.set(scroll.min(max_scroll));
+    }
+
+    /// scroll the input viewport by delta lines
+    pub fn scroll_input_by(&self, delta: i16) {
+        let visible = self.input_visible_lines.get();
+        let total = self.input_total_lines.get();
+        let max_scroll = total.saturating_sub(visible);
+        let current = self.input_scroll.get() as i16;
+        let next = (current + delta).clamp(0, max_scroll as i16) as u16;
+        self.input_scroll.set(next);
+    }
+
+    /// whether the mouse position is over the input box
+    pub fn is_mouse_over_input(&self, column: u16, row: u16) -> bool {
+        self.input_area
+            .get()
+            .contains(ratatui::layout::Position::new(column, row))
     }
 }
 
@@ -1205,7 +1344,7 @@ mod tests {
             usage: None,
             cost: None,
             model_id: None,
-        queued: false,
+            queued: false,
         });
 
         app.start_tool("tc_1", "bash", "ls -la");
@@ -1359,7 +1498,7 @@ mod tests {
             usage: None,
             cost: None,
             model_id: None,
-        queued: false,
+            queued: false,
         });
         app.start_tool("tc_1", "read", "src/main.rs");
         app.end_tool(

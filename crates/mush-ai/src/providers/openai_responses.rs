@@ -140,8 +140,9 @@ fn build_request_body(
     // codex: system prompt goes in top-level `instructions`, not in input
     let input_system_prompt = if is_codex { &None } else { system_prompt };
     let input = convert_input_messages(model, input_system_prompt, messages);
+    // codex endpoint requires `instructions` to be present, even if empty
     let instructions = if is_codex {
-        system_prompt.clone()
+        Some(system_prompt.clone().unwrap_or_default())
     } else {
         None
     };
@@ -1114,6 +1115,15 @@ mod tests {
         );
         // system prompt should not appear in input messages
         assert!(body.input.is_empty());
+    }
+
+    #[test]
+    fn codex_sends_empty_instructions_when_no_system_prompt() {
+        let model = codex_model();
+        let options = StreamOptions::default();
+
+        let body = build_request_body(&model, &None, &[], &[], &options, true);
+        assert_eq!(body.instructions.as_deref(), Some(""));
     }
 
     #[test]

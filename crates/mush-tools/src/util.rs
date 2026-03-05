@@ -51,13 +51,19 @@ mod tests {
     #[test]
     fn resolve_relative() {
         let cwd = Path::new("/home/user/project");
-        assert_eq!(resolve_path(cwd, "src/main.rs"), PathBuf::from("/home/user/project/src/main.rs"));
+        assert_eq!(
+            resolve_path(cwd, "src/main.rs"),
+            PathBuf::from("/home/user/project/src/main.rs")
+        );
     }
 
     #[test]
     fn resolve_absolute() {
         let cwd = Path::new("/home/user/project");
-        assert_eq!(resolve_path(cwd, "/etc/config"), PathBuf::from("/etc/config"));
+        assert_eq!(
+            resolve_path(cwd, "/etc/config"),
+            PathBuf::from("/etc/config")
+        );
     }
 
     #[test]

@@ -157,6 +157,51 @@ pub fn word_wrap_segments(text: &str, width: usize, indent: usize) -> Vec<WrapSe
     segments
 }
 
+/// compute cursor visual position in wrapped lines
+fn cursor_visual_position(
+    expanded_text: &str,
+    cursor: usize,
+    content_width: usize,
+) -> (usize, usize) {
+    let text_before_cursor = &expanded_text[..cursor];
+    let input_lines: Vec<&str> = expanded_text.split('\n').collect();
+    let cursor_lines: Vec<&str> = text_before_cursor.split('\n').collect();
+    let cursor_input_line = cursor_lines.len() - 1;
+    let cursor_in_line = cursor_lines.last().map(|s| s.len()).unwrap_or(0);
+
+    let mut visual_line: usize = 0;
+    let mut visual_col: usize = 0;
+
+    for (line_idx, line_text) in input_lines.iter().enumerate() {
+        let indent = if line_idx == 0 { 2 } else { 0 };
+        let segments = word_wrap_segments(line_text, content_width, indent);
+
+        if line_idx == cursor_input_line {
+            for (seg_i, seg) in segments.iter().enumerate() {
+                let is_last_seg = seg_i == segments.len() - 1;
+                if cursor_in_line < seg.end || (is_last_seg && cursor_in_line <= seg.end) {
+                    let seg_text = &line_text[seg.start..cursor_in_line];
+                    let visual_offset: usize = seg_text.chars().map(char_width).sum();
+                    let seg_indent = if seg_i == 0 { indent } else { 0 };
+                    visual_col = seg_indent + visual_offset;
+                    break;
+                }
+                visual_line += 1;
+            }
+            break;
+        }
+
+        visual_line += segments.len();
+    }
+
+    (visual_line, visual_col)
+}
+
+/// visual wrapped line index for the cursor
+pub fn cursor_visual_line(expanded_text: &str, cursor: usize, content_width: usize) -> usize {
+    cursor_visual_position(expanded_text, cursor, content_width).0
+}
+
 /// renders the input box at the bottom of the screen
 pub struct InputBox<'a> {
     app: &'a App,
@@ -174,53 +219,15 @@ impl<'a> InputBox<'a> {
             return (area.x + 1, area.y + 1);
         }
 
-        let expanded = expand_input(
-            &self.app.input,
-            self.app.cursor,
-            &self.app.pending_images,
-        );
+        let expanded = expand_input(&self.app.input, self.app.cursor, &self.app.pending_images);
+        let (visual_line, visual_col) =
+            cursor_visual_position(&expanded.text, expanded.cursor, content_width);
 
-        let text_before_cursor = &expanded.text[..expanded.cursor];
-        let input_lines: Vec<&str> = expanded.text.split('\n').collect();
-        let cursor_lines: Vec<&str> = text_before_cursor.split('\n').collect();
-        // which input line the cursor is on
-        let cursor_input_line = cursor_lines.len() - 1;
-        // byte offset within that input line
-        let cursor_in_line = cursor_lines.last().map(|s| s.len()).unwrap_or(0);
-
-        let mut visual_line: usize = 0;
-        let mut visual_col: usize = 0;
-
-        for (line_idx, line_text) in input_lines.iter().enumerate() {
-            let indent = if line_idx == 0 { 2 } else { 0 }; // "> " prompt
-            let segments = word_wrap_segments(line_text, content_width, indent);
-
-            if line_idx == cursor_input_line {
-                // find which segment contains the cursor
-                for (seg_i, seg) in segments.iter().enumerate() {
-                    let is_last_seg = seg_i == segments.len() - 1;
-                    if cursor_in_line < seg.end || (is_last_seg && cursor_in_line <= seg.end) {
-                        // cursor is in this segment - compute visual column from
-                        // display widths (not byte offsets) to handle multi-byte chars
-                        let seg_text = &line_text[seg.start..cursor_in_line];
-                        let visual_offset: usize = seg_text
-                            .chars()
-                            .map(char_width)
-                            .sum();
-                        let seg_indent = if seg_i == 0 { indent } else { 0 };
-                        visual_col = seg_indent + visual_offset;
-                        break;
-                    }
-                    visual_line += 1;
-                }
-                break;
-            } else {
-                visual_line += segments.len();
-            }
-        }
+        let scroll = self.app.input_scroll.get() as usize;
+        let visible_line = visual_line.saturating_sub(scroll);
 
         let x = area.x + 1 + visual_col as u16;
-        let y = area.y + 1 + visual_line as u16;
+        let y = area.y + 1 + visible_line as u16;
         (
             x.min(area.x + area.width - 2),
             y.min(area.y + area.height - 2),
@@ -272,15 +279,14 @@ impl Widget for InputBox<'_> {
             .border_style(Style::default().fg(border_colour));
 
         if content_width == 0 {
+            self.app.input_visible_lines.set(0);
+            self.app.input_total_lines.set(0);
+            self.app.input_scroll.set(0);
             Paragraph::new("").block(block).render(area, buf);
             return;
         }
 
-        let expanded = expand_input(
-            &self.app.input,
-            self.app.cursor,
-            &self.app.pending_images,
-        );
+        let expanded = expand_input(&self.app.input, self.app.cursor, &self.app.pending_images);
         let display_lines: Vec<&str> = expanded.text.split('\n').collect();
         let mut lines: Vec<Line<'_>> = Vec::new();
         let image_style = Style::default().fg(Color::Magenta);
@@ -310,7 +316,6 @@ impl Widget for InputBox<'_> {
                     ));
                 }
 
-                // ghost completion on the very last segment of the last line
                 if is_last
                     && seg_i == segments.len() - 1
                     && let Some(ghost) = self.app.ghost_text()
@@ -323,11 +328,23 @@ impl Widget for InputBox<'_> {
 
                 lines.push(Line::from(spans));
             }
-            global_offset += line_text.len() + 1; // +1 for '\n'
+            global_offset += line_text.len() + 1;
         }
 
+        let total_lines = lines.len().min(u16::MAX as usize) as u16;
+        let visible_lines = area.height.saturating_sub(2);
+        self.app.input_total_lines.set(total_lines);
+        self.app.input_visible_lines.set(visible_lines);
+
+        let max_scroll = total_lines.saturating_sub(visible_lines);
+        let scroll = self.app.input_scroll.get().min(max_scroll);
+        self.app.input_scroll.set(scroll);
+
         let text = ratatui::text::Text::from(lines);
-        Paragraph::new(text).block(block).render(area, buf);
+        Paragraph::new(text)
+            .block(block)
+            .scroll((scroll, 0))
+            .render(area, buf);
     }
 }
 
@@ -356,7 +373,9 @@ fn styled_with_images(
         if img_end <= seg_global_start || img_start >= seg_global_end {
             continue;
         }
-        let local_start = img_start.saturating_sub(seg_global_start).min(seg_text.len());
+        let local_start = img_start
+            .saturating_sub(seg_global_start)
+            .min(seg_text.len());
         let local_end = (img_end - seg_global_start).min(seg_text.len());
 
         if local_start > pos {
@@ -392,7 +411,14 @@ mod tests {
     fn word_wrap_no_wrap_needed() {
         let segs = word_wrap_segments("hello", 20, 2);
         assert_eq!(segs.len(), 1);
-        assert_eq!(segs[0], WrapSegment { start: 0, end: 5, cols: 7 });
+        assert_eq!(
+            segs[0],
+            WrapSegment {
+                start: 0,
+                end: 5,
+                cols: 7
+            }
+        );
     }
 
     #[test]
@@ -412,15 +438,36 @@ mod tests {
         // no spaces, falls back to character wrapping
         let segs = word_wrap_segments("abcdefghij", 6, 0);
         assert_eq!(segs.len(), 2);
-        assert_eq!(segs[0], WrapSegment { start: 0, end: 6, cols: 6 });
-        assert_eq!(segs[1], WrapSegment { start: 6, end: 10, cols: 4 });
+        assert_eq!(
+            segs[0],
+            WrapSegment {
+                start: 0,
+                end: 6,
+                cols: 6
+            }
+        );
+        assert_eq!(
+            segs[1],
+            WrapSegment {
+                start: 6,
+                end: 10,
+                cols: 4
+            }
+        );
     }
 
     #[test]
     fn word_wrap_empty() {
         let segs = word_wrap_segments("", 20, 2);
         assert_eq!(segs.len(), 1);
-        assert_eq!(segs[0], WrapSegment { start: 0, end: 0, cols: 2 });
+        assert_eq!(
+            segs[0],
+            WrapSegment {
+                start: 0,
+                end: 0,
+                cols: 2
+            }
+        );
     }
 
     #[test]
@@ -614,6 +661,30 @@ mod tests {
         let (x, y) = input_box.cursor_position(area);
         assert_eq!(x, 1); // border + col 0
         assert_eq!(y, 2); // border + line 1
+    }
+
+    #[test]
+    fn cursor_position_applies_input_scroll() {
+        let mut app = App::new("test".into(), 200_000);
+        app.input = "one two three four five six seven eight nine ten".into();
+        app.cursor = app.input.len();
+        app.input_scroll.set(1);
+        let input_box = InputBox::new(&app);
+        let area = Rect::new(0, 0, 20, 6);
+        let (_x, y) = input_box.cursor_position(area);
+        assert_eq!(y, 3);
+    }
+
+    #[test]
+    fn input_box_updates_input_scroll_metrics() {
+        let mut app = App::new("test".into(), 200_000);
+        app.input = "line1\nline2\nline3\nline4\nline5".into();
+        app.cursor = app.input.len();
+        app.input_scroll.set(99);
+        let _buf = render_input(&app, 20, 4);
+        assert_eq!(app.input_visible_lines.get(), 2);
+        assert!(app.input_total_lines.get() >= 5);
+        assert!(app.input_scroll.get() <= app.input_total_lines.get());
     }
 
     #[test]

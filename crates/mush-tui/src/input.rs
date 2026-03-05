@@ -106,6 +106,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
                 if text.starts_with('/') {
                     app.input = text;
                     app.cursor = app.input.len();
+                    app.ensure_cursor_visible();
                     app.status = Some("slash commands unavailable while streaming".into());
                     return None;
                 }
@@ -194,6 +195,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             if let Some(suffix) = app.ghost_text().map(|s| s.to_string()) {
                 app.input.push_str(&suffix);
                 app.cursor = app.input.len();
+                app.ensure_cursor_visible();
             }
             if app.input.trim().is_empty() {
                 return None;
@@ -301,13 +303,15 @@ fn handle_search_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
                 app.mode = AppMode::Normal;
             }
         }
-        (_, KeyCode::Up) | (KeyModifiers::CONTROL, KeyCode::Char('p'))
+        (_, KeyCode::Up)
+        | (KeyModifiers::CONTROL, KeyCode::Char('p'))
         | (KeyModifiers::CONTROL, KeyCode::Char('k'))
             if !app.search.matches.is_empty() =>
         {
             app.search.selected = app.search.selected.saturating_sub(1);
         }
-        (_, KeyCode::Down) | (KeyModifiers::CONTROL, KeyCode::Char('n'))
+        (_, KeyCode::Down)
+        | (KeyModifiers::CONTROL, KeyCode::Char('n'))
         | (KeyModifiers::CONTROL, KeyCode::Char('j'))
             if !app.search.matches.is_empty()
                 && app.search.selected + 1 < app.search.matches.len() =>
@@ -420,11 +424,18 @@ fn handle_slash_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         }
         // select the highlighted command
         (_, KeyCode::Enter) | (_, KeyCode::Tab) => {
-            if let Some(ref menu) = app.slash_menu
-                && let Some(cmd) = menu.matches.get(menu.selected)
-            {
-                app.input = format!("/{}", cmd.name);
-                app.cursor = app.input.len();
+            if let Some(ref menu) = app.slash_menu {
+                if menu.model_mode {
+                    if let Some(model) = menu.model_matches.get(menu.selected) {
+                        app.input = format!("/model {}", model.id);
+                        app.cursor = app.input.len();
+                        app.ensure_cursor_visible();
+                    }
+                } else if let Some(cmd) = menu.matches.get(menu.selected) {
+                    app.input = format!("/{}", cmd.name);
+                    app.cursor = app.input.len();
+                    app.ensure_cursor_visible();
+                }
             }
             app.close_slash_menu();
             None
@@ -437,10 +448,15 @@ fn handle_slash_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             None
         }
         (_, KeyCode::Down) | (KeyModifiers::CONTROL, KeyCode::Char('j')) => {
-            if let Some(ref mut menu) = app.slash_menu
-                && menu.selected + 1 < menu.matches.len()
-            {
-                menu.selected += 1;
+            if let Some(ref mut menu) = app.slash_menu {
+                let len = if menu.model_mode {
+                    menu.model_matches.len()
+                } else {
+                    menu.matches.len()
+                };
+                if menu.selected + 1 < len {
+                    menu.selected += 1;
+                }
             }
             None
         }
@@ -933,6 +949,7 @@ mod tests {
         assert_eq!(app.mode, AppMode::SlashComplete);
         assert!(app.slash_menu.is_some());
         let menu = app.slash_menu.as_ref().unwrap();
+        assert!(!menu.model_mode);
         assert_eq!(menu.matches.len(), 2);
         assert_eq!(menu.selected, 0);
     }
@@ -998,6 +1015,105 @@ mod tests {
         let menu = app.slash_menu.as_ref().unwrap();
         assert_eq!(menu.matches.len(), 1);
         assert_eq!(menu.matches[0].name, "help");
+    }
+
+    #[test]
+    fn slash_menu_opens_for_model_subcommand() {
+        let mut app = App::new("test".into(), 200_000);
+        app.slash_commands = vec![crate::app::SlashCommand {
+            name: "model".into(),
+            description: "show or switch model".into(),
+        }];
+        app.model_completions = vec![
+            crate::app::ModelCompletion {
+                id: "claude-opus-4-6".into(),
+                name: "Claude Opus 4.6".into(),
+            },
+            crate::app::ModelCompletion {
+                id: "claude-sonnet-4-20250514".into(),
+                name: "Claude Sonnet 4".into(),
+            },
+        ];
+        app.input = "/model claude".into();
+        app.cursor = app.input.len();
+
+        handle_key(&mut app, key(KeyCode::Tab));
+
+        let menu = app.slash_menu.as_ref().unwrap();
+        assert!(menu.model_mode);
+        assert_eq!(menu.model_matches.len(), 2);
+    }
+
+    #[test]
+    fn slash_menu_selects_model_completion() {
+        let mut app = App::new("test".into(), 200_000);
+        app.slash_commands = vec![crate::app::SlashCommand {
+            name: "model".into(),
+            description: "show or switch model".into(),
+        }];
+        app.model_completions = vec![
+            crate::app::ModelCompletion {
+                id: "claude-opus-4-6".into(),
+                name: "Claude Opus 4.6".into(),
+            },
+            crate::app::ModelCompletion {
+                id: "claude-sonnet-4-20250514".into(),
+                name: "Claude Sonnet 4".into(),
+            },
+        ];
+        app.input = "/model claude".into();
+        app.cursor = app.input.len();
+
+        handle_key(&mut app, key(KeyCode::Tab));
+        handle_key(&mut app, ctrl(KeyCode::Char('j')));
+        handle_key(&mut app, key(KeyCode::Enter));
+
+        assert_eq!(app.input, "/model claude-sonnet-4-20250514");
+    }
+
+    #[test]
+    fn slash_menu_typing_filters_model_matches() {
+        let mut app = App::new("test".into(), 200_000);
+        app.slash_commands = vec![crate::app::SlashCommand {
+            name: "model".into(),
+            description: "show or switch model".into(),
+        }];
+        app.model_completions = vec![
+            crate::app::ModelCompletion {
+                id: "claude-opus-4-6".into(),
+                name: "Claude Opus 4.6".into(),
+            },
+            crate::app::ModelCompletion {
+                id: "claude-sonnet-4-20250514".into(),
+                name: "Claude Sonnet 4".into(),
+            },
+        ];
+        app.input = "/model claude-".into();
+        app.cursor = app.input.len();
+
+        handle_key(&mut app, key(KeyCode::Tab));
+        handle_key(&mut app, key(KeyCode::Char('o')));
+
+        let menu = app.slash_menu.as_ref().unwrap();
+        assert!(menu.model_mode);
+        assert_eq!(menu.model_matches.len(), 1);
+        assert_eq!(menu.model_matches[0].id, "claude-opus-4-6");
+    }
+
+    #[test]
+    fn input_reinsert_while_streaming_keeps_cursor_visible() {
+        let mut app = App::new("test".into(), 200_000);
+        app.is_streaming = true;
+        app.input_area.set(ratatui::layout::Rect::new(0, 0, 20, 12));
+        app.input_visible_lines.set(2);
+        app.input_total_lines.set(8);
+        app.input_scroll.set(0);
+        app.input = "/model a\nb\nc\nd".into();
+        app.cursor = app.input.len();
+
+        handle_key(&mut app, key(KeyCode::Enter));
+
+        assert!(app.input_scroll.get() > 0);
     }
 
     #[test]
