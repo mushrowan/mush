@@ -502,7 +502,6 @@ pub async fn run_tui(
                                                 });
                                                 steering_queue.lock().await.push(msg);
                                                 app.push_queued_message(text);
-                                                app.status = Some("steering message queued".into());
                                             }
                                             AppEvent::CycleThinkingLevel => {
                                                 tui_config.options.thinking = Some(app.thinking_level);
@@ -766,11 +765,8 @@ fn handle_agent_event(
             for msg in app.messages.iter_mut().rev().take(*count) {
                 msg.queued = false;
             }
-            app.status = Some(format!("steering: {count} messages injected"));
         }
-        AgentEvent::FollowUpInjected { count } => {
-            app.status = Some(format!("follow-up: {count} messages queued"));
-        }
+        AgentEvent::FollowUpInjected { .. } => {}
         AgentEvent::ContextTransformed {
             before_count,
             after_count,

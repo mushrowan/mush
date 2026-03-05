@@ -184,6 +184,10 @@ impl Widget for MessageList<'_> {
         let max_scroll = total_lines.saturating_sub(visible);
         let scroll = max_scroll.saturating_sub(self.app.scroll_offset);
 
+        // expose scroll geometry for the status bar
+        self.app.total_content_lines.set(total_lines);
+        self.app.visible_area_height.set(visible);
+
         // compute image render areas based on scroll position
         let mut render_areas = Vec::new();
         if !image_placeholders.is_empty() && area.width > 0 {

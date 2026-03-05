@@ -3,7 +3,7 @@
 //! the app holds all TUI state: messages being displayed, current input,
 //! streaming status, and scroll position.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use mush_ai::types::*;
 use mush_session::SessionMeta;
@@ -222,6 +222,10 @@ pub struct App {
     pub pending_images: Vec<PendingImage>,
     /// working directory (with ~ for home)
     pub cwd: String,
+    /// total content lines (set during render by MessageList)
+    pub total_content_lines: Cell<u16>,
+    /// visible area height (set during render by MessageList)
+    pub visible_area_height: Cell<u16>,
 }
 
 /// position computed during render for inline image overlay
@@ -304,6 +308,8 @@ impl App {
                     Err(_) => path.display().to_string(),
                 }
             },
+            total_content_lines: Cell::new(0),
+            visible_area_height: Cell::new(0),
         }
     }
 
