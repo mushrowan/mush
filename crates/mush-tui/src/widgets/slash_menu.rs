@@ -11,10 +11,15 @@ use ratatui::widgets::{Block, Borders, Clear, Padding};
 
 /// render the slash menu as a popup above the input area
 pub fn render(frame: &mut Frame, menu: &SlashMenuState, input_area: Rect) {
-    let max_visible = 12.min(menu.matches.len());
+    let item_count = if menu.model_mode {
+        menu.model_matches.len()
+    } else {
+        menu.matches.len()
+    };
+    let max_visible = 12.min(item_count);
     // popup sits above the input box
     let height = (max_visible + 2) as u16; // +2 for borders
-    let width = input_area.width.min(60);
+    let width = input_area.width.min(80);
     let x = input_area.x;
     let y = input_area.y.saturating_sub(height);
 
@@ -37,29 +42,60 @@ pub fn render(frame: &mut Frame, menu: &SlashMenuState, input_area: Rect) {
     };
 
     let mut lines: Vec<Line<'_>> = Vec::new();
-    for (i, cmd) in menu.matches.iter().enumerate().skip(scroll).take(visible) {
-        let is_selected = i == menu.selected;
+    if menu.model_mode {
+        for (i, model) in menu
+            .model_matches
+            .iter()
+            .enumerate()
+            .skip(scroll)
+            .take(visible)
+        {
+            let is_selected = i == menu.selected;
 
-        let name_style = if is_selected {
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::White)
-        };
-        let desc_style = Style::default().fg(Color::DarkGray);
-        let prefix = if is_selected { "▸ " } else { "  " };
+            let id_style = if is_selected {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            let name_style = Style::default().fg(Color::DarkGray);
+            let prefix = if is_selected { "▸ " } else { "  " };
 
-        let name_text = format!("/{}", cmd.name);
-        // pad name to align descriptions
-        let pad = 16usize.saturating_sub(name_text.len() + prefix.len());
+            let id_text = format!("/model {}", model.id);
+            let pad = 34usize.saturating_sub(id_text.len() + prefix.len());
 
-        lines.push(Line::from(vec![
-            Span::styled(prefix, name_style),
-            Span::styled(name_text, name_style),
-            Span::raw(" ".repeat(pad)),
-            Span::styled(&cmd.description, desc_style),
-        ]));
+            lines.push(Line::from(vec![
+                Span::styled(prefix, id_style),
+                Span::styled(id_text, id_style),
+                Span::raw(" ".repeat(pad)),
+                Span::styled(&model.name, name_style),
+            ]));
+        }
+    } else {
+        for (i, cmd) in menu.matches.iter().enumerate().skip(scroll).take(visible) {
+            let is_selected = i == menu.selected;
+
+            let name_style = if is_selected {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            let desc_style = Style::default().fg(Color::DarkGray);
+            let prefix = if is_selected { "▸ " } else { "  " };
+
+            let name_text = format!("/{}", cmd.name);
+            let pad = 16usize.saturating_sub(name_text.len() + prefix.len());
+
+            lines.push(Line::from(vec![
+                Span::styled(prefix, name_style),
+                Span::styled(name_text, name_style),
+                Span::raw(" ".repeat(pad)),
+                Span::styled(&cmd.description, desc_style),
+            ]));
+        }
     }
 
     let text = ratatui::text::Text::from(lines);

@@ -25,9 +25,9 @@ use mush_ai::types::*;
 use mush_session::tree::SessionTree;
 
 use crate::app::{self, App, AppEvent};
+use crate::event_handler::{self, EventCtx};
 use crate::input::handle_key;
 use crate::slash;
-use crate::event_handler::{self, EventCtx};
 use crate::widgets;
 
 /// callback that returns a relevance hint for a user message.
@@ -51,6 +51,9 @@ pub enum HintMode {
 /// callback to persist per-model thinking level
 pub type ThinkingPrefsSaver =
     std::sync::Arc<dyn Fn(&std::collections::HashMap<String, ThinkingLevel>) + Send + Sync>;
+
+/// callback to persist last selected model id
+pub type LastModelSaver = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
 
 /// callback to persist session state (messages + tree + model_id)
 pub type SessionSaver = std::sync::Arc<dyn Fn(&[Message], &SessionTree, &str) + Send + Sync>;
@@ -77,6 +80,8 @@ pub struct TuiConfig {
     pub thinking_prefs: std::collections::HashMap<String, ThinkingLevel>,
     /// callback to save thinking prefs when they change
     pub save_thinking_prefs: Option<ThinkingPrefsSaver>,
+    /// callback to persist last selected model id
+    pub save_last_model: Option<LastModelSaver>,
     /// callback to auto-save session after each agent turn
     pub save_session: Option<SessionSaver>,
     /// prompt for confirmation before executing tools (off by default)
@@ -191,6 +196,10 @@ pub async fn run_tui(
     // add model ids for /model completion
     for m in models::all_models_with_user() {
         app.completions.push(m.id.to_string());
+        app.model_completions.push(crate::app::ModelCompletion {
+            id: m.id.to_string(),
+            name: m.name.clone(),
+        });
     }
 
     // pull prefs out so we can mutate them without borrowing tui_config
@@ -257,7 +266,7 @@ pub async fn run_tui(
                         usage: Some(a.usage),
                         cost: None,
                         model_id: Some(a.model.clone()),
-                    queued: false,
+                        queued: false,
                     });
                     app.stats.update(&a.usage, None);
                 }
@@ -323,9 +332,8 @@ pub async fn run_tui(
                     UserContent::Text(user_text)
                 } else {
                     let images = app.take_images();
-                    let mut parts: Vec<UserContentPart> = vec![
-                        UserContentPart::Text(TextContent { text: user_text }),
-                    ];
+                    let mut parts: Vec<UserContentPart> =
+                        vec![UserContentPart::Text(TextContent { text: user_text })];
                     for img in images {
                         use base64::Engine;
                         parts.push(UserContentPart::Image(ImageContent {
@@ -354,8 +362,14 @@ pub async fn run_tui(
                 let model = compact_model.clone();
                 let options = compact_options.clone();
                 Box::pin(async move {
-                    let mut msgs =
-                        event_handler::auto_compact(msgs, context_window, registry, &model, &options).await;
+                    let mut msgs = event_handler::auto_compact(
+                        msgs,
+                        context_window,
+                        registry,
+                        &model,
+                        &options,
+                    )
+                    .await;
                     if let Some(ref enricher) = enricher {
                         event_handler::inject_hint(&mut msgs, enricher.as_ref());
                     }
@@ -410,8 +424,11 @@ pub async fn run_tui(
                 Arc::new(Mutex::new(None));
 
             let mut call_options = tui_config.options.clone();
-            let (api_key, account_id) =
-                event_handler::resolve_auth_for_model(&tui_config.model, &tui_config.provider_api_keys).await;
+            let (api_key, account_id) = event_handler::resolve_auth_for_model(
+                &tui_config.model,
+                &tui_config.provider_api_keys,
+            )
+            .await;
             call_options.api_key = api_key;
             call_options.account_id = account_id;
 
@@ -718,15 +735,9 @@ fn draw(
         }
         // slash command menu (above input box)
         if let Some(ref menu) = app.slash_menu {
-            let input_h = crate::ui::input_height(
-                &app.input,
-                area.width,
-                &app.pending_images,
-            );
-            let tools_h = crate::widgets::tool_panels::tool_panels_height(
-                &app.active_tools,
-                area.width,
-            );
+            let input_h = crate::ui::input_height(&app.input, area.width, &app.pending_images);
+            let tools_h =
+                crate::widgets::tool_panels::tool_panels_height(&app.active_tools, area.width);
             let status_h = crate::widgets::status_bar::status_bar_height(app, area.width);
             let regions = crate::ui::layout(area, input_h, tools_h, status_h);
             widgets::slash_menu::render(frame, menu, regions.input);
@@ -774,15 +785,76 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
     const SCROLL_LINES: u16 = 3;
     match mouse.kind {
         MouseEventKind::ScrollUp => {
-            app.scroll_offset = app.scroll_offset.saturating_add(SCROLL_LINES);
+            if app.is_mouse_over_input(mouse.column, mouse.row) {
+                app.scroll_input_by(-(SCROLL_LINES as i16));
+            } else {
+                app.scroll_offset = app.scroll_offset.saturating_add(SCROLL_LINES);
+            }
         }
         MouseEventKind::ScrollDown => {
-            app.scroll_offset = app.scroll_offset.saturating_sub(SCROLL_LINES);
-            if app.scroll_offset == 0 {
-                app.has_unread = false;
+            if app.is_mouse_over_input(mouse.column, mouse.row) {
+                app.scroll_input_by(SCROLL_LINES as i16);
+            } else {
+                app.scroll_offset = app.scroll_offset.saturating_sub(SCROLL_LINES);
+                if app.scroll_offset == 0 {
+                    app.has_unread = false;
+                }
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mouse_scroll_over_messages_scrolls_conversation() {
+        let mut app = App::new("test".into(), 200_000);
+        app.input_area.set(ratatui::layout::Rect::new(0, 10, 40, 5));
+        let before = app.scroll_offset;
+        handle_mouse(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: 1,
+                row: 1,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+        );
+        assert!(app.scroll_offset > before);
+    }
+
+    #[test]
+    fn mouse_scroll_over_input_scrolls_input() {
+        let mut app = App::new("test".into(), 200_000);
+        app.input_area.set(ratatui::layout::Rect::new(0, 10, 40, 5));
+        app.input_visible_lines.set(2);
+        app.input_total_lines.set(8);
+        app.input_scroll.set(2);
+
+        handle_mouse(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: 1,
+                row: 11,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(app.input_scroll.get(), 0);
+
+        handle_mouse(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 1,
+                row: 11,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(app.input_scroll.get(), 3);
     }
 }
 

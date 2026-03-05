@@ -151,6 +151,28 @@ pub fn save_thinking_prefs(prefs: &HashMap<String, ThinkingLevel>) {
     }
 }
 
+fn last_model_path() -> PathBuf {
+    mush_session::data_dir().join("last-model.txt")
+}
+
+pub fn load_last_model() -> Option<String> {
+    let model = std::fs::read_to_string(last_model_path()).ok()?;
+    let model = model.trim();
+    if model.is_empty() {
+        None
+    } else {
+        Some(model.to_string())
+    }
+}
+
+pub fn save_last_model(model_id: &str) {
+    let path = last_model_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, model_id);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

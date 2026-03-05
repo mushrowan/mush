@@ -140,13 +140,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("test.txt"), "hello world").unwrap();
 
-        let result = run_rg(
-            dir.path(),
-            "nonexistent_pattern_xyz",
-            dir.path(),
-            None,
-        )
-        .await;
+        let result = run_rg(dir.path(), "nonexistent_pattern_xyz", dir.path(), None).await;
 
         let text = extract_text(&result);
         assert!(text.contains("no matches"));

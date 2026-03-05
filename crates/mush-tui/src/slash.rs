@@ -267,7 +267,7 @@ fn handle_branch(
                 UserContent::Text(t) if t.chars().count() > 40 => {
                     let truncated: String = t.chars().take(37).collect();
                     format!("{truncated}...")
-                },
+                }
                 UserContent::Text(t) => t.clone(),
                 _ => "message".into(),
             },
@@ -310,6 +310,9 @@ fn handle_model_switch(
             .unwrap_or(ThinkingLevel::Off);
         app.thinking_level = level;
         tui_config.options.thinking = Some(level);
+        if let Some(ref save_last_model) = tui_config.save_last_model {
+            save_last_model(id);
+        }
         let thinking_str = format!("{level:?}").to_lowercase();
         app.push_system_message(format!("switched to {id} (thinking: {thinking_str})"));
     } else {
@@ -324,7 +327,8 @@ fn handle_model_switch(
 
 fn show_cost(app: &mut App) {
     let ctx = if app.stats.context_tokens > 0 {
-        let pct = (app.stats.context_tokens as f64 / app.stats.context_window as f64 * 100.0) as u64;
+        let pct =
+            (app.stats.context_tokens as f64 / app.stats.context_window as f64 * 100.0) as u64;
         format!(
             "context: {}k/{}k ({}%)\n",
             app.stats.context_tokens / 1000,

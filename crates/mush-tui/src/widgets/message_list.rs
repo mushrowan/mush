@@ -187,9 +187,7 @@ impl Widget for MessageList<'_> {
         }
         *self.app.image_render_areas.borrow_mut() = render_areas;
 
-        paragraph
-            .scroll((scroll, 0))
-            .render(area, buf);
+        paragraph.scroll((scroll, 0)).render(area, buf);
     }
 }
 
@@ -466,7 +464,9 @@ fn render_diff_output(output: &str, lines: &mut Vec<Line<'_>>, width: u16) {
 
     let red = Style::default().fg(Color::Red);
     let green = Style::default().fg(Color::Green);
-    let dim = Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM);
+    let dim = Style::default()
+        .fg(Color::DarkGray)
+        .add_modifier(Modifier::DIM);
 
     for i in 0..row_count {
         let left = removed.get(i).copied().unwrap_or("");
@@ -593,7 +593,7 @@ mod tests {
             usage: None,
             cost: None,
             model_id: None,
-        queued: false,
+            queued: false,
         });
         let buf = render_app(&app, 50, 15);
         let content = buffer_to_string(&buf);
@@ -615,7 +615,7 @@ mod tests {
             usage: None,
             cost: None,
             model_id: None,
-        queued: false,
+            queued: false,
         });
         let buf = render_app(&app, 60, 10);
         let content = buffer_to_string(&buf);
@@ -641,7 +641,7 @@ mod tests {
             usage: None,
             cost: None,
             model_id: None,
-        queued: false,
+            queued: false,
         });
         let buf = render_app(&app, 60, 30);
         let content = buffer_to_string(&buf);
