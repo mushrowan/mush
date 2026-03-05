@@ -143,29 +143,43 @@ pub async fn run_tui(
     app.thinking_level = tui_config.options.thinking.unwrap_or(ThinkingLevel::Off);
     app.thinking_display = tui_config.thinking_display;
     app.show_cost = tui_config.show_cost;
-    // populate tab completions
-    let slash_cmds = [
-        "/help",
-        "/keys",
-        "/clear",
-        "/model",
-        "/sessions",
-        "/branch",
-        "/tree",
-        "/compact",
-        "/export",
-        "/undo",
-        "/search",
-        "/cost",
-        "/logs",
-        "/injection",
-        "/quit",
+    // populate tab completions and slash command descriptions
+    let slash_cmds: &[(&str, &str)] = &[
+        ("help", "show available commands"),
+        ("keys", "show keyboard shortcuts"),
+        ("clear", "clear conversation"),
+        ("model", "show or switch model"),
+        ("sessions", "browse and resume sessions"),
+        ("branch", "branch from nth user message"),
+        ("tree", "show conversation tree"),
+        ("compact", "summarise old messages to free context"),
+        ("export", "save conversation as markdown"),
+        ("undo", "revert last turn"),
+        ("search", "search conversation"),
+        ("cost", "show session cost"),
+        ("logs", "show recent log entries"),
+        ("injection", "toggle prompt injection preview"),
+        ("quit", "exit mush"),
     ];
-    app.completions = slash_cmds.iter().map(|s| s.to_string()).collect();
+    app.completions = slash_cmds
+        .iter()
+        .map(|(name, _)| format!("/{name}"))
+        .collect();
+    app.slash_commands = slash_cmds
+        .iter()
+        .map(|(name, desc)| crate::app::SlashCommand {
+            name: name.to_string(),
+            description: desc.to_string(),
+        })
+        .collect();
     // add prompt template names as slash commands
     let cwd = std::env::current_dir().unwrap_or_default();
     for tmpl in mush_ext::discover_templates(&cwd) {
         app.completions.push(format!("/{}", tmpl.name));
+        app.slash_commands.push(crate::app::SlashCommand {
+            name: tmpl.name.clone(),
+            description: tmpl.description.clone(),
+        });
     }
     // add model ids for /model completion
     for m in models::all_models_with_user() {
@@ -903,6 +917,7 @@ fn draw(
         let streaming_idle = app.is_busy() && app.input.is_empty();
         if !streaming_idle
             && (app.mode == app::AppMode::Normal
+                || app.mode == app::AppMode::SlashComplete
                 || (app.is_streaming && app.mode != app::AppMode::ToolConfirm))
         {
             frame.set_cursor_position((cx, cy));
@@ -919,6 +934,21 @@ fn draw(
         // session picker overlay
         if let Some(ref picker) = app.session_picker {
             widgets::session_picker::render(frame, picker);
+        }
+        // slash command menu (above input box)
+        if let Some(ref menu) = app.slash_menu {
+            let input_h = crate::ui::input_height(
+                &app.input,
+                area.width,
+                &app.pending_images,
+            );
+            let tools_h = crate::widgets::tool_panels::tool_panels_height(
+                &app.active_tools,
+                area.width,
+            );
+            let status_h = crate::widgets::status_bar::status_bar_height(app, area.width);
+            let regions = crate::ui::layout(area, input_h, tools_h, status_h);
+            widgets::slash_menu::render(frame, menu, regions.input);
         }
     })?;
     Ok(())

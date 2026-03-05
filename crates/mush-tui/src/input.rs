@@ -13,6 +13,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         return handle_picker_key(app, key);
     }
 
+    // slash command menu
+    if app.mode == AppMode::SlashComplete {
+        return handle_slash_menu_key(app, key);
+    }
+
     // scroll mode: j/k scroll, y copies selected message, esc exits
     if app.mode == AppMode::Scroll {
         return handle_scroll_mode(app, key);
@@ -123,9 +128,17 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             return None;
         }
 
-        // tab completion
+        // tab completion / slash menu
         (_, KeyCode::Tab) | (KeyModifiers::SHIFT, KeyCode::BackTab) => {
-            app.tab_complete();
+            // open slash menu if typing a command and we have descriptions
+            if app.input.starts_with('/')
+                && app.slash_menu.is_none()
+                && !app.slash_commands.is_empty()
+            {
+                app.open_slash_menu();
+            } else {
+                app.tab_complete();
+            }
             return None;
         }
 
@@ -249,11 +262,13 @@ fn handle_search_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             }
         }
         (_, KeyCode::Up) | (KeyModifiers::CONTROL, KeyCode::Char('p'))
+        | (KeyModifiers::CONTROL, KeyCode::Char('k'))
             if !app.search.matches.is_empty() =>
         {
             app.search.selected = app.search.selected.saturating_sub(1);
         }
         (_, KeyCode::Down) | (KeyModifiers::CONTROL, KeyCode::Char('n'))
+        | (KeyModifiers::CONTROL, KeyCode::Char('j'))
             if !app.search.matches.is_empty()
                 && app.search.selected + 1 < app.search.matches.len() =>
         {
@@ -357,10 +372,73 @@ fn copy_to_clipboard(text: &str) -> bool {
     false
 }
 
+fn handle_slash_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
+    match (key.modifiers, key.code) {
+        (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
+            app.close_slash_menu();
+            None
+        }
+        // select the highlighted command
+        (_, KeyCode::Enter) | (_, KeyCode::Tab) => {
+            if let Some(ref menu) = app.slash_menu {
+                if let Some(cmd) = menu.matches.get(menu.selected) {
+                    app.input = format!("/{}", cmd.name);
+                    app.cursor = app.input.len();
+                }
+            }
+            app.close_slash_menu();
+            None
+        }
+        // navigate
+        (_, KeyCode::Up) | (KeyModifiers::CONTROL, KeyCode::Char('k')) => {
+            if let Some(ref mut menu) = app.slash_menu {
+                menu.selected = menu.selected.saturating_sub(1);
+            }
+            None
+        }
+        (_, KeyCode::Down) | (KeyModifiers::CONTROL, KeyCode::Char('j')) => {
+            if let Some(ref mut menu) = app.slash_menu {
+                if menu.selected + 1 < menu.matches.len() {
+                    menu.selected += 1;
+                }
+            }
+            None
+        }
+        // backspace: edit input and update filter
+        (_, KeyCode::Backspace) => {
+            app.input_backspace();
+            if app.input.is_empty() || !app.input.starts_with('/') {
+                app.close_slash_menu();
+            } else {
+                app.update_slash_menu();
+            }
+            None
+        }
+        // typing narrows the filter
+        (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
+            app.input_char(c);
+            app.update_slash_menu();
+            None
+        }
+        _ => None,
+    }
+}
+
 fn handle_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     match (key.modifiers, key.code) {
         (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
             app.close_session_picker();
+            None
+        }
+        (_, KeyCode::Tab) | (_, KeyCode::BackTab) => {
+            // toggle scope between this dir and all dirs
+            if let Some(ref mut picker) = app.session_picker {
+                picker.scope = match picker.scope {
+                    crate::app::SessionScope::ThisDir => crate::app::SessionScope::AllDirs,
+                    crate::app::SessionScope::AllDirs => crate::app::SessionScope::ThisDir,
+                };
+                picker.selected = 0;
+            }
             None
         }
         (_, KeyCode::Enter) => {
@@ -376,13 +454,13 @@ fn handle_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
                 None
             }
         }
-        (_, KeyCode::Up) => {
+        (_, KeyCode::Up) | (KeyModifiers::CONTROL, KeyCode::Char('k')) => {
             if let Some(ref mut picker) = app.session_picker {
                 picker.selected = picker.selected.saturating_sub(1);
             }
             None
         }
-        (_, KeyCode::Down) => {
+        (_, KeyCode::Down) | (KeyModifiers::CONTROL, KeyCode::Char('j')) => {
             if let Some(ref mut picker) = app.session_picker {
                 let filtered_len = crate::app::filtered_sessions(picker).len();
                 if picker.selected + 1 < filtered_len {
@@ -751,5 +829,108 @@ mod tests {
         app.cursor = 5;
         handle_key(&mut app, key(KeyCode::Tab));
         assert_eq!(app.input, "hello"); // unchanged
+    }
+
+    #[test]
+    fn slash_menu_opens_on_tab_with_commands() {
+        let mut app = App::new("test".into(), 200_000);
+        app.slash_commands = vec![
+            crate::app::SlashCommand {
+                name: "help".into(),
+                description: "show help".into(),
+            },
+            crate::app::SlashCommand {
+                name: "clear".into(),
+                description: "clear chat".into(),
+            },
+        ];
+        app.input = "/".into();
+        app.cursor = 1;
+        handle_key(&mut app, key(KeyCode::Tab));
+        assert_eq!(app.mode, AppMode::SlashComplete);
+        assert!(app.slash_menu.is_some());
+        let menu = app.slash_menu.as_ref().unwrap();
+        assert_eq!(menu.matches.len(), 2);
+        assert_eq!(menu.selected, 0);
+    }
+
+    #[test]
+    fn slash_menu_navigate_and_select() {
+        let mut app = App::new("test".into(), 200_000);
+        app.slash_commands = vec![
+            crate::app::SlashCommand {
+                name: "help".into(),
+                description: "show help".into(),
+            },
+            crate::app::SlashCommand {
+                name: "clear".into(),
+                description: "clear chat".into(),
+            },
+        ];
+        app.input = "/".into();
+        app.cursor = 1;
+        handle_key(&mut app, key(KeyCode::Tab));
+
+        // ctrl+j moves down
+        handle_key(&mut app, ctrl(KeyCode::Char('j')));
+        assert_eq!(app.slash_menu.as_ref().unwrap().selected, 1);
+
+        // ctrl+k moves up
+        handle_key(&mut app, ctrl(KeyCode::Char('k')));
+        assert_eq!(app.slash_menu.as_ref().unwrap().selected, 0);
+
+        // enter selects
+        handle_key(&mut app, key(KeyCode::Enter));
+        assert_eq!(app.mode, AppMode::Normal);
+        assert_eq!(app.input, "/help");
+    }
+
+    #[test]
+    fn slash_menu_typing_filters() {
+        let mut app = App::new("test".into(), 200_000);
+        app.slash_commands = vec![
+            crate::app::SlashCommand {
+                name: "help".into(),
+                description: "show help".into(),
+            },
+            crate::app::SlashCommand {
+                name: "history".into(),
+                description: "show history".into(),
+            },
+            crate::app::SlashCommand {
+                name: "clear".into(),
+                description: "clear chat".into(),
+            },
+        ];
+        app.input = "/h".into();
+        app.cursor = 2;
+        handle_key(&mut app, key(KeyCode::Tab));
+
+        // only /h* commands match
+        let menu = app.slash_menu.as_ref().unwrap();
+        assert_eq!(menu.matches.len(), 2);
+
+        // type 'e' to narrow to /he*
+        handle_key(&mut app, key(KeyCode::Char('e')));
+        let menu = app.slash_menu.as_ref().unwrap();
+        assert_eq!(menu.matches.len(), 1);
+        assert_eq!(menu.matches[0].name, "help");
+    }
+
+    #[test]
+    fn slash_menu_esc_closes() {
+        let mut app = App::new("test".into(), 200_000);
+        app.slash_commands = vec![crate::app::SlashCommand {
+            name: "help".into(),
+            description: "show help".into(),
+        }];
+        app.input = "/".into();
+        app.cursor = 1;
+        handle_key(&mut app, key(KeyCode::Tab));
+        assert_eq!(app.mode, AppMode::SlashComplete);
+
+        handle_key(&mut app, key(KeyCode::Esc));
+        assert_eq!(app.mode, AppMode::Normal);
+        assert!(app.slash_menu.is_none());
     }
 }
