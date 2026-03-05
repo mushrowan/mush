@@ -115,7 +115,7 @@ pub async fn run_tui(
     // set up terminal
     enable_raw_mode()?;
     io::stdout().execute(EnterAlternateScreen)?;
-    io::stdout().execute(crossterm::event::EnableMouseCapture)?;
+    enable_mouse_scroll()?;
     // enable kitty keyboard protocol so shift+enter is distinguishable
     let _ = io::stdout().execute(PushKeyboardEnhancementFlags(
         KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
@@ -129,7 +129,7 @@ pub async fn run_tui(
         let _ = io::stdout().execute(PopKeyboardEnhancementFlags);
         let _ = io::stdout().execute(SetCursorStyle::DefaultUserShape);
         let _ = disable_raw_mode();
-        let _ = io::stdout().execute(crossterm::event::DisableMouseCapture);
+        disable_mouse_scroll();
         let _ = io::stdout().execute(LeaveAlternateScreen);
         let _ = crossterm::cursor::Show;
         prev_hook(info);
@@ -768,11 +768,31 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
     }
 }
 
+/// enable minimal mouse tracking: clicks + scroll with SGR coordinates
+///
+/// crossterm's `EnableMouseCapture` also enables `?1003h` (any-event tracking)
+/// which floods the event stream with movement events. when events accumulate
+/// faster than the TUI polls them, SGR escape sequence fragments can leak
+/// through crossterm's parser as spurious key events, causing garbled text
+fn enable_mouse_scroll() -> io::Result<()> {
+    use std::io::Write;
+    // ?1000h = normal tracking (press/release/scroll)
+    // ?1006h = SGR extended coordinates
+    io::stdout().write_all(b"\x1b[?1000h\x1b[?1006h")?;
+    io::stdout().flush()
+}
+
+fn disable_mouse_scroll() {
+    use std::io::Write;
+    let _ = io::stdout().write_all(b"\x1b[?1000l\x1b[?1006l");
+    let _ = io::stdout().flush();
+}
+
 fn cleanup(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
     let _ = io::stdout().execute(PopKeyboardEnhancementFlags);
     let _ = io::stdout().execute(SetCursorStyle::DefaultUserShape);
     disable_raw_mode()?;
-    io::stdout().execute(crossterm::event::DisableMouseCapture)?;
+    disable_mouse_scroll();
     io::stdout().execute(LeaveAlternateScreen)?;
     terminal.show_cursor()?;
     Ok(())
