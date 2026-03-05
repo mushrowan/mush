@@ -25,6 +25,17 @@ fn should_escape_enter_to_newline(app: &App, key: KeyEvent) -> bool {
 }
 /// handle a key event, mutating the app and optionally producing an event
 pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
+    tracing::trace!(
+        code = ?key.code,
+        modifiers = ?key.modifiers,
+        kind = ?key.kind,
+        mode = ?app.mode,
+        is_streaming = app.is_streaming,
+        input_len = app.input.len(),
+        cursor = app.cursor,
+        "key event"
+    );
+
     // session picker mode has its own key handling
     if app.mode == AppMode::SessionPicker {
         return handle_picker_key(app, key);

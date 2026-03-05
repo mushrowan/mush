@@ -212,7 +212,12 @@ fn build_request_body(
         stream: true,
         store: false,
         instructions,
-        max_output_tokens: options.max_tokens.or(Some(model.max_output_tokens)),
+        // chatgpt.com/backend-api doesn't support max_output_tokens
+        max_output_tokens: if is_codex {
+            None
+        } else {
+            options.max_tokens.or(Some(model.max_output_tokens))
+        },
         temperature: if reasoning.is_none() {
             options.temperature.map(|t| t.value())
         } else {
