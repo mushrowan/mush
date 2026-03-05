@@ -5,7 +5,7 @@ use std::process::Stdio;
 
 use mush_agent::tool::{AgentTool, ToolResult};
 
-const MAX_RESULTS: usize = 200;
+use crate::util::{resolve_path, truncate_lines};
 
 pub struct GlobTool {
     cwd: PathBuf,
@@ -58,14 +58,7 @@ impl AgentTool for GlobTool {
             };
 
             let search_dir = match args["path"].as_str() {
-                Some(p) => {
-                    let path = std::path::Path::new(p);
-                    if path.is_absolute() {
-                        path.to_path_buf()
-                    } else {
-                        self.cwd.join(path)
-                    }
-                }
+                Some(p) => resolve_path(&self.cwd, p),
                 None => self.cwd.clone(),
             };
 
@@ -90,19 +83,7 @@ impl AgentTool for GlobTool {
                 return ToolResult::text("no files found");
             }
 
-            let truncated = lines.len() > MAX_RESULTS;
-            let results: Vec<&str> = lines.into_iter().take(MAX_RESULTS).collect();
-            let count = results.len();
-
-            let mut output = results.join("\n");
-            if truncated {
-                output.push_str(&format!(
-                    "\n\n(truncated: showing first {MAX_RESULTS} results. use a more specific pattern.)"
-                ));
-            }
-            output.push_str(&format!("\n\n{count} files matched"));
-
-            ToolResult::text(output)
+            ToolResult::text(truncate_lines(&lines, "files"))
         })
     }
 }

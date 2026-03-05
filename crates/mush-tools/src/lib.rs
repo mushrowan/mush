@@ -6,6 +6,7 @@ pub mod glob;
 pub mod grep;
 pub mod ls;
 pub mod read;
+pub mod util;
 pub mod web_fetch;
 pub mod web_search;
 pub mod write;
@@ -25,41 +26,32 @@ pub fn builtin_tools_with_sink(
     cwd: PathBuf,
     output_sink: Option<bash::OutputSink>,
 ) -> Vec<Box<dyn AgentTool>> {
-    let make_bash = |cwd: PathBuf| -> Box<dyn AgentTool> {
-        let tool = bash::BashTool::new(cwd);
-        if let Some(ref sink) = output_sink {
-            Box::new(tool.with_output_sink(sink.clone()))
-        } else {
-            Box::new(tool)
-        }
+    let make_tools = |cwd: PathBuf| -> Vec<Box<dyn AgentTool>> {
+        let bash_tool: Box<dyn AgentTool> = {
+            let tool = bash::BashTool::new(cwd.clone());
+            if let Some(ref sink) = output_sink {
+                Box::new(tool.with_output_sink(sink.clone()))
+            } else {
+                Box::new(tool)
+            }
+        };
+        vec![
+            Box::new(read::ReadTool::new(cwd.clone())),
+            Box::new(write::WriteTool::new(cwd.clone())),
+            Box::new(edit::EditTool::new(cwd.clone())),
+            bash_tool,
+            Box::new(grep::GrepTool::new(cwd.clone())),
+            Box::new(find::FindTool::new(cwd.clone())),
+            Box::new(glob::GlobTool::new(cwd.clone())),
+            Box::new(ls::LsTool::new(cwd)),
+            Box::new(web_search::WebSearchTool::new()),
+            Box::new(web_fetch::WebFetchTool::new()),
+        ]
     };
 
-    // tools that batch can dispatch to (everything except batch itself)
-    let inner_tools: Vec<Box<dyn AgentTool>> = vec![
-        Box::new(read::ReadTool::new(cwd.clone())),
-        Box::new(write::WriteTool::new(cwd.clone())),
-        Box::new(edit::EditTool::new(cwd.clone())),
-        make_bash(cwd.clone()),
-        Box::new(grep::GrepTool::new(cwd.clone())),
-        Box::new(find::FindTool::new(cwd.clone())),
-        Box::new(glob::GlobTool::new(cwd.clone())),
-        Box::new(ls::LsTool::new(cwd.clone())),
-        Box::new(web_search::WebSearchTool::new()),
-        Box::new(web_fetch::WebFetchTool::new()),
-    ];
-
-    let mut tools: Vec<Box<dyn AgentTool>> = vec![
-        Box::new(read::ReadTool::new(cwd.clone())),
-        Box::new(write::WriteTool::new(cwd.clone())),
-        Box::new(edit::EditTool::new(cwd.clone())),
-        make_bash(cwd.clone()),
-        Box::new(grep::GrepTool::new(cwd.clone())),
-        Box::new(find::FindTool::new(cwd.clone())),
-        Box::new(glob::GlobTool::new(cwd.clone())),
-        Box::new(ls::LsTool::new(cwd)),
-        Box::new(web_search::WebSearchTool::new()),
-        Box::new(web_fetch::WebFetchTool::new()),
-    ];
+    // batch wraps its own copy of the tools so it can dispatch to them
+    let inner_tools = make_tools(cwd.clone());
+    let mut tools = make_tools(cwd);
     tools.push(Box::new(batch::BatchTool::new(inner_tools)));
     tools
 }

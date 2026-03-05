@@ -33,7 +33,7 @@ pub fn watch_config(config_path: PathBuf) -> Option<(RecommendedWatcher, mpsc::R
     Some((watcher, rx))
 }
 
-fn reload_theme(config_path: &PathBuf) -> Option<Theme> {
+fn reload_theme(config_path: &std::path::Path) -> Option<Theme> {
     let content = std::fs::read_to_string(config_path).ok()?;
     let config: ConfigWithTheme = toml::from_str(&content).ok()?;
     Some(Theme::from_config(&config.theme))

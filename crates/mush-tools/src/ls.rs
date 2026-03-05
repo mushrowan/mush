@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 
 use mush_agent::tool::{AgentTool, ToolResult};
 
+use crate::util::resolve_path;
+
 pub struct LsTool {
     cwd: PathBuf,
 }
@@ -45,14 +47,7 @@ impl AgentTool for LsTool {
         Box::pin(async move {
             let path = args["path"]
                 .as_str()
-                .map(|p| {
-                    let path = Path::new(p);
-                    if path.is_absolute() {
-                        path.to_path_buf()
-                    } else {
-                        self.cwd.join(p)
-                    }
-                })
+                .map(|p| resolve_path(&self.cwd, p))
                 .unwrap_or_else(|| self.cwd.clone());
 
             tokio::task::spawn_blocking(move || list_dir(&path))
@@ -132,6 +127,7 @@ fn format_size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::extract_text;
     use std::fs;
 
     #[test]
@@ -188,17 +184,5 @@ mod tests {
         assert_eq!(format_size(500), "500B");
         assert_eq!(format_size(1536), "1.5K");
         assert_eq!(format_size(2 * 1024 * 1024), "2.0M");
-    }
-
-    fn extract_text(result: &ToolResult) -> String {
-        result
-            .content
-            .iter()
-            .filter_map(|p| match p {
-                mush_ai::types::ToolResultContentPart::Text(t) => Some(t.text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
     }
 }

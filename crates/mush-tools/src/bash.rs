@@ -79,20 +79,25 @@ impl AgentTool for BashTool {
 }
 
 async fn run_command(
-    cwd: &PathBuf,
+    cwd: &std::path::Path,
     command: &str,
     timeout_secs: u64,
     output_sink: Option<&OutputSink>,
 ) -> ToolResult {
-    let mut child = match tokio::process::Command::new("bash")
-        .arg("-c")
+    let mut cmd = tokio::process::Command::new("bash");
+    cmd.arg("-c")
         .arg(command)
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
+        .stderr(Stdio::piped());
+
+    // isolate child from the TUI's process group so it can't write to the
+    // controlling terminal (which would inject bytes into crossterm's parser)
+    #[cfg(unix)]
+    cmd.process_group(0);
+
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return ToolResult::error(format!("failed to spawn command: {e}")),
     };
@@ -104,7 +109,7 @@ async fn run_command(
     let stderr_pipe = child.stderr.take();
 
     let stdout_handle = tokio::spawn(stream_pipe(stdout_pipe, output_sink.cloned()));
-    let stderr_handle = tokio::spawn(stream_pipe_stderr(stderr_pipe, output_sink.cloned()));
+    let stderr_handle = tokio::spawn(stream_pipe(stderr_pipe, output_sink.cloned()));
 
     // wait for the process, or kill on timeout
     let status = match tokio::time::timeout(timeout, child.wait()).await {
@@ -150,45 +155,9 @@ async fn run_command(
     }
 }
 
-/// read stdout pipe line-by-line, forwarding to sink with throttling
-async fn stream_pipe(
-    pipe: Option<tokio::process::ChildStdout>,
-    sink: Option<OutputSink>,
-) -> String {
-    use tokio::io::{AsyncBufReadExt, BufReader};
-
-    let Some(pipe) = pipe else {
-        return String::new();
-    };
-    let mut reader = BufReader::new(pipe);
-    let mut output = String::new();
-    let mut line = String::new();
-    let mut last_emit = std::time::Instant::now();
-
-    loop {
-        line.clear();
-        match reader.read_line(&mut line).await {
-            Ok(0) => break, // EOF
-            Ok(_) => {
-                output.push_str(&line);
-                // throttle sink to avoid flooding the TUI (~10 updates/sec)
-                if let Some(ref sink) = sink
-                    && last_emit.elapsed() >= std::time::Duration::from_millis(100)
-                {
-                    sink(line.trim_end());
-                    last_emit = std::time::Instant::now();
-                }
-            }
-            Err(_) => break,
-        }
-    }
-
-    output
-}
-
-/// same as stream_pipe but for stderr
-async fn stream_pipe_stderr(
-    pipe: Option<tokio::process::ChildStderr>,
+/// read a pipe line-by-line, forwarding to sink with throttling
+async fn stream_pipe<R: tokio::io::AsyncRead + Unpin>(
+    pipe: Option<R>,
     sink: Option<OutputSink>,
 ) -> String {
     use tokio::io::{AsyncBufReadExt, BufReader};
@@ -207,6 +176,7 @@ async fn stream_pipe_stderr(
             Ok(0) => break,
             Ok(_) => {
                 output.push_str(&line);
+                // throttle sink to avoid flooding the TUI (~10 updates/sec)
                 if let Some(ref sink) = sink
                     && last_emit.elapsed() >= std::time::Duration::from_millis(100)
                 {
@@ -254,6 +224,7 @@ fn truncate_output(output: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::extract_text;
 
     #[test]
     fn truncate_short_output() {
@@ -307,17 +278,5 @@ mod tests {
         assert!(result.outcome.is_error());
         let text = extract_text(&result);
         assert!(text.contains("timed out"));
-    }
-
-    fn extract_text(result: &ToolResult) -> String {
-        result
-            .content
-            .iter()
-            .filter_map(|p| match p {
-                mush_ai::types::ToolResultContentPart::Text(t) => Some(t.text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
     }
 }
