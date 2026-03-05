@@ -69,8 +69,8 @@ impl AgentTool for WebSearchTool {
                 },
                 "type": {
                     "type": "string",
-                    "enum": ["auto", "fast", "deep"],
-                    "description": "search type: auto (balanced, default), fast (quick), deep (comprehensive)"
+                    "enum": ["auto", "fast"],
+                    "description": "search type: auto (balanced, default), fast (quick)"
                 }
             },
             "required": ["query"]

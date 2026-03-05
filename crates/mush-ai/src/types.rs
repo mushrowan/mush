@@ -79,6 +79,42 @@ impl Timestamp {
     pub fn as_ms(&self) -> u64 {
         self.0
     }
+
+    /// format as a human-readable relative age (e.g. "30s", "5m", "2h")
+    #[must_use]
+    pub fn age_display(&self) -> String {
+        let now = Self::now().as_ms();
+        let then = self.0;
+        if now <= then {
+            return "now".into();
+        }
+        let secs = (now - then) / 1000;
+        if secs < 60 {
+            return format!("{secs}s");
+        }
+        let mins = secs / 60;
+        if mins < 60 {
+            return format!("{mins}m");
+        }
+        let hours = mins / 60;
+        if hours < 24 {
+            return format!("{hours}h");
+        }
+        let days = hours / 24;
+        if days < 7 {
+            return format!("{days}d");
+        }
+        let weeks = days / 7;
+        if days < 30 {
+            return format!("{weeks}w");
+        }
+        let months = days / 30;
+        if days < 365 {
+            return format!("{months}mo");
+        }
+        let years = days / 365;
+        format!("{years}y")
+    }
 }
 
 // -- validated newtypes --
@@ -834,5 +870,39 @@ mod tests {
         let tc: ThinkingContent = serde_json::from_str(json).unwrap();
         assert!(!tc.is_redacted());
         assert_eq!(tc.text(), "no redacted field");
+    }
+
+    #[test]
+    fn age_display_seconds() {
+        let now = Timestamp::now().as_ms();
+        let ts = Timestamp::from_ms(now - 30_000);
+        assert_eq!(ts.age_display(), "30s");
+    }
+
+    #[test]
+    fn age_display_minutes() {
+        let now = Timestamp::now().as_ms();
+        let ts = Timestamp::from_ms(now - 300_000);
+        assert_eq!(ts.age_display(), "5m");
+    }
+
+    #[test]
+    fn age_display_hours() {
+        let now = Timestamp::now().as_ms();
+        let ts = Timestamp::from_ms(now - 7_200_000);
+        assert_eq!(ts.age_display(), "2h");
+    }
+
+    #[test]
+    fn age_display_days() {
+        let now = Timestamp::now().as_ms();
+        let ts = Timestamp::from_ms(now - 172_800_000);
+        assert_eq!(ts.age_display(), "2d");
+    }
+
+    #[test]
+    fn age_display_future_is_now() {
+        let ts = Timestamp::from_ms(Timestamp::now().as_ms() + 10_000);
+        assert_eq!(ts.age_display(), "now");
     }
 }

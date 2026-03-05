@@ -11,20 +11,9 @@ use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 
 use crate::loader::Skill;
 
-/// shared model cache under ~/.local/share/mush/models/
-///
-/// avoids re-downloading the onnx model into every working directory
+/// shared model cache under the mush data dir
 fn model_cache_dir() -> PathBuf {
-    let base = if let Ok(dir) = std::env::var("MUSH_DATA_DIR") {
-        PathBuf::from(dir)
-    } else if let Some(data) = std::env::var_os("XDG_DATA_HOME") {
-        PathBuf::from(data).join("mush")
-    } else if let Some(home) = std::env::var_os("HOME") {
-        PathBuf::from(home).join(".local/share/mush")
-    } else {
-        PathBuf::from(".mush")
-    };
-    base.join("models")
+    mush_session::data_dir().join("models")
 }
 
 /// a document indexed for semantic search

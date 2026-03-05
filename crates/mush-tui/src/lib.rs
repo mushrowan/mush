@@ -3,6 +3,7 @@ pub mod clipboard;
 pub mod config_watcher;
 pub mod input;
 pub mod markdown;
+pub mod path_utils;
 pub mod runner;
 pub mod slash;
 pub mod theme;
