@@ -372,11 +372,21 @@ pub fn agent_loop(
     Box::pin(stream)
 }
 
+/// normalise tool name for matching: lowercase, strip underscores
+/// models may send PascalCase (WebSearch), snake_case (web_search), or
+/// lowercase (websearch) depending on training data
+fn normalise_tool_name(name: &str) -> String {
+    name.to_lowercase().replace('_', "")
+}
+
 async fn execute_tool(tools: &[Box<dyn AgentTool>], tool_call: &ToolCall) -> ToolResult {
-    let tool = tools.iter().find(|t| t.name() == tool_call.name.as_str());
+    let requested = normalise_tool_name(tool_call.name.as_str());
+    let tool = tools
+        .iter()
+        .find(|t| normalise_tool_name(t.name()) == requested);
     match tool {
         Some(t) => {
-            tracing::debug!(tool = %tool_call.name, "executing tool");
+            tracing::debug!(tool = %tool_call.name, resolved = t.name(), "executing tool");
             let result = t.execute(tool_call.arguments.clone()).await;
             if result.outcome.is_error() {
                 tracing::warn!(tool = %tool_call.name, "tool returned error");
@@ -453,6 +463,16 @@ mod tests {
     }
 
     #[test]
+    fn normalise_tool_name_strips_underscores_and_lowercases() {
+        assert_eq!(normalise_tool_name("web_search"), "websearch");
+        assert_eq!(normalise_tool_name("WebSearch"), "websearch");
+        assert_eq!(normalise_tool_name("WEB_SEARCH"), "websearch");
+        assert_eq!(normalise_tool_name("websearch"), "websearch");
+        assert_eq!(normalise_tool_name("Read"), "read");
+        assert_eq!(normalise_tool_name("web_fetch"), "webfetch");
+    }
+
+    #[test]
     fn tool_found_and_executed() {
         let tools: Vec<Box<dyn AgentTool>> = vec![Box::new(CounterTool)];
         let tc = ToolCall {
@@ -463,6 +483,81 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(execute_tool(&tools, &tc));
         assert!(result.outcome.is_success());
+    }
+
+    #[test]
+    fn tool_name_matching_is_normalised() {
+        let tools: Vec<Box<dyn AgentTool>> = vec![Box::new(CounterTool)];
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        // PascalCase should match snake_case tool
+        let tc = ToolCall {
+            id: "tc_1".into(),
+            name: "Counter".into(),
+            arguments: serde_json::json!({}),
+        };
+        assert!(rt.block_on(execute_tool(&tools, &tc)).outcome.is_success());
+
+        // UPPERCASE should match
+        let tc = ToolCall {
+            id: "tc_2".into(),
+            name: "COUNTER".into(),
+            arguments: serde_json::json!({}),
+        };
+        assert!(rt.block_on(execute_tool(&tools, &tc)).outcome.is_success());
+    }
+
+    struct WebSearchTool;
+
+    impl AgentTool for WebSearchTool {
+        fn name(&self) -> &str {
+            "web_search"
+        }
+        fn label(&self) -> &str {
+            "Web Search"
+        }
+        fn description(&self) -> &str {
+            "searches the web"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        fn execute(
+            &self,
+            _args: serde_json::Value,
+        ) -> Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
+            Box::pin(async { ToolResult::text("results") })
+        }
+    }
+
+    #[test]
+    fn tool_name_underscore_variants_match() {
+        let tools: Vec<Box<dyn AgentTool>> = vec![Box::new(WebSearchTool)];
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        // PascalCase (what claude sends) should match web_search
+        let tc = ToolCall {
+            id: "tc_1".into(),
+            name: "WebSearch".into(),
+            arguments: serde_json::json!({}),
+        };
+        assert!(rt.block_on(execute_tool(&tools, &tc)).outcome.is_success());
+
+        // lowercase no underscore should match
+        let tc = ToolCall {
+            id: "tc_2".into(),
+            name: "websearch".into(),
+            arguments: serde_json::json!({}),
+        };
+        assert!(rt.block_on(execute_tool(&tools, &tc)).outcome.is_success());
+
+        // exact match still works
+        let tc = ToolCall {
+            id: "tc_3".into(),
+            name: "web_search".into(),
+            arguments: serde_json::json!({}),
+        };
+        assert!(rt.block_on(execute_tool(&tools, &tc)).outcome.is_success());
     }
 
     #[test]

@@ -17,9 +17,10 @@ impl BatchTool {
     }
 
     fn find_tool(&self, name: &str) -> Option<&dyn AgentTool> {
+        let requested = name.to_lowercase().replace('_', "");
         self.tools
             .iter()
-            .find(|t| t.name().eq_ignore_ascii_case(name))
+            .find(|t| t.name().to_lowercase().replace('_', "") == requested)
             .map(|t| &**t)
     }
 }
