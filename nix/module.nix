@@ -111,6 +111,7 @@ self: {
       max_tokens = cfg.maxTokens;
       max_turns = cfg.maxTurns;
       system_prompt = cfg.systemPrompt;
+      log_filter = cfg.logFilter;
     }
     // lib.optionalAttrs (cfg.hintMode != "message") {
       hint_mode = cfg.hintMode;
@@ -135,7 +136,7 @@ in {
 
     package = lib.mkOption {
       type = lib.types.package;
-      inherit (self.packages.${pkgs.system}) default;
+      default = self.packages.${pkgs.system}.default;
       description = "the mush package to install";
     };
 
@@ -246,6 +247,13 @@ in {
         }
       '';
       description = "MCP (Model Context Protocol) server configurations";
+    };
+
+    logFilter = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "mush=debug,warn";
+      description = "tracing filter string (RUST_LOG env var takes priority over this)";
     };
 
     settings = lib.mkOption {

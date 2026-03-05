@@ -102,7 +102,8 @@ enum Command {
 #[tokio::main]
 async fn main() -> Result<()> {
     color_eyre::install()?;
-    let (_log_guard, log_buffer) = logging::init_logging();
+    let cfg = config::load_config();
+    let (_log_guard, log_buffer) = logging::init_logging(cfg.log_filter.as_deref());
     tracing::info!("mush starting");
     let cli = Cli::parse();
 
