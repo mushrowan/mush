@@ -23,14 +23,14 @@ impl OAuthProvider for AnthropicOAuth {
         "Anthropic (Claude Pro/Max)"
     }
 
-    fn begin_login(&self) -> (AuthPrompt, PkceChallenge) {
-        let pkce = generate_pkce();
+    fn begin_login(&self) -> Result<(AuthPrompt, PkceChallenge), OAuthError> {
+        let pkce = generate_pkce()?;
         let url = build_auth_url(&pkce);
         let prompt = AuthPrompt {
             url,
             instructions: "after authorising, paste the code here (format: code#state)".into(),
         };
-        (prompt, pkce)
+        Ok((prompt, pkce))
     }
 
     fn exchange_code(
@@ -157,7 +157,7 @@ mod tests {
 
     #[test]
     fn auth_url_contains_required_params() {
-        let pkce = generate_pkce();
+        let pkce = generate_pkce().expect("pkce generation should succeed");
         let url = build_auth_url(&pkce);
         assert!(url.starts_with("https://claude.ai/oauth/authorize?"));
         assert!(url.contains("client_id="));

@@ -51,7 +51,7 @@ pub trait OAuthProvider: Send + Sync {
     fn name(&self) -> &str;
 
     /// start the login flow, returning the URL and instructions
-    fn begin_login(&self) -> (AuthPrompt, PkceChallenge);
+    fn begin_login(&self) -> Result<(AuthPrompt, PkceChallenge), OAuthError>;
 
     /// exchange the user-provided code for credentials
     fn exchange_code(

@@ -247,7 +247,9 @@ pub async fn login(provider_id: Option<String>) -> Result<()> {
 
     eprintln!("logging in to {}...\n", provider.name());
 
-    let (prompt, pkce) = provider.begin_login();
+    let (prompt, pkce) = provider
+        .begin_login()
+        .map_err(|e| eyre!("failed to start oauth login: {e}"))?;
     eprintln!("open this URL in your browser:\n");
     eprintln!("  {}\n", prompt.url);
     eprintln!("{}", prompt.instructions);
