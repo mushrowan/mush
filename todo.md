@@ -57,7 +57,7 @@
 ### round 4
 
 #### non_exhaustive
-- [ ] 23. `#[non_exhaustive]` on cross-crate enums likely to grow: `ProviderError`, `AgentEvent`, `StreamEvent`, `StopReason`
+- [x] 23. `#[non_exhaustive]` on cross-crate enums likely to grow: `ProviderError`, `AgentEvent`, `StreamEvent`, `StopReason`
 
 #### strum for enum Display
 - [x] 24. audited manual Display impls — all have custom logic (ApiKey redacted, Provider::Custom, ImageMimeType mime strings), strum wouldn't help
@@ -68,3 +68,22 @@
 #### ecosystem crates
 - [x] 26. `cargo-deny` — added `deny.toml` with license/advisory/ban/source checks, integrated via `craneLib.cargoDeny` in nix checks
 - [x] 27. audited others: `parking_lot` (only 3 brief-lock mutexes, marginal), `dashmap` (no concurrent hashmaps), `const_format` (no const string building), `bon` (no complex builders), `strum` (all Display impls have custom logic)
+
+### round 5
+
+#### clippy hygiene
+- [x] 28. collapse nested ifs into let chains (app.rs, input.rs)
+- [x] 29. replace redundant closure with function ref (input_box.rs)
+- [x] 30. remove unused `entries()` method (logging.rs)
+
+#### text extraction helpers
+- [x] 31. `UserContent::text()`, `UserMessage::text()`, `AssistantMessage::text()`/`thinking()` — used across runner, slash, session, compact
+
+#### shared SSE parser
+- [x] 32. `SseParser` in `providers/sse.rs` — shared byte-buffer→line→event parsing, replaces ~60-80 lines of identical boilerplate in each provider
+
+#### App sub-states
+- [x] 33. `TokenStats` struct with `update()`/`reset()` — groups 8 token/cost fields, eliminates manual 6-line update blocks
+
+#### module extraction
+- [x] 34. `event_handler.rs` — agent event handling, auth resolution, hint injection, auto-compaction. runner.rs 1019→779 lines
