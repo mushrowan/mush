@@ -48,7 +48,8 @@ pub fn handle(
             keys.push_str("  alt/shift+enter - insert newline\n");
             keys.push_str("  ctrl+c         - quit\n");
             keys.push_str("  esc            - abort stream / scroll to bottom\n");
-            keys.push_str("  tab            - autocomplete slash commands\n");
+            keys.push_str("  tab            - autocomplete / command menu\n");
+            keys.push_str("  ctrl+j/k       - navigate menus\n");
             keys.push_str("  ctrl+v         - paste image from clipboard\n");
             keys.push_str("  ctrl+d         - quit (empty input) / delete char\n");
             keys.push_str("  page up/down   - scroll\n");
@@ -103,7 +104,11 @@ pub fn handle(
                     if sessions.is_empty() {
                         app.push_system_message("no saved sessions");
                     } else {
-                        app.open_session_picker(sessions);
+                        let cwd = std::env::current_dir()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned();
+                        app.open_session_picker(sessions, cwd);
                     }
                 }
                 Err(e) => app.push_system_message(format!("failed to list sessions: {e}")),

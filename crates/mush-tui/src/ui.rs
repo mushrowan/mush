@@ -8,7 +8,8 @@ use crate::app::{App, AppMode};
 use crate::widgets::input_box::InputBox;
 use crate::widgets::message_list::MessageList;
 use crate::widgets::search_popup::SearchPopup;
-use crate::widgets::status_bar::{StatusBar, status_bar_height};
+pub use crate::widgets::status_bar::status_bar_height;
+use crate::widgets::status_bar::StatusBar;
 use crate::widgets::tool_panels::{ToolPanels, tool_panels_height};
 
 /// the full TUI layout, composing all widgets
