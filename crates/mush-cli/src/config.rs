@@ -42,6 +42,8 @@ pub struct Config {
     pub debug_cache: bool,
     pub system_prompt: Option<String>,
     pub hint_mode: HintMode,
+    /// tracing filter string (e.g. "mush=debug,warn")
+    pub log_filter: Option<String>,
     /// how to display thinking text (hidden, collapse, expanded)
     pub thinking_display: mush_tui::ThinkingDisplay,
     /// prompt for confirmation before executing tools (off by default)

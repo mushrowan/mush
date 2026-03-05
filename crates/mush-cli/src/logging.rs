@@ -73,7 +73,7 @@ pub fn log_file_path() -> PathBuf {
 
 /// initialise tracing with file output + ring buffer
 /// returns the guard (must be held alive) and the log buffer
-pub fn init_logging() -> (WorkerGuard, LogBuffer) {
+pub fn init_logging(config_filter: Option<&str>) -> (WorkerGuard, LogBuffer) {
     let log_path = log_file_path();
     let log_dir = log_path.parent().unwrap();
     let log_name = log_path.file_name().unwrap();
@@ -87,8 +87,10 @@ pub fn init_logging() -> (WorkerGuard, LogBuffer) {
     // leak the buffer guard so it lives as long as the process
     std::mem::forget(_buf_guard);
 
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("mush=debug,warn"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        let default = config_filter.unwrap_or("warn");
+        EnvFilter::new(default)
+    });
 
     tracing_subscriber::registry()
         .with(filter)

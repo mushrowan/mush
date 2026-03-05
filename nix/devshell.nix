@@ -21,7 +21,6 @@ craneLib.devShell {
   ];
 
   env = {
-    RUST_LOG = "info";
     ORT_LIB_LOCATION = "${pkgs.onnxruntime}/lib";
     ORT_PREFER_DYNAMIC_LINK = "1";
   };
