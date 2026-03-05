@@ -66,8 +66,15 @@
           inherit craneLib src;
           inherit (pkgs) ripgrep fd onnxruntime pkg-config openssl;
         };
+
+        craneOutputsWithEmbeddings = import ./nix/package.nix {
+          inherit craneLib src;
+          inherit (pkgs) ripgrep fd onnxruntime pkg-config openssl;
+          enableEmbeddings = true;
+        };
       in {
         packages.default = craneOutputs.package;
+        packages.with-embeddings = craneOutputsWithEmbeddings.package;
 
         checks = {
           inherit (craneOutputs) package clippy test fmt deny;

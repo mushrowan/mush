@@ -6,19 +6,39 @@
   onnxruntime,
   openssl,
   pkg-config,
+  enableEmbeddings ? false,
 }: let
+  cargoExtraArgs =
+    if enableEmbeddings
+    then "--features embeddings"
+    else "";
+
   commonArgs = {
-    inherit src;
+    inherit src cargoExtraArgs;
     pname = "mush";
     version = "0.1.0";
     strictDeps = true;
 
     nativeBuildInputs = [pkg-config];
-    buildInputs = [onnxruntime openssl];
+    buildInputs =
+      [openssl]
+      ++ (
+        if enableEmbeddings
+        then [onnxruntime]
+        else []
+      );
 
-    # point ort at nix-provided onnxruntime instead of downloading
-    env.ORT_LIB_LOCATION = "${onnxruntime}/lib";
-    env.ORT_PREFER_DYNAMIC_LINK = "1";
+    env =
+      {}
+      // (
+        if enableEmbeddings
+        then {
+          # point ort at nix-provided onnxruntime instead of downloading
+          ORT_LIB_LOCATION = "${onnxruntime}/lib";
+          ORT_PREFER_DYNAMIC_LINK = "1";
+        }
+        else {}
+      );
   };
 
   cargoArtifacts = craneLib.buildDepsOnly commonArgs;
