@@ -34,7 +34,21 @@ fn hint_text(app: &App) -> String {
     } else if app.is_streaming {
         "esc abort | ctrl+c quit".into()
     } else {
-        "enter send | ctrl+v image | ctrl+s scroll | ctrl+t thinking | ctrl+c quit".into()
+        "enter send | ctrl+s scroll | ctrl+t thinking | ctrl+c quit".into()
+    }
+}
+
+/// truncate a path from the beginning, keeping the tail
+/// e.g. "~/dev/some/deep/nested/project" with max 20 => "…/deep/nested/project"
+fn truncate_path(path: &str, max_len: usize) -> String {
+    if path.len() <= max_len {
+        return path.to_string();
+    }
+    // find a `/` near the truncation point to get a clean break
+    let target = path.len() - max_len + 1; // +1 for the `…`
+    match path[target..].find('/') {
+        Some(pos) => format!("…{}", &path[target + pos..]),
+        None => format!("…{}", &path[path.len().saturating_sub(max_len - 1)..]),
     }
 }
 
@@ -55,6 +69,11 @@ fn left_spans(app: &App) -> Vec<Span<'static>> {
 
     let mut spans = vec![
         Span::styled(" ", dim),
+        Span::styled(
+            truncate_path(&app.cwd, 30),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(" • ", dim),
         Span::styled(app.model_id.to_string(), Style::default().fg(Color::Cyan)),
         Span::styled(" • ", dim),
         Span::styled(
@@ -221,9 +240,8 @@ mod tests {
     #[test]
     fn status_bar_shows_hint() {
         let app = App::new("test".into(), 200_000);
-        let buf = render_status(&app, 120, 1);
+        let buf = render_status(&app, 200, 1);
         let content = buffer_to_string(&buf);
-        assert!(content.contains("ctrl+v image"));
         assert!(content.contains("ctrl+c"));
     }
 
@@ -254,6 +272,20 @@ mod tests {
         assert_eq!(status_bar_height(&app, 40), 2);
         // wide terminal should fit in 1
         assert_eq!(status_bar_height(&app, 200), 1);
+    }
+
+    #[test]
+    fn truncate_path_short_unchanged() {
+        assert_eq!(truncate_path("~/dev/mush", 30), "~/dev/mush");
+    }
+
+    #[test]
+    fn truncate_path_long_keeps_tail() {
+        let long = "~/dev/some/deep/nested/project";
+        let result = truncate_path(long, 20);
+        assert!(result.starts_with('…'));
+        assert!(result.ends_with("project"));
+        assert!(result.len() <= 20);
     }
 
     fn render_status(app: &App, width: u16, height: u16) -> Buffer {
