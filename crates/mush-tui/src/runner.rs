@@ -18,7 +18,7 @@ use ratatui::backend::CrosstermBackend;
 use tokio::sync::Mutex;
 
 use mush_agent::tool::AgentTool;
-use mush_agent::{AgentConfig, AgentEvent, agent_loop, summarise_tool_args};
+use mush_agent::{AgentConfig, AgentEvent, agent_loop};
 use mush_ai::models;
 use mush_ai::registry::ApiRegistry;
 use mush_ai::types::*;
