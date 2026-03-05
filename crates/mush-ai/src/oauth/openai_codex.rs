@@ -27,14 +27,14 @@ impl OAuthProvider for OpenaiCodexOAuth {
         "ChatGPT Plus/Pro (Codex subscription)"
     }
 
-    fn begin_login(&self) -> (AuthPrompt, PkceChallenge) {
-        let pkce = generate_pkce();
+    fn begin_login(&self) -> Result<(AuthPrompt, PkceChallenge), OAuthError> {
+        let pkce = generate_pkce()?;
         let url = build_auth_url(&pkce);
         let prompt = AuthPrompt {
             url,
             instructions: "after authorising, paste the full redirect URL (or code) here".into(),
         };
-        (prompt, pkce)
+        Ok((prompt, pkce))
     }
 
     fn exchange_code(
@@ -283,7 +283,7 @@ mod tests {
 
     #[test]
     fn auth_url_contains_expected_params() {
-        let pkce = generate_pkce();
+        let pkce = generate_pkce().expect("pkce generation should succeed");
         let url = build_auth_url(&pkce);
         assert!(url.starts_with("https://auth.openai.com/oauth/authorize?"));
         assert!(url.contains("client_id="));
