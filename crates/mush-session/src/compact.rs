@@ -168,6 +168,20 @@ pub fn compact_with_summary(
     }
 
     let split_at = messages.len() - keep;
+    // walk forward to a user message boundary to avoid orphaned
+    // tool_result messages that reference compacted-away tool_use blocks
+    let split_at = messages[split_at..]
+        .iter()
+        .position(|m| matches!(m, Message::User(_)))
+        .map(|offset| split_at + offset);
+    let Some(split_at) = split_at else {
+        // no user message found in the kept range, keep everything
+        return CompactionResult {
+            summarised_count: 0,
+            summary: String::new(),
+            messages,
+        };
+    };
     let kept = messages[split_at..].to_vec();
 
     let summary_msg = Message::User(UserMessage {
@@ -395,9 +409,10 @@ mod tests {
             .collect();
 
         let result = compact_with_summary(msgs, "this is the summary", Some(5));
-        // should be 1 summary + 5 kept = 6
-        assert_eq!(result.messages.len(), 6);
-        assert_eq!(result.summarised_count, 15);
+        // split_at starts at 15 (assistant), advances to 16 (user)
+        // so: 1 summary + 4 kept = 5
+        assert_eq!(result.messages.len(), 5);
+        assert_eq!(result.summarised_count, 16);
 
         // first message should be the summary
         if let Message::User(u) = &result.messages[0] {
@@ -463,6 +478,33 @@ mod tests {
         assert!(!needs_compaction(&msgs, 100));
     }
 
+    #[test]
+    fn compact_skips_orphaned_tool_results() {
+        // simulate: user, assistant+tool_use, tool_result, user, assistant
+        // with keep=2, naive split would start at the tool_result,
+        // causing an API error. the fix should advance to the next user msg.
+        let msgs = vec![
+            user_msg("first"),
+            assistant_msg("thinking"),
+            Message::ToolResult(ToolResultMessage {
+                tool_call_id: "tc_1".into(),
+                tool_name: "bash".into(),
+                content: vec![ToolResultContentPart::Text(TextContent {
+                    text: "output".into(),
+                })],
+                outcome: ToolOutcome::Success,
+                timestamp_ms: Timestamp::zero(),
+            }),
+            user_msg("second"),
+            assistant_msg("response"),
+        ];
+        let result = compact_with_summary(msgs, "summary", Some(2));
+        // should skip past the tool_result and start at "second" (user msg)
+        assert!(matches!(result.messages[0], Message::User(_))); // summary
+        assert!(matches!(result.messages[1], Message::User(_))); // "second"
+        assert_eq!(result.summarised_count, 3);
+    }
+
     #[tokio::test]
     async fn llm_compact_fallback_on_no_provider() {
         // with an empty registry, the LLM call will fail and it should
@@ -498,9 +540,9 @@ mod tests {
             .collect();
 
         let result = llm_compact(msgs, &registry, &model, &options, Some(5)).await;
-        // should fall back to structured summary
-        assert_eq!(result.summarised_count, 15);
-        assert_eq!(result.messages.len(), 6); // 1 summary + 5 kept
+        // split_at advances from 15 to 16 (msg 15 is assistant, 16 is user)
+        assert_eq!(result.summarised_count, 16);
+        assert_eq!(result.messages.len(), 5); // 1 summary + 4 kept
         assert!(result.summary.contains("Summary of earlier conversation"));
     }
 }

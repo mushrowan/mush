@@ -124,20 +124,8 @@ pub fn load_config() -> Config {
 
 // -- per-model thinking level persistence --
 
-fn data_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("MUSH_DATA_DIR") {
-        PathBuf::from(dir)
-    } else if let Some(data) = std::env::var_os("XDG_DATA_HOME") {
-        PathBuf::from(data).join("mush")
-    } else if let Some(home) = std::env::var_os("HOME") {
-        PathBuf::from(home).join(".local/share/mush")
-    } else {
-        PathBuf::from(".mush")
-    }
-}
-
 fn thinking_prefs_path() -> PathBuf {
-    data_dir().join("thinking.json")
+    mush_session::data_dir().join("thinking.json")
 }
 
 pub fn load_thinking_prefs() -> HashMap<String, ThinkingLevel> {

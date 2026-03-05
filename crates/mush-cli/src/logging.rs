@@ -66,19 +66,9 @@ impl std::io::Write for LogBuffer {
 
 /// log file path: ~/.local/share/mush/mush.log
 pub fn log_file_path() -> PathBuf {
-    let dir = dirs_next()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("mush");
+    let dir = mush_session::data_dir();
     std::fs::create_dir_all(&dir).ok();
     dir.join("mush.log")
-}
-
-fn dirs_next() -> Option<PathBuf> {
-    std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share"))
-        })
 }
 
 /// initialise tracing with file output + ring buffer

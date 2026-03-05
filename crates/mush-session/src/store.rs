@@ -28,7 +28,7 @@ pub struct SessionStore {
 impl SessionStore {
     /// create a store using the default data directory
     pub fn default_dir() -> PathBuf {
-        dirs().join("sessions")
+        data_dir().join("sessions")
     }
 
     pub fn new(base_dir: PathBuf) -> Self {
@@ -105,7 +105,11 @@ fn load_meta(path: &Path) -> Result<SessionMeta, StoreError> {
     Ok(session.meta)
 }
 
-fn dirs() -> PathBuf {
+/// resolve the mush data directory
+///
+/// checks MUSH_DATA_DIR, XDG_DATA_HOME, HOME in order,
+/// falling back to .mush in the current directory
+pub fn data_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("MUSH_DATA_DIR") {
         PathBuf::from(dir)
     } else if let Some(data) = std::env::var_os("XDG_DATA_HOME") {

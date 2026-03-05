@@ -3,7 +3,7 @@
 use color_eyre::eyre::{Result, eyre};
 
 use mush_ai::models;
-use mush_ai::types::*;
+use mush_ai::types::CacheRetention;
 use mush_session::SessionStore;
 
 use crate::config;
@@ -35,7 +35,7 @@ pub fn list_sessions() -> Result<()> {
 
     for meta in &sessions {
         let title = meta.title.as_deref().unwrap_or("(untitled)");
-        let age = format_age(meta.updated_at.as_ms());
+        let age = format_age(&meta.updated_at);
         println!(
             "  \x1b[2m{}\x1b[0m  {} \x1b[2m({}, {} msgs, {})\x1b[0m",
             &meta.id[..8],
@@ -291,17 +291,11 @@ pub fn logout(provider_id: Option<String>) -> Result<()> {
     Ok(())
 }
 
-fn format_age(timestamp_ms: u64) -> String {
-    let now = Timestamp::now().as_ms();
-    let elapsed = now.saturating_sub(timestamp_ms);
-    let secs = elapsed / 1000;
-    if secs < 60 {
+fn format_age(ts: &mush_ai::types::Timestamp) -> String {
+    let age = ts.age_display();
+    if age == "now" {
         "just now".into()
-    } else if secs < 3600 {
-        format!("{}m ago", secs / 60)
-    } else if secs < 86400 {
-        format!("{}h ago", secs / 3600)
     } else {
-        format!("{}d ago", secs / 86400)
+        format!("{age} ago")
     }
 }

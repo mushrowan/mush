@@ -9,6 +9,7 @@ use ratatui::widgets::{Paragraph, Widget};
 use mush_ai::types::ThinkingLevel;
 
 use crate::app::App;
+use crate::path_utils::truncate_path;
 
 /// format token count as human-readable (e.g. 45k, 200k, 1.2m)
 fn format_tokens(tokens: u64) -> String {
@@ -31,27 +32,6 @@ fn confirm_text(app: &App) -> Option<String> {
     } else {
         "confirm tool? (y/n)".into()
     })
-}
-
-/// truncate a path from the beginning, keeping the tail
-/// e.g. "~/dev/some/deep/nested/project" with max 20 => "…/deep/nested/project"
-fn truncate_path(path: &str, max_len: usize) -> String {
-    if path.chars().count() <= max_len {
-        return path.to_string();
-    }
-    // find a `/` near the truncation point to get a clean break
-    // paths are typically ASCII so byte arithmetic is safe, but use
-    // floor_char_boundary to avoid panics on unusual paths
-    let target = path.len().saturating_sub(max_len) + 1; // +1 for the `…`
-    let target = path.floor_char_boundary(target);
-    match path[target..].find('/') {
-        Some(pos) => format!("…{}", &path[target + pos..]),
-        None => {
-            let tail_start = path.len().saturating_sub(max_len.saturating_sub(1));
-            let tail_start = path.ceil_char_boundary(tail_start);
-            format!("…{}", &path[tail_start..])
-        }
-    }
 }
 
 /// build the left-side info spans

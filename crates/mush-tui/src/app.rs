@@ -70,6 +70,8 @@ pub enum ThinkingDisplay {
 pub enum AppMode {
     Normal,
     SessionPicker,
+    /// slash command completion menu visible above input
+    SlashComplete,
     /// waiting for user to confirm a tool call (y/n)
     ToolConfirm,
     /// scroll mode: j/k scroll, y copies message, esc exits
@@ -78,12 +80,24 @@ pub enum AppMode {
     Search,
 }
 
+/// session picker scope
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionScope {
+    /// sessions from current working directory only
+    ThisDir,
+    /// all sessions across all directories
+    AllDirs,
+}
+
 /// state for the session picker overlay
 #[derive(Debug, Clone)]
 pub struct SessionPickerState {
     pub sessions: Vec<SessionMeta>,
     pub selected: usize,
     pub filter: String,
+    pub scope: SessionScope,
+    /// current working directory for scope filtering
+    pub cwd: String,
 }
 
 /// a displayable message block in the conversation
@@ -198,6 +212,10 @@ pub struct App {
     pub mode: AppMode,
     /// session picker state (when mode == SessionPicker)
     pub session_picker: Option<SessionPickerState>,
+    /// slash command menu state (when mode == SlashComplete)
+    pub slash_menu: Option<SlashMenuState>,
+    /// registered slash commands with descriptions
+    pub slash_commands: Vec<SlashCommand>,
     /// available completions (slash commands, model ids, etc)
     pub completions: Vec<String>,
     /// current tab-completion state
@@ -232,6 +250,22 @@ pub struct ImageRenderArea {
     pub msg_idx: usize,
     pub tc_idx: usize,
     pub area: Rect,
+}
+
+/// a slash command with its description
+#[derive(Debug, Clone)]
+pub struct SlashCommand {
+    pub name: String,
+    pub description: String,
+}
+
+/// state for the slash command completion menu
+#[derive(Debug, Clone)]
+pub struct SlashMenuState {
+    /// filtered commands matching current input
+    pub matches: Vec<SlashCommand>,
+    /// which match is selected
+    pub selected: usize,
 }
 
 /// state for the conversation search popup
@@ -285,6 +319,8 @@ impl App {
             thinking_display: ThinkingDisplay::default(),
             mode: AppMode::Normal,
             session_picker: None,
+            slash_menu: None,
+            slash_commands: Vec::new(),
             completions: Vec::new(),
             tab_state: None,
             has_unread: false,
@@ -674,6 +710,57 @@ impl App {
         self.cursor = self.input.len();
     }
 
+    /// open the slash command completion menu, filtering by current input
+    pub fn open_slash_menu(&mut self) {
+        let prefix = self.input.as_str();
+        let matches: Vec<SlashCommand> = self
+            .slash_commands
+            .iter()
+            .filter(|cmd| {
+                let full = format!("/{}", cmd.name);
+                full.starts_with(prefix)
+            })
+            .cloned()
+            .collect();
+
+        if matches.is_empty() {
+            return;
+        }
+
+        self.slash_menu = Some(SlashMenuState {
+            matches,
+            selected: 0,
+        });
+        self.mode = AppMode::SlashComplete;
+    }
+
+    /// update the slash menu filter based on current input
+    pub fn update_slash_menu(&mut self) {
+        if let Some(ref mut menu) = self.slash_menu {
+            let prefix = self.input.as_str();
+            menu.matches = self
+                .slash_commands
+                .iter()
+                .filter(|cmd| {
+                    let full = format!("/{}", cmd.name);
+                    full.starts_with(prefix)
+                })
+                .cloned()
+                .collect();
+            menu.selected = menu.selected.min(menu.matches.len().saturating_sub(1));
+
+            if menu.matches.is_empty() {
+                self.close_slash_menu();
+            }
+        }
+    }
+
+    /// close the slash menu and return to normal mode
+    pub fn close_slash_menu(&mut self) {
+        self.slash_menu = None;
+        self.mode = AppMode::Normal;
+    }
+
     /// jump to bottom of conversation and clear unread indicator
     pub fn scroll_to_bottom(&mut self) {
         self.scroll_offset = 0;
@@ -852,11 +939,13 @@ impl App {
     }
 
     /// open the session picker with the given sessions
-    pub fn open_session_picker(&mut self, sessions: Vec<SessionMeta>) {
+    pub fn open_session_picker(&mut self, sessions: Vec<SessionMeta>, cwd: String) {
         self.session_picker = Some(SessionPickerState {
             sessions,
             selected: 0,
             filter: String::new(),
+            scope: SessionScope::ThisDir,
+            cwd,
         });
         self.mode = AppMode::SessionPicker;
     }
@@ -875,15 +964,24 @@ impl App {
     }
 }
 
-/// get sessions matching the current filter
+/// get sessions matching the current filter and scope
+#[must_use]
 pub fn filtered_sessions(picker: &SessionPickerState) -> Vec<&SessionMeta> {
-    if picker.filter.is_empty() {
-        picker.sessions.iter().collect()
-    } else {
-        let filter_lower = picker.filter.to_lowercase();
-        picker
+    let scope_filtered: Vec<&SessionMeta> = match picker.scope {
+        SessionScope::ThisDir => picker
             .sessions
             .iter()
+            .filter(|s| s.cwd == picker.cwd)
+            .collect(),
+        SessionScope::AllDirs => picker.sessions.iter().collect(),
+    };
+
+    if picker.filter.is_empty() {
+        scope_filtered
+    } else {
+        let filter_lower = picker.filter.to_lowercase();
+        scope_filtered
+            .into_iter()
             .filter(|s| {
                 s.title
                     .as_deref()
@@ -891,6 +989,7 @@ pub fn filtered_sessions(picker: &SessionPickerState) -> Vec<&SessionMeta> {
                     .to_lowercase()
                     .contains(&filter_lower)
                     || s.id.contains(&filter_lower)
+                    || s.cwd.to_lowercase().contains(&filter_lower)
             })
             .collect()
     }
@@ -1346,7 +1445,7 @@ mod tests {
             cwd: "/tmp".into(),
         }];
 
-        app.open_session_picker(sessions);
+        app.open_session_picker(sessions, "/tmp".into());
         assert_eq!(app.mode, AppMode::SessionPicker);
         assert!(app.session_picker.is_some());
 
@@ -1379,13 +1478,53 @@ mod tests {
         ];
 
         let mut app = App::new("test".into(), 200_000);
-        app.open_session_picker(sessions);
+        app.open_session_picker(sessions, "/tmp".into());
 
         let picker = app.session_picker.as_mut().unwrap();
         picker.filter = "rust".into();
         let filtered = filtered_sessions(picker);
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].title.as_deref(), Some("rust project"));
+    }
+
+    #[test]
+    fn session_picker_scope_filter() {
+        let sessions = vec![
+            SessionMeta {
+                id: mush_session::SessionId::from("a"),
+                title: Some("local session".into()),
+                model_id: "m".into(),
+                created_at: Timestamp::now(),
+                updated_at: Timestamp::now(),
+                message_count: 1,
+                cwd: "/home/user/project".into(),
+            },
+            SessionMeta {
+                id: mush_session::SessionId::from("b"),
+                title: Some("other session".into()),
+                model_id: "m".into(),
+                created_at: Timestamp::now(),
+                updated_at: Timestamp::now(),
+                message_count: 2,
+                cwd: "/home/user/other".into(),
+            },
+        ];
+
+        let mut app = App::new("test".into(), 200_000);
+        app.open_session_picker(sessions, "/home/user/project".into());
+
+        // this dir: only the matching session
+        let picker = app.session_picker.as_ref().unwrap();
+        assert_eq!(picker.scope, SessionScope::ThisDir);
+        let filtered = filtered_sessions(picker);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].title.as_deref(), Some("local session"));
+
+        // all dirs: both sessions
+        let picker = app.session_picker.as_mut().unwrap();
+        picker.scope = SessionScope::AllDirs;
+        let filtered = filtered_sessions(picker);
+        assert_eq!(filtered.len(), 2);
     }
 
     #[test]
