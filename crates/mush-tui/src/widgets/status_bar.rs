@@ -137,6 +137,22 @@ fn left_spans(app: &App) -> Vec<Span<'static>> {
         spans.push(Span::styled(format!(" | {status}"), dim));
     }
 
+    // scroll position indicator (only when scrolled away from bottom)
+    if app.scroll_offset > 0 {
+        let total = app.total_content_lines.get();
+        let visible = app.visible_area_height.get();
+        let max_scroll = total.saturating_sub(visible);
+        if max_scroll > 0 {
+            // scroll_offset is lines from bottom, convert to percentage from top
+            let from_top = max_scroll.saturating_sub(app.scroll_offset);
+            let pct = (from_top as f64 / max_scroll as f64 * 100.0) as u16;
+            spans.push(Span::styled(
+                format!(" | {pct}%"),
+                Style::default().fg(Color::Blue),
+            ));
+        }
+    }
+
     spans
 }
 
