@@ -92,6 +92,8 @@ struct RequestBody {
     stream: bool,
     store: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    instructions: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     max_output_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
@@ -135,7 +137,14 @@ fn build_request_body(
     options: &StreamOptions,
     is_codex: bool,
 ) -> RequestBody {
-    let input = convert_input_messages(model, system_prompt, messages);
+    // codex: system prompt goes in top-level `instructions`, not in input
+    let input_system_prompt = if is_codex { &None } else { system_prompt };
+    let input = convert_input_messages(model, input_system_prompt, messages);
+    let instructions = if is_codex {
+        system_prompt.clone()
+    } else {
+        None
+    };
 
     let converted_tools = if tools.is_empty() {
         None
@@ -202,6 +211,7 @@ fn build_request_body(
         input,
         stream: true,
         store: false,
+        instructions,
         max_output_tokens: options.max_tokens.or(Some(model.max_output_tokens)),
         temperature: if reasoning.is_none() {
             options.temperature.map(|t| t.value())
@@ -1064,5 +1074,69 @@ mod tests {
         assert_eq!(map_response_status("completed"), StopReason::Stop);
         assert_eq!(map_response_status("incomplete"), StopReason::Length);
         assert_eq!(map_response_status("failed"), StopReason::Error);
+    }
+
+    fn codex_model() -> Model {
+        Model {
+            id: "gpt-5.2-codex".into(),
+            name: "GPT-5.2 Codex".into(),
+            api: Api::OpenaiResponses,
+            provider: Provider::Custom("openai-codex".into()),
+            base_url: "https://chatgpt.com/backend-api".into(),
+            reasoning: true,
+            input: vec![InputModality::Text],
+            cost: ModelCost {
+                input: 0.0,
+                output: 0.0,
+                cache_read: 0.0,
+                cache_write: 0.0,
+            },
+            context_window: 200_000,
+            max_output_tokens: 32768,
+        }
+    }
+
+    #[test]
+    fn codex_uses_instructions_field() {
+        let model = codex_model();
+        let prompt = Some("you are a coding assistant".into());
+        let options = StreamOptions::default();
+
+        let body = build_request_body(&model, &prompt, &[], &[], &options, true);
+        assert_eq!(
+            body.instructions.as_deref(),
+            Some("you are a coding assistant")
+        );
+        // system prompt should not appear in input messages
+        assert!(body.input.is_empty());
+    }
+
+    #[test]
+    fn non_codex_omits_instructions_field() {
+        let model = Model {
+            id: "gpt-5.2".into(),
+            name: "GPT-5.2".into(),
+            api: Api::OpenaiResponses,
+            provider: Provider::Custom("openai".into()),
+            base_url: "https://api.openai.com/v1".into(),
+            reasoning: true,
+            input: vec![InputModality::Text],
+            cost: ModelCost {
+                input: 0.0,
+                output: 0.0,
+                cache_read: 0.0,
+                cache_write: 0.0,
+            },
+            context_window: 200_000,
+            max_output_tokens: 32768,
+        };
+        let prompt = Some("you are a coding assistant".into());
+        let options = StreamOptions::default();
+
+        let body = build_request_body(&model, &prompt, &[], &[], &options, false);
+        assert!(body.instructions.is_none());
+        // system prompt should be in input as a developer message
+        assert_eq!(body.input.len(), 1);
+        assert_eq!(body.input[0]["role"], "developer");
     }
 }
