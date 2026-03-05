@@ -77,7 +77,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     if app.is_streaming {
         match (key.modifiers, key.code) {
             // multi-line
-            (KeyModifiers::ALT | KeyModifiers::SHIFT, KeyCode::Enter) => {
+            (KeyModifiers::ALT | KeyModifiers::SHIFT, KeyCode::Enter)
+            | (KeyModifiers::CONTROL, KeyCode::Char('j')) => {
                 app.input_char('\n');
             }
             // submit to steering queue (slash commands blocked during streaming)
@@ -164,8 +165,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             return None;
         }
 
-        // multi-line: alt+enter or shift+enter inserts newline
-        (KeyModifiers::ALT | KeyModifiers::SHIFT, KeyCode::Enter) => {
+        // multi-line: alt+enter, shift+enter, or ctrl+j inserts newline
+        (KeyModifiers::ALT | KeyModifiers::SHIFT, KeyCode::Enter)
+        | (KeyModifiers::CONTROL, KeyCode::Char('j')) => {
             app.input_char('\n');
             return None;
         }
@@ -682,6 +684,23 @@ mod tests {
             KeyEvent {
                 code: KeyCode::Enter,
                 modifiers: KeyModifiers::ALT,
+                kind: KeyEventKind::Press,
+                state: KeyEventState::NONE,
+            },
+        );
+        assert!(event.is_none());
+        assert_eq!(app.input, "a\n");
+    }
+
+    #[test]
+    fn ctrl_j_inserts_newline() {
+        let mut app = App::new("test".into(), 200_000);
+        app.input_char('a');
+        let event = handle_key(
+            &mut app,
+            KeyEvent {
+                code: KeyCode::Char('j'),
+                modifiers: KeyModifiers::CONTROL,
                 kind: KeyEventKind::Press,
                 state: KeyEventState::NONE,
             },
