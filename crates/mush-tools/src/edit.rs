@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 
 use mush_agent::tool::{AgentTool, ToolResult};
 
+use crate::util::resolve_path;
+
 pub struct EditTool {
     cwd: PathBuf,
 }
@@ -65,11 +67,7 @@ impl AgentTool for EditTool {
                 return ToolResult::error("missing required parameter: newText");
             };
 
-            let path = if Path::new(path_str).is_absolute() {
-                PathBuf::from(path_str)
-            } else {
-                self.cwd.join(path_str)
-            };
+            let path = resolve_path(&self.cwd, path_str);
             let old_text = old_text.to_string();
             let new_text = new_text.to_string();
 

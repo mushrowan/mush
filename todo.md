@@ -87,3 +87,9 @@
 
 #### module extraction
 - [x] 34. `event_handler.rs` — agent event handling, auth resolution, hint injection, auto-compaction. runner.rs 1019→779 lines
+
+### round 6
+
+#### terminal corruption fix
+- [x] 35. replace `EnableMouseCapture` with selective `?1000h`+`?1006h` — avoids `?1003h` any-event tracking flood that causes SGR escape fragments to leak as garbled text
+- [x] 36. bash child process isolation — `process_group(0)` prevents children from injecting bytes into the controlling terminal

@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 
 use mush_agent::tool::{AgentTool, ToolResult};
 
+use crate::util::resolve_path;
+
 const MAX_LINES: usize = 2000;
 const MAX_BYTES: usize = 50 * 1024;
 
@@ -70,15 +72,6 @@ impl AgentTool for ReadTool {
                 .await
                 .unwrap_or_else(|e| ToolResult::error(format!("task join error: {e}")))
         })
-    }
-}
-
-fn resolve_path(cwd: &Path, path_str: &str) -> PathBuf {
-    let p = Path::new(path_str);
-    if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        cwd.join(p)
     }
 }
 
@@ -179,6 +172,7 @@ fn read_image(path: &Path) -> ToolResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::extract_text;
     use std::fs;
 
     fn temp_dir() -> tempfile::TempDir {
@@ -244,38 +238,11 @@ mod tests {
     }
 
     #[test]
-    fn resolve_relative_path() {
-        let cwd = PathBuf::from("/home/user/project");
-        let resolved = resolve_path(&cwd, "src/main.rs");
-        assert_eq!(resolved, PathBuf::from("/home/user/project/src/main.rs"));
-    }
-
-    #[test]
-    fn resolve_absolute_path() {
-        let cwd = PathBuf::from("/home/user/project");
-        let resolved = resolve_path(&cwd, "/etc/config");
-        assert_eq!(resolved, PathBuf::from("/etc/config"));
-    }
-
-    #[test]
     fn is_image_detection() {
         assert!(is_image(Path::new("photo.jpg")));
         assert!(is_image(Path::new("photo.PNG")));
         assert!(is_image(Path::new("photo.webp")));
         assert!(!is_image(Path::new("code.rs")));
         assert!(!is_image(Path::new("data.json")));
-    }
-
-    fn extract_text(result: &ToolResult) -> String {
-        use mush_ai::types::ToolResultContentPart;
-        result
-            .content
-            .iter()
-            .filter_map(|p| match p {
-                ToolResultContentPart::Text(t) => Some(t.text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
     }
 }

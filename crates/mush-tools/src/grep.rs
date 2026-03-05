@@ -5,7 +5,7 @@ use std::process::Stdio;
 
 use mush_agent::tool::{AgentTool, ToolResult};
 
-const MAX_RESULTS: usize = 200;
+use crate::util::{resolve_path, truncate_lines};
 
 pub struct GrepTool {
     cwd: PathBuf,
@@ -62,14 +62,7 @@ impl AgentTool for GrepTool {
 
             let search_path = args["path"]
                 .as_str()
-                .map(|p| {
-                    let path = std::path::Path::new(p);
-                    if path.is_absolute() {
-                        path.to_path_buf()
-                    } else {
-                        self.cwd.join(p)
-                    }
-                })
+                .map(|p| resolve_path(&self.cwd, p))
                 .unwrap_or_else(|| self.cwd.clone());
 
             let include = args["include"].as_str();
@@ -80,7 +73,7 @@ impl AgentTool for GrepTool {
 }
 
 async fn run_rg(
-    cwd: &PathBuf,
+    cwd: &std::path::Path,
     pattern: &str,
     search_path: &std::path::Path,
     include: Option<&str>,
@@ -116,22 +109,14 @@ async fn run_rg(
         return ToolResult::text("no matches found");
     }
 
-    // truncate to MAX_RESULTS lines
     let lines: Vec<&str> = stdout.lines().collect();
-    if lines.len() > MAX_RESULTS {
-        let truncated: String = lines[..MAX_RESULTS].join("\n");
-        ToolResult::text(format!(
-            "{truncated}\n\n[{} more matches. Narrow your search pattern.]",
-            lines.len() - MAX_RESULTS
-        ))
-    } else {
-        ToolResult::text(format!("{} matches\n\n{stdout}", lines.len()))
-    }
+    ToolResult::text(truncate_lines(&lines, "matches"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::extract_text;
     use std::fs;
 
     #[tokio::test]
@@ -143,7 +128,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = run_rg(&dir.path().to_path_buf(), "println", dir.path(), None).await;
+        let result = run_rg(dir.path(), "println", dir.path(), None).await;
 
         assert!(result.outcome.is_success());
         let text = extract_text(&result);
@@ -156,7 +141,7 @@ mod tests {
         fs::write(dir.path().join("test.txt"), "hello world").unwrap();
 
         let result = run_rg(
-            &dir.path().to_path_buf(),
+            dir.path(),
             "nonexistent_pattern_xyz",
             dir.path(),
             None,
@@ -173,22 +158,10 @@ mod tests {
         fs::write(dir.path().join("code.rs"), "fn hello()").unwrap();
         fs::write(dir.path().join("data.txt"), "fn hello()").unwrap();
 
-        let result = run_rg(&dir.path().to_path_buf(), "hello", dir.path(), Some("*.rs")).await;
+        let result = run_rg(dir.path(), "hello", dir.path(), Some("*.rs")).await;
 
         let text = extract_text(&result);
         assert!(text.contains("code.rs"));
         assert!(!text.contains("data.txt"));
-    }
-
-    fn extract_text(result: &ToolResult) -> String {
-        result
-            .content
-            .iter()
-            .filter_map(|p| match p {
-                mush_ai::types::ToolResultContentPart::Text(t) => Some(t.text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
     }
 }

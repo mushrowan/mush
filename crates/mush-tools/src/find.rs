@@ -5,7 +5,7 @@ use std::process::Stdio;
 
 use mush_agent::tool::{AgentTool, ToolResult};
 
-const MAX_RESULTS: usize = 200;
+use crate::util::{resolve_path, truncate_lines};
 
 pub struct FindTool {
     cwd: PathBuf,
@@ -63,14 +63,7 @@ impl AgentTool for FindTool {
 
             let search_path = args["path"]
                 .as_str()
-                .map(|p| {
-                    let path = std::path::Path::new(p);
-                    if path.is_absolute() {
-                        path.to_path_buf()
-                    } else {
-                        self.cwd.join(p)
-                    }
-                })
+                .map(|p| resolve_path(&self.cwd, p))
                 .unwrap_or_else(|| self.cwd.clone());
 
             let type_filter = args["type"].as_str();
@@ -81,7 +74,7 @@ impl AgentTool for FindTool {
 }
 
 async fn run_fd(
-    cwd: &PathBuf,
+    cwd: &std::path::Path,
     pattern: &str,
     search_path: &std::path::Path,
     type_filter: Option<&str>,
@@ -114,20 +107,13 @@ async fn run_fd(
     }
 
     let lines: Vec<&str> = stdout.lines().collect();
-    if lines.len() > MAX_RESULTS {
-        let truncated: String = lines[..MAX_RESULTS].join("\n");
-        ToolResult::text(format!(
-            "{truncated}\n\n[{} more results. Narrow your search pattern.]",
-            lines.len() - MAX_RESULTS
-        ))
-    } else {
-        ToolResult::text(format!("{} files\n\n{stdout}", lines.len()))
-    }
+    ToolResult::text(truncate_lines(&lines, "files"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::extract_text;
     use std::fs;
 
     #[tokio::test]
@@ -138,7 +124,7 @@ mod tests {
         fs::write(dir.path().join("readme.md"), "").unwrap();
 
         let result = run_fd(
-            &dir.path().to_path_buf(),
+            dir.path(),
             r"\.rs$",
             dir.path(),
             Some("file"),
@@ -157,7 +143,7 @@ mod tests {
         fs::write(dir.path().join("test.txt"), "").unwrap();
 
         let result = run_fd(
-            &dir.path().to_path_buf(),
+            dir.path(),
             "nonexistent_xyz",
             dir.path(),
             None,
@@ -166,17 +152,5 @@ mod tests {
 
         let text = extract_text(&result);
         assert!(text.contains("no files found"));
-    }
-
-    fn extract_text(result: &ToolResult) -> String {
-        result
-            .content
-            .iter()
-            .filter_map(|p| match p {
-                mush_ai::types::ToolResultContentPart::Text(t) => Some(t.text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
     }
 }
