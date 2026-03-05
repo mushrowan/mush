@@ -100,6 +100,16 @@ pub async fn run_tui(
     tools: &[Box<dyn AgentTool>],
     registry: &ApiRegistry,
 ) -> io::Result<()> {
+    // reset terminal state in case prior output (e.g. model download progress
+    // bars from fastembed/indicatif) left it dirty
+    let _ = io::stdout().execute(crossterm::cursor::Show);
+    let _ = io::stdout().execute(crossterm::style::ResetColor);
+    {
+        use std::io::Write;
+        let _ = io::stdout().flush();
+        let _ = io::stderr().flush();
+    }
+
     // detect image protocol before entering alternate screen to avoid probe artifacts
     let image_picker = ratatui_image::picker::Picker::from_query_stdio().ok();
 

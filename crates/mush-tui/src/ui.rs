@@ -26,7 +26,7 @@ impl<'a> Ui<'a> {
         let input_h = input_height(
             &self.app.input,
             area.width,
-            self.app.pending_images.len(),
+            &self.app.pending_images,
         );
         let tools_h = tool_panels_height(&self.app.active_tools, area.width);
         let status_h = status_bar_height(self.app, area.width);
@@ -44,21 +44,22 @@ pub struct LayoutRegions {
 }
 
 /// compute wrapped line count for input text, accounting for newlines and images
-pub fn input_height(input: &str, area_width: u16, image_count: usize) -> u16 {
+pub fn input_height(input: &str, area_width: u16, images: &[crate::app::PendingImage]) -> u16 {
     // inner width of the bordered block (left + right border = 2 columns)
     let content_width = area_width.saturating_sub(2) as usize;
     if content_width == 0 {
         return 3;
     }
+    // expand image placeholders so wrapping accounts for token width
+    let expanded =
+        crate::widgets::input_box::expand_input(input, 0, images);
     // use the same word-wrap algorithm as the input box renderer
     let mut total_lines: usize = 0;
-    for (i, line) in input.split('\n').enumerate() {
+    for (i, line) in expanded.text.split('\n').enumerate() {
         let indent = if i == 0 { 2 } else { 0 }; // "> " prompt
         let segments = crate::widgets::input_box::word_wrap_segments(line, content_width, indent);
         total_lines += segments.len();
     }
-    // 1 line per image attachment label
-    total_lines += image_count;
     // +2 for borders, cap at 12 lines so it doesn't eat the whole screen
     (total_lines as u16 + 2).min(12)
 }
@@ -106,7 +107,7 @@ impl Widget for Ui<'_> {
         let input_h = input_height(
             &self.app.input,
             area.width,
-            self.app.pending_images.len(),
+            &self.app.pending_images,
         );
         let tools_h = tool_panels_height(&self.app.active_tools, area.width);
         let status_h = status_bar_height(self.app, area.width);
@@ -135,37 +136,44 @@ mod tests {
     #[test]
     fn input_height_short_text() {
         // "hi" in an 80-wide box: 1 line + 2 borders = 3
-        assert_eq!(input_height("hi", 80, 0), 3);
+        assert_eq!(input_height("hi", 80, &[]), 3);
     }
 
     #[test]
     fn input_height_wrapping() {
         // 100 chars in a 20-wide box: content_width=18, effective=102, ceil(102/18)+1=6+2=8
         let text = "a".repeat(100);
-        assert_eq!(input_height(&text, 20, 0), 8);
+        assert_eq!(input_height(&text, 20, &[]), 8);
     }
 
     #[test]
     fn input_height_capped() {
         // 1000 chars in a 20-wide box would be 65 lines, but capped at 12
         let text = "a".repeat(1000);
-        assert_eq!(input_height(&text, 20, 0), 12);
+        assert_eq!(input_height(&text, 20, &[]), 12);
     }
 
     #[test]
     fn input_height_multiline() {
         // "hello\nworld" in a 40-wide box: 2 lines + 2 borders = 4
-        assert_eq!(input_height("hello\nworld", 40, 0), 4);
+        assert_eq!(input_height("hello\nworld", 40, &[]), 4);
         // three newlines = 4 lines + 2 borders = 6
-        assert_eq!(input_height("a\nb\nc\nd", 40, 0), 6);
+        assert_eq!(input_height("a\nb\nc\nd", 40, &[]), 6);
     }
 
     #[test]
     fn input_height_with_images() {
-        // 1 image = 1 extra line: "hi" = 1 line + 1 image + 2 borders = 4
-        assert_eq!(input_height("hi", 80, 1), 4);
-        // 2 images = 2 extra lines
-        assert_eq!(input_height("hi", 80, 2), 5);
+        use crate::app::{IMAGE_PLACEHOLDER, PendingImage};
+        use mush_ai::types::ImageMimeType;
+        let img = PendingImage {
+            data: vec![],
+            mime_type: ImageMimeType::Png,
+            dimensions: Some((100, 200)),
+        };
+        // image token is inline, doesn't add a whole line
+        let input = format!("hi{IMAGE_PLACEHOLDER}");
+        // "hi[📷 100x200]" = ~16 chars, fits in 80-wide box = 1 line + 2 borders = 3
+        assert_eq!(input_height(&input, 80, &[img]), 3);
     }
 
     #[test]

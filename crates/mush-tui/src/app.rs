@@ -21,6 +21,10 @@ pub struct PendingImage {
     pub dimensions: Option<(u32, u32)>,
 }
 
+/// object replacement character, marks image positions in input text.
+/// each occurrence maps to the Nth entry in pending_images (by order)
+pub const IMAGE_PLACEHOLDER: char = '\u{FFFC}';
+
 /// events that flow between the TUI and the agent
 #[derive(Debug, Clone)]
 pub enum AppEvent {
@@ -524,6 +528,7 @@ impl App {
                 .next_back()
                 .map(|(i, _)| i)
                 .unwrap_or(0);
+            self.remove_images_in_range(prev, self.cursor);
             self.input.drain(prev..self.cursor);
             self.cursor = prev;
         }
@@ -537,6 +542,7 @@ impl App {
                 .nth(1)
                 .map(|(i, _)| self.cursor + i)
                 .unwrap_or(self.input.len());
+            self.remove_images_in_range(self.cursor, next);
             self.input.drain(self.cursor..next);
         }
     }
@@ -586,6 +592,7 @@ impl App {
     /// delete word before cursor
     pub fn delete_word_backward(&mut self) {
         let boundary = word_boundary_left(&self.input, self.cursor);
+        self.remove_images_in_range(boundary, self.cursor);
         self.input.drain(boundary..self.cursor);
         self.cursor = boundary;
     }
@@ -593,16 +600,19 @@ impl App {
     /// delete word after cursor
     pub fn delete_word_forward(&mut self) {
         let boundary = word_boundary_right(&self.input, self.cursor);
+        self.remove_images_in_range(self.cursor, boundary);
         self.input.drain(self.cursor..boundary);
     }
 
     /// delete from cursor to end of line
     pub fn delete_to_end(&mut self) {
+        self.remove_images_in_range(self.cursor, self.input.len());
         self.input.truncate(self.cursor);
     }
 
     /// delete from cursor to start of line
     pub fn delete_to_start(&mut self) {
+        self.remove_images_in_range(0, self.cursor);
         self.input.drain(..self.cursor);
         self.cursor = 0;
     }
@@ -720,6 +730,31 @@ impl App {
         self.total_cache_read_tokens = 0;
         self.total_cache_write_tokens = 0;
         self.context_tokens = 0;
+        self.pending_images.clear();
+    }
+
+    /// remove pending images whose placeholders fall within input[start..end]
+    fn remove_images_in_range(&mut self, start: usize, end: usize) {
+        let range = &self.input[start..end];
+        if !range.contains(IMAGE_PLACEHOLDER) {
+            return;
+        }
+        // image index = number of placeholders before this one
+        let prior = self.input[..start]
+            .chars()
+            .filter(|c| *c == IMAGE_PLACEHOLDER)
+            .count();
+        // count how many placeholders are in the range, remove in reverse
+        let count = range
+            .chars()
+            .filter(|c| *c == IMAGE_PLACEHOLDER)
+            .count();
+        for i in (0..count).rev() {
+            let idx = prior + i;
+            if idx < self.pending_images.len() {
+                self.pending_images.remove(idx);
+            }
+        }
     }
 
     /// push a system message to the display
@@ -761,13 +796,15 @@ impl App {
         };
     }
 
-    /// take the input text and reset
+    /// take the input text and reset (strips image placeholders)
     pub fn take_input(&mut self) -> String {
         self.cursor = 0;
-        std::mem::take(&mut self.input)
+        let input = std::mem::take(&mut self.input);
+        input.replace(IMAGE_PLACEHOLDER, "")
     }
 
-    /// add a clipboard image to pending attachments
+    /// add a clipboard image to pending attachments, inserting a
+    /// placeholder at the cursor so it appears inline in the input
     pub fn add_image(&mut self, image: ClipboardImage) {
         let dimensions = image::load_from_memory(&image.bytes)
             .ok()
@@ -777,6 +814,8 @@ impl App {
             mime_type: image.mime_type,
             dimensions,
         });
+        self.input.insert(self.cursor, IMAGE_PLACEHOLDER);
+        self.cursor += IMAGE_PLACEHOLDER.len_utf8();
     }
 
     /// take pending images (clearing them from the app)
@@ -784,9 +823,17 @@ impl App {
         std::mem::take(&mut self.pending_images)
     }
 
-    /// remove the last pending image
+    /// remove the last pending image (and its placeholder in the input)
     pub fn remove_last_image(&mut self) {
-        self.pending_images.pop();
+        if self.pending_images.pop().is_some() {
+            if let Some(pos) = self.input.rfind(IMAGE_PLACEHOLDER) {
+                let end = pos + IMAGE_PLACEHOLDER.len_utf8();
+                self.input.drain(pos..end);
+                if self.cursor > pos {
+                    self.cursor = self.cursor.saturating_sub(IMAGE_PLACEHOLDER.len_utf8());
+                }
+            }
+        }
     }
 
     /// open the session picker with the given sessions
