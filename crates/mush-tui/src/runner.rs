@@ -122,6 +122,14 @@ pub async fn run_tui(
     ));
     let _ = io::stdout().execute(SetCursorStyle::BlinkingBar);
 
+    // drain any stale input from terminal probes (e.g. device attribute
+    // responses from the image picker that arrived after the probe finished)
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    while event::poll(std::time::Duration::ZERO)? {
+        let stale = event::read()?;
+        tracing::debug!(?stale, "drained stale event from terminal probe");
+    }
+
     // install panic hook that restores the terminal so a crash doesn't leave
     // the user's shell in raw mode / alternate screen
     let prev_hook = std::panic::take_hook();
@@ -524,7 +532,12 @@ pub async fn run_tui(
                                     }
                                 }
                                 Event::Mouse(mouse) => handle_mouse(&mut app, mouse),
-                                _ => {}
+                                Event::Key(key) => {
+                                    tracing::trace!(code = ?key.code, kind = ?key.kind, "dropped non-press key event (streaming)");
+                                }
+                                event => {
+                                    tracing::trace!(?event, "dropped non-key event (streaming)");
+                                }
                             }
                         }
                     }
@@ -634,7 +647,12 @@ pub async fn run_tui(
                         }
                     }
                     Event::Mouse(mouse) => handle_mouse(&mut app, mouse),
-                    _ => {}
+                    Event::Key(key) => {
+                        tracing::trace!(code = ?key.code, kind = ?key.kind, "dropped non-press key event (idle)");
+                    }
+                    event => {
+                        tracing::trace!(?event, "dropped non-key event (idle)");
+                    }
                 }
 
                 if !event::poll(std::time::Duration::ZERO)? {

@@ -173,7 +173,7 @@ mod tests {
         assert_eq!(provider.id(), "anthropic");
         assert!(provider.name().contains("Anthropic"));
 
-        let (prompt, pkce) = provider.begin_login();
+        let (prompt, pkce) = provider.begin_login().expect("begin_login should succeed");
         assert!(prompt.url.contains("claude.ai"));
         assert!(!pkce.verifier.is_empty());
     }
