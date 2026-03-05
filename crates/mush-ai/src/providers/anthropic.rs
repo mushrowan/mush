@@ -774,8 +774,6 @@ fn parse_sse_stream(
     is_oauth: bool,
     tools: Vec<ToolDefinition>,
 ) -> EventStream {
-    let byte_stream = response.bytes_stream();
-
     let event_stream = async_stream::stream! {
         let mut output = AssistantMessage {
             content: vec![],
@@ -789,68 +787,38 @@ fn parse_sse_stream(
         };
 
         let mut blocks: Vec<BlockState> = Vec::new();
-        let mut buf = String::new();
+        let mut parser = super::sse::SseParser::new();
 
-        // collect the full response body as SSE lines
         use futures::TryStreamExt;
-        let mut byte_stream = byte_stream;
-        let mut chunk_buf = Vec::new();
+        let mut byte_stream = response.bytes_stream();
 
         loop {
             match byte_stream.try_next().await {
                 Ok(Some(chunk)) => {
-                    chunk_buf.extend_from_slice(&chunk);
-
-                    // process complete lines
-                    while let Some(newline_pos) = chunk_buf.iter().position(|&b| b == b'\n') {
-                        let line = String::from_utf8_lossy(&chunk_buf[..newline_pos]).to_string();
-                        chunk_buf.drain(..=newline_pos);
-
-                        let line = line.trim_end_matches('\r');
-
-                        if line.is_empty() {
-                            // empty line = end of SSE event, parse the buffered data
-                            if !buf.is_empty() {
-                                if let Some(data) = buf.strip_prefix("data: ") {
-                                    match serde_json::from_str::<SseEvent>(data) {
-                                        Ok(event) => {
-                                            for stream_event in process_sse_event(event, &mut output, &mut blocks, is_oauth, &tools) {
-                                                yield stream_event;
-                                            }
-                                        }
-                                        Err(_) => {
-                                            // skip unparseable events (eg [DONE])
-                                        }
-                                    }
+                    for raw in parser.push(&chunk) {
+                        match serde_json::from_str::<SseEvent>(&raw.data) {
+                            Ok(event) => {
+                                for stream_event in process_sse_event(event, &mut output, &mut blocks, is_oauth, &tools) {
+                                    yield stream_event;
                                 }
-                                buf.clear();
                             }
-                            continue;
+                            Err(_) => {
+                                // skip unparseable events (eg [DONE])
+                            }
                         }
-
-                        if line.starts_with("event:") {
-                            // we only care about the data lines
-                            continue;
-                        }
-
-                        if !buf.is_empty() {
-                            buf.push('\n');
-                        }
-                        buf.push_str(line);
                     }
                 }
                 Ok(None) => break,
                 Err(e) => {
-                    // log whatever context we have about the failure
-                    let partial_buf = if chunk_buf.is_empty() {
+                    let buffered = parser.buffered_bytes();
+                    let partial_buf = if buffered.is_empty() {
                         "(empty)".to_string()
                     } else {
                         let preview = String::from_utf8_lossy(
-                            &chunk_buf[..chunk_buf.len().min(512)]
+                            &buffered[..buffered.len().min(512)]
                         );
-                        format!("({} bytes) {preview}", chunk_buf.len())
+                        format!("({} bytes) {preview}", buffered.len())
                     };
-                    // walk the error source chain for deeper diagnostics
                     let mut sources = String::new();
                     let mut source = std::error::Error::source(&e);
                     while let Some(s) = source {
@@ -861,7 +829,6 @@ fn parse_sse_stream(
                         error = %e,
                         error_chain = %sources,
                         buffered_data = %partial_buf,
-                        sse_buf = %buf,
                         "SSE stream read error"
                     );
                     output.stop_reason = StopReason::Error;

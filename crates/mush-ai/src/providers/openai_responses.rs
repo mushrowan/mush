@@ -517,9 +517,7 @@ fn parse_sse_stream(
         };
 
         let mut active: HashMap<u64, ActiveBlock> = HashMap::new();
-        let mut chunk_buf = Vec::new();
-        let mut line_buf = String::new();
-        let mut event_name: Option<String> = None;
+        let mut parser = super::sse::SseParser::new();
 
         use futures::TryStreamExt;
         let mut byte_stream = response.bytes_stream();
@@ -529,48 +527,24 @@ fn parse_sse_stream(
         loop {
             match byte_stream.try_next().await {
                 Ok(Some(chunk)) => {
-                    chunk_buf.extend_from_slice(&chunk);
-
-                    while let Some(newline_pos) = chunk_buf.iter().position(|&b| b == b'\n') {
-                        let line = String::from_utf8_lossy(&chunk_buf[..newline_pos]).to_string();
-                        chunk_buf.drain(..=newline_pos);
-                        let line = line.trim_end_matches('\r');
-
-                        if line.is_empty() {
-                            if !line_buf.is_empty() {
-                                let data = line_buf.trim();
-                                if data != "[DONE]"
-                                    && let Ok(json) = serde_json::from_str::<serde_json::Value>(data)
-                                {
-                                    for event in process_sse_event(
-                                        event_name.as_deref(),
-                                        json,
-                                        &mut output,
-                                        &mut active,
-                                    ) {
-                                        let is_error = matches!(event, StreamEvent::Error { .. });
-                                        yield event;
-                                        if is_error {
-                                            return;
-                                        }
-                                    }
+                    for raw in parser.push(&chunk) {
+                        let data = raw.data.trim();
+                        if data == "[DONE]" {
+                            continue;
+                        }
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                            for event in process_sse_event(
+                                raw.event.as_deref(),
+                                json,
+                                &mut output,
+                                &mut active,
+                            ) {
+                                let is_error = matches!(event, StreamEvent::Error { .. });
+                                yield event;
+                                if is_error {
+                                    return;
                                 }
                             }
-                            line_buf.clear();
-                            event_name = None;
-                            continue;
-                        }
-
-                        if let Some(rest) = line.strip_prefix("event: ") {
-                            event_name = Some(rest.to_string());
-                            continue;
-                        }
-
-                        if let Some(rest) = line.strip_prefix("data: ") {
-                            if !line_buf.is_empty() {
-                                line_buf.push('\n');
-                            }
-                            line_buf.push_str(rest);
                         }
                     }
                 }

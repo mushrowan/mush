@@ -369,8 +369,7 @@ fn parse_sse_stream(
         };
 
         let mut current: Option<CurrentBlock> = None;
-        let mut chunk_buf = Vec::new();
-        let mut line_buf = String::new();
+        let mut parser = super::sse::SseParser::new();
 
         use futures::TryStreamExt;
         let mut byte_stream = response.bytes_stream();
@@ -380,40 +379,19 @@ fn parse_sse_stream(
         loop {
             match byte_stream.try_next().await {
                 Ok(Some(chunk)) => {
-                    chunk_buf.extend_from_slice(&chunk);
-
-                    while let Some(newline_pos) = chunk_buf.iter().position(|&b| b == b'\n') {
-                        let line = String::from_utf8_lossy(&chunk_buf[..newline_pos]).to_string();
-                        chunk_buf.drain(..=newline_pos);
-                        let line = line.trim_end_matches('\r');
-
-                        if line.is_empty() {
-                            if !line_buf.is_empty() {
-                                if let Some(data) = line_buf.strip_prefix("data: ") {
-                                    if data.trim() == "[DONE]" {
-                                        line_buf.clear();
-                                        continue;
-                                    }
-                                    if let Ok(chunk) = serde_json::from_str::<ChunkResponse>(data) {
-                                        for event in process_chunk(chunk, &mut output, &mut current) {
-                                            yield event;
-                                        }
-                                    }
-                                }
-                                line_buf.clear();
-                            }
+                    for raw in parser.push(&chunk) {
+                        if raw.data.trim() == "[DONE]" {
                             continue;
                         }
-
-                        if !line_buf.is_empty() {
-                            line_buf.push('\n');
+                        if let Ok(chunk) = serde_json::from_str::<ChunkResponse>(&raw.data) {
+                            for event in process_chunk(chunk, &mut output, &mut current) {
+                                yield event;
+                            }
                         }
-                        line_buf.push_str(line);
                     }
                 }
                 Ok(None) => break,
                 Err(e) => {
-                    // finish any open block before erroring
                     finish_block(&mut current, &mut output);
                     output.stop_reason = StopReason::Error;
                     output.error_message = Some(e.to_string());
