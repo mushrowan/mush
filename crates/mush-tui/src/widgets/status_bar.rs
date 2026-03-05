@@ -21,34 +21,36 @@ fn format_tokens(tokens: u64) -> String {
     }
 }
 
-/// get the hint text for the current app mode
-fn hint_text(app: &App) -> String {
-    if app.mode == crate::app::AppMode::Scroll {
-        "j/k scroll | g/G top/bottom | y copy | esc exit".into()
-    } else if app.mode == crate::app::AppMode::ToolConfirm {
-        if let Some(ref prompt) = app.confirm_prompt {
-            format!("run {prompt}? (y/n)")
-        } else {
-            "confirm tool? (y/n)".into()
-        }
-    } else if app.is_streaming {
-        "esc abort | ctrl+c quit".into()
-    } else {
-        "enter send | ctrl+s scroll | ctrl+t thinking | ctrl+c quit".into()
+/// get the confirm prompt text (only shown during tool confirmation)
+fn confirm_text(app: &App) -> Option<String> {
+    if app.mode != crate::app::AppMode::ToolConfirm {
+        return None;
     }
+    Some(if let Some(ref prompt) = app.confirm_prompt {
+        format!("run {prompt}? (y/n)")
+    } else {
+        "confirm tool? (y/n)".into()
+    })
 }
 
 /// truncate a path from the beginning, keeping the tail
 /// e.g. "~/dev/some/deep/nested/project" with max 20 => "…/deep/nested/project"
 fn truncate_path(path: &str, max_len: usize) -> String {
-    if path.len() <= max_len {
+    if path.chars().count() <= max_len {
         return path.to_string();
     }
     // find a `/` near the truncation point to get a clean break
-    let target = path.len() - max_len + 1; // +1 for the `…`
+    // paths are typically ASCII so byte arithmetic is safe, but use
+    // floor_char_boundary to avoid panics on unusual paths
+    let target = path.len().saturating_sub(max_len) + 1; // +1 for the `…`
+    let target = path.floor_char_boundary(target);
     match path[target..].find('/') {
         Some(pos) => format!("…{}", &path[target + pos..]),
-        None => format!("…{}", &path[path.len().saturating_sub(max_len - 1)..]),
+        None => {
+            let tail_start = path.len().saturating_sub(max_len.saturating_sub(1));
+            let tail_start = path.ceil_char_boundary(tail_start);
+            format!("…{}", &path[tail_start..])
+        }
     }
 }
 
@@ -69,11 +71,6 @@ fn left_spans(app: &App) -> Vec<Span<'static>> {
 
     let mut spans = vec![
         Span::styled(" ", dim),
-        Span::styled(
-            truncate_path(&app.cwd, 30),
-            Style::default().fg(Color::DarkGray),
-        ),
-        Span::styled(" • ", dim),
         Span::styled(app.model_id.to_string(), Style::default().fg(Color::Cyan)),
         Span::styled(" • ", dim),
         Span::styled(
@@ -159,9 +156,13 @@ fn left_spans(app: &App) -> Vec<Span<'static>> {
 /// calculate how many lines the status bar needs (1 or 2)
 pub fn status_bar_height(app: &App, width: u16) -> u16 {
     let left_len: usize = left_spans(app).iter().map(|s| s.content.len()).sum();
-    let hint = hint_text(app);
-    let total = left_len + 1 + hint.len();
-    if total > width as usize {
+    let right = truncate_path(&app.cwd, 30);
+    let total = left_len + 2 + right.len(); // 2 for padding between left and right
+    if let Some(confirm) = confirm_text(app) {
+        // confirm prompt gets its own line
+        let _ = confirm;
+        if total > width as usize { 3 } else { 2 }
+    } else if total > width as usize {
         2
     } else {
         1
@@ -186,33 +187,38 @@ impl Widget for StatusBar<'_> {
             .add_modifier(Modifier::DIM);
 
         let mut spans = left_spans(self.app);
-        let hint = hint_text(self.app);
-        let hint_style = if self.app.mode == crate::app::AppMode::ToolConfirm {
-            Style::default().fg(Color::Yellow)
-        } else {
-            dim
-        };
+        let right_text = truncate_path(&self.app.cwd, 30);
+        let confirm = confirm_text(self.app);
 
         let left_len: usize = spans.iter().map(|s| s.content.len()).sum();
 
-        if area.height >= 2 {
-            // 2-line mode: info on line 1, hints on line 2
-            let total = left_len + 1 + hint.len();
-            if total > area.width as usize {
-                let line1 = Line::from(std::mem::take(&mut spans));
-                let mut hint_spans = vec![Span::styled(" ", dim)];
-                hint_spans.push(Span::styled(hint, hint_style));
-                let line2 = Line::from(hint_spans);
-                Paragraph::new(vec![line1, line2]).render(area, buf);
-                return;
+        if let Some(ref confirm_str) = confirm {
+            // tool confirmation: show info + cwd on line 1, confirm on line 2
+            let padding = (area.width as usize).saturating_sub(left_len + right_text.len() + 1);
+            if padding > 0 {
+                spans.push(Span::styled(" ".repeat(padding), dim));
+                spans.push(Span::styled(
+                    right_text,
+                    Style::default().fg(Color::DarkGray),
+                ));
             }
+            let line1 = Line::from(spans);
+            let line2 = Line::from(vec![
+                Span::styled(" ", dim),
+                Span::styled(confirm_str.clone(), Style::default().fg(Color::Yellow)),
+            ]);
+            Paragraph::new(vec![line1, line2]).render(area, buf);
+            return;
         }
 
-        // single line: right-align hint if it fits
-        let padding = (area.width as usize).saturating_sub(left_len + hint.len() + 1);
+        // single line: right-align cwd
+        let padding = (area.width as usize).saturating_sub(left_len + right_text.len() + 1);
         if padding > 0 {
             spans.push(Span::styled(" ".repeat(padding), dim));
-            spans.push(Span::styled(hint, hint_style));
+            spans.push(Span::styled(
+                right_text,
+                Style::default().fg(Color::DarkGray),
+            ));
         }
 
         Paragraph::new(Line::from(spans)).render(area, buf);
@@ -228,7 +234,7 @@ mod tests {
     #[test]
     fn status_bar_shows_model() {
         let app = App::new("claude-sonnet-4".into(), 200_000);
-        let buf = render_status(&app, 80, 1);
+        let buf = render_status(&app, 120, 1);
         let content = buffer_to_string(&buf);
         assert!(content.contains("claude-sonnet-4"));
     }
@@ -254,11 +260,12 @@ mod tests {
     }
 
     #[test]
-    fn status_bar_shows_hint() {
-        let app = App::new("test".into(), 200_000);
-        let buf = render_status(&app, 200, 1);
+    fn status_bar_shows_cwd_right() {
+        let mut app = App::new("test".into(), 200_000);
+        app.cwd = "/home/user/project".into();
+        let buf = render_status(&app, 120, 1);
         let content = buffer_to_string(&buf);
-        assert!(content.contains("ctrl+c"));
+        assert!(content.contains("/home/user/project"));
     }
 
     #[test]
@@ -271,22 +278,10 @@ mod tests {
     }
 
     #[test]
-    fn status_bar_wraps_to_two_lines_when_narrow() {
+    fn status_bar_single_line_normally() {
         let app = App::new("test".into(), 200_000);
-        // at 80 cols, left (22) + hint (73) = 96 which exceeds 80
-        // so it wraps: line 1 = info, line 2 = hints (73 fits within 80)
-        let buf = render_status(&app, 80, 2);
-        let content = buffer_to_string(&buf);
-        assert!(content.contains("test"));
-        assert!(content.contains("ctrl+c"));
-    }
-
-    #[test]
-    fn status_bar_height_narrow() {
-        let app = App::new("claude-sonnet-4".into(), 200_000);
-        // narrow terminal should need 2 lines
-        assert_eq!(status_bar_height(&app, 40), 2);
-        // wide terminal should fit in 1
+        // without hotkey hints, even narrow terminals should fit in 1 line
+        assert_eq!(status_bar_height(&app, 80), 1);
         assert_eq!(status_bar_height(&app, 200), 1);
     }
 
