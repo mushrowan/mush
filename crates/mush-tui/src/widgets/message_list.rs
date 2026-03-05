@@ -36,7 +36,6 @@ impl Widget for MessageList<'_> {
                 msg,
                 i,
                 &mut lines,
-                &self.app.tool_output_live,
                 selected,
                 &mut image_placeholders,
                 area.width,
@@ -110,32 +109,6 @@ impl Widget for MessageList<'_> {
             ]));
         }
 
-        // active tool indicator (executing, not yet done)
-        for tool in &self.app.active_tools {
-            if tool.status != ToolCallStatus::Running {
-                continue;
-            }
-            let throbber = Throbber::default()
-                .throbber_set(BRAILLE_SIX)
-                .use_type(WhichUse::Spin);
-            let spinner_span = throbber.to_symbol_span(&self.app.throbber_state);
-            lines.push(Line::from(vec![
-                Span::raw("  "),
-                spinner_span.style(Style::default().fg(Color::Cyan)),
-                Span::raw(" "),
-                Span::styled(tool.name.as_str(), Style::default().fg(Color::Cyan)),
-                Span::raw(" "),
-                Span::styled(tool.summary.as_str(), Style::default().fg(Color::DarkGray)),
-            ]));
-
-            if let Some(ref live) = tool.live_output {
-                lines.push(Line::styled(
-                    format!("    {live}"),
-                    Style::default().fg(Color::DarkGray),
-                ));
-            }
-        }
-
         // queued (steering) messages always appear at the bottom
         for (i, msg) in self.app.messages.iter().enumerate() {
             if !msg.queued {
@@ -146,7 +119,6 @@ impl Widget for MessageList<'_> {
                 msg,
                 i,
                 &mut lines,
-                &self.app.tool_output_live,
                 selected,
                 &mut image_placeholders,
                 area.width,
@@ -222,7 +194,12 @@ impl Widget for MessageList<'_> {
 }
 
 fn truncate_model_id(id: &str) -> &str {
-    if id.len() > 20 { &id[..20] } else { id }
+    // model ids are ASCII so byte slicing is safe, but guard anyway
+    if id.len() > 20 {
+        &id[..id.floor_char_boundary(20)]
+    } else {
+        id
+    }
 }
 
 /// height reserved for inline image rendering (in lines)
@@ -240,7 +217,6 @@ fn render_message(
     msg: &DisplayMessage,
     msg_idx: usize,
     lines: &mut Vec<Line<'_>>,
-    live_tool_output: &Option<String>,
     selected: bool,
     image_placeholders: &mut Vec<ImagePlaceholder>,
     width: u16,
@@ -300,8 +276,9 @@ fn render_message(
             }
         } else {
             let preview = thinking.lines().next().unwrap_or("...");
-            let trimmed = if preview.len() > 60 {
-                format!("{}...", &preview[..57])
+            let trimmed = if preview.chars().count() > 60 {
+                let truncated: String = preview.chars().take(57).collect();
+                format!("{truncated}...")
             } else {
                 preview.to_string()
             };
@@ -340,10 +317,13 @@ fn render_message(
         }
     }
 
-    // tool calls
+    // tool calls (skip running ones, they're shown in the tool panels)
     for (tc_idx, tc) in msg.tool_calls.iter().enumerate() {
+        if tc.status == ToolCallStatus::Running {
+            continue;
+        }
         let (icon, colour) = match tc.status {
-            ToolCallStatus::Running => ("▶", Color::Cyan),
+            ToolCallStatus::Running => unreachable!(),
             ToolCallStatus::Done => ("✓", Color::Green),
             ToolCallStatus::Error => ("✗", Color::Red),
         };
@@ -353,15 +333,6 @@ fn render_message(
             Span::raw(" "),
             Span::styled(tc.summary.clone(), Style::default().fg(Color::DarkGray)),
         ]));
-        // live output from running tool
-        if tc.status == ToolCallStatus::Running
-            && let Some(live) = live_tool_output
-        {
-            lines.push(Line::styled(
-                format!("    {live}"),
-                Style::default().fg(Color::DarkGray),
-            ));
-        }
         // image: reserve space for inline rendering
         if tc.image_data.is_some() {
             image_placeholders.push(ImagePlaceholder {
@@ -413,14 +384,16 @@ fn render_message(
     }
 }
 
-/// truncate a string to a max length, adding ellipsis
+/// truncate a string to at most `max` characters (not bytes), adding ellipsis
 fn truncate_line(s: &str, max: usize) -> String {
     // take first line, strip whitespace
     let line = s.lines().next().unwrap_or(s).trim();
-    if line.len() <= max {
+    let char_count = line.chars().count();
+    if char_count <= max {
         line.to_string()
     } else {
-        format!("{}…", &line[..max])
+        let truncated: String = line.chars().take(max).collect();
+        format!("{truncated}…")
     }
 }
 
@@ -499,14 +472,16 @@ fn render_diff_output(output: &str, lines: &mut Vec<Line<'_>>, width: u16) {
         let left = removed.get(i).copied().unwrap_or("");
         let right = added.get(i).copied().unwrap_or("");
 
-        // truncate to fit panel width
-        let left_display = if left.len() > half {
-            format!("{}…", &left[..half.saturating_sub(1)])
+        // truncate to fit panel width (char-safe)
+        let left_display = if left.chars().count() > half {
+            let truncated: String = left.chars().take(half.saturating_sub(1)).collect();
+            format!("{truncated}…")
         } else {
             left.to_string()
         };
-        let right_display = if right.len() > half {
-            format!("{}…", &right[..half.saturating_sub(1)])
+        let right_display = if right.chars().count() > half {
+            let truncated: String = right.chars().take(half.saturating_sub(1)).collect();
+            format!("{truncated}…")
         } else {
             right.to_string()
         };

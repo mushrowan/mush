@@ -23,6 +23,7 @@ pub fn handle(
         "help" => {
             let mut help = String::from("available commands:\n");
             help.push_str("  /help          - show this message\n");
+            help.push_str("  /keys          - show keyboard shortcuts\n");
             help.push_str("  /clear         - clear conversation\n");
             help.push_str("  /model [id]    - show or switch model\n");
             help.push_str("  /sessions      - browse and resume sessions\n");
@@ -38,6 +39,40 @@ pub fn handle(
             help.push_str("  /quit          - exit mush\n");
             help.push_str("\ntip: type a prompt template name (e.g. /review file.rs) to expand it");
             app.push_system_message(help);
+            None
+        }
+        "keys" => {
+            let mut keys = String::from("keyboard shortcuts:\n\n");
+            keys.push_str("general:\n");
+            keys.push_str("  enter          - send message\n");
+            keys.push_str("  alt/shift+enter - insert newline\n");
+            keys.push_str("  ctrl+c         - quit\n");
+            keys.push_str("  esc            - abort stream / scroll to bottom\n");
+            keys.push_str("  tab            - autocomplete slash commands\n");
+            keys.push_str("  ctrl+v         - paste image from clipboard\n");
+            keys.push_str("  ctrl+d         - quit (empty input) / delete char\n");
+            keys.push_str("  page up/down   - scroll\n");
+            keys.push_str("\nmode switches:\n");
+            keys.push_str("  ctrl+s         - scroll/copy mode\n");
+            keys.push_str("  ctrl+f         - search\n");
+            keys.push_str("  ctrl+t         - cycle thinking level\n");
+            keys.push_str("  ctrl+o         - toggle thinking text visibility\n");
+            keys.push_str("  ctrl+i         - toggle prompt injection preview\n");
+            keys.push_str("\nscroll mode:\n");
+            keys.push_str("  j/k            - scroll down/up\n");
+            keys.push_str("  g/G            - jump to top/bottom\n");
+            keys.push_str("  y              - copy selected message\n");
+            keys.push_str("  esc            - exit scroll mode\n");
+            keys.push_str("\nediting:\n");
+            keys.push_str("  ctrl+a / home  - start of line\n");
+            keys.push_str("  ctrl+e / end   - end of line\n");
+            keys.push_str("  ctrl+w         - delete word backward\n");
+            keys.push_str("  alt+d          - delete word forward\n");
+            keys.push_str("  ctrl+u         - delete to start\n");
+            keys.push_str("  ctrl+k         - delete to end\n");
+            keys.push_str("  alt+b / alt+←  - word left\n");
+            keys.push_str("  alt+f / alt+→  - word right");
+            app.push_system_message(keys);
             None
         }
         "clear" => {
@@ -188,8 +223,9 @@ fn show_tree(app: &mut App, session_tree: &SessionTree) {
                 UserContent::Text(t) => t.as_str(),
                 _ => "(parts)",
             };
-            let preview = if text.len() > 60 {
-                format!("{}...", &text[..57])
+            let preview = if text.chars().count() > 60 {
+                let truncated: String = text.chars().take(57).collect();
+                format!("{truncated}...")
             } else {
                 text.to_string()
             };
@@ -223,7 +259,10 @@ fn handle_branch(
             mush_session::tree::EntryKind::Message {
                 message: Message::User(u),
             } => match &u.content {
-                UserContent::Text(t) if t.len() > 40 => format!("{}...", &t[..37]),
+                UserContent::Text(t) if t.chars().count() > 40 => {
+                    let truncated: String = t.chars().take(37).collect();
+                    format!("{truncated}...")
+                },
                 UserContent::Text(t) => t.clone(),
                 _ => "message".into(),
             },
@@ -446,8 +485,9 @@ pub fn handle_export(app: &mut App, conversation: &[Message], args: &str) {
                     })
                     .collect::<Vec<_>>()
                     .join("");
-                let preview = if output.len() > 200 {
-                    format!("{}...", &output[..197])
+                let preview = if output.chars().count() > 200 {
+                    let truncated: String = output.chars().take(197).collect();
+                    format!("{truncated}...")
                 } else {
                     output
                 };
