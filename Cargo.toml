@@ -53,7 +53,8 @@ miette = { version = "7", features = ["fancy"] }
 color-eyre = "0.6"
 
 # tui
-ratatui = "0.30"
+ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
+unicode-width = "0.2"
 crossterm = "0.29"
 
 # cli

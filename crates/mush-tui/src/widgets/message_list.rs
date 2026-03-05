@@ -133,10 +133,32 @@ impl Widget for MessageList<'_> {
             }
         }
 
+        // pre-compute y positions for image placeholders before moving lines
+        // into Text (uses simple char-width approximation, close enough for
+        // image overlay positioning)
+        let w = area.width as usize;
+        let img_y_positions: Vec<u16> = if !image_placeholders.is_empty() && w > 0 {
+            image_placeholders
+                .iter()
+                .map(|ph| {
+                    lines[..ph.line_idx]
+                        .iter()
+                        .map(|line| {
+                            let lw = line.width();
+                            if lw <= w { 1u16 } else { lw.div_ceil(w) as u16 }
+                        })
+                        .sum()
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         let text = Text::from(lines);
 
-        // scroll: account for line wrapping so resize keeps the bottom visible
-        let total_lines = wrapped_line_count(&text, area.width);
+        // use ratatui's own word-wrap logic for accurate line count
+        let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
+        let total_lines = paragraph.line_count(area.width).min(u16::MAX as usize) as u16;
         let visible = area.height;
         let max_scroll = total_lines.saturating_sub(visible);
         let scroll = max_scroll.saturating_sub(self.app.scroll_offset);
@@ -144,16 +166,8 @@ impl Widget for MessageList<'_> {
         // compute image render areas based on scroll position
         let mut render_areas = Vec::new();
         if !image_placeholders.is_empty() && area.width > 0 {
-            let w = area.width as usize;
-            for ph in &image_placeholders {
-                // count wrapped lines before this placeholder
-                let y_before: u16 = text.lines[..ph.line_idx]
-                    .iter()
-                    .map(|line| {
-                        let lw = line.width();
-                        if lw <= w { 1u16 } else { lw.div_ceil(w) as u16 }
-                    })
-                    .sum();
+            for (i, ph) in image_placeholders.iter().enumerate() {
+                let y_before = img_y_positions[i];
                 // skip the label line, image starts on the line after
                 let img_y = y_before.saturating_add(1).saturating_sub(scroll);
                 let img_height = IMAGE_HEIGHT.saturating_sub(1); // minus the label
@@ -176,26 +190,10 @@ impl Widget for MessageList<'_> {
         }
         *self.app.image_render_areas.borrow_mut() = render_areas;
 
-        Paragraph::new(text)
-            .wrap(Wrap { trim: false })
+        paragraph
             .scroll((scroll, 0))
             .render(area, buf);
     }
-}
-
-/// count visual lines after wrapping (each source line wraps to ceil(width/area_width))
-fn wrapped_line_count(text: &Text<'_>, width: u16) -> u16 {
-    if width == 0 {
-        return 0;
-    }
-    let w = width as usize;
-    text.lines
-        .iter()
-        .map(|line| {
-            let lw = line.width();
-            if lw <= w { 1u16 } else { lw.div_ceil(w) as u16 }
-        })
-        .sum()
 }
 
 fn truncate_model_id(id: &str) -> &str {
