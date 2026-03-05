@@ -403,6 +403,24 @@ pub enum UserContent {
     Parts(Vec<UserContentPart>),
 }
 
+impl UserContent {
+    /// extract the text content, joining text parts if multipart
+    #[must_use]
+    pub fn text(&self) -> String {
+        match self {
+            Self::Text(t) => t.clone(),
+            Self::Parts(parts) => parts
+                .iter()
+                .filter_map(|p| match p {
+                    UserContentPart::Text(t) => Some(t.text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" "),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum UserContentPart {
@@ -487,6 +505,14 @@ pub struct UserMessage {
     pub timestamp_ms: Timestamp,
 }
 
+impl UserMessage {
+    /// extract the text content of this message
+    #[must_use]
+    pub fn text(&self) -> String {
+        self.content.text()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AssistantMessage {
     pub content: Vec<AssistantContentPart>,
@@ -498,6 +524,30 @@ pub struct AssistantMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
     pub timestamp_ms: Timestamp,
+}
+
+impl AssistantMessage {
+    /// extract concatenated text content (excludes thinking and tool calls)
+    #[must_use]
+    pub fn text(&self) -> String {
+        self.content
+            .iter()
+            .filter_map(|p| match p {
+                AssistantContentPart::Text(t) if !t.text.is_empty() => Some(t.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    /// extract the thinking text, if any
+    #[must_use]
+    pub fn thinking(&self) -> Option<String> {
+        self.content.iter().find_map(|p| match p {
+            AssistantContentPart::Thinking(t) => Some(t.text().to_string()),
+            _ => None,
+        })
+    }
 }
 
 /// whether a tool execution succeeded or failed

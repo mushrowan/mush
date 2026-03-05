@@ -927,13 +927,13 @@ impl App {
 
     /// remove the last pending image (and its placeholder in the input)
     pub fn remove_last_image(&mut self) {
-        if self.pending_images.pop().is_some() {
-            if let Some(pos) = self.input.rfind(IMAGE_PLACEHOLDER) {
-                let end = pos + IMAGE_PLACEHOLDER.len_utf8();
-                self.input.drain(pos..end);
-                if self.cursor > pos {
-                    self.cursor = self.cursor.saturating_sub(IMAGE_PLACEHOLDER.len_utf8());
-                }
+        if self.pending_images.pop().is_some()
+            && let Some(pos) = self.input.rfind(IMAGE_PLACEHOLDER)
+        {
+            let end = pos + IMAGE_PLACEHOLDER.len_utf8();
+            self.input.drain(pos..end);
+            if self.cursor > pos {
+                self.cursor = self.cursor.saturating_sub(IMAGE_PLACEHOLDER.len_utf8());
             }
         }
     }

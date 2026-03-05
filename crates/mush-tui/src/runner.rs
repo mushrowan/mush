@@ -555,6 +555,9 @@ pub async fn run_tui(
                 &conversation,
                 tui_config.model.context_window as usize,
             ) {
+                app.status = Some("auto-compacting…".into());
+                draw(&mut terminal, &app, &mut image_protos)?;
+
                 slash::handle_compact(
                     &mut app,
                     &mut conversation,
@@ -819,17 +822,7 @@ fn inject_hint(msgs: &mut [Message], enricher: &(dyn Fn(&str) -> Option<String> 
         return;
     };
 
-    let text = match &user_msg.content {
-        UserContent::Text(t) => t.clone(),
-        UserContent::Parts(parts) => parts
-            .iter()
-            .filter_map(|p| match p {
-                UserContentPart::Text(t) => Some(t.text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join(" "),
-    };
+    let text = user_msg.text();
 
     if let Some(hint) = enricher(&text) {
         msgs[pos] = Message::User(UserMessage {

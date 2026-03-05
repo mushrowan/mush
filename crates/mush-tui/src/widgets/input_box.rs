@@ -205,7 +205,7 @@ impl<'a> InputBox<'a> {
                         let seg_text = &line_text[seg.start..cursor_in_line];
                         let visual_offset: usize = seg_text
                             .chars()
-                            .map(|c| char_width(c))
+                            .map(char_width)
                             .sum();
                         let seg_indent = if seg_i == 0 { indent } else { 0 };
                         visual_col = seg_indent + visual_offset;

@@ -461,23 +461,12 @@ pub fn handle_export(app: &mut App, conversation: &[Message], args: &str) {
     for msg in conversation {
         match msg {
             Message::User(u) => {
-                let text = match &u.content {
-                    UserContent::Text(t) => t.as_str(),
-                    _ => "(parts)",
-                };
+                let text = u.text();
                 md.push_str(&format!("## you\n\n{text}\n\n"));
             }
             Message::Assistant(a) => {
                 let model = a.model.as_ref();
-                let text: String = a
-                    .content
-                    .iter()
-                    .filter_map(|p| match p {
-                        AssistantContentPart::Text(t) => Some(t.text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("");
+                let text = a.text();
                 md.push_str(&format!("## {model}\n\n{text}\n\n"));
             }
             Message::ToolResult(tr) => {

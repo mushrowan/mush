@@ -380,11 +380,11 @@ fn handle_slash_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         }
         // select the highlighted command
         (_, KeyCode::Enter) | (_, KeyCode::Tab) => {
-            if let Some(ref menu) = app.slash_menu {
-                if let Some(cmd) = menu.matches.get(menu.selected) {
-                    app.input = format!("/{}", cmd.name);
-                    app.cursor = app.input.len();
-                }
+            if let Some(ref menu) = app.slash_menu
+                && let Some(cmd) = menu.matches.get(menu.selected)
+            {
+                app.input = format!("/{}", cmd.name);
+                app.cursor = app.input.len();
             }
             app.close_slash_menu();
             None
@@ -397,10 +397,10 @@ fn handle_slash_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             None
         }
         (_, KeyCode::Down) | (KeyModifiers::CONTROL, KeyCode::Char('j')) => {
-            if let Some(ref mut menu) = app.slash_menu {
-                if menu.selected + 1 < menu.matches.len() {
-                    menu.selected += 1;
-                }
+            if let Some(ref mut menu) = app.slash_menu
+                && menu.selected + 1 < menu.matches.len()
+            {
+                menu.selected += 1;
             }
             None
         }
