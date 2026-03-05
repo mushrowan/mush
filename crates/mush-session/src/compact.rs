@@ -76,17 +76,7 @@ pub fn build_compaction_prompt(messages: &[Message]) -> String {
     for (i, msg) in messages.iter().enumerate() {
         match msg {
             Message::User(u) => {
-                let text = match &u.content {
-                    UserContent::Text(t) => t.clone(),
-                    UserContent::Parts(p) => p
-                        .iter()
-                        .filter_map(|part| match part {
-                            UserContentPart::Text(t) => Some(t.text.as_str()),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                };
+                let text = u.text();
                 parts.push(format!("[{i}] user: {text}"));
             }
             Message::Assistant(a) => {

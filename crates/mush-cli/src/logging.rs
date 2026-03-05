@@ -30,11 +30,6 @@ impl LogBuffer {
         }
     }
 
-    /// get recent log entries
-    pub fn entries(&self) -> Vec<String> {
-        self.inner.lock().unwrap().entries.clone()
-    }
-
     /// get last N entries
     pub fn tail(&self, n: usize) -> Vec<String> {
         let inner = self.inner.lock().unwrap();

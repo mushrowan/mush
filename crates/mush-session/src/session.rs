@@ -120,18 +120,15 @@ impl Session {
         }
 
         let first_text = self.messages.iter().find_map(|m| match m {
-            Message::User(u) => match &u.content {
-                mush_ai::types::UserContent::Text(t) => Some(t.as_str()),
-                mush_ai::types::UserContent::Parts(parts) => parts.iter().find_map(|p| match p {
-                    mush_ai::types::UserContentPart::Text(t) => Some(t.text.as_str()),
-                    _ => None,
-                }),
-            },
+            Message::User(u) => {
+                let t = u.text();
+                if t.is_empty() { None } else { Some(t) }
+            }
             _ => None,
         });
 
         if let Some(text) = first_text {
-            self.meta.title = Some(clean_title(text, 80));
+            self.meta.title = Some(clean_title(&text, 80));
         }
     }
 }
