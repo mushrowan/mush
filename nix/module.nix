@@ -136,8 +136,22 @@ in {
 
     package = lib.mkOption {
       type = lib.types.package;
-      default = self.packages.${pkgs.system}.default;
+      default =
+        if cfg.embeddings
+        then self.packages.${pkgs.system}.with-embeddings
+        else self.packages.${pkgs.system}.default;
+      defaultText = lib.literalExpression "pkgs.mush (with or without embeddings)";
       description = "the mush package to install";
+    };
+
+    embeddings = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        enable local embeddings for auto-context injection.
+        uses EmbeddingGemma-300M (ONNX) to match relevant skills to queries.
+        requires onnxruntime and downloads the model on first run
+      '';
     };
 
     model = lib.mkOption {
