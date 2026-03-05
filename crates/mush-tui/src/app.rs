@@ -180,8 +180,6 @@ pub struct App {
     pub status: Option<String>,
     /// currently executing tools (for side-by-side panel display)
     pub active_tools: Vec<ActiveToolState>,
-    /// latest live output line from running tools
-    pub tool_output_live: Option<String>,
     /// tool args streaming in (partial JSON from ToolCallDelta)
     pub streaming_tool_args: String,
     /// chars of streaming_text currently visible (typewriter effect)
@@ -278,7 +276,6 @@ impl App {
             should_quit: false,
             status: None,
             active_tools: Vec::new(),
-            tool_output_live: None,
             streaming_tool_args: String::new(),
             visible_text_chars: 0,
             visible_thinking_chars: 0,

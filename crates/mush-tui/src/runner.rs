@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crossterm::ExecutableCommand;
 use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{
-    self, Event, KeyCode, KeyboardEnhancementFlags, MouseEvent, MouseEventKind,
+    self, Event, KeyCode, KeyEventKind, KeyboardEnhancementFlags, MouseEvent, MouseEventKind,
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{
@@ -146,6 +146,7 @@ pub async fn run_tui(
     // populate tab completions
     let slash_cmds = [
         "/help",
+        "/keys",
         "/clear",
         "/model",
         "/sessions",
@@ -464,7 +465,7 @@ pub async fn run_tui(
                         // check for terminal input during streaming
                         while event::poll(std::time::Duration::ZERO)? {
                             match event::read()? {
-                                Event::Key(key) => {
+                                Event::Key(key) if key.kind == KeyEventKind::Press => {
                                     // handle tool confirmation y/n
                                     if app.mode == app::AppMode::ToolConfirm {
                                         let answer = match key.code {
@@ -562,7 +563,7 @@ pub async fn run_tui(
         if event::poll(std::time::Duration::from_millis(50))? {
             loop {
                 match event::read()? {
-                    Event::Key(key) => {
+                    Event::Key(key) if key.kind == KeyEventKind::Press => {
                         if let Some(app_event) = handle_key(&mut app, key) {
                             match app_event {
                                 AppEvent::Quit => {
