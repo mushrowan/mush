@@ -6,6 +6,23 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::app::{App, AppEvent, AppMode};
 
+// A trailing '\' escapes plain Enter into a literal newline, but only when the
+// cursor is at the end of the current line.
+fn should_escape_enter_to_newline(app: &App, key: KeyEvent) -> bool {
+    if key.code != KeyCode::Enter || !key.modifiers.is_empty() || app.cursor == 0 {
+        return false;
+    }
+
+    let current_line = &app.input[..app.cursor];
+    let Some(last_char) = current_line.chars().next_back() else {
+        return false;
+    };
+    if last_char != '\\' {
+        return false;
+    }
+
+    app.input[app.cursor..].starts_with('\n') || app.cursor == app.input.len()
+}
 /// handle a key event, mutating the app and optionally producing an event
 pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     // session picker mode has its own key handling
@@ -65,6 +82,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             }
             // submit to steering queue (slash commands blocked during streaming)
             (_, KeyCode::Enter) => {
+                if should_escape_enter_to_newline(app, key) {
+                    app.input_backspace();
+                    app.input_char('\n');
+                    return None;
+                }
                 if app.input.trim().is_empty() {
                     return None;
                 }
@@ -150,6 +172,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
 
         // submit (accept ghost text if present)
         (_, KeyCode::Enter) => {
+            if should_escape_enter_to_newline(app, key) {
+                app.input_backspace();
+                app.input_char('\n');
+                return None;
+            }
             // accept ghost completion before submitting
             if let Some(suffix) = app.ghost_text().map(|s| s.to_string()) {
                 app.input.push_str(&suffix);
@@ -691,6 +718,32 @@ mod tests {
             }
             other => panic!("expected SlashCommand, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn enter_after_trailing_backslash_inserts_newline() {
+        let mut app = App::new("test".into(), 200_000);
+        app.input = "hello\\".into();
+        app.cursor = app.input.len();
+
+        let event = handle_key(&mut app, key(KeyCode::Enter));
+
+        assert!(event.is_none());
+        assert_eq!(app.input, "hello\n");
+        assert_eq!(app.cursor, app.input.len());
+    }
+
+    #[test]
+    fn enter_after_backslash_mid_input_does_not_submit() {
+        let mut app = App::new("test".into(), 200_000);
+        app.input = "hello\\\nworld".into();
+        app.cursor = "hello\\".len();
+
+        let event = handle_key(&mut app, key(KeyCode::Enter));
+
+        assert!(event.is_none());
+        assert_eq!(app.input, "hello\n\nworld");
+        assert_eq!(app.cursor, "hello\n".len());
     }
 
     #[test]
