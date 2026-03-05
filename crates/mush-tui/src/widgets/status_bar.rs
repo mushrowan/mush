@@ -63,36 +63,36 @@ fn left_spans(app: &App) -> Vec<Span<'static>> {
         ),
     ];
 
-    if app.total_input_tokens > 0 {
+    if app.stats.input_tokens > 0 {
         spans.push(Span::styled(
-            format!(" | ↑{}", format_tokens(app.total_input_tokens)),
+            format!(" | ↑{}", format_tokens(app.stats.input_tokens)),
             dim,
         ));
     }
-    if app.total_output_tokens > 0 {
+    if app.stats.output_tokens > 0 {
         spans.push(Span::styled(
-            format!(" ↓{}", format_tokens(app.total_output_tokens)),
+            format!(" ↓{}", format_tokens(app.stats.output_tokens)),
             dim,
         ));
     }
-    if app.total_cache_read_tokens > 0 {
+    if app.stats.cache_read_tokens > 0 {
         spans.push(Span::styled(
-            format!(" R{}", format_tokens(app.total_cache_read_tokens)),
+            format!(" R{}", format_tokens(app.stats.cache_read_tokens)),
             dim,
         ));
     }
-    if app.total_cache_write_tokens > 0 {
+    if app.stats.cache_write_tokens > 0 {
         spans.push(Span::styled(
-            format!(" W{}", format_tokens(app.total_cache_write_tokens)),
+            format!(" W{}", format_tokens(app.stats.cache_write_tokens)),
             dim,
         ));
     }
 
-    if app.context_tokens > 0 {
-        let ctx = format_tokens(app.context_tokens);
-        let window = format_tokens(app.context_window);
-        let pct = if app.context_window > 0 {
-            (app.context_tokens as f64 / app.context_window as f64 * 100.0) as u64
+    if app.stats.context_tokens > 0 {
+        let ctx = format_tokens(app.stats.context_tokens);
+        let window = format_tokens(app.stats.context_window);
+        let pct = if app.stats.context_window > 0 {
+            (app.stats.context_tokens as f64 / app.stats.context_window as f64 * 100.0) as u64
         } else {
             0
         };
@@ -106,8 +106,8 @@ fn left_spans(app: &App) -> Vec<Span<'static>> {
         spans.push(Span::styled(format!(" | {ctx}/{window}"), ctx_style));
     }
 
-    if app.show_cost && app.total_cost > 0.0 {
-        spans.push(Span::styled(format!(" | ${:.4}", app.total_cost), dim));
+    if app.show_cost && app.stats.total_cost > 0.0 {
+        spans.push(Span::styled(format!(" | ${:.4}", app.stats.total_cost), dim));
     }
 
     if let Some(ref status) = app.status {
@@ -222,13 +222,13 @@ mod tests {
     #[test]
     fn status_bar_shows_cost_and_context() {
         let mut app = App::new("test-model".into(), 200_000);
-        app.total_cost = 0.0123;
+        app.stats.total_cost = 0.0123;
         app.show_cost = true;
-        app.total_input_tokens = 45_000;
-        app.total_output_tokens = 12_000;
-        app.total_cache_read_tokens = 8_000;
-        app.total_cache_write_tokens = 2_000;
-        app.context_tokens = 45_000;
+        app.stats.input_tokens = 45_000;
+        app.stats.output_tokens = 12_000;
+        app.stats.cache_read_tokens = 8_000;
+        app.stats.cache_write_tokens = 2_000;
+        app.stats.context_tokens = 45_000;
         let buf = render_status(&app, 120, 1);
         let content = buffer_to_string(&buf);
         assert!(content.contains("↑45k"));

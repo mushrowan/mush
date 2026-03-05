@@ -303,7 +303,7 @@ fn handle_model_switch(
     if let Some(new_model) = models::find_model_by_id(id) {
         tui_config.model = new_model;
         app.model_id = id.into();
-        app.context_window = tui_config.model.context_window;
+        app.stats.context_window = tui_config.model.context_window;
         let level = thinking_prefs
             .get(id)
             .copied()
@@ -323,12 +323,12 @@ fn handle_model_switch(
 }
 
 fn show_cost(app: &mut App) {
-    let ctx = if app.context_tokens > 0 {
-        let pct = (app.context_tokens as f64 / app.context_window as f64 * 100.0) as u64;
+    let ctx = if app.stats.context_tokens > 0 {
+        let pct = (app.stats.context_tokens as f64 / app.stats.context_window as f64 * 100.0) as u64;
         format!(
             "context: {}k/{}k ({}%)\n",
-            app.context_tokens / 1000,
-            app.context_window / 1000,
+            app.stats.context_tokens / 1000,
+            app.stats.context_window / 1000,
             pct
         )
     } else {
@@ -337,12 +337,12 @@ fn show_cost(app: &mut App) {
     app.push_system_message(format!(
         "{}cumulative: ↑{} ↓{} R{} W{} | {}tok, ${:.4}",
         ctx,
-        app.total_input_tokens,
-        app.total_output_tokens,
-        app.total_cache_read_tokens,
-        app.total_cache_write_tokens,
-        app.total_tokens,
-        app.total_cost
+        app.stats.input_tokens,
+        app.stats.output_tokens,
+        app.stats.cache_read_tokens,
+        app.stats.cache_write_tokens,
+        app.stats.total_tokens,
+        app.stats.total_cost
     ));
 }
 

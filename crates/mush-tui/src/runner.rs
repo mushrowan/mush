@@ -252,12 +252,7 @@ pub async fn run_tui(
                         model_id: Some(a.model.clone()),
                     queued: false,
                     });
-                    app.total_tokens += a.usage.total_tokens();
-                    app.total_input_tokens += a.usage.input_tokens;
-                    app.total_output_tokens += a.usage.output_tokens;
-                    app.total_cache_read_tokens += a.usage.cache_read_tokens;
-                    app.total_cache_write_tokens += a.usage.cache_write_tokens;
-                    app.context_tokens = a.usage.total_input_tokens();
+                    app.stats.update(&a.usage, None);
                 }
                 _ => {} // tool results displayed inline with their tool calls
             }

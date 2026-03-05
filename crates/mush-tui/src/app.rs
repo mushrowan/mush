@@ -154,6 +154,57 @@ pub struct ActiveToolState {
     pub output: Option<String>,
 }
 
+/// cumulative token and cost tracking for the session
+#[derive(Debug, Clone, Default)]
+pub struct TokenStats {
+    /// total cost so far
+    pub total_cost: f64,
+    /// total tokens used (cumulative across all API calls)
+    pub total_tokens: u64,
+    /// cumulative uncached input tokens
+    pub input_tokens: u64,
+    /// cumulative output tokens
+    pub output_tokens: u64,
+    /// cumulative cache-read tokens
+    pub cache_read_tokens: u64,
+    /// cumulative cache-write tokens
+    pub cache_write_tokens: u64,
+    /// last call's input tokens (actual context size)
+    pub context_tokens: u64,
+    /// model's context window size
+    pub context_window: u64,
+}
+
+impl TokenStats {
+    /// create with a given context window
+    #[must_use]
+    pub fn new(context_window: u64) -> Self {
+        Self {
+            context_window,
+            ..Default::default()
+        }
+    }
+
+    /// accumulate usage from an API call
+    pub fn update(&mut self, usage: &Usage, cost: Option<f64>) {
+        if let Some(c) = cost {
+            self.total_cost += c;
+        }
+        self.total_tokens += usage.total_tokens();
+        self.input_tokens += usage.input_tokens;
+        self.output_tokens += usage.output_tokens;
+        self.cache_read_tokens += usage.cache_read_tokens;
+        self.cache_write_tokens += usage.cache_write_tokens;
+        self.context_tokens = usage.total_input_tokens();
+    }
+
+    /// reset all counters (keeps context_window)
+    pub fn reset(&mut self) {
+        let window = self.context_window;
+        *self = Self::new(window);
+    }
+}
+
 /// the main app state
 pub struct App {
     /// conversation messages for display
@@ -172,22 +223,8 @@ pub struct App {
     pub scroll_offset: u16,
     /// model id being used
     pub model_id: ModelId,
-    /// total cost so far
-    pub total_cost: f64,
-    /// total tokens used (cumulative across all API calls)
-    pub total_tokens: u64,
-    /// cumulative uncached input tokens
-    pub total_input_tokens: u64,
-    /// cumulative output tokens
-    pub total_output_tokens: u64,
-    /// cumulative cache-read tokens
-    pub total_cache_read_tokens: u64,
-    /// cumulative cache-write tokens
-    pub total_cache_write_tokens: u64,
-    /// last call's input tokens (actual context size)
-    pub context_tokens: u64,
-    /// model's context window size
-    pub context_window: u64,
+    /// token and cost tracking
+    pub stats: TokenStats,
     /// whether we should quit
     pub should_quit: bool,
     /// status message (bottom bar)
@@ -299,14 +336,7 @@ impl App {
             cursor: 0,
             scroll_offset: 0,
             model_id,
-            total_cost: 0.0,
-            total_tokens: 0,
-            total_input_tokens: 0,
-            total_output_tokens: 0,
-            total_cache_read_tokens: 0,
-            total_cache_write_tokens: 0,
-            context_tokens: 0,
-            context_window,
+            stats: TokenStats::new(context_window),
             should_quit: false,
             status: None,
             active_tools: Vec::new(),
@@ -548,16 +578,10 @@ impl App {
             .unwrap_or(0);
         self.messages.insert(insert_pos, assistant_msg);
 
-        if let Some(c) = cost {
-            self.total_cost += c;
-        }
         if let Some(ref u) = usage {
-            self.total_tokens += u.total_tokens();
-            self.total_input_tokens += u.input_tokens;
-            self.total_output_tokens += u.output_tokens;
-            self.total_cache_read_tokens += u.cache_read_tokens;
-            self.total_cache_write_tokens += u.cache_write_tokens;
-            self.context_tokens = u.total_input_tokens();
+            self.stats.update(u, cost);
+        } else if let Some(c) = cost {
+            self.stats.total_cost += c;
         }
         if self.scroll_offset > 0 {
             self.has_unread = true;
@@ -825,13 +849,7 @@ impl App {
         self.visible_text_chars = 0;
         self.visible_thinking_chars = 0;
         self.scroll_offset = 0;
-        self.total_cost = 0.0;
-        self.total_tokens = 0;
-        self.total_input_tokens = 0;
-        self.total_output_tokens = 0;
-        self.total_cache_read_tokens = 0;
-        self.total_cache_write_tokens = 0;
-        self.context_tokens = 0;
+        self.stats.reset();
         self.pending_images.clear();
     }
 
@@ -1293,13 +1311,13 @@ mod tests {
             Some(0.01),
         );
 
-        assert!((app.total_cost - 0.015).abs() < f64::EPSILON);
-        assert_eq!(app.total_tokens, 450);
-        assert_eq!(app.total_input_tokens, 300);
-        assert_eq!(app.total_output_tokens, 150);
-        assert_eq!(app.total_cache_read_tokens, 0);
-        assert_eq!(app.total_cache_write_tokens, 0);
-        assert_eq!(app.context_tokens, 200);
+        assert!((app.stats.total_cost - 0.015).abs() < f64::EPSILON);
+        assert_eq!(app.stats.total_tokens, 450);
+        assert_eq!(app.stats.input_tokens, 300);
+        assert_eq!(app.stats.output_tokens, 150);
+        assert_eq!(app.stats.cache_read_tokens, 0);
+        assert_eq!(app.stats.cache_write_tokens, 0);
+        assert_eq!(app.stats.context_tokens, 200);
     }
 
     #[test]
