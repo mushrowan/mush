@@ -28,6 +28,9 @@ impl Widget for MessageList<'_> {
 
         let in_scroll_mode = self.app.mode == crate::app::AppMode::Scroll;
         for (i, msg) in self.app.messages.iter().enumerate() {
+            if msg.queued {
+                continue; // rendered after streaming content
+            }
             let selected = in_scroll_mode && self.app.selected_message == Some(i);
             render_message(
                 msg,
@@ -131,6 +134,24 @@ impl Widget for MessageList<'_> {
                     Style::default().fg(Color::DarkGray),
                 ));
             }
+        }
+
+        // queued (steering) messages always appear at the bottom
+        for (i, msg) in self.app.messages.iter().enumerate() {
+            if !msg.queued {
+                continue;
+            }
+            let selected = in_scroll_mode && self.app.selected_message == Some(i);
+            render_message(
+                msg,
+                i,
+                &mut lines,
+                &self.app.tool_output_live,
+                selected,
+                &mut image_placeholders,
+                area.width,
+            );
+            lines.push(Line::raw(""));
         }
 
         // pre-compute y positions for image placeholders before moving lines

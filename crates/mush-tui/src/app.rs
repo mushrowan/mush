@@ -220,6 +220,8 @@ pub struct App {
     pub image_render_areas: RefCell<Vec<ImageRenderArea>>,
     /// images attached to the next user message (not yet sent)
     pub pending_images: Vec<PendingImage>,
+    /// working directory (with ~ for home)
+    pub cwd: String,
 }
 
 /// position computed during render for inline image overlay
@@ -292,6 +294,16 @@ impl App {
             search: SearchState::default(),
             image_render_areas: RefCell::new(Vec::new()),
             pending_images: Vec::new(),
+            cwd: {
+                let path = std::env::current_dir().unwrap_or_default();
+                match std::env::var("HOME") {
+                    Ok(home) => path
+                        .strip_prefix(&home)
+                        .map(|p| format!("~/{}", p.display()))
+                        .unwrap_or_else(|_| path.display().to_string()),
+                    Err(_) => path.display().to_string(),
+                }
+            },
         }
     }
 
