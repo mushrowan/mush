@@ -4,11 +4,28 @@
 //! and matches them against user messages via cosine similarity.
 //! matched skills are auto-injected into the system prompt.
 
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 
 use crate::loader::Skill;
+
+/// shared model cache under ~/.local/share/mush/models/
+///
+/// avoids re-downloading the onnx model into every working directory
+fn model_cache_dir() -> PathBuf {
+    let base = if let Ok(dir) = std::env::var("MUSH_DATA_DIR") {
+        PathBuf::from(dir)
+    } else if let Some(data) = std::env::var_os("XDG_DATA_HOME") {
+        PathBuf::from(data).join("mush")
+    } else if let Some(home) = std::env::var_os("HOME") {
+        PathBuf::from(home).join(".local/share/mush")
+    } else {
+        PathBuf::from(".mush")
+    };
+    base.join("models")
+}
 
 /// a document indexed for semantic search
 #[derive(Debug, Clone)]
@@ -68,7 +85,9 @@ impl ContextIndex {
     /// uses EmbeddingGemma-300M (768-dim), downloaded on first use and cached.
     pub fn build(documents: Vec<ContextDocument>) -> Result<Self, ContextError> {
         let mut model = TextEmbedding::try_new(
-            InitOptions::new(EmbeddingModel::EmbeddingGemma300M).with_show_download_progress(true),
+            InitOptions::new(EmbeddingModel::EmbeddingGemma300M)
+                .with_cache_dir(model_cache_dir())
+                .with_show_download_progress(true),
         )
         .map_err(|e| ContextError::ModelInit(e.to_string()))?;
 
