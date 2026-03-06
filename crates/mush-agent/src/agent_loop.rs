@@ -111,7 +111,7 @@ pub type ConfirmCallback<'a> = Box<
 
 /// configuration for running the agent loop
 pub struct AgentConfig<'a> {
-    pub model: &'a Model,
+    pub model: Model,
     pub system_prompt: Option<String>,
     pub tools: &'a [Box<dyn AgentTool>],
     pub registry: &'a ApiRegistry,
@@ -197,7 +197,7 @@ pub fn agent_loop(
 
                 // stream the assistant response
                 tracing::debug!(turn = turn_index, model = %config.model.id, "streaming LLM response");
-                let stream_result = config.registry.stream(config.model, &context, &config.options);
+                let stream_result = config.registry.stream(&config.model, &context, &config.options);
                 let mut event_stream = match stream_result {
                     Ok(fut) => match fut.await {
                         Ok(s) => s,
@@ -567,7 +567,7 @@ mod tests {
         let tools: Vec<Box<dyn AgentTool>> = vec![];
 
         let config = AgentConfig {
-            model: &model,
+            model: model.clone(),
             system_prompt: None,
             tools: &tools,
             registry: &registry,
@@ -613,7 +613,7 @@ mod tests {
         });
 
         let config = AgentConfig {
-            model: &model,
+            model: model.clone(),
             system_prompt: None,
             tools: &tools,
             registry: &registry,
@@ -726,7 +726,7 @@ mod tests {
         });
 
         let config = AgentConfig {
-            model: &model,
+            model: model.clone(),
             system_prompt: None,
             tools: &tools,
             registry: &registry,
