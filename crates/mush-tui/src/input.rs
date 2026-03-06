@@ -163,6 +163,14 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             return None;
         }
 
+        // pane switching: ctrl+tab / ctrl+shift+tab (before tab completion)
+        (KeyModifiers::CONTROL, KeyCode::Tab) => {
+            return Some(AppEvent::FocusNextPane);
+        }
+        (m, KeyCode::BackTab) if m.contains(KeyModifiers::CONTROL) => {
+            return Some(AppEvent::FocusPrevPane);
+        }
+
         // tab completion / slash menu
         (_, KeyCode::Tab) | (KeyModifiers::SHIFT, KeyCode::BackTab) => {
             // open slash menu if typing a command and we have descriptions
@@ -175,6 +183,13 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
                 app.tab_complete();
             }
             return None;
+        }
+
+        // split pane: ctrl+shift+enter forks conversation into new agent
+        (m, KeyCode::Enter)
+            if m.contains(KeyModifiers::CONTROL) && m.contains(KeyModifiers::SHIFT) =>
+        {
+            return Some(AppEvent::SplitPane);
         }
 
         // multi-line: alt+enter, shift+enter, or ctrl+j inserts newline
@@ -270,6 +285,12 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         // paste image from clipboard
         (KeyModifiers::CONTROL, KeyCode::Char('v')) => {
             return Some(AppEvent::PasteImage);
+        }
+
+        // pane management: alt+number for direct focus
+        (KeyModifiers::ALT, KeyCode::Char(c @ '1'..='9')) => {
+            let idx = (c as usize) - ('1' as usize);
+            return Some(AppEvent::FocusPaneByIndex(idx));
         }
 
         // regular character
@@ -1131,5 +1152,72 @@ mod tests {
         handle_key(&mut app, key(KeyCode::Esc));
         assert_eq!(app.mode, AppMode::Normal);
         assert!(app.slash_menu.is_none());
+    }
+
+    fn alt(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::ALT,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
+    }
+
+    #[test]
+    fn alt_number_focuses_pane() {
+        let mut app = App::new("test".into(), 200_000);
+        let event = handle_key(&mut app, alt(KeyCode::Char('1')));
+        assert!(matches!(event, Some(AppEvent::FocusPaneByIndex(0))));
+
+        let event = handle_key(&mut app, alt(KeyCode::Char('3')));
+        assert!(matches!(event, Some(AppEvent::FocusPaneByIndex(2))));
+
+        let event = handle_key(&mut app, alt(KeyCode::Char('9')));
+        assert!(matches!(event, Some(AppEvent::FocusPaneByIndex(8))));
+    }
+
+    #[test]
+    fn ctrl_shift_enter_splits_pane() {
+        let mut app = App::new("test".into(), 200_000);
+        let event = handle_key(
+            &mut app,
+            KeyEvent {
+                code: KeyCode::Enter,
+                modifiers: KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                kind: KeyEventKind::Press,
+                state: KeyEventState::NONE,
+            },
+        );
+        assert!(matches!(event, Some(AppEvent::SplitPane)));
+    }
+
+    #[test]
+    fn ctrl_tab_focuses_next_pane() {
+        let mut app = App::new("test".into(), 200_000);
+        let event = handle_key(
+            &mut app,
+            KeyEvent {
+                code: KeyCode::Tab,
+                modifiers: KeyModifiers::CONTROL,
+                kind: KeyEventKind::Press,
+                state: KeyEventState::NONE,
+            },
+        );
+        assert!(matches!(event, Some(AppEvent::FocusNextPane)));
+    }
+
+    #[test]
+    fn ctrl_shift_tab_focuses_prev_pane() {
+        let mut app = App::new("test".into(), 200_000);
+        let event = handle_key(
+            &mut app,
+            KeyEvent {
+                code: KeyCode::BackTab,
+                modifiers: KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                kind: KeyEventKind::Press,
+                state: KeyEventState::NONE,
+            },
+        );
+        assert!(matches!(event, Some(AppEvent::FocusPrevPane)));
     }
 }

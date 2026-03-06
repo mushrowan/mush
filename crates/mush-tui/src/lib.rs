@@ -14,7 +14,6 @@ pub mod widgets;
 
 pub use app::{App, AppEvent, ThinkingDisplay};
 pub use runner::{
-    HintMode, LastModelSaver, PromptEnricher, SessionSaver, ThinkingPrefsSaver, TuiConfig,
-    run_tui,
+    HintMode, LastModelSaver, PromptEnricher, SessionSaver, ThinkingPrefsSaver, TuiConfig, run_tui,
 };
 pub use theme::{Theme, ThemeConfig};

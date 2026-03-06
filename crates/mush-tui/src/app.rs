@@ -299,6 +299,10 @@ pub struct App {
     pub input_visible_lines: Cell<u16>,
     /// latest input area rect (set during render by Ui)
     pub input_area: Cell<Rect>,
+    /// pane info: (this pane index 1-based, total panes), None when single pane
+    pub pane_info: Option<(u16, u16)>,
+    /// background pane alert text (e.g. "pane 2: busy")
+    pub background_alert: Option<String>,
 }
 
 /// position computed during render for inline image overlay
@@ -409,6 +413,8 @@ impl App {
             input_total_lines: Cell::new(0),
             input_visible_lines: Cell::new(0),
             input_area: Cell::new(Rect::default()),
+            pane_info: None,
+            background_alert: None,
         }
     }
 

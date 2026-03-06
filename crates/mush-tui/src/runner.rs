@@ -182,6 +182,7 @@ pub async fn run_tui(
         ("cost", "show session cost"),
         ("logs", "show recent log entries"),
         ("injection", "toggle prompt injection preview"),
+        ("close", "close focused pane"),
         ("quit", "exit mush"),
     ];
     app.completions = slash_cmds
@@ -218,12 +219,7 @@ pub async fn run_tui(
     let thinking_saver = tui_config.save_thinking_prefs.clone();
     let mut pending_prompt: Option<String> = None;
     let mut conversation: Vec<Message> = Vec::new();
-    let mut session_tree = SessionTree::new();
-    // image protocol states keyed by (message_idx, tool_call_idx)
-    let mut image_protos: std::collections::HashMap<
-        (usize, usize),
-        ratatui_image::protocol::StatefulProtocol,
-    > = std::collections::HashMap::new();
+    let session_tree = SessionTree::new();
 
     // config hot-reload watcher
     let (_config_watcher, config_rx) = if let Some(ref path) = tui_config.config_path {
@@ -288,88 +284,137 @@ pub async fn run_tui(
         app.status = Some(format!("resumed session ({} messages)", conversation.len()));
     }
 
-    // shared steering queue: user can type while agent is running
-    let steering_queue: Arc<Mutex<Vec<Message>>> = Arc::new(Mutex::new(Vec::new()));
+    // wrap state into pane manager (single pane initially)
+    let mut initial_pane = crate::pane::Pane::new(crate::pane::PaneId::new(1), app);
+    initial_pane.conversation = conversation;
+    initial_pane.session_tree = session_tree;
+    let mut pane_mgr = crate::pane::PaneManager::new(initial_pane);
 
     // draw initial frame
-    draw(&mut terminal, &app, &mut image_protos)?;
+    draw_panes(&mut terminal, &mut pane_mgr, &image_picker)?;
+
+    use crate::pane::PaneId;
+    use futures::stream::SelectAll;
+    type TaggedStream<'a> =
+        std::pin::Pin<Box<dyn futures::Stream<Item = (PaneId, AgentEvent)> + Send + 'a>>;
+
+    // per-stream state for tool confirmation
+    struct StreamMeta {
+        steering_queue: Arc<Mutex<Vec<Message>>>,
+        confirm_req_rx: tokio::sync::mpsc::Receiver<(String, tokio::sync::oneshot::Sender<bool>)>,
+        confirm_reply: Arc<Mutex<Option<tokio::sync::oneshot::Sender<bool>>>>,
+        model: Model,
+    }
+
+    let mut agent_streams: SelectAll<TaggedStream<'_>> = SelectAll::new();
+    let mut stream_metas: std::collections::HashMap<PaneId, StreamMeta> =
+        std::collections::HashMap::new();
 
     loop {
-        // if there's a pending prompt and we're not streaming, start the agent
+        // -- start streams for any pane with a pending prompt --
+        let mut prompts: Vec<(PaneId, String)> = Vec::new();
         if let Some(prompt) = pending_prompt.take() {
-            let prompt_preview = prompt.clone();
-
-            // in Message mode, prepend hint to user message (evaluated once)
-            let mut injection_preview: Option<String> = None;
-            let user_text = if tui_config.hint_mode == HintMode::Message
-                && let Some(ref enricher) = tui_config.prompt_enricher
-                && let Some(hint) = enricher(&prompt)
-            {
-                if app.show_prompt_injection {
-                    injection_preview = Some(format!("message hint\n{hint}"));
+            prompts.push((pane_mgr.focused().id, prompt));
+        }
+        for pane in pane_mgr.panes_mut() {
+            if let Some(prompt) = pane.pending_prompt.take() {
+                if !prompts.iter().any(|(id, _)| *id == pane.id) {
+                    prompts.push((pane.id, prompt));
                 }
-                format!("{hint}\n\n{prompt}")
-            } else {
-                prompt
+            }
+        }
+
+        for (pane_id, prompt) in prompts {
+            let steering_queue = pane_mgr.pane(pane_id).unwrap().steering_queue.clone();
+
+            let model = pane_mgr
+                .pane(pane_id)
+                .map(|p| {
+                    models::find_model_by_id(p.app.model_id.as_str())
+                        .unwrap_or_else(|| tui_config.model.clone())
+                })
+                .unwrap_or_else(|| tui_config.model.clone());
+            let thinking_level = pane_mgr
+                .pane(pane_id)
+                .map(|p| p.app.thinking_level)
+                .unwrap_or(ThinkingLevel::Off);
+
+            let conversation_snapshot = {
+                let pane = pane_mgr.pane_mut(pane_id).unwrap();
+                let (app, conversation, session_tree, _) = pane.fields_mut();
+
+                let prompt_preview = prompt.clone();
+                let mut injection_preview: Option<String> = None;
+                let user_text = if tui_config.hint_mode == HintMode::Message
+                    && let Some(ref enricher) = tui_config.prompt_enricher
+                    && let Some(hint) = enricher(&prompt)
+                {
+                    if app.show_prompt_injection {
+                        injection_preview = Some(format!("message hint\n{hint}"));
+                    }
+                    format!("{hint}\n\n{prompt}")
+                } else {
+                    prompt
+                };
+
+                if app.show_prompt_injection
+                    && tui_config.hint_mode == HintMode::Transform
+                    && let Some(ref enricher) = tui_config.prompt_enricher
+                    && let Some(hint) = enricher(&prompt_preview)
+                {
+                    injection_preview = Some(format!(
+                        "transform hint\n{hint}\n\n(applied before each llm call)"
+                    ));
+                }
+
+                if app.show_prompt_injection {
+                    if let Some(preview) = injection_preview {
+                        app.push_system_message(preview);
+                    } else {
+                        let note = match tui_config.hint_mode {
+                            HintMode::None => "no injection (hint mode is none)",
+                            _ if tui_config.prompt_enricher.is_none() => {
+                                "no injection (enricher unavailable)"
+                            }
+                            _ => "no injection hint matched",
+                        };
+                        app.push_system_message(note);
+                    }
+                }
+
+                let user_message = Message::User(UserMessage {
+                    content: if app.pending_images.is_empty() {
+                        UserContent::Text(user_text)
+                    } else {
+                        let images = app.take_images();
+                        let mut parts: Vec<UserContentPart> =
+                            vec![UserContentPart::Text(TextContent { text: user_text })];
+                        for img in images {
+                            use base64::Engine;
+                            parts.push(UserContentPart::Image(ImageContent {
+                                data: base64::engine::general_purpose::STANDARD.encode(&img.data),
+                                mime_type: img.mime_type,
+                            }));
+                        }
+                        UserContent::Parts(parts)
+                    },
+                    timestamp_ms: Timestamp::now(),
+                });
+                session_tree.append_message(user_message.clone());
+                conversation.push(user_message);
+                conversation.clone()
             };
 
-            if app.show_prompt_injection
-                && tui_config.hint_mode == HintMode::Transform
-                && let Some(ref enricher) = tui_config.prompt_enricher
-                && let Some(hint) = enricher(&prompt_preview)
-            {
-                injection_preview = Some(format!(
-                    "transform hint\n{hint}\n\n(applied before each llm call)"
-                ));
-            }
-
-            if app.show_prompt_injection {
-                if let Some(preview) = injection_preview {
-                    app.push_system_message(preview);
-                } else {
-                    let note = match tui_config.hint_mode {
-                        HintMode::None => "no injection (hint mode is none)",
-                        _ if tui_config.prompt_enricher.is_none() => {
-                            "no injection (enricher unavailable)"
-                        }
-                        _ => "no injection hint matched",
-                    };
-                    app.push_system_message(note);
-                }
-            }
-
-            let user_message = Message::User(UserMessage {
-                content: if app.pending_images.is_empty() {
-                    UserContent::Text(user_text)
-                } else {
-                    let images = app.take_images();
-                    let mut parts: Vec<UserContentPart> =
-                        vec![UserContentPart::Text(TextContent { text: user_text })];
-                    for img in images {
-                        use base64::Engine;
-                        parts.push(UserContentPart::Image(ImageContent {
-                            data: base64::engine::general_purpose::STANDARD.encode(&img.data),
-                            mime_type: img.mime_type,
-                        }));
-                    }
-                    UserContent::Parts(parts)
-                },
-                timestamp_ms: Timestamp::now(),
-            });
-            session_tree.append_message(user_message.clone());
-            conversation.push(user_message);
-
-            // in Transform mode, the hint is injected before each LLM call
-            let context_window = tui_config.model.context_window as usize;
+            // build callbacks (no pane borrows)
+            let context_window = model.context_window as usize;
             let enricher_arc = if tui_config.hint_mode == HintMode::Transform {
                 tui_config.prompt_enricher.clone()
             } else {
                 None
             };
-            let compact_model = tui_config.model.clone();
+            let compact_model = model.clone();
             let compact_options = tui_config.options.clone();
-            // cache compaction results within a turn so the summary text stays
-            // stable across tool-call rounds, preserving the prompt cache prefix
+            #[expect(clippy::type_complexity)]
             let compaction_cache: std::sync::Arc<
                 tokio::sync::Mutex<Option<(usize, Vec<Message>)>>,
             > = std::sync::Arc::new(tokio::sync::Mutex::new(None));
@@ -383,12 +428,10 @@ pub async fn run_tui(
                         let mut guard = cache.lock().await;
                         if let Some((orig_len, ref compacted)) = *guard {
                             if msgs.len() >= orig_len {
-                                // reuse cached compaction, append new messages
                                 let mut result = compacted.clone();
                                 result.extend_from_slice(&msgs[orig_len..]);
                                 result
                             } else {
-                                // messages shrank (undo/branch), invalidate cache
                                 *guard = None;
                                 msgs
                             }
@@ -415,7 +458,6 @@ pub async fn run_tui(
                 })
             }));
 
-            // steering callback: drains any messages queued by user input
             let sq = steering_queue.clone();
             let steering: Option<mush_agent::MessageCallback<'_>> = Some(Box::new(move || {
                 let sq = sq.clone();
@@ -425,7 +467,6 @@ pub async fn run_tui(
                 })
             }));
 
-            // follow-up callback: picks up any remaining queued messages after agent finishes
             let sq_follow = steering_queue.clone();
             let follow_up: Option<mush_agent::MessageCallback<'_>> = Some(Box::new(move || {
                 let sq = sq_follow.clone();
@@ -434,10 +475,9 @@ pub async fn run_tui(
                     q.drain(..).collect()
                 })
             }));
-            type ConfirmRequest = (String, tokio::sync::oneshot::Sender<bool>);
-            let (confirm_req_tx, mut confirm_req_rx) =
-                tokio::sync::mpsc::channel::<ConfirmRequest>(1);
 
+            let (confirm_req_tx, confirm_req_rx) =
+                tokio::sync::mpsc::channel::<(String, tokio::sync::oneshot::Sender<bool>)>(1);
             let confirm: Option<mush_agent::ConfirmCallback<'_>> = if tui_config.confirm_tools {
                 Some(Box::new(move |name: &str, args: &serde_json::Value| {
                     let tx = confirm_req_tx.clone();
@@ -457,21 +497,18 @@ pub async fn run_tui(
             } else {
                 None
             };
-            // stash receiver for the tick handler to pick up pending confirms
             let confirm_reply: Arc<Mutex<Option<tokio::sync::oneshot::Sender<bool>>>> =
                 Arc::new(Mutex::new(None));
 
             let mut call_options = tui_config.options.clone();
-            let (api_key, account_id) = event_handler::resolve_auth_for_model(
-                &tui_config.model,
-                &tui_config.provider_api_keys,
-            )
-            .await;
+            let (api_key, account_id) =
+                event_handler::resolve_auth_for_model(&model, &tui_config.provider_api_keys).await;
             call_options.api_key = api_key;
             call_options.account_id = account_id;
+            call_options.thinking = Some(thinking_level);
 
             let config = AgentConfig {
-                model: &tui_config.model,
+                model: model.clone(),
                 system_prompt: tui_config.system_prompt.clone(),
                 tools,
                 registry,
@@ -483,78 +520,163 @@ pub async fn run_tui(
                 confirm_tool: confirm,
             };
 
-            let mut stream = std::pin::pin!(agent_loop(config, conversation.clone()));
+            let stream = agent_loop(config, conversation_snapshot);
+            let tagged: TaggedStream<'_> =
+                Box::pin(futures::StreamExt::map(stream, move |ev| (pane_id, ev)));
+            agent_streams.push(tagged);
+            stream_metas.insert(
+                pane_id,
+                StreamMeta {
+                    steering_queue: steering_queue.clone(),
+                    confirm_req_rx,
+                    confirm_reply,
+                    model,
+                },
+            );
+        }
 
-            let mut aborted = false;
+        // -- main event loop: streaming or idle --
+        let any_streaming = !agent_streams.is_empty();
 
-            // inner loop: process agent events while also handling terminal input
-            loop {
-                let tick = tokio::time::sleep(std::time::Duration::from_millis(16));
-                tokio::pin!(tick);
+        if any_streaming {
+            let tick = tokio::time::sleep(std::time::Duration::from_millis(16));
+            tokio::pin!(tick);
 
-                tokio::select! {
-                    agent_event = stream.next() => {
-                        match agent_event {
-                            Some(event) => {
-                                let mut ctx = EventCtx {
-                                    app: &mut app,
-                                    conversation: &mut conversation,
-                                    session_tree: &mut session_tree,
-                                    image_protos: &mut image_protos,
-                                };
-                                event_handler::handle_agent_event(
-                                    &mut ctx,
-                                    &event,
-                                    &tui_config.model,
-                                    tui_config.debug_cache,
-                                    &image_picker,
-                                );
-                                if matches!(event, AgentEvent::AgentEnd) {
-                                    break;
+            tokio::select! {
+                result = agent_streams.next() => {
+                    if let Some((pane_id, event)) = result {
+                        // route agent event to the correct pane
+                        if let Some(pane) = pane_mgr.pane_mut(pane_id) {
+                            let model = stream_metas
+                                .get(&pane_id)
+                                .map(|m| &m.model)
+                                .unwrap_or(&tui_config.model);
+                            let (app, conversation, session_tree, image_protos) =
+                                pane.fields_mut();
+                            let mut ctx = EventCtx {
+                                app,
+                                conversation,
+                                session_tree,
+                                image_protos,
+                            };
+                            event_handler::handle_agent_event(
+                                &mut ctx,
+                                &event,
+                                model,
+                                tui_config.debug_cache,
+                                &image_picker,
+                            );
+                        }
+                        if matches!(event, AgentEvent::AgentEnd) {
+                            let stream_model = stream_metas
+                                .get(&pane_id)
+                                .map(|m| m.model.clone())
+                                .unwrap_or_else(|| tui_config.model.clone());
+                            stream_metas.remove(&pane_id);
+                            // auto-save for this pane
+                            if let Some(pane) = pane_mgr.pane(pane_id) {
+                                if let Some(ref saver) = tui_config.save_session {
+                                    saver(
+                                        &pane.conversation,
+                                        &pane.session_tree,
+                                        &pane.app.model_id,
+                                    );
                                 }
                             }
-                            None => break,
+                            // auto-compact for this pane
+                            if let Some(pane) = pane_mgr.pane(pane_id) {
+                                let needs = mush_session::compact::needs_compaction(
+                                    &pane.conversation,
+                                    stream_model.context_window as usize,
+                                );
+                                if needs {
+                                    if let Some(pane) = pane_mgr.pane_mut(pane_id) {
+                                        pane.app.status = Some("auto-compacting…".into());
+                                    }
+                                    draw_panes(&mut terminal, &mut pane_mgr, &image_picker)?;
+                                    if let Some(pane) = pane_mgr.pane_mut(pane_id) {
+                                        let (app, conversation, session_tree, _) =
+                                            pane.fields_mut();
+                                        slash::handle_compact(
+                                            app,
+                                            conversation,
+                                            session_tree,
+                                            &stream_model,
+                                            &tui_config.options,
+                                            registry,
+                                        )
+                                        .await;
+                                    }
+                                    if let Some(pane) = pane_mgr.pane(pane_id) {
+                                        if let Some(ref saver) = tui_config.save_session {
+                                            saver(
+                                                &pane.conversation,
+                                                &pane.session_tree,
+                                                &pane.app.model_id,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
-                    _ = tick => {
-                        // check for pending tool confirmation requests
-                        if let Ok((prompt, reply_tx)) = confirm_req_rx.try_recv() {
+                }
+                _ = tick => {
+                    // check for tool confirmation on focused pane
+                    let focused_id = pane_mgr.focused().id;
+                    if let Some(meta) = stream_metas.get_mut(&focused_id) {
+                        if let Ok((prompt, reply_tx)) = meta.confirm_req_rx.try_recv() {
+                            let app = &mut pane_mgr.focused_mut().app;
                             app.mode = app::AppMode::ToolConfirm;
                             app.confirm_prompt = Some(prompt);
-                            *confirm_reply.lock().await = Some(reply_tx);
+                            *meta.confirm_reply.lock().await = Some(reply_tx);
                         }
+                    }
 
-                        // poll live tool output from bash sink
-                        if let Some(ref live) = tui_config.tool_output_live
-                            && let Ok(guard) = live.lock()
+                    // poll live tool output for focused pane
+                    if let Some(ref live) = tui_config.tool_output_live {
+                        let app = &mut pane_mgr.focused_mut().app;
+                        if let Ok(guard) = live.lock()
                             && let Some(last) = guard.as_ref()
-                            && let Some(active) = app.active_tools.last().map(|t| t.tool_call_id.clone())
+                            && let Some(active) =
+                                app.active_tools.last().map(|t| t.tool_call_id.clone())
                         {
                             app.push_tool_output(active.as_str(), last);
                         }
+                    }
 
-                        // check for terminal input during streaming
-                        while event::poll(std::time::Duration::ZERO)? {
-                            match event::read()? {
-                                Event::Key(key) if key.kind == KeyEventKind::Press => {
-                                    // handle tool confirmation y/n
-                                    if app.mode == app::AppMode::ToolConfirm {
-                                        let answer = match key.code {
-                                            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => Some(true),
-                                            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Some(false),
-                                            _ => None,
-                                        };
-                                        if let Some(allowed) = answer {
-                                            if let Some(tx) = confirm_reply.lock().await.take() {
+                    // handle terminal input during streaming
+                    while event::poll(std::time::Duration::ZERO)? {
+                        match event::read()? {
+                            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                                if pane_mgr.focused().app.mode == app::AppMode::ToolConfirm {
+                                    let answer = match key.code {
+                                        KeyCode::Char('y') | KeyCode::Char('Y')
+                                        | KeyCode::Enter => Some(true),
+                                        KeyCode::Char('n') | KeyCode::Char('N')
+                                        | KeyCode::Esc => Some(false),
+                                        _ => None,
+                                    };
+                                    if let Some(allowed) = answer {
+                                        let fid = pane_mgr.focused().id;
+                                        if let Some(meta) = stream_metas.get_mut(&fid) {
+                                            if let Some(tx) =
+                                                meta.confirm_reply.lock().await.take()
+                                            {
                                                 let _ = tx.send(allowed);
                                             }
-                                            app.mode = app::AppMode::Normal;
-                                            app.confirm_prompt = None;
-                                            if !allowed {
-                                                app.status = Some("tool denied".into());
-                                            }
                                         }
-                                    } else if let Some(app_event) = handle_key(&mut app, key) {
+                                        let app = &mut pane_mgr.focused_mut().app;
+                                        app.mode = app::AppMode::Normal;
+                                        app.confirm_prompt = None;
+                                        if !allowed {
+                                            app.status = Some("tool denied".into());
+                                        }
+                                    }
+                                } else {
+                                    let app_event =
+                                        handle_key(&mut pane_mgr.focused_mut().app, key);
+                                    if let Some(app_event) = app_event {
                                         match app_event {
                                             AppEvent::Quit => {
                                                 cleanup(&mut terminal)?;
@@ -562,174 +684,237 @@ pub async fn run_tui(
                                                 return Ok(());
                                             }
                                             AppEvent::Abort => {
+                                                // abort focused pane's stream
+                                                let app = &mut pane_mgr.focused_mut().app;
                                                 app.is_streaming = false;
                                                 app.active_tools.clear();
                                                 app.status = Some("aborted".into());
-                                                aborted = true;
-                                                break;
+                                                // note: can't cancel a specific stream in
+                                                // SelectAll, so the stream continues but
+                                                // events will be ignored (pane not streaming)
                                             }
                                             AppEvent::UserSubmit { text } => {
-                                                let msg = Message::User(UserMessage {
-                                                    content: UserContent::Text(text.clone()),
-                                                    timestamp_ms: Timestamp::now(),
-                                                });
-                                                steering_queue.lock().await.push(msg);
-                                                app.push_queued_message(text);
+                                                let fid = pane_mgr.focused().id;
+                                                if let Some(meta) = stream_metas.get(&fid) {
+                                                    let msg = Message::User(UserMessage {
+                                                        content: UserContent::Text(text.clone()),
+                                                        timestamp_ms: Timestamp::now(),
+                                                    });
+                                                    meta.steering_queue
+                                                        .lock()
+                                                        .await
+                                                        .push(msg);
+                                                }
+                                                pane_mgr
+                                                    .focused_mut()
+                                                    .app
+                                                    .push_queued_message(text);
                                             }
                                             AppEvent::CycleThinkingLevel => {
-                                                tui_config.options.thinking = Some(app.thinking_level);
-                                                save_thinking_pref(&mut thinking_prefs, &thinking_saver, &app.model_id, app.thinking_level);
+                                                let app = &pane_mgr.focused().app;
+                                                save_thinking_pref(
+                                                    &mut thinking_prefs,
+                                                    &thinking_saver,
+                                                    &app.model_id,
+                                                    app.thinking_level,
+                                                );
                                             }
                                             AppEvent::PasteImage => {
-                                                paste_clipboard_image(&mut app).await;
+                                                paste_clipboard_image(
+                                                    &mut pane_mgr.focused_mut().app,
+                                                )
+                                                .await;
+                                            }
+                                            AppEvent::FocusNextPane => pane_mgr.focus_next(),
+                                            AppEvent::FocusPrevPane => pane_mgr.focus_prev(),
+                                            AppEvent::FocusPaneByIndex(i) => {
+                                                pane_mgr.focus_index(i)
+                                            }
+                                            AppEvent::SplitPane => {
+                                                fork_pane(&mut pane_mgr, &tui_config);
+                                            }
+                                            AppEvent::ClosePane => {
+                                                if pane_mgr.is_multi_pane() {
+                                                    pane_mgr.close_focused();
+                                                }
                                             }
                                             _ => {}
                                         }
                                     }
                                 }
-                                Event::Mouse(mouse) => handle_mouse(&mut app, mouse),
-                                Event::Key(key) => {
-                                    tracing::trace!(code = ?key.code, kind = ?key.kind, "dropped non-press key event (streaming)");
-                                }
-                                event => {
-                                    tracing::trace!(?event, "dropped non-key event (streaming)");
-                                }
+                            }
+                            Event::Mouse(mouse) => {
+                                handle_mouse(&mut pane_mgr.focused_mut().app, mouse)
+                            }
+                            Event::Key(key) => {
+                                tracing::trace!(code = ?key.code, kind = ?key.kind, "dropped non-press key event (streaming)");
+                            }
+                            event => {
+                                tracing::trace!(?event, "dropped non-key event (streaming)");
                             }
                         }
                     }
                 }
-
-                app.tick();
-                draw(&mut terminal, &app, &mut image_protos)?;
-
-                if aborted {
-                    // drop the stream, cancelling any in-flight agent work
-                    break;
-                }
             }
-
-            // auto-save after each agent turn
-            if let Some(ref saver) = tui_config.save_session {
-                saver(&conversation, &session_tree, &app.model_id);
-            }
-
-            // auto-compact when approaching context limit
-            if mush_session::compact::needs_compaction(
-                &conversation,
-                tui_config.model.context_window as usize,
-            ) {
-                app.status = Some("auto-compacting…".into());
-                draw(&mut terminal, &app, &mut image_protos)?;
-
-                slash::handle_compact(
-                    &mut app,
-                    &mut conversation,
-                    &mut session_tree,
-                    &tui_config,
-                    registry,
-                )
-                .await;
-                // save again after compaction
-                if let Some(ref saver) = tui_config.save_session {
-                    saver(&conversation, &session_tree, &app.model_id);
-                }
-            }
-
-            draw(&mut terminal, &app, &mut image_protos)?;
-            continue;
-        }
-
-        // idle: wait for terminal input
-        if event::poll(std::time::Duration::from_millis(50))? {
-            loop {
-                match event::read()? {
-                    Event::Key(key) if key.kind == KeyEventKind::Press => {
-                        if let Some(app_event) = handle_key(&mut app, key) {
-                            match app_event {
-                                AppEvent::Quit => {
-                                    app.should_quit = true;
-                                    break;
-                                }
-                                AppEvent::UserSubmit { text } => {
-                                    let expanded = slash::expand_template(&text);
-                                    app.push_user_message(expanded.clone());
-                                    app.active_tools.clear();
-                                    app.start_streaming();
-                                    pending_prompt = Some(expanded);
-                                }
-                                AppEvent::SlashCommand { name, args } => {
-                                    if name == "search" {
-                                        app.mode = app::AppMode::Search;
-                                        app.search.query = args.to_string();
-                                        app.update_search();
-                                    } else if name == "compact" {
-                                        slash::handle_compact(
-                                            &mut app,
-                                            &mut conversation,
-                                            &mut session_tree,
-                                            &tui_config,
-                                            registry,
-                                        )
-                                        .await;
-                                    } else if name == "export" {
-                                        slash::handle_export(&mut app, &conversation, &args);
-                                    } else if let Some(prompt) = slash::handle(
-                                        &mut app,
-                                        &mut conversation,
-                                        &mut session_tree,
-                                        &mut tui_config,
-                                        &thinking_prefs,
-                                        &name,
-                                        &args,
-                                    ) {
-                                        app.start_streaming();
-                                        pending_prompt = Some(prompt);
+        } else {
+            // idle: no active streams, wait for terminal input
+            if event::poll(std::time::Duration::from_millis(50))? {
+                loop {
+                    match event::read()? {
+                        Event::Key(key) if key.kind == KeyEventKind::Press => {
+                            let app_event = handle_key(&mut pane_mgr.focused_mut().app, key);
+                            if let Some(app_event) = app_event {
+                                match app_event {
+                                    AppEvent::Quit => {
+                                        pane_mgr.focused_mut().app.should_quit = true;
+                                        break;
                                     }
+                                    AppEvent::UserSubmit { text } => {
+                                        let expanded = slash::expand_template(&text);
+                                        let app = &mut pane_mgr.focused_mut().app;
+                                        app.push_user_message(expanded.clone());
+                                        app.active_tools.clear();
+                                        app.start_streaming();
+                                        pending_prompt = Some(expanded);
+                                    }
+                                    AppEvent::SlashCommand { name, args } => {
+                                        // track whether the command mutated conversation state
+                                        let mut state_changed = false;
+
+                                        if name == "search" {
+                                            let app = &mut pane_mgr.focused_mut().app;
+                                            app.mode = app::AppMode::Search;
+                                            app.search.query = args.to_string();
+                                            app.update_search();
+                                        } else if name == "compact" {
+                                            let pane = pane_mgr.focused_mut();
+                                            let (app, conversation, session_tree, _) =
+                                                pane.fields_mut();
+                                            slash::handle_compact(
+                                                app,
+                                                conversation,
+                                                session_tree,
+                                                &models::find_model_by_id(app.model_id.as_str())
+                                                    .unwrap_or_else(|| tui_config.model.clone()),
+                                                &tui_config.options,
+                                                registry,
+                                            )
+                                            .await;
+                                            state_changed = true;
+                                        } else if name == "export" {
+                                            let pane = pane_mgr.focused_mut();
+                                            slash::handle_export(
+                                                &mut pane.app,
+                                                &pane.conversation,
+                                                &args,
+                                            );
+                                        } else if name == "close" {
+                                            if pane_mgr.is_multi_pane() {
+                                                pane_mgr.close_focused();
+                                            } else {
+                                                pane_mgr.focused_mut().app.status =
+                                                    Some("can't close the last pane".into());
+                                            }
+                                        } else {
+                                            let pane = pane_mgr.focused_mut();
+                                            let (app, conversation, session_tree, _) =
+                                                pane.fields_mut();
+                                            if let Some(prompt) = slash::handle(
+                                                app,
+                                                conversation,
+                                                session_tree,
+                                                &mut tui_config,
+                                                &thinking_prefs,
+                                                &name,
+                                                &args,
+                                            ) {
+                                                app.start_streaming();
+                                                pending_prompt = Some(prompt);
+                                            }
+                                            // undo, clear, branch mutate state
+                                            if matches!(name.as_str(), "undo" | "clear" | "branch") {
+                                                state_changed = true;
+                                            }
+                                        }
+
+                                        // persist after state-mutating commands
+                                        if state_changed {
+                                            if let Some(ref saver) = tui_config.save_session {
+                                                let pane = pane_mgr.focused();
+                                                saver(
+                                                    &pane.conversation,
+                                                    &pane.session_tree,
+                                                    &pane.app.model_id,
+                                                );
+                                            }
+                                        }
+                                    }
+                                    AppEvent::CycleThinkingLevel => {
+                                        let app = &pane_mgr.focused().app;
+                                        save_thinking_pref(
+                                            &mut thinking_prefs,
+                                            &thinking_saver,
+                                            &app.model_id,
+                                            app.thinking_level,
+                                        );
+                                    }
+                                    AppEvent::PasteImage => {
+                                        paste_clipboard_image(&mut pane_mgr.focused_mut().app)
+                                            .await;
+                                    }
+                                    AppEvent::SplitPane => {
+                                        fork_pane(&mut pane_mgr, &tui_config);
+                                    }
+                                    AppEvent::ClosePane => {
+                                        if pane_mgr.is_multi_pane() {
+                                            pane_mgr.close_focused();
+                                        } else {
+                                            pane_mgr.focused_mut().app.status =
+                                                Some("can't close the last pane".into());
+                                        }
+                                    }
+                                    AppEvent::FocusNextPane => pane_mgr.focus_next(),
+                                    AppEvent::FocusPrevPane => pane_mgr.focus_prev(),
+                                    AppEvent::FocusPaneByIndex(i) => pane_mgr.focus_index(i),
+                                    _ => {}
                                 }
-                                AppEvent::CycleThinkingLevel => {
-                                    tui_config.options.thinking = Some(app.thinking_level);
-                                    save_thinking_pref(
-                                        &mut thinking_prefs,
-                                        &thinking_saver,
-                                        &app.model_id,
-                                        app.thinking_level,
-                                    );
-                                }
-                                AppEvent::PasteImage => {
-                                    paste_clipboard_image(&mut app).await;
-                                }
-                                _ => {}
                             }
                         }
+                        Event::Mouse(mouse) => handle_mouse(&mut pane_mgr.focused_mut().app, mouse),
+                        Event::Key(key) => {
+                            tracing::trace!(code = ?key.code, kind = ?key.kind, "dropped non-press key event (idle)");
+                        }
+                        event => {
+                            tracing::trace!(?event, "dropped non-key event (idle)");
+                        }
                     }
-                    Event::Mouse(mouse) => handle_mouse(&mut app, mouse),
-                    Event::Key(key) => {
-                        tracing::trace!(code = ?key.code, kind = ?key.kind, "dropped non-press key event (idle)");
-                    }
-                    event => {
-                        tracing::trace!(?event, "dropped non-key event (idle)");
-                    }
-                }
 
-                if !event::poll(std::time::Duration::ZERO)? {
-                    break;
+                    if !event::poll(std::time::Duration::ZERO)? {
+                        break;
+                    }
                 }
             }
         }
 
-        // check for config hot-reload
+        // config hot-reload
         if let Some(ref rx) = config_rx
             && let Ok(new_theme) = rx.try_recv()
         {
             tui_config.theme = new_theme;
-            app.status = Some("config reloaded".into());
+            pane_mgr.focused_mut().app.status = Some("config reloaded".into());
         }
 
-        if app.should_quit {
+        if pane_mgr.focused().app.should_quit {
             break;
         }
 
-        draw(&mut terminal, &app, &mut image_protos)?;
+        // tick streaming panes and draw
+        for pane in pane_mgr.panes_mut() {
+            if pane.app.is_streaming {
+                pane.app.tick();
+            }
+        }
+        draw_panes(&mut terminal, &mut pane_mgr, &image_picker)?;
     }
 
     cleanup(&mut terminal)?;
@@ -737,49 +922,133 @@ pub async fn run_tui(
     Ok(())
 }
 
+use crate::pane::{LayoutMode, PaneManager};
 use crate::ui::Ui;
 
-fn draw(
+fn draw_panes(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    app: &App,
-    image_protos: &mut std::collections::HashMap<
-        (usize, usize),
-        ratatui_image::protocol::StatefulProtocol,
-    >,
+    pane_mgr: &mut PaneManager,
+    _image_picker: &Option<ratatui_image::picker::Picker>,
 ) -> io::Result<()> {
+    // inject pane info for status bar display
+    let pane_count = pane_mgr.pane_count() as u16;
+    let focused_idx = pane_mgr.focused_index();
+    if pane_count > 1 {
+        // build background alert: list busy non-focused panes
+        let alert: Option<String> = {
+            let busy: Vec<String> = pane_mgr
+                .panes()
+                .iter()
+                .enumerate()
+                .filter(|(i, p)| *i != focused_idx && p.app.is_busy())
+                .map(|(i, _)| format!("pane {}", i + 1))
+                .collect();
+            if busy.is_empty() {
+                None
+            } else {
+                Some(format!("{}: busy", busy.join(", ")))
+            }
+        };
+        for (i, pane) in pane_mgr.panes_mut().iter_mut().enumerate() {
+            pane.app.pane_info = Some(((i + 1) as u16, pane_count));
+            pane.app.background_alert = if i == focused_idx {
+                alert.clone()
+            } else {
+                None
+            };
+        }
+    } else {
+        pane_mgr.panes_mut()[0].app.pane_info = None;
+        pane_mgr.panes_mut()[0].app.background_alert = None;
+    }
     terminal.draw(|frame| {
         let area = frame.area();
-        let ui = Ui::new(app);
-        let (cx, cy) = ui.cursor_position(area);
-        frame.render_widget(ui, area);
-        let streaming_idle = app.is_busy() && app.input.is_empty();
+        let mode = pane_mgr.compute_layout(area);
+        let focused_idx = pane_mgr.focused_index();
+        let pane_count = pane_mgr.pane_count();
+
+        // tab bar in tabs mode
+        if mode == LayoutMode::Tabs && pane_count > 1 {
+            let tab_area = ratatui::layout::Rect::new(area.x, area.y, area.width, 1);
+            frame.render_widget(crate::widgets::tab_bar::TabBar::new(&*pane_mgr), tab_area);
+        }
+
+        // cursor position for focused pane (computed before mutable iteration)
+        let focused_area = pane_mgr.panes()[focused_idx].area;
+        let (cx, cy) = Ui::new(&pane_mgr.panes()[focused_idx].app).cursor_position(focused_area);
+
+        // draw column separators between panes
+        if mode == LayoutMode::Columns && pane_count > 1 {
+            let buf = frame.buffer_mut();
+            for (i, pane) in pane_mgr.panes().iter().enumerate() {
+                if i == 0 {
+                    continue;
+                }
+                let sep_x = pane.area.x.saturating_sub(1);
+                let is_adjacent_to_focus = i == focused_idx || i == focused_idx + 1;
+                let style = if is_adjacent_to_focus {
+                    ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray)
+                } else {
+                    ratatui::style::Style::default().fg(ratatui::style::Color::Rgb(50, 50, 50))
+                };
+                for y in area.y..area.y + area.height {
+                    if let Some(cell) = buf.cell_mut(ratatui::layout::Position::new(sep_x, y)) {
+                        cell.set_symbol("│").set_style(style);
+                    }
+                }
+            }
+        }
+
+        // render each visible pane
+        for (i, pane) in pane_mgr.panes_mut().iter_mut().enumerate() {
+            if mode == LayoutMode::Tabs && i != focused_idx {
+                continue;
+            }
+            let pane_area = pane.area;
+            frame.render_widget(Ui::new(&pane.app), pane_area);
+
+            // render inline images
+            let render_areas = pane.app.image_render_areas.borrow().clone();
+            for img_area in &render_areas {
+                if let Some(proto) = pane
+                    .image_protos
+                    .get_mut(&(img_area.msg_idx, img_area.tc_idx))
+                {
+                    let widget = ratatui_image::StatefulImage::new()
+                        .resize(ratatui_image::Resize::Fit(None));
+                    frame.render_stateful_widget(widget, img_area.area, proto);
+                }
+            }
+        }
+
+        // cursor for focused pane
+        let focused_app = &pane_mgr.panes()[focused_idx].app;
+        let streaming_idle = focused_app.is_busy() && focused_app.input.is_empty();
         if !streaming_idle
-            && (app.mode == app::AppMode::Normal
-                || app.mode == app::AppMode::SlashComplete
-                || (app.is_streaming && app.mode != app::AppMode::ToolConfirm))
+            && (focused_app.mode == app::AppMode::Normal
+                || focused_app.mode == app::AppMode::SlashComplete
+                || (focused_app.is_streaming && focused_app.mode != app::AppMode::ToolConfirm))
         {
             frame.set_cursor_position((cx, cy));
         }
-        // render inline images at positions computed by MessageList
-        let render_areas = app.image_render_areas.borrow().clone();
-        for img_area in &render_areas {
-            if let Some(proto) = image_protos.get_mut(&(img_area.msg_idx, img_area.tc_idx)) {
-                let widget =
-                    ratatui_image::StatefulImage::new().resize(ratatui_image::Resize::Fit(None));
-                frame.render_stateful_widget(widget, img_area.area, proto);
-            }
-        }
-        // session picker overlay
-        if let Some(ref picker) = app.session_picker {
+
+        // overlays render on top of the focused pane
+        if let Some(ref picker) = focused_app.session_picker {
             widgets::session_picker::render(frame, picker);
         }
-        // slash command menu (above input box)
-        if let Some(ref menu) = app.slash_menu {
-            let input_h = crate::ui::input_height(&app.input, area.width, &app.pending_images);
-            let tools_h =
-                crate::widgets::tool_panels::tool_panels_height(&app.active_tools, area.width);
-            let status_h = crate::widgets::status_bar::status_bar_height(app, area.width);
-            let regions = crate::ui::layout(area, input_h, tools_h, status_h);
+        if let Some(ref menu) = focused_app.slash_menu {
+            let input_h = crate::ui::input_height(
+                &focused_app.input,
+                focused_area.width,
+                &focused_app.pending_images,
+            );
+            let tools_h = crate::widgets::tool_panels::tool_panels_height(
+                &focused_app.active_tools,
+                focused_area.width,
+            );
+            let status_h =
+                crate::widgets::status_bar::status_bar_height(focused_app, focused_area.width);
+            let regions = crate::ui::layout(focused_area, input_h, tools_h, status_h);
             widgets::slash_menu::render(frame, menu, regions.input);
         }
     })?;
@@ -805,6 +1074,84 @@ async fn paste_clipboard_image(app: &mut App) {
             app.status = Some("failed to read clipboard".into());
         }
     }
+}
+
+/// fork the focused pane's conversation into a new pane.
+/// if the input has text, it becomes the new pane's prompt.
+fn fork_pane(pane_mgr: &mut PaneManager, tui_config: &TuiConfig) {
+    // take input text as the new pane's prompt (if any)
+    let prompt = {
+        let app = &mut pane_mgr.focused_mut().app;
+        let text = std::mem::take(&mut app.input);
+        app.cursor = 0;
+        if text.is_empty() {
+            None
+        } else {
+            Some(slash::expand_template(&text))
+        }
+    };
+
+    // clone state from parent
+    let (
+        conversation,
+        session_tree,
+        display_msgs,
+        model_id,
+        context_window,
+        thinking_level,
+        thinking_display,
+        completions,
+        slash_commands,
+        model_completions,
+        cwd,
+    ) = {
+        let parent = pane_mgr.focused();
+        (
+            parent.conversation.clone(),
+            parent.session_tree.clone(),
+            parent.app.messages.clone(),
+            parent.app.model_id.clone(),
+            parent.app.stats.context_window,
+            parent.app.thinking_level,
+            parent.app.thinking_display,
+            parent.app.completions.clone(),
+            parent.app.slash_commands.clone(),
+            parent.app.model_completions.clone(),
+            parent.app.cwd.clone(),
+        )
+    };
+
+    let new_id = pane_mgr.next_id();
+    let mut new_app = App::new(model_id.clone(), context_window);
+    new_app.messages = display_msgs;
+    new_app.thinking_level = thinking_level;
+    new_app.thinking_display = thinking_display;
+    new_app.completions = completions;
+    new_app.slash_commands = slash_commands;
+    new_app.model_completions = model_completions;
+    new_app.cwd = cwd;
+    // copy options that should carry over
+    new_app.show_cost = tui_config.show_cost;
+
+    let mut new_pane =
+        crate::pane::Pane::with_conversation(new_id, new_app, conversation, session_tree);
+
+    if let Some(ref text) = prompt {
+        new_pane.app.push_user_message(text.clone());
+        new_pane.app.active_tools.clear();
+        new_pane.app.start_streaming();
+        new_pane.pending_prompt = Some(text.clone());
+        new_pane.label = Some(text.chars().take(20).collect());
+    }
+
+    let idx = pane_mgr.add_pane(new_pane);
+    pane_mgr.focus_index(idx);
+
+    pane_mgr.focused_mut().app.status = Some(if prompt.is_some() {
+        "forked conversation".into()
+    } else {
+        "forked conversation (idle)".into()
+    });
 }
 
 /// persist a thinking level change for the current model

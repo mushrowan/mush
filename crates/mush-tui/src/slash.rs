@@ -72,7 +72,12 @@ pub fn handle(
             keys.push_str("  ctrl+u         - delete to start\n");
             keys.push_str("  ctrl+k         - delete to end\n");
             keys.push_str("  alt+b / alt+←  - word left\n");
-            keys.push_str("  alt+f / alt+→  - word right");
+            keys.push_str("  alt+f / alt+→  - word right\n");
+            keys.push_str("\npanes:\n");
+            keys.push_str("  ctrl+shift+enter - fork into new pane\n");
+            keys.push_str("  ctrl+tab         - next pane\n");
+            keys.push_str("  ctrl+shift+tab   - previous pane\n");
+            keys.push_str("  alt+1..9         - focus pane by number");
             app.push_system_message(keys);
             None
         }
@@ -301,15 +306,13 @@ fn handle_model_switch(
 ) {
     let id = args.trim();
     if let Some(new_model) = models::find_model_by_id(id) {
-        tui_config.model = new_model;
         app.model_id = id.into();
-        app.stats.context_window = tui_config.model.context_window;
+        app.stats.context_window = new_model.context_window;
         let level = thinking_prefs
             .get(id)
             .copied()
             .unwrap_or(ThinkingLevel::Off);
         app.thinking_level = level;
-        tui_config.options.thinking = Some(level);
         if let Some(ref save_last_model) = tui_config.save_last_model {
             save_last_model(id);
         }
@@ -509,7 +512,8 @@ pub async fn handle_compact(
     app: &mut App,
     conversation: &mut Vec<Message>,
     session_tree: &mut SessionTree,
-    tui_config: &TuiConfig,
+    model: &Model,
+    options: &StreamOptions,
     registry: &ApiRegistry,
 ) {
     use mush_session::compact;
@@ -521,14 +525,8 @@ pub async fn handle_compact(
     }
 
     app.status = Some("compacting...".into());
-    let result = compact::llm_compact(
-        conversation.clone(),
-        registry,
-        &tui_config.model,
-        &tui_config.options,
-        Some(10),
-    )
-    .await;
+    let result =
+        compact::llm_compact(conversation.clone(), registry, model, options, Some(10)).await;
 
     *conversation = result.messages;
     *session_tree = SessionTree::new();
