@@ -4,7 +4,7 @@ use std::io;
 use std::sync::Arc;
 
 use crossterm::ExecutableCommand;
-use crossterm::cursor::SetCursorStyle;
+use crossterm::cursor::{SetCursorStyle, Show};
 use crossterm::event::{
     self, Event, KeyCode, KeyEventKind, KeyboardEnhancementFlags, MouseEvent, MouseEventKind,
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
@@ -98,24 +98,40 @@ pub struct TuiConfig {
     pub log_buffer: Option<std::sync::Arc<dyn Fn(usize) -> Vec<String> + Send + Sync>>,
 }
 
+struct TerminalStateGuard {
+    active: bool,
+}
+
+impl TerminalStateGuard {
+    fn new() -> Self {
+        Self { active: true }
+    }
+
+    fn disarm(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for TerminalStateGuard {
+    fn drop(&mut self) {
+        if self.active {
+            restore_terminal_state();
+        }
+    }
+}
+
 /// run the interactive TUI
 pub async fn run_tui(
     mut tui_config: TuiConfig,
     tools: &[Box<dyn AgentTool>],
     registry: &ApiRegistry,
 ) -> io::Result<()> {
-    // reset terminal state in case prior output (e.g. model download progress
-    // bars from fastembed/indicatif) left it dirty
-    let _ = io::stdout().execute(crossterm::cursor::Show);
-    let _ = io::stdout().execute(crossterm::style::ResetColor);
-    {
-        use std::io::Write;
-        let _ = io::stdout().flush();
-        let _ = io::stderr().flush();
-    }
+    restore_terminal_state();
 
     // detect image protocol before entering alternate screen to avoid probe artifacts
     let image_picker = ratatui_image::picker::Picker::from_query_stdio().ok();
+
+    let mut terminal_guard = TerminalStateGuard::new();
 
     // set up terminal
     enable_raw_mode()?;
@@ -139,12 +155,7 @@ pub async fn run_tui(
     // the user's shell in raw mode / alternate screen
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let _ = io::stdout().execute(PopKeyboardEnhancementFlags);
-        let _ = io::stdout().execute(SetCursorStyle::DefaultUserShape);
-        let _ = disable_raw_mode();
-        disable_mouse_scroll();
-        let _ = io::stdout().execute(LeaveAlternateScreen);
-        let _ = crossterm::cursor::Show;
+        restore_terminal_state();
         prev_hook(info);
     }));
 
@@ -357,19 +368,46 @@ pub async fn run_tui(
             };
             let compact_model = tui_config.model.clone();
             let compact_options = tui_config.options.clone();
+            // cache compaction results within a turn so the summary text stays
+            // stable across tool-call rounds, preserving the prompt cache prefix
+            let compaction_cache: std::sync::Arc<
+                tokio::sync::Mutex<Option<(usize, Vec<Message>)>>,
+            > = std::sync::Arc::new(tokio::sync::Mutex::new(None));
             let transform: Option<mush_agent::ContextTransform<'_>> = Some(Box::new(move |msgs| {
                 let enricher = enricher_arc.clone();
                 let model = compact_model.clone();
                 let options = compact_options.clone();
+                let cache = compaction_cache.clone();
                 Box::pin(async move {
-                    let mut msgs = event_handler::auto_compact(
-                        msgs,
-                        context_window,
-                        registry,
-                        &model,
-                        &options,
-                    )
-                    .await;
+                    let mut msgs = {
+                        let mut guard = cache.lock().await;
+                        if let Some((orig_len, ref compacted)) = *guard {
+                            if msgs.len() >= orig_len {
+                                // reuse cached compaction, append new messages
+                                let mut result = compacted.clone();
+                                result.extend_from_slice(&msgs[orig_len..]);
+                                result
+                            } else {
+                                // messages shrank (undo/branch), invalidate cache
+                                *guard = None;
+                                msgs
+                            }
+                        } else {
+                            let orig_len = msgs.len();
+                            let compacted = event_handler::auto_compact(
+                                msgs,
+                                context_window,
+                                registry,
+                                &model,
+                                &options,
+                            )
+                            .await;
+                            if compacted.len() < orig_len {
+                                *guard = Some((orig_len, compacted.clone()));
+                            }
+                            compacted
+                        }
+                    };
                     if let Some(ref enricher) = enricher {
                         event_handler::inject_hint(&mut msgs, enricher.as_ref());
                     }
@@ -520,6 +558,7 @@ pub async fn run_tui(
                                         match app_event {
                                             AppEvent::Quit => {
                                                 cleanup(&mut terminal)?;
+                                                terminal_guard.disarm();
                                                 return Ok(());
                                             }
                                             AppEvent::Abort => {
@@ -694,6 +733,7 @@ pub async fn run_tui(
     }
 
     cleanup(&mut terminal)?;
+    terminal_guard.disarm();
     Ok(())
 }
 
@@ -805,6 +845,45 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
     }
 }
 
+/// enable minimal mouse tracking: clicks + scroll with SGR coordinates
+///
+/// crossterm's `EnableMouseCapture` also enables `?1003h` (any-event tracking)
+/// which floods the event stream with movement events. when events accumulate
+/// faster than the TUI polls them, SGR escape sequence fragments can leak
+/// through crossterm's parser as spurious key events, causing garbled text
+fn enable_mouse_scroll() -> io::Result<()> {
+    use std::io::Write;
+    // ?1000h = normal tracking (press/release/scroll)
+    // ?1006h = SGR extended coordinates
+    io::stdout().write_all(b"\x1b[?1000h\x1b[?1006h")?;
+    io::stdout().flush()
+}
+
+fn disable_mouse_scroll() {
+    use std::io::Write;
+    let _ = io::stdout().write_all(b"\x1b[?1000l\x1b[?1006l");
+    let _ = io::stdout().flush();
+}
+
+fn restore_terminal_state() {
+    use std::io::Write;
+    let _ = io::stdout().execute(PopKeyboardEnhancementFlags);
+    let _ = io::stdout().execute(SetCursorStyle::DefaultUserShape);
+    let _ = disable_raw_mode();
+    disable_mouse_scroll();
+    let _ = io::stdout().execute(LeaveAlternateScreen);
+    let _ = io::stdout().execute(Show);
+    let _ = io::stdout().execute(crossterm::style::ResetColor);
+    let _ = io::stdout().flush();
+    let _ = io::stderr().flush();
+}
+
+fn cleanup(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
+    restore_terminal_state();
+    terminal.show_cursor()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -856,34 +935,4 @@ mod tests {
         );
         assert_eq!(app.input_scroll.get(), 3);
     }
-}
-
-/// enable minimal mouse tracking: clicks + scroll with SGR coordinates
-///
-/// crossterm's `EnableMouseCapture` also enables `?1003h` (any-event tracking)
-/// which floods the event stream with movement events. when events accumulate
-/// faster than the TUI polls them, SGR escape sequence fragments can leak
-/// through crossterm's parser as spurious key events, causing garbled text
-fn enable_mouse_scroll() -> io::Result<()> {
-    use std::io::Write;
-    // ?1000h = normal tracking (press/release/scroll)
-    // ?1006h = SGR extended coordinates
-    io::stdout().write_all(b"\x1b[?1000h\x1b[?1006h")?;
-    io::stdout().flush()
-}
-
-fn disable_mouse_scroll() {
-    use std::io::Write;
-    let _ = io::stdout().write_all(b"\x1b[?1000l\x1b[?1006l");
-    let _ = io::stdout().flush();
-}
-
-fn cleanup(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
-    let _ = io::stdout().execute(PopKeyboardEnhancementFlags);
-    let _ = io::stdout().execute(SetCursorStyle::DefaultUserShape);
-    disable_raw_mode()?;
-    disable_mouse_scroll();
-    io::stdout().execute(LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
-    Ok(())
 }
