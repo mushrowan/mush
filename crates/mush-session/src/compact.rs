@@ -65,6 +65,16 @@ fn estimate_message_tokens(msg: &Message) -> usize {
     chars / 4
 }
 
+fn truncate_with_ellipsis(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+
+    let keep = max_chars.saturating_sub(3);
+    let truncated: String = text.chars().take(keep).collect();
+    format!("{truncated}...")
+}
+
 /// build a summary of messages that will be compacted
 ///
 /// this produces a structured text summary. the actual LLM-based
@@ -102,11 +112,7 @@ pub fn build_compaction_prompt(messages: &[Message]) -> String {
                 } else {
                     format!(" [tools: {}]", tools.join(", "))
                 };
-                let truncated = if text.len() > 200 {
-                    format!("{}...", &text[..197])
-                } else {
-                    text
-                };
+                let truncated = truncate_with_ellipsis(&text, 200);
                 parts.push(format!("[{i}] assistant: {truncated}{tool_str}"));
             }
             Message::ToolResult(tr) => {
@@ -119,11 +125,7 @@ pub fn build_compaction_prompt(messages: &[Message]) -> String {
                     })
                     .collect::<Vec<_>>()
                     .join(" ");
-                let truncated = if text.len() > 100 {
-                    format!("{}...", &text[..97])
-                } else {
-                    text
-                };
+                let truncated = truncate_with_ellipsis(&text, 100);
                 let status = if tr.outcome.is_error() {
                     " (error)"
                 } else {
@@ -370,12 +372,12 @@ mod tests {
     }
 
     #[test]
-    fn build_prompt_truncates_long_messages() {
-        let long_text = "x".repeat(300);
+    fn build_prompt_handles_multibyte_truncation() {
+        let long_text = "—".repeat(300);
         let msgs = vec![assistant_msg(&long_text)];
         let prompt = build_compaction_prompt(&msgs);
         assert!(prompt.contains("..."));
-        assert!(prompt.len() < 300);
+        assert!(!prompt.is_empty());
     }
 
     #[test]

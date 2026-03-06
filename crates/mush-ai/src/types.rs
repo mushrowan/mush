@@ -183,8 +183,9 @@ impl ApiKey {
 
 impl std::fmt::Debug for ApiKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.0.len() > 8 {
-            write!(f, "ApiKey({}...)", &self.0[..4])
+        if self.0.chars().count() > 8 {
+            let prefix: String = self.0.chars().take(4).collect();
+            write!(f, "ApiKey({prefix}...)")
         } else {
             write!(f, "ApiKey(***)")
         }

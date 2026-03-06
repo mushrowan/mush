@@ -22,6 +22,10 @@ pub fn list_models() -> Result<()> {
     Ok(())
 }
 
+fn short_id(id: &str) -> String {
+    id.chars().take(8).collect()
+}
+
 pub fn list_sessions() -> Result<()> {
     let store = SessionStore::new(SessionStore::default_dir());
     let sessions = store
@@ -36,9 +40,10 @@ pub fn list_sessions() -> Result<()> {
     for meta in &sessions {
         let title = meta.title.as_deref().unwrap_or("(untitled)");
         let age = format_age(&meta.updated_at);
+        let id = short_id(&meta.id);
         println!(
             "  \x1b[2m{}\x1b[0m  {} \x1b[2m({}, {} msgs, {})\x1b[0m",
-            &meta.id[..8],
+            id,
             title,
             meta.model_id,
             meta.message_count,
@@ -72,7 +77,8 @@ pub fn delete_session(id: &str) -> Result<()> {
             eprintln!("'{id}' matches {n} sessions:");
             for s in matches {
                 let title = s.title.as_deref().unwrap_or("(untitled)");
-                eprintln!("  {} - {title}", &s.id[..8]);
+                let id = short_id(&s.id);
+                eprintln!("  {id} - {title}");
             }
             Err(eyre!("ambiguous prefix, be more specific"))
         }
