@@ -50,6 +50,16 @@ pub enum AppEvent {
     CycleThinkingLevel,
     /// user triggered clipboard image paste
     PasteImage,
+    /// split current pane (fork conversation into new agent)
+    SplitPane,
+    /// close the focused pane
+    ClosePane,
+    /// focus the next pane
+    FocusNextPane,
+    /// focus the previous pane
+    FocusPrevPane,
+    /// focus pane by index (0-based)
+    FocusPaneByIndex(usize),
 }
 
 /// controls how thinking text is displayed
