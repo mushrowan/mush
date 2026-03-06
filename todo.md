@@ -1,95 +1,203 @@
-# refactor todo
+# todo
 
-## enums over booleans
-- [x] 1. `ToolResult.is_error` / `ToolResultMessage.is_error` → `ToolOutcome::Success | Error`
-- [x] 2. `ThinkingContent.redacted: bool` → split into `Thinking` / `RedactedThinking` variants
-- [x] 3. `Config.thinking: Option<bool>` → `Option<ThinkingLevel>` (enum already exists)
-- [x] 4. `Option<bool>` config fields (`debug_cache`, `confirm_tools`) → plain `bool` with `#[serde(default)]`
+## open items
+- [ ] mush-ext: dynamic tool registration from extensions
+- [ ] mush-ext: provider registration from extensions
 
-## deduplication
-- [x] 5. `print_mode` / `tui_mode` shared setup → `AppSetup` struct or builder
-- [x] 6. `HintMode` defined in both `config` and `runner` → single enum in shared location
-
-## blocking I/O in async
-- [x] 7. `std::fs` in tool `execute()` fns (read, write, edit, ls) → `tokio::fs` or `spawn_blocking`
-
-## stringly-typed values
-- [x] 8. `ImageContent.mime_type: String` → `ImageMimeType` enum (jpeg, png, gif, webp)
-
-## api safety
-- [x] 9. `ApiKey` expose pattern → add `fn expose(&self) -> &str` method, remove `Deref` for secret access
-
-## minor cleanup
-- [x] 10. `provider_api_keys` manual HashMap build → `ApiKeys::to_map()` (done in #5)
+## future ideas
+- [ ] neovim plugin
+- [ ] vscode extension
 
 ---
 
-## round 2
+## multi-agent split panes
 
-### lint hygiene
-- [x] 11. `#[allow]` → `#[expect]` — 2 instances in anthropic.rs
-- [x] 12. `#[must_use]` on key types/fns — `ToolResult`, `ToolOutcome`, `ApiKey`, `Temperature`, `BaseUrl`, `ImageMimeType`, `ApiKeys::to_map()`
-- [x] 13. explicit `let _ =` for discarded results — `stdout().flush()`, `store.save()`, `fs::create_dir_all()`, `fs::write()`
+user-facing interaction: press ctrl+shift+enter to fork the current conversation
+into a new agent pane. the window splits (like tmux) and a second agent starts
+from the same conversation history. pressing ctrl+shift+enter again in any pane
+creates yet another split, so you can have N agents running in parallel
 
-### stringly-typed errors
-- [x] 14. `ProviderError::MissingApiKey(String)` → `MissingApiKey(Provider)`
-- [x] 15. `ProviderError::Other(String)` → `InvalidHeader(#[from])` + `ApiError { api, status, body }`
+### research summary (feb/mar 2026 landscape)
 
-### let chains
-- [x] 16. audited nested `if let` patterns — few real opportunities, codebase already uses let chains where appropriate
+the multi-agent coding pattern exploded in early 2026. key references:
 
-### round 3
+**claude code agent teams** (feb 2026, anthropic)
+- team lead spawns 2-16 independent teammates, each with own context window
+- communication via mailbox system (JSON files on disk, one per agent)
+- shared task list for coordination (`~/.claude/tasks/{team-name}/`)
+- peer-to-peer messaging via `SendMessage` tool
+- tmux/iterm2 split panes for visual per-agent monitoring
+- 3-7x token cost vs single session, offset by parallelism gains
 
-#### flexible APIs
-- [x] 17. `push_system_message` / `push_user_message` take `impl Into<String>` — removes `.into()` at call sites
-- [x] 18. `branch_with_summary` takes `impl Into<String>` for the summary param
+**opencode agent teams** (feb 2026, sst/opencode)
+- same concept ported to go, with key architectural differences
+- in-process agents (no separate OS processes), JSONL inbox files
+- event-driven message delivery via session injection + auto-wake
+  (no polling, unlike claude code's file-polling approach)
+- two state machines per agent: coarse lifecycle + fine execution status
+- sub-agents explicitly denied team messaging tools (prevents flood)
+- supports mixing models from different providers in the same team
 
-#### derive & Default
-- [x] 19. `ApiRegistry` `#[derive(Default)]`, `new()` delegates to default
-- [x] 20. `HookRunner` `#[derive(Default)]`, `new()` delegates to default
+**adaptorch** (feb 2026, arxiv 2602.16873)
+- formal framework for task-adaptive multi-agent orchestration
+- dynamically selects among parallel/sequential/hierarchical/hybrid topologies
+- key insight: orchestration topology matters more than individual model capability
+  once models reach comparable benchmark performance
 
-#### Option combinators
-- [x] 21. `resolve_thinking`: nested if-let-else → `.copied().or()` chain
+**google's eight patterns** (jan 2026)
+- supervisor, hierarchical, sequential, parallel, swarm, reflection, tool-use,
+  state-shared
+- state-shared is most critical: centralised context store all agents read/write
+- swarm pattern: agents subscribe to codebase changes, auto-trigger updates
 
-#### clone audit
-- [x] 22. audited runner.rs clones — all necessary (ownership boundaries, Arc, multi-call closures)
+**core patterns across all implementations:**
+1. each agent gets its own context window (independent LLM sessions)
+2. agents share a message prefix (conversation history up to the fork point)
+3. inter-agent communication via message passing (not shared mutable state)
+4. file/directory ownership to prevent write conflicts
+5. a coordination mechanism (task list, mailbox, or shared state file)
 
-### round 4
+### design for mush
 
-#### non_exhaustive
-- [x] 23. `#[non_exhaustive]` on cross-crate enums likely to grow: `ProviderError`, `AgentEvent`, `StreamEvent`, `StopReason`
+**interaction model:**
+- ctrl+shift+enter on a prompt forks the conversation
+- the prompt is sent to the new agent, not the current one
+- the current pane keeps its state (can keep working independently)
+- ctrl+shift+enter again in any pane creates another fork
+- each pane is a fully independent agent loop with its own streaming
+- all forked agents share the conversation prefix up to the fork point
+  (maximises prompt cache hits on providers that support it)
 
-#### strum for enum Display
-- [x] 24. audited manual Display impls — all have custom logic (ApiKey redacted, Provider::Custom, ImageMimeType mime strings), strum wouldn't help
+**TUI layout:**
+- single pane by default (current behaviour)
+- first split: vertical 50/50 (left = original, right = new agent)
+- subsequent splits: subdivide the focused pane
+- each pane has its own: message list, input box, status bar
+- focused pane highlighted (border colour or indicator)
+- ctrl+arrow or alt+arrow to switch focus between panes
+- a pane can be closed with /close or ctrl+w, remaining panes reflow
+- status bar shows pane id/label for orientation
 
-#### LazyLock for statics
-- [x] 25. audited — no regex, model catalogue reads user file each call so can't be static. no lazy_static/once_cell deps to replace
+**agent architecture:**
+- each pane runs its own `agent_loop()` stream independently
+- the `SessionTree` naturally supports this: branch from the fork point,
+  each pane walks its own leaf→root path for context
+- shared `ApiRegistry` and tools (already `Arc`-wrapped)
+- separate `App` state per pane (messages, scroll, streaming buffers)
+- single tokio runtime, multiple agent streams multiplexed via `select!`
 
-#### ecosystem crates
-- [x] 26. `cargo-deny` — added `deny.toml` with license/advisory/ban/source checks, integrated via `craneLib.cargoDeny` in nix checks
-- [x] 27. audited others: `parking_lot` (only 3 brief-lock mutexes, marginal), `dashmap` (no concurrent hashmaps), `const_format` (no const string building), `bon` (no complex builders), `strum` (all Display impls have custom logic)
+**inter-agent messaging:**
+- lightweight mailbox: `tokio::sync::broadcast` or `mpsc` channels
+- a `send_message` tool available to each agent (knows about sibling panes)
+- messages from siblings appear as system messages in the recipient's context
+- auto-wake: if a pane's agent is idle when a message arrives, optionally
+  restart its loop with the new message as input
+- agents told about siblings in their system prompt ("you are agent 2 of 3,
+  working alongside agent 1 (doing X) and agent 3 (doing Y)")
 
-### round 5
+**session persistence:**
+- forked conversations are branches in the same SessionTree
+- each pane's branch saved independently
+- on resume, only the "main" branch loads by default
+- /tree shows all branches including forked agent work
 
-#### clippy hygiene
-- [x] 28. collapse nested ifs into let chains (app.rs, input.rs)
-- [x] 29. replace redundant closure with function ref (input_box.rs)
-- [x] 30. remove unused `entries()` method (logging.rs)
+**cost tracking:**
+- per-pane token/cost counters in each pane's status bar
+- /cost shows aggregate across all panes
+- shared cache hits benefit all panes (same prefix)
 
-#### text extraction helpers
-- [x] 31. `UserContent::text()`, `UserMessage::text()`, `AssistantMessage::text()`/`thinking()` — used across runner, slash, session, compact
+### implementation phases
 
-#### shared SSE parser
-- [x] 32. `SseParser` in `providers/sse.rs` — shared byte-buffer→line→event parsing, replaces ~60-80 lines of identical boilerplate in each provider
+#### phase A: pane infrastructure (TUI)
+- [ ] `Pane` struct: wraps `App` state + pane id + layout rect
+- [ ] `PaneManager`: owns Vec<Pane>, tracks focused pane, handles layout
+- [ ] layout algorithm: recursive binary splits (like tmux)
+- [ ] render loop draws each pane independently into its allocated rect
+- [ ] focus switching: ctrl+arrow keys to navigate between panes
+- [ ] pane border styling (focused vs unfocused)
+- [ ] /close and ctrl+w to close a pane, reflow remaining
+- [ ] single-pane mode is just PaneManager with one pane (no regression)
 
-#### App sub-states
-- [x] 33. `TokenStats` struct with `update()`/`reset()` — groups 8 token/cost fields, eliminates manual 6-line update blocks
+#### phase B: forking agent sessions
+- [ ] ctrl+shift+enter handler: creates new pane + branches SessionTree
+- [ ] new pane inherits conversation history up to fork point
+- [ ] new pane gets its own agent_loop() stream
+- [ ] multiplexing: select! over all active pane streams + terminal events
+- [ ] the prompt typed at fork time goes to the new pane's agent
+- [ ] each pane has independent model, thinking level, streaming state
+- [ ] pane-local /model, /compact, /undo work independently
 
-#### module extraction
-- [x] 34. `event_handler.rs` — agent event handling, auth resolution, hint injection, auto-compaction. runner.rs 1019→779 lines
+#### phase C: inter-agent communication
+- [ ] message bus: broadcast channel connecting all active panes
+- [ ] `send_message` tool: agent can send text to a specific sibling by id
+- [ ] received messages injected as system messages into recipient context
+- [ ] auto-wake idle agents when they receive a message
+- [ ] system prompt additions: sibling awareness ("you are pane 2 of 3")
+- [ ] /broadcast slash command: user sends a message to all panes
 
-### round 6
+#### phase D: polish and UX
+- [ ] pane labels (auto-generated from first prompt or user-assigned)
+- [ ] aggregate /cost across all panes
+- [ ] pane-specific status bar with pane id and sibling count
+- [ ] ctrl+shift+arrow to resize panes
+- [ ] /panes command to list all active panes and their status
+- [ ] session save/resume with multi-pane state
+- [ ] print mode support: -p with --panes flag for parallel agents to stdout
 
-#### terminal corruption fix
-- [x] 35. replace `EnableMouseCapture` with selective `?1000h`+`?1006h` — avoids `?1003h` any-event tracking flood that causes SGR escape fragments to leak as garbled text
-- [x] 36. bash child process isolation — `process_group(0)` prevents children from injecting bytes into the controlling terminal
+### key decisions to make during implementation
+- split direction: always vertical? or alternate h/v like a tiling WM?
+- max panes: hard limit (4? 8?) or unlimited?
+- file conflict prevention: warn when two agents touch the same file?
+  or use git worktrees / temp branches?
+- should agents share tool confirmation state? (one confirms for all?)
+- keyboard shortcut: ctrl+shift+enter may not be detectable in all terminals.
+  need to test crossterm's keyboard enhancement protocol support. fallback
+  to a slash command like /fork?
+
+---
+
+## completed work
+
+<details>
+<summary>phases 1-7 (all done)</summary>
+
+### phase 1: core types + first providers
+- [x] workspace setup, mush-ai core types, providers (anthropic, openai, openai-responses)
+- [x] oauth, env-based api keys, model catalogue, newtypes
+
+### phase 2: agent loop
+- [x] agent tool trait, agent loop, event stream, max turns, steering, follow-up, context transforms
+
+### phase 3: built-in tools
+- [x] read, write, edit, bash, grep, find, glob, ls, web_search, web_fetch, batch
+
+### phase 4: session management
+- [x] session types, file store, save/load/list/delete, compaction, session tree, auto-save
+
+### phase 5: extension system
+- [x] extension trait, hook runner, AGENTS.md discovery, skills, templates, auto-context embeddings
+
+### phase 6: config + CLI
+- [x] clap args, print mode, stdin pipe, session resume, config file, oauth, models/sessions/status commands
+
+### phase 7: TUI
+- [x] ratatui interface, streaming, markdown, syntax highlighting, slash commands, themes
+- [x] image rendering, mouse scroll, tab completion, tool confirmation, /undo, streaming bash output
+
+</details>
+
+<details>
+<summary>refactor rounds 1-6 (all done)</summary>
+
+- [x] enums over booleans (ToolOutcome, ThinkingContent variants, ThinkingLevel)
+- [x] deduplication (AppSetup, HintMode)
+- [x] async I/O (tokio::fs in tools)
+- [x] newtypes (ImageMimeType, Provider in errors)
+- [x] lint hygiene (#[expect], #[must_use], explicit discards)
+- [x] flexible APIs (impl Into<String>), derive Default
+- [x] non_exhaustive on cross-crate enums
+- [x] cargo-deny integration
+- [x] text extraction helpers, shared SSE parser, TokenStats, event_handler extraction
+- [x] terminal corruption fix (selective mouse tracking, process group isolation)
+
+</details>
