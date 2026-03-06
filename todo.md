@@ -3,6 +3,7 @@
 ## open items
 - [ ] mush-ext: dynamic tool registration from extensions
 - [ ] mush-ext: provider registration from extensions
+- [ ] auto compaction not working, and need to react to too-long-context errors
 
 ## future ideas
 - [ ] neovim plugin
@@ -114,34 +115,62 @@ the multi-agent coding pattern exploded in early 2026. key references:
 ### implementation phases
 
 #### phase A: pane infrastructure (TUI)
-- [ ] `Pane` struct: wraps `App` state + pane id + layout rect
-- [ ] `PaneManager`: owns Vec<Pane>, tracks focused pane, handles layout
-- [ ] layout algorithm: columns first, fall back to numbered tabs when too narrow
-- [ ] min column width threshold (e.g. 60 chars), below which panes become tabs
-- [ ] render loop draws each pane independently into its allocated rect
-- [ ] focus switching: ctrl+arrow keys, alt+number for direct jump
-- [ ] tab bar rendering when in stacked mode ("[1] [2] [3*]")
-- [ ] pane border styling (focused vs unfocused)
-- [ ] /close and ctrl+w to close a pane, reflow remaining
-- [ ] single-pane mode is just PaneManager with one pane (no regression)
-- [ ] status bar: show background pane alerts ("pane 2: awaiting prompt")
+- [x] `Pane` struct: wraps `App` state + pane id + layout rect
+- [x] `PaneManager`: owns Vec<Pane>, tracks focused pane, handles layout
+- [x] layout algorithm: columns first, fall back to numbered tabs when too narrow
+- [x] min column width threshold (60 chars), below which panes become tabs
+- [x] render loop draws each pane independently into its allocated rect
+- [x] focus switching: alt+number for direct jump (alt+1..9)
+- [x] tab bar rendering when in stacked mode ("[1:label*] [2:label]")
+- [x] pane border styling (focused vs unfocused)
+- [x] /close command (currently no-op in single pane)
+- [x] single-pane mode is just PaneManager with one pane (no regression)
+- [x] integrate PaneManager into runner (replace bare app/conversation/session_tree)
+- [x] status bar: show background pane alerts ("pane 2: awaiting prompt")
 
 #### phase B: forking agent sessions
-- [ ] ctrl+shift+enter handler: creates new pane + branches SessionTree
-- [ ] new pane inherits conversation history up to fork point
-- [ ] new pane gets its own agent_loop() stream
-- [ ] multiplexing: select! over all active pane streams + terminal events
-- [ ] the prompt typed at fork time goes to the new pane's agent
-- [ ] each pane has independent model, thinking level, streaming state
-- [ ] pane-local /model, /compact, /undo work independently
+- [x] ctrl+shift+enter keybinding emits SplitPane event
+- [x] handler: creates new pane + branches SessionTree
+- [x] new pane inherits conversation history up to fork point
+- [x] new pane gets its own agent_loop() stream
+- [x] multiplexing: select! over all active pane streams + terminal events
+- [x] the prompt typed at fork time goes to the new pane's agent
+- [x] each pane has independent model, thinking level, streaming state
+- [x] pane-local /model, /compact, /undo work independently
 
 #### phase C: inter-agent communication
-- [ ] message bus: broadcast channel connecting all active panes
-- [ ] `send_message` tool: agent can send text to a specific sibling by id
-- [ ] received messages injected as system messages into recipient context
+
+key insights from communication.md research:
+- **context isolation is the #1 lever**: each agent should get focused, narrow
+  context rather than the full shared history. SessionTree branching already
+  provides this naturally (forked agents share prefix, diverge after)
+- **agent-as-tool** is the dominant delegation pattern across frameworks
+  (openai agents sdk, google adk, langchain). wrap sub-agents as callable
+  tools so the parent decides when/to whom to delegate via normal tool use
+- **typed shared state with reducers** (langgraph pattern) beats both
+  unstructured message passing and full shared memory. each field in the
+  shared state has an explicit merge strategy (overwrite, append, custom)
+- **structured output over free text** between agents cuts tokens ~50%
+  while improving accuracy. use json envelopes not prose
+- **observation masking** hides old tool outputs while keeping action history,
+  since 99% of token growth is tool output. cheaper than llm summarisation
+- **debate only helps when**: initial model accuracy is low (<50%), models
+  are heterogeneous (different families), or the task is open-ended.
+  for standard tasks, self-consistency (sample + majority vote) is cheaper
+- **sycophancy is the #1 debate failure mode**: agents uncritically adopt
+  peers' views. anonymise responses and use all-agents-drafting (AAD)
+
+implementation:
+- [ ] message envelope: typed struct with sender, recipient, intent, parts, task_id
+- [ ] shared state store: typed dict per session with reducer functions per field
+- [ ] agent-as-tool: wrap pane agents as callable tools for delegation
+- [ ] `send_message` tool: agent can send structured messages to siblings
+- [ ] received messages injected via steering mechanism into recipient context
 - [ ] auto-wake idle agents when they receive a message
 - [ ] system prompt additions: sibling awareness ("you are pane 2 of 3")
 - [ ] /broadcast slash command: user sends a message to all panes
+- [ ] context isolation: forked agents get only task-relevant context slice
+- [ ] observation masking: strip old tool outputs from forwarded context
 
 #### phase D: file conflict prevention
 - [ ] `IsolationMode` enum: `None`, `Worktree`, `Jj`
@@ -173,12 +202,16 @@ the multi-agent coding pattern exploded in early 2026. key references:
 - [ ] /panes command to list all active panes and their status
 - [ ] session save/resume with multi-pane state
 - [ ] print mode support: -p with --panes flag for parallel agents to stdout
+- [ ] model tiering: budget models for routing/classification, flagship for reasoning
+- [ ] semantic caching: skip llm call when a similar query was recently answered
+- [ ] per-agent cost attribution in observability/tracing
 
 ### key decisions to make during implementation
-- keyboard shortcut: ctrl+shift+enter may not be detectable in all terminals.
-  need to test crossterm's keyboard enhancement protocol support. fallback
-  to a slash command like /fork
+- keyboard shortcut: ctrl+shift+enter ✅ works with crossterm keyboard
+  enhancement protocol. /fork as fallback for terminals without support
 - should agents share tool confirmation state? (one confirms for all?)
+- agent-as-tool vs peer messaging: support both, let the orchestration
+  pattern decide. agent-as-tool for hierarchical, messaging for peer
 
 ### file conflict prevention (research summary)
 
