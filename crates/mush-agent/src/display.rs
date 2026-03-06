@@ -1,13 +1,23 @@
 //! display helpers for agent output
 
+fn truncate_with_ellipsis(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+
+    let keep = max_chars.saturating_sub(3);
+    let truncated: String = text.chars().take(keep).collect();
+    format!("{truncated}...")
+}
+
 /// summarise tool arguments for compact display
 pub fn summarise_tool_args(tool_name: &str, args: &serde_json::Value) -> String {
     match tool_name.to_lowercase().replace('_', "").as_str() {
         "read" | "write" | "edit" => args["path"].as_str().unwrap_or("").to_string(),
         "bash" => {
             let cmd = args["command"].as_str().unwrap_or("");
-            if cmd.len() > 60 {
-                format!("{}...", &cmd[..57])
+            if cmd.chars().count() > 60 {
+                truncate_with_ellipsis(cmd, 60)
             } else {
                 cmd.to_string()
             }
@@ -21,8 +31,8 @@ pub fn summarise_tool_args(tool_name: &str, args: &serde_json::Value) -> String 
         "ls" => args["path"].as_str().unwrap_or(".").to_string(),
         "websearch" => {
             let query = args["query"].as_str().unwrap_or("");
-            if query.len() > 60 {
-                format!("{}...", &query[..57])
+            if query.chars().count() > 60 {
+                truncate_with_ellipsis(query, 60)
             } else {
                 query.to_string()
             }
@@ -34,8 +44,8 @@ pub fn summarise_tool_args(tool_name: &str, args: &serde_json::Value) -> String 
         }
         _ => {
             let s = args.to_string();
-            if s.len() > 60 {
-                format!("{}...", &s[..57])
+            if s.chars().count() > 60 {
+                truncate_with_ellipsis(&s, 60)
             } else {
                 s
             }
@@ -55,15 +65,18 @@ mod tests {
     }
 
     #[test]
-    fn bash_tool_truncates() {
-        let short = serde_json::json!({"command": "ls -la"});
-        assert_eq!(summarise_tool_args("bash", &short), "ls -la");
-
-        let long_cmd = "x".repeat(100);
+    fn bash_tool_truncates_multibyte_safely() {
+        let long_cmd = "—".repeat(100);
         let long = serde_json::json!({"command": long_cmd});
         let summary = summarise_tool_args("bash", &long);
-        assert!(summary.len() <= 63);
         assert!(summary.ends_with("..."));
+        assert!(summary.chars().count() <= 60);
+    }
+
+    #[test]
+    fn bash_tool_keeps_short_command() {
+        let short = serde_json::json!({"command": "ls -la"});
+        assert_eq!(summarise_tool_args("bash", &short), "ls -la");
     }
 
     #[test]
