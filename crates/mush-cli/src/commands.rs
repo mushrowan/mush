@@ -43,11 +43,7 @@ pub fn list_sessions() -> Result<()> {
         let id = short_id(&meta.id);
         println!(
             "  \x1b[2m{}\x1b[0m  {} \x1b[2m({}, {} msgs, {})\x1b[0m",
-            id,
-            title,
-            meta.model_id,
-            meta.message_count,
-            age,
+            id, title, meta.model_id, meta.message_count, age,
         );
     }
     println!("\nresume with: mush -c <id>");

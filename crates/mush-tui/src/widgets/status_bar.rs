@@ -49,8 +49,17 @@ fn left_spans(app: &App) -> Vec<Span<'static>> {
         ThinkingLevel::Xhigh => "xhigh",
     };
 
-    let mut spans = vec![
-        Span::styled(" ", dim),
+    let mut spans = vec![Span::styled(" ", dim)];
+
+    // pane indicator when multi-pane
+    if let Some((pane_idx, pane_count)) = app.pane_info {
+        spans.push(Span::styled(
+            format!("[{pane_idx}/{pane_count}] "),
+            Style::default().fg(Color::Cyan),
+        ));
+    }
+
+    spans.extend([
         Span::styled(app.model_id.to_string(), Style::default().fg(Color::Cyan)),
         Span::styled(" • ", dim),
         Span::styled(
@@ -61,7 +70,7 @@ fn left_spans(app: &App) -> Vec<Span<'static>> {
                 Style::default().fg(Color::Cyan)
             },
         ),
-    ];
+    ]);
 
     if app.stats.input_tokens > 0 {
         spans.push(Span::styled(
@@ -133,6 +142,14 @@ fn left_spans(app: &App) -> Vec<Span<'static>> {
                 Style::default().fg(Color::Blue),
             ));
         }
+    }
+
+    // background pane alerts
+    if let Some(ref alert) = app.background_alert {
+        spans.push(Span::styled(
+            format!(" | {alert}"),
+            Style::default().fg(Color::Yellow),
+        ));
     }
 
     spans

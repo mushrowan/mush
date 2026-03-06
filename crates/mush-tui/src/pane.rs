@@ -40,8 +40,7 @@ pub struct Pane {
     pub app: App,
     pub conversation: Vec<Message>,
     pub session_tree: SessionTree,
-    pub image_protos:
-        HashMap<(usize, usize), ratatui_image::protocol::StatefulProtocol>,
+    pub image_protos: HashMap<(usize, usize), ratatui_image::protocol::StatefulProtocol>,
     pub pending_prompt: Option<String>,
     pub steering_queue: Arc<Mutex<Vec<Message>>>,
     /// user-facing label (auto-generated or manual)
@@ -84,6 +83,25 @@ impl Pane {
             label: None,
             area: Rect::default(),
         }
+    }
+
+    /// mutable references to all major fields at once,
+    /// enabling the borrow checker to see disjoint borrows
+    #[expect(clippy::type_complexity)]
+    pub fn fields_mut(
+        &mut self,
+    ) -> (
+        &mut App,
+        &mut Vec<Message>,
+        &mut SessionTree,
+        &mut HashMap<(usize, usize), ratatui_image::protocol::StatefulProtocol>,
+    ) {
+        (
+            &mut self.app,
+            &mut self.conversation,
+            &mut self.session_tree,
+            &mut self.image_protos,
+        )
     }
 }
 
@@ -221,7 +239,13 @@ impl PaneManager {
     /// determine layout mode for a given terminal width
     pub fn layout_mode(&self, terminal_width: u16) -> LayoutMode {
         let n = self.panes.len() as u16;
-        if n <= 1 || terminal_width / n >= MIN_COLUMN_WIDTH {
+        if n <= 1 {
+            return LayoutMode::Columns;
+        }
+        // reserve 1 char per separator between columns
+        let separators = n - 1;
+        let usable = terminal_width.saturating_sub(separators);
+        if usable / n >= MIN_COLUMN_WIDTH {
             LayoutMode::Columns
         } else {
             LayoutMode::Tabs
@@ -237,13 +261,20 @@ impl PaneManager {
                 if n == 0 {
                     return mode;
                 }
-                let col_width = area.width / n;
-                let remainder = area.width % n;
+                // single pane: no separators
+                let separators = n.saturating_sub(1);
+                let usable = area.width.saturating_sub(separators);
+                let col_width = usable / n;
+                let remainder = usable % n;
                 let mut x = area.x;
                 for (i, pane) in self.panes.iter_mut().enumerate() {
                     let w = col_width + if (i as u16) < remainder { 1 } else { 0 };
                     pane.area = Rect::new(x, area.y, w, area.height);
                     x += w;
+                    // leave 1-char gap for separator (except after last)
+                    if (i as u16) < n - 1 {
+                        x += 1;
+                    }
                 }
             }
             LayoutMode::Tabs => {
@@ -396,8 +427,8 @@ mod tests {
     fn layout_columns_two_panes_wide() {
         let mut mgr = PaneManager::new(test_pane(1));
         mgr.add_pane(test_pane(2));
-        // 120 / 2 = 60 >= MIN_COLUMN_WIDTH
-        assert_eq!(mgr.layout_mode(120), LayoutMode::Columns);
+        // (121 - 1 sep) / 2 = 60 >= MIN_COLUMN_WIDTH
+        assert_eq!(mgr.layout_mode(121), LayoutMode::Columns);
     }
 
     #[test]
@@ -405,40 +436,43 @@ mod tests {
         let mut mgr = PaneManager::new(test_pane(1));
         mgr.add_pane(test_pane(2));
         mgr.add_pane(test_pane(3));
-        // 120 / 3 = 40 < MIN_COLUMN_WIDTH
-        assert_eq!(mgr.layout_mode(120), LayoutMode::Tabs);
+        // (122 - 2 seps) / 3 = 40 < MIN_COLUMN_WIDTH
+        assert_eq!(mgr.layout_mode(122), LayoutMode::Tabs);
     }
 
     #[test]
     fn layout_columns_exact_threshold() {
         let mut mgr = PaneManager::new(test_pane(1));
         mgr.add_pane(test_pane(2));
-        // 120 / 2 = 60 == MIN_COLUMN_WIDTH (passes >=)
-        assert_eq!(mgr.layout_mode(120), LayoutMode::Columns);
-        // 118 / 2 = 59 < MIN_COLUMN_WIDTH
-        assert_eq!(mgr.layout_mode(118), LayoutMode::Tabs);
+        // (121 - 1 sep) / 2 = 60 == MIN_COLUMN_WIDTH (passes >=)
+        assert_eq!(mgr.layout_mode(121), LayoutMode::Columns);
+        // (120 - 1 sep) / 2 = 59 < MIN_COLUMN_WIDTH
+        assert_eq!(mgr.layout_mode(120), LayoutMode::Tabs);
     }
 
     #[test]
     fn compute_layout_columns_even() {
         let mut mgr = PaneManager::new(test_pane(1));
         mgr.add_pane(test_pane(2));
-        let area = Rect::new(0, 0, 120, 40);
+        // 121 wide: 1 separator, usable = 120, each col = 60
+        let area = Rect::new(0, 0, 121, 40);
         let mode = mgr.compute_layout(area);
         assert_eq!(mode, LayoutMode::Columns);
         assert_eq!(mgr.panes()[0].area, Rect::new(0, 0, 60, 40));
-        assert_eq!(mgr.panes()[1].area, Rect::new(60, 0, 60, 40));
+        // x=60 content + 1 sep = 61
+        assert_eq!(mgr.panes()[1].area, Rect::new(61, 0, 60, 40));
     }
 
     #[test]
     fn compute_layout_columns_odd_width() {
         let mut mgr = PaneManager::new(test_pane(1));
         mgr.add_pane(test_pane(2));
-        let area = Rect::new(0, 0, 121, 40);
+        // 122 wide: 1 sep, usable = 121, col = 60 remainder 1
+        let area = Rect::new(0, 0, 122, 40);
         mgr.compute_layout(area);
-        // 121 / 2 = 60 remainder 1, first column gets extra pixel
         assert_eq!(mgr.panes()[0].area, Rect::new(0, 0, 61, 40));
-        assert_eq!(mgr.panes()[1].area, Rect::new(61, 0, 60, 40));
+        // x=61 content + 1 sep = 62
+        assert_eq!(mgr.panes()[1].area, Rect::new(62, 0, 60, 40));
     }
 
     #[test]
@@ -478,11 +512,12 @@ mod tests {
         let mut mgr = PaneManager::new(test_pane(1));
         mgr.add_pane(test_pane(2));
         mgr.add_pane(test_pane(3));
-        let area = Rect::new(0, 0, 180, 40);
+        // 182 wide: 2 separators, usable = 180, each col = 60
+        let area = Rect::new(0, 0, 182, 40);
         let mode = mgr.compute_layout(area);
         assert_eq!(mode, LayoutMode::Columns);
         assert_eq!(mgr.panes()[0].area, Rect::new(0, 0, 60, 40));
-        assert_eq!(mgr.panes()[1].area, Rect::new(60, 0, 60, 40));
-        assert_eq!(mgr.panes()[2].area, Rect::new(120, 0, 60, 40));
+        assert_eq!(mgr.panes()[1].area, Rect::new(61, 0, 60, 40));
+        assert_eq!(mgr.panes()[2].area, Rect::new(122, 0, 60, 40));
     }
 }
