@@ -4,4 +4,5 @@ pub mod search_popup;
 pub mod session_picker;
 pub mod slash_menu;
 pub mod status_bar;
+pub mod tab_bar;
 pub mod tool_panels;
