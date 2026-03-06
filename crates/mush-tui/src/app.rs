@@ -1088,6 +1088,19 @@ impl App {
             content_width as usize,
         ) as u16;
 
+        let total = expanded
+            .text
+            .split('\n')
+            .enumerate()
+            .map(|(i, line)| {
+                let indent = if i == 0 { 2 } else { 0 };
+                crate::widgets::input_box::word_wrap_segments(line, content_width as usize, indent)
+                    .len() as u16
+            })
+            .sum::<u16>()
+            .max(1);
+        self.input_total_lines.set(total);
+
         let mut scroll = self.input_scroll.get();
         if cursor_line < scroll {
             scroll = cursor_line;
@@ -1098,7 +1111,6 @@ impl App {
             }
         }
 
-        let total = self.input_total_lines.get();
         let max_scroll = total.saturating_sub(visible_lines);
         self.input_scroll.set(scroll.min(max_scroll));
     }
@@ -1379,6 +1391,21 @@ mod tests {
         // explicitly clearing simulates user submitting new prompt
         app.active_tools.clear();
         assert!(app.active_tools.is_empty());
+    }
+
+    #[test]
+    fn ensure_cursor_visible_recomputes_total_when_stale() {
+        let mut app = App::new("test".into(), 200_000);
+        app.input_area.set(Rect::new(0, 0, 20, 8));
+        app.input_visible_lines.set(2);
+        app.input_total_lines.set(2); // stale from previous render
+        app.input = "one\ntwo\nthree\nfour\nfive".into();
+        app.cursor = app.input.len();
+
+        app.ensure_cursor_visible();
+
+        assert!(app.input_total_lines.get() >= 5);
+        assert!(app.input_scroll.get() > 0);
     }
 
     #[test]

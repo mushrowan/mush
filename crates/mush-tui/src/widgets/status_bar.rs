@@ -113,7 +113,9 @@ fn left_spans(app: &App) -> Vec<Span<'static>> {
         ));
     }
 
-    if let Some(ref status) = app.status {
+    if let Some(ref status) = app.status
+        && status != "config reloaded"
+    {
         spans.push(Span::styled(format!(" | {status}"), dim));
     }
 
@@ -240,6 +242,15 @@ mod tests {
         assert!(content.contains("W2k"));
         assert!(content.contains("45k/200k"));
         assert!(content.contains("$0.0123"));
+    }
+
+    #[test]
+    fn status_bar_hides_config_reloaded_status() {
+        let mut app = App::new("test".into(), 200_000);
+        app.status = Some("config reloaded".into());
+        let buf = render_status(&app, 120, 1);
+        let content = buffer_to_string(&buf);
+        assert!(!content.contains("config reloaded"));
     }
 
     #[test]
