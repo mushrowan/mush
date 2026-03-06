@@ -70,13 +70,18 @@ the multi-agent coding pattern exploded in early 2026. key references:
 
 **TUI layout:**
 - single pane by default (current behaviour)
-- first split: vertical 50/50 (left = original, right = new agent)
-- subsequent splits: subdivide the focused pane
+- first split: vertical columns (left = original, right = new agent)
+- subsequent splits: add more columns
+- if terminal too narrow for another column, stack panes as numbered tabs
+  (status bar shows "[1] [2] [3*]" where * marks the active pane)
 - each pane has its own: message list, input box, status bar
 - focused pane highlighted (border colour or indicator)
-- ctrl+arrow or alt+arrow to switch focus between panes
+- ctrl+arrow or alt+number to switch focus between panes
 - a pane can be closed with /close or ctrl+w, remaining panes reflow
-- status bar shows pane id/label for orientation
+- status bar shows pane id/label, and flags when a background pane is
+  awaiting a prompt (e.g. "pane 2: awaiting prompt")
+- no hard pane limit, but practically constrained by screen width and
+  token cost
 
 **agent architecture:**
 - each pane runs its own `agent_loop()` stream independently
@@ -111,12 +116,15 @@ the multi-agent coding pattern exploded in early 2026. key references:
 #### phase A: pane infrastructure (TUI)
 - [ ] `Pane` struct: wraps `App` state + pane id + layout rect
 - [ ] `PaneManager`: owns Vec<Pane>, tracks focused pane, handles layout
-- [ ] layout algorithm: recursive binary splits (like tmux)
+- [ ] layout algorithm: columns first, fall back to numbered tabs when too narrow
+- [ ] min column width threshold (e.g. 60 chars), below which panes become tabs
 - [ ] render loop draws each pane independently into its allocated rect
-- [ ] focus switching: ctrl+arrow keys to navigate between panes
+- [ ] focus switching: ctrl+arrow keys, alt+number for direct jump
+- [ ] tab bar rendering when in stacked mode ("[1] [2] [3*]")
 - [ ] pane border styling (focused vs unfocused)
 - [ ] /close and ctrl+w to close a pane, reflow remaining
 - [ ] single-pane mode is just PaneManager with one pane (no regression)
+- [ ] status bar: show background pane alerts ("pane 2: awaiting prompt")
 
 #### phase B: forking agent sessions
 - [ ] ctrl+shift+enter handler: creates new pane + branches SessionTree
@@ -135,7 +143,29 @@ the multi-agent coding pattern exploded in early 2026. key references:
 - [ ] system prompt additions: sibling awareness ("you are pane 2 of 3")
 - [ ] /broadcast slash command: user sends a message to all panes
 
-#### phase D: polish and UX
+#### phase D: file conflict prevention
+- [ ] `IsolationMode` enum: `None`, `Worktree`, `Jj`
+- [ ] auto-detect available modes from `.jj/` and `.git/` presence
+- [ ] config: `[agents] isolation = "none" | "worktree" | "jj"`
+- [ ] **none mode:**
+  - [ ] per-pane file modification tracker (set of paths written/edited)
+  - [ ] warn in status bar when agent modifies a file touched by another pane
+  - [ ] /lock <path> to claim a file, /locks to list, auto-release on pane close
+  - [ ] locked files: write/edit tools return error with lock owner info
+- [ ] **worktree mode:**
+  - [ ] on fork: `git worktree add .mush/worktrees/<pane-id> -b mush-<pane-id>`
+  - [ ] forked pane's tools use worktree path as cwd instead of repo root
+  - [ ] on pane close: prompt to merge/keep/discard, then `git worktree remove`
+  - [ ] /merge slash command to merge a pane's worktree branch back
+  - [ ] cleanup stale worktrees on startup (`.mush/worktrees/`)
+- [ ] **jj mode:**
+  - [ ] on fork: `jj new` to create a new change for the forked pane
+  - [ ] track which jj change id belongs to which pane
+  - [ ] agents told their change id in system prompt for jj-aware operations
+  - [ ] on pane close: `jj squash` into parent or leave as separate change
+  - [ ] /merge to squash a pane's change into the main working copy change
+
+#### phase E: polish and UX
 - [ ] pane labels (auto-generated from first prompt or user-assigned)
 - [ ] aggregate /cost across all panes
 - [ ] pane-specific status bar with pane id and sibling count
@@ -145,14 +175,70 @@ the multi-agent coding pattern exploded in early 2026. key references:
 - [ ] print mode support: -p with --panes flag for parallel agents to stdout
 
 ### key decisions to make during implementation
-- split direction: always vertical? or alternate h/v like a tiling WM?
-- max panes: hard limit (4? 8?) or unlimited?
-- file conflict prevention: warn when two agents touch the same file?
-  or use git worktrees / temp branches?
-- should agents share tool confirmation state? (one confirms for all?)
 - keyboard shortcut: ctrl+shift+enter may not be detectable in all terminals.
   need to test crossterm's keyboard enhancement protocol support. fallback
-  to a slash command like /fork?
+  to a slash command like /fork
+- should agents share tool confirmation state? (one confirms for all?)
+
+### file conflict prevention (research summary)
+
+the industry has converged on a few approaches, roughly ordered by isolation level:
+
+**1. git worktrees (industry standard for multi-process agents)**
+- each agent gets its own checked-out working directory + branch
+- shared .git object store, near-instant creation
+- used by: claude code (`--worktree`), cursor 2.0, openai codex, ccswarm
+- pros: complete filesystem isolation, no conflicts during work
+- cons: disk overhead (full working tree copy per agent), port/db conflicts,
+  slow cleanup on large repos, merge pain at recombination time
+- best for: separate OS processes, long-running independent tasks
+
+**2. jj-native branching (best fit for mush)**
+- since mush uses jj, agents can work on separate jj changes in the same directory
+- jj treats conflicts as first-class data, not blocking errors
+- two agents editing the same file creates a jj conflict that can be resolved later
+- `jj new @` for each forked agent creates independent changes
+- agents see each other's changes after snapshot (jj auto-snapshots on every command)
+- pros: zero disk overhead, works with existing jj workflow, conflicts are data not errors
+- cons: agents share the same working directory so disk state can be inconsistent
+  between operations (one agent's write is visible to another agent's read)
+
+**3. per-path advisory locks (emerging pattern)**
+- lightweight file-level locks: agent claims a path before editing
+- openclaw PR #29793 (feb 2026): `workspace-lock-manager.ts` with atomic locks,
+  stale-lock reclaim, configurable timeout
+- pros: fine-grained, low overhead, works in shared directory
+- cons: requires cooperation (agents must check locks), deadlock risk
+
+**4. detect-and-warn (simplest)**
+- let agents work freely, monitor for overlapping file modifications
+- warn user when two agents touch the same file in the same turn
+- pros: zero friction, no false positives on read-only access
+- cons: damage already done by the time you warn
+
+**recommended approach for mush (configurable isolation modes):**
+
+the default and the available modes depend on what VCS the project uses.
+configured via `[agents]` section in config.toml or auto-detected:
+
+- **`isolation = "none"` (default):** detect-and-warn. all agents share the
+  working directory. track which files each pane modifies, warn when two panes
+  touch the same file. /lock command for manual advisory locks. lowest friction,
+  good enough for agents working on different parts of the codebase
+
+- **`isolation = "worktree"`:** git worktree per forked pane. each pane gets
+  `<repo>/.mush/worktrees/<pane-id>/` with its own branch from the fork point.
+  complete filesystem isolation. merge back via PR-style review or sequential
+  merge. works with any git repo (and jj colocated repos via the .git layer)
+
+- **`isolation = "jj"`:** jj change per forked pane. each pane works on its own
+  jj change (`jj new` at the fork point). agents share the working directory
+  but their edits are tracked as separate changes. conflicts are first-class
+  data in jj, resolvable later. zero disk overhead, natural fit for jj repos.
+  only available when `.jj/` is detected
+
+auto-detection: if `.jj/` exists, offer "jj" and "worktree". if `.git/` exists
+(without `.jj/`), offer "worktree". otherwise, only "none" is available
 
 ---
 
