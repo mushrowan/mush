@@ -64,6 +64,17 @@ pub struct SessionMeta {
     pub cwd: String,
 }
 
+/// per-pane session state for multi-pane persistence
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaneSession {
+    pub pane_id: u32,
+    pub label: Option<String>,
+    pub model_id: ModelId,
+    pub messages: Vec<Message>,
+    #[serde(default)]
+    pub tree: SessionTree,
+}
+
 /// a full session with messages and tree structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
@@ -72,6 +83,9 @@ pub struct Session {
     /// tree structure for branching (optional for backwards compat)
     #[serde(default)]
     pub tree: SessionTree,
+    /// additional panes (empty for single-pane sessions)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub panes: Vec<PaneSession>,
 }
 
 impl Session {
@@ -90,6 +104,7 @@ impl Session {
             },
             messages: vec![],
             tree: SessionTree::new(),
+            panes: vec![],
         }
     }
 
