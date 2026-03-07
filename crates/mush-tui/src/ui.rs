@@ -15,18 +15,33 @@ use crate::widgets::tool_panels::{ToolPanels, tool_panels_height};
 /// the full TUI layout, composing all widgets
 pub struct Ui<'a> {
     app: &'a App,
+    /// when true, skip rendering the status bar (used for shared status bar in multi-pane)
+    hide_status: bool,
 }
 
 impl<'a> Ui<'a> {
     pub fn new(app: &'a App) -> Self {
-        Self { app }
+        Self {
+            app,
+            hide_status: false,
+        }
+    }
+
+    /// suppress the per-pane status bar (for shared status bar in multi-pane)
+    pub fn hide_status(mut self, hide: bool) -> Self {
+        self.hide_status = hide;
+        self
     }
 
     /// get the cursor position for the terminal
     pub fn cursor_position(&self, area: Rect) -> (u16, u16) {
         let input_h = input_height(&self.app.input, area.width, &self.app.pending_images);
         let tools_h = tool_panels_height(&self.app.active_tools, area.width);
-        let status_h = status_bar_height(self.app, area.width);
+        let status_h = if self.hide_status {
+            0
+        } else {
+            status_bar_height(self.app, area.width)
+        };
         let chunks = layout(area, input_h, tools_h, status_h);
         self.app.input_area.set(chunks.input);
         InputBox::new(self.app).cursor_position(chunks.input)
@@ -103,7 +118,11 @@ impl Widget for Ui<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let input_h = input_height(&self.app.input, area.width, &self.app.pending_images);
         let tools_h = tool_panels_height(&self.app.active_tools, area.width);
-        let status_h = status_bar_height(self.app, area.width);
+        let status_h = if self.hide_status {
+            0
+        } else {
+            status_bar_height(self.app, area.width)
+        };
         let regions = layout(area, input_h, tools_h, status_h);
         self.app.input_area.set(regions.input);
         MessageList::new(self.app).render(regions.messages, buf);
@@ -112,7 +131,9 @@ impl Widget for Ui<'_> {
                 .render(tools_area, buf);
         }
         InputBox::new(self.app).render(regions.input, buf);
-        StatusBar::new(self.app).render(regions.status, buf);
+        if !self.hide_status {
+            StatusBar::new(self.app).render(regions.status, buf);
+        }
 
         // floating popups
         if self.app.mode == AppMode::Search {

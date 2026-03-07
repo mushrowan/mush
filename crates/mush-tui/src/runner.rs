@@ -15,6 +15,7 @@ use crossterm::terminal::{
 use futures::StreamExt;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui::layout::Rect;
 use tokio::sync::Mutex;
 
 use mush_agent::tool::AgentTool;
@@ -466,8 +467,7 @@ pub async fn run_tui(
                 .pane(pane_id)
                 .map(|p| p.app.stats.context_tokens)
                 .unwrap_or(0);
-            let context_tokens_shared =
-                Arc::new(std::sync::atomic::AtomicU64::new(initial_ctx));
+            let context_tokens_shared = Arc::new(std::sync::atomic::AtomicU64::new(initial_ctx));
             let ctx_tokens_for_transform = context_tokens_shared.clone();
             #[expect(clippy::type_complexity)]
             let compaction_cache: std::sync::Arc<
@@ -558,13 +558,11 @@ pub async fn run_tui(
                                 && let Some(path) = args["path"].as_str()
                                 && let Some(owner) = ft.check_lock(lock_pane_id, path)
                             {
-                                return mush_agent::ConfirmAction::DenyWithReason(
-                                    format!(
-                                        "file \"{}\" is locked by pane {}",
-                                        path,
-                                        owner.as_u32()
-                                    ),
-                                );
+                                return mush_agent::ConfirmAction::DenyWithReason(format!(
+                                    "file \"{}\" is locked by pane {}",
+                                    path,
+                                    owner.as_u32()
+                                ));
                             }
                             // user confirmation if enabled
                             if do_prompt {
@@ -630,9 +628,8 @@ pub async fn run_tui(
                              is ready to be merged back.",
                             path.display()
                         );
-                        system_prompt = Some(
-                            system_prompt.map_or(note.clone(), |s| format!("{s}{note}")),
-                        );
+                        system_prompt =
+                            Some(system_prompt.map_or(note.clone(), |s| format!("{s}{note}")));
                     }
                     Some(crate::isolation::PaneIsolation::Jj { change_id }) => {
                         let short = &change_id[..change_id.len().min(12)];
@@ -643,9 +640,8 @@ pub async fn run_tui(
                              use /merge when your work is ready to be squashed \
                              into the parent change."
                         );
-                        system_prompt = Some(
-                            system_prompt.map_or(note.clone(), |s| format!("{s}{note}")),
-                        );
+                        system_prompt =
+                            Some(system_prompt.map_or(note.clone(), |s| format!("{s}{note}")));
                     }
                     None => {}
                 }
@@ -997,11 +993,8 @@ pub async fn run_tui(
                                         let expanded = slash::expand_template(&text);
                                         // auto-label pane from first prompt
                                         let pane = pane_mgr.focused_mut();
-                                        if pane.label.is_none() && pane.conversation.is_empty()
-                                        {
-                                            pane.label = Some(
-                                                expanded.chars().take(30).collect(),
-                                            );
+                                        if pane.label.is_none() && pane.conversation.is_empty() {
+                                            pane.label = Some(expanded.chars().take(30).collect());
                                         }
                                         let app = &mut pane_mgr.focused_mut().app;
                                         app.push_user_message(expanded.clone());
@@ -1051,10 +1044,8 @@ pub async fn run_tui(
                                                 );
                                             } else {
                                                 let from = pane_mgr.focused().id;
-                                                let sent = message_bus.broadcast(
-                                                    from,
-                                                    args.trim().to_string(),
-                                                );
+                                                let sent = message_bus
+                                                    .broadcast(from, args.trim().to_string());
                                                 pane_mgr.focused_mut().app.push_system_message(
                                                     format!("broadcast sent to {sent} pane(s)"),
                                                 );
@@ -1106,10 +1097,9 @@ pub async fn run_tui(
                                                         owner.as_u32()
                                                     ));
                                                 }
-                                                pane_mgr
-                                                    .focused_mut()
-                                                    .app
-                                                    .push_system_message(msg.trim_end().to_string());
+                                                pane_mgr.focused_mut().app.push_system_message(
+                                                    msg.trim_end().to_string(),
+                                                );
                                             }
                                         } else if name == "label" {
                                             let pane_id = pane_mgr.focused().id;
@@ -1126,7 +1116,9 @@ pub async fn run_tui(
                                                                 None
                                                             } else {
                                                                 Some(
-                                                                    t.chars().take(30).collect::<String>(),
+                                                                    t.chars()
+                                                                        .take(30)
+                                                                        .collect::<String>(),
                                                                 )
                                                             }
                                                         }
@@ -1146,13 +1138,10 @@ pub async fn run_tui(
                                             }
                                         } else if name == "panes" {
                                             let mut msg = String::from("active panes:\n");
-                                            for (i, pane) in pane_mgr.panes().iter().enumerate()
-                                            {
+                                            for (i, pane) in pane_mgr.panes().iter().enumerate() {
                                                 let idx = i + 1;
-                                                let label = pane
-                                                    .label
-                                                    .as_deref()
-                                                    .unwrap_or("(unlabelled)");
+                                                let label =
+                                                    pane.label.as_deref().unwrap_or("(unlabelled)");
                                                 let status = if pane.app.is_streaming {
                                                     "streaming"
                                                 } else {
@@ -1160,19 +1149,15 @@ pub async fn run_tui(
                                                 };
                                                 let model = &pane.app.model_id;
                                                 let cost = if pane.app.stats.total_cost > 0.0 {
-                                                    format!(
-                                                        " ${:.4}",
-                                                        pane.app.stats.total_cost
-                                                    )
+                                                    format!(" ${:.4}", pane.app.stats.total_cost)
                                                 } else {
                                                     String::new()
                                                 };
-                                                let focused =
-                                                    if i == pane_mgr.focused_index() {
-                                                        " *"
-                                                    } else {
-                                                        ""
-                                                    };
+                                                let focused = if i == pane_mgr.focused_index() {
+                                                    " *"
+                                                } else {
+                                                    ""
+                                                };
                                                 msg.push_str(&format!(
                                                     "  {idx}. {label} [{status}] {model}{cost}{focused}\n"
                                                 ));
@@ -1181,9 +1166,7 @@ pub async fn run_tui(
                                                 .focused_mut()
                                                 .app
                                                 .push_system_message(msg.trim_end().to_string());
-                                        } else if name == "cost"
-                                            && pane_mgr.is_multi_pane()
-                                        {
+                                        } else if name == "cost" && pane_mgr.is_multi_pane() {
                                             // aggregate cost across all panes
                                             let focused = &mut pane_mgr.focused_mut().app;
                                             focused.show_cost = !focused.show_cost;
@@ -1191,14 +1174,10 @@ pub async fn run_tui(
                                             let mut total_cost = 0.0_f64;
                                             let mut total_tokens = 0_u64;
                                             let mut lines = Vec::new();
-                                            for (i, pane) in
-                                                pane_mgr.panes().iter().enumerate()
-                                            {
+                                            for (i, pane) in pane_mgr.panes().iter().enumerate() {
                                                 let idx = i + 1;
-                                                let label = pane
-                                                    .label
-                                                    .as_deref()
-                                                    .unwrap_or("(unlabelled)");
+                                                let label =
+                                                    pane.label.as_deref().unwrap_or("(unlabelled)");
                                                 let s = &pane.app.stats;
                                                 total_cost += s.total_cost;
                                                 total_tokens += s.total_tokens;
@@ -1218,12 +1197,9 @@ pub async fn run_tui(
                                                     msg.push_str(line);
                                                     msg.push('\n');
                                                 }
-                                                pane_mgr
-                                                    .focused_mut()
-                                                    .app
-                                                    .push_system_message(
-                                                        msg.trim_end().to_string(),
-                                                    );
+                                                pane_mgr.focused_mut().app.push_system_message(
+                                                    msg.trim_end().to_string(),
+                                                );
                                             }
                                             // sync show_cost to all panes
                                             for pane in pane_mgr.panes_mut() {
@@ -1232,7 +1208,8 @@ pub async fn run_tui(
                                         } else if name == "close" {
                                             if pane_mgr.is_multi_pane() {
                                                 let closed_id = pane_mgr.focused().id;
-                                                let isolation = pane_mgr.focused().isolation.clone();
+                                                let isolation =
+                                                    pane_mgr.focused().isolation.clone();
                                                 file_tracker.release_pane(closed_id);
                                                 message_bus.unregister(closed_id);
                                                 cleanup_pane_isolation(&cwd, &isolation).await;
@@ -1244,42 +1221,71 @@ pub async fn run_tui(
                                         } else if name == "merge" {
                                             let pane = pane_mgr.focused();
                                             match &pane.isolation {
-                                                Some(crate::isolation::PaneIsolation::Worktree { branch, .. }) => {
+                                                Some(
+                                                    crate::isolation::PaneIsolation::Worktree {
+                                                        branch,
+                                                        ..
+                                                    },
+                                                ) => {
                                                     let branch = branch.clone();
                                                     let pane_id = pane.id;
-                                                    match crate::isolation::merge_worktree(&cwd, pane_id).await {
+                                                    match crate::isolation::merge_worktree(
+                                                        &cwd, pane_id,
+                                                    )
+                                                    .await
+                                                    {
                                                         Ok(msg) => {
-                                                            pane_mgr.focused_mut().app.push_system_message(
-                                                                format!("merged {branch}: {msg}"),
-                                                            );
+                                                            pane_mgr
+                                                                .focused_mut()
+                                                                .app
+                                                                .push_system_message(format!(
+                                                                    "merged {branch}: {msg}"
+                                                                ));
                                                         }
                                                         Err(e) => {
-                                                            pane_mgr.focused_mut().app.push_system_message(
-                                                                format!("merge failed: {e}"),
-                                                            );
+                                                            pane_mgr
+                                                                .focused_mut()
+                                                                .app
+                                                                .push_system_message(format!(
+                                                                    "merge failed: {e}"
+                                                                ));
                                                         }
                                                     }
                                                 }
-                                                Some(crate::isolation::PaneIsolation::Jj { change_id }) => {
+                                                Some(crate::isolation::PaneIsolation::Jj {
+                                                    change_id,
+                                                }) => {
                                                     let change_id = change_id.clone();
-                                                    match crate::isolation::squash_jj_change(&cwd, &change_id).await {
+                                                    match crate::isolation::squash_jj_change(
+                                                        &cwd, &change_id,
+                                                    )
+                                                    .await
+                                                    {
                                                         Ok(msg) => {
-                                                            pane_mgr.focused_mut().app.push_system_message(
-                                                                format!("squashed jj change: {msg}"),
-                                                            );
+                                                            pane_mgr
+                                                                .focused_mut()
+                                                                .app
+                                                                .push_system_message(format!(
+                                                                    "squashed jj change: {msg}"
+                                                                ));
                                                             // clear isolation since it's been merged
                                                             pane_mgr.focused_mut().isolation = None;
                                                         }
                                                         Err(e) => {
-                                                            pane_mgr.focused_mut().app.push_system_message(
-                                                                format!("squash failed: {e}"),
-                                                            );
+                                                            pane_mgr
+                                                                .focused_mut()
+                                                                .app
+                                                                .push_system_message(format!(
+                                                                    "squash failed: {e}"
+                                                                ));
                                                         }
                                                     }
                                                 }
                                                 None => {
-                                                    pane_mgr.focused_mut().app.status =
-                                                        Some("no isolation to merge (mode is none)".into());
+                                                    pane_mgr.focused_mut().app.status = Some(
+                                                        "no isolation to merge (mode is none)"
+                                                            .into(),
+                                                    );
                                                 }
                                             }
                                         } else {
@@ -1299,7 +1305,8 @@ pub async fn run_tui(
                                                 pending_prompt = Some(prompt);
                                             }
                                             // undo, clear, branch mutate state
-                                            if matches!(name.as_str(), "undo" | "clear" | "branch") {
+                                            if matches!(name.as_str(), "undo" | "clear" | "branch")
+                                            {
                                                 state_changed = true;
                                             }
                                         }
@@ -1330,7 +1337,13 @@ pub async fn run_tui(
                                             .await;
                                     }
                                     AppEvent::SplitPane => {
-                                        fork_pane(&mut pane_mgr, &tui_config, &message_bus, &tui_config.tool_output_live).await;
+                                        fork_pane(
+                                            &mut pane_mgr,
+                                            &tui_config,
+                                            &message_bus,
+                                            &tui_config.tool_output_live,
+                                        )
+                                        .await;
                                     }
                                     AppEvent::ClosePane => {
                                         if pane_mgr.is_multi_pane() {
@@ -1457,21 +1470,42 @@ fn draw_panes(
     }
     terminal.draw(|frame| {
         let area = frame.area();
-        let mode = pane_mgr.compute_layout(area);
         let focused_idx = pane_mgr.focused_index();
         let pane_count = pane_mgr.pane_count();
+        let is_multi = pane_count > 1;
+
+        // when multi-pane, reserve space at the bottom for a shared status bar
+        let shared_status_h = if is_multi {
+            crate::widgets::status_bar::status_bar_height(
+                &pane_mgr.panes()[focused_idx].app,
+                area.width,
+            )
+        } else {
+            0
+        };
+        let panes_area = Rect::new(
+            area.x,
+            area.y,
+            area.width,
+            area.height.saturating_sub(shared_status_h),
+        );
+
+        let mode = pane_mgr.compute_layout(panes_area);
 
         // tab bar in tabs mode
         if mode == LayoutMode::Tabs && pane_count > 1 {
-            let tab_area = ratatui::layout::Rect::new(area.x, area.y, area.width, 1);
+            let tab_area =
+                ratatui::layout::Rect::new(panes_area.x, panes_area.y, panes_area.width, 1);
             frame.render_widget(crate::widgets::tab_bar::TabBar::new(&*pane_mgr), tab_area);
         }
 
         // cursor position for focused pane (computed before mutable iteration)
         let focused_area = pane_mgr.panes()[focused_idx].area;
-        let (cx, cy) = Ui::new(&pane_mgr.panes()[focused_idx].app).cursor_position(focused_area);
+        let (cx, cy) = Ui::new(&pane_mgr.panes()[focused_idx].app)
+            .hide_status(is_multi)
+            .cursor_position(focused_area);
 
-        // draw column separators between panes
+        // draw column separators between panes (only within panes_area)
         if mode == LayoutMode::Columns && pane_count > 1 {
             let buf = frame.buffer_mut();
             for (i, pane) in pane_mgr.panes().iter().enumerate() {
@@ -1485,7 +1519,7 @@ fn draw_panes(
                 } else {
                     ratatui::style::Style::default().fg(ratatui::style::Color::Rgb(50, 50, 50))
                 };
-                for y in area.y..area.y + area.height {
+                for y in panes_area.y..panes_area.y + panes_area.height {
                     if let Some(cell) = buf.cell_mut(ratatui::layout::Position::new(sep_x, y)) {
                         cell.set_symbol("│").set_style(style);
                     }
@@ -1493,13 +1527,13 @@ fn draw_panes(
             }
         }
 
-        // render each visible pane
+        // render each visible pane (without status bar in multi-pane mode)
         for (i, pane) in pane_mgr.panes_mut().iter_mut().enumerate() {
             if mode == LayoutMode::Tabs && i != focused_idx {
                 continue;
             }
             let pane_area = pane.area;
-            frame.render_widget(Ui::new(&pane.app), pane_area);
+            frame.render_widget(Ui::new(&pane.app).hide_status(is_multi), pane_area);
 
             // render inline images
             let render_areas = pane.app.image_render_areas.borrow().clone();
@@ -1513,6 +1547,20 @@ fn draw_panes(
                     frame.render_stateful_widget(widget, img_area.area, proto);
                 }
             }
+        }
+
+        // shared status bar at the bottom (multi-pane only)
+        if is_multi && shared_status_h > 0 {
+            let status_area = Rect::new(
+                area.x,
+                panes_area.y + panes_area.height,
+                area.width,
+                shared_status_h,
+            );
+            frame.render_widget(
+                crate::widgets::status_bar::StatusBar::new(&pane_mgr.panes()[focused_idx].app),
+                status_area,
+            );
         }
 
         // cursor for focused pane
@@ -1540,8 +1588,12 @@ fn draw_panes(
                 &focused_app.active_tools,
                 focused_area.width,
             );
-            let status_h =
-                crate::widgets::status_bar::status_bar_height(focused_app, focused_area.width);
+            // status bar is hidden per-pane in multi-pane mode
+            let status_h = if is_multi {
+                0
+            } else {
+                crate::widgets::status_bar::status_bar_height(focused_app, focused_area.width)
+            };
             let regions = crate::ui::layout(focused_area, input_h, tools_h, status_h);
             widgets::slash_menu::render(frame, menu, regions.input);
         }
@@ -1662,10 +1714,7 @@ async fn fork_pane(
                                 });
                             sink
                         });
-                    let pane_tools = mush_tools::builtin_tools_with_sink(
-                        info.path.clone(),
-                        sink,
-                    );
+                    let pane_tools = mush_tools::builtin_tools_with_sink(info.path.clone(), sink);
                     new_pane.tools = Some(pane_tools);
                     new_pane.cwd_override = Some(info.path.clone());
                     new_pane.app.cwd = info.path.display().to_string();
@@ -1698,6 +1747,30 @@ async fn fork_pane(
     // register new pane with message bus
     let inbox = bus.register(new_id);
     new_pane.inbox = Some(inbox);
+
+    // auto-label the original pane if it doesn't have one yet, so the sibling
+    // prompt doesn't fall back to the volatile last-user-message text
+    {
+        let parent = pane_mgr.focused_mut();
+        if parent.label.is_none() {
+            let fallback = parent
+                .conversation
+                .iter()
+                .find_map(|m| match m {
+                    mush_ai::Message::User(u) => {
+                        let text = u.content.text();
+                        if text.is_empty() {
+                            None
+                        } else {
+                            Some(text.chars().take(30).collect::<String>())
+                        }
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| "original".into());
+            parent.label = Some(fallback);
+        }
+    }
 
     if let Some(ref text) = prompt {
         new_pane.app.push_user_message(text.clone());
@@ -1741,11 +1814,9 @@ async fn cleanup_pane_isolation(
                 if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                     if let Some(id_str) = name.strip_prefix("pane-") {
                         if let Ok(id) = id_str.parse::<u32>() {
-                            if let Err(e) = crate::isolation::remove_worktree(
-                                cwd,
-                                crate::pane::PaneId::new(id),
-                            )
-                            .await
+                            if let Err(e) =
+                                crate::isolation::remove_worktree(cwd, crate::pane::PaneId::new(id))
+                                    .await
                             {
                                 tracing::warn!("failed to remove worktree: {e}");
                             }
@@ -1898,9 +1969,8 @@ fn build_sibling_prompt(pane_id: crate::pane::PaneId, pane_mgr: &PaneManager) ->
         .map(|i| i + 1)
         .unwrap_or(0);
 
-    let mut prompt = format!(
-        "You are pane {idx} of {total} agents working in parallel on the same codebase."
-    );
+    let mut prompt =
+        format!("You are pane {idx} of {total} agents working in parallel on the same codebase.");
     prompt.push_str(
         " You have a `send_message` tool to communicate with siblings. \
          Use it to share findings, avoid duplicating work, or ask for help.",
@@ -1915,17 +1985,7 @@ fn build_sibling_prompt(pane_id: crate::pane::PaneId, pane_mgr: &PaneManager) ->
             .position(|pp| pp.id == p.id)
             .map(|i| i + 1)
             .unwrap_or(0);
-        let label = p
-            .label
-            .as_deref()
-            .or_else(|| {
-                p.app
-                    .messages
-                    .last()
-                    .filter(|m| m.role == crate::app::MessageRole::User)
-                    .map(|m| m.content.as_str())
-            })
-            .unwrap_or("idle");
+        let label = p.label.as_deref().unwrap_or("idle");
         // truncate label for prompt space
         let label_preview: String = label.chars().take(60).collect();
         prompt.push_str(&format!("\n- Pane {p_idx}: {label_preview}"));
