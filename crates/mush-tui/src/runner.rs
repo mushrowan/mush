@@ -98,6 +98,8 @@ pub struct TuiConfig {
     pub tool_output_live: Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
     /// callback to get recent log entries (returns last N lines)
     pub log_buffer: Option<std::sync::Arc<dyn Fn(usize) -> Vec<String> + Send + Sync>>,
+    /// multi-pane file isolation mode
+    pub isolation_mode: crate::file_tracker::IsolationMode,
 }
 
 struct TerminalStateGuard {
@@ -191,6 +193,7 @@ pub async fn run_tui(
         ("locks", "list all file locks"),
         ("label", "set pane label"),
         ("panes", "list all panes"),
+        ("merge", "merge forked pane's work back"),
         ("quit", "exit mush"),
     ];
     app.completions = slash_cmds
@@ -307,6 +310,18 @@ pub async fn run_tui(
     // register the initial pane (inbox unused until multi-pane)
     let initial_inbox = message_bus.register(crate::pane::PaneId::new(1));
     pane_mgr.focused_mut().inbox = Some(initial_inbox);
+
+    // clean up stale worktrees from previous sessions
+    if matches!(
+        tui_config.isolation_mode,
+        crate::file_tracker::IsolationMode::Worktree
+    ) {
+        let cleaned = crate::isolation::cleanup_stale_worktrees(&cwd).await;
+        if cleaned > 0 {
+            pane_mgr.focused_mut().app.status =
+                Some(format!("cleaned {cleaned} stale worktree(s)"));
+        }
+    }
 
     // draw initial frame
     draw_panes(&mut terminal, &mut pane_mgr, &image_picker)?;
@@ -545,8 +560,6 @@ pub async fn run_tui(
                 } else {
                     None
                 };
-            let confirm_reply: Arc<Mutex<Option<tokio::sync::oneshot::Sender<bool>>>> =
-                Arc::new(Mutex::new(None));
 
             let mut call_options = tui_config.options.clone();
             let (api_key, account_id) =
@@ -571,7 +584,7 @@ pub async fn run_tui(
             }
 
             // inject sibling awareness into system prompt when multi-pane
-            let system_prompt = if pane_mgr.is_multi_pane() {
+            let mut system_prompt = if pane_mgr.is_multi_pane() {
                 let sibling_info = build_sibling_prompt(pane_id, &pane_mgr);
                 match tui_config.system_prompt.as_ref() {
                     Some(base) => Some(format!("{base}\n\n{sibling_info}")),
@@ -580,6 +593,62 @@ pub async fn run_tui(
             } else {
                 tui_config.system_prompt.clone()
             };
+
+            // inject VCS isolation context into system prompt
+            if let Some(pane) = pane_mgr.pane(pane_id) {
+                match &pane.isolation {
+                    Some(crate::isolation::PaneIsolation::Worktree { path, branch }) => {
+                        let note = format!(
+                            "\n\n## worktree isolation\n\
+                             you are working in a git worktree at `{}`.\n\
+                             your branch is `{branch}`. all file operations are isolated \
+                             from the main working directory. use /merge when your work \
+                             is ready to be merged back.",
+                            path.display()
+                        );
+                        system_prompt = Some(
+                            system_prompt.map_or(note.clone(), |s| format!("{s}{note}")),
+                        );
+                    }
+                    Some(crate::isolation::PaneIsolation::Jj { change_id }) => {
+                        let short = &change_id[..change_id.len().min(12)];
+                        let note = format!(
+                            "\n\n## jj isolation\n\
+                             you are working on jj change `{short}`. \
+                             your edits are tracked as a separate jj change. \
+                             use /merge when your work is ready to be squashed \
+                             into the parent change."
+                        );
+                        system_prompt = Some(
+                            system_prompt.map_or(note.clone(), |s| format!("{s}{note}")),
+                        );
+                    }
+                    None => {}
+                }
+            }
+
+            // take per-pane tools from the pane (if any, e.g. worktree isolation)
+            let pane_tools: Option<Vec<Box<dyn mush_agent::tool::AgentTool>>> =
+                pane_mgr.pane_mut(pane_id).and_then(|p| p.tools.take());
+
+            // when a pane has its own tools (worktree isolation), merge them into
+            // extra_tools to avoid holding a borrow on any external storage.
+            // extra_tools chain with tools in the agent loop
+            if let Some(mut pt) = pane_tools {
+                // prepend pane tools before the coordination tools
+                pt.append(&mut extra_tools);
+                extra_tools = pt;
+            }
+
+            stream_metas.insert(
+                pane_id,
+                StreamMeta {
+                    steering_queue: steering_queue.clone(),
+                    confirm_req_rx,
+                    confirm_reply: Arc::new(Mutex::new(None)),
+                    model: model.clone(),
+                },
+            );
 
             let config = AgentConfig {
                 model: model.clone(),
@@ -599,15 +668,6 @@ pub async fn run_tui(
             let tagged: TaggedStream<'_> =
                 Box::pin(futures::StreamExt::map(stream, move |ev| (pane_id, ev)));
             agent_streams.push(tagged);
-            stream_metas.insert(
-                pane_id,
-                StreamMeta {
-                    steering_queue: steering_queue.clone(),
-                    confirm_req_rx,
-                    confirm_reply,
-                    model,
-                },
-            );
         }
 
         // -- main event loop: streaming or idle --
@@ -853,14 +913,19 @@ pub async fn run_tui(
                                             AppEvent::FocusPaneByIndex(i) => {
                                                 pane_mgr.focus_index(i)
                                             }
+                                            AppEvent::ResizePane(delta) => {
+                                                pane_mgr.resize_focused(delta);
+                                            }
                                             AppEvent::SplitPane => {
-                                                fork_pane(&mut pane_mgr, &tui_config, &message_bus);
+                                                fork_pane(&mut pane_mgr, &tui_config, &message_bus, &tui_config.tool_output_live).await;
                                             }
                                             AppEvent::ClosePane => {
                                                 if pane_mgr.is_multi_pane() {
                                                     let closed_id = pane_mgr.focused().id;
+                                                    let isolation = pane_mgr.focused().isolation.clone();
                                                     file_tracker.release_pane(closed_id);
                                                     message_bus.unregister(closed_id);
+                                                    cleanup_pane_isolation(&cwd, &isolation).await;
                                                     pane_mgr.close_focused();
                                                 }
                                             }
@@ -1144,12 +1209,55 @@ pub async fn run_tui(
                                         } else if name == "close" {
                                             if pane_mgr.is_multi_pane() {
                                                 let closed_id = pane_mgr.focused().id;
+                                                let isolation = pane_mgr.focused().isolation.clone();
                                                 file_tracker.release_pane(closed_id);
                                                 message_bus.unregister(closed_id);
+                                                cleanup_pane_isolation(&cwd, &isolation).await;
                                                 pane_mgr.close_focused();
                                             } else {
                                                 pane_mgr.focused_mut().app.status =
                                                     Some("can't close the last pane".into());
+                                            }
+                                        } else if name == "merge" {
+                                            let pane = pane_mgr.focused();
+                                            match &pane.isolation {
+                                                Some(crate::isolation::PaneIsolation::Worktree { branch, .. }) => {
+                                                    let branch = branch.clone();
+                                                    let pane_id = pane.id;
+                                                    match crate::isolation::merge_worktree(&cwd, pane_id).await {
+                                                        Ok(msg) => {
+                                                            pane_mgr.focused_mut().app.push_system_message(
+                                                                format!("merged {branch}: {msg}"),
+                                                            );
+                                                        }
+                                                        Err(e) => {
+                                                            pane_mgr.focused_mut().app.push_system_message(
+                                                                format!("merge failed: {e}"),
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                                Some(crate::isolation::PaneIsolation::Jj { change_id }) => {
+                                                    let change_id = change_id.clone();
+                                                    match crate::isolation::squash_jj_change(&cwd, &change_id).await {
+                                                        Ok(msg) => {
+                                                            pane_mgr.focused_mut().app.push_system_message(
+                                                                format!("squashed jj change: {msg}"),
+                                                            );
+                                                            // clear isolation since it's been merged
+                                                            pane_mgr.focused_mut().isolation = None;
+                                                        }
+                                                        Err(e) => {
+                                                            pane_mgr.focused_mut().app.push_system_message(
+                                                                format!("squash failed: {e}"),
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                                None => {
+                                                    pane_mgr.focused_mut().app.status =
+                                                        Some("no isolation to merge (mode is none)".into());
+                                                }
                                             }
                                         } else {
                                             let pane = pane_mgr.focused_mut();
@@ -1199,10 +1307,15 @@ pub async fn run_tui(
                                             .await;
                                     }
                                     AppEvent::SplitPane => {
-                                        fork_pane(&mut pane_mgr, &tui_config, &message_bus);
+                                        fork_pane(&mut pane_mgr, &tui_config, &message_bus, &tui_config.tool_output_live).await;
                                     }
                                     AppEvent::ClosePane => {
                                         if pane_mgr.is_multi_pane() {
+                                            let closed_id = pane_mgr.focused().id;
+                                            let isolation = pane_mgr.focused().isolation.clone();
+                                            file_tracker.release_pane(closed_id);
+                                            message_bus.unregister(closed_id);
+                                            cleanup_pane_isolation(&cwd, &isolation).await;
                                             pane_mgr.close_focused();
                                         } else {
                                             pane_mgr.focused_mut().app.status =
@@ -1212,6 +1325,9 @@ pub async fn run_tui(
                                     AppEvent::FocusNextPane => pane_mgr.focus_next(),
                                     AppEvent::FocusPrevPane => pane_mgr.focus_prev(),
                                     AppEvent::FocusPaneByIndex(i) => pane_mgr.focus_index(i),
+                                    AppEvent::ResizePane(delta) => {
+                                        pane_mgr.resize_focused(delta);
+                                    }
                                     _ => {}
                                 }
                             }
@@ -1414,10 +1530,11 @@ async fn paste_clipboard_image(app: &mut App) {
 
 /// fork the focused pane's conversation into a new pane.
 /// if the input has text, it becomes the new pane's prompt.
-fn fork_pane(
+async fn fork_pane(
     pane_mgr: &mut PaneManager,
     tui_config: &TuiConfig,
     bus: &crate::messaging::MessageBus,
+    tool_output_live: &Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
 ) {
     // take input text as the new pane's prompt (if any)
     let prompt = {
@@ -1469,12 +1586,64 @@ fn fork_pane(
     new_app.completions = completions;
     new_app.slash_commands = slash_commands;
     new_app.model_completions = model_completions;
-    new_app.cwd = cwd;
+    new_app.cwd = cwd.clone();
     // copy options that should carry over
     new_app.show_cost = tui_config.show_cost;
 
     let mut new_pane =
         crate::pane::Pane::with_conversation(new_id, new_app, conversation, session_tree);
+
+    // apply VCS isolation based on configured mode
+    let cwd_path = std::path::PathBuf::from(&cwd);
+    match tui_config.isolation_mode {
+        crate::file_tracker::IsolationMode::Worktree => {
+            match crate::isolation::create_worktree(&cwd_path, new_id).await {
+                Ok(info) => {
+                    // create per-pane tools rooted at the worktree.
+                    // convert the tool_output_live mutex into a sink closure
+                    let sink: Option<mush_tools::bash::OutputSink> =
+                        tool_output_live.as_ref().map(|live| {
+                            let live = live.clone();
+                            let sink: mush_tools::bash::OutputSink =
+                                std::sync::Arc::new(move |line: &str| {
+                                    if let Ok(mut guard) = live.lock() {
+                                        *guard = Some(line.to_string());
+                                    }
+                                });
+                            sink
+                        });
+                    let pane_tools = mush_tools::builtin_tools_with_sink(
+                        info.path.clone(),
+                        sink,
+                    );
+                    new_pane.tools = Some(pane_tools);
+                    new_pane.cwd_override = Some(info.path.clone());
+                    new_pane.app.cwd = info.path.display().to_string();
+                    new_pane.isolation = Some(crate::isolation::PaneIsolation::Worktree {
+                        path: info.path,
+                        branch: info.branch,
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!("failed to create worktree: {e}");
+                    // fall back to none mode
+                }
+            }
+        }
+        crate::file_tracker::IsolationMode::Jj => {
+            match crate::isolation::create_jj_change(&cwd_path).await {
+                Ok(info) => {
+                    new_pane.isolation = Some(crate::isolation::PaneIsolation::Jj {
+                        change_id: info.change_id,
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!("failed to create jj change: {e}");
+                }
+            }
+        }
+        crate::file_tracker::IsolationMode::None => {}
+    }
 
     // register new pane with message bus
     let inbox = bus.register(new_id);
@@ -1488,14 +1657,61 @@ fn fork_pane(
         new_pane.label = Some(text.chars().take(20).collect());
     }
 
+    let isolation_label = match &new_pane.isolation {
+        Some(crate::isolation::PaneIsolation::Worktree { branch, .. }) => {
+            format!(" (worktree: {branch})")
+        }
+        Some(crate::isolation::PaneIsolation::Jj { change_id }) => {
+            let short = &change_id[..change_id.len().min(8)];
+            format!(" (jj: {short})")
+        }
+        None => String::new(),
+    };
+
     let idx = pane_mgr.add_pane(new_pane);
     pane_mgr.focus_index(idx);
 
     pane_mgr.focused_mut().app.status = Some(if prompt.is_some() {
-        "forked conversation".into()
+        format!("forked conversation{isolation_label}")
     } else {
-        "forked conversation (idle)".into()
+        format!("forked conversation (idle){isolation_label}")
     });
+}
+
+/// clean up VCS isolation state when a pane is closed
+async fn cleanup_pane_isolation(
+    cwd: &std::path::Path,
+    isolation: &Option<crate::isolation::PaneIsolation>,
+) {
+    match isolation {
+        Some(crate::isolation::PaneIsolation::Worktree { .. }) => {
+            // extract pane id from the branch name
+            if let Some(crate::isolation::PaneIsolation::Worktree { path, .. }) = isolation {
+                // parse pane id from path (pane-N)
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if let Some(id_str) = name.strip_prefix("pane-") {
+                        if let Ok(id) = id_str.parse::<u32>() {
+                            if let Err(e) = crate::isolation::remove_worktree(
+                                cwd,
+                                crate::pane::PaneId::new(id),
+                            )
+                            .await
+                            {
+                                tracing::warn!("failed to remove worktree: {e}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Some(crate::isolation::PaneIsolation::Jj { change_id }) => {
+            // abandon the jj change (discard work)
+            if let Err(e) = crate::isolation::abandon_jj_change(cwd, change_id).await {
+                tracing::warn!("failed to abandon jj change: {e}");
+            }
+        }
+        None => {}
+    }
 }
 
 /// persist a thinking level change for the current model

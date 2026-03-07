@@ -2584,6 +2584,7 @@ dependencies = [
  "mush-ai",
  "mush-ext",
  "mush-session",
+ "mush-tools",
  "notify",
  "pretty_assertions",
  "ratatui",
