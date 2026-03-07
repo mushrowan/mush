@@ -251,22 +251,22 @@ pub async fn auto_compact(
 
 /// max chars to keep in masked tool result text
 const MASK_TRUNCATE_LEN: usize = 200;
-/// number of most-recent tool results to keep unmasked
-const MASK_PRESERVE_RECENT: usize = 6;
 
 /// max messages to carry into a forked pane
 const FORK_CONTEXT_LIMIT: usize = 30;
 /// number of recent tool results to preserve in forked context
 const FORK_MASK_RECENT: usize = 3;
 
-/// strip old tool outputs to reduce context size.
+/// strip tool outputs to reduce context size while keeping cache prefixes stable
 ///
-/// keeps the most recent `MASK_PRESERVE_RECENT` tool results intact.
-/// older tool results have their text content truncated with a summary
-/// of the original length. tool call names and structure are preserved
-/// so the model retains action history without the bulk of output.
+/// this applies a deterministic transform to every tool result, so adding new
+/// messages does not rewrite older masked content on later turns
 pub fn mask_observations(messages: &mut [Message]) {
-    mask_observations_with_limit(messages, MASK_PRESERVE_RECENT);
+    for msg in messages.iter_mut() {
+        if let Message::ToolResult(tr) = msg {
+            mask_tool_result_content(&mut tr.content);
+        }
+    }
 }
 
 /// truncate text parts in a tool result, keeping a prefix + size note
@@ -276,8 +276,7 @@ fn mask_tool_result_content(content: &mut [ToolResultContentPart]) {
             let original_len = t.text.len();
             if original_len > MASK_TRUNCATE_LEN {
                 let truncated: String = t.text.chars().take(MASK_TRUNCATE_LEN).collect();
-                t.text =
-                    format!("{truncated}\n\n[... truncated, {original_len} chars total]");
+                t.text = format!("{truncated}\n\n[... truncated, {original_len} chars total]");
             }
         }
         // images are dropped entirely from old results
@@ -386,37 +385,42 @@ mod tests {
     }
 
     #[test]
-    fn mask_preserves_recent_results() {
-        let mut msgs: Vec<Message> = (0..6)
-            .map(|i| make_tool_result(&format!("output {i}")))
-            .collect();
+    fn mask_is_deterministic_across_turns() {
+        let long = "x".repeat(500);
+        let mut base = vec![
+            make_user("q"),
+            make_tool_result(&long),
+            make_tool_result("short"),
+        ];
 
-        mask_observations(&mut msgs);
+        let mut once = base.clone();
+        mask_observations(&mut once);
 
-        // all 6 should be preserved (at threshold)
-        for (i, msg) in msgs.iter().enumerate() {
-            assert_eq!(tool_text(msg), format!("output {i}"));
-        }
+        base.push(make_tool_result("new output"));
+        let mut with_new = base.clone();
+        mask_observations(&mut with_new);
+
+        assert_eq!(&with_new[..once.len()], once.as_slice());
     }
 
     #[test]
-    fn mask_truncates_old_results() {
+    fn mask_truncates_long_results() {
         let long_text = "x".repeat(500);
         let mut msgs: Vec<Message> = Vec::new();
-        // 3 old results with long text
+        // 3 long results
         for _ in 0..3 {
             msgs.push(make_tool_result(&long_text));
         }
         // interspersed user messages
         msgs.push(make_user("question"));
-        // 6 recent results (should be preserved)
+        // 6 short results
         for i in 0..6 {
             msgs.push(make_tool_result(&format!("recent {i}")));
         }
 
         mask_observations(&mut msgs);
 
-        // first 3 should be truncated
+        // long outputs should be truncated
         for msg in &msgs[..3] {
             let text = tool_text(msg);
             assert!(text.contains("truncated"));
@@ -438,27 +442,25 @@ mod tests {
 
         mask_observations(&mut msgs);
 
-        // first 2 are masked but text is short, so no truncation
-        for msg in &msgs[..2] {
+        // short outputs should remain unchanged
+        for msg in &msgs {
             assert_eq!(tool_text(msg), "short");
         }
     }
 
     #[test]
     fn mask_replaces_images() {
-        let mut msgs = vec![
-            Message::ToolResult(ToolResultMessage {
-                tool_call_id: "tc_img".into(),
-                tool_name: "read".into(),
-                content: vec![ToolResultContentPart::Image(ImageContent {
-                    data: "base64data".into(),
-                    mime_type: ImageMimeType::Png,
-                })],
-                outcome: ToolOutcome::Success,
-                timestamp_ms: Timestamp::now(),
-            }),
-        ];
-        // add 6 more to push the first one past the threshold
+        let mut msgs = vec![Message::ToolResult(ToolResultMessage {
+            tool_call_id: "tc_img".into(),
+            tool_name: "read".into(),
+            content: vec![ToolResultContentPart::Image(ImageContent {
+                data: "base64data".into(),
+                mime_type: ImageMimeType::Png,
+            })],
+            outcome: ToolOutcome::Success,
+            timestamp_ms: Timestamp::now(),
+        })];
+        // add more messages to ensure neighbouring entries don't matter
         for _ in 0..6 {
             msgs.push(make_tool_result("recent"));
         }
@@ -470,10 +472,7 @@ mod tests {
 
     #[test]
     fn slim_for_fork_short_conversation() {
-        let msgs: Vec<Message> = vec![
-            make_user("hello"),
-            make_tool_result("output"),
-        ];
+        let msgs: Vec<Message> = vec![make_user("hello"), make_tool_result("output")];
         let result = slim_for_fork(&msgs);
         // short conversation should be kept as-is
         assert_eq!(result.len(), 2);
