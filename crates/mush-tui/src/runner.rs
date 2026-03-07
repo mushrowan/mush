@@ -295,6 +295,8 @@ pub async fn run_tui(
 
     // inter-pane message bus (shared across all panes)
     let message_bus = crate::messaging::MessageBus::new();
+    // shared state store (shared across all panes)
+    let shared_state = crate::shared_state::SharedState::new();
     // register the initial pane (inbox unused until multi-pane)
     let initial_inbox = message_bus.register(crate::pane::PaneId::new(1));
     pane_mgr.focused_mut().inbox = Some(initial_inbox);
@@ -466,6 +468,8 @@ pub async fn run_tui(
                     if let Some(ref enricher) = enricher {
                         event_handler::inject_hint(&mut msgs, enricher.as_ref());
                     }
+                    // mask old tool outputs to save context space
+                    event_handler::mask_observations(&mut msgs);
                     msgs
                 })
             }));
@@ -519,12 +523,18 @@ pub async fn run_tui(
             call_options.account_id = account_id;
             call_options.thinking = Some(thinking_level);
 
-            // build per-pane extra tools (send_message etc)
+            // build per-pane extra tools (send_message, shared state etc)
             let mut extra_tools: Vec<Box<dyn mush_agent::tool::AgentTool>> = Vec::new();
             if pane_mgr.is_multi_pane() {
                 extra_tools.push(Box::new(crate::messaging::SendMessageTool {
                     sender_id: pane_id,
                     bus: message_bus.clone(),
+                }));
+                extra_tools.push(Box::new(crate::shared_state::ReadStateTool {
+                    state: shared_state.clone(),
+                }));
+                extra_tools.push(Box::new(crate::shared_state::WriteStateTool {
+                    state: shared_state.clone(),
                 }));
             }
 
@@ -1161,7 +1171,7 @@ fn fork_pane(
         }
     };
 
-    // clone state from parent
+    // clone state from parent, with context isolation for focused work
     let (
         conversation,
         session_tree,
@@ -1177,7 +1187,7 @@ fn fork_pane(
     ) = {
         let parent = pane_mgr.focused();
         (
-            parent.conversation.clone(),
+            event_handler::slim_for_fork(&parent.conversation),
             parent.session_tree.clone(),
             parent.app.messages.clone(),
             parent.app.model_id.clone(),
@@ -1313,9 +1323,24 @@ async fn drain_inboxes(pane_mgr: &mut PaneManager) {
             continue;
         };
         while let Ok(msg) = inbox.try_recv() {
+            // structured envelope in the injected text
+            let task_suffix = msg
+                .task_id
+                .as_deref()
+                .map(|t| format!(" task={t}"))
+                .unwrap_or_default();
             let text = format!(
-                "[message from pane {}]: {}",
+                "[{} from pane {}{}]: {}",
+                msg.intent,
                 msg.from.as_u32(),
+                task_suffix,
+                msg.content,
+            );
+            let display = format!(
+                "↶ {} from pane {}{}: {}",
+                msg.intent,
+                msg.from.as_u32(),
+                task_suffix,
                 msg.content,
             );
             // if pane has an active agent (streaming), inject via steering
@@ -1325,18 +1350,10 @@ async fn drain_inboxes(pane_mgr: &mut PaneManager) {
                     timestamp_ms: msg.timestamp,
                 });
                 pane.steering_queue.lock().await.push(steering_msg);
-                pane.app.push_system_message(format!(
-                    "↶ from pane {}: {}",
-                    msg.from.as_u32(),
-                    msg.content
-                ));
+                pane.app.push_system_message(display);
             } else {
                 // idle pane: show the message and auto-wake
-                pane.app.push_system_message(format!(
-                    "↶ from pane {}: {}",
-                    msg.from.as_u32(),
-                    msg.content
-                ));
+                pane.app.push_system_message(display);
                 pane.app.push_user_message(text.clone());
                 pane.app.start_streaming();
                 pane.pending_prompt = Some(text);

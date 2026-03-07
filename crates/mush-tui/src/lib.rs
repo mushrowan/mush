@@ -8,6 +8,7 @@ pub mod messaging;
 pub mod pane;
 pub mod path_utils;
 pub mod runner;
+pub mod shared_state;
 pub mod slash;
 pub mod theme;
 pub mod ui;
