@@ -4,6 +4,9 @@
 - [ ] mush-ext: dynamic tool registration from extensions
 - [ ] mush-ext: provider registration from extensions
 - [ ] auto compaction not working, and need to react to too-long-context errors
+- [ ] grep tool: strip newlines from pattern before passing to rg (currently blows up with "literal \\n is not allowed")
+- [ ] edit tool: warn or error when oldText matches multiple locations in the file (currently silently replaces the first match, leading to wrong-instance edits)
+- [ ] edit tool: diff preview should strip common leading whitespace (dedent to leftmost line) for readability
 
 ## future ideas
 - [ ] neovim plugin
@@ -161,14 +164,14 @@ key insights from communication.md research:
   peers' views. anonymise responses and use all-agents-drafting (AAD)
 
 implementation:
+- [x] `send_message` tool: agent can send structured messages to siblings
+- [x] received messages injected via steering mechanism into recipient context
+- [x] auto-wake idle agents when they receive a message
+- [x] system prompt additions: sibling awareness ("you are pane 2 of 3")
+- [x] /broadcast slash command: user sends a message to all panes
 - [ ] message envelope: typed struct with sender, recipient, intent, parts, task_id
 - [ ] shared state store: typed dict per session with reducer functions per field
 - [ ] agent-as-tool: wrap pane agents as callable tools for delegation
-- [ ] `send_message` tool: agent can send structured messages to siblings
-- [ ] received messages injected via steering mechanism into recipient context
-- [ ] auto-wake idle agents when they receive a message
-- [ ] system prompt additions: sibling awareness ("you are pane 2 of 3")
-- [ ] /broadcast slash command: user sends a message to all panes
 - [ ] context isolation: forked agents get only task-relevant context slice
 - [ ] observation masking: strip old tool outputs from forwarded context
 
