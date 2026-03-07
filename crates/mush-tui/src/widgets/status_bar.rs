@@ -105,14 +105,48 @@ fn left_spans(app: &App) -> Vec<Span<'static>> {
         } else {
             0
         };
+
+        // colour by cache warmth, with context pressure overriding
+        let cache_remaining = app.cache_remaining_secs();
         let ctx_style = if pct > 75 {
+            // context pressure always takes priority
             Style::default().fg(Color::Red)
-        } else if pct > 50 {
-            Style::default().fg(Color::Yellow)
-        } else {
+        } else if app.cache_ttl_secs == 0 {
+            // caching disabled for this provider/retention
             dim
+        } else {
+            match cache_remaining {
+                Some(r) if r > 60 => Style::default().fg(Color::Green),
+                Some(r) if r > 0 => Style::default().fg(Color::Yellow),
+                Some(0) => Style::default().fg(Color::DarkGray),
+                _ => dim,
+            }
         };
-        spans.push(Span::styled(format!(" | {ctx}/{window}"), ctx_style));
+
+        // append cache countdown when active
+        let cache_suffix = match cache_remaining {
+            Some(r) if r > 0 => {
+                let mins = r / 60;
+                let secs = r % 60;
+                format!(" {mins}:{secs:02}")
+            }
+            Some(0) => {
+                // show "cold" briefly then fade out
+                let elapsed =
+                    app.cache_last_active.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+                if elapsed < (app.cache_ttl_secs as u64) + 30 {
+                    " cold".into()
+                } else {
+                    String::new()
+                }
+            }
+            _ => String::new(),
+        };
+
+        spans.push(Span::styled(
+            format!(" | {ctx}/{window}{cache_suffix}"),
+            ctx_style,
+        ));
     }
 
     if app.show_cost && app.stats.total_cost > 0.0 {
@@ -299,6 +333,19 @@ mod tests {
     #[test]
     fn truncate_path_short_unchanged() {
         assert_eq!(truncate_path("~/dev/mush", 30), "~/dev/mush");
+    }
+
+    #[test]
+    fn status_bar_shows_cache_countdown() {
+        let mut app = App::new("test".into(), 200_000);
+        app.cache_ttl_secs = 300;
+        app.stats.context_tokens = 10_000;
+        app.refresh_cache_timer();
+        let buf = render_status(&app, 120, 1);
+        let content = buffer_to_string(&buf);
+        // should show "10k/200k 4:59" or similar
+        assert!(content.contains("10k/200k"));
+        assert!(content.contains(":"));
     }
 
     #[test]

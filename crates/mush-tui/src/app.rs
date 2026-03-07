@@ -4,6 +4,7 @@
 //! streaming status, and scroll position.
 
 use std::cell::{Cell, RefCell};
+use std::time::Instant;
 
 use mush_ai::types::*;
 use mush_session::SessionMeta;
@@ -11,6 +12,21 @@ use ratatui::layout::Rect;
 use throbber_widgets_tui::ThrobberState;
 
 use crate::clipboard::ClipboardImage;
+
+/// determine cache TTL in seconds from provider and retention settings.
+/// returns 0 if caching is disabled or provider doesn't support it
+pub fn cache_ttl_secs(provider: &Provider, retention: Option<&CacheRetention>) -> u16 {
+    match provider {
+        Provider::Anthropic => match retention.copied().unwrap_or(CacheRetention::Short) {
+            CacheRetention::None => 0,
+            CacheRetention::Short => 300,  // 5 minutes
+            CacheRetention::Long => 3600,  // 1 hour
+        },
+        // openai: automatic caching, ~5-10 min, use 5 as conservative estimate
+        // openrouter: passes through to underlying provider, assume anthropic-like
+        _ => 300,
+    }
+}
 
 /// an image attached to the next user message (not yet sent)
 #[derive(Debug, Clone)]
@@ -305,6 +321,14 @@ pub struct App {
     pub pane_info: Option<(u16, u16)>,
     /// background pane alert text (e.g. "pane 2: busy")
     pub background_alert: Option<String>,
+    /// when the cache was last active (read or write), for countdown timer
+    pub cache_last_active: Option<Instant>,
+    /// cache TTL in seconds (determined from provider/retention config)
+    pub cache_ttl_secs: u16,
+    /// whether we already sent a "cache expiring soon" notification
+    pub cache_warn_sent: bool,
+    /// whether we already sent a "cache expired" notification
+    pub cache_expired_sent: bool,
 }
 
 /// position computed during render for inline image overlay
@@ -417,6 +441,28 @@ impl App {
             input_area: Cell::new(Rect::default()),
             pane_info: None,
             background_alert: None,
+            cache_last_active: None,
+            cache_ttl_secs: 300,
+            cache_warn_sent: false,
+            cache_expired_sent: false,
+        }
+    }
+
+    /// refresh the cache warmth timer (call when cache_read or cache_write > 0)
+    pub fn refresh_cache_timer(&mut self) {
+        self.cache_last_active = Some(Instant::now());
+        self.cache_warn_sent = false;
+        self.cache_expired_sent = false;
+    }
+
+    /// seconds remaining before cache expires, None if no active cache
+    pub fn cache_remaining_secs(&self) -> Option<u16> {
+        let last = self.cache_last_active?;
+        let elapsed = last.elapsed().as_secs() as u16;
+        if elapsed >= self.cache_ttl_secs {
+            Some(0)
+        } else {
+            Some(self.cache_ttl_secs - elapsed)
         }
     }
 
@@ -1782,5 +1828,32 @@ mod tests {
         assert_eq!(app.messages[0].content, "assistant reply");
         assert_eq!(app.messages[1].role, MessageRole::User);
         assert_eq!(app.messages[1].content, "steer");
+    }
+
+    #[test]
+    fn cache_ttl_secs_by_provider() {
+        use super::cache_ttl_secs;
+
+        // anthropic: short = 5 min, long = 1 hour, none = 0
+        assert_eq!(cache_ttl_secs(&Provider::Anthropic, Some(&CacheRetention::Short)), 300);
+        assert_eq!(cache_ttl_secs(&Provider::Anthropic, Some(&CacheRetention::Long)), 3600);
+        assert_eq!(cache_ttl_secs(&Provider::Anthropic, Some(&CacheRetention::None)), 0);
+        assert_eq!(cache_ttl_secs(&Provider::Anthropic, None), 300); // default = short
+
+        // openrouter / custom: defaults to 300
+        assert_eq!(cache_ttl_secs(&Provider::OpenRouter, None), 300);
+        assert_eq!(cache_ttl_secs(&Provider::Custom("xai".into()), None), 300);
+    }
+
+    #[test]
+    fn cache_remaining_countdown() {
+        let mut app = App::new("test".into(), 200_000);
+        assert!(app.cache_remaining_secs().is_none());
+
+        app.cache_ttl_secs = 300;
+        app.refresh_cache_timer();
+        let remaining = app.cache_remaining_secs().unwrap();
+        // just refreshed, should be very close to 300
+        assert!(remaining >= 298 && remaining <= 300);
     }
 }
