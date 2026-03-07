@@ -3,10 +3,11 @@
 ## open items
 - [ ] mush-ext: dynamic tool registration from extensions
 - [ ] mush-ext: provider registration from extensions
-- [ ] grep tool: strip newlines from pattern before passing to rg (currently blows up with "literal \\n is not allowed")
-- [ ] edit tool: warn or error when oldText matches multiple locations in the file (currently silently replaces the first match, leading to wrong-instance edits)
-- [ ] edit tool: diff preview should strip common leading whitespace (dedent to leftmost line) for readability
+- [x] grep tool: strip newlines from pattern before passing to rg (currently blows up with "literal \\n is not allowed")
+- [x] edit tool: clarify in tool description that oldText must be unique (code already errors on multi-match)
+- [x] edit tool: diff preview should strip common leading whitespace (dedent to leftmost line) for readability
 - [ ] add more providers: google (native), google vertex, amazon bedrock, azure openai, xai (grok), mistral, groq, deepinfra, cerebras, cohere, together ai, perplexity, github copilot, gitlab, cloudflare workers ai
+- [ ] steering message editing: alt+k to edit previously-sent but unrealised steering messages. first alt+k edits the most recent queued steering message, subsequent alt+k cycles to older ones. while a message is being edited, remove it from the steering queue until it's re-submitted. lets you fix typos or refine instructions before the agent sees them
 
 ## future ideas
 - [ ] neovim plugin
@@ -169,11 +170,10 @@ implementation:
 - [x] auto-wake idle agents when they receive a message
 - [x] system prompt additions: sibling awareness ("you are pane 2 of 3")
 - [x] /broadcast slash command: user sends a message to all panes
-- [ ] message envelope: typed struct with sender, recipient, intent, parts, task_id
-- [ ] shared state store: typed dict per session with reducer functions per field
-- [ ] agent-as-tool: wrap pane agents as callable tools for delegation
-- [ ] context isolation: forked agents get only task-relevant context slice
-- [ ] observation masking: strip old tool outputs from forwarded context
+- [x] message envelope: typed struct with sender, recipient, intent, parts, task_id
+- [x] shared state store: typed dict per session with reducer functions per field
+- [x] context isolation: forked agents get only task-relevant context slice
+- [x] observation masking: strip old tool outputs from forwarded context
 
 #### phase D: file conflict prevention
 - [ ] `IsolationMode` enum: `None`, `Worktree`, `Jj`
@@ -323,3 +323,6 @@ auto-detection: if `.jj/` exists, offer "jj" and "worktree". if `.git/` exists
 - [x] terminal corruption fix (selective mouse tracking, process group isolation)
 
 </details>
+
+## stretch goals
+- [ ] agent-as-tool: wrap pane agents as callable tools for hierarchical delegation

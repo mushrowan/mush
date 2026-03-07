@@ -1,0 +1,368 @@
+//! shared state store for inter-agent coordination
+//!
+//! a typed key-value store accessible by all panes, with configurable
+//! merge strategies (reducers) per field. inspired by langgraph's
+//! state management pattern
+
+use std::collections::HashMap;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+
+use mush_agent::tool::{AgentTool, ToolResult};
+use serde_json::Value;
+
+/// how values are merged when multiple agents write to the same key
+#[derive(Debug, Clone, Copy, Default)]
+pub enum Reducer {
+    /// last write wins (default)
+    #[default]
+    Overwrite,
+    /// append to a JSON array (creates one if key doesn't exist)
+    Append,
+}
+
+/// shared state store accessible by all panes
+#[derive(Clone)]
+pub struct SharedState {
+    fields: Arc<Mutex<HashMap<String, Value>>>,
+    reducers: Arc<Mutex<HashMap<String, Reducer>>>,
+}
+
+impl Default for SharedState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SharedState {
+    pub fn new() -> Self {
+        Self {
+            fields: Arc::new(Mutex::new(HashMap::new())),
+            reducers: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// set the reducer for a key
+    pub fn set_reducer(&self, key: &str, reducer: Reducer) {
+        self.reducers
+            .lock()
+            .unwrap()
+            .insert(key.to_string(), reducer);
+    }
+
+    /// read a value by key
+    pub fn get(&self, key: &str) -> Option<Value> {
+        self.fields.lock().unwrap().get(key).cloned()
+    }
+
+    /// write a value, applying the configured reducer
+    pub fn set(&self, key: &str, value: Value) {
+        let reducer = self
+            .reducers
+            .lock()
+            .unwrap()
+            .get(key)
+            .copied()
+            .unwrap_or_default();
+
+        let mut fields = self.fields.lock().unwrap();
+        match reducer {
+            Reducer::Overwrite => {
+                fields.insert(key.to_string(), value);
+            }
+            Reducer::Append => {
+                let entry = fields
+                    .entry(key.to_string())
+                    .or_insert_with(|| Value::Array(vec![]));
+                if let Value::Array(arr) = entry {
+                    match value {
+                        Value::Array(items) => arr.extend(items),
+                        other => arr.push(other),
+                    }
+                } else {
+                    // key exists but isn't an array, convert
+                    let old = entry.take();
+                    *entry = Value::Array(vec![old, value]);
+                }
+            }
+        }
+    }
+
+    /// delete a key
+    pub fn remove(&self, key: &str) -> Option<Value> {
+        self.fields.lock().unwrap().remove(key)
+    }
+
+    /// list all keys
+    pub fn keys(&self) -> Vec<String> {
+        self.fields.lock().unwrap().keys().cloned().collect()
+    }
+
+    /// snapshot of all state (for debugging / display)
+    pub fn snapshot(&self) -> HashMap<String, Value> {
+        self.fields.lock().unwrap().clone()
+    }
+}
+
+/// tool for reading shared state
+pub struct ReadStateTool {
+    pub state: SharedState,
+}
+
+impl AgentTool for ReadStateTool {
+    fn name(&self) -> &str {
+        "read_state"
+    }
+
+    fn label(&self) -> &str {
+        "Read State"
+    }
+
+    fn description(&self) -> &str {
+        "read a value from shared state. all agents can read and write \
+         to shared state for coordination. use `key` to read a specific \
+         field, or omit it to list all keys"
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "key": {
+                    "type": "string",
+                    "description": "state key to read (omit to list all keys)"
+                }
+            }
+        })
+    }
+
+    fn execute(
+        &self,
+        args: serde_json::Value,
+    ) -> Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
+        Box::pin(async move {
+            match args.get("key").and_then(|v| v.as_str()) {
+                Some(key) => match self.state.get(key) {
+                    Some(val) => ToolResult::text(serde_json::to_string_pretty(&val).unwrap()),
+                    None => ToolResult::text(format!("key \"{key}\" not found")),
+                },
+                None => {
+                    let keys = self.state.keys();
+                    if keys.is_empty() {
+                        ToolResult::text("shared state is empty")
+                    } else {
+                        ToolResult::text(format!("keys: {}", keys.join(", ")))
+                    }
+                }
+            }
+        })
+    }
+}
+
+/// tool for writing shared state
+pub struct WriteStateTool {
+    pub state: SharedState,
+}
+
+impl AgentTool for WriteStateTool {
+    fn name(&self) -> &str {
+        "write_state"
+    }
+
+    fn label(&self) -> &str {
+        "Write State"
+    }
+
+    fn description(&self) -> &str {
+        "write a value to shared state. all agents can read and write \
+         to shared state for coordination. values are JSON. set `reducer` \
+         to control how concurrent writes merge: \"overwrite\" (default, \
+         last write wins) or \"append\" (adds to a JSON array)"
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "key": {
+                    "type": "string",
+                    "description": "state key to write"
+                },
+                "value": {
+                    "description": "JSON value to store"
+                },
+                "reducer": {
+                    "type": "string",
+                    "enum": ["overwrite", "append"],
+                    "description": "merge strategy for this key (default: overwrite)"
+                }
+            },
+            "required": ["key", "value"]
+        })
+    }
+
+    fn execute(
+        &self,
+        args: serde_json::Value,
+    ) -> Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
+        Box::pin(async move {
+            let Some(key) = args.get("key").and_then(|v| v.as_str()) else {
+                return ToolResult::error("key is required (string)");
+            };
+            let Some(value) = args.get("value").cloned() else {
+                return ToolResult::error("value is required");
+            };
+
+            // set reducer if specified
+            if let Some(reducer_str) = args.get("reducer").and_then(|v| v.as_str()) {
+                let reducer = match reducer_str {
+                    "append" => Reducer::Append,
+                    _ => Reducer::Overwrite,
+                };
+                self.state.set_reducer(key, reducer);
+            }
+
+            self.state.set(key, value);
+            ToolResult::text(format!("wrote to \"{key}\""))
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overwrite_reducer() {
+        let state = SharedState::new();
+        state.set("count", serde_json::json!(1));
+        state.set("count", serde_json::json!(2));
+        assert_eq!(state.get("count"), Some(serde_json::json!(2)));
+    }
+
+    #[test]
+    fn append_reducer() {
+        let state = SharedState::new();
+        state.set_reducer("log", Reducer::Append);
+        state.set("log", serde_json::json!("first"));
+        state.set("log", serde_json::json!("second"));
+        assert_eq!(
+            state.get("log"),
+            Some(serde_json::json!(["first", "second"]))
+        );
+    }
+
+    #[test]
+    fn append_array_into_array() {
+        let state = SharedState::new();
+        state.set_reducer("items", Reducer::Append);
+        state.set("items", serde_json::json!([1, 2]));
+        state.set("items", serde_json::json!([3, 4]));
+        assert_eq!(
+            state.get("items"),
+            Some(serde_json::json!([1, 2, 3, 4]))
+        );
+    }
+
+    #[test]
+    fn append_converts_non_array() {
+        let state = SharedState::new();
+        // set without reducer first, so it's a plain value
+        state.set("x", serde_json::json!("old"));
+        // now switch to append
+        state.set_reducer("x", Reducer::Append);
+        state.set("x", serde_json::json!("new"));
+        assert_eq!(
+            state.get("x"),
+            Some(serde_json::json!(["old", "new"]))
+        );
+    }
+
+    #[test]
+    fn get_missing_key() {
+        let state = SharedState::new();
+        assert_eq!(state.get("nope"), None);
+    }
+
+    #[test]
+    fn remove_key() {
+        let state = SharedState::new();
+        state.set("tmp", serde_json::json!(true));
+        assert!(state.remove("tmp").is_some());
+        assert_eq!(state.get("tmp"), None);
+    }
+
+    #[test]
+    fn keys_listing() {
+        let state = SharedState::new();
+        state.set("a", serde_json::json!(1));
+        state.set("b", serde_json::json!(2));
+        let mut keys = state.keys();
+        keys.sort();
+        assert_eq!(keys, vec!["a", "b"]);
+    }
+
+    #[tokio::test]
+    async fn read_state_tool_list_keys() {
+        let state = SharedState::new();
+        state.set("foo", serde_json::json!("bar"));
+
+        let tool = ReadStateTool {
+            state: state.clone(),
+        };
+        let result = tool.execute(serde_json::json!({})).await;
+        assert!(result.outcome.is_success());
+        let text = result
+            .content
+            .iter()
+            .find_map(|p| match p {
+                mush_ai::types::ToolResultContentPart::Text(t) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(text.contains("foo"));
+    }
+
+    #[tokio::test]
+    async fn write_state_tool_sets_value() {
+        let state = SharedState::new();
+        let tool = WriteStateTool {
+            state: state.clone(),
+        };
+        let result = tool
+            .execute(serde_json::json!({
+                "key": "progress",
+                "value": 42
+            }))
+            .await;
+        assert!(result.outcome.is_success());
+        assert_eq!(state.get("progress"), Some(serde_json::json!(42)));
+    }
+
+    #[tokio::test]
+    async fn write_state_tool_with_append_reducer() {
+        let state = SharedState::new();
+        let tool = WriteStateTool {
+            state: state.clone(),
+        };
+
+        let _ = tool
+            .execute(serde_json::json!({
+                "key": "findings",
+                "value": "bug in auth",
+                "reducer": "append"
+            }))
+            .await;
+        let _ = tool
+            .execute(serde_json::json!({
+                "key": "findings",
+                "value": "perf issue in render"
+            }))
+            .await;
+
+        assert_eq!(
+            state.get("findings"),
+            Some(serde_json::json!(["bug in auth", "perf issue in render"]))
+        );
+    }
+}
