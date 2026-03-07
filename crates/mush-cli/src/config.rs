@@ -32,6 +32,7 @@ fn deserialise_thinking<'de, D: Deserializer<'de>>(
 }
 
 pub use mush_tui::HintMode;
+pub use mush_tui::IsolationMode;
 
 /// top-level config
 #[derive(Debug, Default, Deserialize)]
@@ -57,6 +58,8 @@ pub struct Config {
     pub confirm_tools: bool,
     /// show dollar cost in status bar (off by default, toggle with /cost)
     pub show_cost: bool,
+    /// multi-pane file isolation mode: none (detect-and-warn), worktree, jj
+    pub isolation: IsolationMode,
     pub api_keys: ApiKeys,
     pub theme: mush_tui::ThemeConfig,
     /// MCP server configurations keyed by name
@@ -243,6 +246,24 @@ openai = "sk-openai-test"
     fn hint_mode_defaults_to_message() {
         let config: Config = toml::from_str("").unwrap();
         assert_eq!(config.hint_mode, HintMode::Message);
+    }
+
+    #[test]
+    fn parse_isolation_mode() {
+        let config: Config = toml::from_str(r#"isolation = "jj""#).unwrap();
+        assert_eq!(config.isolation, IsolationMode::Jj);
+
+        let config: Config = toml::from_str(r#"isolation = "worktree""#).unwrap();
+        assert_eq!(config.isolation, IsolationMode::Worktree);
+
+        let config: Config = toml::from_str(r#"isolation = "none""#).unwrap();
+        assert_eq!(config.isolation, IsolationMode::None);
+    }
+
+    #[test]
+    fn isolation_defaults_to_none() {
+        let config: Config = toml::from_str("").unwrap();
+        assert_eq!(config.isolation, IsolationMode::None);
     }
 
     #[test]

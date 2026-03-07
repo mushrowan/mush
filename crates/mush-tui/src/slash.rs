@@ -38,6 +38,9 @@ pub fn handle(
             help.push_str("  /injection     - toggle prompt injection preview\n");
             help.push_str("  /close         - close focused pane\n");
             help.push_str("  /broadcast msg - send a message to all panes\n");
+            help.push_str("  /lock <path>   - lock a file for this pane\n");
+            help.push_str("  /unlock <path> - release a file lock\n");
+            help.push_str("  /locks         - list all file locks\n");
             help.push_str("  /quit          - exit mush\n");
             help.push_str("\ntip: type a prompt template name (e.g. /review file.rs) to expand it");
             app.push_system_message(help);

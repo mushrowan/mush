@@ -15,7 +15,7 @@ use tokio::sync::Mutex;
 use crate::app::App;
 
 /// unique pane identifier
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PaneId(u32);
 
 impl PaneId {

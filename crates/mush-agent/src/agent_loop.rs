@@ -94,8 +94,10 @@ pub type ContextTransform<'a> = Box<
 pub enum ConfirmAction {
     /// execute the tool
     Allow,
-    /// skip this tool call, return error message to the model
+    /// skip this tool call, return default error to the model
     Deny,
+    /// skip this tool call with a specific reason (shown to the model)
+    DenyWithReason(String),
 }
 
 /// callback for tool confirmation. receives tool name and args, returns allow/deny.
@@ -272,9 +274,15 @@ pub fn agent_loop(
                 // confirmations are checked sequentially (needs user interaction)
                 let mut confirmed: Vec<&ToolCall> = Vec::new();
                 for tc in &tool_calls {
-                    if let Some(ref confirm) = config.confirm_tool
-                        && confirm(tc.name.as_str(), &tc.arguments).await == ConfirmAction::Deny {
-                            let result = ToolResult::error("tool call denied by user".to_string());
+                    if let Some(ref confirm) = config.confirm_tool {
+                        let action = confirm(tc.name.as_str(), &tc.arguments).await;
+                        let deny_reason = match action {
+                            ConfirmAction::Allow => None,
+                            ConfirmAction::Deny => Some("tool call denied by user".to_string()),
+                            ConfirmAction::DenyWithReason(reason) => Some(reason),
+                        };
+                        if let Some(reason) = deny_reason {
+                            let result = ToolResult::error(reason);
                             yield AgentEvent::ToolExecEnd {
                                 tool_call_id: tc.id.clone(),
                                 tool_name: tc.name.clone(),
@@ -289,6 +297,7 @@ pub fn agent_loop(
                             }));
                             continue;
                         }
+                    }
                     confirmed.push(tc);
                 }
 

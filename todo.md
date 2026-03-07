@@ -176,14 +176,14 @@ implementation:
 - [x] observation masking: strip old tool outputs from forwarded context
 
 #### phase D: file conflict prevention
-- [ ] `IsolationMode` enum: `None`, `Worktree`, `Jj`
-- [ ] auto-detect available modes from `.jj/` and `.git/` presence
-- [ ] config: `[agents] isolation = "none" | "worktree" | "jj"`
-- [ ] **none mode:**
-  - [ ] per-pane file modification tracker (set of paths written/edited)
-  - [ ] warn in status bar when agent modifies a file touched by another pane
-  - [ ] /lock <path> to claim a file, /locks to list, auto-release on pane close
-  - [ ] locked files: write/edit tools return error with lock owner info
+- [x] `IsolationMode` enum: `None`, `Worktree`, `Jj`
+- [x] auto-detect available modes from `.jj/` and `.git/` presence
+- [x] config: `[agents] isolation = "none" | "worktree" | "jj"`
+- [x] **none mode:**
+  - [x] per-pane file modification tracker (set of paths written/edited)
+  - [x] warn in status bar when agent modifies a file touched by another pane
+  - [x] /lock <path> to claim a file, /locks to list, auto-release on pane close
+  - [x] locked files: write/edit tools return error with lock owner info
 - [ ] **worktree mode:**
   - [ ] on fork: `git worktree add .mush/worktrees/<pane-id> -b mush-<pane-id>`
   - [ ] forked pane's tools use worktree path as cwd instead of repo root
