@@ -183,6 +183,7 @@ pub async fn run_tui(
         ("logs", "show recent log entries"),
         ("injection", "toggle prompt injection preview"),
         ("close", "close focused pane"),
+        ("broadcast", "send a message to all panes"),
         ("quit", "exit mush"),
     ];
     app.completions = slash_cmds
@@ -289,6 +290,12 @@ pub async fn run_tui(
     initial_pane.conversation = conversation;
     initial_pane.session_tree = session_tree;
     let mut pane_mgr = crate::pane::PaneManager::new(initial_pane);
+
+    // inter-pane message bus (shared across all panes)
+    let message_bus = crate::messaging::MessageBus::new();
+    // register the initial pane (inbox unused until multi-pane)
+    let initial_inbox = message_bus.register(crate::pane::PaneId::new(1));
+    pane_mgr.focused_mut().inbox = Some(initial_inbox);
 
     // draw initial frame
     draw_panes(&mut terminal, &mut pane_mgr, &image_picker)?;
@@ -507,10 +514,31 @@ pub async fn run_tui(
             call_options.account_id = account_id;
             call_options.thinking = Some(thinking_level);
 
+            // build per-pane extra tools (send_message etc)
+            let mut extra_tools: Vec<Box<dyn mush_agent::tool::AgentTool>> = Vec::new();
+            if pane_mgr.is_multi_pane() {
+                extra_tools.push(Box::new(crate::messaging::SendMessageTool {
+                    sender_id: pane_id,
+                    bus: message_bus.clone(),
+                }));
+            }
+
+            // inject sibling awareness into system prompt when multi-pane
+            let system_prompt = if pane_mgr.is_multi_pane() {
+                let sibling_info = build_sibling_prompt(pane_id, &pane_mgr);
+                match tui_config.system_prompt.as_ref() {
+                    Some(base) => Some(format!("{base}\n\n{sibling_info}")),
+                    None => Some(sibling_info),
+                }
+            } else {
+                tui_config.system_prompt.clone()
+            };
+
             let config = AgentConfig {
                 model: model.clone(),
-                system_prompt: tui_config.system_prompt.clone(),
+                system_prompt,
                 tools,
+                extra_tools,
                 registry,
                 options: call_options,
                 max_turns: tui_config.max_turns,
@@ -645,6 +673,9 @@ pub async fn run_tui(
                         }
                     }
 
+                    // drain inter-pane message inboxes into steering queues
+                    drain_inboxes(&mut pane_mgr).await;
+
                     // handle terminal input during streaming
                     while event::poll(std::time::Duration::ZERO)? {
                         match event::read()? {
@@ -731,7 +762,7 @@ pub async fn run_tui(
                                                 pane_mgr.focus_index(i)
                                             }
                                             AppEvent::SplitPane => {
-                                                fork_pane(&mut pane_mgr, &tui_config);
+                                                fork_pane(&mut pane_mgr, &tui_config, &message_bus);
                                             }
                                             AppEvent::ClosePane => {
                                                 if pane_mgr.is_multi_pane() {
@@ -758,6 +789,16 @@ pub async fn run_tui(
             }
         } else {
             // idle: no active streams, wait for terminal input
+            // check for inter-pane messages that should auto-wake idle panes
+            drain_inboxes(&mut pane_mgr).await;
+            // start agent loops for any pane that received a message while idle
+            for pane in pane_mgr.panes_mut() {
+                if !pane.app.is_streaming && pane.pending_prompt.is_some() {
+                    // pending_prompt was set by drain_inboxes, will be picked up
+                    // at the top of the loop
+                }
+            }
+
             if event::poll(std::time::Duration::from_millis(50))? {
                 loop {
                     match event::read()? {
@@ -808,6 +849,25 @@ pub async fn run_tui(
                                                 &pane.conversation,
                                                 &args,
                                             );
+                                        } else if name == "broadcast" {
+                                            if !pane_mgr.is_multi_pane() {
+                                                pane_mgr.focused_mut().app.push_system_message(
+                                                    "no sibling panes to broadcast to",
+                                                );
+                                            } else if args.trim().is_empty() {
+                                                pane_mgr.focused_mut().app.push_system_message(
+                                                    "usage: /broadcast <message>",
+                                                );
+                                            } else {
+                                                let from = pane_mgr.focused().id;
+                                                let sent = message_bus.broadcast(
+                                                    from,
+                                                    args.trim().to_string(),
+                                                );
+                                                pane_mgr.focused_mut().app.push_system_message(
+                                                    format!("broadcast sent to {sent} pane(s)"),
+                                                );
+                                            }
                                         } else if name == "close" {
                                             if pane_mgr.is_multi_pane() {
                                                 pane_mgr.close_focused();
@@ -863,7 +923,7 @@ pub async fn run_tui(
                                             .await;
                                     }
                                     AppEvent::SplitPane => {
-                                        fork_pane(&mut pane_mgr, &tui_config);
+                                        fork_pane(&mut pane_mgr, &tui_config, &message_bus);
                                     }
                                     AppEvent::ClosePane => {
                                         if pane_mgr.is_multi_pane() {
@@ -1078,7 +1138,11 @@ async fn paste_clipboard_image(app: &mut App) {
 
 /// fork the focused pane's conversation into a new pane.
 /// if the input has text, it becomes the new pane's prompt.
-fn fork_pane(pane_mgr: &mut PaneManager, tui_config: &TuiConfig) {
+fn fork_pane(
+    pane_mgr: &mut PaneManager,
+    tui_config: &TuiConfig,
+    bus: &crate::messaging::MessageBus,
+) {
     // take input text as the new pane's prompt (if any)
     let prompt = {
         let app = &mut pane_mgr.focused_mut().app;
@@ -1135,6 +1199,10 @@ fn fork_pane(pane_mgr: &mut PaneManager, tui_config: &TuiConfig) {
 
     let mut new_pane =
         crate::pane::Pane::with_conversation(new_id, new_app, conversation, session_tree);
+
+    // register new pane with message bus
+    let inbox = bus.register(new_id);
+    new_pane.inbox = Some(inbox);
 
     if let Some(ref text) = prompt {
         new_pane.app.push_user_message(text.clone());
@@ -1229,6 +1297,92 @@ fn cleanup(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
     restore_terminal_state();
     terminal.show_cursor()?;
     Ok(())
+}
+
+/// drain each pane's inter-pane message inbox and inject into steering queues.
+/// for idle panes, sets pending_prompt to auto-wake the agent loop.
+async fn drain_inboxes(pane_mgr: &mut PaneManager) {
+    for pane in pane_mgr.panes_mut() {
+        let Some(ref mut inbox) = pane.inbox else {
+            continue;
+        };
+        while let Ok(msg) = inbox.try_recv() {
+            let text = format!(
+                "[message from pane {}]: {}",
+                msg.from.as_u32(),
+                msg.content,
+            );
+            // if pane has an active agent (streaming), inject via steering
+            if pane.app.is_streaming {
+                let steering_msg = Message::User(UserMessage {
+                    content: UserContent::Text(text.clone()),
+                    timestamp_ms: msg.timestamp,
+                });
+                pane.steering_queue.lock().await.push(steering_msg);
+                pane.app.push_system_message(format!(
+                    "↶ from pane {}: {}",
+                    msg.from.as_u32(),
+                    msg.content
+                ));
+            } else {
+                // idle pane: show the message and auto-wake
+                pane.app.push_system_message(format!(
+                    "↶ from pane {}: {}",
+                    msg.from.as_u32(),
+                    msg.content
+                ));
+                pane.app.push_user_message(text.clone());
+                pane.app.start_streaming();
+                pane.pending_prompt = Some(text);
+            }
+        }
+    }
+}
+
+/// build system prompt fragment describing sibling panes
+fn build_sibling_prompt(pane_id: crate::pane::PaneId, pane_mgr: &PaneManager) -> String {
+    let panes = pane_mgr.panes();
+    let total = panes.len();
+    let idx = panes
+        .iter()
+        .position(|p| p.id == pane_id)
+        .map(|i| i + 1)
+        .unwrap_or(0);
+
+    let mut prompt = format!(
+        "You are pane {idx} of {total} agents working in parallel on the same codebase."
+    );
+    prompt.push_str(
+        " You have a `send_message` tool to communicate with siblings. \
+         Use it to share findings, avoid duplicating work, or ask for help.",
+    );
+
+    for p in panes {
+        if p.id == pane_id {
+            continue;
+        }
+        let p_idx = panes
+            .iter()
+            .position(|pp| pp.id == p.id)
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let label = p
+            .label
+            .as_deref()
+            .or_else(|| {
+                p.app
+                    .messages
+                    .last()
+                    .filter(|m| m.role == crate::app::MessageRole::User)
+                    .map(|m| m.content.as_str())
+            })
+            .unwrap_or("idle");
+        // truncate label for prompt space
+        let label_preview: String = label.chars().take(60).collect();
+        prompt.push_str(&format!("\n- Pane {p_idx}: {label_preview}"));
+    }
+
+    prompt
 }
 
 #[cfg(test)]
