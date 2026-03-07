@@ -86,12 +86,14 @@ pub struct TuiConfig {
     pub save_session: Option<SessionSaver>,
     /// prompt for confirmation before executing tools (off by default)
     pub confirm_tools: bool,
-    /// automatically compact conversation when approaching context limit (on by default)
+    /// automatically compact conversation when approaching context limit (off by default)
     pub auto_compact: bool,
     /// show dollar cost in status bar (off by default, toggle with /cost)
     pub show_cost: bool,
     /// emit system messages when cache reads are observed
     pub debug_cache: bool,
+    /// show cache warmth countdown in status bar and send desktop notifications
+    pub cache_timer: bool,
     /// how to display thinking text (hidden, collapse, expanded)
     pub thinking_display: crate::app::ThinkingDisplay,
     /// shared live tool output (updated by bash sink, read by TUI)
@@ -170,6 +172,14 @@ pub async fn run_tui(
     app.thinking_level = tui_config.options.thinking.unwrap_or(ThinkingLevel::Off);
     app.thinking_display = tui_config.thinking_display;
     app.show_cost = tui_config.show_cost;
+    app.cache_ttl_secs = if tui_config.cache_timer {
+        crate::app::cache_ttl_secs(
+            &tui_config.model.provider,
+            tui_config.options.cache_retention.as_ref(),
+        )
+    } else {
+        0
+    };
     // populate tab completions and slash command descriptions
     let slash_cmds: &[(&str, &str)] = &[
         ("help", "show available commands"),
@@ -337,6 +347,8 @@ pub async fn run_tui(
         confirm_req_rx: tokio::sync::mpsc::Receiver<(String, tokio::sync::oneshot::Sender<bool>)>,
         confirm_reply: Arc<Mutex<Option<tokio::sync::oneshot::Sender<bool>>>>,
         model: Model,
+        /// actual API-reported context tokens, shared with the context transform
+        context_tokens: Arc<std::sync::atomic::AtomicU64>,
     }
 
     let mut agent_streams: SelectAll<TaggedStream<'_>> = SelectAll::new();
@@ -439,7 +451,7 @@ pub async fn run_tui(
             };
 
             // build callbacks (no pane borrows)
-            let context_window = model.context_window as usize;
+            let context_window = model.context_window;
             let enricher_arc = if tui_config.hint_mode == HintMode::Transform {
                 tui_config.prompt_enricher.clone()
             } else {
@@ -448,6 +460,14 @@ pub async fn run_tui(
             let compact_model = model.clone();
             let compact_options = tui_config.options.clone();
             let do_auto_compact = tui_config.auto_compact;
+            // seed with actual API-reported context tokens from previous turn
+            let initial_ctx = pane_mgr
+                .pane(pane_id)
+                .map(|p| p.app.stats.context_tokens)
+                .unwrap_or(0);
+            let context_tokens_shared =
+                Arc::new(std::sync::atomic::AtomicU64::new(initial_ctx));
+            let ctx_tokens_for_transform = context_tokens_shared.clone();
             #[expect(clippy::type_complexity)]
             let compaction_cache: std::sync::Arc<
                 tokio::sync::Mutex<Option<(usize, Vec<Message>)>>,
@@ -457,9 +477,11 @@ pub async fn run_tui(
                 let model = compact_model.clone();
                 let options = compact_options.clone();
                 let cache = compaction_cache.clone();
+                let ctx_tokens = ctx_tokens_for_transform.clone();
                 Box::pin(async move {
                     let mut msgs = if do_auto_compact {
                         let mut guard = cache.lock().await;
+                        let current_tokens = ctx_tokens.load(std::sync::atomic::Ordering::Relaxed);
                         if let Some((orig_len, ref compacted)) = *guard {
                             if msgs.len() >= orig_len {
                                 let mut result = compacted.clone();
@@ -473,6 +495,7 @@ pub async fn run_tui(
                             let orig_len = msgs.len();
                             let compacted = event_handler::auto_compact(
                                 msgs,
+                                current_tokens,
                                 context_window,
                                 registry,
                                 &model,
@@ -647,6 +670,7 @@ pub async fn run_tui(
                     confirm_req_rx,
                     confirm_reply: Arc::new(Mutex::new(None)),
                     model: model.clone(),
+                    context_tokens: context_tokens_shared.clone(),
                 },
             );
 
@@ -703,6 +727,16 @@ pub async fn run_tui(
                             );
                         }
 
+                        // update shared context token count for auto-compaction
+                        if let AgentEvent::MessageEnd { message } = &event {
+                            if let Some(meta) = stream_metas.get(&pane_id) {
+                                meta.context_tokens.store(
+                                    message.usage.total_input_tokens(),
+                                    std::sync::atomic::Ordering::Relaxed,
+                                );
+                            }
+                        }
+
                         // file modification tracking (none isolation mode)
                         if pane_mgr.is_multi_pane() {
                             match &event {
@@ -747,11 +781,22 @@ pub async fn run_tui(
                             }
                         }
                         if matches!(event, AgentEvent::AgentEnd) {
-                            let stream_model = stream_metas
-                                .get(&pane_id)
-                                .map(|m| m.model.clone())
-                                .unwrap_or_else(|| tui_config.model.clone());
                             stream_metas.remove(&pane_id);
+
+                            // notify when agent is done and cache is warm
+                            if tui_config.cache_timer {
+                                if let Some(pane) = pane_mgr.pane(pane_id) {
+                                    if let Some(remaining) = pane.app.cache_remaining_secs() {
+                                        if remaining > 60 {
+                                            crate::notify::send(
+                                                "awaiting input",
+                                                &format!("cache warm for {remaining}s"),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+
                             // auto-save for this pane
                             if let Some(pane) = pane_mgr.pane(pane_id) {
                                 if let Some(ref saver) = tui_config.save_session {
@@ -760,42 +805,6 @@ pub async fn run_tui(
                                         &pane.session_tree,
                                         &pane.app.model_id,
                                     );
-                                }
-                            }
-                            // auto-compact for this pane
-                            if tui_config.auto_compact
-                            && let Some(pane) = pane_mgr.pane(pane_id) {
-                                let needs = mush_session::compact::needs_compaction(
-                                    &pane.conversation,
-                                    stream_model.context_window as usize,
-                                );
-                                if needs {
-                                    if let Some(pane) = pane_mgr.pane_mut(pane_id) {
-                                        pane.app.status = Some("auto-compacting…".into());
-                                    }
-                                    draw_panes(&mut terminal, &mut pane_mgr, &image_picker)?;
-                                    if let Some(pane) = pane_mgr.pane_mut(pane_id) {
-                                        let (app, conversation, session_tree, _) =
-                                            pane.fields_mut();
-                                        slash::handle_compact(
-                                            app,
-                                            conversation,
-                                            session_tree,
-                                            &stream_model,
-                                            &tui_config.options,
-                                            registry,
-                                        )
-                                        .await;
-                                    }
-                                    if let Some(pane) = pane_mgr.pane(pane_id) {
-                                        if let Some(ref saver) = tui_config.save_session {
-                                            saver(
-                                                &pane.conversation,
-                                                &pane.session_tree,
-                                                &pane.app.model_id,
-                                            );
-                                        }
-                                    }
                                 }
                             }
                         }
@@ -1366,6 +1375,25 @@ pub async fn run_tui(
                 pane.app.tick();
             }
         }
+
+        // cache warmth notifications
+        if tui_config.cache_timer {
+            for pane in pane_mgr.panes_mut() {
+                if let Some(remaining) = pane.app.cache_remaining_secs() {
+                    if remaining == 0 && !pane.app.cache_expired_sent {
+                        pane.app.cache_expired_sent = true;
+                        crate::notify::send("cache expired", "prompt cache has gone cold");
+                    } else if remaining > 0 && remaining <= 60 && !pane.app.cache_warn_sent {
+                        pane.app.cache_warn_sent = true;
+                        crate::notify::send(
+                            "cache expiring soon",
+                            &format!("prompt cache expires in {remaining}s"),
+                        );
+                    }
+                }
+            }
+        }
+
         draw_panes(&mut terminal, &mut pane_mgr, &image_picker)?;
     }
 
@@ -1589,6 +1617,14 @@ async fn fork_pane(
     new_app.cwd = cwd.clone();
     // copy options that should carry over
     new_app.show_cost = tui_config.show_cost;
+    new_app.cache_ttl_secs = if tui_config.cache_timer {
+        crate::app::cache_ttl_secs(
+            &tui_config.model.provider,
+            tui_config.options.cache_retention.as_ref(),
+        )
+    } else {
+        0
+    };
 
     let mut new_pane =
         crate::pane::Pane::with_conversation(new_id, new_app, conversation, session_tree);

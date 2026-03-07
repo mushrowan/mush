@@ -197,15 +197,22 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
     session.auto_title();
 
     // auto-compact when approaching context limit
-    let context_window = setup.model.context_window as usize;
+    let context_window = setup.model.context_window;
     let compact_model = setup.model.clone();
     let compact_options = setup.options.clone();
     let reg_ref = &setup.registry;
+    let context_tokens_shared =
+        std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let ctx_tokens_for_transform = context_tokens_shared.clone();
     let transform: Option<mush_agent::ContextTransform<'_>> = if setup.cfg.auto_compact {
         Some(Box::new(move |msgs| {
             let m = compact_model.clone();
             let o = compact_options.clone();
-            Box::pin(async move { auto_compact(msgs, context_window, reg_ref, &m, &o).await })
+            let ctx = ctx_tokens_for_transform.clone();
+            Box::pin(async move {
+                let tokens = ctx.load(std::sync::atomic::Ordering::Relaxed);
+                auto_compact(msgs, tokens, context_window, reg_ref, &m, &o).await
+            })
         }))
     } else {
         None
@@ -272,6 +279,10 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
                 }
             }
             AgentEvent::MessageEnd { message } => {
+                context_tokens_shared.store(
+                    message.usage.total_input_tokens(),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 session.push_message(Message::Assistant(message));
             }
             AgentEvent::TurnEnd { message, .. } => {
@@ -431,6 +442,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         auto_compact: setup.cfg.auto_compact,
         show_cost: setup.cfg.show_cost,
         debug_cache: setup.debug_cache,
+        cache_timer: setup.cfg.cache_timer,
         thinking_display: setup.cfg.thinking_display,
         tool_output_live: Some(tool_output_live),
         log_buffer: Some({

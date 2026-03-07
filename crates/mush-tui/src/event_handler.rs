@@ -47,6 +47,9 @@ pub fn handle_agent_event(
         AgentEvent::MessageEnd { message } => {
             let cost = models::calculate_cost(model, &message.usage);
             app.finish_streaming(Some(message.usage), Some(cost.total()));
+            if message.usage.cache_read_tokens > 0 || message.usage.cache_write_tokens > 0 {
+                app.refresh_cache_timer();
+            }
             if debug_cache && message.usage.cache_read_tokens > 0 {
                 app.push_system_message(format!(
                     "cache read detected: {} tokens",
@@ -223,17 +226,21 @@ fn oauth_account_id(provider_id: &str) -> Option<String> {
     })
 }
 
-/// compact messages when approaching context limit
+/// compact messages when approaching context limit.
+/// `context_tokens` is the actual API-reported input token count from the last call
 pub async fn auto_compact(
     messages: Vec<Message>,
-    context_window: usize,
+    context_tokens: u64,
+    context_window: u64,
     registry: &mush_ai::registry::ApiRegistry,
     model: &Model,
     options: &StreamOptions,
 ) -> Vec<Message> {
     use mush_session::compact;
 
-    if !compact::needs_compaction(&messages, context_window) {
+    // 95% of context window, using real token counts from the API
+    let threshold = context_window * 95 / 100;
+    if context_tokens < threshold || messages.len() <= 10 {
         return messages;
     }
 
