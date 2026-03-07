@@ -78,12 +78,20 @@ async fn run_rg(
     search_path: &std::path::Path,
     include: Option<&str>,
 ) -> ToolResult {
+    // strip newlines from pattern - LLMs sometimes include literal newlines
+    // which rg rejects with "literal \n is not allowed"
+    let pattern: String = pattern.chars().filter(|&c| c != '\n' && c != '\r').collect();
+
+    if pattern.is_empty() {
+        return ToolResult::error("pattern is empty (after stripping newlines)");
+    }
+
     let mut cmd = tokio::process::Command::new("rg");
     cmd.arg("--line-number")
         .arg("--no-heading")
         .arg("--color=never")
         .arg("--max-count=50") // per-file limit
-        .arg(pattern)
+        .arg(&pattern)
         .arg(search_path)
         .current_dir(cwd)
         .stdout(Stdio::piped())
@@ -144,6 +152,31 @@ mod tests {
 
         let text = extract_text(&result);
         assert!(text.contains("no matches"));
+    }
+
+    #[tokio::test]
+    async fn grep_strips_newlines_from_pattern() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("test.txt"), "helloworld").unwrap();
+
+        // pattern with embedded newlines should still match after stripping
+        let result = run_rg(dir.path(), "hello\nworld", dir.path(), None).await;
+
+        assert!(result.outcome.is_success());
+        let text = extract_text(&result);
+        assert!(text.contains("helloworld"));
+    }
+
+    #[tokio::test]
+    async fn grep_empty_after_stripping_newlines() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("test.txt"), "hello").unwrap();
+
+        let result = run_rg(dir.path(), "\n\n", dir.path(), None).await;
+
+        assert!(result.outcome.is_error());
+        let text = extract_text(&result);
+        assert!(text.contains("empty"));
     }
 
     #[tokio::test]

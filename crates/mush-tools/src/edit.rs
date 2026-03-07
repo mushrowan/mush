@@ -28,7 +28,9 @@ impl AgentTool for EditTool {
     }
     fn description(&self) -> &str {
         "Edit a file by replacing exact text. The oldText must match exactly (including whitespace). \
-         Use this for precise, surgical edits."
+         Use this for precise, surgical edits. The oldText must appear exactly once in the file - \
+         if it matches multiple locations, the edit will fail. Include enough surrounding context \
+         (nearby lines) in oldText to make the match unique."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -113,10 +115,42 @@ fn edit_file(path: &Path, old_text: &str, new_text: &str) -> ToolResult {
     }
 }
 
+/// strip common leading whitespace from both texts for readable diffs
+fn dedent_pair(old_text: &str, new_text: &str) -> (String, String) {
+    let min_indent = old_text
+        .lines()
+        .chain(new_text.lines())
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.len() - l.trim_start().len())
+        .min()
+        .unwrap_or(0);
+
+    if min_indent == 0 {
+        return (old_text.to_string(), new_text.to_string());
+    }
+
+    let strip = |text: &str| -> String {
+        text.lines()
+            .map(|l| {
+                if l.len() >= min_indent {
+                    &l[min_indent..]
+                } else {
+                    l.trim_start()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    (strip(old_text), strip(new_text))
+}
+
 /// format a diff between old and new text for display
 fn format_edit_diff(old_text: &str, new_text: &str) -> String {
+    let (old_text, new_text) = dedent_pair(old_text, new_text);
+
     // addition-only: new text contains all of old text with extra content
-    if let Some(added) = new_text.strip_prefix(old_text)
+    if let Some(added) = new_text.strip_prefix(old_text.as_str())
         && !added.trim().is_empty()
     {
         return added
@@ -126,7 +160,7 @@ fn format_edit_diff(old_text: &str, new_text: &str) -> String {
             .collect::<Vec<_>>()
             .join("\n");
     }
-    if let Some(added) = new_text.strip_suffix(old_text)
+    if let Some(added) = new_text.strip_suffix(old_text.as_str())
         && !added.trim().is_empty()
     {
         return added
@@ -237,6 +271,38 @@ mod tests {
         let diff = format_edit_diff("old line", "new line");
         assert!(diff.contains("- old line"));
         assert!(diff.contains("+ new line"));
+    }
+
+    #[test]
+    fn diff_dedents_common_whitespace() {
+        let diff = format_edit_diff(
+            "        deeply indented\n        old code",
+            "        deeply indented\n        new code",
+        );
+        // should strip the 8-space common indent
+        assert!(diff.contains("- old code"));
+        assert!(diff.contains("+ new code"));
+        assert!(!diff.contains("        "));
+    }
+
+    #[test]
+    fn diff_dedent_preserves_relative_indent() {
+        let diff = format_edit_diff(
+            "    base\n        nested",
+            "    base\n            more nested",
+        );
+        // 4-space common indent stripped, relative indent preserved
+        assert!(diff.contains("- base"));
+        assert!(diff.contains("-     nested"));
+        assert!(diff.contains("+ base"));
+        assert!(diff.contains("+         more nested"));
+    }
+
+    #[test]
+    fn diff_no_dedent_when_no_common_indent() {
+        let diff = format_edit_diff("old line here", "new line here");
+        assert!(diff.contains("- old line here"));
+        assert!(diff.contains("+ new line here"));
     }
 
     #[test]
