@@ -60,6 +60,8 @@ pub enum AppEvent {
     FocusPrevPane,
     /// focus pane by index (0-based)
     FocusPaneByIndex(usize),
+    /// resize focused pane (positive = grow, negative = shrink)
+    ResizePane(i16),
 }
 
 /// controls how thinking text is displayed
