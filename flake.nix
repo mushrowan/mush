@@ -84,6 +84,7 @@
           inherit pkgs craneLib;
           inherit (craneOutputs) cargoArtifacts;
           inherit (self') checks;
+          shellHook = config.pre-commit.installationScript;
         };
 
         pre-commit.settings.hooks = {
