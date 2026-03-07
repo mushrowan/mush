@@ -189,6 +189,8 @@ pub async fn run_tui(
         ("lock", "lock a file for this pane"),
         ("unlock", "release a file lock"),
         ("locks", "list all file locks"),
+        ("label", "set pane label"),
+        ("panes", "list all panes"),
         ("quit", "exit mush"),
     ];
     app.completions = slash_cmds
@@ -905,6 +907,14 @@ pub async fn run_tui(
                                     }
                                     AppEvent::UserSubmit { text } => {
                                         let expanded = slash::expand_template(&text);
+                                        // auto-label pane from first prompt
+                                        let pane = pane_mgr.focused_mut();
+                                        if pane.label.is_none() && pane.conversation.is_empty()
+                                        {
+                                            pane.label = Some(
+                                                expanded.chars().take(30).collect(),
+                                            );
+                                        }
                                         let app = &mut pane_mgr.focused_mut().app;
                                         app.push_user_message(expanded.clone());
                                         app.active_tools.clear();
@@ -1012,6 +1022,124 @@ pub async fn run_tui(
                                                     .focused_mut()
                                                     .app
                                                     .push_system_message(msg.trim_end().to_string());
+                                            }
+                                        } else if name == "label" {
+                                            let pane_id = pane_mgr.focused().id;
+                                            if args.trim().is_empty() {
+                                                // auto-generate from first user message
+                                                let label = pane_mgr
+                                                    .focused()
+                                                    .conversation
+                                                    .iter()
+                                                    .find_map(|m| match m {
+                                                        Message::User(u) => {
+                                                            let t = u.text();
+                                                            if t.is_empty() {
+                                                                None
+                                                            } else {
+                                                                Some(
+                                                                    t.chars().take(30).collect::<String>(),
+                                                                )
+                                                            }
+                                                        }
+                                                        _ => None,
+                                                    })
+                                                    .unwrap_or_else(|| {
+                                                        format!("pane {}", pane_id.as_u32())
+                                                    });
+                                                pane_mgr.focused_mut().label = Some(label.clone());
+                                                pane_mgr.focused_mut().app.status =
+                                                    Some(format!("label: {label}"));
+                                            } else {
+                                                let label = args.trim().to_string();
+                                                pane_mgr.focused_mut().label = Some(label.clone());
+                                                pane_mgr.focused_mut().app.status =
+                                                    Some(format!("label: {label}"));
+                                            }
+                                        } else if name == "panes" {
+                                            let mut msg = String::from("active panes:\n");
+                                            for (i, pane) in pane_mgr.panes().iter().enumerate()
+                                            {
+                                                let idx = i + 1;
+                                                let label = pane
+                                                    .label
+                                                    .as_deref()
+                                                    .unwrap_or("(unlabelled)");
+                                                let status = if pane.app.is_streaming {
+                                                    "streaming"
+                                                } else {
+                                                    "idle"
+                                                };
+                                                let model = &pane.app.model_id;
+                                                let cost = if pane.app.stats.total_cost > 0.0 {
+                                                    format!(
+                                                        " ${:.4}",
+                                                        pane.app.stats.total_cost
+                                                    )
+                                                } else {
+                                                    String::new()
+                                                };
+                                                let focused =
+                                                    if i == pane_mgr.focused_index() {
+                                                        " *"
+                                                    } else {
+                                                        ""
+                                                    };
+                                                msg.push_str(&format!(
+                                                    "  {idx}. {label} [{status}] {model}{cost}{focused}\n"
+                                                ));
+                                            }
+                                            pane_mgr
+                                                .focused_mut()
+                                                .app
+                                                .push_system_message(msg.trim_end().to_string());
+                                        } else if name == "cost"
+                                            && pane_mgr.is_multi_pane()
+                                        {
+                                            // aggregate cost across all panes
+                                            let focused = &mut pane_mgr.focused_mut().app;
+                                            focused.show_cost = !focused.show_cost;
+                                            let show = focused.show_cost;
+                                            let mut total_cost = 0.0_f64;
+                                            let mut total_tokens = 0_u64;
+                                            let mut lines = Vec::new();
+                                            for (i, pane) in
+                                                pane_mgr.panes().iter().enumerate()
+                                            {
+                                                let idx = i + 1;
+                                                let label = pane
+                                                    .label
+                                                    .as_deref()
+                                                    .unwrap_or("(unlabelled)");
+                                                let s = &pane.app.stats;
+                                                total_cost += s.total_cost;
+                                                total_tokens += s.total_tokens;
+                                                if s.total_tokens > 0 {
+                                                    lines.push(format!(
+                                                        "  pane {idx} ({label}): {}tok ${:.4}",
+                                                        s.total_tokens, s.total_cost
+                                                    ));
+                                                }
+                                            }
+                                            if show {
+                                                let mut msg = format!(
+                                                    "total: {}tok ${:.4}\n",
+                                                    total_tokens, total_cost
+                                                );
+                                                for line in &lines {
+                                                    msg.push_str(line);
+                                                    msg.push('\n');
+                                                }
+                                                pane_mgr
+                                                    .focused_mut()
+                                                    .app
+                                                    .push_system_message(
+                                                        msg.trim_end().to_string(),
+                                                    );
+                                            }
+                                            // sync show_cost to all panes
+                                            for pane in pane_mgr.panes_mut() {
+                                                pane.app.show_cost = show;
                                             }
                                         } else if name == "close" {
                                             if pane_mgr.is_multi_pane() {
