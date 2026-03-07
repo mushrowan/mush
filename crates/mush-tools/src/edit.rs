@@ -84,35 +84,84 @@ fn edit_file(path: &Path, old_text: &str, new_text: &str) -> ToolResult {
     if !path.exists() {
         return ToolResult::error(format!("file not found: {}", path.display()));
     }
+    if old_text.is_empty() {
+        return ToolResult::error("old text cannot be empty");
+    }
+    if old_text == new_text {
+        return ToolResult::error("old text and new text are identical");
+    }
 
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
         Err(e) => return ToolResult::error(format!("failed to read file: {e}")),
     };
 
-    // count occurrences
-    let count = content.matches(old_text).count();
-    if count == 0 {
-        return ToolResult::error(format!(
-            "old text not found in {}. make sure it matches exactly including whitespace",
-            path.display()
+    let has_bom = bytes.starts_with(&[0xEF, 0xBB, 0xBF]);
+    let text_bytes = if has_bom { &bytes[3..] } else { &bytes[..] };
+    let content = match std::str::from_utf8(text_bytes) {
+        Ok(s) => s,
+        Err(e) => return ToolResult::error(format!("failed to read file as utf-8 text: {e}")),
+    };
+
+    let mut candidates: Vec<(String, String)> = vec![(old_text.to_string(), new_text.to_string())];
+
+    if content.contains("\r\n") && old_text.contains('\n') && !old_text.contains("\r\n") {
+        candidates.push((
+            old_text.replace("\n", "\r\n"),
+            new_text.replace("\n", "\r\n"),
         ));
     }
-    if count > 1 {
+
+    if !content.contains("\r\n") && old_text.contains("\r\n") {
+        candidates.push((
+            old_text.replace("\r\n", "\n"),
+            new_text.replace("\r\n", "\n"),
+        ));
+    }
+
+    candidates.dedup();
+
+    let mut multiple = false;
+
+    for (match_old, match_new) in candidates {
+        let count = content.matches(&match_old).count();
+        if count == 0 {
+            continue;
+        }
+        if count > 1 {
+            multiple = true;
+            continue;
+        }
+
+        let replaced = content.replacen(&match_old, &match_new, 1);
+        let write_result = if has_bom {
+            let mut out = vec![0xEF, 0xBB, 0xBF];
+            out.extend_from_slice(replaced.as_bytes());
+            std::fs::write(path, out)
+        } else {
+            std::fs::write(path, replaced.as_bytes())
+        };
+
+        return match write_result {
+            Ok(()) => {
+                let diff = format_edit_diff(old_text, new_text);
+                ToolResult::text(format!("edited {}\n{diff}", path.display()))
+            }
+            Err(e) => ToolResult::error(format!("failed to write file: {e}")),
+        };
+    }
+
+    if multiple {
         return ToolResult::error(format!(
-            "old text found {count} times in {}. it must be unique for a safe edit",
+            "old text found multiple times in {}. it must be unique for a safe edit",
             path.display()
         ));
     }
 
-    let new_content = content.replacen(old_text, new_text, 1);
-    match std::fs::write(path, &new_content) {
-        Ok(()) => {
-            let diff = format_edit_diff(old_text, new_text);
-            ToolResult::text(format!("edited {}\n{diff}", path.display()))
-        }
-        Err(e) => ToolResult::error(format!("failed to write file: {e}")),
-    }
+    ToolResult::error(format!(
+        "old text not found in {}. make sure it matches exactly including whitespace",
+        path.display()
+    ))
 }
 
 /// strip common leading whitespace from both texts for readable diffs
@@ -250,6 +299,47 @@ mod tests {
 
         let content = fs::read_to_string(&path).unwrap();
         assert_eq!(content, "before\nreplaced line\nafter");
+    }
+
+    #[test]
+    fn edit_supports_lf_old_text_on_crlf_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        fs::write(&path, "before\r\ntarget line\r\nafter\r\n").unwrap();
+
+        let result = edit_file(&path, "target line\nafter", "replaced\nafter");
+        assert!(result.outcome.is_success());
+
+        let bytes = fs::read(&path).unwrap();
+        let content = String::from_utf8(bytes).unwrap();
+        assert!(content.contains("before\r\nreplaced\r\nafter\r\n"));
+    }
+
+    #[test]
+    fn edit_preserves_utf8_bom() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bom.txt");
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(b"hello\nworld\n");
+        fs::write(&path, bytes).unwrap();
+
+        let result = edit_file(&path, "hello", "hi");
+        assert!(result.outcome.is_success());
+
+        let out = fs::read(&path).unwrap();
+        assert!(out.starts_with(&[0xEF, 0xBB, 0xBF]));
+        let text = String::from_utf8(out[3..].to_vec()).unwrap();
+        assert_eq!(text, "hi\nworld\n");
+    }
+
+    #[test]
+    fn edit_fails_on_identical_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("same.txt");
+        fs::write(&path, "unchanged").unwrap();
+
+        let result = edit_file(&path, "unchanged", "unchanged");
+        assert!(result.outcome.is_error());
     }
 
     #[test]
