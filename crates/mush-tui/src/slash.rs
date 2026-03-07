@@ -356,13 +356,31 @@ fn show_cost(app: &mut App) {
     } else {
         String::new()
     };
+
+    let reuse_base = app.stats.cache_read_tokens + app.stats.input_tokens;
+    let reuse_pct = if reuse_base > 0 {
+        (app.stats.cache_read_tokens as f64 / reuse_base as f64 * 100.0) as u64
+    } else {
+        0
+    };
+
+    let total_input =
+        app.stats.cache_read_tokens + app.stats.cache_write_tokens + app.stats.input_tokens;
+    let write_pct = if total_input > 0 {
+        (app.stats.cache_write_tokens as f64 / total_input as f64 * 100.0) as u64
+    } else {
+        0
+    };
+
     app.push_system_message(format!(
-        "{}cumulative: ↑{} ↓{} R{} W{} | {}tok, ${:.4}",
+        "{}cumulative: ↑{} ↓{} R{} W{} | reuse {}% write {}% | {}tok, ${:.4}",
         ctx,
         app.stats.input_tokens,
         app.stats.output_tokens,
         app.stats.cache_read_tokens,
         app.stats.cache_write_tokens,
+        reuse_pct,
+        write_pct,
         app.stats.total_tokens,
         app.stats.total_cost
     ));
@@ -554,4 +572,26 @@ pub async fn handle_compact(
         conversation.len(),
         result.summarised_count,
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn show_cost_includes_reuse_and_write_percentages() {
+        let mut app = App::new("test".into(), 200_000);
+        app.stats.input_tokens = 100;
+        app.stats.output_tokens = 50;
+        app.stats.cache_read_tokens = 150;
+        app.stats.cache_write_tokens = 50;
+        app.stats.total_tokens = 350;
+        app.stats.total_cost = 0.0123;
+
+        show_cost(&mut app);
+
+        let msg = app.messages.last().unwrap();
+        assert!(msg.content.contains("reuse 60%"));
+        assert!(msg.content.contains("write 16%"));
+    }
 }
