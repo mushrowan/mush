@@ -315,6 +315,14 @@ fn handle_model_switch(
     if let Some(new_model) = models::find_model_by_id(id) {
         app.model_id = id.into();
         app.stats.context_window = new_model.context_window;
+        app.cache_ttl_secs = if tui_config.cache_timer {
+            crate::app::cache_ttl_secs(
+                &new_model.provider,
+                tui_config.options.cache_retention.as_ref(),
+            )
+        } else {
+            0
+        };
         let level = thinking_prefs
             .get(id)
             .copied()

@@ -7,6 +7,7 @@ pub mod input;
 pub mod isolation;
 pub mod markdown;
 pub mod messaging;
+pub mod notify;
 pub mod pane;
 pub mod path_utils;
 pub mod runner;

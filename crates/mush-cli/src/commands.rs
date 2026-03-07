@@ -98,6 +98,7 @@ pub fn open_config() -> Result<()> {
              # cache_retention = \"short\"  # none | short | long\n\
              # debug_cache = false\n\
              # show_cost = false  # toggle with /cost\n\
+             # cache_timer = false  # cache warmth countdown + notifications\n\
              # system_prompt = \"\"\n\
              \n\
              # [api_keys]\n\
@@ -154,6 +155,7 @@ pub fn status() -> Result<()> {
     };
     println!("  cache retention: {cache_retention}");
     println!("  debug cache: {}", cfg.debug_cache);
+    println!("  cache timer: {}", cfg.cache_timer);
 
     #[cfg(feature = "embeddings")]
     println!("  embeddings: enabled");
