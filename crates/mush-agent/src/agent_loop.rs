@@ -114,6 +114,7 @@ pub struct AgentConfig<'a> {
     pub model: Model,
     pub system_prompt: Option<String>,
     pub tools: &'a [Box<dyn AgentTool>],
+    pub extra_tools: Vec<Box<dyn AgentTool>>,
     pub registry: &'a ApiRegistry,
     pub options: StreamOptions,
     /// max tool-calling turns before forced stop (default: unlimited)
@@ -183,11 +184,14 @@ pub fn agent_loop(
                 };
 
                 // build LLM context
-                let tool_defs: Vec<ToolDefinition> = config.tools.iter().map(|t| ToolDefinition {
-                    name: t.name().to_string(),
-                    description: t.description().to_string(),
-                    parameters: t.parameters_schema(),
-                }).collect();
+                let tool_defs: Vec<ToolDefinition> = config.tools.iter()
+                    .map(|t| t.as_ref())
+                    .chain(config.extra_tools.iter().map(|t| t.as_ref()))
+                    .map(|t| ToolDefinition {
+                        name: t.name().to_string(),
+                        description: t.description().to_string(),
+                        parameters: t.parameters_schema(),
+                    }).collect();
 
                 let context = LlmContext {
                     system_prompt: config.system_prompt.clone(),
@@ -301,7 +305,7 @@ pub fn agent_loop(
                     // execute all confirmed tools concurrently
                     let futs: Vec<_> = confirmed
                         .iter()
-                        .map(|tc| execute_tool(config.tools, tc))
+                        .map(|tc| execute_tool(config.tools, &config.extra_tools, tc))
                         .collect();
                     let results = futures::future::join_all(futs).await;
 
@@ -379,10 +383,16 @@ fn normalise_tool_name(name: &str) -> String {
     name.to_lowercase().replace('_', "")
 }
 
-async fn execute_tool(tools: &[Box<dyn AgentTool>], tool_call: &ToolCall) -> ToolResult {
+async fn execute_tool(
+    tools: &[Box<dyn AgentTool>],
+    extra_tools: &[Box<dyn AgentTool>],
+    tool_call: &ToolCall,
+) -> ToolResult {
     let requested = normalise_tool_name(tool_call.name.as_str());
     let tool = tools
         .iter()
+        .map(|t| t.as_ref())
+        .chain(extra_tools.iter().map(|t| t.as_ref()))
         .find(|t| normalise_tool_name(t.name()) == requested);
     match tool {
         Some(t) => {
@@ -458,7 +468,7 @@ mod tests {
             arguments: serde_json::json!({}),
         };
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(execute_tool(&tools, &tc));
+        let result = rt.block_on(execute_tool(&tools, &[], &tc));
         assert!(result.outcome.is_error());
     }
 
@@ -481,7 +491,7 @@ mod tests {
             arguments: serde_json::json!({}),
         };
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(execute_tool(&tools, &tc));
+        let result = rt.block_on(execute_tool(&tools, &[], &tc));
         assert!(result.outcome.is_success());
     }
 
@@ -496,7 +506,7 @@ mod tests {
             name: "Counter".into(),
             arguments: serde_json::json!({}),
         };
-        assert!(rt.block_on(execute_tool(&tools, &tc)).outcome.is_success());
+        assert!(rt.block_on(execute_tool(&tools, &[], &tc)).outcome.is_success());
 
         // UPPERCASE should match
         let tc = ToolCall {
@@ -504,7 +514,7 @@ mod tests {
             name: "COUNTER".into(),
             arguments: serde_json::json!({}),
         };
-        assert!(rt.block_on(execute_tool(&tools, &tc)).outcome.is_success());
+        assert!(rt.block_on(execute_tool(&tools, &[], &tc)).outcome.is_success());
     }
 
     struct WebSearchTool;
@@ -541,7 +551,7 @@ mod tests {
             name: "WebSearch".into(),
             arguments: serde_json::json!({}),
         };
-        assert!(rt.block_on(execute_tool(&tools, &tc)).outcome.is_success());
+        assert!(rt.block_on(execute_tool(&tools, &[], &tc)).outcome.is_success());
 
         // lowercase no underscore should match
         let tc = ToolCall {
@@ -549,7 +559,7 @@ mod tests {
             name: "websearch".into(),
             arguments: serde_json::json!({}),
         };
-        assert!(rt.block_on(execute_tool(&tools, &tc)).outcome.is_success());
+        assert!(rt.block_on(execute_tool(&tools, &[], &tc)).outcome.is_success());
 
         // exact match still works
         let tc = ToolCall {
@@ -557,7 +567,7 @@ mod tests {
             name: "web_search".into(),
             arguments: serde_json::json!({}),
         };
-        assert!(rt.block_on(execute_tool(&tools, &tc)).outcome.is_success());
+        assert!(rt.block_on(execute_tool(&tools, &[], &tc)).outcome.is_success());
     }
 
     #[test]
@@ -570,6 +580,7 @@ mod tests {
             model: model.clone(),
             system_prompt: None,
             tools: &tools,
+            extra_tools: vec![],
             registry: &registry,
             options: StreamOptions::default(),
             max_turns: DEFAULT_MAX_TURNS,
@@ -616,6 +627,7 @@ mod tests {
             model: model.clone(),
             system_prompt: None,
             tools: &tools,
+            extra_tools: vec![],
             registry: &registry,
             options: StreamOptions::default(),
             max_turns: DEFAULT_MAX_TURNS,
@@ -729,6 +741,7 @@ mod tests {
             model: model.clone(),
             system_prompt: None,
             tools: &tools,
+            extra_tools: vec![],
             registry: &registry,
             options: StreamOptions::default(),
             max_turns: 1,
@@ -769,3 +782,4 @@ mod tests {
         assert_eq!(DEFAULT_MAX_TURNS, usize::MAX);
     }
 }
+
