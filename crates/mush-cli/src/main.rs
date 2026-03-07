@@ -211,6 +211,7 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
         model: setup.model.clone(),
         system_prompt: Some(setup.system_prompt),
         tools: &setup.tools,
+        extra_tools: vec![],
         registry: &setup.registry,
         options: setup.options,
         max_turns: setup.max_turns,
