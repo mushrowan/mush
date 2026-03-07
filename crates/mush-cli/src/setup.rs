@@ -347,15 +347,19 @@ pub fn list_models_short() -> String {
         .join("\n")
 }
 
-/// compact messages using LLM summarisation when approaching context limit
+/// compact messages using LLM summarisation when approaching context limit.
+/// `context_tokens` is the actual API-reported input token count from the last call
 pub async fn auto_compact(
     messages: Vec<Message>,
-    context_window: usize,
+    context_tokens: u64,
+    context_window: u64,
     registry: &ApiRegistry,
     model: &Model,
     options: &StreamOptions,
 ) -> Vec<Message> {
-    if !compact::needs_compaction(&messages, context_window) {
+    // 95% of context window, using real token counts from the API
+    let threshold = context_window * 95 / 100;
+    if context_tokens < threshold || messages.len() <= 10 {
         return messages;
     }
 
