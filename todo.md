@@ -198,11 +198,11 @@ implementation:
   - [ ] /merge to squash a pane's change into the main working copy change
 
 #### phase E: polish and UX
-- [ ] pane labels (auto-generated from first prompt or user-assigned)
-- [ ] aggregate /cost across all panes
-- [ ] pane-specific status bar with pane id and sibling count
+- [x] pane labels (auto-generated from first prompt or user-assigned)
+- [x] aggregate /cost across all panes
+- [x] pane-specific status bar with pane id and sibling count
+- [x] /panes command to list all active panes and their status
 - [ ] ctrl+shift+arrow to resize panes
-- [ ] /panes command to list all active panes and their status
 - [ ] session save/resume with multi-pane state
 - [ ] print mode support: -p with --panes flag for parallel agents to stdout
 - [ ] model tiering: budget models for routing/classification, flagship for reasoning

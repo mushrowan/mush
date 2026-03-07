@@ -41,6 +41,8 @@ pub fn handle(
             help.push_str("  /lock <path>   - lock a file for this pane\n");
             help.push_str("  /unlock <path> - release a file lock\n");
             help.push_str("  /locks         - list all file locks\n");
+            help.push_str("  /label [text]  - set pane label (or auto-generate)\n");
+            help.push_str("  /panes         - list all panes with status\n");
             help.push_str("  /quit          - exit mush\n");
             help.push_str("\ntip: type a prompt template name (e.g. /review file.rs) to expand it");
             app.push_system_message(help);
