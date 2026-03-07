@@ -5,14 +5,17 @@
 //! (columns or tabs) and focus switching
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
+use mush_agent::tool::AgentTool;
 use mush_ai::types::Message;
 use mush_session::tree::SessionTree;
 use ratatui::layout::Rect;
 use tokio::sync::Mutex;
 
 use crate::app::App;
+use crate::isolation::PaneIsolation;
 
 /// unique pane identifier
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -49,6 +52,12 @@ pub struct Pane {
     pub label: Option<String>,
     /// layout rect computed each frame by PaneManager
     pub area: Rect,
+    /// per-pane tools when cwd differs (worktree isolation)
+    pub tools: Option<Vec<Box<dyn AgentTool>>>,
+    /// per-pane cwd override (worktree isolation)
+    pub cwd_override: Option<PathBuf>,
+    /// VCS isolation state
+    pub isolation: Option<PaneIsolation>,
 }
 
 impl Pane {
@@ -65,6 +74,9 @@ impl Pane {
             inbox: None,
             label: None,
             area: Rect::default(),
+            tools: None,
+            cwd_override: None,
+            isolation: None,
         }
     }
 
@@ -86,6 +98,9 @@ impl Pane {
             inbox: None,
             label: None,
             area: Rect::default(),
+            tools: None,
+            cwd_override: None,
+            isolation: None,
         }
     }
 
@@ -126,6 +141,8 @@ pub struct PaneManager {
     panes: Vec<Pane>,
     focused: usize,
     next_id: u32,
+    /// per-pane width offset in columns mode (positive = wider, negative = narrower)
+    width_offsets: HashMap<PaneId, i16>,
 }
 
 impl PaneManager {
@@ -136,6 +153,7 @@ impl PaneManager {
             panes: vec![initial],
             focused: 0,
             next_id,
+            width_offsets: HashMap::new(),
         }
     }
 
@@ -268,13 +286,35 @@ impl PaneManager {
                 // single pane: no separators
                 let separators = n.saturating_sub(1);
                 let usable = area.width.saturating_sub(separators);
-                let col_width = usable / n;
+                let base_width = usable / n;
                 let remainder = usable % n;
+
+                // compute widths with offsets applied
+                let mut widths: Vec<u16> = self
+                    .panes
+                    .iter()
+                    .enumerate()
+                    .map(|(i, pane)| {
+                        let base = base_width + if (i as u16) < remainder { 1 } else { 0 };
+                        let offset = self.width_offsets.get(&pane.id).copied().unwrap_or(0);
+                        (base as i32 + offset as i32).clamp(MIN_COLUMN_WIDTH as i32, usable as i32)
+                            as u16
+                    })
+                    .collect();
+
+                // normalise: ensure total width matches usable space
+                let total: u16 = widths.iter().sum();
+                if total != usable && !widths.is_empty() {
+                    let diff = usable as i32 - total as i32;
+                    // distribute diff across the last pane (allow down to 20 cols)
+                    let last = widths.len() - 1;
+                    widths[last] = (widths[last] as i32 + diff).max(20) as u16;
+                }
+
                 let mut x = area.x;
                 for (i, pane) in self.panes.iter_mut().enumerate() {
-                    let w = col_width + if (i as u16) < remainder { 1 } else { 0 };
-                    pane.area = Rect::new(x, area.y, w, area.height);
-                    x += w;
+                    pane.area = Rect::new(x, area.y, widths[i], area.height);
+                    x += widths[i];
                     // leave 1-char gap for separator (except after last)
                     if (i as u16) < n - 1 {
                         x += 1;
@@ -295,6 +335,16 @@ impl PaneManager {
             }
         }
         mode
+    }
+
+    /// resize the focused pane by delta columns (negative = shrink)
+    pub fn resize_focused(&mut self, delta: i16) {
+        if self.panes.len() <= 1 {
+            return;
+        }
+        let id = self.panes[self.focused].id;
+        let offset = self.width_offsets.entry(id).or_insert(0);
+        *offset += delta;
     }
 
     /// pane indices with unread activity (not focused)
@@ -523,5 +573,43 @@ mod tests {
         assert_eq!(mgr.panes()[0].area, Rect::new(0, 0, 60, 40));
         assert_eq!(mgr.panes()[1].area, Rect::new(61, 0, 60, 40));
         assert_eq!(mgr.panes()[2].area, Rect::new(122, 0, 60, 40));
+    }
+
+    #[test]
+    fn resize_focused_pane() {
+        let mut mgr = PaneManager::new(test_pane(1));
+        mgr.add_pane(test_pane(2));
+        // 121 wide: 1 sep, usable = 120, base = 60 each
+        let area = Rect::new(0, 0, 121, 40);
+
+        // grow pane 1 by 10 cols
+        mgr.resize_focused(10);
+        mgr.compute_layout(area);
+        assert_eq!(mgr.panes()[0].area.width, 70);
+        // pane 2 shrinks to compensate
+        assert_eq!(mgr.panes()[1].area.width, 50);
+    }
+
+    #[test]
+    fn resize_single_pane_is_noop() {
+        let mut mgr = PaneManager::new(test_pane(1));
+        mgr.resize_focused(10);
+        let area = Rect::new(0, 0, 80, 24);
+        mgr.compute_layout(area);
+        assert_eq!(mgr.panes()[0].area.width, 80);
+    }
+
+    #[test]
+    fn resize_clamps_to_min_width() {
+        let mut mgr = PaneManager::new(test_pane(1));
+        mgr.add_pane(test_pane(2));
+        // 121 wide: 1 sep, usable = 120, base = 60 each
+        let area = Rect::new(0, 0, 121, 40);
+
+        // try to shrink pane 1 below min width
+        mgr.resize_focused(-100);
+        mgr.compute_layout(area);
+        // clamped to MIN_COLUMN_WIDTH
+        assert_eq!(mgr.panes()[0].area.width, MIN_COLUMN_WIDTH);
     }
 }

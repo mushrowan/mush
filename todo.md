@@ -184,25 +184,25 @@ implementation:
   - [x] warn in status bar when agent modifies a file touched by another pane
   - [x] /lock <path> to claim a file, /locks to list, auto-release on pane close
   - [x] locked files: write/edit tools return error with lock owner info
-- [ ] **worktree mode:**
-  - [ ] on fork: `git worktree add .mush/worktrees/<pane-id> -b mush-<pane-id>`
-  - [ ] forked pane's tools use worktree path as cwd instead of repo root
-  - [ ] on pane close: prompt to merge/keep/discard, then `git worktree remove`
-  - [ ] /merge slash command to merge a pane's worktree branch back
-  - [ ] cleanup stale worktrees on startup (`.mush/worktrees/`)
-- [ ] **jj mode:**
-  - [ ] on fork: `jj new` to create a new change for the forked pane
-  - [ ] track which jj change id belongs to which pane
-  - [ ] agents told their change id in system prompt for jj-aware operations
-  - [ ] on pane close: `jj squash` into parent or leave as separate change
-  - [ ] /merge to squash a pane's change into the main working copy change
+- [x] **worktree mode:**
+  - [x] on fork: `git worktree add .mush/worktrees/<pane-id> -b mush-<pane-id>`
+  - [x] forked pane's tools use worktree path as cwd instead of repo root
+  - [x] on pane close: prompt to merge/keep/discard, then `git worktree remove`
+  - [x] /merge slash command to merge a pane's worktree branch back
+  - [x] cleanup stale worktrees on startup (`.mush/worktrees/`)
+- [x] **jj mode:**
+  - [x] on fork: `jj new` to create a new change for the forked pane
+  - [x] track which jj change id belongs to which pane
+  - [x] agents told their change id in system prompt for jj-aware operations
+  - [x] on pane close: `jj abandon` to discard the change
+  - [x] /merge to squash a pane's change into the parent change
 
 #### phase E: polish and UX
 - [x] pane labels (auto-generated from first prompt or user-assigned)
 - [x] aggregate /cost across all panes
 - [x] pane-specific status bar with pane id and sibling count
 - [x] /panes command to list all active panes and their status
-- [ ] ctrl+shift+arrow to resize panes
+- [x] ctrl+shift+arrow to resize panes
 - [ ] session save/resume with multi-pane state
 - [ ] print mode support: -p with --panes flag for parallel agents to stdout
 - [ ] model tiering: budget models for routing/classification, flagship for reasoning

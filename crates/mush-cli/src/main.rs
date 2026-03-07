@@ -437,6 +437,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
             let buf = log_buffer.clone();
             std::sync::Arc::new(move |n| buf.tail(n))
         }),
+        isolation_mode: setup.cfg.isolation,
     };
 
     mush_tui::run_tui(tui_config, &setup.tools, &setup.registry)

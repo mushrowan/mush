@@ -4,6 +4,7 @@ pub mod config_watcher;
 pub mod event_handler;
 pub mod file_tracker;
 pub mod input;
+pub mod isolation;
 pub mod markdown;
 pub mod messaging;
 pub mod pane;

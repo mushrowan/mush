@@ -10,6 +10,7 @@ mush-ai.workspace = true
 mush-agent.workspace = true
 mush-session.workspace = true
 mush-ext.workspace = true
+mush-tools.workspace = true
 tokio.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
