@@ -43,6 +43,8 @@ pub struct Pane {
     pub image_protos: HashMap<(usize, usize), ratatui_image::protocol::StatefulProtocol>,
     pub pending_prompt: Option<String>,
     pub steering_queue: Arc<Mutex<Vec<Message>>>,
+    /// inbox for messages from sibling panes
+    pub inbox: Option<tokio::sync::mpsc::UnboundedReceiver<crate::messaging::InterPaneMessage>>,
     /// user-facing label (auto-generated or manual)
     pub label: Option<String>,
     /// layout rect computed each frame by PaneManager
@@ -60,6 +62,7 @@ impl Pane {
             image_protos: HashMap::new(),
             pending_prompt: None,
             steering_queue: Arc::new(Mutex::new(Vec::new())),
+            inbox: None,
             label: None,
             area: Rect::default(),
         }
@@ -80,6 +83,7 @@ impl Pane {
             image_protos: HashMap::new(),
             pending_prompt: None,
             steering_queue: Arc::new(Mutex::new(Vec::new())),
+            inbox: None,
             label: None,
             area: Rect::default(),
         }
