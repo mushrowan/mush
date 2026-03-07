@@ -116,6 +116,9 @@ self: {
     // lib.optionalAttrs (cfg.hintMode != "message") {
       hint_mode = cfg.hintMode;
     }
+    // lib.optionalAttrs cfg.cacheTimer {
+      cache_timer = true;
+    }
     // lib.optionalAttrs (cfg.apiKeys.anthropic != null || cfg.apiKeys.openrouter != null) {
       api_keys = clean {
         inherit (cfg.apiKeys) anthropic openrouter;
@@ -268,6 +271,15 @@ in {
       default = null;
       example = "mush=debug,warn";
       description = "tracing filter string (RUST_LOG env var takes priority over this)";
+    };
+
+    cacheTimer = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        show cache warmth countdown in the status bar and send desktop
+        notifications when the prompt cache is about to expire
+      '';
     };
 
     settings = lib.mkOption {

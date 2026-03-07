@@ -3,9 +3,10 @@
   craneLib,
   checks ? {},
   cargoArtifacts ? null,
+  shellHook ? "",
 }:
 craneLib.devShell {
-  inherit checks cargoArtifacts;
+  inherit checks cargoArtifacts shellHook;
 
   packages = with pkgs; [
     cargo-edit
