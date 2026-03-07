@@ -160,14 +160,16 @@ pub fn compact_with_summary(
     }
 
     let split_at = messages.len() - keep;
-    // walk forward to a user message boundary to avoid orphaned
-    // tool_result messages that reference compacted-away tool_use blocks
+    // walk forward to a non-tool-result boundary to avoid orphaned
+    // tool_result messages that reference compacted-away tool_use blocks.
+    // both User and Assistant messages are valid split points, but
+    // ToolResult would create a dangling reference to a compacted tool call
     let split_at = messages[split_at..]
         .iter()
-        .position(|m| matches!(m, Message::User(_)))
+        .position(|m| !matches!(m, Message::ToolResult(_)))
         .map(|offset| split_at + offset);
     let Some(split_at) = split_at else {
-        // no user message found in the kept range, keep everything
+        // all kept messages are tool results (shouldn't happen), keep everything
         return CompactionResult {
             summarised_count: 0,
             summary: String::new(),
@@ -401,10 +403,10 @@ mod tests {
             .collect();
 
         let result = compact_with_summary(msgs, "this is the summary", Some(5));
-        // split_at starts at 15 (assistant), advances to 16 (user)
-        // so: 1 summary + 4 kept = 5
-        assert_eq!(result.messages.len(), 5);
-        assert_eq!(result.summarised_count, 16);
+        // split_at starts at 15 (assistant), which is not a ToolResult
+        // so split happens there: 1 summary + 5 kept = 6
+        assert_eq!(result.messages.len(), 6);
+        assert_eq!(result.summarised_count, 15);
 
         // first message should be the summary
         if let Message::User(u) = &result.messages[0] {
@@ -474,7 +476,7 @@ mod tests {
     fn compact_skips_orphaned_tool_results() {
         // simulate: user, assistant+tool_use, tool_result, user, assistant
         // with keep=2, naive split would start at the tool_result,
-        // causing an API error. the fix should advance to the next user msg.
+        // causing an API error. should advance past tool_result to user msg.
         let msgs = vec![
             user_msg("first"),
             assistant_msg("thinking"),
@@ -495,6 +497,37 @@ mod tests {
         assert!(matches!(result.messages[0], Message::User(_))); // summary
         assert!(matches!(result.messages[1], Message::User(_))); // "second"
         assert_eq!(result.summarised_count, 3);
+    }
+
+    #[test]
+    fn compact_works_when_kept_range_has_no_user_messages() {
+        // this was the bug: if the last `keep` messages are all assistant+tool_result
+        // pairs (common in long tool-use chains), the old code returned unchanged
+        // because it only looked for User messages as boundaries
+        let mut msgs = vec![user_msg("start"), assistant_msg("thinking")];
+        // add 10 assistant+tool_result pairs (20 messages)
+        for i in 0..10 {
+            msgs.push(assistant_msg(&format!("calling tool {i}")));
+            msgs.push(Message::ToolResult(ToolResultMessage {
+                tool_call_id: format!("tc_{i}").into(),
+                tool_name: "bash".into(),
+                content: vec![ToolResultContentPart::Text(TextContent {
+                    text: format!("output {i}"),
+                })],
+                outcome: ToolOutcome::Success,
+                timestamp_ms: Timestamp::zero(),
+            }));
+        }
+        assert_eq!(msgs.len(), 22);
+        let result = compact_with_summary(msgs, "summary of work", Some(5));
+        // split_at = 22-5 = 17. messages[17] is a ToolResult, so advances to
+        // 18 (assistant), which is not a ToolResult. kept = 4 + 1 summary = 5
+        assert!(result.summarised_count > 0, "should have compacted");
+        assert!(result.messages.len() < 22, "should have fewer messages");
+        // first message is the summary
+        assert!(matches!(result.messages[0], Message::User(_)));
+        // no orphaned tool results: first non-summary message should be assistant
+        assert!(matches!(result.messages[1], Message::Assistant(_)));
     }
 
     #[tokio::test]
@@ -532,9 +565,9 @@ mod tests {
             .collect();
 
         let result = llm_compact(msgs, &registry, &model, &options, Some(5)).await;
-        // split_at advances from 15 to 16 (msg 15 is assistant, 16 is user)
-        assert_eq!(result.summarised_count, 16);
-        assert_eq!(result.messages.len(), 5); // 1 summary + 4 kept
+        // split_at = 15, which is an assistant msg (not ToolResult), so stays at 15
+        assert_eq!(result.summarised_count, 15);
+        assert_eq!(result.messages.len(), 6); // 1 summary + 5 kept
         assert!(result.summary.contains("Summary of earlier conversation"));
     }
 }

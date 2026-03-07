@@ -8,6 +8,10 @@ use std::path::PathBuf;
 use mush_ai::types::ThinkingLevel;
 use serde::{Deserialize, Deserializer};
 
+fn default_true() -> bool {
+    true
+}
+
 /// deserialise thinking from bool (legacy) or ThinkingLevel string
 fn deserialise_thinking<'de, D: Deserializer<'de>>(
     d: D,
@@ -46,6 +50,9 @@ pub struct Config {
     pub log_filter: Option<String>,
     /// how to display thinking text (hidden, collapse, expanded)
     pub thinking_display: mush_tui::ThinkingDisplay,
+    /// automatically compact conversation when approaching context limit (on by default)
+    #[serde(default = "default_true")]
+    pub auto_compact: bool,
     /// prompt for confirmation before executing tools (off by default)
     pub confirm_tools: bool,
     /// show dollar cost in status bar (off by default, toggle with /cost)
@@ -254,6 +261,18 @@ openai = "sk-openai-test"
     fn thinking_config_defaults_to_none() {
         let config: Config = toml::from_str("").unwrap();
         assert_eq!(config.thinking, None);
+    }
+
+    #[test]
+    fn auto_compact_defaults_to_true() {
+        let config: Config = toml::from_str("").unwrap();
+        assert!(config.auto_compact);
+    }
+
+    #[test]
+    fn auto_compact_can_be_disabled() {
+        let config: Config = toml::from_str("auto_compact = false").unwrap();
+        assert!(!config.auto_compact);
     }
 
     #[test]

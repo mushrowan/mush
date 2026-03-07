@@ -3,10 +3,10 @@
 ## open items
 - [ ] mush-ext: dynamic tool registration from extensions
 - [ ] mush-ext: provider registration from extensions
-- [ ] auto compaction not working, and need to react to too-long-context errors
 - [ ] grep tool: strip newlines from pattern before passing to rg (currently blows up with "literal \\n is not allowed")
 - [ ] edit tool: warn or error when oldText matches multiple locations in the file (currently silently replaces the first match, leading to wrong-instance edits)
 - [ ] edit tool: diff preview should strip common leading whitespace (dedent to leftmost line) for readability
+- [ ] add more providers: google (native), google vertex, amazon bedrock, azure openai, xai (grok), mistral, groq, deepinfra, cerebras, cohere, together ai, perplexity, github copilot, gitlab, cloudflare workers ai
 
 ## future ideas
 - [ ] neovim plugin

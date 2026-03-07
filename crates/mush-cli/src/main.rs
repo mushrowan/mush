@@ -201,11 +201,15 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
     let compact_model = setup.model.clone();
     let compact_options = setup.options.clone();
     let reg_ref = &setup.registry;
-    let transform: Option<mush_agent::ContextTransform<'_>> = Some(Box::new(move |msgs| {
-        let m = compact_model.clone();
-        let o = compact_options.clone();
-        Box::pin(async move { auto_compact(msgs, context_window, reg_ref, &m, &o).await })
-    }));
+    let transform: Option<mush_agent::ContextTransform<'_>> = if setup.cfg.auto_compact {
+        Some(Box::new(move |msgs| {
+            let m = compact_model.clone();
+            let o = compact_options.clone();
+            Box::pin(async move { auto_compact(msgs, context_window, reg_ref, &m, &o).await })
+        }))
+    } else {
+        None
+    };
 
     let config = AgentConfig {
         model: setup.model.clone(),
@@ -424,6 +428,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
             }))
         },
         confirm_tools: setup.cfg.confirm_tools,
+        auto_compact: setup.cfg.auto_compact,
         show_cost: setup.cfg.show_cost,
         debug_cache: setup.debug_cache,
         thinking_display: setup.cfg.thinking_display,

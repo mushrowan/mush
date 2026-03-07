@@ -86,6 +86,8 @@ pub struct TuiConfig {
     pub save_session: Option<SessionSaver>,
     /// prompt for confirmation before executing tools (off by default)
     pub confirm_tools: bool,
+    /// automatically compact conversation when approaching context limit (on by default)
+    pub auto_compact: bool,
     /// show dollar cost in status bar (off by default, toggle with /cost)
     pub show_cost: bool,
     /// emit system messages when cache reads are observed
@@ -421,6 +423,7 @@ pub async fn run_tui(
             };
             let compact_model = model.clone();
             let compact_options = tui_config.options.clone();
+            let do_auto_compact = tui_config.auto_compact;
             #[expect(clippy::type_complexity)]
             let compaction_cache: std::sync::Arc<
                 tokio::sync::Mutex<Option<(usize, Vec<Message>)>>,
@@ -431,7 +434,7 @@ pub async fn run_tui(
                 let options = compact_options.clone();
                 let cache = compaction_cache.clone();
                 Box::pin(async move {
-                    let mut msgs = {
+                    let mut msgs = if do_auto_compact {
                         let mut guard = cache.lock().await;
                         if let Some((orig_len, ref compacted)) = *guard {
                             if msgs.len() >= orig_len {
@@ -457,6 +460,8 @@ pub async fn run_tui(
                             }
                             compacted
                         }
+                    } else {
+                        msgs
                     };
                     if let Some(ref enricher) = enricher {
                         event_handler::inject_hint(&mut msgs, enricher.as_ref());
@@ -612,7 +617,8 @@ pub async fn run_tui(
                                 }
                             }
                             // auto-compact for this pane
-                            if let Some(pane) = pane_mgr.pane(pane_id) {
+                            if tui_config.auto_compact
+                            && let Some(pane) = pane_mgr.pane(pane_id) {
                                 let needs = mush_session::compact::needs_compaction(
                                     &pane.conversation,
                                     stream_model.context_window as usize,
