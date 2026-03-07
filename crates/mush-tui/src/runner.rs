@@ -354,6 +354,7 @@ pub async fn run_tui(
     let mut agent_streams: SelectAll<TaggedStream<'_>> = SelectAll::new();
     let mut stream_metas: std::collections::HashMap<PaneId, StreamMeta> =
         std::collections::HashMap::new();
+    let mut aborted_panes: std::collections::HashSet<PaneId> = std::collections::HashSet::new();
 
     loop {
         // -- start streams for any pane with a pending prompt --
@@ -663,6 +664,9 @@ pub async fn run_tui(
                 extra_tools = pt;
             }
 
+            // clear any previous abort state for this pane
+            aborted_panes.remove(&pane_id);
+
             stream_metas.insert(
                 pane_id,
                 StreamMeta {
@@ -704,6 +708,15 @@ pub async fn run_tui(
             tokio::select! {
                 result = agent_streams.next() => {
                     if let Some((pane_id, event)) = result {
+                        // skip events for panes that were aborted
+                        if aborted_panes.contains(&pane_id) {
+                            if matches!(event, AgentEvent::AgentEnd) {
+                                aborted_panes.remove(&pane_id);
+                                stream_metas.remove(&pane_id);
+                            }
+                            continue;
+                        }
+
                         // route agent event to the correct pane
                         if let Some(pane) = pane_mgr.pane_mut(pane_id) {
                             let model = stream_metas
@@ -877,13 +890,14 @@ pub async fn run_tui(
                                             }
                                             AppEvent::Abort => {
                                                 // abort focused pane's stream
+                                                let fid = pane_mgr.focused().id;
                                                 let app = &mut pane_mgr.focused_mut().app;
                                                 app.is_streaming = false;
                                                 app.active_tools.clear();
                                                 app.status = Some("aborted".into());
-                                                // note: can't cancel a specific stream in
-                                                // SelectAll, so the stream continues but
-                                                // events will be ignored (pane not streaming)
+                                                // mark pane as aborted so remaining
+                                                // stream events are dropped
+                                                aborted_panes.insert(fid);
                                             }
                                             AppEvent::UserSubmit { text } => {
                                                 let fid = pane_mgr.focused().id;
