@@ -24,6 +24,14 @@ fn should_escape_enter_to_newline(app: &App, key: KeyEvent) -> bool {
     app.input[app.cursor..].starts_with('\n') || app.cursor == app.input.len()
 }
 /// handle a key event, mutating the app and optionally producing an event
+///
+/// dispatch layers (checked in order):
+/// 1. mode-specific handlers (picker, slash menu, scroll, search)
+/// 2. global keys (quit, abort, page scroll)
+/// 3. pane management (focus, split, resize) - works in all states
+/// 4. multiline enter (alt/shift+enter, ctrl+j)
+/// 5. streaming-only or idle-only keys (submit behaviour, mode switches)
+/// 6. shared editing (cursor, deletion, character input)
 pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     tracing::trace!(
         code = ?key.code,
@@ -36,27 +44,21 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         "key event"
     );
 
-    // session picker mode has its own key handling
+    // 1. mode-specific dispatches
     if app.mode == AppMode::SessionPicker {
         return handle_picker_key(app, key);
     }
-
-    // slash command menu
     if app.mode == AppMode::SlashComplete {
         return handle_slash_menu_key(app, key);
     }
-
-    // scroll mode: j/k scroll, y copies selected message, esc exits
     if app.mode == AppMode::Scroll {
         return handle_scroll_mode(app, key);
     }
-
-    // search mode
     if app.mode == AppMode::Search {
         return handle_search_mode(app, key);
     }
 
-    // global bindings (work even while streaming)
+    // 2. global bindings
     match (key.modifiers, key.code) {
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => return Some(AppEvent::Quit),
         (_, KeyCode::Esc) if app.is_streaming => return Some(AppEvent::Abort),
@@ -66,8 +68,6 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         }
         _ => {}
     }
-
-    // scroll bindings
     match key.code {
         KeyCode::PageUp => {
             app.scroll_offset = app.scroll_offset.saturating_add(10);
@@ -83,97 +83,103 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         _ => {}
     }
 
-    // while streaming, allow typing + submission (queued as steering messages
-    // by the runner) but block mode switches and slash commands
-    if app.is_streaming {
-        match (key.modifiers, key.code) {
-            // multi-line
-            (KeyModifiers::ALT | KeyModifiers::SHIFT, KeyCode::Enter)
-            | (KeyModifiers::CONTROL, KeyCode::Char('j')) => {
-                app.input_char('\n');
-            }
-            // submit to steering queue (slash commands blocked during streaming)
-            (_, KeyCode::Enter) => {
-                if should_escape_enter_to_newline(app, key) {
-                    app.input_backspace();
-                    app.input_char('\n');
-                    return None;
-                }
-                if app.input.trim().is_empty() {
-                    return None;
-                }
-                let text = app.take_input();
-                if text.starts_with('/') {
-                    app.input = text;
-                    app.cursor = app.input.len();
-                    app.ensure_cursor_visible();
-                    app.status = Some("slash commands unavailable while streaming".into());
-                    return None;
-                }
-                return Some(AppEvent::UserSubmit { text });
-            }
-            // editing
-            (KeyModifiers::CONTROL, KeyCode::Backspace)
-            | (KeyModifiers::ALT, KeyCode::Backspace)
-            | (KeyModifiers::CONTROL, KeyCode::Char('w')) => app.delete_word_backward(),
-            (KeyModifiers::ALT, KeyCode::Char('d')) => app.delete_word_forward(),
-            (_, KeyCode::Backspace) => app.input_backspace(),
-            (_, KeyCode::Delete) => app.input_delete(),
-            // cursor movement
-            (KeyModifiers::ALT, KeyCode::Left)
-            | (KeyModifiers::CONTROL, KeyCode::Left)
-            | (KeyModifiers::ALT, KeyCode::Char('b')) => app.cursor_word_left(),
-            (KeyModifiers::ALT, KeyCode::Right)
-            | (KeyModifiers::CONTROL, KeyCode::Right)
-            | (KeyModifiers::ALT, KeyCode::Char('f')) => app.cursor_word_right(),
-            (KeyModifiers::CONTROL, KeyCode::Char('b')) => app.cursor_left(),
-            (_, KeyCode::Left) => app.cursor_left(),
-            (_, KeyCode::Right) => app.cursor_right(),
-            (_, KeyCode::Home) | (KeyModifiers::CONTROL, KeyCode::Char('a')) => app.cursor_home(),
-            (_, KeyCode::End) | (KeyModifiers::CONTROL, KeyCode::Char('e')) => app.cursor_end(),
-            // line editing
-            (KeyModifiers::CONTROL, KeyCode::Char('u')) => app.delete_to_start(),
-            (KeyModifiers::CONTROL, KeyCode::Char('k')) => app.delete_to_end(),
-            // regular character
-            (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
-                app.input_char(c);
-            }
-            _ => {}
-        }
-        return None;
+    // 3. pane management (works regardless of streaming state)
+    if let Some(event) = handle_pane_keys(key) {
+        return Some(event);
     }
 
+    // 4. multiline enter (before mode-specific enter handling)
     match (key.modifiers, key.code) {
-        // search
+        (KeyModifiers::ALT | KeyModifiers::SHIFT, KeyCode::Enter)
+        | (KeyModifiers::CONTROL, KeyCode::Char('j')) => {
+            app.input_char('\n');
+            return None;
+        }
+        _ => {}
+    }
+
+    // 5. streaming vs idle dispatch
+    if app.is_streaming {
+        handle_streaming_keys(app, key)
+    } else {
+        handle_idle_keys(app, key)
+    }
+}
+
+/// pane management bindings, independent of streaming state
+fn handle_pane_keys(key: KeyEvent) -> Option<AppEvent> {
+    match (key.modifiers, key.code) {
+        (KeyModifiers::ALT, KeyCode::Char(c @ '1'..='9')) => {
+            Some(AppEvent::FocusPaneByIndex((c as usize) - ('1' as usize)))
+        }
+        (m, KeyCode::Enter)
+            if m.contains(KeyModifiers::CONTROL) && m.contains(KeyModifiers::SHIFT) =>
+        {
+            Some(AppEvent::SplitPane)
+        }
+        (m, KeyCode::Left)
+            if m.contains(KeyModifiers::CONTROL) && m.contains(KeyModifiers::SHIFT) =>
+        {
+            Some(AppEvent::ResizePane(-4))
+        }
+        (m, KeyCode::Right)
+            if m.contains(KeyModifiers::CONTROL) && m.contains(KeyModifiers::SHIFT) =>
+        {
+            Some(AppEvent::ResizePane(4))
+        }
+        (KeyModifiers::CONTROL, KeyCode::Tab) => Some(AppEvent::FocusNextPane),
+        (m, KeyCode::BackTab) if m.contains(KeyModifiers::CONTROL) => {
+            Some(AppEvent::FocusPrevPane)
+        }
+        _ => None,
+    }
+}
+
+/// keys specific to streaming: enter submits to steering queue
+fn handle_streaming_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
+    if key.code == KeyCode::Enter {
+        if should_escape_enter_to_newline(app, key) {
+            app.input_backspace();
+            app.input_char('\n');
+            return None;
+        }
+        if app.input.trim().is_empty() {
+            return None;
+        }
+        let text = app.take_input();
+        if text.starts_with('/') {
+            app.input = text;
+            app.cursor = app.input.len();
+            app.ensure_cursor_visible();
+            app.status = Some("slash commands unavailable while streaming".into());
+            return None;
+        }
+        return Some(AppEvent::UserSubmit { text });
+    }
+    handle_editing(app, key)
+}
+
+/// keys specific to idle: mode switches, toggles, submit with slash parsing
+fn handle_idle_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
+    match (key.modifiers, key.code) {
+        // mode switches
         (KeyModifiers::CONTROL, KeyCode::Char('f')) => {
             app.mode = AppMode::Search;
             app.search.query.clear();
             app.search.matches.clear();
             app.search.selected = 0;
-            return None;
+            None
         }
-
-        // scroll/copy mode
         (KeyModifiers::CONTROL, KeyCode::Char('s')) => {
             app.mode = AppMode::Scroll;
-            // select the last message by default
             if !app.messages.is_empty() {
                 app.selected_message = Some(app.messages.len() - 1);
             }
-            return None;
-        }
-
-        // pane switching: ctrl+tab / ctrl+shift+tab (before tab completion)
-        (KeyModifiers::CONTROL, KeyCode::Tab) => {
-            return Some(AppEvent::FocusNextPane);
-        }
-        (m, KeyCode::BackTab) if m.contains(KeyModifiers::CONTROL) => {
-            return Some(AppEvent::FocusPrevPane);
+            None
         }
 
         // tab completion / slash menu
         (_, KeyCode::Tab) | (KeyModifiers::SHIFT, KeyCode::BackTab) => {
-            // open slash menu if typing a command and we have descriptions
             if app.input.starts_with('/')
                 && app.slash_menu.is_none()
                 && !app.slash_commands.is_empty()
@@ -182,31 +188,16 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             } else {
                 app.tab_complete();
             }
-            return None;
+            None
         }
 
-        // split pane: ctrl+shift+enter forks conversation into new agent
-        (m, KeyCode::Enter)
-            if m.contains(KeyModifiers::CONTROL) && m.contains(KeyModifiers::SHIFT) =>
-        {
-            return Some(AppEvent::SplitPane);
-        }
-
-        // multi-line: alt+enter, shift+enter, or ctrl+j inserts newline
-        (KeyModifiers::ALT | KeyModifiers::SHIFT, KeyCode::Enter)
-        | (KeyModifiers::CONTROL, KeyCode::Char('j')) => {
-            app.input_char('\n');
-            return None;
-        }
-
-        // submit (accept ghost text if present)
+        // submit (accept ghost text, parse slash commands)
         (_, KeyCode::Enter) => {
             if should_escape_enter_to_newline(app, key) {
                 app.input_backspace();
                 app.input_char('\n');
                 return None;
             }
-            // accept ghost completion before submitting
             if let Some(suffix) = app.ghost_text().map(|s| s.to_string()) {
                 app.input.push_str(&suffix);
                 app.cursor = app.input.len();
@@ -216,35 +207,61 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
                 return None;
             }
             let text = app.take_input();
-
-            // check for slash commands
             if let Some(rest) = text.strip_prefix('/') {
                 let parts: Vec<&str> = rest.splitn(2, ' ').collect();
                 let name = parts[0].to_string();
                 let args = parts.get(1).unwrap_or(&"").to_string();
                 return Some(AppEvent::SlashCommand { name, args });
             }
-
-            return Some(AppEvent::UserSubmit { text });
+            Some(AppEvent::UserSubmit { text })
         }
 
-        // word deletion
-        (KeyModifiers::CONTROL, KeyCode::Backspace)
-        | (KeyModifiers::ALT, KeyCode::Backspace)
-        | (KeyModifiers::CONTROL, KeyCode::Char('w')) => app.delete_word_backward(),
-        (KeyModifiers::ALT, KeyCode::Char('d')) => app.delete_word_forward(),
-
-        // editing
-        (_, KeyCode::Backspace) => app.input_backspace(),
+        // ctrl+d: quit on empty, delete char otherwise
         (KeyModifiers::CONTROL, KeyCode::Char('d')) => {
             if app.input.is_empty() {
                 return Some(AppEvent::Quit);
             }
             app.input_delete();
+            None
         }
+
+        // toggles
+        (KeyModifiers::CONTROL, KeyCode::Char('t')) => {
+            app.cycle_thinking_level();
+            Some(AppEvent::CycleThinkingLevel)
+        }
+        (KeyModifiers::CONTROL, KeyCode::Char('o')) => {
+            app.toggle_thinking_expanded();
+            None
+        }
+        (KeyModifiers::CONTROL, KeyCode::Char('i')) => {
+            app.show_prompt_injection = !app.show_prompt_injection;
+            app.status = Some(if app.show_prompt_injection {
+                "prompt injection visible".into()
+            } else {
+                "prompt injection hidden".into()
+            });
+            None
+        }
+        (KeyModifiers::CONTROL, KeyCode::Char('v')) => Some(AppEvent::PasteImage),
+
+        // everything else falls through to shared editing
+        _ => handle_editing(app, key),
+    }
+}
+
+/// shared text editing bindings (cursor movement, deletion, character input)
+fn handle_editing(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
+    match (key.modifiers, key.code) {
+        // word deletion
+        (KeyModifiers::CONTROL, KeyCode::Backspace)
+        | (KeyModifiers::ALT, KeyCode::Backspace)
+        | (KeyModifiers::CONTROL, KeyCode::Char('w')) => app.delete_word_backward(),
+        (KeyModifiers::ALT, KeyCode::Char('d')) => app.delete_word_forward(),
+        (_, KeyCode::Backspace) => app.input_backspace(),
         (_, KeyCode::Delete) => app.input_delete(),
 
-        // cursor movement (specific modifiers before wildcards)
+        // cursor movement
         (KeyModifiers::ALT, KeyCode::Left)
         | (KeyModifiers::CONTROL, KeyCode::Left)
         | (KeyModifiers::ALT, KeyCode::Char('b')) => app.cursor_word_left(),
@@ -261,46 +278,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         (KeyModifiers::CONTROL, KeyCode::Char('u')) => app.delete_to_start(),
         (KeyModifiers::CONTROL, KeyCode::Char('k')) => app.delete_to_end(),
 
-        // cycle thinking level
-        (KeyModifiers::CONTROL, KeyCode::Char('t')) => {
-            app.cycle_thinking_level();
-            return Some(AppEvent::CycleThinkingLevel);
-        }
-
-        // toggle thinking text visibility
-        (KeyModifiers::CONTROL, KeyCode::Char('o')) => {
-            app.toggle_thinking_expanded();
-        }
-
-        // toggle prompt injection visibility
-        (KeyModifiers::CONTROL, KeyCode::Char('i')) => {
-            app.show_prompt_injection = !app.show_prompt_injection;
-            app.status = Some(if app.show_prompt_injection {
-                "prompt injection visible".into()
-            } else {
-                "prompt injection hidden".into()
-            });
-        }
-
-        // paste image from clipboard
-        (KeyModifiers::CONTROL, KeyCode::Char('v')) => {
-            return Some(AppEvent::PasteImage);
-        }
-
-        // pane management: alt+number for direct focus
-        (KeyModifiers::ALT, KeyCode::Char(c @ '1'..='9')) => {
-            let idx = (c as usize) - ('1' as usize);
-            return Some(AppEvent::FocusPaneByIndex(idx));
-        }
-
-        // regular character
-        (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
-            app.input_char(c);
-        }
+        // character input
+        (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => app.input_char(c),
 
         _ => {}
     }
-
     None
 }
 
@@ -1219,5 +1201,51 @@ mod tests {
             },
         );
         assert!(matches!(event, Some(AppEvent::FocusPrevPane)));
+    }
+
+    #[test]
+    fn pane_keys_work_while_streaming() {
+        let mut app = App::new("test".into(), 200_000);
+        app.is_streaming = true;
+
+        // alt+number should still focus panes
+        let event = handle_key(&mut app, alt(KeyCode::Char('2')));
+        assert!(matches!(event, Some(AppEvent::FocusPaneByIndex(1))));
+
+        // ctrl+shift+enter should still split
+        let event = handle_key(
+            &mut app,
+            KeyEvent {
+                code: KeyCode::Enter,
+                modifiers: KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                kind: KeyEventKind::Press,
+                state: KeyEventState::NONE,
+            },
+        );
+        assert!(matches!(event, Some(AppEvent::SplitPane)));
+
+        // ctrl+tab should still cycle panes
+        let event = handle_key(
+            &mut app,
+            KeyEvent {
+                code: KeyCode::Tab,
+                modifiers: KeyModifiers::CONTROL,
+                kind: KeyEventKind::Press,
+                state: KeyEventState::NONE,
+            },
+        );
+        assert!(matches!(event, Some(AppEvent::FocusNextPane)));
+
+        // ctrl+shift+left should resize
+        let event = handle_key(
+            &mut app,
+            KeyEvent {
+                code: KeyCode::Left,
+                modifiers: KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                kind: KeyEventKind::Press,
+                state: KeyEventState::NONE,
+            },
+        );
+        assert!(matches!(event, Some(AppEvent::ResizePane(-4))));
     }
 }
