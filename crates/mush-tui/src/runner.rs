@@ -186,6 +186,9 @@ pub async fn run_tui(
         ("injection", "toggle prompt injection preview"),
         ("close", "close focused pane"),
         ("broadcast", "send a message to all panes"),
+        ("lock", "lock a file for this pane"),
+        ("unlock", "release a file lock"),
+        ("locks", "list all file locks"),
         ("quit", "exit mush"),
     ];
     app.completions = slash_cmds
@@ -297,6 +300,8 @@ pub async fn run_tui(
     let message_bus = crate::messaging::MessageBus::new();
     // shared state store (shared across all panes)
     let shared_state = crate::shared_state::SharedState::new();
+    // file modification tracker (shared across all panes)
+    let file_tracker = crate::file_tracker::FileTracker::new(cwd.clone());
     // register the initial pane (inbox unused until multi-pane)
     let initial_inbox = message_bus.register(crate::pane::PaneId::new(1));
     pane_mgr.focused_mut().inbox = Some(initial_inbox);
@@ -494,25 +499,50 @@ pub async fn run_tui(
 
             let (confirm_req_tx, confirm_req_rx) =
                 tokio::sync::mpsc::channel::<(String, tokio::sync::oneshot::Sender<bool>)>(1);
-            let confirm: Option<mush_agent::ConfirmCallback<'_>> = if tui_config.confirm_tools {
-                Some(Box::new(move |name: &str, args: &serde_json::Value| {
-                    let tx = confirm_req_tx.clone();
-                    let summary = mush_agent::summarise_tool_args(name, args);
-                    let prompt = format!("{name} {summary}");
-                    Box::pin(async move {
-                        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-                        if tx.send((prompt, resp_tx)).await.is_err() {
-                            return mush_agent::ConfirmAction::Allow;
-                        }
-                        match resp_rx.await {
-                            Ok(true) => mush_agent::ConfirmAction::Allow,
-                            _ => mush_agent::ConfirmAction::Deny,
-                        }
-                    })
-                }))
-            } else {
-                None
-            };
+            let confirm: Option<mush_agent::ConfirmCallback<'_>> =
+                if tui_config.confirm_tools || pane_mgr.is_multi_pane() {
+                    let ft = file_tracker.clone();
+                    let lock_pane_id = pane_id;
+                    let do_prompt = tui_config.confirm_tools;
+                    Some(Box::new(move |name: &str, args: &serde_json::Value| {
+                        let ft = ft.clone();
+                        let tx = confirm_req_tx.clone();
+                        let summary = mush_agent::summarise_tool_args(name, args);
+                        let prompt = format!("{name} {summary}");
+                        let name = name.to_string();
+                        let args = args.clone();
+                        Box::pin(async move {
+                            // check file locks for write/edit tools
+                            if matches!(name.as_str(), "write" | "edit")
+                                && let Some(path) = args["path"].as_str()
+                                && let Some(owner) = ft.check_lock(lock_pane_id, path)
+                            {
+                                return mush_agent::ConfirmAction::DenyWithReason(
+                                    format!(
+                                        "file \"{}\" is locked by pane {}",
+                                        path,
+                                        owner.as_u32()
+                                    ),
+                                );
+                            }
+                            // user confirmation if enabled
+                            if do_prompt {
+                                let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+                                if tx.send((prompt, resp_tx)).await.is_err() {
+                                    return mush_agent::ConfirmAction::Allow;
+                                }
+                                match resp_rx.await {
+                                    Ok(true) => mush_agent::ConfirmAction::Allow,
+                                    _ => mush_agent::ConfirmAction::Deny,
+                                }
+                            } else {
+                                mush_agent::ConfirmAction::Allow
+                            }
+                        })
+                    }))
+                } else {
+                    None
+                };
             let confirm_reply: Arc<Mutex<Option<tokio::sync::oneshot::Sender<bool>>>> =
                 Arc::new(Mutex::new(None));
 
@@ -609,6 +639,50 @@ pub async fn run_tui(
                                 tui_config.debug_cache,
                                 &image_picker,
                             );
+                        }
+
+                        // file modification tracking (none isolation mode)
+                        if pane_mgr.is_multi_pane() {
+                            match &event {
+                                AgentEvent::ToolExecStart {
+                                    tool_call_id,
+                                    tool_name,
+                                    args,
+                                } => {
+                                    file_tracker.record_tool_start(
+                                        pane_id,
+                                        tool_call_id.as_str(),
+                                        tool_name.as_str(),
+                                        args,
+                                    );
+                                }
+                                AgentEvent::ToolExecEnd {
+                                    tool_call_id,
+                                    tool_name: _,
+                                    result,
+                                } => {
+                                    if let Some(conflict) = file_tracker.record_tool_end(
+                                        pane_id,
+                                        tool_call_id.as_str(),
+                                        result.outcome.is_success(),
+                                    ) {
+                                        let others: Vec<String> = conflict
+                                            .other_panes
+                                            .iter()
+                                            .map(|p| p.to_string())
+                                            .collect();
+                                        let warning = format!(
+                                            "⚠ file conflict: {} also modified by pane {}",
+                                            conflict.path.display(),
+                                            others.join(", ")
+                                        );
+                                        if let Some(pane) = pane_mgr.pane_mut(pane_id) {
+                                            pane.app.status = Some(warning);
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
                         }
                         if matches!(event, AgentEvent::AgentEnd) {
                             let stream_model = stream_metas
@@ -782,6 +856,9 @@ pub async fn run_tui(
                                             }
                                             AppEvent::ClosePane => {
                                                 if pane_mgr.is_multi_pane() {
+                                                    let closed_id = pane_mgr.focused().id;
+                                                    file_tracker.release_pane(closed_id);
+                                                    message_bus.unregister(closed_id);
                                                     pane_mgr.close_focused();
                                                 }
                                             }
@@ -884,8 +961,63 @@ pub async fn run_tui(
                                                     format!("broadcast sent to {sent} pane(s)"),
                                                 );
                                             }
+                                        } else if name == "lock" {
+                                            let pane_id = pane_mgr.focused().id;
+                                            if args.is_empty() {
+                                                pane_mgr.focused_mut().app.status =
+                                                    Some("usage: /lock <path>".into());
+                                            } else {
+                                                match file_tracker.lock(pane_id, args.trim()) {
+                                                    Ok(()) => {
+                                                        pane_mgr.focused_mut().app.status =
+                                                            Some(format!("locked {}", args.trim()));
+                                                    }
+                                                    Err(owner) => {
+                                                        pane_mgr.focused_mut().app.status =
+                                                            Some(format!(
+                                                                "already locked by pane {}",
+                                                                owner.as_u32()
+                                                            ));
+                                                    }
+                                                }
+                                            }
+                                        } else if name == "unlock" {
+                                            let pane_id = pane_mgr.focused().id;
+                                            if args.is_empty() {
+                                                pane_mgr.focused_mut().app.status =
+                                                    Some("usage: /unlock <path>".into());
+                                            } else if file_tracker.unlock(pane_id, args.trim()) {
+                                                pane_mgr.focused_mut().app.status =
+                                                    Some(format!("unlocked {}", args.trim()));
+                                            } else {
+                                                pane_mgr.focused_mut().app.status =
+                                                    Some("not locked by this pane".into());
+                                            }
+                                        } else if name == "locks" {
+                                            let locks = file_tracker.list_locks();
+                                            if locks.is_empty() {
+                                                pane_mgr.focused_mut().app.push_system_message(
+                                                    "no file locks active".to_string(),
+                                                );
+                                            } else {
+                                                let mut msg = String::from("file locks:\n");
+                                                for (path, owner) in &locks {
+                                                    msg.push_str(&format!(
+                                                        "  {} (pane {})\n",
+                                                        path.display(),
+                                                        owner.as_u32()
+                                                    ));
+                                                }
+                                                pane_mgr
+                                                    .focused_mut()
+                                                    .app
+                                                    .push_system_message(msg.trim_end().to_string());
+                                            }
                                         } else if name == "close" {
                                             if pane_mgr.is_multi_pane() {
+                                                let closed_id = pane_mgr.focused().id;
+                                                file_tracker.release_pane(closed_id);
+                                                message_bus.unregister(closed_id);
                                                 pane_mgr.close_focused();
                                             } else {
                                                 pane_mgr.focused_mut().app.status =
