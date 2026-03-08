@@ -28,9 +28,9 @@ impl AgentTool for EditTool {
     }
     fn description(&self) -> &str {
         "Edit a file by replacing exact text. The oldText must match exactly (including whitespace). \
-         Use this for precise, surgical edits. The oldText must appear exactly once in the file - \
-         if it matches multiple locations, the edit will fail. Include enough surrounding context \
-         (nearby lines) in oldText to make the match unique."
+         Use this for precise, surgical edits. By default oldText must appear exactly once in the \
+         file - use expected_matches to allow replacing multiple occurrences. Use start_line/end_line \
+         to restrict the search to a specific line range."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -48,6 +48,18 @@ impl AgentTool for EditTool {
                 "newText": {
                     "type": "string",
                     "description": "new text to replace the old text with"
+                },
+                "expected_matches": {
+                    "type": "integer",
+                    "description": "expected number of matches (default 1). edit proceeds only when actual count equals this"
+                },
+                "start_line": {
+                    "type": "integer",
+                    "description": "restrict search to lines starting from this line (1-indexed)"
+                },
+                "end_line": {
+                    "type": "integer",
+                    "description": "restrict search to lines ending at this line (1-indexed, inclusive). requires start_line"
                 }
             },
             "required": ["path", "oldText", "newText"]
@@ -72,15 +84,51 @@ impl AgentTool for EditTool {
             let path = resolve_path(&self.cwd, path_str);
             let old_text = old_text.to_string();
             let new_text = new_text.to_string();
+            let expected_matches = args["expected_matches"].as_u64().map(|n| n as usize);
+            let start_line = args["start_line"].as_u64().map(|n| n as usize);
+            let end_line = args["end_line"].as_u64().map(|n| n as usize);
 
-            tokio::task::spawn_blocking(move || edit_file(&path, &old_text, &new_text))
+            if end_line.is_some() && start_line.is_none() {
+                return ToolResult::error("end_line requires start_line");
+            }
+            if let (Some(s), Some(e)) = (start_line, end_line) {
+                if e < s {
+                    return ToolResult::error(format!(
+                        "end_line ({e}) must be >= start_line ({s})"
+                    ));
+                }
+            }
+
+            let opts = EditOpts {
+                expected_matches: expected_matches.unwrap_or(1),
+                start_line,
+                end_line,
+            };
+
+            tokio::task::spawn_blocking(move || edit_file(&path, &old_text, &new_text, &opts))
                 .await
                 .unwrap_or_else(|e| ToolResult::error(format!("task join error: {e}")))
         })
     }
 }
 
-fn edit_file(path: &Path, old_text: &str, new_text: &str) -> ToolResult {
+struct EditOpts {
+    expected_matches: usize,
+    start_line: Option<usize>,
+    end_line: Option<usize>,
+}
+
+impl Default for EditOpts {
+    fn default() -> Self {
+        Self {
+            expected_matches: 1,
+            start_line: None,
+            end_line: None,
+        }
+    }
+}
+
+fn edit_file(path: &Path, old_text: &str, new_text: &str, opts: &EditOpts) -> ToolResult {
     if !path.exists() {
         return ToolResult::error(format!("file not found: {}", path.display()));
     }
@@ -103,16 +151,38 @@ fn edit_file(path: &Path, old_text: &str, new_text: &str) -> ToolResult {
         Err(e) => return ToolResult::error(format!("failed to read file as utf-8 text: {e}")),
     };
 
+    // when a line range is specified, extract the search region
+    let (search_content, region_start_byte) = if let Some(start) = opts.start_line {
+        let lines: Vec<&str> = content.split_inclusive('\n').collect();
+        let start_idx = start.saturating_sub(1).min(lines.len());
+        let end_idx = opts.end_line.unwrap_or(lines.len()).min(lines.len());
+        let prefix_bytes: usize = lines[..start_idx].iter().map(|l| l.len()).sum();
+        let region: String = lines[start_idx..end_idx].concat();
+        (region, prefix_bytes)
+    } else {
+        (content.to_string(), 0)
+    };
+
+    let range_label = if opts.start_line.is_some() {
+        format!(
+            " (lines {}-{})",
+            opts.start_line.unwrap_or(1),
+            opts.end_line.unwrap_or_else(|| content.lines().count())
+        )
+    } else {
+        String::new()
+    };
+
     let mut candidates: Vec<(String, String)> = vec![(old_text.to_string(), new_text.to_string())];
 
-    if content.contains("\r\n") && old_text.contains('\n') && !old_text.contains("\r\n") {
+    if search_content.contains("\r\n") && old_text.contains('\n') && !old_text.contains("\r\n") {
         candidates.push((
             old_text.replace("\n", "\r\n"),
             new_text.replace("\n", "\r\n"),
         ));
     }
 
-    if !content.contains("\r\n") && old_text.contains("\r\n") {
+    if !search_content.contains("\r\n") && old_text.contains("\r\n") {
         candidates.push((
             old_text.replace("\r\n", "\n"),
             new_text.replace("\r\n", "\n"),
@@ -124,22 +194,20 @@ fn edit_file(path: &Path, old_text: &str, new_text: &str) -> ToolResult {
     // also try with/without trailing newline (LLMs often get this wrong)
     let mut extra = Vec::new();
     for (o, n) in &candidates {
-        if o.ends_with('\n') && !content.contains(o.as_str()) {
+        if o.ends_with('\n') && !search_content.contains(o.as_str()) {
             let trimmed = o.trim_end_matches('\n').trim_end_matches('\r');
             extra.push((trimmed.to_string(), n.clone()));
         } else if !o.ends_with('\n') {
             extra.push((format!("{o}\n"), format!("{n}\n")));
-            if content.contains("\r\n") {
+            if search_content.contains("\r\n") {
                 extra.push((format!("{o}\r\n"), format!("{n}\r\n")));
             }
         }
     }
     candidates.extend(extra);
 
-    // trailing whitespace per-line: LLMs often omit trailing spaces/tabs on lines.
-    // slide a window over content lines, compare with trimEnd on each line,
-    // and yield the actual content substring (with its real whitespace) as a candidate
-    for actual_old in find_line_trimmed_matches(content, old_text) {
+    // trailing whitespace per-line: LLMs often omit trailing spaces/tabs on lines
+    for actual_old in find_line_trimmed_matches(&search_content, old_text) {
         if actual_old != old_text {
             let adapted_new = if actual_old.contains("\r\n") && !new_text.contains("\r\n") {
                 new_text.replace('\n', "\r\n")
@@ -152,19 +220,33 @@ fn edit_file(path: &Path, old_text: &str, new_text: &str) -> ToolResult {
 
     candidates.dedup();
 
-    let mut multiple = false;
+    let expected = opts.expected_matches;
+    let mut mismatch_count: Option<usize> = None;
 
     for (match_old, match_new) in candidates {
-        let count = content.matches(&match_old).count();
+        let count = search_content.matches(&match_old).count();
         if count == 0 {
             continue;
         }
-        if count > 1 {
-            multiple = true;
+        if count != expected {
+            mismatch_count = Some(count);
             continue;
         }
 
-        let replaced = content.replacen(&match_old, &match_new, 1);
+        // apply replacements within the search region
+        let replaced_region = search_content.replace(&match_old, &match_new);
+
+        // reconstruct full content
+        let replaced = if opts.start_line.is_some() {
+            let mut full = String::with_capacity(content.len() + replaced_region.len());
+            full.push_str(&content[..region_start_byte]);
+            full.push_str(&replaced_region);
+            full.push_str(&content[region_start_byte + search_content.len()..]);
+            full
+        } else {
+            replaced_region
+        };
+
         let write_result = if has_bom {
             let mut out = vec![0xEF, 0xBB, 0xBF];
             out.extend_from_slice(replaced.as_bytes());
@@ -176,13 +258,18 @@ fn edit_file(path: &Path, old_text: &str, new_text: &str) -> ToolResult {
         return match write_result {
             Ok(()) => {
                 let diff = format_edit_diff(old_text, new_text);
-                ToolResult::text(format!("edited {}\n{diff}", path.display()))
+                let count_note = if expected > 1 {
+                    format!(" ({expected} replacements)")
+                } else {
+                    String::new()
+                };
+                ToolResult::text(format!("edited {}{count_note}\n{diff}", path.display()))
             }
             Err(e) => ToolResult::error(format!("failed to write file: {e}")),
         };
     }
 
-    if multiple {
+    if let Some(found) = mismatch_count {
         // find all match locations to help the caller add context
         let first_line = old_text.lines().next().unwrap_or(old_text);
         let match_lines: Vec<usize> = content
@@ -195,14 +282,18 @@ fn edit_file(path: &Path, old_text: &str, new_text: &str) -> ToolResult {
             String::new()
         } else {
             format!(
-                "\n\nmatches near lines: {}\nhint: include more surrounding context in oldText to make the match unique",
+                "\nmatches near lines: {}",
                 match_lines.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", ")
             )
         };
+        let hint = if found > expected {
+            "\nhint: include more surrounding context in oldText to make the match unique, or use start_line/end_line to restrict the search range"
+        } else {
+            ""
+        };
         return ToolResult::error(format!(
-            "oldText found multiple times in {}.{}",
+            "expected {expected} match(es) but found {found} in {}{range_label}.{locations}{hint}",
             path.display(),
-            locations
         ));
     }
 
@@ -447,7 +538,7 @@ mod tests {
         let path = dir.path().join("test.rs");
         fs::write(&path, "fn main() {\n    println!(\"hello\");\n}").unwrap();
 
-        let result = edit_file(&path, "println!(\"hello\")", "println!(\"world\")");
+        let result = edit_file(&path, "println!(\"hello\")", "println!(\"world\")", &EditOpts::default());
         assert!(result.outcome.is_success());
 
         let content = fs::read_to_string(&path).unwrap();
@@ -473,7 +564,7 @@ mod tests {
         let path = dir.path().join("test.rs");
         fs::write(&path, "fn main() {}").unwrap();
 
-        let result = edit_file(&path, "nonexistent text", "replacement");
+        let result = edit_file(&path, "nonexistent text", "replacement", &EditOpts::default());
         assert!(result.outcome.is_error());
     }
 
@@ -483,13 +574,13 @@ mod tests {
         let path = dir.path().join("test.rs");
         fs::write(&path, "foo bar foo bar").unwrap();
 
-        let result = edit_file(&path, "foo", "baz");
+        let result = edit_file(&path, "foo", "baz", &EditOpts::default());
         assert!(result.outcome.is_error());
     }
 
     #[test]
     fn edit_nonexistent_file() {
-        let result = edit_file(Path::new("/nonexistent/file.rs"), "old", "new");
+        let result = edit_file(Path::new("/nonexistent/file.rs"), "old", "new", &EditOpts::default());
         assert!(result.outcome.is_error());
     }
 
@@ -499,7 +590,7 @@ mod tests {
         let path = dir.path().join("test.txt");
         fs::write(&path, "before\ntarget line\nafter").unwrap();
 
-        let result = edit_file(&path, "target line", "replaced line");
+        let result = edit_file(&path, "target line", "replaced line", &EditOpts::default());
         assert!(result.outcome.is_success());
 
         let content = fs::read_to_string(&path).unwrap();
@@ -512,7 +603,7 @@ mod tests {
         let path = dir.path().join("test.txt");
         fs::write(&path, "before\r\ntarget line\r\nafter\r\n").unwrap();
 
-        let result = edit_file(&path, "target line\nafter", "replaced\nafter");
+        let result = edit_file(&path, "target line\nafter", "replaced\nafter", &EditOpts::default());
         assert!(result.outcome.is_success());
 
         let bytes = fs::read(&path).unwrap();
@@ -528,7 +619,7 @@ mod tests {
         bytes.extend_from_slice(b"hello\nworld\n");
         fs::write(&path, bytes).unwrap();
 
-        let result = edit_file(&path, "hello", "hi");
+        let result = edit_file(&path, "hello", "hi", &EditOpts::default());
         assert!(result.outcome.is_success());
 
         let out = fs::read(&path).unwrap();
@@ -543,7 +634,7 @@ mod tests {
         let path = dir.path().join("same.txt");
         fs::write(&path, "unchanged").unwrap();
 
-        let result = edit_file(&path, "unchanged", "unchanged");
+        let result = edit_file(&path, "unchanged", "unchanged", &EditOpts::default());
         assert!(result.outcome.is_error());
     }
 
@@ -650,7 +741,7 @@ mod tests {
         let path = dir.path().join("test.rs");
         fs::write(&path, "fn process(input: &str) {\n    validate(input);\n}\n").unwrap();
 
-        let result = edit_file(&path, "fn process(input: &String) {", "fn replaced() {");
+        let result = edit_file(&path, "fn process(input: &String) {", "fn replaced() {", &EditOpts::default());
         let text = extract_text(&result);
         assert!(text.contains("similar lines") || text.contains("whitespace"));
     }
@@ -661,9 +752,9 @@ mod tests {
         let path = dir.path().join("test.rs");
         fs::write(&path, "let x = 1;\nlet y = 2;\nlet x = 1;\n").unwrap();
 
-        let result = edit_file(&path, "let x = 1;", "let x = 42;");
+        let result = edit_file(&path, "let x = 1;", "let x = 42;", &EditOpts::default());
         let text = extract_text(&result);
-        assert!(text.contains("multiple times"));
+        assert!(text.contains("expected 1") && text.contains("found 2"), "got: {text}");
         assert!(text.contains("lines:"));
     }
 
@@ -685,7 +776,7 @@ mod tests {
         fs::write(&path, "fn main() {\n    hello();\n}\n").unwrap();
 
         // oldText without trailing newline should still match
-        let result = edit_file(&path, "fn main() {\n    hello();\n}", "fn main() {\n    world();\n}");
+        let result = edit_file(&path, "fn main() {\n    hello();\n}", "fn main() {\n    world();\n}", &EditOpts::default());
         assert!(result.outcome.is_success());
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("world()"));
@@ -698,7 +789,7 @@ mod tests {
         fs::write(&path, "hello world").unwrap();
 
         // oldText with trailing newline when file doesn't have one
-        let result = edit_file(&path, "hello world\n", "goodbye world\n");
+        let result = edit_file(&path, "hello world\n", "goodbye world\n", &EditOpts::default());
         assert!(result.outcome.is_success());
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("goodbye world"));
@@ -716,6 +807,7 @@ mod tests {
             &path,
             "fn main() {\n    println!(\"hello\");\n}\n",
             "fn main() {\n    println!(\"goodbye\");\n}\n",
+            &EditOpts::default(),
         );
         let text = extract_text(&result);
         assert!(!text.contains("not found"), "should match: {text}");
@@ -731,7 +823,7 @@ mod tests {
         let path = dir.path().join("test.txt");
         fs::write(&path, "line one\t\nline two\t\t\n").unwrap();
 
-        let result = edit_file(&path, "line one\nline two\n", "replaced one\nreplaced two\n");
+        let result = edit_file(&path, "line one\nline two\n", "replaced one\nreplaced two\n", &EditOpts::default());
         let text = extract_text(&result);
         assert!(!text.contains("not found"), "should match: {text}");
 
@@ -746,7 +838,7 @@ mod tests {
         fs::write(&path, "foo  \nbar  \n").unwrap();
 
         // oldText content differs, not just whitespace
-        let result = edit_file(&path, "fox\nbaz\n", "replaced\n");
+        let result = edit_file(&path, "fox\nbaz\n", "replaced\n", &EditOpts::default());
         let text = extract_text(&result);
         assert!(text.contains("not found"));
     }
@@ -758,12 +850,88 @@ mod tests {
         fs::write(&path, "foo  \nbar\nfoo  \nbaz\n").unwrap();
 
         // "foo\n" matches twice after trimming
-        let result = edit_file(&path, "foo\n", "replaced\n");
+        let result = edit_file(&path, "foo\n", "replaced\n", &EditOpts::default());
         let text = extract_text(&result);
         // should fail - ambiguous (or succeed via exact if "foo\n" appears exactly once)
         // "foo\n" doesn't appear exactly in the file (file has "foo  \n"), and
         // trimmed match finds 2 positions, so it should fail
-        assert!(text.contains("not found") || text.contains("multiple"));
+        assert!(text.contains("not found") || text.contains("expected 1"), "got: {text}");
+    }
+
+    #[test]
+    fn edit_expected_matches_multiple() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        fs::write(&path, "TODO: fix\nsome code\nTODO: fix\n").unwrap();
+
+        let result = edit_file(
+            &path, "TODO: fix", "DONE",
+            &EditOpts { expected_matches: 2, ..Default::default() },
+        );
+        assert!(result.outcome.is_success());
+        let content = fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "DONE\nsome code\nDONE\n");
+    }
+
+    #[test]
+    fn edit_expected_matches_mismatch_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        fs::write(&path, "foo\nbar\nfoo\nbaz\nfoo\n").unwrap();
+
+        let result = edit_file(
+            &path, "foo", "replaced",
+            &EditOpts { expected_matches: 2, ..Default::default() },
+        );
+        assert!(result.outcome.is_error());
+        let text = extract_text(&result);
+        assert!(text.contains("expected 2") && text.contains("found 3"), "got: {text}");
+    }
+
+    #[test]
+    fn edit_range_limited() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        fs::write(&path, "let x = 1;\nlet y = 2;\nlet x = 1;\nlet z = 3;\n").unwrap();
+
+        // "let x = 1;" appears on lines 1 and 3, but restrict to lines 2-4
+        let result = edit_file(
+            &path, "let x = 1;", "let x = 99;",
+            &EditOpts { expected_matches: 1, start_line: Some(2), end_line: Some(4), },
+        );
+        assert!(result.outcome.is_success(), "got: {}", extract_text(&result));
+        let content = fs::read_to_string(&path).unwrap();
+        // only line 3 should be replaced
+        assert_eq!(content, "let x = 1;\nlet y = 2;\nlet x = 99;\nlet z = 3;\n");
+    }
+
+    #[test]
+    fn edit_invalid_line_range_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        fs::write(&path, "hello\nworld\n").unwrap();
+
+        let tool = super::EditTool::new(dir.path().to_path_buf());
+        // end_line without start_line - tested via tool execute
+        let result = futures::executor::block_on(tool.execute(serde_json::json!({
+            "path": path.to_str().unwrap(),
+            "oldText": "hello",
+            "newText": "hi",
+            "end_line": 5,
+        })));
+        assert!(result.outcome.is_error());
+        assert!(extract_text(&result).contains("requires start_line"));
+
+        // end < start
+        let result = futures::executor::block_on(tool.execute(serde_json::json!({
+            "path": path.to_str().unwrap(),
+            "oldText": "hello",
+            "newText": "hi",
+            "start_line": 5,
+            "end_line": 2,
+        })));
+        assert!(result.outcome.is_error());
+        assert!(extract_text(&result).contains("must be >="));
     }
 
     #[test]
@@ -777,6 +945,7 @@ mod tests {
             &path,
             "alpha\nbeta",
             "one\ntwo",
+            &EditOpts::default(),
         );
         let text = extract_text(&result);
         assert!(!text.contains("not found"), "should match: {text}");
