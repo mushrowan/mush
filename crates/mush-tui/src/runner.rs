@@ -477,7 +477,7 @@ pub async fn run_tui(
             let compaction_cache: std::sync::Arc<
                 tokio::sync::Mutex<Option<(usize, Vec<Message>)>>,
             > = std::sync::Arc::new(tokio::sync::Mutex::new(None));
-            let transform: Option<mush_agent::ContextTransform<'_>> = Some(Box::new(move |msgs| {
+            let transform: Option<mush_agent::ContextTransform<'_>> = Some(Box::new(move |mut msgs| {
                 let enricher = enricher_arc.clone();
                 let model = compact_model.clone();
                 let options = compact_options.clone();
@@ -487,31 +487,35 @@ pub async fn run_tui(
                     let mut msgs = if do_auto_compact {
                         let mut guard = cache.lock().await;
                         let current_tokens = ctx_tokens.load(std::sync::atomic::Ordering::Relaxed);
+
+                        // replay cached compaction if available
                         if let Some((orig_len, ref compacted)) = *guard {
                             if msgs.len() >= orig_len {
                                 let mut result = compacted.clone();
-                                result.extend_from_slice(&msgs[orig_len..]);
-                                result
+                                result.extend(msgs[orig_len..].iter().cloned());
+                                msgs = result;
                             } else {
+                                // conversation shrank (e.g. undo), invalidate
                                 *guard = None;
-                                msgs
                             }
-                        } else {
-                            let orig_len = msgs.len();
-                            let compacted = event_handler::auto_compact(
-                                msgs,
-                                current_tokens,
-                                context_window,
-                                registry,
-                                &model,
-                                &options,
-                            )
-                            .await;
-                            if compacted.len() < orig_len {
-                                *guard = Some((orig_len, compacted.clone()));
-                            }
-                            compacted
                         }
+
+                        // (re-)compact if approaching context limit, whether
+                        // fresh or the cached result grew too large
+                        let pre_len = msgs.len();
+                        let compacted = event_handler::auto_compact(
+                            msgs,
+                            current_tokens,
+                            context_window,
+                            registry,
+                            &model,
+                            &options,
+                        )
+                        .await;
+                        if compacted.len() < pre_len {
+                            *guard = Some((pre_len, compacted.clone()));
+                        }
+                        compacted
                     } else {
                         msgs
                     };

@@ -301,7 +301,9 @@ impl PaneManager {
                     .map(|(i, pane)| {
                         let base = base_width + if (i as u16) < remainder { 1 } else { 0 };
                         let offset = self.width_offsets.get(&pane.id).copied().unwrap_or(0);
-                        (base as i32 + offset as i32).clamp(MIN_COLUMN_WIDTH as i32, usable as i32)
+                        let min_w = (MIN_COLUMN_WIDTH as i32).min(usable as i32);
+                        (base as i32 + offset as i32)
+                            .clamp(min_w, usable as i32)
                             as u16
                     })
                     .collect();
@@ -615,5 +617,24 @@ mod tests {
         mgr.compute_layout(area);
         // clamped to MIN_COLUMN_WIDTH
         assert_eq!(mgr.panes()[0].area.width, MIN_COLUMN_WIDTH);
+    }
+
+    #[test]
+    fn narrow_terminal_single_pane_no_panic() {
+        let mut mgr = PaneManager::new(test_pane(1));
+        // terminal narrower than MIN_COLUMN_WIDTH - should not panic
+        let area = Rect::new(0, 0, 46, 24);
+        mgr.compute_layout(area);
+        assert_eq!(mgr.panes()[0].area.width, 46);
+    }
+
+    #[test]
+    fn narrow_terminal_multi_pane_tabs() {
+        let mut mgr = PaneManager::new(test_pane(1));
+        mgr.add_pane(test_pane(2));
+        // too narrow for columns, falls back to tabs
+        let area = Rect::new(0, 0, 80, 24);
+        let mode = mgr.compute_layout(area);
+        assert_eq!(mode, LayoutMode::Tabs);
     }
 }
