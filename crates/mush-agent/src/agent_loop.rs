@@ -174,7 +174,7 @@ pub fn agent_loop(
                     let before = messages.len();
                     let transformed = transform(messages.clone()).await;
                     let after = transformed.len();
-                    if after != before {
+                    if after < before {
                         yield AgentEvent::ContextTransformed {
                             before_count: before,
                             after_count: after,
@@ -203,22 +203,52 @@ pub fn agent_loop(
 
                 // stream the assistant response
                 tracing::debug!(turn = turn_index, model = %config.model.id, "streaming LLM response");
-                let stream_result = config.registry.stream(&config.model, &context, &config.options);
-                let mut event_stream = match stream_result {
-                    Ok(fut) => match fut.await {
-                        Ok(s) => s,
+
+                // retry transient errors with exponential backoff
+                const MAX_RETRIES: u32 = 3;
+                let mut event_stream = None;
+                let mut last_error = None;
+
+                for attempt in 0..=MAX_RETRIES {
+                    if attempt > 0 {
+                        let delay = std::time::Duration::from_secs(1 << (attempt - 1));
+                        tracing::warn!(attempt, ?delay, "retrying after transient error");
+                        tokio::time::sleep(delay).await;
+                    }
+
+                    let stream_result = config.registry.stream(
+                        &config.model, &context, &config.options,
+                    );
+                    match stream_result {
+                        Ok(fut) => match fut.await {
+                            Ok(stream) => {
+                                event_stream = Some(stream);
+                                break;
+                            }
+                            Err(e) if e.is_retryable() && attempt < MAX_RETRIES => {
+                                tracing::warn!(error = %e, "retryable request error");
+                                last_error = Some(format!("request failed: {e}"));
+                            }
+                            Err(e) => {
+                                last_error = Some(format!("request failed: {e}"));
+                                break;
+                            }
+                        },
                         Err(e) => {
-                            tracing::error!(error = %e, "LLM stream init failed");
-                            yield AgentEvent::Error { error: e.to_string() };
-                            yield AgentEvent::AgentEnd;
-                            return;
+                            // setup errors (no provider, missing key) aren't retryable
+                            last_error = Some(format!("stream setup failed: {e}"));
+                            break;
                         }
-                    },
-                    Err(e) => {
-                        tracing::error!(error = %e, "no provider for model");
-                        yield AgentEvent::Error { error: e.to_string() };
-                        yield AgentEvent::AgentEnd;
-                        return;
+                    }
+                }
+
+                let mut event_stream = match event_stream {
+                    Some(s) => s,
+                    None => {
+                        yield AgentEvent::Error {
+                            error: last_error.unwrap_or_else(|| "unknown stream error".into()),
+                        };
+                        break;
                     }
                 };
 

@@ -332,7 +332,7 @@ pub fn default_model_id(cfg: &config::Config) -> String {
     }
 
     if has_openai_codex_auth {
-        return "gpt-5.3-codex".into();
+        return "gpt-5.4-codex".into();
     }
 
     "claude-opus-4-6".into()

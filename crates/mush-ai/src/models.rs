@@ -215,6 +215,23 @@ pub fn openai_models() -> Vec<Model> {
 pub fn openai_codex_models() -> Vec<Model> {
     vec![
         Model {
+            id: "gpt-5.4-codex".into(),
+            name: "GPT-5.4 Codex (ChatGPT subscription)".into(),
+            api: Api::OpenaiResponses,
+            provider: Provider::Custom("openai-codex".into()),
+            base_url: "https://chatgpt.com/backend-api".into(),
+            reasoning: true,
+            input: vec![InputModality::Text, InputModality::Image],
+            cost: ModelCost {
+                input: 0.0,
+                output: 0.0,
+                cache_read: 0.0,
+                cache_write: 0.0,
+            },
+            context_window: 400_000,
+            max_output_tokens: 128_000,
+        },
+        Model {
             id: "gpt-5.3-codex".into(),
             name: "GPT-5.3 Codex (ChatGPT subscription)".into(),
             api: Api::OpenaiResponses,

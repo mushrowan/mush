@@ -1,4 +1,177 @@
-# todo
+# todo2
+
+## why this exists
+- the current tool interface makes agent-side coding brittle
+- the main pain is needing exact text for `edit` while tool outputs are truncated or loosely structured
+- goal is to make tools a stable frontend for any model, without needing rg-specific knowledge
+
+## 1) add gpt-5.4 to codex model options
+
+### what
+- add `gpt-5.4-codex` to `openai_codex_models()` in `crates/mush-ai/src/models.rs`
+- keep naming consistent with existing codex entries, including the chatgpt subscription label style
+- confirm whether `gpt-5.4-codex` should also appear in any api-key model list, or codex oauth only
+- check if default/help text mentions only `gpt-5.3-codex` and update where needed
+  - likely spots: `crates/mush-cli/src/commands.rs`, docs references in `AGENTS.md`
+
+### why
+- user requested parity with opencode/pi behaviour
+- codex users need the latest codex family option in the picker and config flow
+
+### verify
+- `mush models` shows the new codex model
+- selecting it works in both tui and print mode
+- no duplicate ids or broken provider/api mapping
+
+## 2) make grep a model-friendly frontend over rg
+
+### what
+- keep rg backend for speed, but hide rg mental model from callers
+- redesign grep params around intent, not cli flags
+- proposed schema
+  - `query: string` required
+  - `path?: string`
+  - `include?: string`
+  - `mode?: "literal" | "regex"` default `literal`
+  - `case_sensitive?: boolean` default `false`
+  - `whole_word?: boolean` default `false`
+  - `context_before?: integer` default `0`
+  - `context_after?: integer` default `0`
+  - `max_matches?: integer` optional hard cap
+  - `output?: "text" | "json"` default `json`
+- map these cleanly to rg args internally
+- add deterministic json output shape
+  - `meta`: query, mode, path, include, truncated, total_matches, returned_matches
+  - `matches[]`: path, line, column, text
+
+### why
+- models should express search intent directly
+- avoids rg flag knowledge and regex-engine confusion
+- structured output enables reliable follow-up edits and tooling chains
+
+### verify
+- existing usage still works or has a clean migration path
+- json output is stable and parseable
+- clear error for invalid regex only when `mode=regex`
+
+## 3) improve read for precise edits and less guesswork
+
+### what
+- keep current behaviour for simple text read, but add structured metadata option
+- proposed schema additions
+  - `output?: "text" | "json"` default `text` for compatibility
+  - `start_line?: integer` and `end_line?: integer` as an explicit range mode
+  - `around_pattern?: string`, `before?: integer`, `after?: integer` for contextual reads
+- include truncation metadata when possible
+  - `truncated`, `total_lines`, `returned_lines`, `total_bytes`, `returned_bytes`
+- keep image support intact
+
+### why
+- exact line/range retrieval reduces fragile copy-paste edits
+- metadata helps the agent know when it is missing context
+
+### verify
+- range reads are 1-indexed and documented
+- conflicting params return clear errors
+- json output includes enough info to decide whether another read is needed
+
+## 4) improve bash output contract
+
+### what
+- keep command execution as-is, but optionally return structured result
+- proposed schema addition
+  - `output?: "text" | "json"` default `text`
+- json fields
+  - `stdout`, `stderr`, `exit_code`, `timed_out`, `truncated`
+  - `stdout_lines`, `stderr_lines`, `stdout_bytes`, `stderr_bytes`
+- make truncation explicit in both text and json modes
+
+### why
+- avoids brittle parsing of mixed stdout/stderr text
+- easier for agents to branch on exit code and timeout status
+
+### verify
+- previous text format remains usable
+- json consumers can reliably detect failures and truncation
+
+## 5) consider a patch tool for robust code edits
+
+### what
+- keep strict `edit` for exact-match replacements
+- add new `patch` tool that applies unified diffs or line-range replacements
+- suggested minimal schema
+  - `path: string`
+  - `patch: string` (unified diff for one file)
+  - `dry_run?: boolean`
+- return clear apply diagnostics
+  - applied hunks, rejected hunks, reject snippets
+
+### why
+- exact string replacement is safe but fails often in long or reformatted files
+- patch-based edits are the common denominator across coding agents
+
+### verify
+- dry-run shows what would change
+- failed hunks report enough context to retry automatically
+
+## 6) docs and architecture updates after tool changes
+
+### what
+- update `AGENTS.md` built-in tool section to reflect real schema and output behaviour
+- document new defaults and json contracts
+- include short examples per tool with intent-style usage
+- if architecture shape changes, update architecture section in `AGENTS.md`
+
+### why
+- current docs are higher-level than actual contracts
+- keeping docs aligned prevents model drift and bad tool calls
+
+### verify
+- docs mention current params exactly
+- examples match tested behaviour
+
+## 7) investigate: "error decoding response body"
+
+### what
+- track and debug intermittent decode failures (seen in harness output)
+- inspect likely paths
+  - `mush-ai` providers: `openai`, `openai_responses`, `anthropic`, shared sse parser
+  - `mush-tools` web tools: `web_fetch`, `web_search`
+- improve error diagnostics
+  - include status code, content-type, and bounded response snippet
+  - distinguish transport error vs json decode error vs sse framing error
+
+### why
+- currently too opaque to root-cause quickly
+- better diagnostics reduce ghost-chasing and false caching assumptions
+
+### verify
+- forced malformed responses produce actionable errors
+- no secrets leaked in diagnostics
+
+## 8) opencode/pi comparison pass before finalising interfaces
+
+### what
+- review how opencode/pi expose search and file-read tools to models
+- extract interface ideas, not 1:1 implementation
+- explicitly decide where mush diverges
+
+### why
+- user requested parity direction
+- avoids reinventing bad patterns and helps with model portability
+
+### verify
+- short design note recorded with decisions and tradeoffs
+
+## suggested order
+1. gpt-5.4 codex model entry
+2. grep schema + json output
+3. read range/context + metadata
+4. bash json contract
+5. docs refresh
+6. decode-error diagnostics pass
+7. patch tool exploration
+
 
 ## newtype audit
 
