@@ -7,11 +7,20 @@ pub fn send(summary: &str, body: &str) {
     // try platform-specific tools in order
     let tools: &[(&str, &[&str])] = &[
         ("notify-send", &["-a", "mush", summary, body]),
-        ("osascript", &["-e", &format!(
-            "display notification \"{}\" with title \"mush\" subtitle \"{}\"",
-            body, summary
-        )]),
-        ("terminal-notifier", &["-title", "mush", "-subtitle", summary, "-message", body]),
+        (
+            "osascript",
+            &[
+                "-e",
+                &format!(
+                    "display notification \"{}\" with title \"mush\" subtitle \"{}\"",
+                    body, summary
+                ),
+            ],
+        ),
+        (
+            "terminal-notifier",
+            &["-title", "mush", "-subtitle", summary, "-message", body],
+        ),
     ];
 
     for (cmd, args) in tools {

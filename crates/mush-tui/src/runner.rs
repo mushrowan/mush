@@ -364,11 +364,10 @@ pub async fn run_tui(
             prompts.push((pane_mgr.focused().id, prompt));
         }
         for pane in pane_mgr.panes_mut() {
-            if let Some(prompt) = pane.pending_prompt.take() {
-                if !prompts.iter().any(|(id, _)| *id == pane.id) {
+            if let Some(prompt) = pane.pending_prompt.take()
+                && !prompts.iter().any(|(id, _)| *id == pane.id) {
                     prompts.push((pane.id, prompt));
                 }
-            }
         }
 
         for (pane_id, prompt) in prompts {
@@ -737,14 +736,13 @@ pub async fn run_tui(
                         }
 
                         // update shared context token count for auto-compaction
-                        if let AgentEvent::MessageEnd { message } = &event {
-                            if let Some(meta) = stream_metas.get(&pane_id) {
+                        if let AgentEvent::MessageEnd { message } = &event
+                            && let Some(meta) = stream_metas.get(&pane_id) {
                                 meta.context_tokens.store(
                                     message.usage.total_input_tokens(),
                                     std::sync::atomic::Ordering::Relaxed,
                                 );
                             }
-                        }
 
                         // file modification tracking (none isolation mode)
                         if pane_mgr.is_multi_pane() {
@@ -793,43 +791,38 @@ pub async fn run_tui(
                             stream_metas.remove(&pane_id);
 
                             // notify when agent is done and cache is warm
-                            if tui_config.cache_timer {
-                                if let Some(pane) = pane_mgr.pane(pane_id) {
-                                    if let Some(remaining) = pane.app.cache_remaining_secs() {
-                                        if remaining > 60 {
+                            if tui_config.cache_timer
+                                && let Some(pane) = pane_mgr.pane(pane_id)
+                                    && let Some(remaining) = pane.app.cache_remaining_secs()
+                                        && remaining > 60 {
                                             crate::notify::send(
                                                 "awaiting input",
                                                 &format!("cache warm for {remaining}s"),
                                             );
                                         }
-                                    }
-                                }
-                            }
 
                             // auto-save for this pane
-                            if let Some(pane) = pane_mgr.pane(pane_id) {
-                                if let Some(ref saver) = tui_config.save_session {
+                            if let Some(pane) = pane_mgr.pane(pane_id)
+                                && let Some(ref saver) = tui_config.save_session {
                                     saver(
                                         &pane.conversation,
                                         &pane.session_tree,
                                         &pane.app.model_id,
                                     );
                                 }
-                            }
                         }
                     }
                 }
                 _ = tick => {
                     // check for tool confirmation on focused pane
                     let focused_id = pane_mgr.focused().id;
-                    if let Some(meta) = stream_metas.get_mut(&focused_id) {
-                        if let Ok((prompt, reply_tx)) = meta.confirm_req_rx.try_recv() {
+                    if let Some(meta) = stream_metas.get_mut(&focused_id)
+                        && let Ok((prompt, reply_tx)) = meta.confirm_req_rx.try_recv() {
                             let app = &mut pane_mgr.focused_mut().app;
                             app.mode = app::AppMode::ToolConfirm;
                             app.confirm_prompt = Some(prompt);
                             *meta.confirm_reply.lock().await = Some(reply_tx);
                         }
-                    }
 
                     // poll live tool output for focused pane
                     if let Some(ref live) = tui_config.tool_output_live {
@@ -860,13 +853,12 @@ pub async fn run_tui(
                                     };
                                     if let Some(allowed) = answer {
                                         let fid = pane_mgr.focused().id;
-                                        if let Some(meta) = stream_metas.get_mut(&fid) {
-                                            if let Some(tx) =
+                                        if let Some(meta) = stream_metas.get_mut(&fid)
+                                            && let Some(tx) =
                                                 meta.confirm_reply.lock().await.take()
                                             {
                                                 let _ = tx.send(allowed);
                                             }
-                                        }
                                         let app = &mut pane_mgr.focused_mut().app;
                                         app.mode = app::AppMode::Normal;
                                         app.confirm_prompt = None;
@@ -938,8 +930,8 @@ pub async fn run_tui(
                                             AppEvent::SplitPane => {
                                                 fork_pane(&mut pane_mgr, &tui_config, &message_bus, &tui_config.tool_output_live).await;
                                             }
-                                            AppEvent::ClosePane => {
-                                                if pane_mgr.is_multi_pane() {
+                                            AppEvent::ClosePane
+                                                if pane_mgr.is_multi_pane() => {
                                                     let closed_id = pane_mgr.focused().id;
                                                     let isolation = pane_mgr.focused().isolation.clone();
                                                     file_tracker.release_pane(closed_id);
@@ -947,7 +939,6 @@ pub async fn run_tui(
                                                     cleanup_pane_isolation(&cwd, &isolation).await;
                                                     pane_mgr.close_focused();
                                                 }
-                                            }
                                             _ => {}
                                         }
                                     }
@@ -1312,8 +1303,8 @@ pub async fn run_tui(
                                         }
 
                                         // persist after state-mutating commands
-                                        if state_changed {
-                                            if let Some(ref saver) = tui_config.save_session {
+                                        if state_changed
+                                            && let Some(ref saver) = tui_config.save_session {
                                                 let pane = pane_mgr.focused();
                                                 saver(
                                                     &pane.conversation,
@@ -1321,7 +1312,6 @@ pub async fn run_tui(
                                                     &pane.app.model_id,
                                                 );
                                             }
-                                        }
                                     }
                                     AppEvent::CycleThinkingLevel => {
                                         let app = &pane_mgr.focused().app;
@@ -1811,18 +1801,15 @@ async fn cleanup_pane_isolation(
             // extract pane id from the branch name
             if let Some(crate::isolation::PaneIsolation::Worktree { path, .. }) = isolation {
                 // parse pane id from path (pane-N)
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if let Some(id_str) = name.strip_prefix("pane-") {
-                        if let Ok(id) = id_str.parse::<u32>() {
-                            if let Err(e) =
+                if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                    && let Some(id_str) = name.strip_prefix("pane-")
+                        && let Ok(id) = id_str.parse::<u32>()
+                            && let Err(e) =
                                 crate::isolation::remove_worktree(cwd, crate::pane::PaneId::new(id))
                                     .await
                             {
                                 tracing::warn!("failed to remove worktree: {e}");
                             }
-                        }
-                    }
-                }
             }
         }
         Some(crate::isolation::PaneIsolation::Jj { change_id }) => {

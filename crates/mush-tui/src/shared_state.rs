@@ -258,10 +258,7 @@ mod tests {
         state.set_reducer("items", Reducer::Append);
         state.set("items", serde_json::json!([1, 2]));
         state.set("items", serde_json::json!([3, 4]));
-        assert_eq!(
-            state.get("items"),
-            Some(serde_json::json!([1, 2, 3, 4]))
-        );
+        assert_eq!(state.get("items"), Some(serde_json::json!([1, 2, 3, 4])));
     }
 
     #[test]
@@ -272,10 +269,7 @@ mod tests {
         // now switch to append
         state.set_reducer("x", Reducer::Append);
         state.set("x", serde_json::json!("new"));
-        assert_eq!(
-            state.get("x"),
-            Some(serde_json::json!(["old", "new"]))
-        );
+        assert_eq!(state.get("x"), Some(serde_json::json!(["old", "new"])));
     }
 
     #[test]

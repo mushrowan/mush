@@ -142,7 +142,10 @@ impl FileTracker {
     pub fn check_lock(&self, pane_id: PaneId, path: &str) -> Option<PaneId> {
         let resolved = self.resolve(path);
         let locks = self.locks.lock().unwrap();
-        locks.get(&resolved).copied().filter(|&owner| owner != pane_id)
+        locks
+            .get(&resolved)
+            .copied()
+            .filter(|&owner| owner != pane_id)
     }
 
     /// acquire an advisory lock. returns Err(owner) if already locked by another pane
@@ -268,20 +271,10 @@ mod tests {
         let p1 = PaneId::new(1);
         let p2 = PaneId::new(2);
 
-        ft.record_tool_start(
-            p1,
-            "tc1",
-            "write",
-            &serde_json::json!({"path": "a.rs"}),
-        );
+        ft.record_tool_start(p1, "tc1", "write", &serde_json::json!({"path": "a.rs"}));
         ft.record_tool_end(p1, "tc1", true);
 
-        ft.record_tool_start(
-            p2,
-            "tc2",
-            "write",
-            &serde_json::json!({"path": "b.rs"}),
-        );
+        ft.record_tool_start(p2, "tc2", "write", &serde_json::json!({"path": "b.rs"}));
         let conflict = ft.record_tool_end(p2, "tc2", true);
         assert!(conflict.is_none());
     }
@@ -291,12 +284,7 @@ mod tests {
         let ft = tracker();
         let p1 = PaneId::new(1);
 
-        ft.record_tool_start(
-            p1,
-            "tc1",
-            "write",
-            &serde_json::json!({"path": "fail.rs"}),
-        );
+        ft.record_tool_start(p1, "tc1", "write", &serde_json::json!({"path": "fail.rs"}));
         let conflict = ft.record_tool_end(p1, "tc1", false);
         assert!(conflict.is_none());
         assert!(ft.pane_modifications(p1).is_empty());
@@ -307,12 +295,7 @@ mod tests {
         let ft = tracker();
         let p1 = PaneId::new(1);
 
-        ft.record_tool_start(
-            p1,
-            "tc1",
-            "bash",
-            &serde_json::json!({"command": "ls"}),
-        );
+        ft.record_tool_start(p1, "tc1", "bash", &serde_json::json!({"command": "ls"}));
         // nothing pending, so record_tool_end is a no-op
         let conflict = ft.record_tool_end(p1, "tc1", true);
         assert!(conflict.is_none());

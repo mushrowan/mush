@@ -201,8 +201,7 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
     let compact_model = setup.model.clone();
     let compact_options = setup.options.clone();
     let reg_ref = &setup.registry;
-    let context_tokens_shared =
-        std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let context_tokens_shared = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let ctx_tokens_for_transform = context_tokens_shared.clone();
     let transform: Option<mush_agent::ContextTransform<'_>> = if setup.cfg.auto_compact {
         Some(Box::new(move |msgs| {
