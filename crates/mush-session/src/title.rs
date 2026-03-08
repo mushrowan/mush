@@ -1,0 +1,58 @@
+//! LLM-based session title generation
+
+use futures::StreamExt;
+use mush_ai::Model;
+use mush_ai::registry::{ApiRegistry, LlmContext};
+use mush_ai::stream::StreamEvent;
+use mush_ai::types::*;
+
+const TITLE_PROMPT: &str = "\
+Generate a very short title (max 6 words) for this conversation. \
+The title should capture the main topic or task. \
+Reply with ONLY the title, no quotes, no punctuation at the end, all lowercase.";
+
+/// generate a title from the first few messages using an LLM
+pub async fn generate_title(
+    messages: &[Message],
+    registry: &ApiRegistry,
+    model: &Model,
+    options: &StreamOptions,
+) -> Option<String> {
+    if messages.is_empty() {
+        return None;
+    }
+
+    // take at most the first 4 messages for title generation
+    let context_messages: Vec<Message> = messages.iter().take(4).cloned().collect();
+
+    let context = LlmContext {
+        system_prompt: Some(TITLE_PROMPT.to_string()),
+        messages: context_messages,
+        tools: vec![],
+    };
+
+    let stream_future = registry.stream(model, &context, options).ok()?;
+    let mut stream = stream_future.await.ok()?;
+
+    let mut title = String::new();
+    while let Some(event) = stream.next().await {
+        if let StreamEvent::TextDelta { delta, .. } = event {
+            title.push_str(&delta);
+        }
+    }
+
+    let title = title.trim().to_string();
+    if title.is_empty() {
+        return None;
+    }
+
+    // clean up: remove quotes, trailing punctuation
+    let title = title
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim_end_matches('.')
+        .trim()
+        .to_lowercase();
+
+    if title.is_empty() { None } else { Some(title) }
+}
