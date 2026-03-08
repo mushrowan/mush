@@ -49,6 +49,11 @@ impl AgentTool for ReadTool {
                 "limit": {
                     "type": "integer",
                     "description": "maximum number of lines to read"
+                },
+                "output": {
+                    "type": "string",
+                    "description": "output format: 'text' (default) or 'json' with metadata (total_lines, start_line, end_line, truncated)",
+                    "enum": ["text", "json"]
                 }
             },
             "required": ["path"]
@@ -67,8 +72,9 @@ impl AgentTool for ReadTool {
             let path = resolve_path(&self.cwd, path_str);
             let offset = args["offset"].as_u64().map(|n| n as usize);
             let limit = args["limit"].as_u64().map(|n| n as usize);
+            let json_output = args["output"].as_str() == Some("json");
 
-            tokio::task::spawn_blocking(move || read_file(&path, offset, limit))
+            tokio::task::spawn_blocking(move || read_file(&path, offset, limit, json_output))
                 .await
                 .unwrap_or_else(|e| ToolResult::error(format!("task join error: {e}")))
         })
@@ -81,7 +87,7 @@ fn is_image(path: &Path) -> bool {
         .is_some_and(|ext| IMAGE_EXTENSIONS.contains(&ext.to_lowercase().as_str()))
 }
 
-fn read_file(path: &Path, offset: Option<usize>, limit: Option<usize>) -> ToolResult {
+fn read_file(path: &Path, offset: Option<usize>, limit: Option<usize>, json_output: bool) -> ToolResult {
     if !path.exists() {
         return ToolResult::error(format!("file not found: {}", path.display()));
     }
@@ -142,7 +148,20 @@ fn read_file(path: &Path, offset: Option<usize>, limit: Option<usize>) -> ToolRe
         ));
     }
 
-    ToolResult::text(result)
+    if json_output {
+        let end_line = start + lines_written;
+        let json = serde_json::json!({
+            "path": path.display().to_string(),
+            "total_lines": total_lines,
+            "start_line": start + 1,
+            "end_line": end_line,
+            "truncated": truncated,
+            "content": result,
+        });
+        ToolResult::text(json.to_string())
+    } else {
+        ToolResult::text(result)
+    }
 }
 
 fn read_image(path: &Path) -> ToolResult {
@@ -189,7 +208,7 @@ mod tests {
         let file = dir.path().join("test.txt");
         fs::write(&file, "line 1\nline 2\nline 3").unwrap();
 
-        let result = read_file(&file, None, None);
+        let result = read_file(&file, None, None, false);
         assert!(result.outcome.is_success());
         let text = extract_text(&result);
         assert!(text.contains("line 1"));
@@ -202,7 +221,7 @@ mod tests {
         let file = dir.path().join("test.txt");
         fs::write(&file, "line 1\nline 2\nline 3\nline 4").unwrap();
 
-        let result = read_file(&file, Some(3), None);
+        let result = read_file(&file, Some(3), None, false);
         let text = extract_text(&result);
         assert!(!text.contains("line 1"));
         assert!(!text.contains("line 2"));
@@ -220,7 +239,7 @@ mod tests {
             .join("\n");
         fs::write(&file, &content).unwrap();
 
-        let result = read_file(&file, None, Some(5));
+        let result = read_file(&file, None, Some(5), false);
         let text = extract_text(&result);
         assert!(text.contains("line 1"));
         assert!(text.contains("line 5"));
@@ -230,14 +249,14 @@ mod tests {
 
     #[test]
     fn read_nonexistent_file() {
-        let result = read_file(Path::new("/nonexistent/file.txt"), None, None);
+        let result = read_file(Path::new("/nonexistent/file.txt"), None, None, false);
         assert!(result.outcome.is_error());
     }
 
     #[test]
     fn read_directory_returns_error() {
         let dir = temp_dir();
-        let result = read_file(dir.path(), None, None);
+        let result = read_file(dir.path(), None, None, false);
         assert!(result.outcome.is_error());
     }
 
@@ -256,8 +275,41 @@ mod tests {
         let file = dir.path().join("empty.txt");
         fs::write(&file, "").unwrap();
 
-        let result = read_file(&file, None, None);
+        let result = read_file(&file, None, None, false);
         let text = extract_text(&result);
         assert!(text.contains("empty file"));
+    }
+
+    #[test]
+    fn read_json_output() {
+        let dir = temp_dir();
+        let file = dir.path().join("test.txt");
+        fs::write(&file, "line 1\nline 2\nline 3").unwrap();
+
+        let result = read_file(&file, None, None, true);
+        let text = extract_text(&result);
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["total_lines"], 3);
+        assert_eq!(json["start_line"], 1);
+        assert_eq!(json["end_line"], 3);
+        assert_eq!(json["truncated"], false);
+        assert!(json["content"].as_str().unwrap().contains("line 1"));
+    }
+
+    #[test]
+    fn read_json_output_with_offset() {
+        let dir = temp_dir();
+        let file = dir.path().join("test.txt");
+        fs::write(&file, "line 1\nline 2\nline 3\nline 4").unwrap();
+
+        let result = read_file(&file, Some(3), None, true);
+        let text = extract_text(&result);
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["total_lines"], 4);
+        assert_eq!(json["start_line"], 3);
+        assert_eq!(json["truncated"], false);
+        let content = json["content"].as_str().unwrap();
+        assert!(!content.contains("line 1"));
+        assert!(content.contains("line 3"));
     }
 }

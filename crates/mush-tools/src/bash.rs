@@ -56,6 +56,11 @@ impl AgentTool for BashTool {
                 "timeout": {
                     "type": "integer",
                     "description": "timeout in seconds (optional, default 120)"
+                },
+                "output": {
+                    "type": "string",
+                    "description": "output format: 'text' (default) or 'json' with structured fields (stdout, stderr, exit_code, timed_out, truncated)",
+                    "enum": ["text", "json"]
                 }
             },
             "required": ["command"]
@@ -72,8 +77,9 @@ impl AgentTool for BashTool {
             };
 
             let timeout = args["timeout"].as_u64().unwrap_or(DEFAULT_TIMEOUT_SECS);
+            let json_output = args["output"].as_str() == Some("json");
 
-            run_command(&self.cwd, command, timeout, self.output_sink.as_ref()).await
+            run_command(&self.cwd, command, timeout, self.output_sink.as_ref(), json_output).await
         })
     }
 }
@@ -83,6 +89,7 @@ async fn run_command(
     command: &str,
     timeout_secs: u64,
     output_sink: Option<&OutputSink>,
+    json_output: bool,
 ) -> ToolResult {
     let mut cmd = tokio::process::Command::new("bash");
     cmd.arg("-c")
@@ -117,6 +124,11 @@ async fn run_command(
         Ok(Err(e)) => return ToolResult::error(format!("command failed: {e}")),
         Err(_) => {
             let _ = child.kill().await;
+            let stdout = stdout_handle.await.unwrap_or_default();
+            let stderr = stderr_handle.await.unwrap_or_default();
+            if json_output {
+                return format_result(stdout, stderr, -1, true, true);
+            }
             return ToolResult::error(format!("command timed out after {timeout_secs}s"));
         }
     };
@@ -124,34 +136,72 @@ async fn run_command(
     let stdout = stdout_handle.await.unwrap_or_default();
     let stderr = stderr_handle.await.unwrap_or_default();
     let exit_code = status.code().unwrap_or(-1);
+    let timed_out = false;
 
-    let mut text = String::new();
+    format_result(stdout, stderr, exit_code, timed_out, json_output)
+}
 
-    if !stdout.is_empty() {
-        text.push_str(&truncate_output(&stdout));
-    }
+fn format_result(
+    stdout: String,
+    stderr: String,
+    exit_code: i32,
+    timed_out: bool,
+    json_output: bool,
+) -> ToolResult {
+    let stdout_truncated = stdout.lines().count() > MAX_OUTPUT_LINES || stdout.len() > MAX_OUTPUT_BYTES;
+    let stderr_truncated = stderr.lines().count() > MAX_OUTPUT_LINES || stderr.len() > MAX_OUTPUT_BYTES;
 
-    if !stderr.is_empty() {
-        if !text.is_empty() {
-            text.push('\n');
-        }
-        text.push_str(&truncate_output(&stderr));
-    }
-
-    if text.is_empty() {
-        text = "(no output)".into();
-    }
-
-    if exit_code != 0 {
-        text.push_str(&format!("\n\nCommand exited with code {exit_code}"));
-        ToolResult {
-            content: vec![mush_ai::types::ToolResultContentPart::Text(
-                mush_ai::types::TextContent { text },
-            )],
-            outcome: mush_ai::types::ToolOutcome::Error,
+    if json_output {
+        let json = serde_json::json!({
+            "stdout": truncate_output(&stdout),
+            "stderr": truncate_output(&stderr),
+            "exit_code": exit_code,
+            "timed_out": timed_out,
+            "stdout_lines": stdout.lines().count(),
+            "stderr_lines": stderr.lines().count(),
+            "stdout_bytes": stdout.len(),
+            "stderr_bytes": stderr.len(),
+            "truncated": stdout_truncated || stderr_truncated,
+        });
+        if exit_code != 0 || timed_out {
+            ToolResult {
+                content: vec![mush_ai::types::ToolResultContentPart::Text(
+                    mush_ai::types::TextContent { text: json.to_string() },
+                )],
+                outcome: mush_ai::types::ToolOutcome::Error,
+            }
+        } else {
+            ToolResult::text(json.to_string())
         }
     } else {
-        ToolResult::text(text)
+        let mut text = String::new();
+
+        if !stdout.is_empty() {
+            text.push_str(&truncate_output(&stdout));
+        }
+
+        if !stderr.is_empty() {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(&truncate_output(&stderr));
+        }
+
+        if text.is_empty() {
+            text = "(no output)".into();
+        }
+
+        if exit_code != 0 {
+            text.push_str(&format!("\n\nCommand exited with code {exit_code}"));
+            ToolResult {
+                content: vec![mush_ai::types::ToolResultContentPart::Text(
+                    mush_ai::types::TextContent { text },
+                )],
+                outcome: mush_ai::types::ToolOutcome::Error,
+            }
+        } else {
+            ToolResult::text(text)
+        }
     }
 }
 
@@ -248,7 +298,7 @@ mod tests {
     #[tokio::test]
     async fn run_echo_command() {
         let cwd = std::env::current_dir().unwrap();
-        let result = run_command(&cwd, "echo hello", 10, None).await;
+        let result = run_command(&cwd, "echo hello", 10, None, false).await;
         assert!(result.outcome.is_success());
         let text = extract_text(&result);
         assert!(text.contains("hello"));
@@ -257,7 +307,7 @@ mod tests {
     #[tokio::test]
     async fn run_failing_command() {
         let cwd = std::env::current_dir().unwrap();
-        let result = run_command(&cwd, "exit 1", 10, None).await;
+        let result = run_command(&cwd, "exit 1", 10, None, false).await;
         assert!(result.outcome.is_error());
         let text = extract_text(&result);
         assert!(text.contains("exited with code 1"));
@@ -266,7 +316,7 @@ mod tests {
     #[tokio::test]
     async fn run_command_with_stderr() {
         let cwd = std::env::current_dir().unwrap();
-        let result = run_command(&cwd, "echo error >&2", 10, None).await;
+        let result = run_command(&cwd, "echo error >&2", 10, None, false).await;
         let text = extract_text(&result);
         assert!(text.contains("error"));
     }
@@ -274,9 +324,34 @@ mod tests {
     #[tokio::test]
     async fn run_command_timeout() {
         let cwd = std::env::current_dir().unwrap();
-        let result = run_command(&cwd, "sleep 30", 1, None).await;
+        let result = run_command(&cwd, "sleep 30", 1, None, false).await;
         assert!(result.outcome.is_error());
         let text = extract_text(&result);
         assert!(text.contains("timed out"));
+    }
+
+    #[tokio::test]
+    async fn run_json_output() {
+        let cwd = std::env::current_dir().unwrap();
+        let result = run_command(&cwd, "echo hello && echo err >&2", 10, None, true).await;
+        assert!(result.outcome.is_success());
+        let text = extract_text(&result);
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(json["stdout"].as_str().unwrap().contains("hello"));
+        assert!(json["stderr"].as_str().unwrap().contains("err"));
+        assert_eq!(json["exit_code"], 0);
+        assert_eq!(json["timed_out"], false);
+        assert_eq!(json["truncated"], false);
+    }
+
+    #[tokio::test]
+    async fn run_json_output_failure() {
+        let cwd = std::env::current_dir().unwrap();
+        let result = run_command(&cwd, "echo oops >&2; exit 42", 10, None, true).await;
+        assert!(result.outcome.is_error());
+        let text = extract_text(&result);
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["exit_code"], 42);
+        assert!(json["stderr"].as_str().unwrap().contains("oops"));
     }
 }
