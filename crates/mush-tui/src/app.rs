@@ -518,10 +518,23 @@ impl App {
         self.scroll_offset = 0;
     }
 
+    /// remove all queued steering messages, returning their text content
+    pub fn take_queued_messages(&mut self) -> Vec<String> {
+        let mut texts = Vec::new();
+        self.messages.retain(|m| {
+            if m.queued {
+                texts.push(m.content.clone());
+                false
+            } else {
+                true
+            }
+        });
+        texts
+    }
+
     /// add a queued steering message (shown dimmed until processed)
     pub fn push_queued_message(&mut self, text: impl Into<String>) {
-        self.messages.push(DisplayMessage {
-            role: MessageRole::User,
+        self.messages.push(DisplayMessage {            role: MessageRole::User,
             content: text.into(),
             tool_calls: vec![],
             thinking: None,
