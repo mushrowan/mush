@@ -4,6 +4,8 @@
 //! (`chatgpt.com/backend-api/codex/responses`) style endpoints.
 
 use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
 
 use base64::Engine;
 use reqwest::header::{
@@ -560,6 +562,40 @@ fn extract_account_id(token: &str) -> Option<String> {
         })
 }
 
+
+fn write_decode_snapshot(model_id: &str, provider: &str, bytes: &[u8]) -> Option<String> {
+    if bytes.is_empty() {
+        return None;
+    }
+
+    let mut dir = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let home = std::env::var_os("HOME").unwrap_or_else(|| ".".into());
+            let mut p = PathBuf::from(home);
+            p.push(".local/share");
+            p
+        });
+    dir.push("mush");
+    dir.push("stream-errors");
+
+    if fs::create_dir_all(&dir).is_err() {
+        return None;
+    }
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let file = format!("decode-{provider}-{model_id}-{ts}.bin");
+    let path = dir.join(file);
+    if fs::write(&path, bytes).is_ok() {
+        Some(path.display().to_string())
+    } else {
+        None
+    }
+}
+
 fn decode_jwt_payload(token: &str) -> Option<serde_json::Value> {
     let payload_b64 = token.split('.').nth(1)?;
 
@@ -612,6 +648,8 @@ fn parse_sse_stream(
 
         let mut active: HashMap<u64, ActiveBlock> = HashMap::new();
         let mut parser = super::sse::SseParser::new();
+        let mut raw_capture: Vec<u8> = Vec::new();
+        const MAX_CAPTURE_BYTES: usize = 128 * 1024;
 
         use futures::TryStreamExt;
         let mut byte_stream = response.bytes_stream();
@@ -621,6 +659,11 @@ fn parse_sse_stream(
         loop {
             match byte_stream.try_next().await {
                 Ok(Some(chunk)) => {
+                    if raw_capture.len() < MAX_CAPTURE_BYTES {
+                        let remain = MAX_CAPTURE_BYTES - raw_capture.len();
+                        let take = remain.min(chunk.len());
+                        raw_capture.extend_from_slice(&chunk[..take]);
+                    }
                     let chunk_len = chunk.len();
                     let chunk_preview = super::sse::preview_bytes(&chunk, 240);
                     tracing::trace!(
@@ -670,12 +713,27 @@ fn parse_sse_stream(
                 }
                 Ok(None) => break,
                 Err(e) => {
+                    let capture_path = write_decode_snapshot(
+                        &model_id.to_string(),
+                        &provider_name.to_string(),
+                        &raw_capture,
+                    );
+                    tracing::error!(
+                        model = %model_id,
+                        provider = %provider_name,
+                        api = ?api,
+                        error = %e,
+                        captured_bytes = raw_capture.len(),
+                        capture_path = capture_path.as_deref().unwrap_or("<none>"),
+                        capture_preview = %super::sse::preview_bytes(&raw_capture, 400),
+                        "openai responses body stream decode error"
+                    );
                     finish_all_blocks(&mut active, &mut output);
                     output.stop_reason = StopReason::Error;
                     output.error_message = Some(e.to_string());
                     yield StreamEvent::Error {
-                        reason: StopReason::Error,
-                        message: output,
+                        reason: output.stop_reason,
+                        message: output.clone(),
                     };
                     return;
                 }
