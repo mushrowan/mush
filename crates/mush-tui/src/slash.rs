@@ -558,9 +558,11 @@ pub async fn handle_compact(
     }
 
     app.status = Some("compacting...".into());
+    let tokens_before = compact::estimate_tokens(conversation);
     let result =
         compact::llm_compact(conversation.clone(), registry, model, options, Some(10)).await;
 
+    let tokens_after = compact::estimate_tokens(&result.messages);
     *conversation = result.messages;
     *session_tree = SessionTree::new();
     for msg in conversation.iter() {
@@ -568,7 +570,7 @@ pub async fn handle_compact(
     }
     rebuild_display(app, conversation);
     app.status = Some(format!(
-        "compacted: {before} → {} messages ({} summarised)",
+        "compacted: {before} → {} messages, ~{tokens_before} → ~{tokens_after} tokens ({} summarised)",
         conversation.len(),
         result.summarised_count,
     ));

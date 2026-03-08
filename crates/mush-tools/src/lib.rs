@@ -5,6 +5,7 @@ pub mod find;
 pub mod glob;
 pub mod grep;
 pub mod ls;
+pub mod notify_user;
 pub mod read;
 pub mod util;
 pub mod web_fetch;
@@ -46,6 +47,7 @@ pub fn builtin_tools_with_sink(
             Box::new(ls::LsTool::new(cwd)),
             Box::new(web_search::WebSearchTool::new()),
             Box::new(web_fetch::WebFetchTool::new()),
+            Box::new(notify_user::NotifyUserTool::new()),
         ]
     };
 
