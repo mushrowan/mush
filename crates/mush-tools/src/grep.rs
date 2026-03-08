@@ -76,6 +76,10 @@ impl AgentTool for GrepTool {
                 "max_results": {
                     "description": "max files to show in count/files output (default: all)",
                     "type": "integer"
+                },
+                "top_n": {
+                    "description": "return only the top N files by match count (for count/json output modes). applied after sorting by count desc",
+                    "type": "integer"
                 }
             },
             "required": ["pattern"]
@@ -100,6 +104,7 @@ impl AgentTool for GrepTool {
             let context_after = args["context_after"].as_u64().unwrap_or(0);
             let output_mode = args["output"].as_str().unwrap_or("lines");
             let max_results = args["max_results"].as_u64().map(|n| n as usize);
+            let top_n = args["top_n"].as_u64().map(|n| n as usize);
 
             if pattern.is_empty() {
                 return ToolResult::error("pattern is required");
@@ -122,6 +127,7 @@ impl AgentTool for GrepTool {
                 context_after,
                 output_mode,
                 max_results,
+                top_n,
             )
             .await
         })
@@ -141,6 +147,7 @@ async fn run_rg(
     context_after: u64,
     output_mode: &str,
     max_results: Option<usize>,
+    top_n: Option<usize>,
 ) -> ToolResult {
     // strip newlines from pattern - LLMs sometimes include literal newlines
     // which rg rejects with "literal \n is not allowed"
@@ -242,7 +249,9 @@ async fn run_rg(
             let total_matches: u64 = entries.iter().map(|(_, c)| c).sum();
             let total_files = entries.len();
 
-            if let Some(n) = max_results {
+            // top_n takes priority over max_results for count/json modes
+            let effective_limit = top_n.or(max_results);
+            if let Some(n) = effective_limit {
                 entries.truncate(n);
             }
 
@@ -258,7 +267,7 @@ async fn run_rg(
                 });
                 ToolResult::text(json.to_string())
             } else {
-                let showing = if max_results.is_some() && entries.len() < total_files {
+                let showing = if effective_limit.is_some() && entries.len() < total_files {
                     format!(" (showing top {})", entries.len())
                 } else {
                     String::new()
@@ -509,6 +518,55 @@ mod tests {
         assert!(text.contains("6 matches across 3 files (showing top 2)"));
         // should have the top 2 by count, not all 3
         assert!(text.lines().filter(|l| l.contains(": ")).count() == 2);
+    }
+
+    #[tokio::test]
+    async fn grep_count_with_top_n() {
+        let dir = temp_dir();
+        fs::write(dir.path().join("a.txt"), "x\nx\nx\nx\nx").unwrap();
+        fs::write(dir.path().join("b.txt"), "x\nx\nx").unwrap();
+        fs::write(dir.path().join("c.txt"), "x\nx").unwrap();
+        fs::write(dir.path().join("d.txt"), "x").unwrap();
+
+        let tool = GrepTool::new(dir.path().to_path_buf());
+        let result = tool
+            .execute(serde_json::json!({
+                "pattern": "x",
+                "path": dir.path().to_str().unwrap(),
+                "output": "count",
+                "top_n": 2
+            }))
+            .await;
+        let text = extract_text(&result);
+        // 5+3+2+1 = 11 matches, 4 files, showing top 2
+        assert!(text.contains("across 4 files"), "got: {text}");
+        assert!(text.contains("showing top 2"), "got: {text}");
+        assert_eq!(text.lines().filter(|l| l.contains(": ")).count(), 2);
+    }
+
+    #[tokio::test]
+    async fn grep_json_with_top_n() {
+        let dir = temp_dir();
+        fs::write(dir.path().join("a.txt"), "y\ny\ny").unwrap();
+        fs::write(dir.path().join("b.txt"), "y\ny").unwrap();
+        fs::write(dir.path().join("c.txt"), "y").unwrap();
+
+        let tool = GrepTool::new(dir.path().to_path_buf());
+        let result = tool
+            .execute(serde_json::json!({
+                "pattern": "y",
+                "path": dir.path().to_str().unwrap(),
+                "output": "json",
+                "top_n": 1
+            }))
+            .await;
+        let text = extract_text(&result);
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["total_matches"], 6);
+        assert_eq!(json["total_files"], 3);
+        let files = json["files"].as_array().unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0]["count"], 3);
     }
 
     #[tokio::test]
