@@ -570,4 +570,131 @@ mod tests {
         assert_eq!(result.messages.len(), 6); // 1 summary + 5 kept
         assert!(result.summary.contains("Summary of earlier conversation"));
     }
+
+    #[test]
+    fn recompaction_triggers_after_compacted_conversation_grows() {
+        // context window sized so that kept messages fit comfortably,
+        // but a full conversation exceeds 75%
+        let context_window = 1000;
+        let keep = 4; // keep fewer messages to make post-compaction smaller
+
+        // build enough messages to exceed 75% threshold (750 tokens)
+        let mut msgs: Vec<Message> = (0..20)
+            .flat_map(|i| {
+                vec![
+                    user_msg(&format!("question {i}: here is a detailed question with enough text to accumulate significant token count")),
+                    assistant_msg(&format!("answer {i}: here is a correspondingly detailed response with enough text to push the total")),
+                ]
+            })
+            .collect();
+
+        assert!(
+            needs_compaction(&msgs, context_window),
+            "should need compaction: {} tokens, threshold {}",
+            estimate_tokens(&msgs),
+            context_window * 3 / 4,
+        );
+
+        // compact with a short summary
+        let result = compact_with_summary(msgs, "brief summary", Some(keep));
+        msgs = result.messages;
+
+        // right after compaction, shouldn't need it again
+        // (summary + few kept messages should be well under threshold)
+        assert!(
+            !needs_compaction(&msgs, context_window),
+            "shouldn't need compaction right after: {} tokens in {} msgs, threshold {}",
+            estimate_tokens(&msgs),
+            msgs.len(),
+            context_window * 3 / 4,
+        );
+
+        // add more messages until we exceed threshold again
+        for i in 0..20 {
+            msgs.push(user_msg(&format!(
+                "follow-up {i}: another detailed question to push the conversation back over the threshold"
+            )));
+            msgs.push(assistant_msg(&format!(
+                "follow-up answer {i}: another detailed response that inflates the total context usage"
+            )));
+        }
+
+        assert!(
+            needs_compaction(&msgs, context_window),
+            "should need re-compaction: {} tokens in {} msgs, threshold {}",
+            estimate_tokens(&msgs),
+            msgs.len(),
+            context_window * 3 / 4,
+        );
+
+        // compact again
+        let result2 = compact_with_summary(msgs, "updated summary including follow-ups", Some(keep));
+        assert!(
+            result2.summarised_count > 0,
+            "should have summarised some messages"
+        );
+        assert!(result2.summary.contains("updated summary"));
+    }
+
+    #[test]
+    fn compaction_summary_replaces_prior_summary() {
+        // verify that re-compaction replaces the old summary, not stacks them
+        let keep = 4;
+
+        let msgs: Vec<Message> = (0..20)
+            .flat_map(|i| {
+                vec![
+                    user_msg(&format!("msg {i} padding padding padding padding padding")),
+                    assistant_msg(&format!("reply {i} padding padding padding padding padding")),
+                ]
+            })
+            .collect();
+
+        // first compaction
+        let r1 = compact_with_summary(msgs, "first summary", Some(keep));
+        let r1_first = match &r1.messages[0] {
+            Message::User(u) => match &u.content {
+                mush_ai::types::UserContent::Text(t) => t.as_str(),
+                _ => panic!("expected text content"),
+            },
+            _ => panic!("expected user message"),
+        };
+        assert!(
+            r1_first.contains("first summary"),
+            "first compaction should contain summary: {r1_first}"
+        );
+
+        // add more messages
+        let mut msgs2 = r1.messages;
+        for i in 0..20 {
+            msgs2.push(user_msg(&format!("more {i} padding padding padding padding padding")));
+            msgs2.push(assistant_msg(&format!("more reply {i} padding padding padding padding")));
+        }
+
+        // second compaction
+        let r2 = compact_with_summary(msgs2, "second summary covering everything", Some(keep));
+
+        // should only have one summary message at the start
+        let first_text = match &r2.messages[0] {
+            Message::User(u) => match &u.content {
+                mush_ai::types::UserContent::Text(t) => Some(t.as_str()),
+                mush_ai::types::UserContent::Parts(parts) => parts.iter().find_map(|p| {
+                    if let mush_ai::types::UserContentPart::Text(t) = p {
+                        Some(t.text.as_str())
+                    } else {
+                        None
+                    }
+                }),
+            },
+            _ => None,
+        };
+        assert!(
+            first_text.is_some_and(|t| t.contains("second summary")),
+            "should have second summary, got: {first_text:?}"
+        );
+        assert!(
+            !first_text.is_some_and(|t| t.contains("first summary")),
+            "should not contain first summary anymore"
+        );
+    }
 }
