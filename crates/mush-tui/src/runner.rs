@@ -1008,6 +1008,47 @@ pub async fn run_tui(
                                                     cleanup_pane_isolation(&cwd, &isolation).await;
                                                     pane_mgr.close_focused();
                                                 }
+                                            AppEvent::EditSteering => {
+                                                let fid = pane_mgr.focused().id;
+                                                let app = &mut pane_mgr.focused_mut().app;
+
+                                                // pop last queued display message
+                                                if let Some(queued_text) = app.pop_last_queued_message() {
+                                                    // if input has text, push it back as queued
+                                                    let current_input = app.take_input();
+                                                    if !current_input.trim().is_empty() {
+                                                        app.push_queued_message(&current_input);
+                                                        // also add to steering_queue
+                                                        if let Some(meta) = stream_metas.get(&fid) {
+                                                            meta.steering_queue.lock().await.push(
+                                                                Message::User(UserMessage {
+                                                                    content: UserContent::Text(current_input),
+                                                                    timestamp_ms: Timestamp::now(),
+                                                                }),
+                                                            );
+                                                        }
+                                                    }
+                                                    // put queued text into input
+                                                    app.input.clone_from(&queued_text);
+                                                    app.cursor = app.input.len();
+                                                    app.ensure_cursor_visible();
+                                                    // remove from steering_queue
+                                                    if let Some(meta) = stream_metas.get(&fid) {
+                                                        let mut q = meta.steering_queue.lock().await;
+                                                        if let Some(pos) = q.iter().rposition(|m| {
+                                                            if let Message::User(um) = m {
+                                                                um.content.text() == queued_text
+                                                            } else {
+                                                                false
+                                                            }
+                                                        }) {
+                                                            q.remove(pos);
+                                                        }
+                                                    }
+                                                } else {
+                                                    app.status = Some("no queued messages to edit".into());
+                                                }
+                                            }
                                             _ => {}
                                         }
                                     }

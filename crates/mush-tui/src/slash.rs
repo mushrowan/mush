@@ -60,6 +60,7 @@ pub fn handle(
             keys.push_str("  ctrl+v         - paste image from clipboard\n");
             keys.push_str("  ctrl+d         - quit (empty input) / delete char\n");
             keys.push_str("  page up/down   - scroll\n");
+            keys.push_str("  alt+k          - edit queued steering message\n");
             keys.push_str("\nmode switches:\n");
             keys.push_str("  ctrl+s         - scroll/copy mode\n");
             keys.push_str("  ctrl+f         - search\n");
