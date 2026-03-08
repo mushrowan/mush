@@ -4,6 +4,12 @@ use mush_agent::tool::{AgentTool, ToolResult};
 
 pub struct NotifyUserTool;
 
+impl Default for NotifyUserTool {
+    fn default() -> Self {
+        Self
+    }
+}
+
 impl NotifyUserTool {
     pub fn new() -> Self {
         Self

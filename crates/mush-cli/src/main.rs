@@ -424,7 +424,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         save_session: if cli.no_session {
             None
         } else {
-            let sid = session_id;
+            let sid = session_id.clone();
             let cwd_s = cwd_str.clone();
             Some(std::sync::Arc::new(move |msgs, tree, model_id| {
                 let store = SessionStore::new(SessionStore::default_dir());
@@ -448,6 +448,18 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
             let buf = log_buffer.clone();
             std::sync::Arc::new(move |n| buf.tail(n))
         }),
+        update_title: if cli.no_session {
+            None
+        } else {
+            let sid = session_id.clone();
+            Some(std::sync::Arc::new(move |title: String| {
+                let store = SessionStore::new(SessionStore::default_dir());
+                if let Ok(mut session) = store.load(&sid) {
+                    session.meta.title = Some(title);
+                    let _ = store.save(&session);
+                }
+            }))
+        },
         isolation_mode: setup.cfg.isolation,
     };
 
