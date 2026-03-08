@@ -1,5 +1,32 @@
 # todo
 
+## newtype audit
+
+### high priority
+- [ ] token count type inconsistency: `needs_compaction()` takes `usize`, `Model.context_window` is `u64`, `auto_compact()` takes `u64`, `estimate_tokens()` returns `usize`
+  - token counts flow as both `u64` (API responses, Model) and `usize` (estimate_tokens, needs_compaction)
+  - implicit `as` casts between them
+  - fix: `TokenCount(u64)` newtype in mush-ai, use consistently everywhere
+- [ ] duplicate compaction threshold logic: `needs_compaction()` uses 75% estimate-based, `auto_compact()` uses 95% usage-based
+  - two independent systems checking different things with different thresholds and different token counting
+  - fix: unify into a single `CompactionPolicy` or at least use the same token type and make the two thresholds explicit/documented
+
+### medium priority
+- [ ] `session_id: Option<String>` in `StreamOptions` and `ExtensionContext` but `SessionId` newtype exists in mush-session
+  - newtype lives in the wrong crate, mush-ai and mush-ext can't use it
+  - fix: move `SessionId` to mush-ai::types (all crates depend on it), use everywhere
+- [ ] `Cost` fields are bare `f64`: `Cost { input: f64, .. }`, `ModelCost { input: f64, .. }`, `TokenStats.total_cost: f64`
+  - easy to mix "cost per million tokens" with "actual cost in dollars"
+  - `$0.0042` display formatting repeated in status bar and slash commands
+  - fix: `Dollars(f64)` newtype with Display, or separate `CostPerMillion(f64)` and `Dollars(f64)`
+- [ ] `context_window: u64` and `max_output_tokens: u64` on Model are interchangeable bare `u64`
+  - easy to pass one where the other is expected
+  - fix: if doing `TokenCount` newtype above, both become `TokenCount` which is fine (same domain), or distinct newtypes if we want compiler-enforced separation
+
+### low priority
+- [ ] `truncate_with_ellipsis` in compact.rs scans string twice (`chars().count()` then re-iterates)
+  - not a newtype issue but could use `char_indices` to do it in one pass
+
 ## in progress (this session)
 - [x] fix: pane layout panic when terminal narrower than MIN_COLUMN_WIDTH (clamp min > max)
 - [x] fix: compaction never re-triggers after initial compact (cache replay never re-checks needs_compaction)
