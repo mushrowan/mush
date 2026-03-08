@@ -27,7 +27,8 @@ impl AgentTool for GrepTool {
     fn description(&self) -> &str {
         "Search file contents using ripgrep (rg). Respects .gitignore. \
          Returns matching lines with file paths and line numbers. \
-         Use this for searching code, config, and text files by content pattern."
+         Use 'count' output to get per-file match counts instead of full lines. \
+         Use 'files' output to get just filenames with matches."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -66,6 +67,15 @@ impl AgentTool for GrepTool {
                 "context_after": {
                     "description": "lines of context to show after each match (default 0)",
                     "type": "integer"
+                },
+                "output": {
+                    "description": "output format: 'lines' (default, full matching lines), 'count' (per-file match counts sorted by count desc), 'files' (just filenames with matches), 'json' (structured per-file counts as JSON array)",
+                    "type": "string",
+                    "enum": ["lines", "count", "files", "json"]
+                },
+                "max_results": {
+                    "description": "max files to show in count/files output (default: all)",
+                    "type": "integer"
                 }
             },
             "required": ["pattern"]
@@ -88,6 +98,8 @@ impl AgentTool for GrepTool {
             let whole_word = args["whole_word"].as_bool().unwrap_or(false);
             let context_before = args["context_before"].as_u64().unwrap_or(0);
             let context_after = args["context_after"].as_u64().unwrap_or(0);
+            let output_mode = args["output"].as_str().unwrap_or("lines");
+            let max_results = args["max_results"].as_u64().map(|n| n as usize);
 
             if pattern.is_empty() {
                 return ToolResult::error("pattern is required");
@@ -108,6 +120,8 @@ impl AgentTool for GrepTool {
                 whole_word,
                 context_before,
                 context_after,
+                output_mode,
+                max_results,
             )
             .await
         })
@@ -125,6 +139,8 @@ async fn run_rg(
     whole_word: bool,
     context_before: u64,
     context_after: u64,
+    output_mode: &str,
+    max_results: Option<usize>,
 ) -> ToolResult {
     // strip newlines from pattern - LLMs sometimes include literal newlines
     // which rg rejects with "literal \n is not allowed"
@@ -138,11 +154,28 @@ async fn run_rg(
     }
 
     let mut cmd = tokio::process::Command::new("rg");
-    cmd.arg("--no-heading")
-        .arg("--line-number")
-        .arg("--color=never")
-        .arg("--with-filename")
-        .arg("--max-count=50");
+
+    match output_mode {
+        "count" | "json" => {
+            // per-file match counts (json uses same rg output, formatted differently)
+            cmd.arg("--count")
+                .arg("--color=never")
+                .arg("--with-filename");
+        }
+        "files" => {
+            // just filenames
+            cmd.arg("--files-with-matches")
+                .arg("--color=never");
+        }
+        _ => {
+            // default: full matching lines
+            cmd.arg("--no-heading")
+                .arg("--line-number")
+                .arg("--color=never")
+                .arg("--with-filename")
+                .arg("--max-count=50");
+        }
+    }
 
     if mode == "literal" {
         cmd.arg("--fixed-strings");
@@ -156,12 +189,15 @@ async fn run_rg(
         cmd.arg("--word-regexp");
     }
 
-    if context_before > 0 {
-        cmd.arg(format!("-B{context_before}"));
-    }
+    // context lines only make sense in default mode
+    if output_mode != "count" && output_mode != "files" {
+        if context_before > 0 {
+            cmd.arg(format!("-B{context_before}"));
+        }
 
-    if context_after > 0 {
-        cmd.arg(format!("-A{context_after}"));
+        if context_after > 0 {
+            cmd.arg(format!("-A{context_after}"));
+        }
     }
 
     if let Some(glob) = include {
@@ -191,7 +227,66 @@ async fn run_rg(
     }
 
     let lines: Vec<&str> = stdout.lines().collect();
-    ToolResult::text(truncate_lines(&lines, "matches"))
+
+    match output_mode {
+        "count" | "json" => {
+            let mut entries: Vec<(&str, u64)> = lines
+                .iter()
+                .filter_map(|line| {
+                    let (path, count) = line.rsplit_once(':')?;
+                    Some((path, count.trim().parse().ok()?))
+                })
+                .collect();
+            entries.sort_by_key(|e| std::cmp::Reverse(e.1));
+
+            let total_matches: u64 = entries.iter().map(|(_, c)| c).sum();
+            let total_files = entries.len();
+
+            if let Some(n) = max_results {
+                entries.truncate(n);
+            }
+
+            if output_mode == "json" {
+                let items: Vec<serde_json::Value> = entries
+                    .iter()
+                    .map(|(path, count)| serde_json::json!({"file": path, "count": count}))
+                    .collect();
+                let json = serde_json::json!({
+                    "total_matches": total_matches,
+                    "total_files": total_files,
+                    "files": items,
+                });
+                ToolResult::text(json.to_string())
+            } else {
+                let showing = if max_results.is_some() && entries.len() < total_files {
+                    format!(" (showing top {})", entries.len())
+                } else {
+                    String::new()
+                };
+                let mut out = format!("{total_matches} matches across {total_files} files{showing}\n");
+                for (path, count) in &entries {
+                    out.push_str(&format!("{path}: {count}\n"));
+                }
+                ToolResult::text(out)
+            }
+        }
+        "files" => {
+            let mut file_lines = lines;
+            let total = file_lines.len();
+            if let Some(n) = max_results {
+                file_lines.truncate(n);
+            }
+            let showing = if file_lines.len() < total {
+                format!(" (showing {}/{})", file_lines.len(), total)
+            } else {
+                String::new()
+            };
+            ToolResult::text(format!("{total} files{showing}\n\n{}", file_lines.join("\n")))
+        }
+        _ => {
+            ToolResult::text(truncate_lines(&lines, "matches"))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -352,6 +447,92 @@ mod tests {
         assert!(result.outcome.is_success());
         let text = extract_text(&result);
         assert!(text.contains("helloworld"));
+    }
+
+    #[tokio::test]
+    async fn grep_count_mode() {
+        let dir = temp_dir();
+        fs::write(dir.path().join("a.txt"), "hello\nhello\nhello").unwrap();
+        fs::write(dir.path().join("b.txt"), "hello\nworld").unwrap();
+
+        let tool = GrepTool::new(dir.path().to_path_buf());
+        let result = tool
+            .execute(serde_json::json!({
+                "pattern": "hello",
+                "path": dir.path().to_str().unwrap(),
+                "output": "count"
+            }))
+            .await;
+        let text = extract_text(&result);
+        // sorted descending by count, with summary header
+        assert!(text.contains("4 matches across 2 files"));
+        assert!(text.contains("a.txt: 3"));
+        assert!(text.contains("b.txt: 1"));
+    }
+
+    #[tokio::test]
+    async fn grep_files_mode() {
+        let dir = temp_dir();
+        fs::write(dir.path().join("match.txt"), "hello world").unwrap();
+        fs::write(dir.path().join("no.txt"), "goodbye").unwrap();
+
+        let tool = GrepTool::new(dir.path().to_path_buf());
+        let result = tool
+            .execute(serde_json::json!({
+                "pattern": "hello",
+                "path": dir.path().to_str().unwrap(),
+                "output": "files"
+            }))
+            .await;
+        let text = extract_text(&result);
+        assert!(text.contains("match.txt"));
+        assert!(!text.contains("no.txt"));
+    }
+
+    #[tokio::test]
+    async fn grep_count_with_max_results() {
+        let dir = temp_dir();
+        fs::write(dir.path().join("a.txt"), "x\nx\nx").unwrap();
+        fs::write(dir.path().join("b.txt"), "x\nx").unwrap();
+        fs::write(dir.path().join("c.txt"), "x").unwrap();
+
+        let tool = GrepTool::new(dir.path().to_path_buf());
+        let result = tool
+            .execute(serde_json::json!({
+                "pattern": "x",
+                "path": dir.path().to_str().unwrap(),
+                "output": "count",
+                "max_results": 2
+            }))
+            .await;
+        let text = extract_text(&result);
+        assert!(text.contains("6 matches across 3 files (showing top 2)"));
+        // should have the top 2 by count, not all 3
+        assert!(text.lines().filter(|l| l.contains(": ")).count() == 2);
+    }
+
+    #[tokio::test]
+    async fn grep_json_mode() {
+        let dir = temp_dir();
+        fs::write(dir.path().join("a.txt"), "hello\nhello").unwrap();
+        fs::write(dir.path().join("b.txt"), "hello").unwrap();
+
+        let tool = GrepTool::new(dir.path().to_path_buf());
+        let result = tool
+            .execute(serde_json::json!({
+                "pattern": "hello",
+                "path": dir.path().to_str().unwrap(),
+                "output": "json"
+            }))
+            .await;
+        let text = extract_text(&result);
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["total_matches"], 3);
+        assert_eq!(json["total_files"], 2);
+        let files = json["files"].as_array().unwrap();
+        assert_eq!(files.len(), 2);
+        // sorted desc by count
+        assert!(files[0]["count"].as_u64().unwrap() >= files[1]["count"].as_u64().unwrap());
     }
 
     #[tokio::test]

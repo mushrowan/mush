@@ -58,8 +58,31 @@ impl ApiProvider for OpenaiCompletionsProvider {
                 .send()
                 .await?;
 
-            if !response.status().is_success() {
-                let status = response.status();
+            let status = response.status();
+            let content_type = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("<missing>")
+                .to_string();
+            let header_names: Vec<_> = response
+                .headers()
+                .keys()
+                .map(reqwest::header::HeaderName::as_str)
+                .collect();
+            tracing::debug!(
+                model = %model.id,
+                %url,
+                %status,
+                content_type,
+                ?header_names,
+                "received openai completions response"
+            );
+            if content_type == "<missing>" {
+                tracing::warn!(model = %model.id, %url, ?header_names, "openai completions response missing content-type header");
+            }
+
+            if !status.is_success() {
                 let text = response.text().await.unwrap_or_default();
                 tracing::error!(%status, body = %text, "openai completions API error");
                 return Err(ProviderError::ApiError {
@@ -132,8 +155,24 @@ fn build_request_body(
         }));
     }
 
-    // conversation messages
-    for msg in messages {
+    // conversation messages (trim old tool results to save context)
+    let boundary = {
+        let mut user_count = 0;
+        let mut b = 0;
+        for (i, msg) in messages.iter().enumerate().rev() {
+            if matches!(msg, Message::User(_)) {
+                user_count += 1;
+                if user_count >= 3 {
+                    b = i;
+                    break;
+                }
+            }
+        }
+        b
+    };
+
+    for (msg_idx, msg) in messages.iter().enumerate() {
+        let is_old_turn = msg_idx < boundary;
         match msg {
             Message::User(user) => {
                 let content = match &user.content {
@@ -207,7 +246,7 @@ fn build_request_body(
                 all_messages.push(msg_obj);
             }
             Message::ToolResult(tr) => {
-                let text = tr
+                let raw_text = tr
                     .content
                     .iter()
                     .filter_map(|p| match p {
@@ -216,6 +255,19 @@ fn build_request_body(
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
+
+                // trim large tool results from older turns
+                let text = if is_old_turn && raw_text.len() > 1500 {
+                    let preview_end = raw_text.floor_char_boundary(750);
+                    let tail_start = raw_text.ceil_char_boundary(raw_text.len().saturating_sub(375));
+                    let trimmed = raw_text.len() - preview_end - (raw_text.len() - tail_start);
+                    format!(
+                        "{}\n\n[... {} chars trimmed from old tool result ...]\n\n{}",
+                        &raw_text[..preview_end], trimmed, &raw_text[tail_start..]
+                    )
+                } else {
+                    raw_text
+                };
 
                 all_messages.push(serde_json::json!({
                     "role": "tool",
@@ -359,9 +411,9 @@ fn parse_sse_stream(
     let event_stream = async_stream::stream! {
         let mut output = AssistantMessage {
             content: vec![],
-            model: model_id,
-            provider: provider_name,
-            api,
+            model: model_id.clone(),
+            provider: provider_name.clone(),
+            api: api.clone(),
             usage: Usage::default(),
             stop_reason: StopReason::Stop,
             error_message: None,
@@ -379,7 +431,25 @@ fn parse_sse_stream(
         loop {
             match byte_stream.try_next().await {
                 Ok(Some(chunk)) => {
+                    let chunk_len = chunk.len();
+                    let chunk_preview = super::sse::preview_bytes(&chunk, 240);
+                    tracing::trace!(
+                        model = %model_id,
+                        provider = %provider_name,
+                        api = ?api,
+                        chunk_len,
+                        chunk_preview = %chunk_preview,
+                        "openai completions raw stream chunk"
+                    );
                     for raw in parser.push(&chunk) {
+                        tracing::trace!(
+                            model = %model_id,
+                            provider = %provider_name,
+                            api = ?api,
+                            event_name = raw.event.as_deref().unwrap_or("message"),
+                            data_preview = %super::sse::preview_text(raw.data.trim(), 240),
+                            "openai completions sse event"
+                        );
                         if raw.data.trim() == "[DONE]" {
                             continue;
                         }

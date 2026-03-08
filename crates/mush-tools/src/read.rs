@@ -150,14 +150,26 @@ fn read_file(path: &Path, offset: Option<usize>, limit: Option<usize>, json_outp
 
     if json_output {
         let end_line = start + lines_written;
-        let json = serde_json::json!({
+        let meta = std::fs::metadata(path);
+        let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+        let modified = meta
+            .as_ref()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
+        let mut json = serde_json::json!({
             "path": path.display().to_string(),
             "total_lines": total_lines,
             "start_line": start + 1,
             "end_line": end_line,
             "truncated": truncated,
+            "size_bytes": size,
             "content": result,
         });
+        if let Some(mtime) = modified {
+            json["modified_epoch"] = serde_json::json!(mtime);
+        }
         ToolResult::text(json.to_string())
     } else {
         ToolResult::text(result)

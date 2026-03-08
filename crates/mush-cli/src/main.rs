@@ -106,6 +106,10 @@ async fn main() -> Result<()> {
     let cfg = config::load_config();
     let (_log_guard, log_buffer) = logging::init_logging(cfg.log_filter.as_deref());
     tracing::info!("mush starting");
+
+    // clean up old tool output files
+    mush_agent::truncation::cleanup();
+
     let cli = Cli::parse();
 
     // read from stdin if piped

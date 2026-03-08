@@ -13,6 +13,30 @@ pub struct SseRawEvent {
     pub data: String,
 }
 
+
+#[must_use]
+pub fn preview_bytes(bytes: &[u8], max_chars: usize) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    preview_text(&text, max_chars)
+}
+
+#[must_use]
+pub fn preview_text(text: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    for ch in text.chars().take(max_chars) {
+        match ch {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(ch),
+        }
+    }
+    if text.chars().count() > max_chars {
+        out.push_str("...");
+    }
+    out
+}
+
 /// incrementally parses SSE from byte chunks
 pub struct SseParser {
     chunk_buf: Vec<u8>,

@@ -148,8 +148,31 @@ impl ApiProvider for AnthropicProvider {
                 .send()
                 .await?;
 
-            if !response.status().is_success() {
-                let status = response.status();
+            let status = response.status();
+            let content_type = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("<missing>")
+                .to_string();
+            let header_names: Vec<_> = response
+                .headers()
+                .keys()
+                .map(reqwest::header::HeaderName::as_str)
+                .collect();
+            tracing::debug!(
+                model = %model.id,
+                %url,
+                %status,
+                content_type,
+                ?header_names,
+                "received anthropic response"
+            );
+            if content_type == "<missing>" {
+                tracing::warn!(model = %model.id, %url, ?header_names, "anthropic response missing content-type header");
+            }
+
+            if !status.is_success() {
                 let text = response.text().await.unwrap_or_default();
                 tracing::error!(%status, body = %text, "anthropic API error");
                 return Err(ProviderError::ApiError {
@@ -389,11 +412,45 @@ fn convert_messages(
     fixed
 }
 
+/// max chars for tool results in older turns
+const TRIM_TOOL_OUTPUT_CHARS: usize = 1500;
+/// number of recent user messages whose tool results are kept at full size
+const RECENT_TURNS_TO_KEEP: usize = 3;
+
+fn recent_boundary(messages: &[Message]) -> usize {
+    let mut user_count = 0;
+    for (i, msg) in messages.iter().enumerate().rev() {
+        if matches!(msg, Message::User(_)) {
+            user_count += 1;
+            if user_count >= RECENT_TURNS_TO_KEEP {
+                return i;
+            }
+        }
+    }
+    0
+}
+
+fn trim_old_tool_output(text: &str) -> String {
+    if text.len() <= TRIM_TOOL_OUTPUT_CHARS {
+        return text.to_string();
+    }
+    let preview_end = text.floor_char_boundary(TRIM_TOOL_OUTPUT_CHARS / 2);
+    let tail_start = text.len().saturating_sub(TRIM_TOOL_OUTPUT_CHARS / 4);
+    let tail_start = text.ceil_char_boundary(tail_start);
+    let trimmed = text.len() - preview_end - (text.len() - tail_start);
+    format!(
+        "{}\n\n[... {} chars trimmed from old tool result ...]\n\n{}",
+        &text[..preview_end], trimmed, &text[tail_start..]
+    )
+}
+
 /// raw conversion without orphan fixing
 fn convert_messages_raw(messages: &[Message], is_oauth: bool) -> Vec<RequestMessage> {
     let mut result = Vec::new();
+    let boundary = recent_boundary(messages);
 
-    for msg in messages {
+    for (msg_idx, msg) in messages.iter().enumerate() {
+        let is_old_turn = msg_idx < boundary;
         match msg {
             Message::User(user) => {
                 let content = match &user.content {
@@ -493,10 +550,17 @@ fn convert_messages_raw(messages: &[Message], is_oauth: bool) -> Vec<RequestMess
                     .content
                     .iter()
                     .map(|part| match part {
-                        ToolResultContentPart::Text(t) => serde_json::json!({
-                            "type": "text",
-                            "text": t.text,
-                        }),
+                        ToolResultContentPart::Text(t) => {
+                            let text = if is_old_turn {
+                                trim_old_tool_output(&t.text)
+                            } else {
+                                t.text.clone()
+                            };
+                            serde_json::json!({
+                                "type": "text",
+                                "text": text,
+                            })
+                        }
                         ToolResultContentPart::Image(img) => serde_json::json!({
                             "type": "image",
                             "source": {
@@ -777,9 +841,9 @@ fn parse_sse_stream(
     let event_stream = async_stream::stream! {
         let mut output = AssistantMessage {
             content: vec![],
-            model: model_id,
-            provider: provider_name,
-            api,
+            model: model_id.clone(),
+            provider: provider_name.clone(),
+            api: api.clone(),
             usage: Usage::default(),
             stop_reason: StopReason::Stop,
             error_message: None,
@@ -795,7 +859,25 @@ fn parse_sse_stream(
         loop {
             match byte_stream.try_next().await {
                 Ok(Some(chunk)) => {
+                    let chunk_len = chunk.len();
+                    let chunk_preview = super::sse::preview_bytes(&chunk, 240);
+                    tracing::trace!(
+                        model = %model_id,
+                        provider = %provider_name,
+                        api = ?api,
+                        chunk_len,
+                        chunk_preview = %chunk_preview,
+                        "anthropic raw stream chunk"
+                    );
                     for raw in parser.push(&chunk) {
+                        tracing::trace!(
+                            model = %model_id,
+                            provider = %provider_name,
+                            api = ?api,
+                            event_name = raw.event.as_deref().unwrap_or("message"),
+                            data_preview = %super::sse::preview_text(raw.data.trim(), 240),
+                            "anthropic sse event"
+                        );
                         match serde_json::from_str::<SseEvent>(&raw.data) {
                             Ok(event) => {
                                 for stream_event in process_sse_event(event, &mut output, &mut blocks, is_oauth, &tools) {

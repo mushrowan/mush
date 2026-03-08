@@ -266,7 +266,15 @@ pub fn agent_loop(
                         }
                         StreamEvent::Error { message, .. } => {
                             let error_msg = message.error_message.clone().unwrap_or_else(|| "unknown error".into());
-                            tracing::error!(error = %error_msg, "LLM stream error");
+                            tracing::error!(
+                                error = %error_msg,
+                                model = %config.model.id,
+                                provider = %config.model.provider,
+                                api = ?config.model.api,
+                                partial_content_parts = message.content.len(),
+                                partial_stop_reason = ?message.stop_reason,
+                                "LLM stream error"
+                            );
                             yield AgentEvent::Error { error: error_msg };
                             yield AgentEvent::AgentEnd;
                             return;
@@ -440,7 +448,9 @@ async fn execute_tool(
             if result.outcome.is_error() {
                 tracing::warn!(tool = %tool_call.name, "tool returned error");
             }
-            result
+            // apply truncation with file spillover (saves full output to disk
+            // so the model can grep/read it instead of re-running the command)
+            crate::truncation::truncate_tool_output(result)
         }
         None => {
             tracing::error!(tool = %tool_call.name, "tool not found");
