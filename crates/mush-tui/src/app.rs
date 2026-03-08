@@ -78,6 +78,8 @@ pub enum AppEvent {
     FocusPaneByIndex(usize),
     /// resize focused pane (positive = grow, negative = shrink)
     ResizePane(i16),
+    /// alt+k: edit a queued steering message
+    EditSteering,
 }
 
 /// controls how thinking text is displayed
@@ -545,6 +547,13 @@ impl App {
             queued: true,
         });
         self.scroll_offset = 0;
+    }
+
+    /// remove the last queued steering message from display, return its text
+    pub fn pop_last_queued_message(&mut self) -> Option<String> {
+        let idx = self.messages.iter().rposition(|m| m.queued)?;
+        let msg = self.messages.remove(idx);
+        Some(msg.content)
     }
 
     /// start streaming a new assistant message
@@ -1878,5 +1887,35 @@ mod tests {
         let remaining = app.cache_remaining_secs().unwrap();
         // just refreshed, should be very close to 300
         assert!((298..=300).contains(&remaining));
+    }
+
+    #[test]
+    fn pop_last_queued_message() {
+        let mut app = App::new("test".into(), 200_000);
+        // no queued messages returns none
+        assert!(app.pop_last_queued_message().is_none());
+
+        // add some queued messages
+        app.push_queued_message("first steering");
+        app.push_queued_message("second steering");
+
+        // pops the last one
+        assert_eq!(app.pop_last_queued_message().unwrap(), "second steering");
+        assert_eq!(app.pop_last_queued_message().unwrap(), "first steering");
+        assert!(app.pop_last_queued_message().is_none());
+    }
+
+    #[test]
+    fn pop_queued_skips_non_queued() {
+        let mut app = App::new("test".into(), 200_000);
+        app.push_user_message("normal message");
+        app.push_queued_message("steering msg");
+
+        // only pops the queued one
+        assert_eq!(app.pop_last_queued_message().unwrap(), "steering msg");
+        assert!(app.pop_last_queued_message().is_none());
+        // normal message still there
+        assert_eq!(app.messages.len(), 1);
+        assert!(!app.messages[0].queued);
     }
 }

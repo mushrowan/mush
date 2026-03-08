@@ -154,6 +154,15 @@ fn handle_streaming_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         }
         return Some(AppEvent::UserSubmit { text });
     }
+
+    // alt+k: edit queued steering messages
+    if matches!(
+        (key.modifiers, key.code),
+        (KeyModifiers::ALT, KeyCode::Char('k'))
+    ) {
+        return Some(AppEvent::EditSteering);
+    }
+
     handle_editing(app, key)
 }
 

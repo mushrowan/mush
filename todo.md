@@ -4,10 +4,19 @@
 - [ ] mush-ext: dynamic tool registration from extensions
 - [ ] mush-ext: provider registration from extensions
 - [x] grep tool: strip newlines from pattern before passing to rg (currently blows up with "literal \\n is not allowed")
+- [x] edit tool: near-miss diagnostics (whitespace diff, similar line suggestions, match locations)
+- [x] edit tool: trailing newline normalisation (try with/without trailing \n)
+- [x] read tool: report empty files explicitly instead of blank string
+- [x] web_fetch: char boundary safe truncation (floor_char_boundary)
+- [x] tui: fix abort blocking new message submissions
+- [x] tui: notification sounds via pw-play + freedesktop theme
+- [x] tui: show token counts in compact status message
+- [x] tools: add notify_user tool for desktop notifications
+- [x] session: LLM-based title generation after first turn
 - [x] edit tool: clarify in tool description that oldText must be unique (code already errors on multi-match)
 - [x] edit tool: diff preview should strip common leading whitespace (dedent to leftmost line) for readability
 - [ ] add more providers: google (native), google vertex, amazon bedrock, azure openai, xai (grok), mistral, groq, deepinfra, cerebras, cohere, together ai, perplexity, github copilot, gitlab, cloudflare workers ai
-- [ ] steering message editing: alt+k to edit previously-sent but unrealised steering messages. first alt+k edits the most recent queued steering message, subsequent alt+k cycles to older ones. while a message is being edited, remove it from the steering queue until it's re-submitted. lets you fix typos or refine instructions before the agent sees them
+- [x] steering message editing: alt+k to edit queued steering messages
 
 ## future ideas
 - [ ] neovim plugin
