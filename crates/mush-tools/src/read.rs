@@ -104,6 +104,10 @@ fn read_file(path: &Path, offset: Option<usize>, limit: Option<usize>) -> ToolRe
     let lines: Vec<&str> = content.lines().collect();
     let total_lines = lines.len();
 
+    if total_lines == 0 {
+        return ToolResult::text(format!("(empty file, {} bytes)", content.len()));
+    }
+
     // apply offset (1-indexed)
     let start = offset.unwrap_or(1).saturating_sub(1).min(total_lines);
     let max_lines = limit.unwrap_or(MAX_LINES).min(MAX_LINES);
@@ -244,5 +248,16 @@ mod tests {
         assert!(is_image(Path::new("photo.webp")));
         assert!(!is_image(Path::new("code.rs")));
         assert!(!is_image(Path::new("data.json")));
+    }
+
+    #[test]
+    fn read_empty_file() {
+        let dir = temp_dir();
+        let file = dir.path().join("empty.txt");
+        fs::write(&file, "").unwrap();
+
+        let result = read_file(&file, None, None);
+        let text = extract_text(&result);
+        assert!(text.contains("empty file"));
     }
 }
