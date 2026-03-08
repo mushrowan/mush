@@ -1,3 +1,4 @@
+pub mod apply_patch;
 pub mod bash;
 pub mod batch;
 pub mod edit;
@@ -44,10 +45,11 @@ pub fn builtin_tools_with_sink(
             Box::new(grep::GrepTool::new(cwd.clone())),
             Box::new(find::FindTool::new(cwd.clone())),
             Box::new(glob::GlobTool::new(cwd.clone())),
-            Box::new(ls::LsTool::new(cwd)),
+            Box::new(ls::LsTool::new(cwd.clone())),
             Box::new(web_search::WebSearchTool::new()),
             Box::new(web_fetch::WebFetchTool::new()),
             Box::new(notify_user::NotifyUserTool::new()),
+            Box::new(apply_patch::ApplyPatchTool::new(cwd)),
         ]
     };
 
