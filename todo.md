@@ -11,10 +11,10 @@
   - consider: normalise trailing whitespace in match candidates, like we already do for CRLF/LF
 
 ## needs verification
-- [ ] compaction: test that re-compaction actually fires when compacted+new messages exceed threshold
+- [x] compaction: test that re-compaction actually fires when compacted+new messages exceed threshold
   - the auto_compact function uses both usage-based and estimate-based checks
   - need to verify context_tokens_shared is being read correctly after the cache replay change
-- [ ] retry: test that retries actually work in practice (hard to unit test network failures)
+- [x] retry: test that retries actually work in practice (hard to unit test network failures)
   - currently retries up to 3 times with 1s/2s/4s backoff
   - only retries reqwest errors and 429/5xx status codes
 - [ ] status bar: verify "compacted x → y" only shows on actual new compaction, not cache replays

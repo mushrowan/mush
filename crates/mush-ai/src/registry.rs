@@ -47,6 +47,24 @@ pub enum ProviderError {
     Other(String),
 }
 
+impl ProviderError {
+    /// whether this error is transient and worth retrying
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::Request(e) => {
+                // network errors, timeouts, connection resets
+                e.is_timeout() || e.is_connect() || e.is_request()
+            }
+            Self::ApiError { status, .. } => {
+                // rate limit, server errors, overloaded
+                status.as_u16() == 429
+                    || status.as_u16() >= 500
+            }
+            _ => false,
+        }
+    }
+}
+
 /// context passed to providers for each LLM call
 pub struct LlmContext {
     pub system_prompt: Option<String>,
@@ -140,5 +158,93 @@ mod tests {
         };
         let err = registry.stream(&model, &ctx, &StreamOptions::default());
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn retryable_429_rate_limit() {
+        let err = ProviderError::ApiError {
+            api: "test",
+            status: reqwest::StatusCode::TOO_MANY_REQUESTS,
+            body: "rate limited".into(),
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn retryable_500_server_error() {
+        let err = ProviderError::ApiError {
+            api: "test",
+            status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            body: "internal error".into(),
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn retryable_502_bad_gateway() {
+        let err = ProviderError::ApiError {
+            api: "test",
+            status: reqwest::StatusCode::BAD_GATEWAY,
+            body: "bad gateway".into(),
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn retryable_503_service_unavailable() {
+        let err = ProviderError::ApiError {
+            api: "test",
+            status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            body: "unavailable".into(),
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn not_retryable_400_bad_request() {
+        let err = ProviderError::ApiError {
+            api: "test",
+            status: reqwest::StatusCode::BAD_REQUEST,
+            body: "bad request".into(),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn not_retryable_401_unauthorized() {
+        let err = ProviderError::ApiError {
+            api: "test",
+            status: reqwest::StatusCode::UNAUTHORIZED,
+            body: "unauthorized".into(),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn not_retryable_403_forbidden() {
+        let err = ProviderError::ApiError {
+            api: "test",
+            status: reqwest::StatusCode::FORBIDDEN,
+            body: "forbidden".into(),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn not_retryable_no_provider() {
+        let err = ProviderError::NoProvider(Api::AnthropicMessages);
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn not_retryable_missing_key() {
+        let err = ProviderError::MissingApiKey(crate::types::Provider::Anthropic);
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn not_retryable_other() {
+        let err = ProviderError::Other("some error".into());
+        assert!(!err.is_retryable());
     }
 }
