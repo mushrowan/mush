@@ -50,6 +50,8 @@ pub struct Pane {
     pub inbox: Option<tokio::sync::mpsc::UnboundedReceiver<crate::messaging::InterPaneMessage>>,
     /// user-facing label (auto-generated or manual)
     pub label: Option<String>,
+    /// whether an LLM title has already been generated
+    pub title_generated: bool,
     /// layout rect computed each frame by PaneManager
     pub area: Rect,
     /// per-pane tools when cwd differs (worktree isolation)
@@ -73,6 +75,7 @@ impl Pane {
             steering_queue: Arc::new(Mutex::new(Vec::new())),
             inbox: None,
             label: None,
+            title_generated: false,
             area: Rect::default(),
             tools: None,
             cwd_override: None,
@@ -97,6 +100,7 @@ impl Pane {
             steering_queue: Arc::new(Mutex::new(Vec::new())),
             inbox: None,
             label: None,
+            title_generated: false,
             area: Rect::default(),
             tools: None,
             cwd_override: None,

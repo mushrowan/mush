@@ -56,6 +56,9 @@ pub type ThinkingPrefsSaver =
 /// callback to persist last selected model id
 pub type LastModelSaver = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
 
+/// callback to update session title
+pub type TitleUpdater = std::sync::Arc<dyn Fn(String) + Send + Sync>;
+
 /// callback to persist session state (messages + tree + model_id)
 pub type SessionSaver = std::sync::Arc<dyn Fn(&[Message], &SessionTree, &str) + Send + Sync>;
 
@@ -85,6 +88,8 @@ pub struct TuiConfig {
     pub save_last_model: Option<LastModelSaver>,
     /// callback to auto-save session after each agent turn
     pub save_session: Option<SessionSaver>,
+    /// callback to update session title (called with LLM-generated title)
+    pub update_title: Option<TitleUpdater>,
     /// prompt for confirmation before executing tools (off by default)
     pub confirm_tools: bool,
     /// automatically compact conversation when approaching context limit (off by default)
@@ -792,6 +797,35 @@ pub async fn run_tui(
 
                             // play completion sound
                             crate::notify::play(crate::notify::Sound::Complete);
+
+                            // generate LLM title after first turn (with timeout)
+                            if let Some(pane) = pane_mgr.pane(pane_id)
+                                && !pane.title_generated
+                                && pane.conversation.len() >= 2
+                                && let Some(ref updater) = tui_config.update_title
+                            {
+                                let msgs = pane.conversation.clone();
+                                let model = tui_config.model.clone();
+                                let opts = StreamOptions {
+                                    api_key: tui_config.options.api_key.clone(),
+                                    ..Default::default()
+                                };
+                                let updater = updater.clone();
+                                // 10s timeout so it doesn't block the UI
+                                if let Ok(Some(title)) = tokio::time::timeout(
+                                    std::time::Duration::from_secs(10),
+                                    mush_session::title::generate_title(
+                                        &msgs, registry, &model, &opts,
+                                    ),
+                                )
+                                .await
+                                {
+                                    updater(title);
+                                }
+                                if let Some(pane) = pane_mgr.pane_mut(pane_id) {
+                                    pane.title_generated = true;
+                                }
+                            }
 
                             // notify when agent is done and cache is warm
                             if tui_config.cache_timer
