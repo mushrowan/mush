@@ -31,7 +31,8 @@ impl AgentTool for ReadTool {
     fn description(&self) -> &str {
         "Read the contents of a file. Supports text files and images (jpg, png, gif, webp). \
          For text files, output is truncated to 2000 lines or 50KB (whichever is hit first). \
-         Use offset/limit for large files."
+         Use offset/limit for large files. Use start_line/end_line for exact spans, or \
+         around_line to centre on a specific line with configurable context."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -49,6 +50,26 @@ impl AgentTool for ReadTool {
                 "limit": {
                     "type": "integer",
                     "description": "maximum number of lines to read"
+                },
+                "start_line": {
+                    "type": "integer",
+                    "description": "first line to read (1-indexed). use with end_line for exact spans"
+                },
+                "end_line": {
+                    "type": "integer",
+                    "description": "last line to read (1-indexed, inclusive). requires start_line"
+                },
+                "around_line": {
+                    "type": "integer",
+                    "description": "centre the view on this line number (1-indexed). uses context_before/context_after for window size"
+                },
+                "context_before": {
+                    "type": "integer",
+                    "description": "lines of context before around_line (default 20)"
+                },
+                "context_after": {
+                    "type": "integer",
+                    "description": "lines of context after around_line (default 20)"
                 },
                 "output": {
                     "type": "string",
@@ -70,9 +91,39 @@ impl AgentTool for ReadTool {
             };
 
             let path = resolve_path(&self.cwd, path_str);
-            let offset = args["offset"].as_u64().map(|n| n as usize);
-            let limit = args["limit"].as_u64().map(|n| n as usize);
             let json_output = args["output"].as_str() == Some("json");
+
+            let start_line = args["start_line"].as_u64().map(|n| n as usize);
+            let end_line = args["end_line"].as_u64().map(|n| n as usize);
+            let around_line = args["around_line"].as_u64().map(|n| n as usize);
+            let context_before = args["context_before"].as_u64().map(|n| n as usize);
+            let context_after = args["context_after"].as_u64().map(|n| n as usize);
+
+            // resolve span params into offset/limit
+            let (offset, limit) = match (start_line, end_line, around_line) {
+                (_, Some(_), None) if start_line.is_none() => {
+                    return ToolResult::error("end_line requires start_line");
+                }
+                (Some(s), Some(e), _) if e < s => {
+                    return ToolResult::error(format!(
+                        "end_line ({e}) must be >= start_line ({s})"
+                    ));
+                }
+                (Some(s), Some(e), _) => (Some(s), Some(e - s + 1)),
+                (Some(s), None, _) => (Some(s), args["limit"].as_u64().map(|n| n as usize)),
+                (_, _, Some(a)) => {
+                    let before = context_before.unwrap_or(20);
+                    let after = context_after.unwrap_or(20);
+                    let start = a.saturating_sub(before);
+                    let window = before + 1 + after;
+                    (Some(start.max(1)), Some(window))
+                }
+                _ => {
+                    let offset = args["offset"].as_u64().map(|n| n as usize);
+                    let limit = args["limit"].as_u64().map(|n| n as usize);
+                    (offset, limit)
+                }
+            };
 
             tokio::task::spawn_blocking(move || read_file(&path, offset, limit, json_output))
                 .await
@@ -306,6 +357,111 @@ mod tests {
         assert_eq!(json["end_line"], 3);
         assert_eq!(json["truncated"], false);
         assert!(json["content"].as_str().unwrap().contains("line 1"));
+    }
+
+    #[tokio::test]
+    async fn read_start_end_window() {
+        let dir = temp_dir();
+        let file = dir.path().join("test.txt");
+        let content: String = (1..=20).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        fs::write(&file, &content).unwrap();
+
+        let tool = super::ReadTool::new(dir.path().to_path_buf());
+        let result = tool
+            .execute(serde_json::json!({
+                "path": file.to_str().unwrap(),
+                "start_line": 5,
+                "end_line": 8,
+            }))
+            .await;
+        let text = extract_text(&result);
+        assert!(text.contains("line 5"));
+        assert!(text.contains("line 8"));
+        assert!(!text.contains("line 4"));
+        assert!(!text.contains("line 9"));
+    }
+
+    #[tokio::test]
+    async fn read_around_line_window() {
+        let dir = temp_dir();
+        let file = dir.path().join("test.txt");
+        let content: String = (1..=100).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        fs::write(&file, &content).unwrap();
+
+        let tool = super::ReadTool::new(dir.path().to_path_buf());
+        let result = tool
+            .execute(serde_json::json!({
+                "path": file.to_str().unwrap(),
+                "around_line": 50,
+                "context_before": 3,
+                "context_after": 3,
+            }))
+            .await;
+        let text = extract_text(&result);
+        assert!(text.contains("line 47"));
+        assert!(text.contains("line 50"));
+        assert!(text.contains("line 53"));
+        assert!(!text.contains("line 46"));
+        assert!(!text.contains("line 54"));
+    }
+
+    #[tokio::test]
+    async fn read_around_line_default_context() {
+        let dir = temp_dir();
+        let file = dir.path().join("test.txt");
+        let content: String = (1..=100).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        fs::write(&file, &content).unwrap();
+
+        let tool = super::ReadTool::new(dir.path().to_path_buf());
+        let result = tool
+            .execute(serde_json::json!({
+                "path": file.to_str().unwrap(),
+                "around_line": 50,
+            }))
+            .await;
+        let text = extract_text(&result);
+        // default context is 20 before + 20 after = lines 30-70
+        assert!(text.contains("line 30"));
+        assert!(text.contains("line 70"));
+        assert!(!text.contains("line 29"));
+        assert!(!text.contains("line 71"));
+    }
+
+    #[tokio::test]
+    async fn read_end_line_without_start_errors() {
+        let dir = temp_dir();
+        let file = dir.path().join("test.txt");
+        fs::write(&file, "line 1\nline 2").unwrap();
+
+        let tool = super::ReadTool::new(dir.path().to_path_buf());
+        let result = tool
+            .execute(serde_json::json!({
+                "path": file.to_str().unwrap(),
+                "end_line": 5,
+            }))
+            .await;
+        assert!(result.outcome.is_error());
+        let text = extract_text(&result);
+        assert!(text.contains("requires start_line"));
+    }
+
+    #[tokio::test]
+    async fn read_end_before_start_errors() {
+        let dir = temp_dir();
+        let file = dir.path().join("test.txt");
+        fs::write(&file, "line 1\nline 2\nline 3").unwrap();
+
+        let tool = super::ReadTool::new(dir.path().to_path_buf());
+        let result = tool
+            .execute(serde_json::json!({
+                "path": file.to_str().unwrap(),
+                "start_line": 5,
+                "end_line": 2,
+            }))
+            .await;
+        assert!(result.outcome.is_error());
+        let text = extract_text(&result);
+        assert!(text.contains("must be >="));
     }
 
     #[test]

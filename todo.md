@@ -560,3 +560,26 @@ auto-detection: if `.jj/` exists, offer "jj" and "worktree". if `.git/` exists
 
 ## stretch goals
 - [ ] agent-as-tool: wrap pane agents as callable tools for hierarchical delegation
+
+
+## response stitching glitch
+- [ ] investigate occasional output stitching artefacts where adjacent chunks merge without whitespace
+  - observed example: `firstyep, we can fix that` where `first` and `yep` were separate intended tokens
+  - this has happened more than once in normal chat responses, not tied to one specific repo action
+- [ ] capture exact trigger pattern
+  - likely appears after rapid follow-up replies or when two templated response fragments are concatenated
+  - verify whether it correlates with tool-heavy turns vs plain-text turns
+- [ ] add guardrails in assistant response path
+  - add final response normalisation pass to detect token-boundary joins like `...firstyep...`
+  - heuristic: detect lowercase/uppercase and punctuation boundary anomalies between merged fragments
+  - keep heuristic conservative to avoid changing intended code identifiers or user-provided strings
+- [ ] add regression tests
+  - unit test for response joiner ensuring delimiters/newlines are preserved between fragments
+  - fixture-based tests with known bad joins from logs/transcripts
+- [ ] add diagnostics
+  - log fragment boundaries and final assembled response length in debug mode
+  - include marker when normalisation corrected a suspected join artefact
+- [ ] acceptance criteria
+  - no observed merged-word artefacts in 100+ mixed tool/chat turns
+  - zero false-positive corrections in code blocks and inline identifiers
+
