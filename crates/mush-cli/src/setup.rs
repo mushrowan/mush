@@ -79,7 +79,7 @@ impl AppSetup {
 
         let mut options = StreamOptions {
             thinking: thinking_level,
-            max_tokens: args.max_tokens.or(cfg.max_tokens),
+            max_tokens: args.max_tokens.or(cfg.max_tokens).map(TokenCount::new),
             cache_retention: cfg.cache_retention,
             ..Default::default()
         };
@@ -351,15 +351,14 @@ pub fn list_models_short() -> String {
 /// `context_tokens` is the actual API-reported input token count from the last call
 pub async fn auto_compact(
     messages: Vec<Message>,
-    context_tokens: u64,
-    context_window: u64,
+    context_tokens: TokenCount,
+    context_window: TokenCount,
     registry: &ApiRegistry,
     model: &Model,
     options: &StreamOptions,
 ) -> Vec<Message> {
     // 95% of context window, using real token counts from the API
-    let threshold = context_window * 95 / 100;
-    if context_tokens < threshold || messages.len() <= 10 {
+    if !context_tokens.exceeds_fraction(context_window, 95, 100) || messages.len() <= 10 {
         return messages;
     }
 

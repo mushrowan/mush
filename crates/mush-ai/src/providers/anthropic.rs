@@ -298,7 +298,7 @@ fn build_request_body(
                     config_type: "adaptive".into(),
                 })
             } else {
-                let budget = thinking_budget(level, max_tokens);
+                let budget = thinking_budget(level, max_tokens.get());
                 Some(ThinkingConfig::Enabled {
                     config_type: "enabled".into(),
                     budget_tokens: budget,
@@ -318,9 +318,9 @@ fn build_request_body(
     // when thinking is enabled with budget, max_tokens must include the budget
     let effective_max_tokens =
         if let Some(ThinkingConfig::Enabled { budget_tokens, .. }) = &thinking {
-            max_tokens.max(*budget_tokens + 1024)
+            max_tokens.get().max(*budget_tokens + 1024)
         } else {
-            max_tokens
+            max_tokens.get()
         };
 
     RequestBody {
@@ -866,10 +866,10 @@ fn process_sse_event(
     match event {
         SseEvent::MessageStart { message } => {
             if let Some(usage) = message.usage {
-                output.usage.input_tokens = usage.input_tokens;
-                output.usage.output_tokens = usage.output_tokens;
-                output.usage.cache_read_tokens = usage.cache_read_input_tokens;
-                output.usage.cache_write_tokens = usage.cache_creation_input_tokens;
+                output.usage.input_tokens = TokenCount::new(usage.input_tokens);
+                output.usage.output_tokens = TokenCount::new(usage.output_tokens);
+                output.usage.cache_read_tokens = TokenCount::new(usage.cache_read_input_tokens);
+                output.usage.cache_write_tokens = TokenCount::new(usage.cache_creation_input_tokens);
             }
             events.push(StreamEvent::Start {
                 partial: output.clone(),
@@ -1033,7 +1033,7 @@ fn process_sse_event(
             }
         }
         SseEvent::MessageDelta { delta, usage } => {
-            output.usage.output_tokens = usage.output_tokens;
+            output.usage.output_tokens = TokenCount::new(usage.output_tokens);
             if let Some(reason) = delta.stop_reason {
                 output.stop_reason = map_stop_reason(&reason);
             }
@@ -1291,8 +1291,8 @@ mod tests {
 
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0], StreamEvent::Start { .. }));
-        assert_eq!(output.usage.input_tokens, 100);
-        assert_eq!(output.usage.cache_read_tokens, 50);
+        assert_eq!(output.usage.input_tokens, TokenCount::new(100));
+        assert_eq!(output.usage.cache_read_tokens, TokenCount::new(50));
     }
 
     #[test]
@@ -1571,8 +1571,8 @@ mod tests {
                 cache_read: 0.3,
                 cache_write: 3.75,
             },
-            context_window: 200_000,
-            max_output_tokens: 16384,
+            context_window: TokenCount::new(200_000),
+            max_output_tokens: TokenCount::new(16384),
         }
     }
 

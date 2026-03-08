@@ -209,7 +209,7 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
             let o = compact_options.clone();
             let ctx = ctx_tokens_for_transform.clone();
             Box::pin(async move {
-                let tokens = ctx.load(std::sync::atomic::Ordering::Relaxed);
+                let tokens = TokenCount::new(ctx.load(std::sync::atomic::Ordering::Relaxed));
                 auto_compact(msgs, tokens, context_window, reg_ref, &m, &o).await
             })
         }))
@@ -279,7 +279,7 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
             }
             AgentEvent::MessageEnd { message } => {
                 context_tokens_shared.store(
-                    message.usage.total_input_tokens(),
+                    message.usage.total_input_tokens().get(),
                     std::sync::atomic::Ordering::Relaxed,
                 );
                 session.push_message(Message::Assistant(message));
@@ -291,14 +291,14 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
                 }
                 let cost = models::calculate_cost(&setup.model, &message.usage);
                 eprintln!(
-                    "\n\x1b[2m{} | in:{} out:{} cache:{} | ${:.4}\x1b[0m",
+                    "\n\x1b[2m{} | in:{} out:{} cache:{} | {}\x1b[0m",
                     message.model,
                     message.usage.input_tokens,
                     message.usage.output_tokens,
                     message.usage.cache_read_tokens,
                     cost.total(),
                 );
-                if setup.debug_cache && message.usage.cache_read_tokens > 0 {
+                if setup.debug_cache && message.usage.cache_read_tokens > TokenCount::ZERO {
                     eprintln!(
                         "\x1b[36mcache read detected: {} tokens\x1b[0m",
                         message.usage.cache_read_tokens

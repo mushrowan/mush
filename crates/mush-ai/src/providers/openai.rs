@@ -260,7 +260,7 @@ fn build_request_body(
         model: model.id.to_string(),
         messages: all_messages,
         stream: true,
-        max_completion_tokens: options.max_tokens.or(Some(model.max_output_tokens)),
+        max_completion_tokens: Some(options.max_tokens.unwrap_or(model.max_output_tokens).get()),
         temperature: if reasoning_effort.is_none() {
             options.temperature.map(|t| t.value())
         } else {
@@ -430,10 +430,10 @@ fn process_chunk(
             .as_ref()
             .map_or(0, |d| d.cached_tokens);
         output.usage = Usage {
-            input_tokens: usage.prompt_tokens.saturating_sub(cached),
-            output_tokens: usage.completion_tokens,
-            cache_read_tokens: cached,
-            cache_write_tokens: 0,
+            input_tokens: TokenCount::new(usage.prompt_tokens.saturating_sub(cached)),
+            output_tokens: TokenCount::new(usage.completion_tokens),
+            cache_read_tokens: TokenCount::new(cached),
+            cache_write_tokens: TokenCount::ZERO,
         };
     }
 
@@ -886,9 +886,9 @@ mod tests {
         };
 
         process_chunk(chunk, &mut output, &mut current);
-        assert_eq!(output.usage.input_tokens, 50); // 150 - 100 cached
-        assert_eq!(output.usage.output_tokens, 50);
-        assert_eq!(output.usage.cache_read_tokens, 100);
+        assert_eq!(output.usage.input_tokens, TokenCount::new(50)); // 150 - 100 cached
+        assert_eq!(output.usage.output_tokens, TokenCount::new(50));
+        assert_eq!(output.usage.cache_read_tokens, TokenCount::new(100));
     }
 
     fn test_model() -> Model {
@@ -906,8 +906,8 @@ mod tests {
                 cache_read: 0.3,
                 cache_write: 3.75,
             },
-            context_window: 200_000,
-            max_output_tokens: 16384,
+            context_window: TokenCount::new(200_000),
+            max_output_tokens: TokenCount::new(16384),
         }
     }
 

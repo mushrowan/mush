@@ -493,8 +493,8 @@ mod tests {
                 cache_read: 0.0,
                 cache_write: 0.0,
             },
-            context_window: 200_000,
-            max_output_tokens: 8192,
+            context_window: TokenCount::new(200_000),
+            max_output_tokens: TokenCount::new(8192),
         }
     }
 
