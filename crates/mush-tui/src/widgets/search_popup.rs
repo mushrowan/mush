@@ -100,7 +100,8 @@ impl Widget for SearchPopup<'_> {
                     .unwrap_or("(empty)");
                 let max_len = (results_area.width as usize).saturating_sub(role.len() + 4);
                 let truncated = if preview.len() > max_len {
-                    format!("{}…", &preview[..max_len.saturating_sub(1)])
+                    let end = preview.floor_char_boundary(max_len.saturating_sub(1));
+                    format!("{}…", &preview[..end])
                 } else {
                     preview.to_string()
                 };

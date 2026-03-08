@@ -128,9 +128,7 @@ fn handle_pane_keys(key: KeyEvent) -> Option<AppEvent> {
             Some(AppEvent::ResizePane(4))
         }
         (KeyModifiers::CONTROL, KeyCode::Tab) => Some(AppEvent::FocusNextPane),
-        (m, KeyCode::BackTab) if m.contains(KeyModifiers::CONTROL) => {
-            Some(AppEvent::FocusPrevPane)
-        }
+        (m, KeyCode::BackTab) if m.contains(KeyModifiers::CONTROL) => Some(AppEvent::FocusPrevPane),
         _ => None,
     }
 }

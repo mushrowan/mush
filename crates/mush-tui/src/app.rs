@@ -19,8 +19,8 @@ pub fn cache_ttl_secs(provider: &Provider, retention: Option<&CacheRetention>) -
     match provider {
         Provider::Anthropic => match retention.copied().unwrap_or(CacheRetention::Short) {
             CacheRetention::None => 0,
-            CacheRetention::Short => 300,  // 5 minutes
-            CacheRetention::Long => 3600,  // 1 hour
+            CacheRetention::Short => 300, // 5 minutes
+            CacheRetention::Long => 3600, // 1 hour
         },
         // openai: automatic caching, ~5-10 min, use 5 as conservative estimate
         // openrouter: passes through to underlying provider, assume anthropic-like
@@ -1286,7 +1286,8 @@ fn truncate_output(output: &str) -> String {
         .take(MAX_PREVIEW_LINES)
         .map(|l| {
             if l.len() > MAX_PREVIEW_LINE_LEN {
-                format!("{}...", &l[..MAX_PREVIEW_LINE_LEN])
+                let end = l.floor_char_boundary(MAX_PREVIEW_LINE_LEN);
+                format!("{}...", &l[..end])
             } else {
                 l.to_string()
             }
@@ -1835,9 +1836,18 @@ mod tests {
         use super::cache_ttl_secs;
 
         // anthropic: short = 5 min, long = 1 hour, none = 0
-        assert_eq!(cache_ttl_secs(&Provider::Anthropic, Some(&CacheRetention::Short)), 300);
-        assert_eq!(cache_ttl_secs(&Provider::Anthropic, Some(&CacheRetention::Long)), 3600);
-        assert_eq!(cache_ttl_secs(&Provider::Anthropic, Some(&CacheRetention::None)), 0);
+        assert_eq!(
+            cache_ttl_secs(&Provider::Anthropic, Some(&CacheRetention::Short)),
+            300
+        );
+        assert_eq!(
+            cache_ttl_secs(&Provider::Anthropic, Some(&CacheRetention::Long)),
+            3600
+        );
+        assert_eq!(
+            cache_ttl_secs(&Provider::Anthropic, Some(&CacheRetention::None)),
+            0
+        );
         assert_eq!(cache_ttl_secs(&Provider::Anthropic, None), 300); // default = short
 
         // openrouter / custom: defaults to 300
@@ -1854,6 +1864,6 @@ mod tests {
         app.refresh_cache_timer();
         let remaining = app.cache_remaining_secs().unwrap();
         // just refreshed, should be very close to 300
-        assert!(remaining >= 298 && remaining <= 300);
+        assert!((298..=300).contains(&remaining));
     }
 }

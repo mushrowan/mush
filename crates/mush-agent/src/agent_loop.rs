@@ -515,7 +515,11 @@ mod tests {
             name: "Counter".into(),
             arguments: serde_json::json!({}),
         };
-        assert!(rt.block_on(execute_tool(&tools, &[], &tc)).outcome.is_success());
+        assert!(
+            rt.block_on(execute_tool(&tools, &[], &tc))
+                .outcome
+                .is_success()
+        );
 
         // UPPERCASE should match
         let tc = ToolCall {
@@ -523,7 +527,11 @@ mod tests {
             name: "COUNTER".into(),
             arguments: serde_json::json!({}),
         };
-        assert!(rt.block_on(execute_tool(&tools, &[], &tc)).outcome.is_success());
+        assert!(
+            rt.block_on(execute_tool(&tools, &[], &tc))
+                .outcome
+                .is_success()
+        );
     }
 
     struct WebSearchTool;
@@ -560,7 +568,11 @@ mod tests {
             name: "WebSearch".into(),
             arguments: serde_json::json!({}),
         };
-        assert!(rt.block_on(execute_tool(&tools, &[], &tc)).outcome.is_success());
+        assert!(
+            rt.block_on(execute_tool(&tools, &[], &tc))
+                .outcome
+                .is_success()
+        );
 
         // lowercase no underscore should match
         let tc = ToolCall {
@@ -568,7 +580,11 @@ mod tests {
             name: "websearch".into(),
             arguments: serde_json::json!({}),
         };
-        assert!(rt.block_on(execute_tool(&tools, &[], &tc)).outcome.is_success());
+        assert!(
+            rt.block_on(execute_tool(&tools, &[], &tc))
+                .outcome
+                .is_success()
+        );
 
         // exact match still works
         let tc = ToolCall {
@@ -576,7 +592,11 @@ mod tests {
             name: "web_search".into(),
             arguments: serde_json::json!({}),
         };
-        assert!(rt.block_on(execute_tool(&tools, &[], &tc)).outcome.is_success());
+        assert!(
+            rt.block_on(execute_tool(&tools, &[], &tc))
+                .outcome
+                .is_success()
+        );
     }
 
     #[test]
@@ -791,4 +811,3 @@ mod tests {
         assert_eq!(DEFAULT_MAX_TURNS, usize::MAX);
     }
 }
-

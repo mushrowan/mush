@@ -132,8 +132,10 @@ fn left_spans(app: &App) -> Vec<Span<'static>> {
             }
             Some(0) => {
                 // show "cold" briefly then fade out
-                let elapsed =
-                    app.cache_last_active.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+                let elapsed = app
+                    .cache_last_active
+                    .map(|t| t.elapsed().as_secs())
+                    .unwrap_or(0);
                 if elapsed < (app.cache_ttl_secs as u64) + 30 {
                     " cold".into()
                 } else {

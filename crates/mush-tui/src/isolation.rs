@@ -229,7 +229,9 @@ pub async fn create_jj_change(repo_root: &Path) -> Result<JjChangeInfo, String> 
         .await
         .map_err(|e| format!("failed to get change id: {e}"))?;
 
-    let change_id = String::from_utf8_lossy(&id_output.stdout).trim().to_string();
+    let change_id = String::from_utf8_lossy(&id_output.stdout)
+        .trim()
+        .to_string();
     if change_id.is_empty() {
         return Err("got empty change id from jj".into());
     }
@@ -309,9 +311,7 @@ pub async fn describe_jj_change(repo_root: &Path, change_id: &str) -> Result<Str
         .await
         .map_err(|e| format!("failed to describe jj change: {e}"))?;
 
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .to_string())
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 #[cfg(test)]

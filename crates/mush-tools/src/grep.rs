@@ -80,7 +80,10 @@ async fn run_rg(
 ) -> ToolResult {
     // strip newlines from pattern - LLMs sometimes include literal newlines
     // which rg rejects with "literal \n is not allowed"
-    let pattern: String = pattern.chars().filter(|&c| c != '\n' && c != '\r').collect();
+    let pattern: String = pattern
+        .chars()
+        .filter(|&c| c != '\n' && c != '\r')
+        .collect();
 
     if pattern.is_empty() {
         return ToolResult::error("pattern is empty (after stripping newlines)");
