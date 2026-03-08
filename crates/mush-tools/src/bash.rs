@@ -1,4 +1,4 @@
-//! bash tool - executes shell commands with timeout and output truncation
+//! bash tool - executes shell commands with timeout
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -6,8 +6,6 @@ use std::process::Stdio;
 use mush_agent::tool::{AgentTool, ToolResult};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
-const MAX_OUTPUT_BYTES: usize = 50 * 1024;
-const MAX_OUTPUT_LINES: usize = 2000;
 
 /// sender for streaming partial output lines from bash
 pub type OutputSink = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
@@ -41,8 +39,8 @@ impl AgentTool for BashTool {
     }
     fn description(&self) -> &str {
         "Execute a bash command in the current working directory. Returns stdout and stderr. \
-         Output is truncated to last 2000 lines or 50KB (whichever is hit first). \
-         Optionally provide a timeout in seconds."
+         Output is truncated to 2000 lines or 50KB (whichever is hit first). If truncated, \
+         full output is saved to a temp file. Optionally provide a timeout in seconds."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -59,7 +57,7 @@ impl AgentTool for BashTool {
                 },
                 "output": {
                     "type": "string",
-                    "description": "output format: 'text' (default) or 'json' with structured fields (stdout, stderr, exit_code, timed_out, truncated)",
+                    "description": "output format: 'text' (default) or 'json' with structured fields (stdout, stderr, exit_code, timed_out)",
                     "enum": ["text", "json"]
                 }
             },
@@ -148,20 +146,19 @@ fn format_result(
     timed_out: bool,
     json_output: bool,
 ) -> ToolResult {
-    let stdout_truncated = stdout.lines().count() > MAX_OUTPUT_LINES || stdout.len() > MAX_OUTPUT_BYTES;
-    let stderr_truncated = stderr.lines().count() > MAX_OUTPUT_LINES || stderr.len() > MAX_OUTPUT_BYTES;
+    // truncation is handled by the agent layer (truncation::truncate_tool_output),
+    // so we just pass the raw output through here
 
     if json_output {
         let json = serde_json::json!({
-            "stdout": truncate_output(&stdout),
-            "stderr": truncate_output(&stderr),
+            "stdout": &stdout,
+            "stderr": &stderr,
             "exit_code": exit_code,
             "timed_out": timed_out,
             "stdout_lines": stdout.lines().count(),
             "stderr_lines": stderr.lines().count(),
             "stdout_bytes": stdout.len(),
             "stderr_bytes": stderr.len(),
-            "truncated": stdout_truncated || stderr_truncated,
         });
         if exit_code != 0 || timed_out {
             ToolResult {
@@ -177,14 +174,14 @@ fn format_result(
         let mut text = String::new();
 
         if !stdout.is_empty() {
-            text.push_str(&truncate_output(&stdout));
+            text.push_str(&stdout);
         }
 
         if !stderr.is_empty() {
             if !text.is_empty() {
                 text.push('\n');
             }
-            text.push_str(&truncate_output(&stderr));
+            text.push_str(&stderr);
         }
 
         if text.is_empty() {
@@ -241,59 +238,10 @@ async fn stream_pipe<R: tokio::io::AsyncRead + Unpin>(
     output
 }
 
-fn truncate_output(output: &str) -> String {
-    let lines: Vec<&str> = output.lines().collect();
-
-    if lines.len() <= MAX_OUTPUT_LINES && output.len() <= MAX_OUTPUT_BYTES {
-        return output.to_string();
-    }
-
-    // take from the end (most recent output is usually most relevant)
-    let mut result_lines = Vec::new();
-    let mut bytes = 0;
-
-    for line in lines.iter().rev() {
-        if result_lines.len() >= MAX_OUTPUT_LINES || bytes + line.len() >= MAX_OUTPUT_BYTES {
-            break;
-        }
-        result_lines.push(*line);
-        bytes += line.len() + 1;
-    }
-
-    result_lines.reverse();
-
-    let truncated_count = lines.len() - result_lines.len();
-    let mut result = String::new();
-    if truncated_count > 0 {
-        result.push_str(&format!("[{truncated_count} lines truncated]\n\n"));
-    }
-    result.push_str(&result_lines.join("\n"));
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::util::extract_text;
-
-    #[test]
-    fn truncate_short_output() {
-        let output = "line 1\nline 2\nline 3";
-        assert_eq!(truncate_output(output), output);
-    }
-
-    #[test]
-    fn truncate_long_output() {
-        let lines: Vec<String> = (1..=3000).map(|i| format!("line {i}")).collect();
-        let output = lines.join("\n");
-
-        let truncated = truncate_output(&output);
-        assert!(truncated.contains("["));
-        assert!(truncated.contains("truncated]"));
-        // should contain lines from the end
-        assert!(truncated.contains("line 3000"));
-        assert!(!truncated.contains("line 1\n"));
-    }
 
     #[tokio::test]
     async fn run_echo_command() {
@@ -341,7 +289,6 @@ mod tests {
         assert!(json["stderr"].as_str().unwrap().contains("err"));
         assert_eq!(json["exit_code"], 0);
         assert_eq!(json["timed_out"], false);
-        assert_eq!(json["truncated"], false);
     }
 
     #[tokio::test]

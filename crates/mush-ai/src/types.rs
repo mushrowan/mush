@@ -868,7 +868,7 @@ mod tests {
     fn message_serialisation_roundtrip() {
         let msg = Message::User(UserMessage {
             content: UserContent::Text("hello".into()),
-            timestamp_ms: Timestamp::from_ms(1234567890),
+            timestamp_ms: Timestamp::from_ms(1_234_567_890),
         });
         let json = serde_json::to_string(&msg).unwrap();
         let back: Message = serde_json::from_str(&json).unwrap();

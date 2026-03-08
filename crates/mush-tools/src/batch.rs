@@ -4,24 +4,19 @@ use mush_agent::tool::{AgentTool, ToolResult};
 use mush_ai::types::ToolResultContentPart;
 
 const MAX_CALLS: usize = 25;
+/// max total output bytes across all batch results to prevent context flooding
+const MAX_TOTAL_OUTPUT_BYTES: usize = 100 * 1024;
+/// reserve room for the summary so truncation doesn't hide it
+const SUMMARY_RESERVE_BYTES: usize = 512;
 
-/// batch tool that runs multiple tool calls concurrently.
-/// holds references to the available tools so it can dispatch.
 pub struct BatchTool {
     tools: Vec<Box<dyn AgentTool>>,
 }
 
 impl BatchTool {
+    #[must_use]
     pub fn new(tools: Vec<Box<dyn AgentTool>>) -> Self {
         Self { tools }
-    }
-
-    fn find_tool(&self, name: &str) -> Option<&dyn AgentTool> {
-        let requested = name.to_lowercase().replace('_', "");
-        self.tools
-            .iter()
-            .find(|t| t.name().to_lowercase().replace('_', "") == requested)
-            .map(|t| &**t)
     }
 }
 
@@ -29,18 +24,13 @@ impl AgentTool for BatchTool {
     fn name(&self) -> &str {
         "batch"
     }
+
     fn label(&self) -> &str {
-        "Batch"
+        self.name()
     }
+
     fn description(&self) -> &str {
-        "Execute multiple tool calls concurrently to reduce latency. All calls run in parallel; \
-         ordering is NOT guaranteed. Partial failures do not stop other calls. \
-         Do NOT nest batch inside batch.\n\n\
-         Good for: reading many files, grep+glob combos, multiple bash commands, multi-part edits.\n\
-         Bad for: operations that depend on prior output, ordered stateful mutations.\n\n\
-         Payload format (JSON array):\n\
-         [{\"tool\": \"read\", \"parameters\": {\"path\": \"src/main.rs\"}}, \
-         {\"tool\": \"grep\", \"parameters\": {\"pattern\": \"TODO\"}}]"
+        "Execute multiple tool calls concurrently to reduce latency. All calls run in parallel; ordering is NOT guaranteed. Partial failures do not stop other calls. Do NOT nest batch inside batch.\n\nGood for: reading many files, grep+glob combos, multiple bash commands, multi-part edits.\nBad for: operations that depend on prior output, ordered stateful mutations.\n\nPayload format (JSON array):\n[{\"tool\": \"read\", \"parameters\": {\"path\": \"src/main.rs\"}}, {\"tool\": \"grep\", \"parameters\": {\"pattern\": \"TODO\"}}]"
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -59,7 +49,7 @@ impl AgentTool for BatchTool {
                             },
                             "parameters": {
                                 "type": "object",
-                                "description": "parameters for the tool"
+                                "description": "parameters to pass to the tool"
                             }
                         },
                         "required": ["tool", "parameters"]
@@ -72,27 +62,42 @@ impl AgentTool for BatchTool {
 
     fn execute(
         &self,
-        args: serde_json::Value,
+        params: serde_json::Value,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
         Box::pin(async move {
-            let calls = match args["tool_calls"].as_array() {
+            let calls = match params.get("tool_calls").and_then(serde_json::Value::as_array) {
                 Some(a) => a,
                 None => return ToolResult::error("missing required parameter: tool_calls"),
             };
 
             if calls.is_empty() {
-                return ToolResult::error("tool_calls must not be empty");
+                return ToolResult::error("tool_calls cannot be empty");
+            }
+
+            if calls.len() > MAX_CALLS {
+                return ToolResult::error(format!(
+                    "too many tool calls: {} (max {})",
+                    calls.len(),
+                    MAX_CALLS
+                ));
             }
 
             let calls: Vec<_> = calls.iter().take(MAX_CALLS).collect();
             let total = calls.len();
 
-            // build futures for all calls
             let futures: Vec<_> = calls
-                .iter()
+                .into_iter()
                 .enumerate()
                 .map(|(i, call)| async move {
-                    let tool_name = call["tool"].as_str().unwrap_or("unknown");
+                    let tool_name = call
+                        .get("tool")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("");
+
+                    let params = call
+                        .get("parameters")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({}));
 
                     if tool_name.eq_ignore_ascii_case("batch") {
                         return (
@@ -102,7 +107,7 @@ impl AgentTool for BatchTool {
                         );
                     }
 
-                    let tool = match self.find_tool(tool_name) {
+                    let tool = match self.tools.iter().find(|t| t.name().eq_ignore_ascii_case(tool_name)) {
                         Some(t) => t,
                         None => {
                             return (
@@ -113,7 +118,6 @@ impl AgentTool for BatchTool {
                         }
                     };
 
-                    let params = call["parameters"].clone();
                     let result = tool.execute(params).await;
                     (i, tool_name.to_string(), Ok(result))
                 })
@@ -121,46 +125,61 @@ impl AgentTool for BatchTool {
 
             let results = futures::future::join_all(futures).await;
 
-            // format output
+            // format output, tracking total size to avoid context flooding
             let mut output = String::new();
             let mut success_count = 0;
             let mut error_count = 0;
+            let mut total_bytes = 0;
+            let mut items_truncated = 0;
+            let content_budget = MAX_TOTAL_OUTPUT_BYTES.saturating_sub(SUMMARY_RESERVE_BYTES);
 
             for (i, tool_name, result) in &results {
-                output.push_str(&format!("--- [{i}] {tool_name} ---\n"));
+                let mut item = format!("--- [{i}] {tool_name} ---\n");
                 match result {
                     Ok(r) => {
                         if r.outcome.is_error() {
                             error_count += 1;
-                            output.push_str("ERROR: ");
+                            item.push_str("ERROR: ");
                         } else {
                             success_count += 1;
                         }
                         for part in &r.content {
                             match part {
-                                ToolResultContentPart::Text(t) => output.push_str(&t.text),
-                                ToolResultContentPart::Image(_) => output.push_str("[image]"),
+                                ToolResultContentPart::Text(t) => item.push_str(&t.text),
+                                ToolResultContentPart::Image(_) => item.push_str("[image]"),
                             }
                         }
                     }
                     Err(e) => {
                         error_count += 1;
-                        output.push_str(&format!("ERROR: {e}"));
+                        item.push_str(&format!("ERROR: {e}"));
                     }
                 }
-                output.push_str("\n\n");
+                item.push_str("\n\n");
+
+                if total_bytes >= content_budget {
+                    items_truncated += 1;
+                    continue;
+                }
+
+                let remaining = content_budget - total_bytes;
+                if item.len() > remaining {
+                    items_truncated += 1;
+                    output.push_str(&item[..remaining]);
+                    break;
+                }
+
+                total_bytes += item.len();
+                output.push_str(&item);
             }
 
-            output.push_str(&format!(
-                "batch: {success_count}/{total} succeeded, {error_count} failed"
-            ));
-
-            if error_count > 0 {
-                // still return as non-error so the model can see partial results
-                ToolResult::text(output)
-            } else {
-                ToolResult::text(output)
+            let mut summary = format!("batch: {success_count}/{total} succeeded, {error_count} failed");
+            if items_truncated > 0 {
+                summary.push_str(&format!(", {items_truncated} items truncated due to combined size"));
             }
+            output.push_str(&summary);
+
+            ToolResult::text(output)
         })
     }
 }
@@ -173,28 +192,49 @@ mod tests {
     fn schema_has_required_tool_calls() {
         let tool = BatchTool::new(vec![]);
         let schema = tool.parameters_schema();
-        let required = schema["required"].as_array().unwrap();
-        assert!(required.iter().any(|v| v == "tool_calls"));
+        assert_eq!(schema["required"], serde_json::json!(["tool_calls"]));
     }
 
     #[tokio::test]
     async fn empty_calls_returns_error() {
         let tool = BatchTool::new(vec![]);
-        let result = tool.execute(serde_json::json!({"tool_calls": []})).await;
+        let result = tool.execute(serde_json::json!({ "tool_calls": [] })).await;
         assert!(result.outcome.is_error());
     }
 
     #[tokio::test]
-    async fn unknown_tool_reports_error() {
+    async fn too_many_calls_returns_error() {
+        let tool = BatchTool::new(vec![]);
+        let calls: Vec<_> = (0..26)
+            .map(|_| serde_json::json!({ "tool": "read", "parameters": {} }))
+            .collect();
+        let result = tool.execute(serde_json::json!({ "tool_calls": calls })).await;
+        assert!(result.outcome.is_error());
+    }
+
+    #[tokio::test]
+    async fn batch_self_nesting_blocked() {
         let tool = BatchTool::new(vec![]);
         let result = tool
             .execute(serde_json::json!({
-                "tool_calls": [
-                    {"tool": "nonexistent", "parameters": {}}
-                ]
+                "tool_calls": [{"tool": "batch", "parameters": {"tool_calls": []}}]
             }))
             .await;
-        assert!(result.outcome.is_success()); // partial results are non-error
+        let text = match &result.content[0] {
+            ToolResultContentPart::Text(t) => &t.text,
+            _ => panic!("expected text"),
+        };
+        assert!(text.contains("cannot nest batch inside batch"));
+    }
+
+    #[tokio::test]
+    async fn unknown_tool_returns_error() {
+        let tool = BatchTool::new(vec![]);
+        let result = tool
+            .execute(serde_json::json!({
+                "tool_calls": [{"tool": "does-not-exist", "parameters": {}}]
+            }))
+            .await;
         let text = match &result.content[0] {
             ToolResultContentPart::Text(t) => &t.text,
             _ => panic!("expected text"),
@@ -203,38 +243,87 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_lookup_is_case_insensitive() {
-        // models sometimes send capitalised tool names (e.g. "Grep" instead of "grep")
-        let tool = BatchTool::new(vec![]);
+    async fn summary_survives_large_output() {
+        struct LargeTool;
+
+        impl AgentTool for LargeTool {
+            fn name(&self) -> &str {
+                "large"
+            }
+
+            fn label(&self) -> &str {
+                self.name()
+            }
+
+            fn description(&self) -> &str {
+                "large"
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+
+            fn execute(
+                &self,
+                _params: serde_json::Value,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
+                Box::pin(async { ToolResult::text("x".repeat(MAX_TOTAL_OUTPUT_BYTES)) })
+            }
+        }
+
+        let tool = BatchTool::new(vec![Box::new(LargeTool)]);
         let result = tool
             .execute(serde_json::json!({
-                "tool_calls": [
-                    {"tool": "Batch", "parameters": {"tool_calls": []}}
-                ]
+                "tool_calls": [{"tool": "large", "parameters": {}}]
             }))
             .await;
         let text = match &result.content[0] {
             ToolResultContentPart::Text(t) => &t.text,
             _ => panic!("expected text"),
         };
-        // should find "batch" even when called as "Batch"
-        assert!(text.contains("cannot nest batch"));
+        assert!(text.contains("batch: 1/1 succeeded, 0 failed"));
+        assert!(text.contains("1 items truncated due to combined size"));
     }
 
     #[tokio::test]
-    async fn batch_self_nesting_blocked() {
-        let tool = BatchTool::new(vec![]);
+    async fn tool_lookup_is_case_insensitive() {
+        struct DummyTool;
+
+        impl AgentTool for DummyTool {
+            fn name(&self) -> &str {
+                "DuMmY"
+            }
+
+            fn label(&self) -> &str {
+                self.name()
+            }
+
+            fn description(&self) -> &str {
+                "dummy"
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+
+            fn execute(
+                &self,
+                _params: serde_json::Value,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
+                Box::pin(async { ToolResult::text("ok") })
+            }
+        }
+
+        let tool = BatchTool::new(vec![Box::new(DummyTool)]);
         let result = tool
             .execute(serde_json::json!({
-                "tool_calls": [
-                    {"tool": "batch", "parameters": {"tool_calls": []}}
-                ]
+                "tool_calls": [{"tool": "dummy", "parameters": {}}]
             }))
             .await;
         let text = match &result.content[0] {
             ToolResultContentPart::Text(t) => &t.text,
             _ => panic!("expected text"),
         };
-        assert!(text.contains("cannot nest batch"));
+        assert!(text.contains("ok"));
     }
 }

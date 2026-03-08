@@ -2,9 +2,10 @@
 //!
 //! static definitions for known models. users can override via models.json.
 
-use crate::types::*;
+use crate::types::{Api, Cost, Dollars, InputModality, Model, ModelCost, Provider, TokenCount, Usage};
 
 /// all built-in anthropic models
+#[must_use]
 pub fn anthropic_models() -> Vec<Model> {
     vec![
         // current generation
@@ -98,6 +99,7 @@ pub fn anthropic_models() -> Vec<Model> {
 }
 
 /// all built-in openrouter models (via openai-completions api)
+#[must_use]
 pub fn openrouter_models() -> Vec<Model> {
     vec![
         Model {
@@ -172,6 +174,7 @@ pub fn openrouter_models() -> Vec<Model> {
 }
 
 /// all built-in openai api-key models (responses API)
+#[must_use]
 pub fn openai_models() -> Vec<Model> {
     vec![
         Model {
@@ -212,6 +215,7 @@ pub fn openai_models() -> Vec<Model> {
 }
 
 /// all built-in openai codex subscription models (chatgpt oauth)
+#[must_use]
 pub fn openai_codex_models() -> Vec<Model> {
     vec![
         Model {
@@ -269,6 +273,7 @@ pub fn openai_codex_models() -> Vec<Model> {
 }
 
 /// all built-in models across all providers
+#[must_use]
 pub fn all_models() -> Vec<Model> {
     let mut models = Vec::new();
     models.extend(anthropic_models());
@@ -279,6 +284,7 @@ pub fn all_models() -> Vec<Model> {
 }
 
 /// all models including user overrides from models.json
+#[must_use]
 pub fn all_models_with_user() -> Vec<Model> {
     let mut models = all_models();
     let user = load_user_models();
@@ -296,6 +302,7 @@ pub fn all_models_with_user() -> Vec<Model> {
 }
 
 /// find a model by provider and id (includes user models)
+#[must_use]
 pub fn find_model(provider: &Provider, id: &str) -> Option<Model> {
     all_models_with_user()
         .into_iter()
@@ -303,6 +310,7 @@ pub fn find_model(provider: &Provider, id: &str) -> Option<Model> {
 }
 
 /// find a model by id alone (first match, includes user models)
+#[must_use]
 pub fn find_model_by_id(id: &str) -> Option<Model> {
     all_models_with_user()
         .into_iter()
@@ -334,6 +342,7 @@ fn user_models_path() -> std::path::PathBuf {
 }
 
 /// list all models for a provider
+#[must_use]
 pub fn models_for_provider(provider: &Provider) -> Vec<Model> {
     all_models()
         .into_iter()

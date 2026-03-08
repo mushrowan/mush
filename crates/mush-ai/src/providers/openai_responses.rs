@@ -65,8 +65,31 @@ impl ApiProvider for OpenaiResponsesProvider {
                 .send()
                 .await?;
 
-            if !response.status().is_success() {
-                let status = response.status();
+            let status = response.status();
+            let content_type = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("<missing>")
+                .to_string();
+            let header_names: Vec<_> = response
+                .headers()
+                .keys()
+                .map(reqwest::header::HeaderName::as_str)
+                .collect();
+            tracing::debug!(
+                model = %model.id,
+                %url,
+                %status,
+                content_type,
+                ?header_names,
+                "received openai responses response"
+            );
+            if content_type == "<missing>" {
+                tracing::warn!(model = %model.id, %url, ?header_names, "openai responses response missing content-type header");
+            }
+
+            if !status.is_success() {
                 let text = response.text().await.unwrap_or_default();
                 tracing::error!(%status, body = %text, "openai responses API error");
                 return Err(ProviderError::ApiError {
@@ -111,6 +134,9 @@ struct RequestBody {
     prompt_cache_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_cache_retention: Option<String>,
+    /// auto-truncate input when it exceeds the model's context window
+    #[serde(skip_serializing_if = "Option::is_none")]
+    truncation: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -231,7 +257,50 @@ fn build_request_body(
         include,
         prompt_cache_key,
         prompt_cache_retention,
+        // auto-truncate input to avoid context overflow errors
+        // codex endpoint (chatgpt.com/backend-api) doesn't support this param
+        truncation: if is_codex { None } else { Some("auto".into()) },
     }
+}
+
+/// max chars for tool results in older turns (beyond recent_turns_to_keep)
+const TRIM_TOOL_OUTPUT_CHARS: usize = 1500;
+/// number of recent user messages whose tool results are kept at full size
+const RECENT_TURNS_TO_KEEP: usize = 3;
+
+/// find the message index at which "recent" turns begin
+fn recent_boundary(messages: &[Message]) -> usize {
+    let mut user_count = 0;
+    for (i, msg) in messages.iter().enumerate().rev() {
+        if matches!(msg, Message::User(_)) {
+            user_count += 1;
+            if user_count >= RECENT_TURNS_TO_KEEP {
+                return i;
+            }
+        }
+    }
+    0
+}
+
+/// trim a tool result string for older turns to save context
+fn trim_old_tool_output(text: &str) -> String {
+    if text.len() <= TRIM_TOOL_OUTPUT_CHARS {
+        return text.to_string();
+    }
+
+    // keep head preview
+    let preview_end = text.floor_char_boundary(TRIM_TOOL_OUTPUT_CHARS / 2);
+    // keep tail preview
+    let tail_start = text.len().saturating_sub(TRIM_TOOL_OUTPUT_CHARS / 4);
+    let tail_start = text.ceil_char_boundary(tail_start);
+
+    let trimmed = text.len() - preview_end - (text.len() - tail_start);
+    format!(
+        "{}\n\n[... {} chars trimmed from old tool result ...]\n\n{}",
+        &text[..preview_end],
+        trimmed,
+        &text[tail_start..]
+    )
 }
 
 fn convert_input_messages(
@@ -239,6 +308,7 @@ fn convert_input_messages(
     system_prompt: &Option<String>,
     messages: &[Message],
 ) -> Vec<serde_json::Value> {
+    let boundary = recent_boundary(messages);
     let mut converted = Vec::new();
 
     if let Some(prompt) = system_prompt {
@@ -253,7 +323,8 @@ fn convert_input_messages(
         }));
     }
 
-    for msg in messages {
+    for (msg_idx, msg) in messages.iter().enumerate() {
+        let is_old_turn = msg_idx < boundary;
         match msg {
             Message::User(user) => match &user.content {
                 UserContent::Text(text) => {
@@ -319,7 +390,7 @@ fn convert_input_messages(
                 }
             }
             Message::ToolResult(tr) => {
-                let text = tr
+                let raw_text = tr
                     .content
                     .iter()
                     .filter_map(|p| match p {
@@ -328,6 +399,13 @@ fn convert_input_messages(
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
+
+                // trim large tool results from older turns to save context
+                let text = if is_old_turn {
+                    trim_old_tool_output(&raw_text)
+                } else {
+                    raw_text
+                };
 
                 let has_images = tr
                     .content
@@ -338,9 +416,9 @@ fn convert_input_messages(
                     "type": "function_call_output",
                     "call_id": normalized_call_id(tr.tool_call_id.as_str()),
                     "output": if text.is_empty() && has_images {
-                        "(see attached image)"
+                        "(see attached image)".to_string()
                     } else {
-                        text.as_str()
+                        text
                     },
                 }));
 
@@ -523,9 +601,9 @@ fn parse_sse_stream(
     let event_stream = async_stream::stream! {
         let mut output = AssistantMessage {
             content: vec![],
-            model: model_id,
-            provider: provider_name,
-            api,
+            model: model_id.clone(),
+            provider: provider_name.clone(),
+            api: api.clone(),
             usage: Usage::default(),
             stop_reason: StopReason::Stop,
             error_message: None,
@@ -543,8 +621,26 @@ fn parse_sse_stream(
         loop {
             match byte_stream.try_next().await {
                 Ok(Some(chunk)) => {
+                    let chunk_len = chunk.len();
+                    let chunk_preview = super::sse::preview_bytes(&chunk, 240);
+                    tracing::trace!(
+                        model = %model_id,
+                        provider = %provider_name,
+                        api = ?api,
+                        chunk_len,
+                        chunk_preview = %chunk_preview,
+                        "openai responses raw stream chunk"
+                    );
                     for raw in parser.push(&chunk) {
                         let data = raw.data.trim();
+                        tracing::trace!(
+                            model = %model_id,
+                            provider = %provider_name,
+                            api = ?api,
+                            event_name = raw.event.as_deref().unwrap_or("message"),
+                            data_preview = %super::sse::preview_text(data, 240),
+                            "openai responses sse event"
+                        );
                         if data == "[DONE]" {
                             continue;
                         }
@@ -561,6 +657,14 @@ fn parse_sse_stream(
                                     return;
                                 }
                             }
+                        } else {
+                            tracing::warn!(
+                                model = %model_id,
+                                provider = %provider_name,
+                                api = ?api,
+                                data_preview = %super::sse::preview_text(data, 240),
+                                "openai responses non-json sse payload"
+                            );
                         }
                     }
                 }
