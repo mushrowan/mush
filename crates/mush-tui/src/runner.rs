@@ -790,14 +790,18 @@ pub async fn run_tui(
                         if matches!(event, AgentEvent::AgentEnd) {
                             stream_metas.remove(&pane_id);
 
+                            // play completion sound
+                            crate::notify::play(crate::notify::Sound::Complete);
+
                             // notify when agent is done and cache is warm
                             if tui_config.cache_timer
                                 && let Some(pane) = pane_mgr.pane(pane_id)
                                     && let Some(remaining) = pane.app.cache_remaining_secs()
                                         && remaining > 60 {
-                                            crate::notify::send(
+                                            crate::notify::send_with_sound(
                                                 "awaiting input",
                                                 &format!("cache warm for {remaining}s"),
+                                                Some(crate::notify::Sound::Attention),
                                             );
                                         }
 
@@ -886,6 +890,37 @@ pub async fn run_tui(
                                                 // mark pane as aborted so remaining
                                                 // stream events are dropped
                                                 aborted_panes.insert(fid);
+                                                // remove stream meta so new submissions
+                                                // go to pending_prompt, not steering queue
+                                                stream_metas.remove(&fid);
+                                                // finalise any partial streaming content
+                                                // as a display message before cleanup
+                                                let pane = pane_mgr.focused_mut();
+                                                pane.app.finish_streaming(None, None);
+                                                // collect queued message texts, drain
+                                                // steering queue, and restore to input
+                                                let mut restored: Vec<String> = pane
+                                                    .app
+                                                    .take_queued_messages();
+                                                {
+                                                    let mut sq =
+                                                        pane.steering_queue.lock().await;
+                                                    for msg in sq.drain(..) {
+                                                        if let Message::User(UserMessage {
+                                                            content: mush_ai::types::UserContent::Text(t),
+                                                            ..
+                                                        }) = msg
+                                                            && !t.is_empty()
+                                                        {
+                                                            restored.push(t);
+                                                        }
+                                                    }
+                                                }
+                                                if !restored.is_empty() {
+                                                    let text = restored.join("\n");
+                                                    pane.app.input = text.clone();
+                                                    pane.app.cursor = text.len();
+                                                }
                                             }
                                             AppEvent::UserSubmit { text } => {
                                                 let fid = pane_mgr.focused().id;
@@ -1399,12 +1434,13 @@ pub async fn run_tui(
                 if let Some(remaining) = pane.app.cache_remaining_secs() {
                     if remaining == 0 && !pane.app.cache_expired_sent {
                         pane.app.cache_expired_sent = true;
-                        crate::notify::send("cache expired", "prompt cache has gone cold");
+                        crate::notify::send_with_sound("cache expired", "prompt cache has gone cold", Some(crate::notify::Sound::Attention));
                     } else if remaining > 0 && remaining <= 60 && !pane.app.cache_warn_sent {
                         pane.app.cache_warn_sent = true;
-                        crate::notify::send(
+                        crate::notify::send_with_sound(
                             "cache expiring soon",
                             &format!("prompt cache expires in {remaining}s"),
+                            Some(crate::notify::Sound::Attention),
                         );
                     }
                 }
