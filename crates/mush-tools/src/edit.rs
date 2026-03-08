@@ -152,16 +152,140 @@ fn edit_file(path: &Path, old_text: &str, new_text: &str) -> ToolResult {
     }
 
     if multiple {
+        // find all match locations to help the caller add context
+        let first_line = old_text.lines().next().unwrap_or(old_text);
+        let match_lines: Vec<usize> = content
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| line.contains(first_line.trim()))
+            .map(|(i, _)| i + 1)
+            .collect();
+        let locations = if match_lines.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n\nmatches near lines: {}\nhint: include more surrounding context in oldText to make the match unique",
+                match_lines.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", ")
+            )
+        };
         return ToolResult::error(format!(
-            "old text found multiple times in {}. it must be unique for a safe edit",
-            path.display()
+            "oldText found multiple times in {}.{}",
+            path.display(),
+            locations
         ));
     }
 
-    ToolResult::error(format!(
-        "old text not found in {}. make sure it matches exactly including whitespace",
-        path.display()
-    ))
+    // try to provide helpful context about why the match failed
+    let hint = find_near_miss(content, old_text);
+    let display = path.display();
+
+    match hint {
+        NearMiss::WhitespaceDifference(line_num) => ToolResult::error(format!(
+            "oldText not found in {display} (but a whitespace-normalised match was found near \
+             line {line_num}). check for extra/missing spaces, tabs, or trailing whitespace"
+        )),
+        NearMiss::SimilarLines(lines) => {
+            let mut msg = format!("oldText not found in {display}.\n\nmost similar lines:\n");
+            for (num, line) in lines {
+                msg.push_str(&format!("  {num}: {line}\n"));
+            }
+            msg.push_str(
+                "\nhint: use Read to see the exact file contents, then retry with corrected oldText",
+            );
+            ToolResult::error(msg)
+        }
+        NearMiss::None => ToolResult::error(format!(
+            "oldText not found in {display}. make sure it matches exactly including whitespace. \
+             use Read to verify the current file contents"
+        )),
+    }
+}
+
+enum NearMiss {
+    /// normalising whitespace would have matched, near this line
+    WhitespaceDifference(usize),
+    /// the most similar lines from the file (line_number, line_content)
+    SimilarLines(Vec<(usize, String)>),
+    /// nothing close found
+    None,
+}
+
+/// check if oldText nearly matches something in the file
+fn find_near_miss(content: &str, old_text: &str) -> NearMiss {
+    // check whitespace-normalised match
+    let normalise = |s: &str| -> String {
+        s.split_whitespace().collect::<Vec<_>>().join(" ")
+    };
+    let norm_old = normalise(old_text);
+    if !norm_old.is_empty() {
+        let norm_content = normalise(content);
+        if norm_content.contains(&norm_old) {
+            // find approximate line number
+            let line_num = content
+                .lines()
+                .enumerate()
+                .find(|(_, line)| normalise(line).contains(normalise(old_text.lines().next().unwrap_or("")).as_str()))
+                .map(|(i, _)| i + 1)
+                .unwrap_or(1);
+            return NearMiss::WhitespaceDifference(line_num);
+        }
+    }
+
+    // find most similar lines using first line of oldText
+    let first_old_line = old_text.lines().next().unwrap_or("").trim();
+    if first_old_line.len() < 4 {
+        return NearMiss::None;
+    }
+
+    let mut scored: Vec<(usize, &str, f64)> = content
+        .lines()
+        .enumerate()
+        .filter_map(|(i, line)| {
+            let score = line_similarity(first_old_line, line.trim());
+            if score > 0.4 {
+                Some((i + 1, line, score))
+            } else {
+                Option::None
+            }
+        })
+        .collect();
+
+    scored.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    scored.truncate(3);
+
+    if scored.is_empty() {
+        NearMiss::None
+    } else {
+        NearMiss::SimilarLines(
+            scored
+                .into_iter()
+                .map(|(num, line, _)| (num, line.to_string()))
+                .collect(),
+        )
+    }
+}
+
+/// simple similarity score between two strings (jaccard on character bigrams)
+fn line_similarity(a: &str, b: &str) -> f64 {
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+
+    let bigrams = |s: &str| -> std::collections::HashSet<(char, char)> {
+        s.chars().zip(s.chars().skip(1)).collect()
+    };
+
+    let a_bi = bigrams(a);
+    let b_bi = bigrams(b);
+
+    if a_bi.is_empty() || b_bi.is_empty() {
+        return 0.0;
+    }
+
+    let intersection = a_bi.intersection(&b_bi).count() as f64;
+    let union = a_bi.union(&b_bi).count() as f64;
+
+    intersection / union
 }
 
 /// strip common leading whitespace from both texts for readable diffs
@@ -234,6 +358,7 @@ fn format_edit_diff(old_text: &str, new_text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::extract_text;
     use std::fs;
 
     #[test]
@@ -403,5 +528,73 @@ mod tests {
         assert!(diff.contains("+ line A"));
         assert!(diff.contains("+ line B"));
         assert!(diff.contains("+ line C"));
+    }
+
+    #[test]
+    fn near_miss_whitespace_difference() {
+        let content = "fn main() {\n    println!(\"hello\");\n}\n";
+        // extra spaces in the search text
+        let old_text = "fn main() {\n        println!(\"hello\");\n}\n";
+        match find_near_miss(content, old_text) {
+            NearMiss::WhitespaceDifference(_) => {}
+            NearMiss::SimilarLines(_) => panic!("expected WhitespaceDifference, got SimilarLines"),
+            NearMiss::None => panic!("expected WhitespaceDifference, got None"),
+        }
+    }
+
+    #[test]
+    fn near_miss_similar_lines() {
+        let content = "fn process_data(input: &str) -> Result<(), Error> {\n    validate(input)?;\n    Ok(())\n}\n";
+        // slightly wrong return type
+        let old_text = "fn process_data(input: &str) -> Result<(), MyError> {";
+        match find_near_miss(content, old_text) {
+            NearMiss::SimilarLines(lines) => {
+                assert!(!lines.is_empty());
+                assert!(lines[0].1.contains("process_data"));
+            }
+            NearMiss::WhitespaceDifference(_) => panic!("expected SimilarLines, got WhitespaceDifference"),
+            NearMiss::None => panic!("expected SimilarLines, got None"),
+        }
+    }
+
+    #[test]
+    fn near_miss_nothing_close() {
+        let content = "fn main() {\n    println!(\"hello\");\n}\n";
+        let old_text = "completely unrelated text that appears nowhere";
+        assert!(matches!(find_near_miss(content, old_text), NearMiss::None));
+    }
+
+    #[test]
+    fn edit_no_match_shows_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.rs");
+        fs::write(&path, "fn process(input: &str) {\n    validate(input);\n}\n").unwrap();
+
+        let result = edit_file(&path, "fn process(input: &String) {", "fn replaced() {");
+        let text = extract_text(&result);
+        assert!(text.contains("similar lines") || text.contains("whitespace"));
+    }
+
+    #[test]
+    fn edit_multiple_match_shows_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.rs");
+        fs::write(&path, "let x = 1;\nlet y = 2;\nlet x = 1;\n").unwrap();
+
+        let result = edit_file(&path, "let x = 1;", "let x = 42;");
+        let text = extract_text(&result);
+        assert!(text.contains("multiple times"));
+        assert!(text.contains("lines:"));
+    }
+
+    #[test]
+    fn similarity_identical() {
+        assert!((line_similarity("hello world", "hello world") - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn similarity_empty() {
+        assert_eq!(line_similarity("", "hello"), 0.0);
+        assert_eq!(line_similarity("hello", ""), 0.0);
     }
 }
