@@ -6,19 +6,20 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
-use mush_ai::types::ThinkingLevel;
+use mush_ai::types::{Dollars, ThinkingLevel, TokenCount};
 
 use crate::app::App;
 use crate::path_utils::truncate_path;
 
 /// format token count as human-readable (e.g. 45k, 200k, 1.2m)
-fn format_tokens(tokens: u64) -> String {
-    if tokens >= 1_000_000 {
-        format!("{:.1}m", tokens as f64 / 1_000_000.0)
-    } else if tokens >= 1_000 {
-        format!("{}k", tokens / 1_000)
+fn format_tokens(tokens: mush_ai::types::TokenCount) -> String {
+    let n = tokens.get();
+    if n >= 1_000_000 {
+        format!("{:.1}m", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{}k", n / 1_000)
     } else {
-        format!("{tokens}")
+        format!("{n}")
     }
 }
 
@@ -72,39 +73,35 @@ fn left_spans(app: &App) -> Vec<Span<'static>> {
         ),
     ]);
 
-    if app.stats.input_tokens > 0 {
+    if app.stats.input_tokens > TokenCount::ZERO {
         spans.push(Span::styled(
             format!(" | ↑{}", format_tokens(app.stats.input_tokens)),
             dim,
         ));
     }
-    if app.stats.output_tokens > 0 {
+    if app.stats.output_tokens > TokenCount::ZERO {
         spans.push(Span::styled(
             format!(" ↓{}", format_tokens(app.stats.output_tokens)),
             dim,
         ));
     }
-    if app.stats.cache_read_tokens > 0 {
+    if app.stats.cache_read_tokens > TokenCount::ZERO {
         spans.push(Span::styled(
             format!(" R{}", format_tokens(app.stats.cache_read_tokens)),
             dim,
         ));
     }
-    if app.stats.cache_write_tokens > 0 {
+    if app.stats.cache_write_tokens > TokenCount::ZERO {
         spans.push(Span::styled(
             format!(" W{}", format_tokens(app.stats.cache_write_tokens)),
             dim,
         ));
     }
 
-    if app.stats.context_tokens > 0 {
+    if app.stats.context_tokens > TokenCount::ZERO {
         let ctx = format_tokens(app.stats.context_tokens);
         let window = format_tokens(app.stats.context_window);
-        let pct = if app.stats.context_window > 0 {
-            (app.stats.context_tokens as f64 / app.stats.context_window as f64 * 100.0) as u64
-        } else {
-            0
-        };
+        let pct = app.stats.context_tokens.percent_of(app.stats.context_window) as u64;
 
         // colour by cache warmth, with context pressure overriding
         let cache_remaining = app.cache_remaining_secs();
@@ -151,9 +148,9 @@ fn left_spans(app: &App) -> Vec<Span<'static>> {
         ));
     }
 
-    if app.show_cost && app.stats.total_cost > 0.0 {
+    if app.show_cost && app.stats.total_cost > Dollars::ZERO {
         spans.push(Span::styled(
-            format!(" | ${:.4}", app.stats.total_cost),
+            format!(" | {}", app.stats.total_cost),
             dim,
         ));
     }
@@ -271,7 +268,7 @@ mod tests {
 
     #[test]
     fn status_bar_shows_model() {
-        let app = App::new("claude-sonnet-4".into(), 200_000);
+        let app = App::new("claude-sonnet-4".into(), TokenCount::new(200_000));
         let buf = render_status(&app, 120, 1);
         let content = buffer_to_string(&buf);
         assert!(content.contains("claude-sonnet-4"));
@@ -279,14 +276,14 @@ mod tests {
 
     #[test]
     fn status_bar_shows_cost_and_context() {
-        let mut app = App::new("test-model".into(), 200_000);
-        app.stats.total_cost = 0.0123;
+        let mut app = App::new("test-model".into(), TokenCount::new(200_000));
+        app.stats.total_cost = Dollars::new(0.0123);
         app.show_cost = true;
-        app.stats.input_tokens = 45_000;
-        app.stats.output_tokens = 12_000;
-        app.stats.cache_read_tokens = 8_000;
-        app.stats.cache_write_tokens = 2_000;
-        app.stats.context_tokens = 45_000;
+        app.stats.input_tokens = TokenCount::new(45_000);
+        app.stats.output_tokens = TokenCount::new(12_000);
+        app.stats.cache_read_tokens = TokenCount::new(8_000);
+        app.stats.cache_write_tokens = TokenCount::new(2_000);
+        app.stats.context_tokens = TokenCount::new(45_000);
         let buf = render_status(&app, 120, 1);
         let content = buffer_to_string(&buf);
         assert!(content.contains("↑45k"));
@@ -299,7 +296,7 @@ mod tests {
 
     #[test]
     fn status_bar_hides_config_reloaded_status() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.status = Some("config reloaded".into());
         let buf = render_status(&app, 120, 1);
         let content = buffer_to_string(&buf);
@@ -308,7 +305,7 @@ mod tests {
 
     #[test]
     fn status_bar_shows_cwd_right() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.cwd = "/home/user/project".into();
         let buf = render_status(&app, 120, 1);
         let content = buffer_to_string(&buf);
@@ -317,7 +314,7 @@ mod tests {
 
     #[test]
     fn status_bar_shows_thinking_level() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.thinking_level = ThinkingLevel::High;
         let buf = render_status(&app, 120, 1);
         let content = buffer_to_string(&buf);
@@ -326,7 +323,7 @@ mod tests {
 
     #[test]
     fn status_bar_single_line_normally() {
-        let app = App::new("test".into(), 200_000);
+        let app = App::new("test".into(), TokenCount::new(200_000));
         // without hotkey hints, even narrow terminals should fit in 1 line
         assert_eq!(status_bar_height(&app, 80), 1);
         assert_eq!(status_bar_height(&app, 200), 1);
@@ -339,9 +336,9 @@ mod tests {
 
     #[test]
     fn status_bar_shows_cache_countdown() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.cache_ttl_secs = 300;
-        app.stats.context_tokens = 10_000;
+        app.stats.context_tokens = TokenCount::new(10_000);
         app.refresh_cache_timer();
         let buf = render_status(&app, 120, 1);
         let content = buffer_to_string(&buf);

@@ -145,6 +145,7 @@ impl Widget for Ui<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mush_ai::types::{Dollars, TokenCount};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -193,7 +194,7 @@ mod tests {
 
     #[test]
     fn ui_sets_input_area_for_mouse_routing() {
-        let app = App::new("test".into(), 200_000);
+        let app = App::new("test".into(), TokenCount::new(200_000));
         let ui = Ui::new(&app);
         let area = Rect::new(0, 0, 80, 24);
         let _ = ui.cursor_position(area);
@@ -204,11 +205,11 @@ mod tests {
 
     #[test]
     fn full_layout_renders() {
-        let mut app = App::new("claude-sonnet-4".into(), 200_000);
+        let mut app = App::new("claude-sonnet-4".into(), TokenCount::new(200_000));
         app.push_user_message("what is rust?");
         app.start_streaming();
         app.push_text_delta("rust is a systems programming language");
-        app.finish_streaming(None, Some(0.003));
+        app.finish_streaming(None, Some(Dollars::new(0.003)));
 
         let buf = render_full(&app, 60, 20);
         let content = buffer_to_string(&buf);
@@ -233,7 +234,7 @@ mod tests {
 
     #[test]
     fn cursor_position_in_layout() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.input = "hello".into();
         app.cursor = 5;
         let ui = Ui::new(&app);

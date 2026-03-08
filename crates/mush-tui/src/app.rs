@@ -140,7 +140,7 @@ pub struct DisplayMessage {
     /// whether thinking is expanded (visible)
     pub thinking_expanded: bool,
     pub usage: Option<Usage>,
-    pub cost: Option<f64>,
+    pub cost: Option<Dollars>,
     /// model id for assistant messages
     pub model_id: Option<ModelId>,
     /// whether this message is queued (steering) and hasn't been processed yet
@@ -188,27 +188,27 @@ pub struct ActiveToolState {
 #[derive(Debug, Clone, Default)]
 pub struct TokenStats {
     /// total cost so far
-    pub total_cost: f64,
+    pub total_cost: Dollars,
     /// total tokens used (cumulative across all API calls)
-    pub total_tokens: u64,
+    pub total_tokens: TokenCount,
     /// cumulative uncached input tokens
-    pub input_tokens: u64,
+    pub input_tokens: TokenCount,
     /// cumulative output tokens
-    pub output_tokens: u64,
+    pub output_tokens: TokenCount,
     /// cumulative cache-read tokens
-    pub cache_read_tokens: u64,
+    pub cache_read_tokens: TokenCount,
     /// cumulative cache-write tokens
-    pub cache_write_tokens: u64,
+    pub cache_write_tokens: TokenCount,
     /// last call's input tokens (actual context size)
-    pub context_tokens: u64,
+    pub context_tokens: TokenCount,
     /// model's context window size
-    pub context_window: u64,
+    pub context_window: TokenCount,
 }
 
 impl TokenStats {
     /// create with a given context window
     #[must_use]
-    pub fn new(context_window: u64) -> Self {
+    pub fn new(context_window: TokenCount) -> Self {
         Self {
             context_window,
             ..Default::default()
@@ -216,7 +216,7 @@ impl TokenStats {
     }
 
     /// accumulate usage from an API call
-    pub fn update(&mut self, usage: &Usage, cost: Option<f64>) {
+    pub fn update(&mut self, usage: &Usage, cost: Option<Dollars>) {
         if let Some(c) = cost {
             self.total_cost += c;
         }
@@ -389,7 +389,7 @@ struct TabState {
 }
 
 impl App {
-    pub fn new(model_id: ModelId, context_window: u64) -> Self {
+    pub fn new(model_id: ModelId, context_window: TokenCount) -> Self {
         Self {
             messages: Vec::new(),
             streaming_text: String::new(),
@@ -659,7 +659,7 @@ impl App {
     }
 
     /// finish streaming, create the assistant message
-    pub fn finish_streaming(&mut self, usage: Option<Usage>, cost: Option<f64>) {
+    pub fn finish_streaming(&mut self, usage: Option<Usage>, cost: Option<Dollars>) {
         self.is_streaming = false;
         let thinking = if self.streaming_thinking.is_empty() {
             None
@@ -1336,7 +1336,7 @@ mod tests {
 
     #[test]
     fn new_app_is_empty() {
-        let app = App::new("test-model".into(), 200_000);
+        let app = App::new("test-model".into(), TokenCount::new(200_000));
         assert!(app.messages.is_empty());
         assert!(!app.is_streaming);
         assert!(app.input.is_empty());
@@ -1345,7 +1345,7 @@ mod tests {
 
     #[test]
     fn push_user_message() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.push_user_message("hello");
         assert_eq!(app.messages.len(), 1);
         assert_eq!(app.messages[0].role, MessageRole::User);
@@ -1354,7 +1354,7 @@ mod tests {
 
     #[test]
     fn streaming_lifecycle() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.start_streaming();
         assert!(app.is_streaming);
 
@@ -1371,7 +1371,7 @@ mod tests {
 
     #[test]
     fn streaming_with_thinking() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.start_streaming();
         app.push_thinking_delta("let me think...");
         app.push_text_delta("answer");
@@ -1394,7 +1394,7 @@ mod tests {
 
     #[test]
     fn typewriter_advances_with_ticks() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.start_streaming();
         app.push_text_delta("hello world");
 
@@ -1416,7 +1416,7 @@ mod tests {
 
     #[test]
     fn typewriter_resets_on_new_stream() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.start_streaming();
         app.push_text_delta("first");
         for _ in 0..20 {
@@ -1431,7 +1431,7 @@ mod tests {
 
     #[test]
     fn tool_lifecycle() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.push_user_message("do something");
         // simulate assistant message already pushed by finish_streaming
         app.messages.push(DisplayMessage {
@@ -1482,7 +1482,7 @@ mod tests {
 
     #[test]
     fn ensure_cursor_visible_recomputes_total_when_stale() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.input_area.set(Rect::new(0, 0, 20, 8));
         app.input_visible_lines.set(2);
         app.input_total_lines.set(2); // stale from previous render
@@ -1497,7 +1497,7 @@ mod tests {
 
     #[test]
     fn input_editing() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.input_char('h');
         app.input_char('i');
         assert_eq!(app.input, "hi");
@@ -1519,7 +1519,7 @@ mod tests {
 
     #[test]
     fn input_delete() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.input = "abc".into();
         app.cursor = 1;
         app.input_delete();
@@ -1528,7 +1528,7 @@ mod tests {
 
     #[test]
     fn take_input_resets() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.input = "hello".into();
         app.cursor = 3;
         let text = app.take_input();
@@ -1539,38 +1539,38 @@ mod tests {
 
     #[test]
     fn cost_accumulates() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.start_streaming();
         app.push_text_delta("a");
         app.finish_streaming(
             Some(Usage {
-                input_tokens: 100,
-                output_tokens: 50,
-                cache_read_tokens: 0,
-                cache_write_tokens: 0,
+                input_tokens: TokenCount::new(100),
+                output_tokens: TokenCount::new(50),
+                cache_read_tokens: TokenCount::ZERO,
+                cache_write_tokens: TokenCount::ZERO,
             }),
-            Some(0.005),
+            Some(Dollars::new(0.005)),
         );
 
         app.start_streaming();
         app.push_text_delta("b");
         app.finish_streaming(
             Some(Usage {
-                input_tokens: 200,
-                output_tokens: 100,
-                cache_read_tokens: 0,
-                cache_write_tokens: 0,
+                input_tokens: TokenCount::new(200),
+                output_tokens: TokenCount::new(100),
+                cache_read_tokens: TokenCount::ZERO,
+                cache_write_tokens: TokenCount::ZERO,
             }),
-            Some(0.01),
+            Some(Dollars::new(0.01)),
         );
 
-        assert!((app.stats.total_cost - 0.015).abs() < f64::EPSILON);
-        assert_eq!(app.stats.total_tokens, 450);
-        assert_eq!(app.stats.input_tokens, 300);
-        assert_eq!(app.stats.output_tokens, 150);
-        assert_eq!(app.stats.cache_read_tokens, 0);
-        assert_eq!(app.stats.cache_write_tokens, 0);
-        assert_eq!(app.stats.context_tokens, 200);
+        assert!((app.stats.total_cost.get() - 0.015).abs() < f64::EPSILON);
+        assert_eq!(app.stats.total_tokens, TokenCount::new(450));
+        assert_eq!(app.stats.input_tokens, TokenCount::new(300));
+        assert_eq!(app.stats.output_tokens, TokenCount::new(150));
+        assert_eq!(app.stats.cache_read_tokens, TokenCount::ZERO);
+        assert_eq!(app.stats.cache_write_tokens, TokenCount::ZERO);
+        assert_eq!(app.stats.context_tokens, TokenCount::new(200));
     }
 
     #[test]
@@ -1602,7 +1602,7 @@ mod tests {
 
     #[test]
     fn tool_output_stored() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.messages.push(DisplayMessage {
             role: MessageRole::Assistant,
             content: String::new(),
@@ -1629,7 +1629,7 @@ mod tests {
 
     #[test]
     fn toggle_thinking() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.start_streaming();
         app.push_thinking_delta("deep thoughts");
         app.push_text_delta("answer");
@@ -1647,7 +1647,7 @@ mod tests {
 
     #[test]
     fn toggle_thinking_targets_last_assistant() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
 
         // first assistant with thinking
         app.start_streaming();
@@ -1669,7 +1669,7 @@ mod tests {
 
     #[test]
     fn thinking_display_collapse_starts_collapsed() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.thinking_display = ThinkingDisplay::Collapse;
         app.start_streaming();
         app.push_thinking_delta("deep thoughts");
@@ -1681,7 +1681,7 @@ mod tests {
 
     #[test]
     fn thinking_display_hidden_starts_collapsed() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.thinking_display = ThinkingDisplay::Hidden;
         app.start_streaming();
         app.push_thinking_delta("deep thoughts");
@@ -1693,7 +1693,7 @@ mod tests {
 
     #[test]
     fn multi_line_input() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.input_char('a');
         app.input_char('\n');
         app.input_char('b');
@@ -1703,7 +1703,7 @@ mod tests {
 
     #[test]
     fn session_picker_open_close() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         assert_eq!(app.mode, AppMode::Normal);
 
         let sessions = vec![SessionMeta {
@@ -1748,7 +1748,7 @@ mod tests {
             },
         ];
 
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.open_session_picker(sessions, "/tmp".into());
 
         let picker = app.session_picker.as_mut().unwrap();
@@ -1781,7 +1781,7 @@ mod tests {
             },
         ];
 
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.open_session_picker(sessions, "/home/user/project".into());
 
         // this dir: only the matching session
@@ -1800,7 +1800,7 @@ mod tests {
 
     #[test]
     fn streaming_tool_args_accumulate() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.push_tool_args_delta("{\"path\":");
         app.push_tool_args_delta("\"src/");
         assert_eq!(app.streaming_tool_args, "{\"path\":\"src/");
@@ -1838,7 +1838,7 @@ mod tests {
 
     #[test]
     fn steering_message_ordered_after_assistant() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.start_streaming();
         app.push_text_delta("assistant reply");
         // user sends steering while streaming
@@ -1879,7 +1879,7 @@ mod tests {
 
     #[test]
     fn cache_remaining_countdown() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         assert!(app.cache_remaining_secs().is_none());
 
         app.cache_ttl_secs = 300;
@@ -1891,7 +1891,7 @@ mod tests {
 
     #[test]
     fn pop_last_queued_message() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         // no queued messages returns none
         assert!(app.pop_last_queued_message().is_none());
 
@@ -1907,7 +1907,7 @@ mod tests {
 
     #[test]
     fn pop_queued_skips_non_queued() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.push_user_message("normal message");
         app.push_queued_message("steering msg");
 
