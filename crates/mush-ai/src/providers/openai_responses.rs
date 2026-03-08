@@ -217,7 +217,7 @@ fn build_request_body(
         max_output_tokens: if is_codex {
             None
         } else {
-            options.max_tokens.or(Some(model.max_output_tokens))
+            Some(options.max_tokens.unwrap_or(model.max_output_tokens).get())
         },
         temperature: if reasoning.is_none() {
             options.temperature.map(|t| t.value())
@@ -811,10 +811,10 @@ fn process_sse_event(
                         .unwrap_or(0);
 
                     output.usage = Usage {
-                        input_tokens: input_tokens.saturating_sub(cache_read_tokens),
-                        output_tokens,
-                        cache_read_tokens,
-                        cache_write_tokens: 0,
+                        input_tokens: TokenCount::new(input_tokens.saturating_sub(cache_read_tokens)),
+                        output_tokens: TokenCount::new(output_tokens),
+                        cache_read_tokens: TokenCount::new(cache_read_tokens),
+                        cache_write_tokens: TokenCount::ZERO,
                     };
                 }
 
@@ -977,8 +977,8 @@ mod tests {
                 cache_read: 0.0,
                 cache_write: 0.0,
             },
-            context_window: 200_000,
-            max_output_tokens: 32768,
+            context_window: TokenCount::new(200_000),
+            max_output_tokens: TokenCount::new(32768),
         };
 
         assert_eq!(
@@ -1003,8 +1003,8 @@ mod tests {
                 cache_read: 0.0,
                 cache_write: 0.0,
             },
-            context_window: 200_000,
-            max_output_tokens: 32768,
+            context_window: TokenCount::new(200_000),
+            max_output_tokens: TokenCount::new(32768),
         };
 
         assert_eq!(
@@ -1060,8 +1060,8 @@ mod tests {
                 cache_read: 0.0,
                 cache_write: 0.0,
             },
-            context_window: 200_000,
-            max_output_tokens: 32768,
+            context_window: TokenCount::new(200_000),
+            max_output_tokens: TokenCount::new(32768),
         };
 
         let options = StreamOptions {
@@ -1097,8 +1097,8 @@ mod tests {
                 cache_read: 0.0,
                 cache_write: 0.0,
             },
-            context_window: 200_000,
-            max_output_tokens: 32768,
+            context_window: TokenCount::new(200_000),
+            max_output_tokens: TokenCount::new(32768),
         }
     }
 
@@ -1142,8 +1142,8 @@ mod tests {
                 cache_read: 0.0,
                 cache_write: 0.0,
             },
-            context_window: 200_000,
-            max_output_tokens: 32768,
+            context_window: TokenCount::new(200_000),
+            max_output_tokens: TokenCount::new(32768),
         };
         let prompt = Some("you are a coding assistant".into());
         let options = StreamOptions::default();

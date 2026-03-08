@@ -282,7 +282,7 @@ pub async fn llm_compact(
 
     // use reduced max_tokens for the summary, no thinking
     let mut compact_options = options.clone();
-    compact_options.max_tokens = Some(4096);
+    compact_options.max_tokens = Some(mush_ai::types::TokenCount::new(4096));
     compact_options.thinking = None;
 
     let summary = match call_for_text(registry, model, &context, &compact_options).await {
@@ -549,8 +549,8 @@ mod tests {
                 cache_read: 0.0,
                 cache_write: 0.0,
             },
-            context_window: 200_000,
-            max_output_tokens: 8192,
+            context_window: TokenCount::new(200_000),
+            max_output_tokens: TokenCount::new(8192),
         };
         let options = StreamOptions::default();
 

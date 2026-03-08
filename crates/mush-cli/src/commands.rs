@@ -15,7 +15,7 @@ pub fn list_models() -> Result<()> {
         println!("  \x1b[1m{}\x1b[0m ({})", m.id, m.provider);
         println!(
             "    context: {}k, max output: {}, {cost}",
-            m.context_window / 1000,
+            m.context_window.get() / 1000,
             m.max_output_tokens
         );
     }

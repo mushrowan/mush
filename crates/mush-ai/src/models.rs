@@ -22,8 +22,8 @@ pub fn anthropic_models() -> Vec<Model> {
                 cache_read: 0.5,
                 cache_write: 6.25,
             },
-            context_window: 200_000,
-            max_output_tokens: 128_000,
+            context_window: TokenCount::new(200_000),
+            max_output_tokens: TokenCount::new(128_000),
         },
         Model {
             id: "claude-sonnet-4-6".into(),
@@ -39,8 +39,8 @@ pub fn anthropic_models() -> Vec<Model> {
                 cache_read: 0.3,
                 cache_write: 3.75,
             },
-            context_window: 200_000,
-            max_output_tokens: 64_000,
+            context_window: TokenCount::new(200_000),
+            max_output_tokens: TokenCount::new(64_000),
         },
         Model {
             id: "claude-haiku-4-5".into(),
@@ -56,8 +56,8 @@ pub fn anthropic_models() -> Vec<Model> {
                 cache_read: 0.1,
                 cache_write: 1.25,
             },
-            context_window: 200_000,
-            max_output_tokens: 64_000,
+            context_window: TokenCount::new(200_000),
+            max_output_tokens: TokenCount::new(64_000),
         },
         // legacy
         Model {
@@ -74,8 +74,8 @@ pub fn anthropic_models() -> Vec<Model> {
                 cache_read: 0.3,
                 cache_write: 3.75,
             },
-            context_window: 200_000,
-            max_output_tokens: 64_000,
+            context_window: TokenCount::new(200_000),
+            max_output_tokens: TokenCount::new(64_000),
         },
         Model {
             id: "claude-opus-4-20250514".into(),
@@ -91,8 +91,8 @@ pub fn anthropic_models() -> Vec<Model> {
                 cache_read: 1.5,
                 cache_write: 18.75,
             },
-            context_window: 200_000,
-            max_output_tokens: 32768,
+            context_window: TokenCount::new(200_000),
+            max_output_tokens: TokenCount::new(32768),
         },
     ]
 }
@@ -114,8 +114,8 @@ pub fn openrouter_models() -> Vec<Model> {
                 cache_read: 0.3,
                 cache_write: 3.75,
             },
-            context_window: 200_000,
-            max_output_tokens: 16384,
+            context_window: TokenCount::new(200_000),
+            max_output_tokens: TokenCount::new(16384),
         },
         Model {
             id: "anthropic/claude-opus-4".into(),
@@ -131,8 +131,8 @@ pub fn openrouter_models() -> Vec<Model> {
                 cache_read: 1.5,
                 cache_write: 18.75,
             },
-            context_window: 200_000,
-            max_output_tokens: 32768,
+            context_window: TokenCount::new(200_000),
+            max_output_tokens: TokenCount::new(32768),
         },
         Model {
             id: "google/gemini-2.5-pro".into(),
@@ -148,8 +148,8 @@ pub fn openrouter_models() -> Vec<Model> {
                 cache_read: 0.0,
                 cache_write: 0.0,
             },
-            context_window: 1_048_576,
-            max_output_tokens: 65536,
+            context_window: TokenCount::new(1_048_576),
+            max_output_tokens: TokenCount::new(65536),
         },
         Model {
             id: "google/gemini-2.5-flash".into(),
@@ -165,8 +165,8 @@ pub fn openrouter_models() -> Vec<Model> {
                 cache_read: 0.0,
                 cache_write: 0.0,
             },
-            context_window: 1_048_576,
-            max_output_tokens: 65536,
+            context_window: TokenCount::new(1_048_576),
+            max_output_tokens: TokenCount::new(65536),
         },
     ]
 }
@@ -188,8 +188,8 @@ pub fn openai_models() -> Vec<Model> {
                 cache_read: 0.125,
                 cache_write: 1.5625,
             },
-            context_window: 400_000,
-            max_output_tokens: 128_000,
+            context_window: TokenCount::new(400_000),
+            max_output_tokens: TokenCount::new(128_000),
         },
         Model {
             id: "gpt-5.2-mini".into(),
@@ -205,8 +205,8 @@ pub fn openai_models() -> Vec<Model> {
                 cache_read: 0.025,
                 cache_write: 0.3125,
             },
-            context_window: 400_000,
-            max_output_tokens: 64_000,
+            context_window: TokenCount::new(400_000),
+            max_output_tokens: TokenCount::new(64_000),
         },
     ]
 }
@@ -228,8 +228,8 @@ pub fn openai_codex_models() -> Vec<Model> {
                 cache_read: 0.0,
                 cache_write: 0.0,
             },
-            context_window: 400_000,
-            max_output_tokens: 128_000,
+            context_window: TokenCount::new(400_000),
+            max_output_tokens: TokenCount::new(128_000),
         },
         Model {
             id: "gpt-5.3-codex".into(),
@@ -245,8 +245,8 @@ pub fn openai_codex_models() -> Vec<Model> {
                 cache_read: 0.0,
                 cache_write: 0.0,
             },
-            context_window: 400_000,
-            max_output_tokens: 128_000,
+            context_window: TokenCount::new(400_000),
+            max_output_tokens: TokenCount::new(128_000),
         },
         Model {
             id: "gpt-5.2-codex".into(),
@@ -262,8 +262,8 @@ pub fn openai_codex_models() -> Vec<Model> {
                 cache_read: 0.0,
                 cache_write: 0.0,
             },
-            context_window: 400_000,
-            max_output_tokens: 128_000,
+            context_window: TokenCount::new(400_000),
+            max_output_tokens: TokenCount::new(128_000),
         },
     ]
 }
@@ -343,11 +343,14 @@ pub fn models_for_provider(provider: &Provider) -> Vec<Model> {
 
 /// calculate cost from usage and model pricing
 pub fn calculate_cost(model: &Model, usage: &Usage) -> Cost {
+    let per_token = |rate: f64, tokens: TokenCount| -> Dollars {
+        Dollars::new((rate / 1_000_000.0) * tokens.get() as f64)
+    };
     Cost {
-        input: (model.cost.input / 1_000_000.0) * usage.input_tokens as f64,
-        output: (model.cost.output / 1_000_000.0) * usage.output_tokens as f64,
-        cache_read: (model.cost.cache_read / 1_000_000.0) * usage.cache_read_tokens as f64,
-        cache_write: (model.cost.cache_write / 1_000_000.0) * usage.cache_write_tokens as f64,
+        input: per_token(model.cost.input, usage.input_tokens),
+        output: per_token(model.cost.output, usage.output_tokens),
+        cache_read: per_token(model.cost.cache_read, usage.cache_read_tokens),
+        cache_write: per_token(model.cost.cache_write, usage.cache_write_tokens),
     }
 }
 
@@ -443,8 +446,8 @@ mod tests {
                 cache_read: 0.0,
                 cache_write: 0.0,
             },
-            context_window: 100_000,
-            max_output_tokens: 4096,
+            context_window: TokenCount::new(100_000),
+            max_output_tokens: TokenCount::new(4096),
         }];
 
         let user = vec![Model {
@@ -461,8 +464,8 @@ mod tests {
                 cache_read: 0.0,
                 cache_write: 0.0,
             },
-            context_window: 200_000,
-            max_output_tokens: 8192,
+            context_window: TokenCount::new(200_000),
+            max_output_tokens: TokenCount::new(8192),
         }];
 
         for um in user {
@@ -475,7 +478,7 @@ mod tests {
 
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].name, "Test Override");
-        assert_eq!(models[0].context_window, 200_000);
+        assert_eq!(models[0].context_window, TokenCount::new(200_000));
     }
 
     #[test]
@@ -497,8 +500,8 @@ mod tests {
                 cache_read: 0.0,
                 cache_write: 0.0,
             },
-            context_window: 128_000,
-            max_output_tokens: 4096,
+            context_window: TokenCount::new(128_000),
+            max_output_tokens: TokenCount::new(4096),
         }];
 
         for um in user {
@@ -541,8 +544,8 @@ mod tests {
                 cache_read: 0.0,
                 cache_write: 0.0,
             },
-            context_window: 128_000,
-            max_output_tokens: 4096,
+            context_window: TokenCount::new(128_000),
+            max_output_tokens: TokenCount::new(4096),
         }];
         std::fs::write(&path, serde_json::to_string(&models).unwrap()).unwrap();
 
@@ -566,14 +569,14 @@ mod tests {
         // opus 4.6: $5/MTok input, $25/MTok output
         let model = anthropic_models().into_iter().next().unwrap();
         let usage = Usage {
-            input_tokens: 1_000_000,
-            output_tokens: 500_000,
-            cache_read_tokens: 100_000,
-            cache_write_tokens: 50_000,
+            input_tokens: TokenCount::new(1_000_000),
+            output_tokens: TokenCount::new(500_000),
+            cache_read_tokens: TokenCount::new(100_000),
+            cache_write_tokens: TokenCount::new(50_000),
         };
         let cost = calculate_cost(&model, &usage);
-        assert!((cost.input - 5.0).abs() < f64::EPSILON);
-        assert!((cost.output - 12.5).abs() < f64::EPSILON);
-        assert!(cost.total() > 0.0);
+        assert!((cost.input.get() - 5.0).abs() < f64::EPSILON);
+        assert!((cost.output.get() - 12.5).abs() < f64::EPSILON);
+        assert!(cost.total() > Dollars::ZERO);
     }
 }

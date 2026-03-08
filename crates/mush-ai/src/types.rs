@@ -117,6 +117,120 @@ impl Timestamp {
     }
 }
 
+// -- token count --
+
+/// token count used in context windows, usage stats, and compaction thresholds.
+/// wraps u64 to prevent mixing with arbitrary integers
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Display,
+    Serialize,
+    Deserialize,
+)]
+pub struct TokenCount(u64);
+
+impl TokenCount {
+    pub const ZERO: Self = Self(0);
+
+    pub const fn new(n: u64) -> Self {
+        Self(n)
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    /// percentage of a context window this count represents
+    pub fn percent_of(self, window: Self) -> f64 {
+        if window.0 == 0 {
+            return 0.0;
+        }
+        (self.0 as f64 / window.0 as f64) * 100.0
+    }
+
+    /// whether this count exceeds a fraction of a context window
+    pub fn exceeds_fraction(self, window: Self, numerator: u64, denominator: u64) -> bool {
+        self.0 * denominator > window.0 * numerator
+    }
+}
+
+impl From<u64> for TokenCount {
+    fn from(n: u64) -> Self {
+        Self(n)
+    }
+}
+
+impl From<usize> for TokenCount {
+    fn from(n: usize) -> Self {
+        Self(n as u64)
+    }
+}
+
+impl std::ops::Add for TokenCount {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self {
+        Self(self.0 + rhs.0)
+    }
+}
+
+impl std::ops::AddAssign for TokenCount {
+    fn add_assign(&mut self, rhs: Self) {
+        self.0 += rhs.0;
+    }
+}
+
+// -- dollars --
+
+/// monetary cost in US dollars.
+/// wraps f64 to prevent mixing cost-per-million with actual dollar amounts
+#[derive(Debug, Clone, Copy, Default, PartialEq, PartialOrd, Serialize, Deserialize)]
+pub struct Dollars(f64);
+
+impl Dollars {
+    pub const ZERO: Self = Self(0.0);
+
+    pub const fn new(amount: f64) -> Self {
+        Self(amount)
+    }
+
+    pub const fn get(self) -> f64 {
+        self.0
+    }
+}
+
+impl std::fmt::Display for Dollars {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "${:.4}", self.0)
+    }
+}
+
+impl From<f64> for Dollars {
+    fn from(n: f64) -> Self {
+        Self(n)
+    }
+}
+
+impl std::ops::Add for Dollars {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self {
+        Self(self.0 + rhs.0)
+    }
+}
+
+impl std::ops::AddAssign for Dollars {
+    fn add_assign(&mut self, rhs: Self) {
+        self.0 += rhs.0;
+    }
+}
+
 // -- validated newtypes --
 
 /// a base URL for an API endpoint (trailing slash stripped on construction)
@@ -452,35 +566,35 @@ pub enum ToolResultContentPart {
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
 pub struct Usage {
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub cache_read_tokens: u64,
-    pub cache_write_tokens: u64,
+    pub input_tokens: TokenCount,
+    pub output_tokens: TokenCount,
+    pub cache_read_tokens: TokenCount,
+    pub cache_write_tokens: TokenCount,
 }
 
 impl Usage {
     /// total tokens processed in this API call (all categories)
-    pub fn total_tokens(&self) -> u64 {
+    pub fn total_tokens(&self) -> TokenCount {
         self.input_tokens + self.output_tokens + self.cache_read_tokens + self.cache_write_tokens
     }
 
     /// total input tokens (context size for this call).
     /// for anthropic: input_tokens is non-cached, cache_read + cache_write are the rest
-    pub fn total_input_tokens(&self) -> u64 {
+    pub fn total_input_tokens(&self) -> TokenCount {
         self.input_tokens + self.cache_read_tokens + self.cache_write_tokens
     }
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
 pub struct Cost {
-    pub input: f64,
-    pub output: f64,
-    pub cache_read: f64,
-    pub cache_write: f64,
+    pub input: Dollars,
+    pub output: Dollars,
+    pub cache_read: Dollars,
+    pub cache_write: Dollars,
 }
 
 impl Cost {
-    pub fn total(&self) -> f64 {
+    pub fn total(&self) -> Dollars {
         self.input + self.output + self.cache_read + self.cache_write
     }
 }
@@ -671,8 +785,8 @@ pub struct Model {
     pub reasoning: bool,
     pub input: Vec<InputModality>,
     pub cost: ModelCost,
-    pub context_window: u64,
-    pub max_output_tokens: u64,
+    pub context_window: TokenCount,
+    pub max_output_tokens: TokenCount,
 }
 
 // -- thinking level --
@@ -693,7 +807,7 @@ pub enum ThinkingLevel {
 #[derive(Debug, Clone, Default)]
 pub struct StreamOptions {
     pub temperature: Option<Temperature>,
-    pub max_tokens: Option<u64>,
+    pub max_tokens: Option<TokenCount>,
     pub api_key: Option<ApiKey>,
     pub thinking: Option<ThinkingLevel>,
     /// stable session identifier for provider-side prompt caching
@@ -719,35 +833,35 @@ mod tests {
     #[test]
     fn usage_total_tokens() {
         let usage = Usage {
-            input_tokens: 100,
-            output_tokens: 50,
-            cache_read_tokens: 25,
-            cache_write_tokens: 10,
+            input_tokens: TokenCount::new(100),
+            output_tokens: TokenCount::new(50),
+            cache_read_tokens: TokenCount::new(25),
+            cache_write_tokens: TokenCount::new(10),
         };
-        assert_eq!(usage.total_tokens(), 185);
+        assert_eq!(usage.total_tokens(), TokenCount::new(185));
     }
 
     #[test]
     fn usage_total_input_tokens() {
         let usage = Usage {
-            input_tokens: 100,
-            output_tokens: 50,
-            cache_read_tokens: 25,
-            cache_write_tokens: 10,
+            input_tokens: TokenCount::new(100),
+            output_tokens: TokenCount::new(50),
+            cache_read_tokens: TokenCount::new(25),
+            cache_write_tokens: TokenCount::new(10),
         };
         // input + cache_read + cache_write, excludes output
-        assert_eq!(usage.total_input_tokens(), 135);
+        assert_eq!(usage.total_input_tokens(), TokenCount::new(135));
     }
 
     #[test]
     fn cost_total() {
         let cost = Cost {
-            input: 0.003,
-            output: 0.015,
-            cache_read: 0.001,
-            cache_write: 0.002,
+            input: Dollars::new(0.003),
+            output: Dollars::new(0.015),
+            cache_read: Dollars::new(0.001),
+            cache_write: Dollars::new(0.002),
         };
-        assert!((cost.total() - 0.021).abs() < f64::EPSILON);
+        assert!((cost.total().get() - 0.021).abs() < f64::EPSILON);
     }
 
     #[test]
