@@ -557,7 +557,7 @@ fn handle_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
-    use mush_ai::types::ThinkingLevel;
+    use mush_ai::types::{ThinkingLevel, TokenCount};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent {
@@ -579,14 +579,14 @@ mod tests {
 
     #[test]
     fn ctrl_c_quits() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         let event = handle_key(&mut app, ctrl(KeyCode::Char('c')));
         assert!(matches!(event, Some(AppEvent::Quit)));
     }
 
     #[test]
     fn escape_aborts_when_streaming() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.is_streaming = true;
         let event = handle_key(&mut app, key(KeyCode::Esc));
         assert!(matches!(event, Some(AppEvent::Abort)));
@@ -594,14 +594,14 @@ mod tests {
 
     #[test]
     fn escape_does_nothing_when_idle() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         let event = handle_key(&mut app, key(KeyCode::Esc));
         assert!(event.is_none());
     }
 
     #[test]
     fn typing_characters() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         handle_key(&mut app, key(KeyCode::Char('h')));
         handle_key(&mut app, key(KeyCode::Char('i')));
         assert_eq!(app.input, "hi");
@@ -610,7 +610,7 @@ mod tests {
 
     #[test]
     fn enter_submits_input() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.input = "hello".into();
         app.cursor = 5;
         let event = handle_key(&mut app, key(KeyCode::Enter));
@@ -623,14 +623,14 @@ mod tests {
 
     #[test]
     fn enter_on_empty_does_nothing() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         let event = handle_key(&mut app, key(KeyCode::Enter));
         assert!(event.is_none());
     }
 
     #[test]
     fn backspace_deletes() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.input = "abc".into();
         app.cursor = 3;
         handle_key(&mut app, key(KeyCode::Backspace));
@@ -639,7 +639,7 @@ mod tests {
 
     #[test]
     fn ctrl_u_clears_line() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.input = "long text here".into();
         app.cursor = 14;
         handle_key(&mut app, ctrl(KeyCode::Char('u')));
@@ -649,7 +649,7 @@ mod tests {
 
     #[test]
     fn home_end_navigation() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.input = "hello".into();
         app.cursor = 3;
 
@@ -662,7 +662,7 @@ mod tests {
 
     #[test]
     fn page_up_down_scrolls() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         let event = handle_key(&mut app, key(KeyCode::PageUp));
         assert!(matches!(event, Some(AppEvent::ScrollUp(10))));
         assert_eq!(app.scroll_offset, 10);
@@ -674,7 +674,7 @@ mod tests {
 
     #[test]
     fn ctrl_t_cycles_thinking_level() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         assert_eq!(app.thinking_level, ThinkingLevel::Off);
 
         let event = handle_key(&mut app, ctrl(KeyCode::Char('t')));
@@ -687,7 +687,7 @@ mod tests {
 
     #[test]
     fn ctrl_o_toggles_thinking_expanded() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.start_streaming();
         app.push_thinking_delta("thoughts");
         app.push_text_delta("text");
@@ -701,7 +701,7 @@ mod tests {
 
     #[test]
     fn ctrl_i_toggles_prompt_injection_preview() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         assert!(!app.show_prompt_injection);
         handle_key(&mut app, ctrl(KeyCode::Char('i')));
         assert!(app.show_prompt_injection);
@@ -714,7 +714,7 @@ mod tests {
 
     #[test]
     fn alt_enter_inserts_newline() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.input_char('a');
         let event = handle_key(
             &mut app,
@@ -731,7 +731,7 @@ mod tests {
 
     #[test]
     fn ctrl_j_inserts_newline() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.input_char('a');
         let event = handle_key(
             &mut app,
@@ -748,7 +748,7 @@ mod tests {
 
     #[test]
     fn slash_command_parsed() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.input = "/help".into();
         app.cursor = 5;
         let event = handle_key(&mut app, key(KeyCode::Enter));
@@ -763,7 +763,7 @@ mod tests {
 
     #[test]
     fn slash_command_with_args() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.input = "/review src/main.rs".into();
         app.cursor = 19;
         let event = handle_key(&mut app, key(KeyCode::Enter));
@@ -778,7 +778,7 @@ mod tests {
 
     #[test]
     fn enter_after_trailing_backslash_inserts_newline() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.input = "hello\\".into();
         app.cursor = app.input.len();
 
@@ -791,7 +791,7 @@ mod tests {
 
     #[test]
     fn enter_after_backslash_mid_input_does_not_submit() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.input = "hello\\\nworld".into();
         app.cursor = "hello\\".len();
 
@@ -804,7 +804,7 @@ mod tests {
 
     #[test]
     fn ctrl_w_deletes_word_backward() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.input = "hello world".into();
         app.cursor = 11;
         handle_key(&mut app, ctrl(KeyCode::Char('w')));
@@ -813,7 +813,7 @@ mod tests {
 
     #[test]
     fn ctrl_k_deletes_to_end() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.input = "hello world".into();
         app.cursor = 5;
         handle_key(&mut app, ctrl(KeyCode::Char('k')));
@@ -822,14 +822,14 @@ mod tests {
 
     #[test]
     fn ctrl_d_on_empty_quits() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         let event = handle_key(&mut app, ctrl(KeyCode::Char('d')));
         assert!(matches!(event, Some(AppEvent::Quit)));
     }
 
     #[test]
     fn ctrl_d_with_input_deletes_char() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.input = "abc".into();
         app.cursor = 1;
         handle_key(&mut app, ctrl(KeyCode::Char('d')));
@@ -838,7 +838,7 @@ mod tests {
 
     #[test]
     fn typing_allowed_while_streaming() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.is_streaming = true;
         handle_key(&mut app, key(KeyCode::Char('h')));
         handle_key(&mut app, key(KeyCode::Char('i')));
@@ -847,7 +847,7 @@ mod tests {
 
     #[test]
     fn submit_allowed_while_streaming() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.is_streaming = true;
         app.input = "steer this".into();
         app.cursor = 10;
@@ -860,7 +860,7 @@ mod tests {
 
     #[test]
     fn slash_commands_blocked_while_streaming() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.is_streaming = true;
         app.input = "/clear".into();
         app.cursor = 6;
@@ -876,7 +876,7 @@ mod tests {
 
     #[test]
     fn tab_completes_slash_commands() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.completions = vec!["/help".into(), "/history".into(), "/clear".into()];
         app.input = "/h".into();
         app.cursor = 2;
@@ -894,7 +894,7 @@ mod tests {
 
     #[test]
     fn tab_completes_model_ids() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.completions = vec![
             "/model".into(),
             "claude-opus-4-6".into(),
@@ -908,7 +908,7 @@ mod tests {
 
     #[test]
     fn tab_no_match_does_nothing() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.completions = vec!["/help".into()];
         app.input = "/zzz".into();
         app.cursor = 4;
@@ -918,7 +918,7 @@ mod tests {
 
     #[test]
     fn tab_resets_on_typing() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.completions = vec!["/help".into(), "/history".into()];
         app.input = "/h".into();
         app.cursor = 2;
@@ -932,7 +932,7 @@ mod tests {
 
     #[test]
     fn tab_ignored_for_non_slash_input() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.completions = vec!["/help".into()];
         app.input = "hello".into();
         app.cursor = 5;
@@ -942,7 +942,7 @@ mod tests {
 
     #[test]
     fn slash_menu_opens_on_tab_with_commands() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.slash_commands = vec![
             crate::app::SlashCommand {
                 name: "help".into(),
@@ -966,7 +966,7 @@ mod tests {
 
     #[test]
     fn slash_menu_navigate_and_select() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.slash_commands = vec![
             crate::app::SlashCommand {
                 name: "help".into(),
@@ -997,7 +997,7 @@ mod tests {
 
     #[test]
     fn slash_menu_typing_filters() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.slash_commands = vec![
             crate::app::SlashCommand {
                 name: "help".into(),
@@ -1029,7 +1029,7 @@ mod tests {
 
     #[test]
     fn slash_menu_opens_for_model_subcommand() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.slash_commands = vec![crate::app::SlashCommand {
             name: "model".into(),
             description: "show or switch model".into(),
@@ -1056,7 +1056,7 @@ mod tests {
 
     #[test]
     fn slash_menu_selects_model_completion() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.slash_commands = vec![crate::app::SlashCommand {
             name: "model".into(),
             description: "show or switch model".into(),
@@ -1083,7 +1083,7 @@ mod tests {
 
     #[test]
     fn slash_menu_typing_filters_model_matches() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.slash_commands = vec![crate::app::SlashCommand {
             name: "model".into(),
             description: "show or switch model".into(),
@@ -1112,7 +1112,7 @@ mod tests {
 
     #[test]
     fn input_reinsert_while_streaming_keeps_cursor_visible() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.is_streaming = true;
         app.input_area.set(ratatui::layout::Rect::new(0, 0, 20, 12));
         app.input_visible_lines.set(2);
@@ -1128,7 +1128,7 @@ mod tests {
 
     #[test]
     fn slash_menu_esc_closes() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.slash_commands = vec![crate::app::SlashCommand {
             name: "help".into(),
             description: "show help".into(),
@@ -1154,7 +1154,7 @@ mod tests {
 
     #[test]
     fn alt_number_focuses_pane() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         let event = handle_key(&mut app, alt(KeyCode::Char('1')));
         assert!(matches!(event, Some(AppEvent::FocusPaneByIndex(0))));
 
@@ -1167,7 +1167,7 @@ mod tests {
 
     #[test]
     fn ctrl_shift_enter_splits_pane() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         let event = handle_key(
             &mut app,
             KeyEvent {
@@ -1182,7 +1182,7 @@ mod tests {
 
     #[test]
     fn ctrl_tab_focuses_next_pane() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         let event = handle_key(
             &mut app,
             KeyEvent {
@@ -1197,7 +1197,7 @@ mod tests {
 
     #[test]
     fn ctrl_shift_tab_focuses_prev_pane() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         let event = handle_key(
             &mut app,
             KeyEvent {
@@ -1212,7 +1212,7 @@ mod tests {
 
     #[test]
     fn pane_keys_work_while_streaming() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.is_streaming = true;
 
         // alt+number should still focus panes

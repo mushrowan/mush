@@ -367,9 +367,10 @@ impl PaneManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mush_ai::types::TokenCount;
 
     fn test_pane(id: u32) -> Pane {
-        Pane::new(PaneId(id), App::new("test".into(), 200_000))
+        Pane::new(PaneId(id), App::new("test".into(), TokenCount::new(200_000)))
     }
 
     #[test]

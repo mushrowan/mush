@@ -404,6 +404,7 @@ fn styled_with_images(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mush_ai::types::TokenCount;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -493,7 +494,7 @@ mod tests {
 
     #[test]
     fn cursor_position_multibyte_char() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         // "a¬b" - cursor after ¬ (byte offset 3, but visual col 2)
         app.input = "a¬b".into();
         app.cursor = 3; // byte offset after ¬
@@ -540,7 +541,7 @@ mod tests {
         use crate::app::IMAGE_PLACEHOLDER;
         use crate::clipboard::ClipboardImage;
         use mush_ai::types::ImageMimeType;
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.input = "hello".into();
         app.cursor = 5;
         // simulate pasting an image (inserts placeholder at cursor)
@@ -559,7 +560,7 @@ mod tests {
 
     #[test]
     fn input_box_renders_empty() {
-        let app = App::new("test".into(), 200_000);
+        let app = App::new("test".into(), TokenCount::new(200_000));
         let buf = render_input(&app, 40, 3);
         let content = buffer_to_string(&buf);
         assert!(content.contains("> "));
@@ -567,7 +568,7 @@ mod tests {
 
     #[test]
     fn input_box_renders_text() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.input = "hello world".into();
         app.cursor = 11;
         let buf = render_input(&app, 40, 3);
@@ -577,7 +578,7 @@ mod tests {
 
     #[test]
     fn input_box_streaming_shows_dots_when_empty() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.is_streaming = true;
         let buf = render_input(&app, 40, 3);
         let content = buffer_to_string(&buf);
@@ -586,7 +587,7 @@ mod tests {
 
     #[test]
     fn input_box_streaming_shows_prompt_when_typing() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.is_streaming = true;
         app.input = "hold on".into();
         app.cursor = 7;
@@ -598,7 +599,7 @@ mod tests {
 
     #[test]
     fn cursor_position_calculation() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.input = "hello".into();
         app.cursor = 3;
         let input_box = InputBox::new(&app);
@@ -611,7 +612,7 @@ mod tests {
 
     #[test]
     fn cursor_position_wraps_at_word_boundary() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         // "this is a long prompt that wraps around!!!" in a 20-wide box
         // content_width = 18
         app.input = "this is a long prompt that wraps around!!!".into();
@@ -630,7 +631,7 @@ mod tests {
 
     #[test]
     fn input_box_shows_ghost_completion() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.completions = vec!["/help".into(), "/history".into()];
         app.input = "/h".into();
         app.cursor = 2;
@@ -641,7 +642,7 @@ mod tests {
 
     #[test]
     fn cursor_position_multiline() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.input = "hello\nworld".into();
         app.cursor = 11;
         let input_box = InputBox::new(&app);
@@ -653,7 +654,7 @@ mod tests {
 
     #[test]
     fn cursor_position_after_newline() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.input = "hello\n".into();
         app.cursor = 6;
         let input_box = InputBox::new(&app);
@@ -665,7 +666,7 @@ mod tests {
 
     #[test]
     fn cursor_position_applies_input_scroll() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.input = "one two three four five six seven eight nine ten".into();
         app.cursor = app.input.len();
         app.input_scroll.set(1);
@@ -677,7 +678,7 @@ mod tests {
 
     #[test]
     fn input_box_updates_input_scroll_metrics() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.input = "line1\nline2\nline3\nline4\nline5".into();
         app.cursor = app.input.len();
         app.input_scroll.set(99);
@@ -689,7 +690,7 @@ mod tests {
 
     #[test]
     fn word_wrap_preserves_words_on_render() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         // in a 22-wide box (content_width=20), "hello world foo bar baz"
         // should wrap at word boundaries, not mid-word
         app.input = "hello world foo bar baz".into();

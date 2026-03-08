@@ -8,6 +8,8 @@ use ratatui::widgets::{Paragraph, Widget, Wrap};
 
 use throbber_widgets_tui::{BRAILLE_SIX, Throbber, WhichUse};
 
+use mush_ai::types::TokenCount;
+
 use crate::app::{App, DisplayMessage, ImageRenderArea, MessageRole, ToolCallStatus};
 
 /// renders the full message list including any active stream
@@ -362,20 +364,19 @@ fn render_message(
     // usage line (compact: total tokens + cost, with cache reuse + write ratios)
     if let Some(ref usage) = msg.usage {
         let total = usage.total_tokens();
-        if total > 0 {
+        if total > TokenCount::ZERO {
             let mut parts = vec![format!("  {total}tok")];
             let reuse_base = usage.cache_read_tokens + usage.input_tokens;
-            if reuse_base > 0 {
-                let reuse_pct = (usage.cache_read_tokens as f64 / reuse_base as f64 * 100.0) as u32;
+            if reuse_base > TokenCount::ZERO {
+                let reuse_pct = usage.cache_read_tokens.percent_of(reuse_base) as u32;
                 parts.push(format!("reuse {reuse_pct}%"));
             }
-            if usage.cache_write_tokens > 0 {
-                let total_input = usage.total_input_tokens().max(1) as f64;
-                let write_pct = (usage.cache_write_tokens as f64 / total_input * 100.0) as u32;
+            if usage.cache_write_tokens > TokenCount::ZERO {
+                let write_pct = usage.cache_write_tokens.percent_of(usage.total_input_tokens()) as u32;
                 parts.push(format!("write {write_pct}%"));
             }
             if let Some(c) = msg.cost {
-                parts.push(format!("${c:.4}"));
+                parts.push(format!("{c}"));
             }
             lines.push(Line::styled(
                 parts.join(" | "),
@@ -509,7 +510,7 @@ fn render_diff_output(output: &str, lines: &mut Vec<Line<'_>>, width: u16) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mush_ai::types::Usage;
+    use mush_ai::types::{Dollars, Usage};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -527,7 +528,7 @@ mod tests {
 
     #[test]
     fn empty_app_renders() {
-        let app = App::new("test".into(), 200_000);
+        let app = App::new("test".into(), TokenCount::new(200_000));
         let buf = render_app(&app, 40, 10);
         // should be mostly empty
         let content = buffer_to_string(&buf);
@@ -536,7 +537,7 @@ mod tests {
 
     #[test]
     fn user_message_renders() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.push_user_message("hello world");
         let buf = render_app(&app, 40, 10);
         let content = buffer_to_string(&buf);
@@ -546,7 +547,7 @@ mod tests {
 
     #[test]
     fn assistant_message_renders() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.start_streaming();
         app.push_text_delta("i can help");
         app.finish_streaming(None, None);
@@ -559,7 +560,7 @@ mod tests {
 
     #[test]
     fn streaming_shows_partial_text() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.start_streaming();
         app.push_text_delta("partial");
         // tick several times to let typewriter catch up
@@ -574,7 +575,7 @@ mod tests {
 
     #[test]
     fn usage_line_shows_reuse_and_write_ratios() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.messages.push(DisplayMessage {
             role: MessageRole::Assistant,
             content: "done".into(),
@@ -582,12 +583,12 @@ mod tests {
             thinking: None,
             thinking_expanded: false,
             usage: Some(Usage {
-                input_tokens: 100,
-                output_tokens: 20,
-                cache_read_tokens: 150,
-                cache_write_tokens: 50,
+                input_tokens: TokenCount::new(100),
+                output_tokens: TokenCount::new(20),
+                cache_read_tokens: TokenCount::new(150),
+                cache_write_tokens: TokenCount::new(50),
             }),
-            cost: Some(0.0012),
+            cost: Some(Dollars::new(0.0012)),
             model_id: None,
             queued: false,
         });
@@ -602,7 +603,7 @@ mod tests {
 
     #[test]
     fn tool_calls_render() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.messages.push(DisplayMessage {
             role: MessageRole::Assistant,
             content: "let me check".into(),
@@ -637,7 +638,7 @@ mod tests {
 
     #[test]
     fn thinking_shows_collapsed() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.messages.push(DisplayMessage {
             role: MessageRole::Assistant,
             content: "the answer is 42".into(),
@@ -659,7 +660,7 @@ mod tests {
 
     #[test]
     fn image_reserves_space_and_produces_render_area() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.messages.push(DisplayMessage {
             role: MessageRole::Assistant,
             content: "here is the image".into(),

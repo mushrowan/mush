@@ -1,5 +1,17 @@
 # todo2
 
+## status
+- [x] 1) gpt-5.4-codex model added, default updated, config example updated
+- [x] 2) grep.rs rewritten with new params (mode, case_sensitive, whole_word, context_before/after) + tests. compiles, all tests pass
+- [x] 3) read json output param added, threaded through read_file() + tests
+- [x] 4) bash json output contract (stdout/stderr/exit_code/timed_out/truncated) + tests
+- [ ] 5) patch tool
+- [ ] 6) docs/architecture updates
+- [ ] 7) decode error diagnostics
+- [ ] 8) opencode/pi comparison pass
+- [x] newtypes: `TokenCount(u64)`, `Dollars(f64)` added to mush-ai, used throughout all crates
+- note: all changes in current wc, needs splitting into logical commits
+
 ## why this exists
 - the current tool interface makes agent-side coding brittle
 - the main pain is needing exact text for `edit` while tool outputs are truncated or loosely structured
@@ -176,25 +188,19 @@
 ## newtype audit
 
 ### high priority
-- [ ] token count type inconsistency: `needs_compaction()` takes `usize`, `Model.context_window` is `u64`, `auto_compact()` takes `u64`, `estimate_tokens()` returns `usize`
-  - token counts flow as both `u64` (API responses, Model) and `usize` (estimate_tokens, needs_compaction)
-  - implicit `as` casts between them
-  - fix: `TokenCount(u64)` newtype in mush-ai, use consistently everywhere
+- [x] token count type inconsistency: `TokenCount(u64)` newtype added to mush-ai, used in `Usage`, `Model`, `StreamOptions`, `TokenStats`, and all auto_compact thresholds
+  - `estimate_tokens()` and `needs_compaction()` still use `usize` internally (estimate-based path), separate from API-reported `TokenCount`
 - [ ] duplicate compaction threshold logic: `needs_compaction()` uses 75% estimate-based, `auto_compact()` uses 95% usage-based
   - two independent systems checking different things with different thresholds and different token counting
-  - fix: unify into a single `CompactionPolicy` or at least use the same token type and make the two thresholds explicit/documented
+  - fix: unify into a single `CompactionPolicy` or at least make the two thresholds explicit/documented
 
 ### medium priority
 - [ ] `session_id: Option<String>` in `StreamOptions` and `ExtensionContext` but `SessionId` newtype exists in mush-session
   - newtype lives in the wrong crate, mush-ai and mush-ext can't use it
   - fix: move `SessionId` to mush-ai::types (all crates depend on it), use everywhere
-- [ ] `Cost` fields are bare `f64`: `Cost { input: f64, .. }`, `ModelCost { input: f64, .. }`, `TokenStats.total_cost: f64`
-  - easy to mix "cost per million tokens" with "actual cost in dollars"
-  - `$0.0042` display formatting repeated in status bar and slash commands
-  - fix: `Dollars(f64)` newtype with Display, or separate `CostPerMillion(f64)` and `Dollars(f64)`
-- [ ] `context_window: u64` and `max_output_tokens: u64` on Model are interchangeable bare `u64`
-  - easy to pass one where the other is expected
-  - fix: if doing `TokenCount` newtype above, both become `TokenCount` which is fine (same domain), or distinct newtypes if we want compiler-enforced separation
+- [x] `Cost` fields are `Dollars(f64)` newtype with `Display` impl (`$0.0042` formatting centralised)
+  - `ModelCost` still uses bare `f64` for cost-per-million-tokens (intentionally different domain)
+- [x] `context_window` and `max_output_tokens` on `Model` are `TokenCount` (same domain, compiler catches bare integer use)
 
 ### low priority
 - [ ] `truncate_with_ellipsis` in compact.rs scans string twice (`chars().count()` then re-iterates)

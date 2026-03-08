@@ -469,7 +469,7 @@ pub async fn run_tui(
             // seed with actual API-reported context tokens from previous turn
             let initial_ctx = pane_mgr
                 .pane(pane_id)
-                .map(|p| p.app.stats.context_tokens)
+                .map(|p| p.app.stats.context_tokens.get())
                 .unwrap_or(0);
             let context_tokens_shared = Arc::new(std::sync::atomic::AtomicU64::new(initial_ctx));
             let ctx_tokens_for_transform = context_tokens_shared.clone();
@@ -486,7 +486,7 @@ pub async fn run_tui(
                 Box::pin(async move {
                     let mut msgs = if do_auto_compact {
                         let mut guard = cache.lock().await;
-                        let current_tokens = ctx_tokens.load(std::sync::atomic::Ordering::Relaxed);
+                        let current_tokens = TokenCount::new(ctx_tokens.load(std::sync::atomic::Ordering::Relaxed));
 
                         // replay cached compaction if available
                         if let Some((orig_len, ref compacted)) = *guard {
@@ -748,7 +748,7 @@ pub async fn run_tui(
                         if let AgentEvent::MessageEnd { message } = &event
                             && let Some(meta) = stream_metas.get(&pane_id) {
                                 meta.context_tokens.store(
-                                    message.usage.total_input_tokens(),
+                                    message.usage.total_input_tokens().get(),
                                     std::sync::atomic::Ordering::Relaxed,
                                 );
                             }
@@ -1253,8 +1253,8 @@ pub async fn run_tui(
                                                     "idle"
                                                 };
                                                 let model = &pane.app.model_id;
-                                                let cost = if pane.app.stats.total_cost > 0.0 {
-                                                    format!(" ${:.4}", pane.app.stats.total_cost)
+                                                let cost = if pane.app.stats.total_cost > Dollars::ZERO {
+                                                    format!(" {}", pane.app.stats.total_cost)
                                                 } else {
                                                     String::new()
                                                 };
@@ -1276,8 +1276,8 @@ pub async fn run_tui(
                                             let focused = &mut pane_mgr.focused_mut().app;
                                             focused.show_cost = !focused.show_cost;
                                             let show = focused.show_cost;
-                                            let mut total_cost = 0.0_f64;
-                                            let mut total_tokens = 0_u64;
+                                            let mut total_cost = Dollars::ZERO;
+                                            let mut total_tokens = TokenCount::ZERO;
                                             let mut lines = Vec::new();
                                             for (i, pane) in pane_mgr.panes().iter().enumerate() {
                                                 let idx = i + 1;
@@ -1286,16 +1286,16 @@ pub async fn run_tui(
                                                 let s = &pane.app.stats;
                                                 total_cost += s.total_cost;
                                                 total_tokens += s.total_tokens;
-                                                if s.total_tokens > 0 {
+                                                if s.total_tokens > TokenCount::ZERO {
                                                     lines.push(format!(
-                                                        "  pane {idx} ({label}): {}tok ${:.4}",
+                                                        "  pane {idx} ({label}): {}tok {}",
                                                         s.total_tokens, s.total_cost
                                                     ));
                                                 }
                                             }
                                             if show {
                                                 let mut msg = format!(
-                                                    "total: {}tok ${:.4}\n",
+                                                    "total: {}tok {}\n",
                                                     total_tokens, total_cost
                                                 );
                                                 for line in &lines {
@@ -2102,7 +2102,7 @@ mod tests {
 
     #[test]
     fn mouse_scroll_over_messages_scrolls_conversation() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.input_area.set(ratatui::layout::Rect::new(0, 10, 40, 5));
         let before = app.scroll_offset;
         handle_mouse(
@@ -2119,7 +2119,7 @@ mod tests {
 
     #[test]
     fn mouse_scroll_over_input_scrolls_input() {
-        let mut app = App::new("test".into(), 200_000);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.input_area.set(ratatui::layout::Rect::new(0, 10, 40, 5));
         app.input_visible_lines.set(2);
         app.input_total_lines.set(8);

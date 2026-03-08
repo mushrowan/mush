@@ -68,11 +68,12 @@ impl Widget for TabBar<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mush_ai::types::TokenCount;
     use crate::app::App;
     use crate::pane::{Pane, PaneId};
 
     fn test_pane(id: u32) -> Pane {
-        Pane::new(PaneId::new(id), App::new("test".into(), 200_000))
+        Pane::new(PaneId::new(id), App::new("test".into(), TokenCount::new(200_000)))
     }
 
     #[test]
