@@ -56,12 +56,15 @@ impl AppSetup {
 
         let cwd = std::env::current_dir()?;
 
+        let use_patch = mush_tools::uses_patch_tool(&model.id);
         let mut tools: Vec<Box<dyn mush_agent::tool::AgentTool>> = if args.no_tools {
             vec![]
-        } else if let Some(sink) = args.output_sink {
-            mush_tools::builtin_tools_with_sink(cwd.clone(), Some(sink))
         } else {
-            mush_tools::builtin_tools(cwd.clone())
+            mush_tools::builtin_tools_with_options(
+                cwd.clone(),
+                args.output_sink,
+                use_patch,
+            )
         };
 
         if !args.no_tools && !cfg.mcp.is_empty() {

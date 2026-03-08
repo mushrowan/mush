@@ -91,12 +91,12 @@ impl AgentTool for EditTool {
             if end_line.is_some() && start_line.is_none() {
                 return ToolResult::error("end_line requires start_line");
             }
-            if let (Some(s), Some(e)) = (start_line, end_line) {
-                if e < s {
-                    return ToolResult::error(format!(
-                        "end_line ({e}) must be >= start_line ({s})"
-                    ));
-                }
+            if let (Some(s), Some(e)) = (start_line, end_line)
+                && e < s
+            {
+                return ToolResult::error(format!(
+                    "end_line ({e}) must be >= start_line ({s})"
+                ));
             }
 
             let opts = EditOpts {
@@ -287,12 +287,12 @@ fn edit_file(path: &Path, old_text: &str, new_text: &str, opts: &EditOpts) -> To
             )
         };
         let hint = if found > expected {
-            "\nhint: include more surrounding context in oldText to make the match unique, or use start_line/end_line to restrict the search range"
+            "\nhint: add more context in oldText to uniquify, or use start_line/end_line to restrict"
         } else {
             ""
         };
         return ToolResult::error(format!(
-            "expected {expected} match(es) but found {found} in {}{range_label}.{locations}{hint}",
+            "expected {expected} match(es) but found {found} in {}{range_label}{locations}{hint}",
             path.display(),
         ));
     }
@@ -303,22 +303,21 @@ fn edit_file(path: &Path, old_text: &str, new_text: &str, opts: &EditOpts) -> To
 
     match hint {
         NearMiss::WhitespaceDifference(line_num) => ToolResult::error(format!(
-            "oldText not found in {display} (but a whitespace-normalised match was found near \
-             line {line_num}). check for extra/missing spaces, tabs, or trailing whitespace"
+            "oldText not found in {display}{range_label}\n\
+             near-miss: whitespace-normalised match near line {line_num}\n\
+             hint: check for extra/missing spaces, tabs, or trailing whitespace"
         )),
         NearMiss::SimilarLines(lines) => {
-            let mut msg = format!("oldText not found in {display}.\n\nmost similar lines:\n");
+            let mut msg = format!("oldText not found in {display}{range_label}\n\nsimilar lines:\n");
             for (num, line) in lines {
                 msg.push_str(&format!("  {num}: {line}\n"));
             }
-            msg.push_str(
-                "\nhint: use Read to see the exact file contents, then retry with corrected oldText",
-            );
+            msg.push_str("\nhint: use Read to check exact file contents, then retry");
             ToolResult::error(msg)
         }
         NearMiss::None => ToolResult::error(format!(
-            "oldText not found in {display}. make sure it matches exactly including whitespace. \
-             use Read to verify the current file contents"
+            "oldText not found in {display}{range_label}\n\
+             hint: use Read to check exact file contents, then retry"
         )),
     }
 }

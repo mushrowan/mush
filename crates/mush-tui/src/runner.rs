@@ -1819,7 +1819,8 @@ async fn fork_pane(
                                 });
                             sink
                         });
-                    let pane_tools = mush_tools::builtin_tools_with_sink(info.path.clone(), sink);
+                    let use_patch = mush_tools::uses_patch_tool(&model_id);
+                    let pane_tools = mush_tools::builtin_tools_with_options(info.path.clone(), sink, use_patch);
                     new_pane.tools = Some(pane_tools);
                     new_pane.cwd_override = Some(info.path.clone());
                     new_pane.app.cwd = info.path.display().to_string();
