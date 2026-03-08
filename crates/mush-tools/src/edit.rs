@@ -121,6 +121,22 @@ fn edit_file(path: &Path, old_text: &str, new_text: &str) -> ToolResult {
 
     candidates.dedup();
 
+    // also try with/without trailing newline (LLMs often get this wrong)
+    let mut extra = Vec::new();
+    for (o, n) in &candidates {
+        if o.ends_with('\n') && !content.contains(o.as_str()) {
+            let trimmed = o.trim_end_matches('\n').trim_end_matches('\r');
+            extra.push((trimmed.to_string(), n.clone()));
+        } else if !o.ends_with('\n') {
+            extra.push((format!("{o}\n"), format!("{n}\n")));
+            if content.contains("\r\n") {
+                extra.push((format!("{o}\r\n"), format!("{n}\r\n")));
+            }
+        }
+    }
+    candidates.extend(extra);
+    candidates.dedup();
+
     let mut multiple = false;
 
     for (match_old, match_new) in candidates {
@@ -596,5 +612,31 @@ mod tests {
     fn similarity_empty() {
         assert_eq!(line_similarity("", "hello"), 0.0);
         assert_eq!(line_similarity("hello", ""), 0.0);
+    }
+
+    #[test]
+    fn edit_trailing_newline_normalisation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.rs");
+        fs::write(&path, "fn main() {\n    hello();\n}\n").unwrap();
+
+        // oldText without trailing newline should still match
+        let result = edit_file(&path, "fn main() {\n    hello();\n}", "fn main() {\n    world();\n}");
+        assert!(result.outcome.is_success());
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("world()"));
+    }
+
+    #[test]
+    fn edit_extra_trailing_newline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.rs");
+        fs::write(&path, "hello world").unwrap();
+
+        // oldText with trailing newline when file doesn't have one
+        let result = edit_file(&path, "hello world\n", "goodbye world\n");
+        assert!(result.outcome.is_success());
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("goodbye world"));
     }
 }

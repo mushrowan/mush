@@ -139,9 +139,10 @@ impl AgentTool for WebFetchTool {
                 _ => body.to_string(),
             };
 
-            // truncate if needed
+            // truncate if needed (find char boundary to avoid panic)
             let output = if output.len() > MAX_OUTPUT_CHARS {
-                let truncated = &output[..MAX_OUTPUT_CHARS];
+                let end = output.floor_char_boundary(MAX_OUTPUT_CHARS);
+                let truncated = &output[..end];
                 format!(
                     "{truncated}\n\n... (truncated, {} total chars)",
                     output.len()
