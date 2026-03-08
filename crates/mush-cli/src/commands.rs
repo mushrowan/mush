@@ -91,7 +91,7 @@ pub fn open_config() -> Result<()> {
         std::fs::write(
             &path,
             "# mush configuration\n\
-             # model = \"gpt-5.4-codex\"  # optional, auto-default depends on auth\n\
+             # model = \"gpt-5.4\"  # optional, auto-default depends on auth\n\
              # thinking = false\n\
              # max_tokens = 16384\n\
              # max_turns = 200  # default: unlimited\n\

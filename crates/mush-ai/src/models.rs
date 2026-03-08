@@ -215,8 +215,8 @@ pub fn openai_models() -> Vec<Model> {
 pub fn openai_codex_models() -> Vec<Model> {
     vec![
         Model {
-            id: "gpt-5.4-codex".into(),
-            name: "GPT-5.4 Codex (ChatGPT subscription)".into(),
+            id: "gpt-5.4".into(),
+            name: "GPT-5.4 (ChatGPT subscription)".into(),
             api: Api::OpenaiResponses,
             provider: Provider::Custom("openai-codex".into()),
             base_url: "https://chatgpt.com/backend-api".into(),
