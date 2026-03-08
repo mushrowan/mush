@@ -1,5 +1,24 @@
 # todo
 
+## in progress (this session)
+- [x] fix: pane layout panic when terminal narrower than MIN_COLUMN_WIDTH (clamp min > max)
+- [x] fix: compaction never re-triggers after initial compact (cache replay never re-checks needs_compaction)
+- [x] fix: ContextTransformed event fires every turn during cache replay, inflating status bar counts
+- [x] feat: retry logic for transient API errors (network, 429, 5xx) with exponential backoff
+- [x] fix: edit tool fails matching text with trailing whitespace in files (blocked tooling, needs investigation)
+  - the Edit tool's exact-match approach chokes when file lines have trailing whitespace that isn't visible in Read output
+  - workaround: use python/sed for replacements, but this defeats the purpose
+  - consider: normalise trailing whitespace in match candidates, like we already do for CRLF/LF
+
+## needs verification
+- [ ] compaction: test that re-compaction actually fires when compacted+new messages exceed threshold
+  - the auto_compact function uses both usage-based and estimate-based checks
+  - need to verify context_tokens_shared is being read correctly after the cache replay change
+- [ ] retry: test that retries actually work in practice (hard to unit test network failures)
+  - currently retries up to 3 times with 1s/2s/4s backoff
+  - only retries reqwest errors and 429/5xx status codes
+- [ ] status bar: verify "compacted x → y" only shows on actual new compaction, not cache replays
+
 ## open items
 - [ ] mush-ext: dynamic tool registration from extensions
 - [ ] mush-ext: provider registration from extensions

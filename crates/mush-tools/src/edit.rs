@@ -135,6 +135,21 @@ fn edit_file(path: &Path, old_text: &str, new_text: &str) -> ToolResult {
         }
     }
     candidates.extend(extra);
+
+    // trailing whitespace per-line: LLMs often omit trailing spaces/tabs on lines.
+    // slide a window over content lines, compare with trimEnd on each line,
+    // and yield the actual content substring (with its real whitespace) as a candidate
+    for actual_old in find_line_trimmed_matches(content, old_text) {
+        if actual_old != old_text {
+            let adapted_new = if actual_old.contains("\r\n") && !new_text.contains("\r\n") {
+                new_text.replace('\n', "\r\n")
+            } else {
+                new_text.to_string()
+            };
+            candidates.push((actual_old, adapted_new));
+        }
+    }
+
     candidates.dedup();
 
     let mut multiple = false;
@@ -224,6 +239,55 @@ enum NearMiss {
     SimilarLines(Vec<(usize, String)>),
     /// nothing close found
     None,
+}
+
+/// find substrings in content that match old_text when each line is trimEnd'd
+///
+/// slides a window of old_text's line count across content's lines, comparing
+/// each pair after stripping trailing spaces/tabs. yields the actual content
+/// substring (with its real whitespace) for each match position
+fn find_line_trimmed_matches(content: &str, old_text: &str) -> Vec<String> {
+    let content_lines: Vec<&str> = content.split_inclusive('\n').collect();
+    let search_lines: Vec<&str> = old_text.split_inclusive('\n').collect();
+
+    if search_lines.is_empty() {
+        return vec![];
+    }
+
+    let mut results = Vec::new();
+    let max_start = content_lines.len().saturating_sub(search_lines.len());
+
+    'outer: for i in 0..=max_start {
+        for (j, search_line) in search_lines.iter().enumerate() {
+            let content_line = content_lines[i + j];
+            if content_line.trim_end() != search_line.trim_end() {
+                continue 'outer;
+            }
+        }
+
+        // all lines matched - extract the actual content substring
+        let start: usize = content_lines[..i].iter().map(|l| l.len()).sum();
+        let mut end: usize = content_lines[..i + search_lines.len()]
+            .iter()
+            .map(|l| l.len())
+            .sum();
+
+        // if old_text doesn't end with a newline, trim the match to exclude
+        // the content line's trailing whitespace and newline
+        if !old_text.ends_with('\n') {
+            let last_content_line = content_lines[i + search_lines.len() - 1];
+            let trimmed_len = last_content_line.trim_end().len();
+            end = content_lines[..i + search_lines.len() - 1]
+                .iter()
+                .map(|l| l.len())
+                .sum::<usize>()
+                + trimmed_len;
+        }
+
+        results.push(content[start..end].to_string());
+    }
+
+    results
 }
 
 /// check if oldText nearly matches something in the file
@@ -638,5 +702,86 @@ mod tests {
         assert!(result.outcome.is_success());
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("goodbye world"));
+    }
+
+    #[test]
+    fn edit_matches_with_trailing_whitespace_in_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.rs");
+        // file has trailing spaces on lines
+        fs::write(&path, "fn main() {  \n    println!(\"hello\");  \n}\n").unwrap();
+
+        // oldText has no trailing spaces (as LLM would send)
+        let result = edit_file(
+            &path,
+            "fn main() {\n    println!(\"hello\");\n}\n",
+            "fn main() {\n    println!(\"goodbye\");\n}\n",
+        );
+        let text = extract_text(&result);
+        assert!(!text.contains("not found"), "should match: {text}");
+
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("goodbye"));
+        assert!(!content.contains("hello"));
+    }
+
+    #[test]
+    fn edit_matches_trailing_tabs_in_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        fs::write(&path, "line one\t\nline two\t\t\n").unwrap();
+
+        let result = edit_file(&path, "line one\nline two\n", "replaced one\nreplaced two\n");
+        let text = extract_text(&result);
+        assert!(!text.contains("not found"), "should match: {text}");
+
+        let content = fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "replaced one\nreplaced two\n");
+    }
+
+    #[test]
+    fn edit_trailing_ws_no_match_when_content_differs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        fs::write(&path, "foo  \nbar  \n").unwrap();
+
+        // oldText content differs, not just whitespace
+        let result = edit_file(&path, "fox\nbaz\n", "replaced\n");
+        let text = extract_text(&result);
+        assert!(text.contains("not found"));
+    }
+
+    #[test]
+    fn edit_trailing_ws_rejects_ambiguous_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        fs::write(&path, "foo  \nbar\nfoo  \nbaz\n").unwrap();
+
+        // "foo\n" matches twice after trimming
+        let result = edit_file(&path, "foo\n", "replaced\n");
+        let text = extract_text(&result);
+        // should fail - ambiguous (or succeed via exact if "foo\n" appears exactly once)
+        // "foo\n" doesn't appear exactly in the file (file has "foo  \n"), and
+        // trimmed match finds 2 positions, so it should fail
+        assert!(text.contains("not found") || text.contains("multiple"));
+    }
+
+    #[test]
+    fn edit_trailing_ws_without_trailing_newline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        fs::write(&path, "alpha  \nbeta  \ngamma\n").unwrap();
+
+        // oldText spans two lines, no trailing newline
+        let result = edit_file(
+            &path,
+            "alpha\nbeta",
+            "one\ntwo",
+        );
+        let text = extract_text(&result);
+        assert!(!text.contains("not found"), "should match: {text}");
+
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.starts_with("one\ntwo"));
     }
 }
