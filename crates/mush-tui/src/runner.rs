@@ -2,7 +2,6 @@
 
 use std::io;
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use futures::StreamExt;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -14,22 +13,21 @@ use mush_ai::registry::ApiRegistry;
 use mush_ai::types::*;
 use mush_session::ConversationState;
 
-use crate::app::{self, App, AppEvent};
+use crate::app::App;
 use crate::event_handler::{self, EventCtx};
-use crate::input::handle_key;
-use crate::runner_commands::{SlashEnv, handle_slash_action, save_thinking_pref};
-use crate::runner_panes::{close_focused_pane, drain_inboxes, fork_pane};
-use crate::runner_render::{draw_panes, handle_mouse};
+use crate::runner_input::{
+    InputDeps, LoopAction, handle_idle_terminal_events, handle_streaming_terminal_events,
+};
+use crate::runner_panes::drain_inboxes;
+use crate::runner_render::draw_panes;
 use crate::runner_streams::{
-    StreamDeps, StreamState, abort_focused_stream, answer_confirmation, edit_last_queued_steering,
-    handle_agent_event_side_effects, new_agent_streams, poll_confirmation_prompt,
-    poll_live_tool_output, start_pending_streams, submit_streaming_input,
+    StreamDeps, StreamState, handle_agent_event_side_effects, new_agent_streams,
+    poll_confirmation_prompt, poll_live_tool_output, start_pending_streams,
 };
 use crate::runner_terminal::{
     TerminalStateGuard, cleanup, enter_tui_terminal, install_panic_cleanup_hook,
     restore_terminal_state,
 };
-use crate::slash;
 
 /// callback that returns a relevance hint for a user message.
 /// used to nudge the model toward the most relevant skills.
@@ -298,7 +296,7 @@ pub async fn run_tui(
     let mut agent_streams = new_agent_streams();
     let mut stream_state = StreamState::new();
 
-    loop {
+    'ui: loop {
         start_pending_streams(
             &mut agent_streams,
             &mut stream_state,
@@ -376,115 +374,28 @@ pub async fn run_tui(
                 }
                 _ = tick => {
                     poll_confirmation_prompt(&mut pane_mgr, &mut stream_state).await;
-
                     poll_live_tool_output(&mut pane_mgr, &tui_config.tool_output_live);
 
                     // drain inter-pane message inboxes into steering queues
                     drain_inboxes(&mut pane_mgr).await;
 
-                    // handle terminal input during streaming
-                    while event::poll(std::time::Duration::ZERO)? {
-                        match event::read()? {
-                            Event::Key(key) if key.kind == KeyEventKind::Press => {
-                                if pane_mgr.focused().app.mode == app::AppMode::ToolConfirm {
-                                    let answer = match key.code {
-                                        KeyCode::Char('y') | KeyCode::Char('Y')
-                                        | KeyCode::Enter => Some(true),
-                                        KeyCode::Char('n') | KeyCode::Char('N')
-                                        | KeyCode::Esc => Some(false),
-                                        _ => None,
-                                    };
-                                    if let Some(allowed) = answer {
-                                        answer_confirmation(
-                                            &mut pane_mgr,
-                                            &mut stream_state,
-                                            allowed,
-                                        )
-                                        .await;
-                                    }
-                                } else {
-                                    let app_event =
-                                        handle_key(&mut pane_mgr.focused_mut().app, key);
-                                    if let Some(app_event) = app_event {
-                                        match app_event {
-                                            AppEvent::Quit => {
-                                                cleanup(&mut terminal)?;
-                                                terminal_guard.disarm();
-                                                return Ok(());
-                                            }
-                                            AppEvent::Abort => {
-                                                abort_focused_stream(
-                                                    &mut pane_mgr,
-                                                    &mut stream_state,
-                                                )
-                                                .await;
-                                            }
-                                            AppEvent::UserSubmit { text } => {
-                                                submit_streaming_input(
-                                                    &mut pane_mgr,
-                                                    &stream_state,
-                                                    text,
-                                                )
-                                                .await;
-                                            }
-                                            AppEvent::CycleThinkingLevel => {
-                                                let app = &pane_mgr.focused().app;
-                                                save_thinking_pref(
-                                                    &mut thinking_prefs,
-                                                    &thinking_saver,
-                                                    &app.model_id,
-                                                    app.thinking_level,
-                                                );
-                                            }
-                                            AppEvent::PasteImage => {
-                                                paste_clipboard_image(
-                                                    &mut pane_mgr.focused_mut().app,
-                                                )
-                                                .await;
-                                            }
-                                            AppEvent::FocusNextPane => pane_mgr.focus_next(),
-                                            AppEvent::FocusPrevPane => pane_mgr.focus_prev(),
-                                            AppEvent::FocusPaneByIndex(i) => {
-                                                pane_mgr.focus_index(i)
-                                            }
-                                            AppEvent::ResizePane(delta) => {
-                                                pane_mgr.resize_focused(delta);
-                                            }
-                                            AppEvent::SplitPane => {
-                                                fork_pane(&mut pane_mgr, &tui_config, &message_bus, &tui_config.tool_output_live).await;
-                                            }
-                                            AppEvent::ClosePane
-                                                if pane_mgr.is_multi_pane() => {
-                                                    close_focused_pane(
-                                                        &mut pane_mgr,
-                                                        &message_bus,
-                                                        &file_tracker,
-                                                        &cwd,
-                                                    )
-                                                    .await;
-                                                }
-                                            AppEvent::EditSteering => {
-                                                edit_last_queued_steering(
-                                                    &mut pane_mgr,
-                                                    &stream_state,
-                                                )
-                                                .await;
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                }
-                            }
-                            Event::Mouse(mouse) => {
-                                handle_mouse(&mut pane_mgr.focused_mut().app, mouse)
-                            }
-                            Event::Key(key) => {
-                                tracing::trace!(code = ?key.code, kind = ?key.kind, "dropped non-press key event (streaming)");
-                            }
-                            event => {
-                                tracing::trace!(?event, "dropped non-key event (streaming)");
-                            }
-                        }
+                    let action = handle_streaming_terminal_events(
+                        &mut pane_mgr,
+                        &mut stream_state,
+                        &mut InputDeps {
+                            tui_config: &mut tui_config,
+                            thinking_prefs: &mut thinking_prefs,
+                            thinking_saver: &thinking_saver,
+                            registry,
+                            message_bus: &message_bus,
+                            file_tracker: &file_tracker,
+                            cwd: &cwd,
+                            pending_prompt: &mut pending_prompt,
+                        },
+                    )
+                    .await?;
+                    if matches!(action, LoopAction::Quit) {
+                        break 'ui;
                     }
                 }
             }
@@ -500,107 +411,22 @@ pub async fn run_tui(
                 }
             }
 
-            if event::poll(std::time::Duration::from_millis(50))? {
-                loop {
-                    match event::read()? {
-                        Event::Key(key) if key.kind == KeyEventKind::Press => {
-                            let app_event = handle_key(&mut pane_mgr.focused_mut().app, key);
-                            if let Some(app_event) = app_event {
-                                match app_event {
-                                    AppEvent::Quit => {
-                                        pane_mgr.focused_mut().app.should_quit = true;
-                                        break;
-                                    }
-                                    AppEvent::UserSubmit { text } => {
-                                        let expanded = slash::expand_template(&text);
-                                        // auto-label pane from first prompt
-                                        let pane = pane_mgr.focused_mut();
-                                        if pane.label.is_none() && pane.conversation.is_empty() {
-                                            pane.label = Some(expanded.chars().take(30).collect());
-                                        }
-                                        let app = &mut pane_mgr.focused_mut().app;
-                                        app.push_user_message(expanded.clone());
-                                        app.active_tools.clear();
-                                        app.start_streaming();
-                                        pending_prompt = Some(expanded);
-                                    }
-                                    AppEvent::SlashCommand { action } => {
-                                        let state_changed = handle_slash_action(
-                                            &mut pane_mgr,
-                                            action,
-                                            SlashEnv {
-                                                tui_config: &mut tui_config,
-                                                thinking_prefs: &thinking_prefs,
-                                                registry,
-                                                message_bus: &message_bus,
-                                                file_tracker: &file_tracker,
-                                                cwd: &cwd,
-                                                pending_prompt: &mut pending_prompt,
-                                            },
-                                        )
-                                        .await;
-
-                                        if state_changed
-                                            && let Some(ref saver) = tui_config.save_session
-                                        {
-                                            let pane = pane_mgr.focused();
-                                            saver(&pane.conversation, &pane.app.model_id);
-                                        }
-                                    }
-                                    AppEvent::CycleThinkingLevel => {
-                                        let app = &pane_mgr.focused().app;
-                                        save_thinking_pref(
-                                            &mut thinking_prefs,
-                                            &thinking_saver,
-                                            &app.model_id,
-                                            app.thinking_level,
-                                        );
-                                    }
-                                    AppEvent::PasteImage => {
-                                        paste_clipboard_image(&mut pane_mgr.focused_mut().app)
-                                            .await;
-                                    }
-                                    AppEvent::SplitPane => {
-                                        fork_pane(
-                                            &mut pane_mgr,
-                                            &tui_config,
-                                            &message_bus,
-                                            &tui_config.tool_output_live,
-                                        )
-                                        .await;
-                                    }
-                                    AppEvent::ClosePane => {
-                                        close_focused_pane(
-                                            &mut pane_mgr,
-                                            &message_bus,
-                                            &file_tracker,
-                                            &cwd,
-                                        )
-                                        .await;
-                                    }
-                                    AppEvent::FocusNextPane => pane_mgr.focus_next(),
-                                    AppEvent::FocusPrevPane => pane_mgr.focus_prev(),
-                                    AppEvent::FocusPaneByIndex(i) => pane_mgr.focus_index(i),
-                                    AppEvent::ResizePane(delta) => {
-                                        pane_mgr.resize_focused(delta);
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                        Event::Mouse(mouse) => handle_mouse(&mut pane_mgr.focused_mut().app, mouse),
-                        Event::Key(key) => {
-                            tracing::trace!(code = ?key.code, kind = ?key.kind, "dropped non-press key event (idle)");
-                        }
-                        event => {
-                            tracing::trace!(?event, "dropped non-key event (idle)");
-                        }
-                    }
-
-                    if !event::poll(std::time::Duration::ZERO)? {
-                        break;
-                    }
-                }
+            let action = handle_idle_terminal_events(
+                &mut pane_mgr,
+                &mut InputDeps {
+                    tui_config: &mut tui_config,
+                    thinking_prefs: &mut thinking_prefs,
+                    thinking_saver: &thinking_saver,
+                    registry,
+                    message_bus: &message_bus,
+                    file_tracker: &file_tracker,
+                    cwd: &cwd,
+                    pending_prompt: &mut pending_prompt,
+                },
+            )
+            .await?;
+            if matches!(action, LoopAction::Quit) {
+                break 'ui;
             }
         }
 
@@ -652,25 +478,4 @@ pub async fn run_tui(
     cleanup(&mut terminal)?;
     terminal_guard.disarm();
     Ok(())
-}
-
-/// read a clipboard image in a background thread and add it to the app
-async fn paste_clipboard_image(app: &mut App) {
-    app.status = Some("reading clipboard...".into());
-    match tokio::task::spawn_blocking(crate::clipboard::read_clipboard_image).await {
-        Ok(Some(image)) => {
-            let mime = image.mime_type.as_str();
-            let size = image.bytes.len();
-            app.add_image(image);
-            let n = app.pending_images.len();
-            let kb = size / 1024;
-            app.status = Some(format!("{n} image(s) attached ({mime}, {kb}kb)"));
-        }
-        Ok(None) => {
-            app.status = Some("no image in clipboard".into());
-        }
-        Err(_) => {
-            app.status = Some("failed to read clipboard".into());
-        }
-    }
 }

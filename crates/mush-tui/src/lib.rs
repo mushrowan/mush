@@ -12,6 +12,7 @@ pub mod pane;
 pub mod path_utils;
 pub mod runner;
 mod runner_commands;
+mod runner_input;
 mod runner_panes;
 mod runner_render;
 mod runner_streams;
