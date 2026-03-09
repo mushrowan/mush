@@ -18,7 +18,7 @@ use crate::app::{self, App, AppEvent};
 use crate::event_handler::{self, EventCtx};
 use crate::input::handle_key;
 use crate::runner_commands::{SlashEnv, handle_slash_action, save_thinking_pref};
-use crate::runner_panes::{cleanup_pane_isolation, drain_inboxes, fork_pane};
+use crate::runner_panes::{close_focused_pane, drain_inboxes, fork_pane};
 use crate::runner_render::{draw_panes, handle_mouse};
 use crate::runner_streams::{
     StreamDeps, StreamState, abort_focused_stream, answer_confirmation, edit_last_queued_steering,
@@ -455,12 +455,13 @@ pub async fn run_tui(
                                             }
                                             AppEvent::ClosePane
                                                 if pane_mgr.is_multi_pane() => {
-                                                    let closed_id = pane_mgr.focused().id;
-                                                    let isolation = pane_mgr.focused().isolation.clone();
-                                                    file_tracker.release_pane(closed_id);
-                                                    message_bus.unregister(closed_id);
-                                                    cleanup_pane_isolation(&cwd, &isolation).await;
-                                                    pane_mgr.close_focused();
+                                                    close_focused_pane(
+                                                        &mut pane_mgr,
+                                                        &message_bus,
+                                                        &file_tracker,
+                                                        &cwd,
+                                                    )
+                                                    .await;
                                                 }
                                             AppEvent::EditSteering => {
                                                 edit_last_queued_steering(
@@ -569,17 +570,13 @@ pub async fn run_tui(
                                         .await;
                                     }
                                     AppEvent::ClosePane => {
-                                        if pane_mgr.is_multi_pane() {
-                                            let closed_id = pane_mgr.focused().id;
-                                            let isolation = pane_mgr.focused().isolation.clone();
-                                            file_tracker.release_pane(closed_id);
-                                            message_bus.unregister(closed_id);
-                                            cleanup_pane_isolation(&cwd, &isolation).await;
-                                            pane_mgr.close_focused();
-                                        } else {
-                                            pane_mgr.focused_mut().app.status =
-                                                Some("can't close the last pane".into());
-                                        }
+                                        close_focused_pane(
+                                            &mut pane_mgr,
+                                            &message_bus,
+                                            &file_tracker,
+                                            &cwd,
+                                        )
+                                        .await;
                                     }
                                     AppEvent::FocusNextPane => pane_mgr.focus_next(),
                                     AppEvent::FocusPrevPane => pane_mgr.focus_prev(),

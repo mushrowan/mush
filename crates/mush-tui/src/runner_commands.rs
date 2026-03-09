@@ -8,7 +8,7 @@ use mush_ai::types::{Dollars, Message, ThinkingLevel, TokenCount};
 use crate::file_tracker::FileTracker;
 use crate::pane::PaneManager;
 use crate::runner::TuiConfig;
-use crate::runner_panes::cleanup_pane_isolation;
+use crate::runner_panes::close_focused_pane;
 use crate::slash::{self, SlashAction};
 
 pub(super) struct SlashEnv<'a> {
@@ -209,16 +209,7 @@ pub(super) async fn handle_slash_action(
             }
         }
         SlashAction::Close => {
-            if pane_mgr.is_multi_pane() {
-                let closed_id = pane_mgr.focused().id;
-                let isolation = pane_mgr.focused().isolation.clone();
-                file_tracker.release_pane(closed_id);
-                message_bus.unregister(closed_id);
-                cleanup_pane_isolation(cwd, &isolation).await;
-                pane_mgr.close_focused();
-            } else {
-                pane_mgr.focused_mut().app.status = Some("can't close the last pane".into());
-            }
+            close_focused_pane(pane_mgr, message_bus, file_tracker, cwd).await;
         }
         SlashAction::Merge => {
             let pane = pane_mgr.focused();

@@ -257,6 +257,26 @@ pub(super) async fn fork_pane(
     });
 }
 
+pub(super) async fn close_focused_pane(
+    pane_mgr: &mut PaneManager,
+    message_bus: &crate::messaging::MessageBus,
+    file_tracker: &crate::file_tracker::FileTracker,
+    cwd: &Path,
+) -> bool {
+    if !pane_mgr.is_multi_pane() {
+        pane_mgr.focused_mut().app.status = Some("can't close the last pane".into());
+        return false;
+    }
+
+    let closed_id = pane_mgr.focused().id;
+    let isolation = pane_mgr.focused().isolation.clone();
+    file_tracker.release_pane(closed_id);
+    message_bus.unregister(closed_id);
+    cleanup_pane_isolation(cwd, &isolation).await;
+    pane_mgr.close_focused();
+    true
+}
+
 pub(super) async fn cleanup_pane_isolation(
     cwd: &Path,
     isolation: &Option<crate::isolation::PaneIsolation>,
@@ -278,5 +298,66 @@ pub(super) async fn cleanup_pane_isolation(
             }
         }
         None => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use mush_ai::types::{ModelId, TokenCount};
+
+    use crate::file_tracker::FileTracker;
+    use crate::pane::Pane;
+
+    fn app() -> App {
+        App::new(ModelId::from("test-model"), TokenCount::new(4096))
+    }
+
+    #[tokio::test]
+    async fn close_focused_pane_rejects_last_pane() {
+        let mut pane_mgr = PaneManager::new(Pane::new(PaneId::new(1), app()));
+        let message_bus = crate::messaging::MessageBus::new();
+        let file_tracker = FileTracker::new(Path::new("/tmp").to_path_buf());
+
+        let closed = close_focused_pane(
+            &mut pane_mgr,
+            &message_bus,
+            &file_tracker,
+            Path::new("/tmp"),
+        )
+        .await;
+
+        assert!(!closed);
+        assert_eq!(pane_mgr.panes().len(), 1);
+        assert_eq!(
+            pane_mgr.focused().app.status.as_deref(),
+            Some("can't close the last pane")
+        );
+    }
+
+    #[tokio::test]
+    async fn close_focused_pane_closes_multi_pane_focus() {
+        let mut pane_mgr = PaneManager::new(Pane::new(PaneId::new(1), app()));
+        pane_mgr.add_pane(Pane::new(PaneId::new(2), app()));
+        pane_mgr.focus_index(1);
+
+        let message_bus = crate::messaging::MessageBus::new();
+        message_bus.register(PaneId::new(1));
+        message_bus.register(PaneId::new(2));
+
+        let file_tracker = FileTracker::new(Path::new("/tmp").to_path_buf());
+        let closed = close_focused_pane(
+            &mut pane_mgr,
+            &message_bus,
+            &file_tracker,
+            Path::new("/tmp"),
+        )
+        .await;
+
+        assert!(closed);
+        assert_eq!(pane_mgr.panes().len(), 1);
+        assert_eq!(pane_mgr.focused().id, PaneId::new(1));
+        assert_eq!(message_bus.pane_ids(), vec![PaneId::new(1)]);
     }
 }
