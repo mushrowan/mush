@@ -16,7 +16,8 @@ use tokio::sync::Mutex;
 use crate::event_handler;
 use crate::file_tracker::FileTracker;
 use crate::pane::{PaneId, PaneManager};
-use crate::runner::HintMode;
+
+use super::{HintMode, PromptEnricher, TuiConfig};
 
 pub(super) type TaggedStream<'a> =
     Pin<Box<dyn futures::Stream<Item = (PaneId, AgentEvent)> + Send + 'a>>;
@@ -57,7 +58,7 @@ pub(super) struct StreamDeps<'a> {
     pub system_prompt: Option<String>,
     pub options: StreamOptions,
     pub max_turns: usize,
-    pub prompt_enricher: Option<crate::runner::PromptEnricher>,
+    pub prompt_enricher: Option<PromptEnricher>,
     pub hint_mode: HintMode,
     pub provider_api_keys: HashMap<String, String>,
     pub confirm_tools: bool,
@@ -192,7 +193,7 @@ pub(super) async fn handle_agent_event_side_effects(
     pane_id: PaneId,
     event: &AgentEvent,
     file_tracker: &FileTracker,
-    tui_config: &crate::runner::TuiConfig,
+    tui_config: &TuiConfig,
     registry: &ApiRegistry,
 ) {
     if let AgentEvent::MessageEnd { message } = event
@@ -249,10 +250,10 @@ pub(super) async fn handle_agent_event_side_effects(
 
     let title_request = if let Some(pane) = pane_mgr.pane(pane_id)
         && !pane.title_generated
-        && pane.conversation.len() >= 2
+        && pane.conversation.context_len() >= 2
         && let Some(ref updater) = tui_config.update_title
     {
-        Some((pane.conversation.context(), updater.clone()))
+        Some((pane.conversation.context_prefix(4), updater.clone()))
     } else {
         None
     };
@@ -265,7 +266,7 @@ pub(super) async fn handle_agent_event_side_effects(
         };
         if let Ok(Some(title)) = tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            mush_session::title::generate_title(&msgs, registry, &model, &opts),
+            mush_session::title::generate_title(msgs, registry, &model, &opts),
         )
         .await
         {
@@ -516,10 +517,12 @@ async fn start_stream_for_prompt<'a>(
         registry,
         options: call_options,
         max_turns: deps.max_turns,
-        get_steering: steering,
-        get_follow_up: follow_up,
-        transform_context: transform,
-        confirm_tool: confirm,
+        hooks: mush_agent::AgentHooks {
+            get_steering: steering,
+            get_follow_up: follow_up,
+            transform_context: transform,
+            confirm_tool: confirm,
+        },
     };
 
     let stream = agent_loop(config, conversation_snapshot);
@@ -551,7 +554,7 @@ fn append_prompt_and_snapshot(
     conversation: &mut mush_session::ConversationState,
     prompt: String,
     hint_mode: HintMode,
-    prompt_enricher: &Option<crate::runner::PromptEnricher>,
+    prompt_enricher: &Option<PromptEnricher>,
 ) -> Vec<Message> {
     let prompt_preview = prompt.clone();
     let mut injection_preview: Option<String> = None;
@@ -614,7 +617,7 @@ fn append_prompt_and_snapshot(
 }
 
 fn build_context_transform<'a>(
-    enricher_arc: Option<crate::runner::PromptEnricher>,
+    enricher_arc: Option<PromptEnricher>,
     compact_model: Model,
     compact_options: StreamOptions,
     do_auto_compact: bool,
@@ -627,27 +630,47 @@ fn build_context_transform<'a>(
     let compaction_cache: std::sync::Arc<tokio::sync::Mutex<Option<(usize, Vec<Message>)>>> =
         std::sync::Arc::new(tokio::sync::Mutex::new(None));
 
-    Some(Box::new(move |mut msgs| {
+    Some(Box::new(move |messages| {
+        let hint_match = enricher_arc
+            .as_ref()
+            .is_some_and(|enricher| event_handler::would_inject_hint(messages, enricher.as_ref()));
+        let needs_mask = event_handler::needs_observation_mask(messages);
+        let owned_messages = if do_auto_compact || hint_match || needs_mask {
+            Some(messages.to_vec())
+        } else {
+            None
+        };
         let enricher = enricher_arc.clone();
         let model = compact_model.clone();
         let options = compact_options.clone();
         let cache = compaction_cache.clone();
         let ctx_tokens = ctx_tokens_for_transform.clone();
         Box::pin(async move {
-            let mut msgs = if do_auto_compact {
+            let mut replayed_cached_compaction = false;
+            let mut fresh_compaction = false;
+            let mut maybe_msgs: Option<Vec<Message>> = None;
+
+            if do_auto_compact {
+                let messages = owned_messages
+                    .as_ref()
+                    .expect("owned messages required for context transform");
                 let mut guard = cache.lock().await;
                 let current_tokens =
                     TokenCount::new(ctx_tokens.load(std::sync::atomic::Ordering::Relaxed));
 
-                if let Some((orig_len, ref compacted)) = *guard {
-                    if msgs.len() >= orig_len {
+                let msgs = if let Some((orig_len, ref compacted)) = *guard {
+                    if messages.len() >= orig_len {
+                        replayed_cached_compaction = true;
                         let mut result = compacted.clone();
-                        result.extend(msgs[orig_len..].iter().cloned());
-                        msgs = result;
+                        result.extend(messages[orig_len..].iter().cloned());
+                        result
                     } else {
                         *guard = None;
+                        messages.clone()
                     }
-                }
+                } else {
+                    messages.clone()
+                };
 
                 let pre_len = msgs.len();
                 let compacted = event_handler::auto_compact(
@@ -661,16 +684,33 @@ fn build_context_transform<'a>(
                 .await;
                 if compacted.len() < pre_len {
                     *guard = Some((pre_len, compacted.clone()));
+                    replayed_cached_compaction = false;
+                    fresh_compaction = true;
                 }
-                compacted
-            } else {
-                msgs
-            };
-            if let Some(ref enricher) = enricher {
-                event_handler::inject_hint(&mut msgs, enricher.as_ref());
+                maybe_msgs = Some(compacted);
             }
-            event_handler::mask_observations(&mut msgs);
-            msgs
+
+            if !fresh_compaction && !replayed_cached_compaction && !hint_match && !needs_mask {
+                return mush_agent::ContextTransformResult::Unchanged;
+            }
+
+            let mut msgs = maybe_msgs.unwrap_or_else(|| {
+                owned_messages.expect("owned messages required for context transform")
+            });
+            let mut changed = fresh_compaction || replayed_cached_compaction;
+
+            if let Some(ref enricher) = enricher {
+                changed |= event_handler::inject_hint(&mut msgs, enricher.as_ref());
+            }
+            changed |= event_handler::mask_observations(&mut msgs);
+
+            if fresh_compaction {
+                mush_agent::ContextTransformResult::Updated(msgs)
+            } else if changed {
+                mush_agent::ContextTransformResult::Silent(msgs)
+            } else {
+                mush_agent::ContextTransformResult::Unchanged
+            }
         })
     }))
 }
@@ -782,7 +822,7 @@ fn build_system_prompt(
     base_system_prompt: &Option<String>,
 ) -> Option<String> {
     let mut system_prompt = if pane_mgr.is_multi_pane() {
-        let sibling_info = crate::runner_panes::build_sibling_prompt(pane_id, pane_mgr);
+        let sibling_info = super::panes::build_sibling_prompt(pane_id, pane_mgr);
         match base_system_prompt.as_ref() {
             Some(base) => Some(format!("{base}\n\n{sibling_info}")),
             None => Some(sibling_info),

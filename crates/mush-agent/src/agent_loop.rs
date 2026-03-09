@@ -78,13 +78,20 @@ pub type MessageCallback<'a> = Box<
         + 'a,
 >;
 
+#[derive(Debug, Clone)]
+pub enum ContextTransformResult {
+    Unchanged,
+    Updated(Vec<Message>),
+    Silent(Vec<Message>),
+}
+
 /// callback type for context transforms (e.g. compaction)
 pub type ContextTransform<'a> = Box<
     dyn Fn(
-            Vec<Message>,
-        )
-            -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<Message>> + Send + 'a>>
-        + Send
+            &[Message],
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = ContextTransformResult> + Send + 'a>,
+        > + Send
         + Sync
         + 'a,
 >;
@@ -112,15 +119,8 @@ pub type ConfirmCallback<'a> = Box<
         + 'a,
 >;
 
-/// configuration for running the agent loop
-pub struct AgentConfig<'a> {
-    pub model: Model,
-    pub system_prompt: Option<String>,
-    pub tools: ToolRegistry,
-    pub registry: &'a ApiRegistry,
-    pub options: StreamOptions,
-    /// max tool-calling turns before forced stop (default: unlimited)
-    pub max_turns: usize,
+#[derive(Default)]
+pub struct AgentHooks<'a> {
     /// check for steering messages between tool calls.
     /// if messages are returned, remaining tool calls are skipped and
     /// these messages are added before the next LLM call.
@@ -133,6 +133,18 @@ pub struct AgentConfig<'a> {
     pub transform_context: Option<ContextTransform<'a>>,
     /// confirm before executing a tool. if None, all tools run without confirmation.
     pub confirm_tool: Option<ConfirmCallback<'a>>,
+}
+
+/// configuration for running the agent loop
+pub struct AgentConfig<'a> {
+    pub model: Model,
+    pub system_prompt: Option<String>,
+    pub tools: ToolRegistry,
+    pub registry: &'a ApiRegistry,
+    pub options: StreamOptions,
+    /// max tool-calling turns before forced stop (default: unlimited)
+    pub max_turns: usize,
+    pub hooks: AgentHooks<'a>,
 }
 
 /// run the agent loop, yielding events as they happen
@@ -150,7 +162,7 @@ pub fn agent_loop(
         let mut turn_index = 0;
 
         // check for steering at start (user may have typed while waiting)
-        let mut pending: Vec<Message> = if let Some(ref get) = config.get_steering {
+        let mut pending: Vec<Message> = if let Some(ref get) = config.hooks.get_steering {
             get().await
         } else {
             vec![]
@@ -170,17 +182,22 @@ pub fn agent_loop(
                 yield AgentEvent::TurnStart { turn_index };
 
                 // apply context transform before LLM call
-                let llm_messages = if let Some(ref transform) = config.transform_context {
+                let llm_messages = if let Some(ref transform) = config.hooks.transform_context {
                     let before = messages.len();
-                    let transformed = transform(messages.clone()).await;
-                    let after = transformed.len();
-                    if after < before {
-                        yield AgentEvent::ContextTransformed {
-                            before_count: before,
-                            after_count: after,
-                        };
+                    match transform(&messages).await {
+                        ContextTransformResult::Unchanged => messages.clone(),
+                        ContextTransformResult::Updated(transformed) => {
+                            let after = transformed.len();
+                            if after < before {
+                                yield AgentEvent::ContextTransformed {
+                                    before_count: before,
+                                    after_count: after,
+                                };
+                            }
+                            transformed
+                        }
+                        ContextTransformResult::Silent(transformed) => transformed,
                     }
-                    transformed
                 } else {
                     messages.clone()
                 };
@@ -310,7 +327,7 @@ pub fn agent_loop(
                 // confirmations are checked sequentially (needs user interaction)
                 let mut confirmed: Vec<&ToolCall> = Vec::new();
                 for tc in &tool_calls {
-                    if let Some(ref confirm) = config.confirm_tool {
+                    if let Some(ref confirm) = config.hooks.confirm_tool {
                         let action = confirm(&tc.id, tc.name.as_str(), &tc.arguments).await;
                         let deny_reason = match action {
                             ConfirmAction::Allow => None,
@@ -371,7 +388,7 @@ pub fn agent_loop(
                     }
 
                     // check steering after all tools complete
-                    if let Some(ref get) = config.get_steering {
+                    if let Some(ref get) = config.hooks.get_steering {
                         let steering = get().await;
                         if !steering.is_empty() {
                             pending = steering;
@@ -388,7 +405,7 @@ pub fn agent_loop(
                 }
 
                 // if no pending steering, check for more
-                if pending.is_empty() && let Some(ref get) = config.get_steering {
+                if pending.is_empty() && let Some(ref get) = config.hooks.get_steering {
                     pending = get().await;
                 }
 
@@ -402,7 +419,7 @@ pub fn agent_loop(
             }
 
             // agent would stop. check for follow-ups
-            if let Some(ref get) = config.get_follow_up {
+            if let Some(ref get) = config.hooks.get_follow_up {
                 let follow_up = get().await;
                 if !follow_up.is_empty() {
                     let count = follow_up.len();
@@ -607,10 +624,7 @@ mod tests {
             registry: &registry,
             options: StreamOptions::default(),
             max_turns: DEFAULT_MAX_TURNS,
-            get_steering: None,
-            get_follow_up: None,
-            transform_context: None,
-            confirm_tool: None,
+            hooks: AgentHooks::default(),
         };
 
         let messages = vec![Message::User(UserMessage {
@@ -643,7 +657,8 @@ mod tests {
 
         let transform: ContextTransform<'_> = Box::new(move |msgs| {
             called_clone.store(true, Ordering::SeqCst);
-            Box::pin(async move { msgs })
+            let msgs = msgs.to_vec();
+            Box::pin(async move { ContextTransformResult::Silent(msgs) })
         });
 
         let config = AgentConfig {
@@ -653,10 +668,10 @@ mod tests {
             registry: &registry,
             options: StreamOptions::default(),
             max_turns: DEFAULT_MAX_TURNS,
-            get_steering: None,
-            get_follow_up: None,
-            transform_context: Some(transform),
-            confirm_tool: None,
+            hooks: AgentHooks {
+                transform_context: Some(transform),
+                ..AgentHooks::default()
+            },
         };
 
         let messages = vec![Message::User(UserMessage {
@@ -766,10 +781,10 @@ mod tests {
             registry: &registry,
             options: StreamOptions::default(),
             max_turns: 1,
-            get_steering: None,
-            get_follow_up: Some(get_follow_up),
-            transform_context: None,
-            confirm_tool: None,
+            hooks: AgentHooks {
+                get_follow_up: Some(get_follow_up),
+                ..AgentHooks::default()
+            },
         };
 
         let messages = vec![Message::User(UserMessage {

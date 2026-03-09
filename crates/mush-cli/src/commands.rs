@@ -101,6 +101,12 @@ pub fn open_config() -> Result<()> {
              # cache_timer = false  # cache warmth countdown + notifications\n\
              # system_prompt = \"\"\n\
              \n\
+             # [terminal]\n\
+             # keyboard_enhancement = \"auto\"  # auto | enabled | disabled\n\
+             # mouse_tracking = \"minimal\"     # minimal | disabled\n\
+             # image_probe = \"auto\"           # auto | disabled\n\
+             # env overrides: MUSH_TUI_KEYBOARD_ENHANCEMENT, MUSH_TUI_MOUSE_TRACKING, MUSH_TUI_IMAGE_PROBE\n\
+             \n\
              # [api_keys]\n\
              # anthropic = \"sk-...\"\n\
              # openrouter = \"sk-or-...\"\n\
@@ -118,8 +124,9 @@ pub fn open_config() -> Result<()> {
     Ok(())
 }
 
-pub fn status() -> Result<()> {
+pub fn status(terminal_overrides: mush_tui::TerminalPolicyOverrides) -> Result<()> {
     let cfg = config::load_config();
+    let terminal = cfg.terminal.with_overrides(terminal_overrides);
 
     println!("\x1b[1mmush status\x1b[0m\n");
 
@@ -156,6 +163,12 @@ pub fn status() -> Result<()> {
     println!("  cache retention: {cache_retention}");
     println!("  debug cache: {}", cfg.debug_cache);
     println!("  cache timer: {}", cfg.cache_timer);
+    println!(
+        "  keyboard enhancement: {}",
+        terminal.keyboard_enhancement.as_str()
+    );
+    println!("  mouse tracking: {}", terminal.mouse_tracking.as_str());
+    println!("  image probe: {}", terminal.image_probe.as_str());
 
     #[cfg(feature = "embeddings")]
     println!("  embeddings: enabled");

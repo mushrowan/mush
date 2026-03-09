@@ -53,12 +53,20 @@ impl ConversationState {
         self.tree.build_context()
     }
 
+    pub fn context_prefix(&self, limit: usize) -> Vec<Message> {
+        self.tree.build_context_prefix(limit)
+    }
+
+    pub fn context_len(&self) -> usize {
+        self.tree.context_len()
+    }
+
     pub fn messages(&self) -> Vec<Message> {
         self.context()
     }
 
     pub fn len(&self) -> usize {
-        self.context().len()
+        self.context_len()
     }
 
     pub fn tree(&self) -> &SessionTree {

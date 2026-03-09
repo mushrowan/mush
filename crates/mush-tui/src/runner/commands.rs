@@ -7,9 +7,10 @@ use mush_ai::types::{Dollars, Message, ThinkingLevel, TokenCount};
 
 use crate::file_tracker::FileTracker;
 use crate::pane::PaneManager;
-use crate::runner::TuiConfig;
-use crate::runner_panes::close_focused_pane;
 use crate::slash::{self, SlashAction};
+
+use super::TuiConfig;
+use super::panes::close_focused_pane;
 
 pub(super) struct SlashEnv<'a> {
     pub tui_config: &'a mut TuiConfig,
@@ -280,7 +281,7 @@ pub(super) async fn handle_slash_action(
 
 pub(super) fn save_thinking_pref(
     prefs: &mut HashMap<String, ThinkingLevel>,
-    saver: &Option<crate::runner::ThinkingPrefsSaver>,
+    saver: &Option<super::ThinkingPrefsSaver>,
     model_id: &str,
     level: ThinkingLevel,
 ) {

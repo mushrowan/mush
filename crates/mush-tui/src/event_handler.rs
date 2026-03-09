@@ -160,23 +160,36 @@ pub fn handle_agent_event(
 pub fn inject_hint(
     msgs: &mut [Message],
     enricher: &(dyn Fn(&str) -> Option<String> + Send + Sync),
-) {
-    let Some(pos) = msgs.iter().rposition(|m| matches!(m, Message::User(_))) else {
-        return;
-    };
-
-    let Message::User(ref user_msg) = msgs[pos] else {
-        return;
-    };
-
-    let text = user_msg.text();
-
-    if let Some(hint) = enricher(&text) {
+) -> bool {
+    if let Some((pos, content, timestamp_ms)) = hinted_user_message(msgs, enricher) {
         msgs[pos] = Message::User(UserMessage {
-            content: UserContent::Text(format!("{hint}\n\n{text}")),
-            timestamp_ms: user_msg.timestamp_ms,
+            content: UserContent::Text(content),
+            timestamp_ms,
         });
+        true
+    } else {
+        false
     }
+}
+
+pub fn would_inject_hint(
+    msgs: &[Message],
+    enricher: &(dyn Fn(&str) -> Option<String> + Send + Sync),
+) -> bool {
+    hinted_user_message(msgs, enricher).is_some()
+}
+
+fn hinted_user_message(
+    msgs: &[Message],
+    enricher: &(dyn Fn(&str) -> Option<String> + Send + Sync),
+) -> Option<(usize, String, Timestamp)> {
+    let pos = msgs.iter().rposition(|m| matches!(m, Message::User(_)))?;
+    let Message::User(user_msg) = &msgs[pos] else {
+        return None;
+    };
+    let text = user_msg.text();
+    let hint = enricher(&text)?;
+    Some((pos, format!("{hint}\n\n{text}"), user_msg.timestamp_ms))
 }
 
 /// resolve API key and account ID for a model
@@ -258,22 +271,33 @@ const FORK_MASK_RECENT: usize = 3;
 ///
 /// this applies a deterministic transform to every tool result, so adding new
 /// messages does not rewrite older masked content on later turns
-pub fn mask_observations(messages: &mut [Message]) {
+pub fn mask_observations(messages: &mut [Message]) -> bool {
+    let mut changed = false;
     for msg in messages.iter_mut() {
         if let Message::ToolResult(tr) = msg {
-            mask_tool_result_content(&mut tr.content);
+            changed |= mask_tool_result_content(&mut tr.content);
         }
     }
+    changed
+}
+
+pub fn needs_observation_mask(messages: &[Message]) -> bool {
+    messages.iter().any(|msg| match msg {
+        Message::ToolResult(tr) => tool_result_needs_mask(&tr.content),
+        _ => false,
+    })
 }
 
 /// truncate text parts in a tool result, keeping a prefix + size note
-fn mask_tool_result_content(content: &mut [ToolResultContentPart]) {
+fn mask_tool_result_content(content: &mut [ToolResultContentPart]) -> bool {
+    let mut changed = false;
     for part in content.iter_mut() {
         if let ToolResultContentPart::Text(t) = part {
             let original_len = t.text.len();
             if original_len > MASK_TRUNCATE_LEN {
                 let truncated: String = t.text.chars().take(MASK_TRUNCATE_LEN).collect();
                 t.text = format!("{truncated}\n\n[... truncated, {original_len} chars total]");
+                changed = true;
             }
         }
         // images are dropped entirely from old results
@@ -281,8 +305,17 @@ fn mask_tool_result_content(content: &mut [ToolResultContentPart]) {
             *part = ToolResultContentPart::Text(TextContent {
                 text: "[image omitted]".into(),
             });
+            changed = true;
         }
     }
+    changed
+}
+
+fn tool_result_needs_mask(content: &[ToolResultContentPart]) -> bool {
+    content.iter().any(|part| match part {
+        ToolResultContentPart::Text(text) => text.text.len() > MASK_TRUNCATE_LEN,
+        ToolResultContentPart::Image(_) => true,
+    })
 }
 
 /// slim down a conversation for a forked pane.
@@ -343,7 +376,7 @@ fn mask_observations_with_limit(messages: &mut [Message], preserve_recent: usize
     let to_mask = tool_positions.len() - preserve_recent;
     for &pos in &tool_positions[..to_mask] {
         if let Message::ToolResult(tr) = &mut messages[pos] {
-            mask_tool_result_content(&mut tr.content);
+            let _ = mask_tool_result_content(&mut tr.content);
         }
     }
 }

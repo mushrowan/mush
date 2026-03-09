@@ -66,13 +66,23 @@ fn estimate_message_tokens(msg: &Message) -> usize {
 }
 
 fn truncate_with_ellipsis(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        return text.to_string();
+    let ellipsis = if max_chars >= 3 { "..." } else { "" };
+    let keep = max_chars.saturating_sub(ellipsis.len());
+    let mut iter = text.char_indices();
+
+    for _ in 0..keep {
+        if iter.next().is_none() {
+            return text.to_string();
+        }
     }
 
-    let keep = max_chars.saturating_sub(3);
-    let truncated: String = text.chars().take(keep).collect();
-    format!("{truncated}...")
+    let Some((end, _)) = iter.next() else {
+        return text.to_string();
+    };
+
+    let mut truncated = text[..end].to_string();
+    truncated.push_str(ellipsis);
+    truncated
 }
 
 /// build a summary of messages that will be compacted

@@ -1318,7 +1318,7 @@ const MAX_PREVIEW_LINES: usize = 12;
 /// max chars per preview line
 const MAX_PREVIEW_LINE_LEN: usize = 120;
 
-fn truncate_output(output: &str) -> String {
+pub(crate) fn truncate_output(output: &str) -> String {
     let lines: Vec<&str> = output.lines().collect();
     let total = lines.len();
     let preview: Vec<String> = lines

@@ -9,14 +9,15 @@ use mush_ai::types::ThinkingLevel;
 use crate::app::{self, App, AppEvent};
 use crate::input::handle_key;
 use crate::pane::PaneManager;
-use crate::runner::{ThinkingPrefsSaver, TuiConfig};
-use crate::runner_commands::{SlashEnv, handle_slash_action, save_thinking_pref};
-use crate::runner_panes::{close_focused_pane, fork_pane};
-use crate::runner_render::handle_mouse;
-use crate::runner_streams::{
+
+use super::commands::{SlashEnv, handle_slash_action, save_thinking_pref};
+use super::panes::{close_focused_pane, fork_pane};
+use super::render::handle_mouse;
+use super::streams::{
     StreamState, abort_focused_stream, answer_confirmation, edit_last_queued_steering,
     submit_streaming_input,
 };
+use super::{ThinkingPrefsSaver, TuiConfig};
 use crate::slash;
 
 pub(super) enum LoopAction {

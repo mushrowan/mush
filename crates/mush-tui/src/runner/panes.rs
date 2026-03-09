@@ -7,8 +7,9 @@ use mush_session::ConversationState;
 use crate::app::App;
 use crate::event_handler;
 use crate::pane::{PaneId, PaneManager};
-use crate::runner::TuiConfig;
 use crate::slash;
+
+use super::TuiConfig;
 
 pub(super) async fn drain_inboxes(pane_mgr: &mut PaneManager) {
     for pane in pane_mgr.panes_mut() {
