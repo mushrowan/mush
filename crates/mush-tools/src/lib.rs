@@ -26,9 +26,20 @@ pub fn uses_patch_tool(model_id: &str) -> bool {
         && !model_id.contains("gpt-4")
 }
 
+/// whether a model supports native parallel tool calls and doesn't need the
+/// batch tool. GPT/codex models use the responses API which handles parallel
+/// calls natively, and anthropic does too.
+pub fn supports_native_parallel_calls(model_id: &str) -> bool {
+    model_id.contains("gpt-")
+        || model_id.contains("codex")
+        || model_id.starts_with("o1")
+        || model_id.starts_with("o3")
+        || model_id.starts_with("o4")
+}
+
 /// create the full set of built-in tools for a given working directory
 pub fn builtin_tools(cwd: PathBuf) -> Vec<Box<dyn AgentTool>> {
-    builtin_tools_with_options(cwd, None, false)
+    builtin_tools_with_options(cwd, None, false, false)
 }
 
 /// create built-in tools with an optional bash output sink for streaming
@@ -36,15 +47,18 @@ pub fn builtin_tools_with_sink(
     cwd: PathBuf,
     output_sink: Option<bash::OutputSink>,
 ) -> Vec<Box<dyn AgentTool>> {
-    builtin_tools_with_options(cwd, output_sink, false)
+    builtin_tools_with_options(cwd, output_sink, false, false)
 }
 
 /// create built-in tools with all options.
 /// when `use_patch` is true, apply_patch replaces edit + write (for GPT models).
+/// when `skip_batch` is true, the batch tool is omitted (for models with native
+/// parallel tool calls).
 pub fn builtin_tools_with_options(
     cwd: PathBuf,
     output_sink: Option<bash::OutputSink>,
     use_patch: bool,
+    skip_batch: bool,
 ) -> Vec<Box<dyn AgentTool>> {
     let make_tools = |cwd: PathBuf| -> Vec<Box<dyn AgentTool>> {
         let bash_tool: Box<dyn AgentTool> = {
@@ -78,9 +92,13 @@ pub fn builtin_tools_with_options(
         tools
     };
 
-    // batch wraps its own copy of the tools so it can dispatch to them
-    let inner_tools = make_tools(cwd.clone());
-    let mut tools = make_tools(cwd);
-    tools.push(Box::new(batch::BatchTool::new(inner_tools)));
-    tools
+    if skip_batch {
+        make_tools(cwd)
+    } else {
+        // batch wraps its own copy of the tools so it can dispatch to them
+        let inner_tools = make_tools(cwd.clone());
+        let mut tools = make_tools(cwd);
+        tools.push(Box::new(batch::BatchTool::new(inner_tools)));
+        tools
+    }
 }

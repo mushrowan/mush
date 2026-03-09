@@ -448,9 +448,13 @@ async fn execute_tool(
             if result.outcome.is_error() {
                 tracing::warn!(tool = %tool_call.name, "tool returned error");
             }
-            // apply truncation with file spillover (saves full output to disk
-            // so the model can grep/read it instead of re-running the command)
-            crate::truncation::truncate_tool_output(result)
+            // skip truncation for tools that handle their own output limits
+            // (read already caps at 2000 lines / 50KB with line numbers)
+            if crate::truncation::self_truncating(t.name()) {
+                result
+            } else {
+                crate::truncation::truncate_tool_output(result)
+            }
         }
         None => {
             tracing::error!(tool = %tool_call.name, "tool not found");

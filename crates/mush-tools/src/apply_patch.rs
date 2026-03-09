@@ -235,7 +235,7 @@ pub fn parse_patch(patch_text: &str) -> Result<Vec<Hunk>, PatchError> {
 
 /// multi-pass line matching: exact, rstrip, trim, normalised unicode
 fn seek_sequence(lines: &[&str], pattern: &[String], start: usize, eof: bool) -> Option<usize> {
-    if pattern.is_empty() {
+    if pattern.is_empty() || lines.len() < pattern.len() {
         return None;
     }
 
@@ -975,6 +975,190 @@ mod tests {
         apply_hunks(dir.path(), &hunks).unwrap();
         let content = fs::read_to_string(dir.path().join("test.txt")).unwrap();
         assert_eq!(content, "first\nsecond\nthird\nfinal\n");
+    }
+
+    #[test]
+    fn apply_pure_addition_no_old_lines() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("test.txt"), "existing content\n").unwrap();
+
+        let hunks = vec![Hunk::Update {
+            path: "test.txt".into(),
+            move_path: None,
+            chunks: vec![UpdateChunk {
+                old_lines: vec![],
+                new_lines: vec!["appended line".into()],
+                context: None,
+                is_eof: false,
+            }],
+        }];
+
+        apply_hunks(dir.path(), &hunks).unwrap();
+        let content = fs::read_to_string(dir.path().join("test.txt")).unwrap();
+        assert!(content.contains("appended line"));
+        assert!(content.contains("existing content"));
+    }
+
+    #[test]
+    fn apply_eof_with_context() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("test.rs"),
+            "fn main() {\n    hello();\n}\n\nfn cleanup() {\n    done();\n}\n",
+        )
+        .unwrap();
+
+        let hunks = vec![Hunk::Update {
+            path: "test.rs".into(),
+            move_path: None,
+            chunks: vec![UpdateChunk {
+                old_lines: vec!["    done();".into()],
+                new_lines: vec!["    finished();".into()],
+                context: Some("fn cleanup() {".into()),
+                is_eof: true,
+            }],
+        }];
+
+        apply_hunks(dir.path(), &hunks).unwrap();
+        let content = fs::read_to_string(dir.path().join("test.rs")).unwrap();
+        assert!(content.contains("finished()"));
+        assert!(content.contains("hello()")); // first fn untouched
+    }
+
+    #[test]
+    fn apply_move_with_no_content_changes() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("old.txt"), "keep this\n").unwrap();
+
+        let hunks = vec![Hunk::Update {
+            path: "old.txt".into(),
+            move_path: Some("renamed.txt".into()),
+            chunks: vec![],
+        }];
+
+        // no chunks = no content changes, just a rename
+        // this should fail because derive_new_contents has no changes
+        // but the original content is still read and written to the new path
+        let result = apply_hunks(dir.path(), &hunks);
+        assert!(result.is_ok());
+        assert!(!dir.path().join("old.txt").exists());
+        let content = fs::read_to_string(dir.path().join("renamed.txt")).unwrap();
+        assert_eq!(content, "keep this\n");
+    }
+
+    #[test]
+    fn apply_context_not_found_errors() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("test.rs"), "fn main() {\n}\n").unwrap();
+
+        let hunks = vec![Hunk::Update {
+            path: "test.rs".into(),
+            move_path: None,
+            chunks: vec![UpdateChunk {
+                old_lines: vec!["old".into()],
+                new_lines: vec!["new".into()],
+                context: Some("fn nonexistent() {".into()),
+                is_eof: false,
+            }],
+        }];
+
+        let result = apply_hunks(dir.path(), &hunks);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("nonexistent"), "got: {err}");
+    }
+
+    #[test]
+    fn apply_unicode_normalisation_matching() {
+        let dir = TempDir::new().unwrap();
+        // file uses unicode smart quotes
+        fs::write(
+            dir.path().join("test.txt"),
+            "let msg = \u{201C}hello\u{201D};\n",
+        )
+        .unwrap();
+
+        let hunks = vec![Hunk::Update {
+            path: "test.txt".into(),
+            move_path: None,
+            chunks: vec![UpdateChunk {
+                // patch uses ascii quotes (normalisation should match)
+                old_lines: vec!["let msg = \"hello\";".into()],
+                new_lines: vec!["let msg = \"world\";".into()],
+                context: None,
+                is_eof: false,
+            }],
+        }];
+
+        apply_hunks(dir.path(), &hunks).unwrap();
+        let content = fs::read_to_string(dir.path().join("test.txt")).unwrap();
+        assert!(content.contains("world"));
+    }
+
+    #[test]
+    fn apply_empty_file_update_errors() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("empty.txt"), "").unwrap();
+
+        let hunks = vec![Hunk::Update {
+            path: "empty.txt".into(),
+            move_path: None,
+            chunks: vec![UpdateChunk {
+                old_lines: vec!["nonexistent".into()],
+                new_lines: vec!["replaced".into()],
+                context: None,
+                is_eof: false,
+            }],
+        }];
+
+        let result = apply_hunks(dir.path(), &hunks);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_heredoc_wrapped_patch() {
+        let patch = "cat <<'EOF'\n*** Begin Patch\n*** Add File: hello.txt\n+hi\n*** End Patch\nEOF";
+        let hunks = parse_patch(patch).unwrap();
+        assert_eq!(hunks.len(), 1);
+        match &hunks[0] {
+            Hunk::Add { path, contents } => {
+                assert_eq!(path, "hello.txt");
+                assert_eq!(contents, "hi");
+            }
+            _ => panic!("expected add hunk"),
+        }
+    }
+
+    #[test]
+    fn apply_add_then_update_same_patch() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("existing.rs"), "fn old() {}\n").unwrap();
+
+        let patch = "\
+*** Begin Patch
+*** Add File: new.txt
++first line
++second line
+*** Update File: existing.rs
+@@
+-fn old() {}
++fn updated() {}
+*** Delete File: nonexistent_but_thats_ok.txt
+*** End Patch";
+
+        let hunks = parse_patch(patch).unwrap();
+        assert_eq!(hunks.len(), 3);
+        // only apply the first two (delete will fail on missing file)
+        let mut results = Vec::new();
+        for hunk in &hunks[..2] {
+            match apply_hunks(dir.path(), &[hunk.clone()]) {
+                Ok(s) => results.extend(s),
+                Err(e) => panic!("unexpected error: {e}"),
+            }
+        }
+        assert!(dir.path().join("new.txt").exists());
+        let content = fs::read_to_string(dir.path().join("existing.rs")).unwrap();
+        assert!(content.contains("updated()"));
     }
 
     #[test]

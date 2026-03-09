@@ -8,8 +8,19 @@ use crate::util::resolve_path;
 
 const MAX_LINES: usize = 2000;
 const MAX_BYTES: usize = 50 * 1024;
+/// per-line length cap (chars). longer lines silently truncated
+const MAX_LINE_CHARS: usize = 500;
 
 const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "webp"];
+
+/// truncate a line to at most `max` chars
+fn truncate_line(line: &str, max: usize) -> &str {
+    if line.len() <= max {
+        return line;
+    }
+    // find a char boundary at or before max
+    &line[..line.floor_char_boundary(max)]
+}
 
 pub struct ReadTool {
     cwd: PathBuf,
@@ -29,10 +40,9 @@ impl AgentTool for ReadTool {
         "Read"
     }
     fn description(&self) -> &str {
-        "Read the contents of a file. Supports text files and images (jpg, png, gif, webp). \
-         For text files, output is truncated to 2000 lines or 50KB (whichever is hit first). \
-         Use offset/limit for large files. Use start_line/end_line for exact spans, or \
-         around_line to centre on a specific line with configurable context."
+        "Read a file's contents with 1-indexed line numbers. Supports text files and images \
+         (jpg, png, gif, webp). Images are returned as attachments. Use offset/limit for \
+         large files, start_line/end_line for exact spans, or around_line for contextual reads."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -184,18 +194,22 @@ fn read_file(path: &Path, offset: Option<usize>, limit: Option<usize>, json_outp
             result.push('\n');
             bytes_written += 1;
         }
-        result.push_str(line);
-        bytes_written += line.len();
-        lines_written += 1;
 
-        let _ = i; // used by enumerate for skip
+        // format as L{n}: {content} with per-line length cap
+        let line_num = i + 1;
+        let display_line = truncate_line(line, MAX_LINE_CHARS);
+        let formatted = format!("L{line_num}: {display_line}");
+        result.push_str(&formatted);
+        bytes_written += formatted.len();
+        lines_written += 1;
     }
 
     if truncated {
-        let remaining = total_lines - start - lines_written;
+        let end_line = start + lines_written;
+        let next_offset = end_line + 1;
+        let remaining = total_lines - end_line;
         result.push_str(&format!(
-            "\n\n[{remaining} more lines in file. Use offset={} to continue.]",
-            start + lines_written + 1
+            "\n\n[{remaining} more lines in file. Use offset={next_offset} to continue]",
         ));
     }
 
@@ -216,6 +230,7 @@ fn read_file(path: &Path, offset: Option<usize>, limit: Option<usize>, json_outp
             "end_line": end_line,
             "truncated": truncated,
             "size_bytes": size,
+            // content already has L{n}: prefixes
             "content": result,
         });
         if let Some(mtime) = modified {
@@ -274,8 +289,9 @@ mod tests {
         let result = read_file(&file, None, None, false);
         assert!(result.outcome.is_success());
         let text = extract_text(&result);
-        assert!(text.contains("line 1"));
-        assert!(text.contains("line 3"));
+        // output now has L{n}: prefixes
+        assert!(text.contains("L1: line 1"));
+        assert!(text.contains("L3: line 3"));
     }
 
     #[test]
@@ -286,10 +302,10 @@ mod tests {
 
         let result = read_file(&file, Some(3), None, false);
         let text = extract_text(&result);
-        assert!(!text.contains("line 1"));
-        assert!(!text.contains("line 2"));
-        assert!(text.contains("line 3"));
-        assert!(text.contains("line 4"));
+        assert!(!text.contains("L1:"));
+        assert!(!text.contains("L2:"));
+        assert!(text.contains("L3: line 3"));
+        assert!(text.contains("L4: line 4"));
     }
 
     #[test]
@@ -304,10 +320,11 @@ mod tests {
 
         let result = read_file(&file, None, Some(5), false);
         let text = extract_text(&result);
-        assert!(text.contains("line 1"));
-        assert!(text.contains("line 5"));
-        assert!(!text.contains("line 6"));
-        assert!(text.contains("more lines in file"));
+        assert!(text.contains("L1: line 1"));
+        assert!(text.contains("L5: line 5"));
+        assert!(!text.contains("L6:"));
+        assert!(text.contains("95 more lines"));
+        assert!(text.contains("offset=6 to continue"));
     }
 
     #[test]
@@ -375,10 +392,10 @@ mod tests {
             }))
             .await;
         let text = extract_text(&result);
-        assert!(text.contains("line 5"));
-        assert!(text.contains("line 8"));
-        assert!(!text.contains("line 4"));
-        assert!(!text.contains("line 9"));
+        assert!(text.contains("L5: line 5"));
+        assert!(text.contains("L8: line 8"));
+        assert!(!text.contains("L4:"));
+        assert!(!text.contains("L9:"));
     }
 
     #[tokio::test]
@@ -398,11 +415,11 @@ mod tests {
             }))
             .await;
         let text = extract_text(&result);
-        assert!(text.contains("line 47"));
-        assert!(text.contains("line 50"));
-        assert!(text.contains("line 53"));
-        assert!(!text.contains("line 46"));
-        assert!(!text.contains("line 54"));
+        assert!(text.contains("L47: line 47"));
+        assert!(text.contains("L50: line 50"));
+        assert!(text.contains("L53: line 53"));
+        assert!(!text.contains("L46:"));
+        assert!(!text.contains("L54:"));
     }
 
     #[tokio::test]
@@ -421,10 +438,10 @@ mod tests {
             .await;
         let text = extract_text(&result);
         // default context is 20 before + 20 after = lines 30-70
-        assert!(text.contains("line 30"));
-        assert!(text.contains("line 70"));
-        assert!(!text.contains("line 29"));
-        assert!(!text.contains("line 71"));
+        assert!(text.contains("L30: line 30"));
+        assert!(text.contains("L70: line 70"));
+        assert!(!text.contains("L29:"));
+        assert!(!text.contains("L71:"));
     }
 
     #[tokio::test]
@@ -462,6 +479,21 @@ mod tests {
         assert!(result.outcome.is_error());
         let text = extract_text(&result);
         assert!(text.contains("must be >="));
+    }
+
+    #[test]
+    fn read_long_lines_truncated() {
+        let dir = temp_dir();
+        let file = dir.path().join("test.txt");
+        let long_line = "x".repeat(1000);
+        fs::write(&file, &long_line).unwrap();
+
+        let result = read_file(&file, None, None, false);
+        let text = extract_text(&result);
+        // should be capped at MAX_LINE_CHARS (500)
+        assert!(text.starts_with("L1: "));
+        let content = text.strip_prefix("L1: ").unwrap();
+        assert_eq!(content.len(), 500);
     }
 
     #[test]
