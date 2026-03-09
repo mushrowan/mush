@@ -299,6 +299,8 @@ pub struct App {
     pub show_cost: bool,
     /// selected message index in scroll mode (for copy)
     pub selected_message: Option<usize>,
+    /// anchor for visual selection range (v in scroll mode)
+    pub selection_anchor: Option<usize>,
     /// search state
     pub search: SearchState,
     /// image render positions (populated by MessageList during render)
@@ -422,6 +424,7 @@ impl App {
             show_prompt_injection: false,
             show_cost: false,
             selected_message: None,
+            selection_anchor: None,
             search: SearchState::default(),
             image_render_areas: RefCell::new(Vec::new()),
             pending_images: Vec::new(),
@@ -965,6 +968,18 @@ impl App {
     pub fn scroll_to_bottom(&mut self) {
         self.scroll_offset = 0;
         self.has_unread = false;
+    }
+
+    /// whether visual selection mode is active (v in scroll mode)
+    pub fn has_selection(&self) -> bool {
+        self.selection_anchor.is_some() && self.selected_message.is_some()
+    }
+
+    /// get the inclusive selection range (min..=max), if active
+    pub fn selection_range(&self) -> Option<(usize, usize)> {
+        let anchor = self.selection_anchor?;
+        let cursor = self.selected_message?;
+        Some((anchor.min(cursor), anchor.max(cursor)))
     }
 
     /// update search matches based on current query
@@ -1917,5 +1932,32 @@ mod tests {
         // normal message still there
         assert_eq!(app.messages.len(), 1);
         assert!(!app.messages[0].queued);
+    }
+
+    #[test]
+    fn selection_range_none_without_anchor() {
+        let app = App::new("test".into(), TokenCount::new(200_000));
+        assert!(!app.has_selection());
+        assert!(app.selection_range().is_none());
+    }
+
+    #[test]
+    fn selection_range_normalises_order() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        // anchor at 3, cursor at 1 => range (1, 3)
+        app.selection_anchor = Some(3);
+        app.selected_message = Some(1);
+        assert!(app.has_selection());
+        assert_eq!(app.selection_range(), Some((1, 3)));
+
+        // anchor at 1, cursor at 3 => range (1, 3)
+        app.selection_anchor = Some(1);
+        app.selected_message = Some(3);
+        assert_eq!(app.selection_range(), Some((1, 3)));
+
+        // same index => single message range
+        app.selection_anchor = Some(2);
+        app.selected_message = Some(2);
+        assert_eq!(app.selection_range(), Some((2, 2)));
     }
 }

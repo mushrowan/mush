@@ -57,6 +57,7 @@ impl AppSetup {
         let cwd = std::env::current_dir()?;
 
         let use_patch = mush_tools::uses_patch_tool(&model.id);
+        let skip_batch = mush_tools::supports_native_parallel_calls(&model.id);
         let mut tools: Vec<Box<dyn mush_agent::tool::AgentTool>> = if args.no_tools {
             vec![]
         } else {
@@ -64,6 +65,7 @@ impl AppSetup {
                 cwd.clone(),
                 args.output_sink,
                 use_patch,
+                skip_batch,
             )
         };
 

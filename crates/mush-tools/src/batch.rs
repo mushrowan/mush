@@ -1,13 +1,14 @@
 //! batch tool - execute multiple tool calls in parallel
+//!
+//! each sub-call gets the same truncation treatment as a standalone call.
+//! the batch result is marked self-truncating so the agent loop doesn't
+//! double-truncate the combined output.
 
 use mush_agent::tool::{AgentTool, ToolResult};
+use mush_agent::truncation;
 use mush_ai::types::ToolResultContentPart;
 
 const MAX_CALLS: usize = 25;
-/// max total output bytes across all batch results to prevent context flooding
-const MAX_TOTAL_OUTPUT_BYTES: usize = 100 * 1024;
-/// reserve room for the summary so truncation doesn't hide it
-const SUMMARY_RESERVE_BYTES: usize = 512;
 
 pub struct BatchTool {
     tools: Vec<Box<dyn AgentTool>>,
@@ -30,7 +31,7 @@ impl AgentTool for BatchTool {
     }
 
     fn description(&self) -> &str {
-        "Execute multiple tool calls concurrently to reduce latency. All calls run in parallel; ordering is NOT guaranteed. Partial failures do not stop other calls. Do NOT nest batch inside batch.\n\nGood for: reading many files, grep+glob combos, multiple bash commands, multi-part edits.\nBad for: operations that depend on prior output, ordered stateful mutations.\n\nPayload format (JSON array):\n[{\"tool\": \"read\", \"parameters\": {\"path\": \"src/main.rs\"}}, {\"tool\": \"grep\", \"parameters\": {\"pattern\": \"TODO\"}}]"
+        "Execute multiple tool calls concurrently to reduce latency. Each call gets the same output limits as a standalone call. Do NOT nest batch inside batch.\n\nGood for: reading multiple files, grep+glob combos, multiple bash commands, multi-part edits.\nBad for: operations that depend on prior output, ordered stateful mutations."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -125,60 +126,42 @@ impl AgentTool for BatchTool {
 
             let results = futures::future::join_all(futures).await;
 
-            // format output, tracking total size to avoid context flooding
-            let mut output = String::new();
             let mut success_count = 0;
             let mut error_count = 0;
-            let mut total_bytes = 0;
-            let mut items_truncated = 0;
-            let content_budget = MAX_TOTAL_OUTPUT_BYTES.saturating_sub(SUMMARY_RESERVE_BYTES);
+            let mut output = String::new();
 
             for (i, tool_name, result) in &results {
-                let mut item = format!("--- [{i}] {tool_name} ---\n");
-                match result {
+                // apply the same truncation each tool would get as a standalone call
+                let truncated = match result {
                     Ok(r) => {
                         if r.outcome.is_error() {
                             error_count += 1;
-                            item.push_str("ERROR: ");
                         } else {
                             success_count += 1;
                         }
-                        for part in &r.content {
-                            match part {
-                                ToolResultContentPart::Text(t) => item.push_str(&t.text),
-                                ToolResultContentPart::Image(_) => item.push_str("[image]"),
-                            }
+                        if truncation::self_truncating(tool_name) {
+                            r.clone()
+                        } else {
+                            truncation::truncate_tool_output(r.clone())
                         }
                     }
                     Err(e) => {
                         error_count += 1;
-                        item.push_str(&format!("ERROR: {e}"));
+                        ToolResult::error(e.to_string())
+                    }
+                };
+
+                output.push_str(&format!("--- [{i}] {tool_name} ---\n"));
+                for part in &truncated.content {
+                    match part {
+                        ToolResultContentPart::Text(t) => output.push_str(&t.text),
+                        ToolResultContentPart::Image(_) => output.push_str("[image]"),
                     }
                 }
-                item.push_str("\n\n");
-
-                if total_bytes >= content_budget {
-                    items_truncated += 1;
-                    continue;
-                }
-
-                let remaining = content_budget - total_bytes;
-                if item.len() > remaining {
-                    items_truncated += 1;
-                    output.push_str(&item[..remaining]);
-                    break;
-                }
-
-                total_bytes += item.len();
-                output.push_str(&item);
+                output.push_str("\n\n");
             }
 
-            let mut summary = format!("batch: {success_count}/{total} succeeded, {error_count} failed");
-            if items_truncated > 0 {
-                summary.push_str(&format!(", {items_truncated} items truncated due to combined size"));
-            }
-            output.push_str(&summary);
-
+            output.push_str(&format!("batch: {success_count}/{total} succeeded, {error_count} failed"));
             ToolResult::text(output)
         })
     }
@@ -243,7 +226,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn summary_survives_large_output() {
+    async fn large_output_truncated_like_standalone() {
         struct LargeTool;
 
         impl AgentTool for LargeTool {
@@ -267,7 +250,9 @@ mod tests {
                 &self,
                 _params: serde_json::Value,
             ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
-                Box::pin(async { ToolResult::text("x".repeat(MAX_TOTAL_OUTPUT_BYTES)) })
+                // 5000 lines exceeds agent-loop truncation limits (2000 lines)
+                let lines: Vec<String> = (0..5000).map(|i| format!("line {i}")).collect();
+                Box::pin(async move { ToolResult::text(lines.join("\n")) })
             }
         }
 
@@ -282,7 +267,12 @@ mod tests {
             _ => panic!("expected text"),
         };
         assert!(text.contains("batch: 1/1 succeeded, 0 failed"));
-        assert!(text.contains("1 items truncated due to combined size"));
+        // agent-loop truncation applied per-item (middle-out with hint)
+        assert!(text.contains("lines truncated"));
+        assert!(text.contains("Use grep to search"));
+        // should contain both head and tail (middle-out)
+        assert!(text.contains("line 0"));
+        assert!(text.contains("line 4999"));
     }
 
     #[tokio::test]

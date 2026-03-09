@@ -39,8 +39,8 @@ impl AgentTool for BashTool {
     }
     fn description(&self) -> &str {
         "Execute a bash command in the current working directory. Returns stdout and stderr. \
-         Output is truncated to 2000 lines or 50KB (whichever is hit first). If truncated, \
-         full output is saved to a temp file. Optionally provide a timeout in seconds."
+         Output is truncated to last 2000 lines or 50KB (whichever is hit first). Optionally \
+         provide a timeout in seconds."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -107,6 +107,7 @@ async fn run_command(
         Err(e) => return ToolResult::error(format!("failed to spawn command: {e}")),
     };
 
+    let started = std::time::Instant::now();
     let timeout = tokio::time::Duration::from_secs(timeout_secs);
 
     // stream stdout and stderr concurrently, forwarding lines to sink
@@ -124,8 +125,9 @@ async fn run_command(
             let _ = child.kill().await;
             let stdout = stdout_handle.await.unwrap_or_default();
             let stderr = stderr_handle.await.unwrap_or_default();
+            let duration = started.elapsed();
             if json_output {
-                return format_result(stdout, stderr, -1, true, true);
+                return format_result(stdout, stderr, -1, true, duration, true);
             }
             return ToolResult::error(format!("command timed out after {timeout_secs}s"));
         }
@@ -134,9 +136,9 @@ async fn run_command(
     let stdout = stdout_handle.await.unwrap_or_default();
     let stderr = stderr_handle.await.unwrap_or_default();
     let exit_code = status.code().unwrap_or(-1);
-    let timed_out = false;
+    let duration = started.elapsed();
 
-    format_result(stdout, stderr, exit_code, timed_out, json_output)
+    format_result(stdout, stderr, exit_code, false, duration, json_output)
 }
 
 fn format_result(
@@ -144,10 +146,10 @@ fn format_result(
     stderr: String,
     exit_code: i32,
     timed_out: bool,
+    duration: std::time::Duration,
     json_output: bool,
 ) -> ToolResult {
-    // truncation is handled by the agent layer (truncation::truncate_tool_output),
-    // so we just pass the raw output through here
+    let duration_secs = (duration.as_secs_f32() * 10.0).round() / 10.0;
 
     if json_output {
         let json = serde_json::json!({
@@ -155,6 +157,7 @@ fn format_result(
             "stderr": &stderr,
             "exit_code": exit_code,
             "timed_out": timed_out,
+            "duration_seconds": duration_secs,
             "stdout_lines": stdout.lines().count(),
             "stderr_lines": stderr.lines().count(),
             "stdout_bytes": stdout.len(),
@@ -171,25 +174,29 @@ fn format_result(
             ToolResult::text(json.to_string())
         }
     } else {
-        let mut text = String::new();
+        let mut output = String::new();
 
         if !stdout.is_empty() {
-            text.push_str(&stdout);
+            output.push_str(&stdout);
         }
 
         if !stderr.is_empty() {
-            if !text.is_empty() {
-                text.push('\n');
+            if !output.is_empty() {
+                output.push('\n');
             }
-            text.push_str(&stderr);
+            output.push_str(&stderr);
         }
 
-        if text.is_empty() {
-            text = "(no output)".into();
+        if output.is_empty() {
+            output = "(no output)".into();
         }
 
+        // structured preamble so the model sees exit status without parsing
+        let preamble = format!("Exit code: {exit_code}\nDuration: {duration_secs}s\n\n");
+
+        // agent loop handles truncation (middle-out with actionable hint)
         if exit_code != 0 {
-            text.push_str(&format!("\n\nCommand exited with code {exit_code}"));
+            let text = format!("{preamble}{output}");
             ToolResult {
                 content: vec![mush_ai::types::ToolResultContentPart::Text(
                     mush_ai::types::TextContent { text },
@@ -197,7 +204,7 @@ fn format_result(
                 outcome: mush_ai::types::ToolOutcome::Error,
             }
         } else {
-            ToolResult::text(text)
+            ToolResult::text(format!("{preamble}{output}"))
         }
     }
 }
@@ -258,7 +265,7 @@ mod tests {
         let result = run_command(&cwd, "exit 1", 10, None, false).await;
         assert!(result.outcome.is_error());
         let text = extract_text(&result);
-        assert!(text.contains("exited with code 1"));
+        assert!(text.contains("Exit code: 1"));
     }
 
     #[tokio::test]

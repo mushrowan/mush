@@ -563,7 +563,7 @@ fn extract_account_id(token: &str) -> Option<String> {
 }
 
 
-fn write_decode_snapshot(model_id: &str, provider: &str, bytes: &[u8]) -> Option<String> {
+pub fn write_decode_snapshot(model_id: &str, provider: &str, bytes: &[u8]) -> Option<String> {
     if bytes.is_empty() {
         return None;
     }

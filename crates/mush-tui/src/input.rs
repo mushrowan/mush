@@ -345,8 +345,21 @@ fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     match (key.modifiers, key.code) {
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => return Some(AppEvent::Quit),
         (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('s')) => {
-            app.mode = AppMode::Normal;
-            app.selected_message = None;
+            if app.selection_anchor.is_some() {
+                // first esc clears selection, stays in scroll mode
+                app.selection_anchor = None;
+            } else {
+                app.mode = AppMode::Normal;
+                app.selected_message = None;
+            }
+        }
+        (_, KeyCode::Char('v')) => {
+            // toggle visual selection
+            if app.selection_anchor.is_some() {
+                app.selection_anchor = None;
+            } else {
+                app.selection_anchor = app.selected_message;
+            }
         }
         (_, KeyCode::Char('j')) | (_, KeyCode::Down) => {
             app.scroll_offset = app.scroll_offset.saturating_sub(3);
@@ -379,12 +392,25 @@ fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             app.selected_message = Some(0);
         }
         (_, KeyCode::Char('y')) => {
-            // copy selected message content to clipboard
-            if let Some(sel) = app.selected_message
+            if let Some((start, end)) = app.selection_range() {
+                // copy visual selection range
+                let text: String = app.messages[start..=end]
+                    .iter()
+                    .map(|m| m.content.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                let count = end - start + 1;
+                if copy_to_clipboard(&text) {
+                    app.status = Some(format!("copied {count} messages"));
+                } else {
+                    app.status = Some("clipboard copy failed".into());
+                }
+                app.selection_anchor = None;
+            } else if let Some(sel) = app.selected_message
                 && let Some(msg) = app.messages.get(sel)
             {
-                let text = &msg.content;
-                if copy_to_clipboard(text) {
+                // copy single selected message
+                if copy_to_clipboard(&msg.content) {
                     app.status = Some("copied to clipboard".into());
                 } else {
                     app.status = Some("clipboard copy failed".into());
@@ -1254,5 +1280,86 @@ mod tests {
             },
         );
         assert!(matches!(event, Some(AppEvent::ResizePane(-4))));
+    }
+
+    #[test]
+    fn scroll_mode_v_toggles_visual_selection() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.push_user_message("one");
+        app.push_user_message("two");
+        app.push_user_message("three");
+
+        // enter scroll mode
+        handle_key(&mut app, ctrl(KeyCode::Char('s')));
+        assert_eq!(app.mode, AppMode::Scroll);
+        assert_eq!(app.selected_message, Some(2));
+        assert!(app.selection_anchor.is_none());
+
+        // press v to start visual selection
+        handle_key(&mut app, key(KeyCode::Char('v')));
+        assert_eq!(app.selection_anchor, Some(2));
+
+        // press v again to toggle off
+        handle_key(&mut app, key(KeyCode::Char('v')));
+        assert!(app.selection_anchor.is_none());
+    }
+
+    #[test]
+    fn scroll_mode_visual_selection_range() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.push_user_message("one");
+        app.push_user_message("two");
+        app.push_user_message("three");
+
+        handle_key(&mut app, ctrl(KeyCode::Char('s')));
+        // cursor on message 2 (last)
+        assert_eq!(app.selected_message, Some(2));
+
+        // start visual selection at message 2
+        handle_key(&mut app, key(KeyCode::Char('v')));
+        assert_eq!(app.selection_anchor, Some(2));
+
+        // move up twice
+        handle_key(&mut app, key(KeyCode::Char('k')));
+        handle_key(&mut app, key(KeyCode::Char('k')));
+        assert_eq!(app.selected_message, Some(0));
+
+        // range should be 0..=2
+        assert_eq!(app.selection_range(), Some((0, 2)));
+    }
+
+    #[test]
+    fn scroll_mode_esc_clears_selection_first() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.push_user_message("one");
+        app.push_user_message("two");
+
+        handle_key(&mut app, ctrl(KeyCode::Char('s')));
+        handle_key(&mut app, key(KeyCode::Char('v')));
+        assert!(app.selection_anchor.is_some());
+
+        // first esc clears selection, stays in scroll mode
+        handle_key(&mut app, key(KeyCode::Esc));
+        assert!(app.selection_anchor.is_none());
+        assert_eq!(app.mode, AppMode::Scroll);
+
+        // second esc exits scroll mode
+        handle_key(&mut app, key(KeyCode::Esc));
+        assert_eq!(app.mode, AppMode::Normal);
+    }
+
+    #[test]
+    fn scroll_mode_exit_clears_selection() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.push_user_message("one");
+
+        handle_key(&mut app, ctrl(KeyCode::Char('s')));
+        handle_key(&mut app, key(KeyCode::Char('v')));
+        assert!(app.selection_anchor.is_some());
+
+        // esc clears selection first
+        handle_key(&mut app, key(KeyCode::Esc));
+        assert!(app.selection_anchor.is_none());
+        assert_eq!(app.mode, AppMode::Scroll);
     }
 }

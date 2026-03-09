@@ -18,9 +18,11 @@ const RETENTION: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 6
 /// which end to keep when truncating
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Direction {
-    #[default]
     Head,
     Tail,
+    /// keep both head and tail with a marker in the middle (codex-style)
+    #[default]
+    Middle,
 }
 
 /// directory for saving full tool output
@@ -76,10 +78,16 @@ pub fn cleanup() {
     }
 }
 
+/// tools that handle their own output truncation and shouldn't be
+/// double-truncated by the agent loop
+pub fn self_truncating(tool_name: &str) -> bool {
+    matches!(tool_name, "read" | "Read" | "batch")
+}
+
 /// truncate a tool result if it exceeds limits.
 /// saves the full output to a file and tells the model where to find it.
 pub fn truncate_tool_output(result: ToolResult) -> ToolResult {
-    truncate_tool_output_with(result, MAX_LINES, MAX_BYTES, Direction::Head)
+    truncate_tool_output_with(result, MAX_LINES, MAX_BYTES, Direction::Middle)
 }
 
 /// truncate with explicit options
@@ -108,60 +116,42 @@ pub fn truncate_tool_output_with(
 
     let saved_path = save_full_output(&full_text);
 
-    let mut kept: Vec<&str> = Vec::new();
-    let mut bytes = 0;
-    let mut hit_bytes = false;
+    let total = lines.len();
 
-    match direction {
+    let truncated_text = match direction {
         Direction::Head => {
-            for line in &lines {
-                if kept.len() >= max_lines {
-                    break;
-                }
-                let size = line.len() + if kept.is_empty() { 0 } else { 1 };
-                if bytes + size > max_bytes {
-                    hit_bytes = true;
-                    break;
-                }
-                kept.push(line);
-                bytes += size;
+            let (kept, hit_bytes) = collect_head(&lines, max_lines, max_bytes);
+            let omitted = total - kept.len();
+            let preview = kept.join("\n");
+            let hint = actionable_hint(&saved_path);
+            if hit_bytes {
+                format!("{preview}\n\n[…{omitted} lines truncated ({} total). {hint}]", total)
+            } else {
+                format!("{preview}\n\n[…{omitted} lines truncated ({total} total). {hint}]")
             }
         }
         Direction::Tail => {
-            for line in lines.iter().rev() {
-                if kept.len() >= max_lines {
-                    break;
-                }
-                let size = line.len() + if kept.is_empty() { 0 } else { 1 };
-                if bytes + size > max_bytes {
-                    hit_bytes = true;
-                    break;
-                }
-                kept.insert(0, line);
-                bytes += size;
+            let (kept, hit_bytes) = collect_tail(&lines, max_lines, max_bytes);
+            let omitted = total - kept.len();
+            let preview = kept.join("\n");
+            let hint = actionable_hint(&saved_path);
+            if hit_bytes {
+                format!("[{omitted} lines truncated… ({total} total). {hint}]\n\n{preview}")
+            } else {
+                format!("[{omitted} lines truncated… ({total} total). {hint}]\n\n{preview}")
             }
         }
-    }
-
-    let removed = if hit_bytes {
-        total_bytes - bytes
-    } else {
-        lines.len() - kept.len()
-    };
-    let unit = if hit_bytes { "bytes" } else { "lines" };
-    let preview = kept.join("\n");
-
-    let hint = match &saved_path {
-        Some(path) => format!(
-            "output truncated, full content saved to: {}\nuse grep to narrow first\nuse read with start_line/end_line for exact spans",
-            path.display()
-        ),
-        None => "output truncated. use grep to narrow results or read with offset/limit".to_string(),
-    };
-
-    let truncated = match direction {
-        Direction::Head => format!("{preview}\n\n...{removed} {unit} truncated...\n\n{hint}"),
-        Direction::Tail => format!("...{removed} {unit} truncated...\n\n{hint}\n\n{preview}"),
+        Direction::Middle => {
+            let half_lines = max_lines / 2;
+            let half_bytes = max_bytes / 2;
+            let (head, _) = collect_head(&lines, half_lines, half_bytes);
+            let (tail, _) = collect_tail(&lines, half_lines, half_bytes);
+            let omitted = total.saturating_sub(head.len() + tail.len());
+            let head_text = head.join("\n");
+            let tail_text = tail.join("\n");
+            let hint = actionable_hint(&saved_path);
+            format!("{head_text}\n\n[…{omitted} lines truncated ({total} total). {hint}]\n\n{tail_text}")
+        }
     };
 
     // replace text parts with truncated version
@@ -171,11 +161,60 @@ pub fn truncate_tool_output_with(
     result.content.insert(
         0,
         ToolResultContentPart::Text(mush_ai::types::TextContent {
-            text: truncated,
+            text: truncated_text,
         }),
     );
 
     result
+}
+
+/// collect lines from the start
+fn collect_head<'a>(lines: &[&'a str], max_lines: usize, max_bytes: usize) -> (Vec<&'a str>, bool) {
+    let mut kept = Vec::new();
+    let mut bytes = 0;
+    for line in lines {
+        if kept.len() >= max_lines {
+            break;
+        }
+        let size = line.len() + if kept.is_empty() { 0 } else { 1 };
+        if bytes + size > max_bytes {
+            return (kept, true);
+        }
+        kept.push(*line);
+        bytes += size;
+    }
+    (kept, false)
+}
+
+/// collect lines from the end
+fn collect_tail<'a>(lines: &[&'a str], max_lines: usize, max_bytes: usize) -> (Vec<&'a str>, bool) {
+    let mut kept = Vec::new();
+    let mut bytes = 0;
+    for line in lines.iter().rev() {
+        if kept.len() >= max_lines {
+            break;
+        }
+        let size = line.len() + if kept.is_empty() { 0 } else { 1 };
+        if bytes + size > max_bytes {
+            kept.reverse();
+            return (kept, true);
+        }
+        kept.push(*line);
+        bytes += size;
+    }
+    kept.reverse();
+    (kept, false)
+}
+
+/// actionable hint telling the model what to do with truncated output
+fn actionable_hint(saved_path: &Option<PathBuf>) -> String {
+    match saved_path {
+        Some(path) => format!(
+            "Use grep to search or read with offset/limit to view sections. Full output: {}",
+            path.display()
+        ),
+        None => "Use grep to search or read with offset/limit to view sections.".into(),
+    }
 }
 
 #[cfg(test)]
@@ -192,13 +231,17 @@ mod tests {
     }
 
     #[test]
-    fn truncates_by_line_count() {
+    fn truncates_by_line_count_middle_out() {
         let big = make_lines(3000);
         let out = truncate_tool_output(ToolResult::text(big));
         assert_text(&out, |t| {
+            // head preserved
             assert!(t.contains("line 0"));
-            assert!(t.contains("...1000 lines truncated..."));
-            assert!(!t.contains("line 2999"));
+            // tail preserved
+            assert!(t.contains("line 2999"));
+            // middle-out marker
+            assert!(t.contains("lines truncated"));
+            assert!(t.contains("3000 total"));
         });
     }
 
@@ -208,7 +251,7 @@ mod tests {
         let big = "x".repeat(MAX_BYTES + 10000);
         let out = truncate_tool_output(ToolResult::text(big));
         assert_text(&out, |t| {
-            assert!(t.contains("bytes truncated"));
+            assert!(t.contains("lines truncated"));
         });
     }
 
@@ -220,7 +263,7 @@ mod tests {
             assert!(t.contains("line 0"));
             assert!(t.contains("line 2"));
             assert!(!t.contains("line 9"));
-            assert!(t.contains("...7 lines truncated..."));
+            assert!(t.contains("7 lines truncated"));
         });
     }
 
@@ -233,7 +276,25 @@ mod tests {
             assert!(!t.contains("\nline 0\n"));
             assert!(t.contains("line 7"));
             assert!(t.contains("line 9"));
-            assert!(t.contains("...7 lines truncated..."));
+            assert!(t.contains("7 lines truncated"));
+        });
+    }
+
+    #[test]
+    fn middle_keeps_head_and_tail() {
+        let lines = make_numbered_lines(20);
+        let out =
+            truncate_tool_output_with(ToolResult::text(lines), 6, usize::MAX, Direction::Middle);
+        assert_text(&out, |t| {
+            // head (3 lines: 0, 1, 2)
+            assert!(t.contains("line 0"));
+            assert!(t.contains("line 2"));
+            // tail (3 lines: 17, 18, 19)
+            assert!(t.contains("line 17"));
+            assert!(t.contains("line 19"));
+            // middle omitted
+            assert!(!t.contains("line 10"));
+            assert!(t.contains("14 lines truncated"));
         });
     }
 
@@ -243,7 +304,7 @@ mod tests {
         let out = truncate_tool_output(ToolResult::error(big));
         assert!(out.outcome.is_error());
         assert_text(&out, |t| {
-            assert!(t.contains("truncated"));
+            assert!(t.contains("lines truncated"));
         });
     }
 
@@ -252,8 +313,16 @@ mod tests {
         let big = make_lines(3000);
         let out = truncate_tool_output(ToolResult::text(big));
         assert_text(&out, |t| {
-            assert!(t.contains("full content saved to:"));
-            assert!(t.contains("grep/read"));
+            assert!(t.contains("Full output:"));
+        });
+    }
+
+    #[test]
+    fn includes_actionable_hint() {
+        let big = make_lines(3000);
+        let out = truncate_tool_output(ToolResult::text(big));
+        assert_text(&out, |t| {
+            assert!(t.contains("Use grep to search or read with offset/limit"));
         });
     }
 

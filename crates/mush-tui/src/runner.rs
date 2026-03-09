@@ -963,6 +963,7 @@ pub async fn run_tui(
                                             AppEvent::UserSubmit { text } => {
                                                 let fid = pane_mgr.focused().id;
                                                 if let Some(meta) = stream_metas.get(&fid) {
+                                                    // pane has an active stream, inject via steering
                                                     let msg = Message::User(UserMessage {
                                                         content: UserContent::Text(text.clone()),
                                                         timestamp_ms: Timestamp::now(),
@@ -971,11 +972,19 @@ pub async fn run_tui(
                                                         .lock()
                                                         .await
                                                         .push(msg);
+                                                    pane_mgr
+                                                        .focused_mut()
+                                                        .app
+                                                        .push_queued_message(text);
+                                                } else {
+                                                    // pane was aborted (or has no stream).
+                                                    // start a fresh agent loop via pending_prompt
+                                                    let pane = pane_mgr.focused_mut();
+                                                    pane.app.push_user_message(text.clone());
+                                                    pane.app.active_tools.clear();
+                                                    pane.app.start_streaming();
+                                                    pane.pending_prompt = Some(text);
                                                 }
-                                                pane_mgr
-                                                    .focused_mut()
-                                                    .app
-                                                    .push_queued_message(text);
                                             }
                                             AppEvent::CycleThinkingLevel => {
                                                 let app = &pane_mgr.focused().app;
@@ -1820,7 +1829,8 @@ async fn fork_pane(
                             sink
                         });
                     let use_patch = mush_tools::uses_patch_tool(&model_id);
-                    let pane_tools = mush_tools::builtin_tools_with_options(info.path.clone(), sink, use_patch);
+                    let skip_batch = mush_tools::supports_native_parallel_calls(&model_id);
+                    let pane_tools = mush_tools::builtin_tools_with_options(info.path.clone(), sink, use_patch, skip_batch);
                     new_pane.tools = Some(pane_tools);
                     new_pane.cwd_override = Some(info.path.clone());
                     new_pane.app.cwd = info.path.display().to_string();

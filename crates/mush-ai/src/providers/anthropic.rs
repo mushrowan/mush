@@ -852,6 +852,8 @@ fn parse_sse_stream(
 
         let mut blocks: Vec<BlockState> = Vec::new();
         let mut parser = super::sse::SseParser::new();
+        let mut raw_capture: Vec<u8> = Vec::new();
+        const MAX_CAPTURE_BYTES: usize = 128 * 1024;
 
         use futures::TryStreamExt;
         let mut byte_stream = response.bytes_stream();
@@ -859,6 +861,11 @@ fn parse_sse_stream(
         loop {
             match byte_stream.try_next().await {
                 Ok(Some(chunk)) => {
+                    if raw_capture.len() < MAX_CAPTURE_BYTES {
+                        let remain = MAX_CAPTURE_BYTES - raw_capture.len();
+                        let take = remain.min(chunk.len());
+                        raw_capture.extend_from_slice(&chunk[..take]);
+                    }
                     let chunk_len = chunk.len();
                     let chunk_preview = super::sse::preview_bytes(&chunk, 240);
                     tracing::trace!(
@@ -884,34 +891,39 @@ fn parse_sse_stream(
                                     yield stream_event;
                                 }
                             }
-                            Err(_) => {
-                                // skip unparseable events (eg [DONE])
+                            Err(e) => {
+                                // [DONE] and empty payloads are expected
+                                let data = raw.data.trim();
+                                if data != "[DONE]" && !data.is_empty() {
+                                    tracing::warn!(
+                                        model = %model_id,
+                                        provider = %provider_name,
+                                        api = ?api,
+                                        error = %e,
+                                        data_preview = %super::sse::preview_text(data, 240),
+                                        "anthropic non-parseable sse payload"
+                                    );
+                                }
                             }
                         }
                     }
                 }
                 Ok(None) => break,
                 Err(e) => {
-                    let buffered = parser.buffered_bytes();
-                    let partial_buf = if buffered.is_empty() {
-                        "(empty)".to_string()
-                    } else {
-                        let preview = String::from_utf8_lossy(
-                            &buffered[..buffered.len().min(512)]
-                        );
-                        format!("({} bytes) {preview}", buffered.len())
-                    };
-                    let mut sources = String::new();
-                    let mut source = std::error::Error::source(&e);
-                    while let Some(s) = source {
-                        sources.push_str(&format!(" -> {s}"));
-                        source = std::error::Error::source(s);
-                    }
+                    let capture_path = super::openai_responses::write_decode_snapshot(
+                        &model_id.to_string(),
+                        &provider_name.to_string(),
+                        &raw_capture,
+                    );
                     tracing::error!(
+                        model = %model_id,
+                        provider = %provider_name,
+                        api = ?api,
                         error = %e,
-                        error_chain = %sources,
-                        buffered_data = %partial_buf,
-                        "SSE stream read error"
+                        captured_bytes = raw_capture.len(),
+                        capture_path = capture_path.as_deref().unwrap_or("<none>"),
+                        capture_preview = %super::sse::preview_bytes(&raw_capture, 400),
+                        "anthropic body stream decode error"
                     );
                     output.stop_reason = StopReason::Error;
                     output.error_message = Some(e.to_string());

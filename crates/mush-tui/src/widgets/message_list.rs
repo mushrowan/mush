@@ -29,16 +29,24 @@ impl Widget for MessageList<'_> {
         let mut image_placeholders: Vec<ImagePlaceholder> = Vec::new();
 
         let in_scroll_mode = self.app.mode == crate::app::AppMode::Scroll;
+        let selection_range = self.app.selection_range();
         for (i, msg) in self.app.messages.iter().enumerate() {
             if msg.queued {
                 continue; // rendered after streaming content
             }
-            let selected = in_scroll_mode && self.app.selected_message == Some(i);
+            let in_selection = selection_range
+                .is_some_and(|(start, end)| i >= start && i <= end);
+            let sel = SelectionHint {
+                selected: in_scroll_mode
+                    && (self.app.selected_message == Some(i) || in_selection),
+                is_cursor: in_scroll_mode && self.app.selected_message == Some(i),
+                has_visual: self.app.has_selection(),
+            };
             render_message(
                 msg,
                 i,
                 &mut lines,
-                selected,
+                sel,
                 &mut image_placeholders,
                 area.width,
             );
@@ -116,12 +124,19 @@ impl Widget for MessageList<'_> {
             if !msg.queued {
                 continue;
             }
-            let selected = in_scroll_mode && self.app.selected_message == Some(i);
+            let in_selection = selection_range
+                .is_some_and(|(start, end)| i >= start && i <= end);
+            let sel = SelectionHint {
+                selected: in_scroll_mode
+                    && (self.app.selected_message == Some(i) || in_selection),
+                is_cursor: in_scroll_mode && self.app.selected_message == Some(i),
+                has_visual: self.app.has_selection(),
+            };
             render_message(
                 msg,
                 i,
                 &mut lines,
-                selected,
+                sel,
                 &mut image_placeholders,
                 area.width,
             );
@@ -213,11 +228,22 @@ struct ImagePlaceholder {
     line_idx: usize,
 }
 
+/// scroll/selection state passed to render_message
+struct SelectionHint {
+    /// message is highlighted (cursor or within visual range)
+    selected: bool,
+    /// message is the cursor position (shows hint text)
+    is_cursor: bool,
+    /// visual selection is active
+    has_visual: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn render_message(
     msg: &DisplayMessage,
     msg_idx: usize,
     lines: &mut Vec<Line<'_>>,
-    selected: bool,
+    sel: SelectionHint,
     image_placeholders: &mut Vec<ImagePlaceholder>,
     width: u16,
 ) {
@@ -251,15 +277,18 @@ fn render_message(
     };
 
     let mut label_spans = Vec::new();
-    if selected {
+    if sel.selected {
         label_spans.push(Span::styled("▌ ", Style::default().fg(Color::Cyan)));
     }
     label_spans.push(Span::styled(label, label_style));
-    if selected {
-        label_spans.push(Span::styled(
-            " (y to copy)",
-            Style::default().fg(Color::DarkGray),
-        ));
+    // show hint only on the cursor message
+    if sel.is_cursor {
+        let hint = if sel.has_visual {
+            " (y to copy range)"
+        } else {
+            " (v to select, y to copy)"
+        };
+        label_spans.push(Span::styled(hint, Style::default().fg(Color::DarkGray)));
     }
     lines.push(Line::from(label_spans));
 
