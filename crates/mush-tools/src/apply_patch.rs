@@ -21,11 +21,18 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use mush_agent::tool::{AgentTool, ToolResult};
+use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
+use serde::Deserialize;
 
 use crate::util::resolve_path;
 
 // -- types --
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApplyPatchArgs {
+    patch_text: String,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Hunk {
@@ -56,9 +63,18 @@ pub struct UpdateChunk {
 #[derive(Debug)]
 pub enum PatchError {
     MissingMarkers,
-    ContextNotFound { context: String, path: String },
-    LinesNotFound { path: String, lines: String },
-    ReadFile { path: String, source: std::io::Error },
+    ContextNotFound {
+        context: String,
+        path: String,
+    },
+    LinesNotFound {
+        path: String,
+        lines: String,
+    },
+    ReadFile {
+        path: String,
+        source: std::io::Error,
+    },
     EmptyPatch,
     Io(std::io::Error),
 }
@@ -92,21 +108,21 @@ impl From<std::io::Error> for PatchError {
 fn strip_heredoc(input: &str) -> &str {
     let trimmed = input.trim();
     // simple check: if it starts with cat <<'EOF' or <<EOF pattern, strip
-    if let Some(rest) = trimmed.strip_prefix("cat ") {
-        if let Some(body_start) = rest.find('\n') {
-            let header = &rest[..body_start];
-            if header.contains("<<") {
-                // extract delimiter
-                let delim = header
-                    .split("<<")
-                    .nth(1)
-                    .unwrap_or("")
-                    .trim()
-                    .trim_matches(|c| c == '\'' || c == '"');
-                if let Some(end_pos) = rest.rfind(delim) {
-                    let body = &rest[body_start + 1..end_pos];
-                    return body.trim();
-                }
+    if let Some(rest) = trimmed.strip_prefix("cat ")
+        && let Some(body_start) = rest.find('\n')
+    {
+        let header = &rest[..body_start];
+        if header.contains("<<") {
+            // extract delimiter
+            let delim = header
+                .split("<<")
+                .nth(1)
+                .unwrap_or("")
+                .trim()
+                .trim_matches(|c| c == '\'' || c == '"');
+            if let Some(end_pos) = rest.rfind(delim) {
+                let body = &rest[body_start + 1..end_pos];
+                return body.trim();
             }
         }
     }
@@ -186,7 +202,10 @@ pub fn parse_patch(patch_text: &str) -> Result<Vec<Hunk>, PatchError> {
                     let mut new_lines = Vec::new();
                     let mut is_eof = false;
 
-                    while i < end && !lines[i].starts_with("@@") && (!lines[i].starts_with("*** ") || lines[i] == "*** End of File") {
+                    while i < end
+                        && !lines[i].starts_with("@@")
+                        && (!lines[i].starts_with("*** ") || lines[i] == "*** End of File")
+                    {
                         if lines[i] == "*** End of File" {
                             is_eof = true;
                             i += 1;
@@ -330,9 +349,7 @@ fn compute_replacements(
         let mut found = seek_sequence(original_lines, &pattern, line_idx, chunk.is_eof);
 
         // retry without trailing empty line
-        if found.is_none()
-            && pattern.last().is_some_and(|l| l.is_empty())
-        {
+        if found.is_none() && pattern.last().is_some_and(|l| l.is_empty()) {
             pattern.pop();
             if new_slice.last().is_some_and(|l| l.is_empty()) {
                 new_slice.pop();
@@ -370,10 +387,7 @@ fn apply_replacements(lines: &[&str], replacements: &[(usize, usize, Vec<String>
 }
 
 /// derive new file contents by applying update chunks
-fn derive_new_contents(
-    file_path: &Path,
-    chunks: &[UpdateChunk],
-) -> Result<String, PatchError> {
+fn derive_new_contents(file_path: &Path, chunks: &[UpdateChunk]) -> Result<String, PatchError> {
     let original = fs::read_to_string(file_path).map_err(|e| PatchError::ReadFile {
         path: file_path.display().to_string(),
         source: e,
@@ -515,12 +529,15 @@ impl AgentTool for ApplyPatchTool {
         args: serde_json::Value,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
         Box::pin(async move {
-            let patch_text = match args.get("patch_text").and_then(|v| v.as_str()) {
-                Some(t) if !t.is_empty() => t,
-                _ => return ToolResult::error("patch_text is required"),
+            let args = match parse_tool_args::<ApplyPatchArgs>(args) {
+                Ok(args) => args,
+                Err(error) => return error,
             };
+            if args.patch_text.is_empty() {
+                return ToolResult::error("patch_text is required");
+            }
 
-            let hunks = match parse_patch(patch_text) {
+            let hunks = match parse_patch(&args.patch_text) {
                 Ok(h) => h,
                 Err(e) => return ToolResult::error(format!("patch parse error: {e}")),
             };
@@ -840,11 +857,7 @@ mod tests {
     fn apply_eof_anchor_prefers_end_over_earlier_match() {
         let dir = TempDir::new().unwrap();
         // "dupe" appears twice, eof anchor should match the last one
-        fs::write(
-            dir.path().join("test.txt"),
-            "dupe\nother\ndupe\n",
-        )
-        .unwrap();
+        fs::write(dir.path().join("test.txt"), "dupe\nother\ndupe\n").unwrap();
 
         let hunks = vec![Hunk::Update {
             path: "test.txt".into(),
@@ -951,11 +964,7 @@ mod tests {
     #[test]
     fn roundtrip_eof_anchor() {
         let dir = TempDir::new().unwrap();
-        fs::write(
-            dir.path().join("test.txt"),
-            "first\nsecond\nthird\nlast\n",
-        )
-        .unwrap();
+        fs::write(dir.path().join("test.txt"), "first\nsecond\nthird\nlast\n").unwrap();
 
         let patch = "\
 *** Begin Patch
@@ -1117,7 +1126,8 @@ mod tests {
 
     #[test]
     fn parse_heredoc_wrapped_patch() {
-        let patch = "cat <<'EOF'\n*** Begin Patch\n*** Add File: hello.txt\n+hi\n*** End Patch\nEOF";
+        let patch =
+            "cat <<'EOF'\n*** Begin Patch\n*** Add File: hello.txt\n+hi\n*** End Patch\nEOF";
         let hunks = parse_patch(patch).unwrap();
         assert_eq!(hunks.len(), 1);
         match &hunks[0] {
@@ -1151,7 +1161,7 @@ mod tests {
         // only apply the first two (delete will fail on missing file)
         let mut results = Vec::new();
         for hunk in &hunks[..2] {
-            match apply_hunks(dir.path(), &[hunk.clone()]) {
+            match apply_hunks(dir.path(), std::slice::from_ref(hunk)) {
                 Ok(s) => results.extend(s),
                 Err(e) => panic!("unexpected error: {e}"),
             }
@@ -1164,7 +1174,11 @@ mod tests {
     #[test]
     fn roundtrip_parse_and_apply() {
         let dir = TempDir::new().unwrap();
-        fs::write(dir.path().join("existing.rs"), "fn main() {\n    old();\n}\n").unwrap();
+        fs::write(
+            dir.path().join("existing.rs"),
+            "fn main() {\n    old();\n}\n",
+        )
+        .unwrap();
 
         let patch = "\
 *** Begin Patch

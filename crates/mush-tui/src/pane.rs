@@ -8,41 +8,22 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use mush_agent::tool::AgentTool;
+use mush_agent::tool::ToolRegistry;
 use mush_ai::types::Message;
-use mush_session::tree::SessionTree;
+use mush_session::ConversationState;
 use ratatui::layout::Rect;
 use tokio::sync::Mutex;
 
 use crate::app::App;
 use crate::isolation::PaneIsolation;
 
-/// unique pane identifier
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct PaneId(u32);
-
-impl PaneId {
-    pub fn new(id: u32) -> Self {
-        Self(id)
-    }
-
-    pub fn as_u32(self) -> u32 {
-        self.0
-    }
-}
-
-impl std::fmt::Display for PaneId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
+pub use mush_ai::types::PaneId;
 
 /// per-pane state: independent agent session with display + conversation
 pub struct Pane {
     pub id: PaneId,
     pub app: App,
-    pub conversation: Vec<Message>,
-    pub session_tree: SessionTree,
+    pub conversation: ConversationState,
     pub image_protos: HashMap<(usize, usize), ratatui_image::protocol::StatefulProtocol>,
     pub pending_prompt: Option<String>,
     pub steering_queue: Arc<Mutex<Vec<Message>>>,
@@ -55,7 +36,7 @@ pub struct Pane {
     /// layout rect computed each frame by PaneManager
     pub area: Rect,
     /// per-pane tools when cwd differs (worktree isolation)
-    pub tools: Option<Vec<Box<dyn AgentTool>>>,
+    pub tools: Option<ToolRegistry>,
     /// per-pane cwd override (worktree isolation)
     pub cwd_override: Option<PathBuf>,
     /// VCS isolation state
@@ -68,8 +49,7 @@ impl Pane {
         Self {
             id,
             app,
-            conversation: Vec::new(),
-            session_tree: SessionTree::new(),
+            conversation: ConversationState::new(),
             image_protos: HashMap::new(),
             pending_prompt: None,
             steering_queue: Arc::new(Mutex::new(Vec::new())),
@@ -84,17 +64,11 @@ impl Pane {
     }
 
     /// create with existing conversation (for session resume or forking)
-    pub fn with_conversation(
-        id: PaneId,
-        app: App,
-        conversation: Vec<Message>,
-        session_tree: SessionTree,
-    ) -> Self {
+    pub fn with_conversation(id: PaneId, app: App, conversation: ConversationState) -> Self {
         Self {
             id,
             app,
             conversation,
-            session_tree,
             image_protos: HashMap::new(),
             pending_prompt: None,
             steering_queue: Arc::new(Mutex::new(Vec::new())),
@@ -110,19 +84,16 @@ impl Pane {
 
     /// mutable references to all major fields at once,
     /// enabling the borrow checker to see disjoint borrows
-    #[expect(clippy::type_complexity)]
     pub fn fields_mut(
         &mut self,
     ) -> (
         &mut App,
-        &mut Vec<Message>,
-        &mut SessionTree,
+        &mut ConversationState,
         &mut HashMap<(usize, usize), ratatui_image::protocol::StatefulProtocol>,
     ) {
         (
             &mut self.app,
             &mut self.conversation,
-            &mut self.session_tree,
             &mut self.image_protos,
         )
     }
@@ -152,7 +123,7 @@ pub struct PaneManager {
 impl PaneManager {
     /// create with a single initial pane
     pub fn new(initial: Pane) -> Self {
-        let next_id = initial.id.0 + 1;
+        let next_id = initial.id.as_u32() + 1;
         Self {
             panes: vec![initial],
             focused: 0,
@@ -163,7 +134,7 @@ impl PaneManager {
 
     /// allocate the next pane id
     pub fn next_id(&mut self) -> PaneId {
-        let id = PaneId(self.next_id);
+        let id = PaneId::new(self.next_id);
         self.next_id += 1;
         id
     }
@@ -302,9 +273,7 @@ impl PaneManager {
                         let base = base_width + if (i as u16) < remainder { 1 } else { 0 };
                         let offset = self.width_offsets.get(&pane.id).copied().unwrap_or(0);
                         let min_w = (MIN_COLUMN_WIDTH as i32).min(usable as i32);
-                        (base as i32 + offset as i32)
-                            .clamp(min_w, usable as i32)
-                            as u16
+                        (base as i32 + offset as i32).clamp(min_w, usable as i32) as u16
                     })
                     .collect();
 
@@ -370,7 +339,10 @@ mod tests {
     use mush_ai::types::TokenCount;
 
     fn test_pane(id: u32) -> Pane {
-        Pane::new(PaneId(id), App::new("test".into(), TokenCount::new(200_000)))
+        Pane::new(
+            PaneId::new(id),
+            App::new("test".into(), TokenCount::new(200_000)),
+        )
     }
 
     #[test]
@@ -426,7 +398,7 @@ mod tests {
         mgr.add_pane(test_pane(3));
         mgr.focus_index(2);
 
-        let removed = mgr.remove_pane(PaneId(1));
+        let removed = mgr.remove_pane(PaneId::new(1));
         assert!(removed.is_some());
         assert_eq!(mgr.pane_count(), 2);
         assert_eq!(mgr.focused_index(), 1); // shifted left
@@ -438,7 +410,7 @@ mod tests {
         mgr.add_pane(test_pane(2));
         mgr.focus_index(1);
 
-        let removed = mgr.remove_pane(PaneId(2));
+        let removed = mgr.remove_pane(PaneId::new(2));
         assert!(removed.is_some());
         assert_eq!(mgr.pane_count(), 1);
         assert_eq!(mgr.focused_index(), 0);
@@ -447,7 +419,7 @@ mod tests {
     #[test]
     fn remove_last_pane_returns_none() {
         let mut mgr = PaneManager::new(test_pane(1));
-        assert!(mgr.remove_pane(PaneId(1)).is_none());
+        assert!(mgr.remove_pane(PaneId::new(1)).is_none());
         assert_eq!(mgr.pane_count(), 1);
     }
 
@@ -455,7 +427,7 @@ mod tests {
     fn remove_nonexistent_pane() {
         let mut mgr = PaneManager::new(test_pane(1));
         mgr.add_pane(test_pane(2));
-        assert!(mgr.remove_pane(PaneId(99)).is_none());
+        assert!(mgr.remove_pane(PaneId::new(99)).is_none());
         assert_eq!(mgr.pane_count(), 2);
     }
 
@@ -466,16 +438,16 @@ mod tests {
         mgr.focus_index(1);
         let closed = mgr.close_focused();
         assert!(closed.is_some());
-        assert_eq!(closed.unwrap().id, PaneId(2));
+        assert_eq!(closed.unwrap().id, PaneId::new(2));
         assert_eq!(mgr.focused_index(), 0);
     }
 
     #[test]
     fn next_id_increments() {
         let mut mgr = PaneManager::new(test_pane(1));
-        assert_eq!(mgr.next_id(), PaneId(2));
-        assert_eq!(mgr.next_id(), PaneId(3));
-        assert_eq!(mgr.next_id(), PaneId(4));
+        assert_eq!(mgr.next_id(), PaneId::new(2));
+        assert_eq!(mgr.next_id(), PaneId::new(3));
+        assert_eq!(mgr.next_id(), PaneId::new(4));
     }
 
     #[test]
@@ -563,9 +535,9 @@ mod tests {
     fn pane_lookup_by_id() {
         let mut mgr = PaneManager::new(test_pane(1));
         mgr.add_pane(test_pane(2));
-        assert!(mgr.pane(PaneId(1)).is_some());
-        assert!(mgr.pane(PaneId(2)).is_some());
-        assert!(mgr.pane(PaneId(99)).is_none());
+        assert!(mgr.pane(PaneId::new(1)).is_some());
+        assert!(mgr.pane(PaneId::new(2)).is_some());
+        assert!(mgr.pane(PaneId::new(99)).is_none());
     }
 
     #[test]

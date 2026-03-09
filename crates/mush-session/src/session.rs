@@ -3,54 +3,11 @@
 //! a session holds the conversation history and metadata for a single
 //! agent interaction. sessions can be persisted, resumed, and branched.
 
-use crate::tree::SessionTree;
-use derive_more::Display;
-use mush_ai::types::{Message, ModelId, Timestamp};
+use crate::conversation::ConversationState;
+use mush_ai::types::{Message, ModelId, PaneId, Timestamp};
 use serde::{Deserialize, Serialize};
 
-/// unique session identifier
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Display, Serialize, Deserialize)]
-pub struct SessionId(String);
-
-impl From<String> for SessionId {
-    fn from(s: String) -> Self {
-        Self(s)
-    }
-}
-
-impl From<&str> for SessionId {
-    fn from(s: &str) -> Self {
-        Self(s.to_string())
-    }
-}
-
-impl std::ops::Deref for SessionId {
-    type Target = str;
-    fn deref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl SessionId {
-    pub fn new() -> Self {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let time = Timestamp::now().as_ms();
-        let count = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let pid = std::process::id() as u64;
-        let id = time
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(pid)
-            .wrapping_add(count);
-        Self(format!("{id:016x}"))
-    }
-}
-
-impl Default for SessionId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+pub use mush_ai::types::SessionId;
 
 /// metadata about a session
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,22 +24,19 @@ pub struct SessionMeta {
 /// per-pane session state for multi-pane persistence
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaneSession {
-    pub pane_id: u32,
+    pub pane_id: PaneId,
     pub label: Option<String>,
     pub model_id: ModelId,
-    pub messages: Vec<Message>,
-    #[serde(default)]
-    pub tree: SessionTree,
+    #[serde(flatten)]
+    pub conversation: ConversationState,
 }
 
 /// a full session with messages and tree structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub meta: SessionMeta,
-    pub messages: Vec<Message>,
-    /// tree structure for branching (optional for backwards compat)
-    #[serde(default)]
-    pub tree: SessionTree,
+    #[serde(flatten)]
+    pub conversation: ConversationState,
     /// additional panes (empty for single-pane sessions)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub panes: Vec<PaneSession>,
@@ -102,27 +56,20 @@ impl Session {
                 message_count: 0,
                 cwd: cwd.into(),
             },
-            messages: vec![],
-            tree: SessionTree::new(),
+            conversation: ConversationState::new(),
             panes: vec![],
         }
     }
 
     pub fn push_message(&mut self, message: Message) {
-        self.tree.append_message(message.clone());
-        self.messages.push(message);
-        self.meta.message_count = self.messages.len();
+        self.conversation.append_message(message);
+        self.meta.message_count = self.context().len();
         self.meta.updated_at = Timestamp::now();
     }
 
     /// get the conversation for the current branch (what the LLM sees)
     pub fn context(&self) -> Vec<Message> {
-        if self.tree.is_empty() {
-            // backwards compat: old sessions without tree
-            self.messages.clone()
-        } else {
-            self.tree.build_context()
-        }
+        self.conversation.context()
     }
 
     /// set title from first user message if not already set
@@ -134,7 +81,7 @@ impl Session {
             return;
         }
 
-        let first_text = self.messages.iter().find_map(|m| match m {
+        let first_text = self.context().into_iter().find_map(|m| match m {
             Message::User(u) => {
                 let t = u.text();
                 if t.is_empty() { None } else { Some(t) }
@@ -186,7 +133,7 @@ mod tests {
     #[test]
     fn new_session_has_no_messages() {
         let session = Session::new("test-model", "/tmp");
-        assert_eq!(session.messages.len(), 0);
+        assert!(session.context().is_empty());
         assert_eq!(session.meta.message_count, 0);
         assert!(session.meta.title.is_none());
     }
@@ -199,7 +146,7 @@ mod tests {
             timestamp_ms: Timestamp::zero(),
         }));
         assert_eq!(session.meta.message_count, 1);
-        assert_eq!(session.messages.len(), 1);
+        assert_eq!(session.context().len(), 1);
     }
 
     #[test]
@@ -284,6 +231,6 @@ mod tests {
         let json = serde_json::to_string(&session).unwrap();
         let restored: Session = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.meta.id, session.meta.id);
-        assert_eq!(restored.messages.len(), 1);
+        assert_eq!(restored.context().len(), 1);
     }
 }

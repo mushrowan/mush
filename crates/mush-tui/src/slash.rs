@@ -3,24 +3,144 @@
 use mush_ai::models;
 use mush_ai::registry::ApiRegistry;
 use mush_ai::types::*;
-use mush_session::tree::SessionTree;
+use mush_session::ConversationState;
+use thiserror::Error;
 
 use crate::TuiConfig;
 use crate::app::App;
 use crate::runner::HintMode;
 
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum SlashParseError {
+    #[error("slash commands must start with /")]
+    MissingPrefix,
+    #[error("usage: /resume <session-id>")]
+    ResumeUsage,
+    #[error("usage: /branch <number> (try /tree first)")]
+    BranchUsage,
+    #[error("usage: /logs [n]")]
+    LogsUsage,
+    #[error("usage: /broadcast <message>")]
+    BroadcastUsage,
+    #[error("usage: /lock <path>")]
+    LockUsage,
+    #[error("usage: /unlock <path>")]
+    UnlockUsage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SlashAction {
+    Help,
+    Keys,
+    Clear,
+    Model { model_id: Option<String> },
+    Sessions,
+    Resume { session_id: SessionId },
+    Branch { index: Option<usize> },
+    Tree,
+    Compact,
+    Export { path: Option<String> },
+    Undo,
+    Search { query: String },
+    Cost,
+    Logs { count: usize },
+    Injection,
+    Close,
+    Broadcast { message: String },
+    Lock { path: String },
+    Unlock { path: String },
+    Locks,
+    Label { text: Option<String> },
+    Panes,
+    Merge,
+    Quit,
+    Other { name: String, args: String },
+}
+
+pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
+    let Some(command) = input.strip_prefix('/') else {
+        return Err(SlashParseError::MissingPrefix);
+    };
+
+    let (name, args) = split_name_and_args(command);
+    match name {
+        "help" => Ok(SlashAction::Help),
+        "keys" => Ok(SlashAction::Keys),
+        "clear" => Ok(SlashAction::Clear),
+        "model" => Ok(SlashAction::Model {
+            model_id: (!args.is_empty()).then(|| args.to_string()),
+        }),
+        "sessions" => Ok(SlashAction::Sessions),
+        "resume" if args.is_empty() => Err(SlashParseError::ResumeUsage),
+        "resume" => Ok(SlashAction::Resume {
+            session_id: SessionId::from(args),
+        }),
+        "branch" if args.is_empty() => Ok(SlashAction::Branch { index: None }),
+        "branch" => args
+            .parse::<usize>()
+            .map(|index| SlashAction::Branch { index: Some(index) })
+            .map_err(|_| SlashParseError::BranchUsage),
+        "tree" => Ok(SlashAction::Tree),
+        "compact" => Ok(SlashAction::Compact),
+        "export" => Ok(SlashAction::Export {
+            path: (!args.is_empty()).then(|| args.to_string()),
+        }),
+        "undo" => Ok(SlashAction::Undo),
+        "search" => Ok(SlashAction::Search {
+            query: args.to_string(),
+        }),
+        "cost" => Ok(SlashAction::Cost),
+        "logs" if args.is_empty() => Ok(SlashAction::Logs { count: 50 }),
+        "logs" => args
+            .parse::<usize>()
+            .map(|count| SlashAction::Logs { count })
+            .map_err(|_| SlashParseError::LogsUsage),
+        "injection" => Ok(SlashAction::Injection),
+        "close" => Ok(SlashAction::Close),
+        "broadcast" if args.is_empty() => Err(SlashParseError::BroadcastUsage),
+        "broadcast" => Ok(SlashAction::Broadcast {
+            message: args.to_string(),
+        }),
+        "lock" if args.is_empty() => Err(SlashParseError::LockUsage),
+        "lock" => Ok(SlashAction::Lock {
+            path: args.to_string(),
+        }),
+        "unlock" if args.is_empty() => Err(SlashParseError::UnlockUsage),
+        "unlock" => Ok(SlashAction::Unlock {
+            path: args.to_string(),
+        }),
+        "locks" => Ok(SlashAction::Locks),
+        "label" => Ok(SlashAction::Label {
+            text: (!args.is_empty()).then(|| args.to_string()),
+        }),
+        "panes" => Ok(SlashAction::Panes),
+        "merge" => Ok(SlashAction::Merge),
+        "quit" | "exit" | "q" => Ok(SlashAction::Quit),
+        other => Ok(SlashAction::Other {
+            name: other.to_string(),
+            args: args.to_string(),
+        }),
+    }
+}
+
+fn split_name_and_args(command: &str) -> (&str, &str) {
+    let trimmed = command.trim();
+    match trimmed.split_once(char::is_whitespace) {
+        Some((name, rest)) => (name, rest.trim()),
+        None => (trimmed, ""),
+    }
+}
+
 /// handle a slash command, returning Some(prompt) if it should trigger the agent
 pub fn handle(
     app: &mut App,
-    conversation: &mut Vec<Message>,
-    session_tree: &mut SessionTree,
+    conversation: &mut ConversationState,
     tui_config: &mut TuiConfig,
     thinking_prefs: &std::collections::HashMap<String, ThinkingLevel>,
-    name: &str,
-    args: &str,
+    action: &SlashAction,
 ) -> Option<String> {
-    match name {
-        "help" => {
+    match action {
+        SlashAction::Help => {
             let mut help = String::from("available commands:\n");
             help.push_str("  /help          - show this message\n");
             help.push_str("  /keys          - show keyboard shortcuts\n");
@@ -48,7 +168,7 @@ pub fn handle(
             app.push_system_message(help);
             None
         }
-        "keys" => {
+        SlashAction::Keys => {
             let mut keys = String::from("keyboard shortcuts:\n\n");
             keys.push_str("general:\n");
             keys.push_str("  enter          - send message\n");
@@ -89,28 +209,27 @@ pub fn handle(
             app.push_system_message(keys);
             None
         }
-        "clear" => {
+        SlashAction::Clear => {
             app.clear_messages();
-            conversation.clear();
-            *session_tree = SessionTree::new();
+            conversation.replace_messages(vec![]);
             app.status = Some("conversation cleared".into());
             None
         }
-        "tree" => {
-            show_tree(app, session_tree);
+        SlashAction::Tree => {
+            show_tree(app, conversation);
             None
         }
-        "branch" if !args.is_empty() => {
-            handle_branch(app, conversation, session_tree, args);
+        SlashAction::Branch { index: Some(index) } => {
+            handle_branch(app, conversation, *index);
             None
         }
-        "branch" => {
+        SlashAction::Branch { index: None } => {
             app.push_system_message(
                 "usage: /branch <n> — branch from nth user message\ntry /tree to see messages",
             );
             None
         }
-        "sessions" => {
+        SlashAction::Sessions => {
             let store = mush_session::SessionStore::new(mush_session::SessionStore::default_dir());
             match store.list() {
                 Ok(sessions) => {
@@ -128,14 +247,12 @@ pub fn handle(
             }
             None
         }
-        "resume" if !args.is_empty() => {
+        SlashAction::Resume { session_id } => {
             let store = mush_session::SessionStore::new(mush_session::SessionStore::default_dir());
-            let id = mush_session::SessionId::from(args.trim());
-            match store.load(&id) {
+            match store.load(session_id) {
                 Ok(session) => {
-                    *conversation = session.messages.clone();
-                    *session_tree = session.tree;
-                    rebuild_display(app, conversation);
+                    *conversation = session.conversation;
+                    rebuild_display(app, &conversation.context());
                     let title = session.meta.title.as_deref().unwrap_or("untitled");
                     app.status = Some(format!("resumed: {title}"));
                 }
@@ -143,23 +260,30 @@ pub fn handle(
             }
             None
         }
-        "model" if args.is_empty() => {
+        SlashAction::Model { model_id: None } => {
             app.push_system_message(format!("model: {}", app.model_id));
             None
         }
-        "model" => {
-            handle_model_switch(app, tui_config, thinking_prefs, args);
+        SlashAction::Model {
+            model_id: Some(model_id),
+        } => {
+            handle_model_switch(app, tui_config, thinking_prefs, model_id);
             None
         }
-        "cost" => {
+        SlashAction::Search { query } => {
+            app.mode = crate::app::AppMode::Search;
+            app.search.query = query.clone();
+            app.update_search();
+            None
+        }
+        SlashAction::Cost => {
             app.show_cost = !app.show_cost;
             show_cost(app);
             None
         }
-        "logs" => {
-            let n = args.trim().parse::<usize>().unwrap_or(50);
+        SlashAction::Logs { count } => {
             if let Some(ref buf) = tui_config.log_buffer {
-                let entries = buf(n);
+                let entries = buf(*count);
                 if entries.is_empty() {
                     app.push_system_message("no log entries yet");
                 } else {
@@ -170,7 +294,7 @@ pub fn handle(
             }
             None
         }
-        "injection" => {
+        SlashAction::Injection => {
             app.show_prompt_injection = !app.show_prompt_injection;
             let mode = match tui_config.hint_mode {
                 HintMode::Message => "message",
@@ -192,20 +316,22 @@ pub fn handle(
             ));
             None
         }
-        "undo" => {
-            handle_undo(app, conversation, session_tree);
+        SlashAction::Undo => {
+            handle_undo(app, conversation);
             None
         }
-        "quit" | "exit" | "q" => {
+        SlashAction::Quit => {
             app.should_quit = true;
             None
         }
-        other => try_template(app, other, args),
+        SlashAction::Other { name, args } => try_template(app, name, args),
+        _ => None,
     }
 }
 
-fn show_tree(app: &mut App, session_tree: &SessionTree) {
-    let user_msgs: Vec<_> = session_tree
+fn show_tree(app: &mut App, conversation: &ConversationState) {
+    let tree = conversation.tree();
+    let user_msgs: Vec<_> = tree
         .current_branch()
         .into_iter()
         .filter(|e| {
@@ -225,11 +351,10 @@ fn show_tree(app: &mut App, session_tree: &SessionTree) {
 
     let mut info = format!(
         "tree: {} entries, {} branch points\n",
-        session_tree.len(),
-        session_tree
-            .entries()
+        tree.len(),
+        tree.entries()
             .iter()
-            .filter(|e| session_tree.is_branch_point(&e.id))
+            .filter(|e| tree.is_branch_point(&e.id))
             .count()
     );
     for (i, entry) in user_msgs.iter().enumerate() {
@@ -247,7 +372,7 @@ fn show_tree(app: &mut App, session_tree: &SessionTree) {
             } else {
                 text.to_string()
             };
-            let marker = if session_tree.is_branch_point(&entry.id) {
+            let marker = if tree.is_branch_point(&entry.id) {
                 " ⑂"
             } else {
                 ""
@@ -258,18 +383,8 @@ fn show_tree(app: &mut App, session_tree: &SessionTree) {
     app.push_system_message(info);
 }
 
-fn handle_branch(
-    app: &mut App,
-    conversation: &mut Vec<Message>,
-    session_tree: &mut SessionTree,
-    args: &str,
-) {
-    let Ok(n) = args.trim().parse::<usize>() else {
-        app.push_system_message("usage: /branch <number> (try /tree first)");
-        return;
-    };
-
-    let user_msgs = session_tree.user_messages_in_branch();
+fn handle_branch(app: &mut App, conversation: &mut ConversationState, n: usize) {
+    let user_msgs = conversation.user_messages_in_branch();
     let count = user_msgs.len();
     let target_info = user_msgs.get(n.wrapping_sub(1)).map(|e| {
         let parent = e.parent_id.clone();
@@ -296,12 +411,11 @@ fn handle_branch(
         ));
     } else if let Some((parent_id, preview)) = target_info {
         if let Some(ref pid) = parent_id {
-            session_tree.branch(pid);
+            conversation.branch(pid);
         } else {
-            session_tree.reset_leaf();
+            conversation.reset_leaf();
         }
-        *conversation = session_tree.build_context();
-        rebuild_display(app, conversation);
+        rebuild_display(app, &conversation.context());
         app.status = Some(format!("branched before: {preview}"));
     }
 }
@@ -387,23 +501,21 @@ fn show_cost(app: &mut App) {
     ));
 }
 
-fn handle_undo(app: &mut App, conversation: &mut Vec<Message>, session_tree: &mut SessionTree) {
-    let parent = session_tree
+fn handle_undo(app: &mut App, conversation: &mut ConversationState) {
+    let parent = conversation
         .user_messages_in_branch()
         .last()
         .map(|e| e.parent_id.clone());
     match parent {
         None => app.push_system_message("nothing to undo"),
         Some(None) => {
-            session_tree.reset_leaf();
-            *conversation = session_tree.build_context();
-            rebuild_display(app, conversation);
+            conversation.reset_leaf();
+            rebuild_display(app, &conversation.context());
             app.status = Some("undid last turn".into());
         }
         Some(Some(pid)) => {
-            session_tree.branch(&pid);
-            *conversation = session_tree.build_context();
-            rebuild_display(app, conversation);
+            conversation.branch(&pid);
+            rebuild_display(app, &conversation.context());
             app.status = Some("undid last turn".into());
         }
     }
@@ -491,7 +603,7 @@ pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
 }
 
 /// export conversation to a markdown file
-pub fn handle_export(app: &mut App, conversation: &[Message], args: &str) {
+pub fn handle_export(app: &mut App, conversation: &ConversationState, args: &str) {
     let path = if args.trim().is_empty() {
         "conversation.md".to_string()
     } else {
@@ -499,7 +611,8 @@ pub fn handle_export(app: &mut App, conversation: &[Message], args: &str) {
     };
 
     let mut md = String::new();
-    for msg in conversation {
+    let messages = conversation.context();
+    for msg in &messages {
         match msg {
             Message::User(u) => {
                 let text = u.text();
@@ -544,35 +657,31 @@ pub fn handle_export(app: &mut App, conversation: &[Message], args: &str) {
 /// run LLM compaction on the conversation
 pub async fn handle_compact(
     app: &mut App,
-    conversation: &mut Vec<Message>,
-    session_tree: &mut SessionTree,
+    conversation: &mut ConversationState,
     model: &Model,
     options: &StreamOptions,
     registry: &ApiRegistry,
 ) {
     use mush_session::compact;
 
-    let before = conversation.len();
+    let messages = conversation.context();
+    let before = messages.len();
     if before <= 4 {
         app.push_system_message("conversation too short to compact");
         return;
     }
 
     app.status = Some("compacting...".into());
-    let tokens_before = compact::estimate_tokens(conversation);
-    let result =
-        compact::llm_compact(conversation.clone(), registry, model, options, Some(10)).await;
+    let tokens_before = compact::estimate_tokens(&messages);
+    let result = compact::llm_compact(messages, registry, model, options, Some(10)).await;
 
     let tokens_after = compact::estimate_tokens(&result.messages);
-    *conversation = result.messages;
-    *session_tree = SessionTree::new();
-    for msg in conversation.iter() {
-        session_tree.append_message(msg.clone());
-    }
-    rebuild_display(app, conversation);
+    conversation.replace_messages(result.messages);
+    let compacted = conversation.context();
+    rebuild_display(app, &compacted);
     app.status = Some(format!(
         "compacted: {before} → {} messages, ~{tokens_before} → ~{tokens_after} tokens ({} summarised)",
-        conversation.len(),
+        compacted.len(),
         result.summarised_count,
     ));
 }
@@ -580,6 +689,35 @@ pub async fn handle_compact(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_model_action() {
+        assert_eq!(
+            parse("/model claude-sonnet").unwrap(),
+            SlashAction::Model {
+                model_id: Some("claude-sonnet".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_lock_requires_path() {
+        assert_eq!(
+            parse("/lock").unwrap_err().to_string(),
+            "usage: /lock <path>"
+        );
+    }
+
+    #[test]
+    fn parse_other_command_preserves_args() {
+        assert_eq!(
+            parse("/review src/main.rs").unwrap(),
+            SlashAction::Other {
+                name: "review".into(),
+                args: "src/main.rs".into(),
+            }
+        );
+    }
 
     #[test]
     fn show_cost_includes_reuse_and_write_percentages() {

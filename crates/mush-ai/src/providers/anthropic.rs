@@ -440,7 +440,9 @@ fn trim_old_tool_output(text: &str) -> String {
     let trimmed = text.len() - preview_end - (text.len() - tail_start);
     format!(
         "{}\n\n[... {} chars trimmed from old tool result ...]\n\n{}",
-        &text[..preview_end], trimmed, &text[tail_start..]
+        &text[..preview_end],
+        trimmed,
+        &text[tail_start..]
     )
 }
 
@@ -843,7 +845,7 @@ fn parse_sse_stream(
             content: vec![],
             model: model_id.clone(),
             provider: provider_name.clone(),
-            api: api.clone(),
+            api,
             usage: Usage::default(),
             stop_reason: StopReason::Stop,
             error_message: None,
@@ -963,7 +965,8 @@ fn process_sse_event(
                 output.usage.input_tokens = TokenCount::new(usage.input_tokens);
                 output.usage.output_tokens = TokenCount::new(usage.output_tokens);
                 output.usage.cache_read_tokens = TokenCount::new(usage.cache_read_input_tokens);
-                output.usage.cache_write_tokens = TokenCount::new(usage.cache_creation_input_tokens);
+                output.usage.cache_write_tokens =
+                    TokenCount::new(usage.cache_creation_input_tokens);
             }
             events.push(StreamEvent::Start {
                 partial: output.clone(),

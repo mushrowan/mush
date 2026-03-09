@@ -14,16 +14,15 @@ pub mod web_search;
 pub mod write;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use mush_agent::tool::AgentTool;
+use mush_agent::tool::{SharedTool, ToolRegistry};
 
 /// whether a model id should use the codex patch format instead of edit + write.
 /// GPT models (except gpt-4 and oss variants) are trained on the patch format
 /// and produce better edits with it.
 pub fn uses_patch_tool(model_id: &str) -> bool {
-    model_id.contains("gpt-")
-        && !model_id.contains("oss")
-        && !model_id.contains("gpt-4")
+    model_id.contains("gpt-") && !model_id.contains("oss") && !model_id.contains("gpt-4")
 }
 
 /// whether a model supports native parallel tool calls and doesn't need the
@@ -38,7 +37,7 @@ pub fn supports_native_parallel_calls(model_id: &str) -> bool {
 }
 
 /// create the full set of built-in tools for a given working directory
-pub fn builtin_tools(cwd: PathBuf) -> Vec<Box<dyn AgentTool>> {
+pub fn builtin_tools(cwd: PathBuf) -> ToolRegistry {
     builtin_tools_with_options(cwd, None, false, false)
 }
 
@@ -46,7 +45,7 @@ pub fn builtin_tools(cwd: PathBuf) -> Vec<Box<dyn AgentTool>> {
 pub fn builtin_tools_with_sink(
     cwd: PathBuf,
     output_sink: Option<bash::OutputSink>,
-) -> Vec<Box<dyn AgentTool>> {
+) -> ToolRegistry {
     builtin_tools_with_options(cwd, output_sink, false, false)
 }
 
@@ -59,46 +58,45 @@ pub fn builtin_tools_with_options(
     output_sink: Option<bash::OutputSink>,
     use_patch: bool,
     skip_batch: bool,
-) -> Vec<Box<dyn AgentTool>> {
-    let make_tools = |cwd: PathBuf| -> Vec<Box<dyn AgentTool>> {
-        let bash_tool: Box<dyn AgentTool> = {
+) -> ToolRegistry {
+    let make_tools = |cwd: PathBuf| -> ToolRegistry {
+        let bash_tool: SharedTool = {
             let tool = bash::BashTool::new(cwd.clone());
             if let Some(ref sink) = output_sink {
-                Box::new(tool.with_output_sink(sink.clone()))
+                Arc::new(tool.with_output_sink(sink.clone()))
             } else {
-                Box::new(tool)
+                Arc::new(tool)
             }
         };
 
-        let mut tools: Vec<Box<dyn AgentTool>> = vec![
-            Box::new(read::ReadTool::new(cwd.clone())),
+        let mut tools: Vec<SharedTool> = vec![
+            Arc::new(read::ReadTool::new(cwd.clone())),
             bash_tool,
-            Box::new(grep::GrepTool::new(cwd.clone())),
-            Box::new(find::FindTool::new(cwd.clone())),
-            Box::new(glob::GlobTool::new(cwd.clone())),
-            Box::new(ls::LsTool::new(cwd.clone())),
-            Box::new(web_search::WebSearchTool::new()),
-            Box::new(web_fetch::WebFetchTool::new()),
-            Box::new(notify_user::NotifyUserTool::new()),
+            Arc::new(grep::GrepTool::new(cwd.clone())),
+            Arc::new(find::FindTool::new(cwd.clone())),
+            Arc::new(glob::GlobTool::new(cwd.clone())),
+            Arc::new(ls::LsTool::new(cwd.clone())),
+            Arc::new(web_search::WebSearchTool::new()),
+            Arc::new(web_fetch::WebFetchTool::new()),
+            Arc::new(notify_user::NotifyUserTool::new()),
         ];
 
         if use_patch {
-            tools.push(Box::new(apply_patch::ApplyPatchTool::new(cwd)));
+            tools.push(Arc::new(apply_patch::ApplyPatchTool::new(cwd)));
         } else {
-            tools.push(Box::new(write::WriteTool::new(cwd.clone())));
-            tools.push(Box::new(edit::EditTool::new(cwd)));
+            tools.push(Arc::new(write::WriteTool::new(cwd.clone())));
+            tools.push(Arc::new(edit::EditTool::new(cwd)));
         }
 
-        tools
+        ToolRegistry::from_shared(tools)
     };
 
     if skip_batch {
         make_tools(cwd)
     } else {
-        // batch wraps its own copy of the tools so it can dispatch to them
         let inner_tools = make_tools(cwd.clone());
         let mut tools = make_tools(cwd);
-        tools.push(Box::new(batch::BatchTool::new(inner_tools)));
+        tools.register_shared(Arc::new(batch::BatchTool::new(inner_tools)));
         tools
     }
 }

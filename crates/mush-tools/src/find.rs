@@ -3,9 +3,35 @@
 use std::path::PathBuf;
 use std::process::Stdio;
 
-use mush_agent::tool::{AgentTool, ToolResult};
+use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
+use serde::Deserialize;
 
 use crate::util::{resolve_path, truncate_lines};
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum FindType {
+    File,
+    Directory,
+}
+
+impl FindType {
+    fn as_fd_arg(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::Directory => "directory",
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FindArgs {
+    pattern: String,
+    path: Option<String>,
+    #[serde(rename = "type")]
+    type_filter: Option<FindType>,
+}
 
 pub struct FindTool {
     cwd: PathBuf,
@@ -57,18 +83,18 @@ impl AgentTool for FindTool {
         args: serde_json::Value,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
         Box::pin(async move {
-            let Some(pattern) = args["pattern"].as_str() else {
-                return ToolResult::error("missing required parameter: pattern");
+            let args = match parse_tool_args::<FindArgs>(args) {
+                Ok(args) => args,
+                Err(error) => return error,
             };
 
-            let search_path = args["path"]
-                .as_str()
-                .map(|p| resolve_path(&self.cwd, p))
+            let search_path = args
+                .path
+                .as_deref()
+                .map(|path| resolve_path(&self.cwd, path))
                 .unwrap_or_else(|| self.cwd.clone());
 
-            let type_filter = args["type"].as_str();
-
-            run_fd(&self.cwd, pattern, &search_path, type_filter).await
+            run_fd(&self.cwd, &args.pattern, &search_path, args.type_filter).await
         })
     }
 }
@@ -77,7 +103,7 @@ async fn run_fd(
     cwd: &std::path::Path,
     pattern: &str,
     search_path: &std::path::Path,
-    type_filter: Option<&str>,
+    type_filter: Option<FindType>,
 ) -> ToolResult {
     let mut cmd = tokio::process::Command::new("fd");
     cmd.arg("--color=never")
@@ -87,8 +113,8 @@ async fn run_fd(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    if let Some(t) = type_filter {
-        cmd.arg("--type").arg(t);
+    if let Some(type_filter) = type_filter {
+        cmd.arg("--type").arg(type_filter.as_fd_arg());
     }
 
     let output = match cmd.output().await {
@@ -113,32 +139,28 @@ async fn run_fd(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::util::extract_text;
-    use std::fs;
 
     #[tokio::test]
     async fn find_files_by_extension() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("main.rs"), "").unwrap();
-        fs::write(dir.path().join("lib.rs"), "").unwrap();
-        fs::write(dir.path().join("readme.md"), "").unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "pub fn x() {}\n").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "hi\n").unwrap();
 
-        let result = run_fd(dir.path(), r"\.rs$", dir.path(), Some("file")).await;
-
-        let text = extract_text(&result);
+        let result = run_fd(dir.path(), r".*\.rs$", dir.path(), Some(FindType::File)).await;
+        let text = crate::util::extract_text(&result);
         assert!(text.contains("main.rs"));
         assert!(text.contains("lib.rs"));
-        assert!(!text.contains("readme.md"));
+        assert!(!text.contains("notes.txt"));
     }
 
     #[tokio::test]
     async fn find_no_results() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("test.txt"), "").unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
 
-        let result = run_fd(dir.path(), "nonexistent_xyz", dir.path(), None).await;
-
-        let text = extract_text(&result);
-        assert!(text.contains("no files found"));
+        let result = run_fd(dir.path(), r".*\.py$", dir.path(), None).await;
+        let text = crate::util::extract_text(&result);
+        assert_eq!(text, "no files found");
     }
 }

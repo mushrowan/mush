@@ -5,8 +5,8 @@
 
 use std::path::PathBuf;
 
-use mush_agent::tool::AgentTool;
-use mush_ai::types::{Message, ModelId};
+use mush_agent::tool::ToolRegistry;
+use mush_ai::types::{Message, ModelId, SessionId};
 
 /// metadata about a loaded extension
 #[derive(Debug, Clone)]
@@ -23,7 +23,7 @@ pub struct ExtensionMeta {
 pub struct ExtensionContext {
     pub cwd: PathBuf,
     pub model_id: ModelId,
-    pub session_id: Option<String>,
+    pub session_id: Option<SessionId>,
 }
 
 /// result of discovering resources (system prompt additions, tools, etc)
@@ -32,7 +32,7 @@ pub struct DiscoveredResources {
     /// additional system prompt content to append
     pub system_prompt_additions: Vec<String>,
     /// additional tool definitions (extensions can provide tools)
-    pub tools: Vec<Box<dyn AgentTool>>,
+    pub tools: ToolRegistry,
 }
 
 /// result of a context transform (modify messages before sending to LLM)
@@ -92,7 +92,7 @@ mod tests {
         fn on_discover(&self, _ctx: &ExtensionContext) -> DiscoveredResources {
             DiscoveredResources {
                 system_prompt_additions: vec!["test extension active".into()],
-                tools: vec![],
+                tools: ToolRegistry::new(),
             }
         }
     }

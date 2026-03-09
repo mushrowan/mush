@@ -57,8 +57,7 @@ impl ProviderError {
             }
             Self::ApiError { status, .. } => {
                 // rate limit, server errors, overloaded
-                status.as_u16() == 429
-                    || status.as_u16() >= 500
+                status.as_u16() == 429 || status.as_u16() >= 500
             }
             _ => false,
         }

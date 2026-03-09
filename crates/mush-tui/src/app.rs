@@ -50,8 +50,7 @@ pub enum AppEvent {
     },
     /// user executed a slash command
     SlashCommand {
-        name: String,
-        args: String,
+        action: crate::slash::SlashAction,
     },
     /// user requested quit
     Quit,
@@ -175,7 +174,7 @@ pub enum ToolCallStatus {
 /// state for a currently executing tool (shown in the tool panels)
 #[derive(Debug, Clone)]
 pub struct ActiveToolState {
-    pub tool_call_id: String,
+    pub tool_call_id: ToolCallId,
     pub name: String,
     pub summary: String,
     pub live_output: Option<String>,
@@ -293,6 +292,8 @@ pub struct App {
     pub has_unread: bool,
     /// tool confirmation prompt (shown when mode == ToolConfirm)
     pub confirm_prompt: Option<String>,
+    /// tool call being confirmed
+    pub confirm_tool_call_id: Option<ToolCallId>,
     /// whether to show prompt injection previews in the chat
     pub show_prompt_injection: bool,
     /// whether to show dollar cost in status bar
@@ -421,6 +422,7 @@ impl App {
             tab_state: None,
             has_unread: false,
             confirm_prompt: None,
+            confirm_tool_call_id: None,
             show_prompt_injection: false,
             show_cost: false,
             selected_message: None,
@@ -539,7 +541,8 @@ impl App {
 
     /// add a queued steering message (shown dimmed until processed)
     pub fn push_queued_message(&mut self, text: impl Into<String>) {
-        self.messages.push(DisplayMessage {            role: MessageRole::User,
+        self.messages.push(DisplayMessage {
+            role: MessageRole::User,
             content: text.into(),
             tool_calls: vec![],
             thinking: None,
@@ -595,9 +598,9 @@ impl App {
     }
 
     /// mark a tool as being executed
-    pub fn start_tool(&mut self, tool_call_id: &str, name: &str, summary: &str) {
+    pub fn start_tool(&mut self, tool_call_id: &ToolCallId, name: &str, summary: &str) {
         self.active_tools.push(ActiveToolState {
-            tool_call_id: tool_call_id.to_string(),
+            tool_call_id: tool_call_id.clone(),
             name: name.to_string(),
             summary: summary.to_string(),
             live_output: None,
@@ -620,7 +623,7 @@ impl App {
     /// mark a tool as done, with optional output preview
     pub fn end_tool(
         &mut self,
-        tool_call_id: &str,
+        tool_call_id: &ToolCallId,
         name: &str,
         outcome: mush_ai::types::ToolOutcome,
         output: Option<&str>,
@@ -635,7 +638,7 @@ impl App {
         if let Some(tool) = self
             .active_tools
             .iter_mut()
-            .find(|t| t.tool_call_id == tool_call_id)
+            .find(|t| &t.tool_call_id == tool_call_id)
         {
             tool.status = status.clone();
             tool.output = output.map(truncate_output);
@@ -651,11 +654,11 @@ impl App {
     }
 
     /// update live output for an active tool
-    pub fn push_tool_output(&mut self, tool_call_id: &str, output: &str) {
+    pub fn push_tool_output(&mut self, tool_call_id: &ToolCallId, output: &str) {
         if let Some(tool) = self
             .active_tools
             .iter_mut()
-            .find(|t| t.tool_call_id == tool_call_id)
+            .find(|t| &t.tool_call_id == tool_call_id)
         {
             tool.live_output = Some(output.to_string());
         }
@@ -1461,7 +1464,8 @@ mod tests {
             queued: false,
         });
 
-        app.start_tool("tc_1", "bash", "ls -la");
+        let tool_call_id = ToolCallId::from("tc_1");
+        app.start_tool(&tool_call_id, "bash", "ls -la");
         assert_eq!(app.active_tools.len(), 1);
         assert_eq!(app.active_tools[0].name, "bash");
         assert_eq!(app.messages.last().unwrap().tool_calls.len(), 1);
@@ -1471,7 +1475,7 @@ mod tests {
         );
 
         app.end_tool(
-            "tc_1",
+            &tool_call_id,
             "bash",
             ToolOutcome::Success,
             Some("file1.txt\nfile2.txt"),
@@ -1629,9 +1633,10 @@ mod tests {
             model_id: None,
             queued: false,
         });
-        app.start_tool("tc_1", "read", "src/main.rs");
+        let tool_call_id = ToolCallId::from("tc_1");
+        app.start_tool(&tool_call_id, "read", "src/main.rs");
         app.end_tool(
-            "tc_1",
+            &tool_call_id,
             "read",
             ToolOutcome::Success,
             Some("fn main() {}\n"),
@@ -1821,7 +1826,8 @@ mod tests {
         assert_eq!(app.streaming_tool_args, "{\"path\":\"src/");
 
         // start_tool clears the buffer
-        app.start_tool("tc_1", "read", "src/main.rs");
+        let tool_call_id = ToolCallId::from("tc_1");
+        app.start_tool(&tool_call_id, "read", "src/main.rs");
         assert!(app.streaming_tool_args.is_empty());
     }
 

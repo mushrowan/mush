@@ -4,19 +4,33 @@
 //! the batch result is marked self-truncating so the agent loop doesn't
 //! double-truncate the combined output.
 
-use mush_agent::tool::{AgentTool, ToolResult};
+use mush_agent::tool::{AgentTool, ToolRegistry, ToolResult, parse_tool_args};
 use mush_agent::truncation;
 use mush_ai::types::ToolResultContentPart;
+use serde::Deserialize;
 
 const MAX_CALLS: usize = 25;
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BatchArgs {
+    tool_calls: Vec<BatchCall>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BatchCall {
+    tool: String,
+    parameters: serde_json::Value,
+}
+
 pub struct BatchTool {
-    tools: Vec<Box<dyn AgentTool>>,
+    tools: ToolRegistry,
 }
 
 impl BatchTool {
     #[must_use]
-    pub fn new(tools: Vec<Box<dyn AgentTool>>) -> Self {
+    pub fn new(tools: ToolRegistry) -> Self {
         Self { tools }
     }
 }
@@ -66,61 +80,50 @@ impl AgentTool for BatchTool {
         params: serde_json::Value,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
         Box::pin(async move {
-            let calls = match params.get("tool_calls").and_then(serde_json::Value::as_array) {
-                Some(a) => a,
-                None => return ToolResult::error("missing required parameter: tool_calls"),
+            let params = match parse_tool_args::<BatchArgs>(params) {
+                Ok(params) => params,
+                Err(error) => return error,
             };
 
-            if calls.is_empty() {
+            if params.tool_calls.is_empty() {
                 return ToolResult::error("tool_calls cannot be empty");
             }
 
-            if calls.len() > MAX_CALLS {
+            if params.tool_calls.len() > MAX_CALLS {
                 return ToolResult::error(format!(
                     "too many tool calls: {} (max {})",
-                    calls.len(),
+                    params.tool_calls.len(),
                     MAX_CALLS
                 ));
             }
 
-            let calls: Vec<_> = calls.iter().take(MAX_CALLS).collect();
-            let total = calls.len();
-
-            let futures: Vec<_> = calls
+            let total = params.tool_calls.len();
+            let futures: Vec<_> = params
+                .tool_calls
                 .into_iter()
                 .enumerate()
                 .map(|(i, call)| async move {
-                    let tool_name = call
-                        .get("tool")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("");
-
-                    let params = call
-                        .get("parameters")
-                        .cloned()
-                        .unwrap_or_else(|| serde_json::json!({}));
-
-                    if tool_name.eq_ignore_ascii_case("batch") {
+                    if call.tool.eq_ignore_ascii_case("batch") {
                         return (
                             i,
-                            tool_name.to_string(),
+                            call.tool,
                             Err("cannot nest batch inside batch".to_string()),
                         );
                     }
 
-                    let tool = match self.tools.iter().find(|t| t.name().eq_ignore_ascii_case(tool_name)) {
-                        Some(t) => t,
+                    let tool = match self.tools.get(&call.tool) {
+                        Some(tool) => tool,
                         None => {
                             return (
                                 i,
-                                tool_name.to_string(),
-                                Err(format!("unknown tool: {tool_name}")),
+                                call.tool.clone(),
+                                Err(format!("unknown tool: {}", call.tool)),
                             );
                         }
                     };
 
-                    let result = tool.execute(params).await;
-                    (i, tool_name.to_string(), Ok(result))
+                    let result = tool.execute(call.parameters).await;
+                    (i, call.tool, Ok(result))
                 })
                 .collect();
 
@@ -131,37 +134,38 @@ impl AgentTool for BatchTool {
             let mut output = String::new();
 
             for (i, tool_name, result) in &results {
-                // apply the same truncation each tool would get as a standalone call
                 let truncated = match result {
-                    Ok(r) => {
-                        if r.outcome.is_error() {
+                    Ok(result) => {
+                        if result.outcome.is_error() {
                             error_count += 1;
                         } else {
                             success_count += 1;
                         }
                         if truncation::self_truncating(tool_name) {
-                            r.clone()
+                            result.clone()
                         } else {
-                            truncation::truncate_tool_output(r.clone())
+                            truncation::truncate_tool_output(result.clone())
                         }
                     }
-                    Err(e) => {
+                    Err(error) => {
                         error_count += 1;
-                        ToolResult::error(e.to_string())
+                        ToolResult::error(error.clone())
                     }
                 };
 
                 output.push_str(&format!("--- [{i}] {tool_name} ---\n"));
                 for part in &truncated.content {
                     match part {
-                        ToolResultContentPart::Text(t) => output.push_str(&t.text),
+                        ToolResultContentPart::Text(text) => output.push_str(&text.text),
                         ToolResultContentPart::Image(_) => output.push_str("[image]"),
                     }
                 }
                 output.push_str("\n\n");
             }
 
-            output.push_str(&format!("batch: {success_count}/{total} succeeded, {error_count} failed"));
+            output.push_str(&format!(
+                "batch: {success_count}/{total} succeeded, {error_count} failed"
+            ));
             ToolResult::text(output)
         })
     }
@@ -173,31 +177,33 @@ mod tests {
 
     #[test]
     fn schema_has_required_tool_calls() {
-        let tool = BatchTool::new(vec![]);
+        let tool = BatchTool::new(ToolRegistry::new());
         let schema = tool.parameters_schema();
         assert_eq!(schema["required"], serde_json::json!(["tool_calls"]));
     }
 
     #[tokio::test]
     async fn empty_calls_returns_error() {
-        let tool = BatchTool::new(vec![]);
+        let tool = BatchTool::new(ToolRegistry::new());
         let result = tool.execute(serde_json::json!({ "tool_calls": [] })).await;
         assert!(result.outcome.is_error());
     }
 
     #[tokio::test]
     async fn too_many_calls_returns_error() {
-        let tool = BatchTool::new(vec![]);
+        let tool = BatchTool::new(ToolRegistry::new());
         let calls: Vec<_> = (0..26)
             .map(|_| serde_json::json!({ "tool": "read", "parameters": {} }))
             .collect();
-        let result = tool.execute(serde_json::json!({ "tool_calls": calls })).await;
+        let result = tool
+            .execute(serde_json::json!({ "tool_calls": calls }))
+            .await;
         assert!(result.outcome.is_error());
     }
 
     #[tokio::test]
     async fn batch_self_nesting_blocked() {
-        let tool = BatchTool::new(vec![]);
+        let tool = BatchTool::new(ToolRegistry::new());
         let result = tool
             .execute(serde_json::json!({
                 "tool_calls": [{"tool": "batch", "parameters": {"tool_calls": []}}]
@@ -212,7 +218,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_tool_returns_error() {
-        let tool = BatchTool::new(vec![]);
+        let tool = BatchTool::new(ToolRegistry::new());
         let result = tool
             .execute(serde_json::json!({
                 "tool_calls": [{"tool": "does-not-exist", "parameters": {}}]
@@ -249,14 +255,14 @@ mod tests {
             fn execute(
                 &self,
                 _params: serde_json::Value,
-            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
-                // 5000 lines exceeds agent-loop truncation limits (2000 lines)
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>>
+            {
                 let lines: Vec<String> = (0..5000).map(|i| format!("line {i}")).collect();
                 Box::pin(async move { ToolResult::text(lines.join("\n")) })
             }
         }
 
-        let tool = BatchTool::new(vec![Box::new(LargeTool)]);
+        let tool = BatchTool::new(ToolRegistry::from_boxed(vec![Box::new(LargeTool)]));
         let result = tool
             .execute(serde_json::json!({
                 "tool_calls": [{"tool": "large", "parameters": {}}]
@@ -267,10 +273,8 @@ mod tests {
             _ => panic!("expected text"),
         };
         assert!(text.contains("batch: 1/1 succeeded, 0 failed"));
-        // agent-loop truncation applied per-item (middle-out with hint)
         assert!(text.contains("lines truncated"));
         assert!(text.contains("Use grep to search"));
-        // should contain both head and tail (middle-out)
         assert!(text.contains("line 0"));
         assert!(text.contains("line 4999"));
     }
@@ -299,12 +303,13 @@ mod tests {
             fn execute(
                 &self,
                 _params: serde_json::Value,
-            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>>
+            {
                 Box::pin(async { ToolResult::text("ok") })
             }
         }
 
-        let tool = BatchTool::new(vec![Box::new(DummyTool)]);
+        let tool = BatchTool::new(ToolRegistry::from_boxed(vec![Box::new(DummyTool)]));
         let result = tool
             .execute(serde_json::json!({
                 "tool_calls": [{"tool": "dummy", "parameters": {}}]

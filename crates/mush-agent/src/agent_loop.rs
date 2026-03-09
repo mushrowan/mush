@@ -11,7 +11,7 @@ use mush_ai::registry::{ApiRegistry, LlmContext, ToolDefinition};
 use mush_ai::stream::StreamEvent;
 use mush_ai::types::*;
 
-use crate::tool::{AgentTool, ToolResult};
+use crate::tool::{ToolRegistry, ToolResult};
 
 /// events emitted by the agent loop for UI consumption
 #[derive(Debug, Clone)]
@@ -100,9 +100,10 @@ pub enum ConfirmAction {
     DenyWithReason(String),
 }
 
-/// callback for tool confirmation. receives tool name and args, returns allow/deny.
+/// callback for tool confirmation. receives tool call id, name, and args.
 pub type ConfirmCallback<'a> = Box<
     dyn Fn(
+            &ToolCallId,
             &str,
             &serde_json::Value,
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ConfirmAction> + Send>>
@@ -115,8 +116,7 @@ pub type ConfirmCallback<'a> = Box<
 pub struct AgentConfig<'a> {
     pub model: Model,
     pub system_prompt: Option<String>,
-    pub tools: &'a [Box<dyn AgentTool>],
-    pub extra_tools: Vec<Box<dyn AgentTool>>,
+    pub tools: ToolRegistry,
     pub registry: &'a ApiRegistry,
     pub options: StreamOptions,
     /// max tool-calling turns before forced stop (default: unlimited)
@@ -187,8 +187,6 @@ pub fn agent_loop(
 
                 // build LLM context
                 let tool_defs: Vec<ToolDefinition> = config.tools.iter()
-                    .map(|t| t.as_ref())
-                    .chain(config.extra_tools.iter().map(|t| t.as_ref()))
                     .map(|t| ToolDefinition {
                         name: t.name().to_string(),
                         description: t.description().to_string(),
@@ -313,7 +311,7 @@ pub fn agent_loop(
                 let mut confirmed: Vec<&ToolCall> = Vec::new();
                 for tc in &tool_calls {
                     if let Some(ref confirm) = config.confirm_tool {
-                        let action = confirm(tc.name.as_str(), &tc.arguments).await;
+                        let action = confirm(&tc.id, tc.name.as_str(), &tc.arguments).await;
                         let deny_reason = match action {
                             ConfirmAction::Allow => None,
                             ConfirmAction::Deny => Some("tool call denied by user".to_string()),
@@ -352,7 +350,7 @@ pub fn agent_loop(
                     // execute all confirmed tools concurrently
                     let futs: Vec<_> = confirmed
                         .iter()
-                        .map(|tc| execute_tool(config.tools, &config.extra_tools, tc))
+                        .map(|tc| execute_tool(&config.tools, tc))
                         .collect();
                     let results = futures::future::join_all(futs).await;
 
@@ -423,34 +421,17 @@ pub fn agent_loop(
     Box::pin(stream)
 }
 
-/// normalise tool name for matching: lowercase, strip underscores
-/// models may send PascalCase (WebSearch), snake_case (web_search), or
-/// lowercase (websearch) depending on training data
-fn normalise_tool_name(name: &str) -> String {
-    name.to_lowercase().replace('_', "")
-}
-
-async fn execute_tool(
-    tools: &[Box<dyn AgentTool>],
-    extra_tools: &[Box<dyn AgentTool>],
-    tool_call: &ToolCall,
-) -> ToolResult {
-    let requested = normalise_tool_name(tool_call.name.as_str());
-    let tool = tools
-        .iter()
-        .map(|t| t.as_ref())
-        .chain(extra_tools.iter().map(|t| t.as_ref()))
-        .find(|t| normalise_tool_name(t.name()) == requested);
-    match tool {
-        Some(t) => {
-            tracing::debug!(tool = %tool_call.name, resolved = t.name(), "executing tool");
-            let result = t.execute(tool_call.arguments.clone()).await;
+async fn execute_tool(tools: &ToolRegistry, tool_call: &ToolCall) -> ToolResult {
+    match tools.get(tool_call.name.as_str()) {
+        Some(tool) => {
+            tracing::debug!(tool = %tool_call.name, resolved = tool.name(), "executing tool");
+            let result = tool.execute(tool_call.arguments.clone()).await;
             if result.outcome.is_error() {
                 tracing::warn!(tool = %tool_call.name, "tool returned error");
             }
             // skip truncation for tools that handle their own output limits
             // (read already caps at 2000 lines / 50KB with line numbers)
-            if crate::truncation::self_truncating(t.name()) {
+            if crate::truncation::self_truncating(tool.name()) {
                 result
             } else {
                 crate::truncation::truncate_tool_output(result)
@@ -466,7 +447,7 @@ async fn execute_tool(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tool::AgentTool;
+    use crate::tool::{AgentTool, ToolRegistry};
     use std::pin::Pin;
 
     struct CounterTool;
@@ -514,43 +495,33 @@ mod tests {
 
     #[test]
     fn tool_not_found_returns_error() {
-        let tools: Vec<Box<dyn AgentTool>> = vec![];
+        let tools = ToolRegistry::new();
         let tc = ToolCall {
             id: "tc_1".into(),
             name: "nonexistent".into(),
             arguments: serde_json::json!({}),
         };
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(execute_tool(&tools, &[], &tc));
+        let result = rt.block_on(execute_tool(&tools, &tc));
         assert!(result.outcome.is_error());
     }
 
     #[test]
-    fn normalise_tool_name_strips_underscores_and_lowercases() {
-        assert_eq!(normalise_tool_name("web_search"), "websearch");
-        assert_eq!(normalise_tool_name("WebSearch"), "websearch");
-        assert_eq!(normalise_tool_name("WEB_SEARCH"), "websearch");
-        assert_eq!(normalise_tool_name("websearch"), "websearch");
-        assert_eq!(normalise_tool_name("Read"), "read");
-        assert_eq!(normalise_tool_name("web_fetch"), "webfetch");
-    }
-
-    #[test]
     fn tool_found_and_executed() {
-        let tools: Vec<Box<dyn AgentTool>> = vec![Box::new(CounterTool)];
+        let tools = ToolRegistry::from_boxed(vec![Box::new(CounterTool)]);
         let tc = ToolCall {
             id: "tc_1".into(),
             name: "counter".into(),
             arguments: serde_json::json!({}),
         };
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(execute_tool(&tools, &[], &tc));
+        let result = rt.block_on(execute_tool(&tools, &tc));
         assert!(result.outcome.is_success());
     }
 
     #[test]
     fn tool_name_matching_is_normalised() {
-        let tools: Vec<Box<dyn AgentTool>> = vec![Box::new(CounterTool)];
+        let tools = ToolRegistry::from_boxed(vec![Box::new(CounterTool)]);
         let rt = tokio::runtime::Runtime::new().unwrap();
 
         // PascalCase should match snake_case tool
@@ -559,11 +530,7 @@ mod tests {
             name: "Counter".into(),
             arguments: serde_json::json!({}),
         };
-        assert!(
-            rt.block_on(execute_tool(&tools, &[], &tc))
-                .outcome
-                .is_success()
-        );
+        assert!(rt.block_on(execute_tool(&tools, &tc)).outcome.is_success());
 
         // UPPERCASE should match
         let tc = ToolCall {
@@ -571,11 +538,7 @@ mod tests {
             name: "COUNTER".into(),
             arguments: serde_json::json!({}),
         };
-        assert!(
-            rt.block_on(execute_tool(&tools, &[], &tc))
-                .outcome
-                .is_success()
-        );
+        assert!(rt.block_on(execute_tool(&tools, &tc)).outcome.is_success());
     }
 
     struct WebSearchTool;
@@ -603,7 +566,7 @@ mod tests {
 
     #[test]
     fn tool_name_underscore_variants_match() {
-        let tools: Vec<Box<dyn AgentTool>> = vec![Box::new(WebSearchTool)];
+        let tools = ToolRegistry::from_boxed(vec![Box::new(WebSearchTool)]);
         let rt = tokio::runtime::Runtime::new().unwrap();
 
         // PascalCase (what claude sends) should match web_search
@@ -612,11 +575,7 @@ mod tests {
             name: "WebSearch".into(),
             arguments: serde_json::json!({}),
         };
-        assert!(
-            rt.block_on(execute_tool(&tools, &[], &tc))
-                .outcome
-                .is_success()
-        );
+        assert!(rt.block_on(execute_tool(&tools, &tc)).outcome.is_success());
 
         // lowercase no underscore should match
         let tc = ToolCall {
@@ -624,11 +583,7 @@ mod tests {
             name: "websearch".into(),
             arguments: serde_json::json!({}),
         };
-        assert!(
-            rt.block_on(execute_tool(&tools, &[], &tc))
-                .outcome
-                .is_success()
-        );
+        assert!(rt.block_on(execute_tool(&tools, &tc)).outcome.is_success());
 
         // exact match still works
         let tc = ToolCall {
@@ -636,24 +591,19 @@ mod tests {
             name: "web_search".into(),
             arguments: serde_json::json!({}),
         };
-        assert!(
-            rt.block_on(execute_tool(&tools, &[], &tc))
-                .outcome
-                .is_success()
-        );
+        assert!(rt.block_on(execute_tool(&tools, &tc)).outcome.is_success());
     }
 
     #[test]
     fn agent_loop_errors_without_provider() {
         let registry = ApiRegistry::new();
         let model = test_model();
-        let tools: Vec<Box<dyn AgentTool>> = vec![];
+        let tools = ToolRegistry::new();
 
         let config = AgentConfig {
             model: model.clone(),
             system_prompt: None,
-            tools: &tools,
-            extra_tools: vec![],
+            tools,
             registry: &registry,
             options: StreamOptions::default(),
             max_turns: DEFAULT_MAX_TURNS,
@@ -689,7 +639,7 @@ mod tests {
 
         let registry = ApiRegistry::new();
         let model = test_model();
-        let tools: Vec<Box<dyn AgentTool>> = vec![];
+        let tools = ToolRegistry::new();
 
         let transform: ContextTransform<'_> = Box::new(move |msgs| {
             called_clone.store(true, Ordering::SeqCst);
@@ -699,8 +649,7 @@ mod tests {
         let config = AgentConfig {
             model: model.clone(),
             system_prompt: None,
-            tools: &tools,
-            extra_tools: vec![],
+            tools,
             registry: &registry,
             options: StreamOptions::default(),
             max_turns: DEFAULT_MAX_TURNS,
@@ -790,7 +739,7 @@ mod tests {
         }));
 
         let model = test_model();
-        let tools: Vec<Box<dyn AgentTool>> = vec![Box::new(CounterTool)];
+        let tools = ToolRegistry::from_boxed(vec![Box::new(CounterTool)]);
 
         let follow_up_calls = Arc::new(AtomicUsize::new(0));
         let follow_up_calls_clone = follow_up_calls.clone();
@@ -813,8 +762,7 @@ mod tests {
         let config = AgentConfig {
             model: model.clone(),
             system_prompt: None,
-            tools: &tools,
-            extra_tools: vec![],
+            tools,
             registry: &registry,
             options: StreamOptions::default(),
             max_turns: 1,

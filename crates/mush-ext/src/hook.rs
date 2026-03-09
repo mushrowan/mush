@@ -34,7 +34,7 @@ impl HookRunner {
             merged
                 .system_prompt_additions
                 .extend(resources.system_prompt_additions);
-            merged.tools.extend(resources.tools);
+            merged.tools.extend_shared(resources.tools.iter().cloned());
         }
         merged
     }
@@ -91,7 +91,7 @@ mod tests {
         fn on_discover(&self, _ctx: &ExtensionContext) -> DiscoveredResources {
             DiscoveredResources {
                 system_prompt_additions: vec![self.addition.clone()],
-                tools: vec![],
+                tools: mush_agent::tool::ToolRegistry::new(),
             }
         }
     }

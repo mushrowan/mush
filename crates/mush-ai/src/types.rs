@@ -41,6 +41,55 @@ impl From<&str> for ToolName {
     }
 }
 
+/// stable session identifier shared across crates
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, Display, From, Deref, AsRef, Serialize, Deserialize,
+)]
+pub struct SessionId(String);
+
+impl From<&str> for SessionId {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+impl SessionId {
+    pub fn new() -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let time = Timestamp::now().as_ms();
+        let count = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id() as u64;
+        let id = time
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(pid)
+            .wrapping_add(count);
+        Self(format!("{id:016x}"))
+    }
+}
+
+impl Default for SessionId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// unique pane identifier shared across tui and session state
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Display, From, Serialize, Deserialize,
+)]
+pub struct PaneId(u32);
+
+impl PaneId {
+    pub const fn new(id: u32) -> Self {
+        Self(id)
+    }
+
+    pub const fn as_u32(self) -> u32 {
+        self.0
+    }
+}
+
 /// millisecond unix timestamp
 #[derive(
     Debug,
@@ -811,7 +860,7 @@ pub struct StreamOptions {
     pub api_key: Option<ApiKey>,
     pub thinking: Option<ThinkingLevel>,
     /// stable session identifier for provider-side prompt caching
-    pub session_id: Option<String>,
+    pub session_id: Option<SessionId>,
     /// optional account id for providers that need account-scoped headers
     pub account_id: Option<String>,
     /// prompt cache retention preference for providers that support it

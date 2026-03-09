@@ -10,9 +10,10 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
-use mush_agent::tool::{AgentTool, ToolResult};
+use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
 use mush_ai::types::Timestamp;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 use tokio::sync::mpsc;
 
 use crate::pane::PaneId;
@@ -68,6 +69,14 @@ pub struct InterPaneMessage {
     pub timestamp: Timestamp,
 }
 
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum MessageBusError {
+    #[error("pane channel closed")]
+    PaneClosed,
+    #[error("pane {0} not found")]
+    PaneNotFound(PaneId),
+}
+
 /// routes messages between panes via per-pane channels
 #[derive(Clone)]
 pub struct MessageBus {
@@ -100,11 +109,11 @@ impl MessageBus {
     }
 
     /// send a message to a specific pane
-    pub fn send(&self, to: PaneId, msg: InterPaneMessage) -> Result<(), String> {
+    pub fn send(&self, to: PaneId, msg: InterPaneMessage) -> Result<(), MessageBusError> {
         let senders = self.senders.lock().unwrap();
         match senders.get(&to) {
-            Some(tx) => tx.send(msg).map_err(|_| "pane channel closed".into()),
-            None => Err(format!("pane {} not found", to)),
+            Some(tx) => tx.send(msg).map_err(|_| MessageBusError::PaneClosed),
+            None => Err(MessageBusError::PaneNotFound(to)),
         }
     }
 
@@ -135,6 +144,16 @@ impl MessageBus {
     pub fn pane_ids(&self) -> Vec<PaneId> {
         self.senders.lock().unwrap().keys().copied().collect()
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SendMessageArgs {
+    recipient_pane: u32,
+    message: String,
+    #[serde(default)]
+    intent: MessageIntent,
+    task_id: Option<String>,
 }
 
 /// tool that lets an agent send messages to sibling panes
@@ -189,27 +208,12 @@ impl AgentTool for SendMessageTool {
         args: serde_json::Value,
     ) -> Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
         Box::pin(async move {
-            let recipient = match args.get("recipient_pane").and_then(|v| v.as_u64()) {
-                Some(n) => n as u32,
-                None => return ToolResult::error("recipient_pane is required (integer)"),
-            };
-            let message = match args.get("message").and_then(|v| v.as_str()) {
-                Some(s) => s,
-                None => return ToolResult::error("message is required (string)"),
+            let args = match parse_tool_args::<SendMessageArgs>(args) {
+                Ok(args) => args,
+                Err(error) => return error,
             };
 
-            let intent: MessageIntent = args
-                .get("intent")
-                .and_then(|v| v.as_str())
-                .and_then(|s| serde_json::from_value(serde_json::Value::String(s.into())).ok())
-                .unwrap_or_default();
-
-            let task_id = args
-                .get("task_id")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-
-            let target = PaneId::new(recipient);
+            let target = PaneId::new(args.recipient_pane);
             if target == self.sender_id {
                 return ToolResult::error("cannot send a message to yourself");
             }
@@ -217,21 +221,21 @@ impl AgentTool for SendMessageTool {
             let msg = InterPaneMessage {
                 from: self.sender_id,
                 to: Some(target),
-                intent,
-                content: message.to_string(),
-                task_id: task_id.clone(),
+                intent: args.intent,
+                content: args.message,
+                task_id: args.task_id.clone(),
                 timestamp: Timestamp::now(),
             };
 
             match self.bus.send(target, msg) {
                 Ok(()) => {
-                    let mut reply = format!("sent {intent} to pane {recipient}");
-                    if let Some(tid) = &task_id {
-                        reply.push_str(&format!(" (task: {tid})"));
+                    let mut reply = format!("sent {} to pane {}", args.intent, args.recipient_pane);
+                    if let Some(task_id) = &args.task_id {
+                        reply.push_str(&format!(" (task: {task_id})"));
                     }
                     ToolResult::text(reply)
                 }
-                Err(e) => ToolResult::error(e),
+                Err(e) => ToolResult::error(e.to_string()),
             }
         })
     }

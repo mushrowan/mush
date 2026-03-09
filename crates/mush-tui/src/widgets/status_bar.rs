@@ -101,7 +101,10 @@ fn left_spans(app: &App) -> Vec<Span<'static>> {
     if app.stats.context_tokens > TokenCount::ZERO {
         let ctx = format_tokens(app.stats.context_tokens);
         let window = format_tokens(app.stats.context_window);
-        let pct = app.stats.context_tokens.percent_of(app.stats.context_window) as u64;
+        let pct = app
+            .stats
+            .context_tokens
+            .percent_of(app.stats.context_window) as u64;
 
         // colour by cache warmth, with context pressure overriding
         let cache_remaining = app.cache_remaining_secs();
@@ -149,10 +152,7 @@ fn left_spans(app: &App) -> Vec<Span<'static>> {
     }
 
     if app.show_cost && app.stats.total_cost > Dollars::ZERO {
-        spans.push(Span::styled(
-            format!(" | {}", app.stats.total_cost),
-            dim,
-        ));
+        spans.push(Span::styled(format!(" | {}", app.stats.total_cost), dim));
     }
 
     if let Some(ref status) = app.status

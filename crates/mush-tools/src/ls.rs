@@ -2,9 +2,16 @@
 
 use std::path::{Path, PathBuf};
 
-use mush_agent::tool::{AgentTool, ToolResult};
+use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
+use serde::Deserialize;
 
 use crate::util::resolve_path;
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LsArgs {
+    path: Option<String>,
+}
 
 pub struct LsTool {
     cwd: PathBuf,
@@ -45,9 +52,15 @@ impl AgentTool for LsTool {
         args: serde_json::Value,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
         Box::pin(async move {
-            let path = args["path"]
-                .as_str()
-                .map(|p| resolve_path(&self.cwd, p))
+            let args = match parse_tool_args::<LsArgs>(args) {
+                Ok(args) => args,
+                Err(error) => return error,
+            };
+
+            let path = args
+                .path
+                .as_deref()
+                .map(|path| resolve_path(&self.cwd, path))
                 .unwrap_or_else(|| self.cwd.clone());
 
             tokio::task::spawn_blocking(move || list_dir(&path))
@@ -71,7 +84,6 @@ fn list_dir(path: &Path) -> ToolResult {
         Err(e) => return ToolResult::error(format!("failed to read directory: {e}")),
     };
 
-    // sort: dirs first, then alphabetically
     entries.sort_by(|a, b| {
         let a_dir = a.file_type().map(|t| t.is_dir()).unwrap_or(false);
         let b_dir = b.file_type().map(|t| t.is_dir()).unwrap_or(false);
@@ -102,25 +114,23 @@ fn list_dir(path: &Path) -> ToolResult {
 
         let size = meta
             .as_ref()
-            .filter(|m| m.is_file())
-            .map(|m| format_size(m.len()))
-            .unwrap_or_else(|| "-".into());
-
+            .map_or_else(|| "?".to_string(), |m| format_size(m.len()));
         lines.push(format!("{size:>8}  {name}{type_indicator}"));
     }
 
-    ToolResult::text(format!("{} entries\n\n{}", entries.len(), lines.join("\n")))
+    ToolResult::text(lines.join("\n"))
 }
 
 fn format_size(bytes: u64) -> String {
-    if bytes < 1024 {
-        format!("{bytes}B")
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1}K", bytes as f64 / 1024.0)
-    } else if bytes < 1024 * 1024 * 1024 {
-        format!("{:.1}M", bytes as f64 / (1024.0 * 1024.0))
-    } else {
-        format!("{:.1}G", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+
+    match bytes {
+        b if b >= GB => format!("{:.1}G", b as f64 / GB as f64),
+        b if b >= MB => format!("{:.1}M", b as f64 / MB as f64),
+        b if b >= KB => format!("{:.1}K", b as f64 / KB as f64),
+        b => format!("{b}B"),
     }
 }
 
@@ -131,29 +141,16 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn list_directory() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("file.txt"), "hello").unwrap();
-        fs::create_dir(dir.path().join("subdir")).unwrap();
-
-        let result = list_dir(dir.path());
-        assert!(result.outcome.is_success());
-        let text = extract_text(&result);
-        assert!(text.contains("subdir/"));
-        assert!(text.contains("file.txt"));
-    }
-
-    #[test]
     fn list_empty_directory() {
         let dir = tempfile::tempdir().unwrap();
         let result = list_dir(dir.path());
         let text = extract_text(&result);
-        assert!(text.contains("empty directory"));
+        assert_eq!(text, "(empty directory)");
     }
 
     #[test]
     fn list_nonexistent() {
-        let result = list_dir(Path::new("/nonexistent/path"));
+        let result = list_dir(Path::new("/definitely/does/not/exist"));
         assert!(result.outcome.is_error());
     }
 
@@ -161,28 +158,40 @@ mod tests {
     fn list_file_not_dir() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("file.txt");
-        fs::write(&file, "hello").unwrap();
+        fs::write(&file, "x").unwrap();
         let result = list_dir(&file);
         assert!(result.outcome.is_error());
     }
 
     #[test]
-    fn dirs_listed_first() {
+    fn list_directory() {
         let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("aaa.txt"), "").unwrap();
-        fs::create_dir(dir.path().join("zzz_dir")).unwrap();
+        fs::create_dir(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("a.txt"), "hello").unwrap();
 
         let result = list_dir(dir.path());
         let text = extract_text(&result);
-        let dir_pos = text.find("zzz_dir").unwrap();
-        let file_pos = text.find("aaa.txt").unwrap();
-        assert!(dir_pos < file_pos, "dirs should come before files");
+        assert!(text.contains("src/"));
+        assert!(text.contains("a.txt"));
+    }
+
+    #[test]
+    fn dirs_listed_first() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("zzz_dir")).unwrap();
+        fs::write(dir.path().join("aaa_file.txt"), "hello").unwrap();
+
+        let result = list_dir(dir.path());
+        let text = extract_text(&result);
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines[0].contains("zzz_dir/"));
+        assert!(lines[1].contains("aaa_file.txt"));
     }
 
     #[test]
     fn format_sizes() {
-        assert_eq!(format_size(500), "500B");
-        assert_eq!(format_size(1536), "1.5K");
-        assert_eq!(format_size(2 * 1024 * 1024), "2.0M");
+        assert_eq!(format_size(123), "123B");
+        assert_eq!(format_size(2048), "2.0K");
+        assert_eq!(format_size(3 * 1024 * 1024), "3.0M");
     }
 }
