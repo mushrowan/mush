@@ -22,7 +22,8 @@ use crate::runner_panes::{cleanup_pane_isolation, drain_inboxes, fork_pane};
 use crate::runner_render::{draw_panes, handle_mouse};
 use crate::runner_streams::{
     StreamDeps, StreamState, abort_focused_stream, answer_confirmation, edit_last_queued_steering,
-    new_agent_streams, poll_confirmation_prompt, start_pending_streams, submit_streaming_input,
+    handle_agent_event_side_effects, new_agent_streams, poll_confirmation_prompt,
+    poll_live_tool_output, start_pending_streams, submit_streaming_input,
 };
 use crate::runner_terminal::{
     TerminalStateGuard, cleanup, enter_tui_terminal, install_panic_cleanup_hook,
@@ -361,127 +362,22 @@ pub async fn run_tui(
                             );
                         }
 
-                        // update shared context token count for auto-compaction
-                        if let AgentEvent::MessageEnd { message } = &event
-                            && let Some(meta) = stream_state.meta(pane_id) {
-                                meta.context_tokens.store(
-                                    message.usage.total_input_tokens().get(),
-                                    std::sync::atomic::Ordering::Relaxed,
-                                );
-                            }
-
-                        // file modification tracking (none isolation mode)
-                        if pane_mgr.is_multi_pane() {
-                            match &event {
-                                AgentEvent::ToolExecStart {
-                                    tool_call_id,
-                                    tool_name,
-                                    args,
-                                } => {
-                                    file_tracker.record_tool_start(
-                                        pane_id,
-                                        tool_call_id,
-                                        tool_name.as_str(),
-                                        args,
-                                    );
-                                }
-                                AgentEvent::ToolExecEnd {
-                                    tool_call_id,
-                                    tool_name: _,
-                                    result,
-                                } => {
-                                    if let Some(conflict) = file_tracker.record_tool_end(
-                                        pane_id,
-                                        tool_call_id,
-                                        result.outcome.is_success(),
-                                    ) {
-                                        let others: Vec<String> = conflict
-                                            .other_panes
-                                            .iter()
-                                            .map(|p| p.to_string())
-                                            .collect();
-                                        let warning = format!(
-                                            "⚠ file conflict: {} also modified by pane {}",
-                                            conflict.path.display(),
-                                            others.join(", ")
-                                        );
-                                        if let Some(pane) = pane_mgr.pane_mut(pane_id) {
-                                            pane.app.status = Some(warning);
-                                        }
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                        if matches!(event, AgentEvent::AgentEnd) {
-                            stream_state.remove(pane_id);
-
-                            // play completion sound
-                            crate::notify::play(crate::notify::Sound::Complete);
-
-                            // generate LLM title after first turn (with timeout)
-                            if let Some(pane) = pane_mgr.pane(pane_id)
-                                && !pane.title_generated
-                                && pane.conversation.len() >= 2
-                                && let Some(ref updater) = tui_config.update_title
-                            {
-                                let msgs = pane.conversation.context();
-                                let model = tui_config.model.clone();
-                                let opts = StreamOptions {
-                                    api_key: tui_config.options.api_key.clone(),
-                                    ..Default::default()
-                                };
-                                let updater = updater.clone();
-                                // 10s timeout so it doesn't block the UI
-                                if let Ok(Some(title)) = tokio::time::timeout(
-                                    std::time::Duration::from_secs(10),
-                                    mush_session::title::generate_title(
-                                        &msgs, registry, &model, &opts,
-                                    ),
-                                )
-                                .await
-                                {
-                                    updater(title);
-                                }
-                                if let Some(pane) = pane_mgr.pane_mut(pane_id) {
-                                    pane.title_generated = true;
-                                }
-                            }
-
-                            // notify when agent is done and cache is warm
-                            if tui_config.cache_timer
-                                && let Some(pane) = pane_mgr.pane(pane_id)
-                                    && let Some(remaining) = pane.app.cache_remaining_secs()
-                                        && remaining > 60 {
-                                            crate::notify::send_with_sound(
-                                                "awaiting input",
-                                                &format!("cache warm for {remaining}s"),
-                                                Some(crate::notify::Sound::Attention),
-                                            );
-                                        }
-
-                            // auto-save for this pane
-                            if let Some(pane) = pane_mgr.pane(pane_id)
-                                && let Some(ref saver) = tui_config.save_session {
-                                    saver(&pane.conversation, &pane.app.model_id);
-                                }
-                        }
+                        handle_agent_event_side_effects(
+                            &mut pane_mgr,
+                            &mut stream_state,
+                            pane_id,
+                            &event,
+                            &file_tracker,
+                            &tui_config,
+                            registry,
+                        )
+                        .await;
                     }
                 }
                 _ = tick => {
                     poll_confirmation_prompt(&mut pane_mgr, &mut stream_state).await;
 
-                    // poll live tool output for focused pane
-                    if let Some(ref live) = tui_config.tool_output_live {
-                        let app = &mut pane_mgr.focused_mut().app;
-                        if let Ok(guard) = live.lock()
-                            && let Some(last) = guard.as_ref()
-                            && let Some(active) =
-                                app.active_tools.last().map(|t| t.tool_call_id.clone())
-                        {
-                            app.push_tool_output(&active, last);
-                        }
-                    }
+                    poll_live_tool_output(&mut pane_mgr, &tui_config.tool_output_live);
 
                     // drain inter-pane message inboxes into steering queues
                     drain_inboxes(&mut pane_mgr).await;

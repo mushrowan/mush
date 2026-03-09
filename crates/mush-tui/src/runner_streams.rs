@@ -171,6 +171,130 @@ pub(super) async fn answer_confirmation(
     }
 }
 
+pub(super) fn poll_live_tool_output(
+    pane_mgr: &mut PaneManager,
+    live: &Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
+) {
+    if let Some(live) = live {
+        let app = &mut pane_mgr.focused_mut().app;
+        if let Ok(guard) = live.lock()
+            && let Some(last) = guard.as_ref()
+            && let Some(active) = app.active_tools.last().map(|t| t.tool_call_id.clone())
+        {
+            app.push_tool_output(&active, last);
+        }
+    }
+}
+
+pub(super) async fn handle_agent_event_side_effects(
+    pane_mgr: &mut PaneManager,
+    stream_state: &mut StreamState,
+    pane_id: PaneId,
+    event: &AgentEvent,
+    file_tracker: &FileTracker,
+    tui_config: &crate::runner::TuiConfig,
+    registry: &ApiRegistry,
+) {
+    if let AgentEvent::MessageEnd { message } = event
+        && let Some(meta) = stream_state.meta(pane_id)
+    {
+        meta.context_tokens.store(
+            message.usage.total_input_tokens().get(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    if pane_mgr.is_multi_pane() {
+        match event {
+            AgentEvent::ToolExecStart {
+                tool_call_id,
+                tool_name,
+                args,
+            } => {
+                file_tracker.record_tool_start(pane_id, tool_call_id, tool_name.as_str(), args);
+            }
+            AgentEvent::ToolExecEnd {
+                tool_call_id,
+                tool_name: _,
+                result,
+            } => {
+                if let Some(conflict) =
+                    file_tracker.record_tool_end(pane_id, tool_call_id, result.outcome.is_success())
+                {
+                    let others: Vec<String> = conflict
+                        .other_panes
+                        .iter()
+                        .map(|pane_id| pane_id.to_string())
+                        .collect();
+                    let warning = format!(
+                        "⚠ file conflict: {} also modified by pane {}",
+                        conflict.path.display(),
+                        others.join(", ")
+                    );
+                    if let Some(pane) = pane_mgr.pane_mut(pane_id) {
+                        pane.app.status = Some(warning);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if !matches!(event, AgentEvent::AgentEnd) {
+        return;
+    }
+
+    stream_state.remove(pane_id);
+    crate::notify::play(crate::notify::Sound::Complete);
+
+    let title_request = if let Some(pane) = pane_mgr.pane(pane_id)
+        && !pane.title_generated
+        && pane.conversation.len() >= 2
+        && let Some(ref updater) = tui_config.update_title
+    {
+        Some((pane.conversation.context(), updater.clone()))
+    } else {
+        None
+    };
+
+    if let Some((msgs, updater)) = title_request {
+        let model = tui_config.model.clone();
+        let opts = StreamOptions {
+            api_key: tui_config.options.api_key.clone(),
+            ..Default::default()
+        };
+        if let Ok(Some(title)) = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            mush_session::title::generate_title(&msgs, registry, &model, &opts),
+        )
+        .await
+        {
+            updater(title);
+        }
+        if let Some(pane) = pane_mgr.pane_mut(pane_id) {
+            pane.title_generated = true;
+        }
+    }
+
+    if tui_config.cache_timer
+        && let Some(pane) = pane_mgr.pane(pane_id)
+        && let Some(remaining) = pane.app.cache_remaining_secs()
+        && remaining > 60
+    {
+        crate::notify::send_with_sound(
+            "awaiting input",
+            &format!("cache warm for {remaining}s"),
+            Some(crate::notify::Sound::Attention),
+        );
+    }
+
+    if let Some(pane) = pane_mgr.pane(pane_id)
+        && let Some(ref saver) = tui_config.save_session
+    {
+        saver(&pane.conversation, &pane.app.model_id);
+    }
+}
+
 pub(super) async fn abort_focused_stream(
     pane_mgr: &mut PaneManager,
     stream_state: &mut StreamState,
@@ -849,6 +973,29 @@ mod tests {
                 .lock()
                 .await
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn poll_live_tool_output_updates_focused_tool() {
+        let pane_id = PaneId::new(1);
+        let mut pane_mgr = PaneManager::new(Pane::new(pane_id, app()));
+        let tool_call_id = ToolCallId::from("tc_live");
+        pane_mgr
+            .focused_mut()
+            .app
+            .start_tool(&tool_call_id, "bash", "cargo test");
+
+        let live = Some(std::sync::Arc::new(std::sync::Mutex::new(Some(
+            "running".to_string(),
+        ))));
+        poll_live_tool_output(&mut pane_mgr, &live);
+
+        assert_eq!(
+            pane_mgr.focused().app.active_tools[0]
+                .live_output
+                .as_deref(),
+            Some("running")
         );
     }
 }

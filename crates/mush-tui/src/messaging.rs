@@ -77,6 +77,13 @@ pub enum MessageBusError {
     PaneNotFound(PaneId),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BroadcastStats {
+    pub attempted: usize,
+    pub sent: usize,
+    pub dropped: usize,
+}
+
 /// routes messages between panes via per-pane channels
 #[derive(Clone)]
 pub struct MessageBus {
@@ -118,12 +125,14 @@ impl MessageBus {
     }
 
     /// send a message to all panes except the sender
-    pub fn broadcast(&self, from: PaneId, content: String) -> usize {
+    pub fn broadcast(&self, from: PaneId, content: String) -> BroadcastStats {
         let senders = self.senders.lock().unwrap();
         let timestamp = Timestamp::now();
+        let mut attempted = 0;
         let mut sent = 0;
         for (&id, tx) in senders.iter() {
             if id != from {
+                attempted += 1;
                 let msg = InterPaneMessage {
                     from,
                     to: Some(id),
@@ -137,7 +146,11 @@ impl MessageBus {
                 }
             }
         }
-        sent
+        BroadcastStats {
+            attempted,
+            sent,
+            dropped: attempted.saturating_sub(sent),
+        }
     }
 
     /// list registered pane ids
@@ -288,8 +301,15 @@ mod tests {
         let mut rx2 = bus.register(PaneId::new(2));
         bus.register(PaneId::new(3)); // sender
 
-        let sent = bus.broadcast(PaneId::new(3), "broadcast msg".into());
-        assert_eq!(sent, 2);
+        let stats = bus.broadcast(PaneId::new(3), "broadcast msg".into());
+        assert_eq!(
+            stats,
+            BroadcastStats {
+                attempted: 2,
+                sent: 2,
+                dropped: 0,
+            }
+        );
 
         assert_eq!(rx1.try_recv().unwrap().content, "broadcast msg");
         assert_eq!(rx2.try_recv().unwrap().content, "broadcast msg");
@@ -300,9 +320,34 @@ mod tests {
         let bus = MessageBus::new();
         let mut rx1 = bus.register(PaneId::new(1));
 
-        let sent = bus.broadcast(PaneId::new(1), "self msg".into());
-        assert_eq!(sent, 0);
+        let stats = bus.broadcast(PaneId::new(1), "self msg".into());
+        assert_eq!(
+            stats,
+            BroadcastStats {
+                attempted: 0,
+                sent: 0,
+                dropped: 0,
+            }
+        );
         assert!(rx1.try_recv().is_err());
+    }
+
+    #[test]
+    fn message_bus_broadcast_reports_dropped_receivers() {
+        let bus = MessageBus::new();
+        drop(bus.register(PaneId::new(1)));
+        let _rx2 = bus.register(PaneId::new(2));
+        let _rx3 = bus.register(PaneId::new(3));
+
+        let stats = bus.broadcast(PaneId::new(3), "broadcast msg".into());
+        assert_eq!(
+            stats,
+            BroadcastStats {
+                attempted: 2,
+                sent: 1,
+                dropped: 1,
+            }
+        );
     }
 
     #[test]

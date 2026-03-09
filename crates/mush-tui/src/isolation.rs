@@ -30,6 +30,20 @@ pub struct JjChangeInfo {
     pub change_id: String,
 }
 
+pub struct WorktreeMergeInfo {
+    pub branch: String,
+    pub summary: Option<String>,
+}
+
+pub struct JjSquashInfo {
+    pub summary: Option<String>,
+}
+
+pub struct JjChangeDescription {
+    pub short_change_id: String,
+    pub description: Option<String>,
+}
+
 #[derive(Debug, Error)]
 pub enum IsolationError {
     #[error("failed to {action}: {source}")]
@@ -45,6 +59,8 @@ pub enum IsolationError {
     },
     #[error("got empty change id from jj")]
     EmptyChangeId,
+    #[error("got malformed change description from jj")]
+    MalformedChangeDescription,
 }
 
 fn command_detail(output: &Output) -> String {
@@ -59,6 +75,38 @@ fn command_detail(output: &Output) -> String {
     }
 
     format!("exit status {}", output.status)
+}
+
+fn stdout_summary(output: &Output) -> Option<String> {
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if stdout.is_empty() {
+        None
+    } else {
+        Some(stdout)
+    }
+}
+
+fn parse_jj_change_description(text: &str) -> Result<JjChangeDescription, IsolationError> {
+    let mut lines = text.lines();
+    let short_change_id = lines
+        .next()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .ok_or(IsolationError::MalformedChangeDescription)?
+        .to_string();
+
+    let description = lines.collect::<Vec<_>>().join("\n");
+    let description = description.trim();
+    let description = if description.is_empty() || description == "(empty)" {
+        None
+    } else {
+        Some(description.to_string())
+    };
+
+    Ok(JjChangeDescription {
+        short_change_id,
+        description,
+    })
 }
 
 async fn run_command(
@@ -191,7 +239,10 @@ pub async fn remove_worktree(repo_root: &Path, pane_id: PaneId) -> Result<(), Is
     Ok(())
 }
 
-pub async fn merge_worktree(repo_root: &Path, pane_id: PaneId) -> Result<String, IsolationError> {
+pub async fn merge_worktree(
+    repo_root: &Path,
+    pane_id: PaneId,
+) -> Result<WorktreeMergeInfo, IsolationError> {
     let branch = worktree_branch(pane_id);
 
     let output = {
@@ -202,9 +253,11 @@ pub async fn merge_worktree(repo_root: &Path, pane_id: PaneId) -> Result<String,
         run_command(&mut command, "run git merge").await?
     };
     let output = ensure_success(output, "merge worktree branch")?;
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
-    Ok(format!("merged {branch}: {stdout}"))
+    Ok(WorktreeMergeInfo {
+        branch,
+        summary: stdout_summary(&output),
+    })
 }
 
 pub async fn cleanup_stale_worktrees(repo_root: &Path) -> usize {
@@ -285,7 +338,10 @@ pub async fn edit_jj_change(repo_root: &Path, change_id: &str) -> Result<(), Iso
     Ok(())
 }
 
-pub async fn squash_jj_change(repo_root: &Path, change_id: &str) -> Result<String, IsolationError> {
+pub async fn squash_jj_change(
+    repo_root: &Path,
+    change_id: &str,
+) -> Result<JjSquashInfo, IsolationError> {
     let output = {
         let mut command = tokio::process::Command::new("jj");
         command
@@ -294,7 +350,9 @@ pub async fn squash_jj_change(repo_root: &Path, change_id: &str) -> Result<Strin
         run_command(&mut command, "run jj squash").await?
     };
     let output = ensure_success(output, "run jj squash")?;
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    Ok(JjSquashInfo {
+        summary: stdout_summary(&output),
+    })
 }
 
 pub async fn abandon_jj_change(repo_root: &Path, change_id: &str) -> Result<(), IsolationError> {
@@ -310,7 +368,7 @@ pub async fn abandon_jj_change(repo_root: &Path, change_id: &str) -> Result<(), 
 pub async fn describe_jj_change(
     repo_root: &Path,
     change_id: &str,
-) -> Result<String, IsolationError> {
+) -> Result<JjChangeDescription, IsolationError> {
     let output = {
         let mut command = tokio::process::Command::new("jj");
         command
@@ -326,7 +384,7 @@ pub async fn describe_jj_change(
         run_command(&mut command, "describe jj change").await?
     };
     let output = ensure_success(output, "describe jj change")?;
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    parse_jj_change_description(&String::from_utf8_lossy(&output.stdout))
 }
 
 #[cfg(test)]
@@ -372,5 +430,42 @@ mod tests {
             stderr: b"stderr".to_vec(),
         };
         assert_eq!(command_detail(&output), "stderr");
+    }
+
+    #[test]
+    fn stdout_summary_trims_stdout() {
+        let output = std::process::Output {
+            status: std::process::ExitStatus::from_raw(0),
+            stdout: b"  merged cleanly\n".to_vec(),
+            stderr: vec![],
+        };
+        assert_eq!(stdout_summary(&output).as_deref(), Some("merged cleanly"));
+    }
+
+    #[test]
+    fn stdout_summary_ignores_empty_stdout() {
+        let output = std::process::Output {
+            status: std::process::ExitStatus::from_raw(0),
+            stdout: b"  \n".to_vec(),
+            stderr: vec![],
+        };
+        assert_eq!(stdout_summary(&output), None);
+    }
+
+    #[test]
+    fn parse_jj_change_description_handles_empty_marker() {
+        let description = parse_jj_change_description("abc12345\n(empty)\n").unwrap();
+        assert_eq!(description.short_change_id, "abc12345");
+        assert_eq!(description.description, None);
+    }
+
+    #[test]
+    fn parse_jj_change_description_keeps_multiline_body() {
+        let description = parse_jj_change_description("abc12345\nline one\nline two\n").unwrap();
+        assert_eq!(description.short_change_id, "abc12345");
+        assert_eq!(
+            description.description.as_deref(),
+            Some("line one\nline two")
+        );
     }
 }

@@ -68,11 +68,16 @@ pub(super) async fn handle_slash_action(
                     .push_system_message("no sibling panes to broadcast to");
             } else {
                 let from = pane_mgr.focused().id;
-                let sent = message_bus.broadcast(from, message);
-                pane_mgr
-                    .focused_mut()
-                    .app
-                    .push_system_message(format!("broadcast sent to {sent} pane(s)"));
+                let stats = message_bus.broadcast(from, message);
+                let summary = if stats.dropped == 0 {
+                    format!("broadcast sent to {} pane(s)", stats.sent)
+                } else {
+                    format!(
+                        "broadcast sent to {} pane(s), {} dropped",
+                        stats.sent, stats.dropped
+                    )
+                };
+                pane_mgr.focused_mut().app.push_system_message(summary);
             }
         }
         SlashAction::Lock { path } => {
@@ -218,15 +223,15 @@ pub(super) async fn handle_slash_action(
         SlashAction::Merge => {
             let pane = pane_mgr.focused();
             match &pane.isolation {
-                Some(crate::isolation::PaneIsolation::Worktree { branch, .. }) => {
-                    let branch = branch.clone();
+                Some(crate::isolation::PaneIsolation::Worktree { .. }) => {
                     let pane_id = pane.id;
                     match crate::isolation::merge_worktree(cwd, pane_id).await {
-                        Ok(msg) => {
-                            pane_mgr
-                                .focused_mut()
-                                .app
-                                .push_system_message(format!("merged {branch}: {msg}"));
+                        Ok(info) => {
+                            let summary = match info.summary {
+                                Some(summary) => format!("merged {}: {summary}", info.branch),
+                                None => format!("merged {}", info.branch),
+                            };
+                            pane_mgr.focused_mut().app.push_system_message(summary);
                         }
                         Err(error) => {
                             pane_mgr
@@ -239,11 +244,12 @@ pub(super) async fn handle_slash_action(
                 Some(crate::isolation::PaneIsolation::Jj { change_id }) => {
                     let change_id = change_id.clone();
                     match crate::isolation::squash_jj_change(cwd, &change_id).await {
-                        Ok(msg) => {
-                            pane_mgr
-                                .focused_mut()
-                                .app
-                                .push_system_message(format!("squashed jj change: {msg}"));
+                        Ok(info) => {
+                            let summary = match info.summary {
+                                Some(summary) => format!("squashed jj change: {summary}"),
+                                None => "squashed jj change".into(),
+                            };
+                            pane_mgr.focused_mut().app.push_system_message(summary);
                             pane_mgr.focused_mut().isolation = None;
                         }
                         Err(error) => {
