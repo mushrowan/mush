@@ -34,22 +34,13 @@ impl Widget for MessageList<'_> {
             if msg.queued {
                 continue; // rendered after streaming content
             }
-            let in_selection = selection_range
-                .is_some_and(|(start, end)| i >= start && i <= end);
+            let in_selection = selection_range.is_some_and(|(start, end)| i >= start && i <= end);
             let sel = SelectionHint {
-                selected: in_scroll_mode
-                    && (self.app.selected_message == Some(i) || in_selection),
+                selected: in_scroll_mode && (self.app.selected_message == Some(i) || in_selection),
                 is_cursor: in_scroll_mode && self.app.selected_message == Some(i),
                 has_visual: self.app.has_selection(),
             };
-            render_message(
-                msg,
-                i,
-                &mut lines,
-                sel,
-                &mut image_placeholders,
-                area.width,
-            );
+            render_message(msg, i, &mut lines, sel, &mut image_placeholders, area.width);
             lines.push(Line::raw(""));
         }
 
@@ -124,22 +115,13 @@ impl Widget for MessageList<'_> {
             if !msg.queued {
                 continue;
             }
-            let in_selection = selection_range
-                .is_some_and(|(start, end)| i >= start && i <= end);
+            let in_selection = selection_range.is_some_and(|(start, end)| i >= start && i <= end);
             let sel = SelectionHint {
-                selected: in_scroll_mode
-                    && (self.app.selected_message == Some(i) || in_selection),
+                selected: in_scroll_mode && (self.app.selected_message == Some(i) || in_selection),
                 is_cursor: in_scroll_mode && self.app.selected_message == Some(i),
                 has_visual: self.app.has_selection(),
             };
-            render_message(
-                msg,
-                i,
-                &mut lines,
-                sel,
-                &mut image_placeholders,
-                area.width,
-            );
+            render_message(msg, i, &mut lines, sel, &mut image_placeholders, area.width);
             lines.push(Line::raw(""));
         }
 
@@ -401,7 +383,9 @@ fn render_message(
                 parts.push(format!("reuse {reuse_pct}%"));
             }
             if usage.cache_write_tokens > TokenCount::ZERO {
-                let write_pct = usage.cache_write_tokens.percent_of(usage.total_input_tokens()) as u32;
+                let write_pct = usage
+                    .cache_write_tokens
+                    .percent_of(usage.total_input_tokens()) as u32;
                 parts.push(format!("write {write_pct}%"));
             }
             if let Some(c) = msg.cost {

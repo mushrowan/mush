@@ -1,6 +1,14 @@
 //! notify_user tool - send a desktop notification to the user
 
-use mush_agent::tool::{AgentTool, ToolResult};
+use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NotifyUserArgs {
+    title: String,
+    body: String,
+}
 
 pub struct NotifyUserTool;
 
@@ -51,20 +59,23 @@ impl AgentTool for NotifyUserTool {
         args: serde_json::Value,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
         Box::pin(async move {
-            let title = args["title"].as_str().unwrap_or("mush");
-            let body = args["body"].as_str().unwrap_or("");
+            let args = match parse_tool_args::<NotifyUserArgs>(args) {
+                Ok(args) => args,
+                Err(error) => return error,
+            };
 
-            // send notification via notify-send
+            let title = args.title;
+            let body = args.body;
+
             let notif_result = std::process::Command::new("notify-send")
                 .arg("--app-name=mush")
-                .arg(title)
-                .arg(body)
+                .arg(&title)
+                .arg(&body)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status();
 
-            // also play a sound via pw-play
             let sound_path =
                 "/run/current-system/sw/share/sounds/freedesktop/stereo/message-new-instant.oga";
             if std::path::Path::new(sound_path).exists() {
@@ -84,10 +95,7 @@ impl AgentTool for NotifyUserTool {
                     "notify-send exited with {}, notification may not have appeared",
                     status
                 )),
-                Err(_) => {
-                    // no notify-send available, still OK
-                    ToolResult::text("notification attempted (notify-send not available)")
-                }
+                Err(_) => ToolResult::text("notification attempted (notify-send not available)"),
             }
         })
     }

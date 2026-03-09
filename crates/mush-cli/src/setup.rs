@@ -19,7 +19,7 @@ pub struct AppSetup {
     pub system_prompt: String,
     pub options: StreamOptions,
     pub thinking_prefs: std::collections::HashMap<String, ThinkingLevel>,
-    pub tools: Vec<Box<dyn mush_agent::tool::AgentTool>>,
+    pub tools: mush_agent::tool::ToolRegistry,
     pub debug_cache: bool,
     pub max_turns: usize,
 }
@@ -58,8 +58,8 @@ impl AppSetup {
 
         let use_patch = mush_tools::uses_patch_tool(&model.id);
         let skip_batch = mush_tools::supports_native_parallel_calls(&model.id);
-        let mut tools: Vec<Box<dyn mush_agent::tool::AgentTool>> = if args.no_tools {
-            vec![]
+        let mut tools = if args.no_tools {
+            mush_agent::tool::ToolRegistry::new()
         } else {
             mush_tools::builtin_tools_with_options(
                 cwd.clone(),
@@ -71,7 +71,7 @@ impl AppSetup {
 
         if !args.no_tools && !cfg.mcp.is_empty() {
             let (_mcp_manager, mcp_tools) = mush_mcp::McpManager::connect_all(&cfg.mcp).await;
-            tools.extend(mcp_tools);
+            tools.extend_shared(mcp_tools.iter().cloned());
         }
 
         let system_prompt = args

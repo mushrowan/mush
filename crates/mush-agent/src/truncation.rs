@@ -125,21 +125,20 @@ pub fn truncate_tool_output_with(
             let preview = kept.join("\n");
             let hint = actionable_hint(&saved_path);
             if hit_bytes {
-                format!("{preview}\n\n[…{omitted} lines truncated ({} total). {hint}]", total)
+                format!(
+                    "{preview}\n\n[…{omitted} lines truncated ({} total). {hint}]",
+                    total
+                )
             } else {
                 format!("{preview}\n\n[…{omitted} lines truncated ({total} total). {hint}]")
             }
         }
         Direction::Tail => {
-            let (kept, hit_bytes) = collect_tail(&lines, max_lines, max_bytes);
+            let (kept, _hit_bytes) = collect_tail(&lines, max_lines, max_bytes);
             let omitted = total - kept.len();
             let preview = kept.join("\n");
             let hint = actionable_hint(&saved_path);
-            if hit_bytes {
-                format!("[{omitted} lines truncated… ({total} total). {hint}]\n\n{preview}")
-            } else {
-                format!("[{omitted} lines truncated… ({total} total). {hint}]\n\n{preview}")
-            }
+            format!("[{omitted} lines truncated… ({total} total). {hint}]\n\n{preview}")
         }
         Direction::Middle => {
             let half_lines = max_lines / 2;
@@ -150,7 +149,9 @@ pub fn truncate_tool_output_with(
             let head_text = head.join("\n");
             let tail_text = tail.join("\n");
             let hint = actionable_hint(&saved_path);
-            format!("{head_text}\n\n[…{omitted} lines truncated ({total} total). {hint}]\n\n{tail_text}")
+            format!(
+                "{head_text}\n\n[…{omitted} lines truncated ({total} total). {hint}]\n\n{tail_text}"
+            )
         }
     };
 
@@ -258,7 +259,8 @@ mod tests {
     #[test]
     fn head_keeps_start() {
         let lines = make_numbered_lines(10);
-        let out = truncate_tool_output_with(ToolResult::text(lines), 3, usize::MAX, Direction::Head);
+        let out =
+            truncate_tool_output_with(ToolResult::text(lines), 3, usize::MAX, Direction::Head);
         assert_text(&out, |t| {
             assert!(t.contains("line 0"));
             assert!(t.contains("line 2"));
@@ -329,7 +331,10 @@ mod tests {
     // helpers
 
     fn make_lines(n: usize) -> String {
-        (0..n).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n")
+        (0..n)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn make_numbered_lines(n: usize) -> String {

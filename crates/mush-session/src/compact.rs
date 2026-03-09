@@ -628,7 +628,8 @@ mod tests {
         );
 
         // compact again
-        let result2 = compact_with_summary(msgs, "updated summary including follow-ups", Some(keep));
+        let result2 =
+            compact_with_summary(msgs, "updated summary including follow-ups", Some(keep));
         assert!(
             result2.summarised_count > 0,
             "should have summarised some messages"
@@ -645,7 +646,9 @@ mod tests {
             .flat_map(|i| {
                 vec![
                     user_msg(&format!("msg {i} padding padding padding padding padding")),
-                    assistant_msg(&format!("reply {i} padding padding padding padding padding")),
+                    assistant_msg(&format!(
+                        "reply {i} padding padding padding padding padding"
+                    )),
                 ]
             })
             .collect();
@@ -667,8 +670,12 @@ mod tests {
         // add more messages
         let mut msgs2 = r1.messages;
         for i in 0..20 {
-            msgs2.push(user_msg(&format!("more {i} padding padding padding padding padding")));
-            msgs2.push(assistant_msg(&format!("more reply {i} padding padding padding padding")));
+            msgs2.push(user_msg(&format!(
+                "more {i} padding padding padding padding padding"
+            )));
+            msgs2.push(assistant_msg(&format!(
+                "more reply {i} padding padding padding padding"
+            )));
         }
 
         // second compaction

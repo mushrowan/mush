@@ -2457,6 +2457,7 @@ dependencies = [
  "futures",
  "mush-ai",
  "pretty_assertions",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",
@@ -2568,6 +2569,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
 ]
@@ -2592,6 +2594,7 @@ dependencies = [
  "serde",
  "serde_json",
  "syntect",
+ "thiserror 2.0.18",
  "throbber-widgets-tui",
  "tokio",
  "toml",

@@ -3,9 +3,38 @@
 use std::path::PathBuf;
 use std::process::Stdio;
 
-use mush_agent::tool::{AgentTool, ToolResult};
+use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
+use serde::Deserialize;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
+
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum BashOutput {
+    #[default]
+    Text,
+    Json,
+}
+
+impl BashOutput {
+    fn is_json(self) -> bool {
+        matches!(self, Self::Json)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BashArgs {
+    command: String,
+    #[serde(default = "default_timeout_secs")]
+    timeout: u64,
+    #[serde(default)]
+    output: BashOutput,
+}
+
+const fn default_timeout_secs() -> u64 {
+    DEFAULT_TIMEOUT_SECS
+}
 
 /// sender for streaming partial output lines from bash
 pub type OutputSink = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
@@ -70,14 +99,19 @@ impl AgentTool for BashTool {
         args: serde_json::Value,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
         Box::pin(async move {
-            let Some(command) = args["command"].as_str() else {
-                return ToolResult::error("missing required parameter: command");
+            let args = match parse_tool_args::<BashArgs>(args) {
+                Ok(args) => args,
+                Err(error) => return error,
             };
 
-            let timeout = args["timeout"].as_u64().unwrap_or(DEFAULT_TIMEOUT_SECS);
-            let json_output = args["output"].as_str() == Some("json");
-
-            run_command(&self.cwd, command, timeout, self.output_sink.as_ref(), json_output).await
+            run_command(
+                &self.cwd,
+                &args.command,
+                args.timeout,
+                self.output_sink.as_ref(),
+                args.output.is_json(),
+            )
+            .await
         })
     }
 }
@@ -166,7 +200,9 @@ fn format_result(
         if exit_code != 0 || timed_out {
             ToolResult {
                 content: vec![mush_ai::types::ToolResultContentPart::Text(
-                    mush_ai::types::TextContent { text: json.to_string() },
+                    mush_ai::types::TextContent {
+                        text: json.to_string(),
+                    },
                 )],
                 outcome: mush_ai::types::ToolOutcome::Error,
             }

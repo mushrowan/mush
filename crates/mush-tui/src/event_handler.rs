@@ -9,15 +9,14 @@ use mush_agent::{AgentEvent, summarise_tool_args};
 use mush_ai::models;
 use mush_ai::stream::StreamEvent;
 use mush_ai::types::*;
-use mush_session::tree::SessionTree;
+use mush_session::ConversationState;
 
 use crate::app::App;
 
 /// mutable state shared across the event loop
 pub struct EventCtx<'a> {
     pub app: &'a mut App,
-    pub conversation: &'a mut Vec<Message>,
-    pub session_tree: &'a mut SessionTree,
+    pub conversation: &'a mut ConversationState,
     pub image_protos: &'a mut std::collections::HashMap<
         (usize, usize),
         ratatui_image::protocol::StatefulProtocol,
@@ -34,7 +33,6 @@ pub fn handle_agent_event(
     let EventCtx {
         app,
         conversation,
-        session_tree,
         image_protos,
     } = ctx;
     match event {
@@ -59,8 +57,7 @@ pub fn handle_agent_event(
                 ));
             }
             let msg = Message::Assistant(message.clone());
-            session_tree.append_message(msg.clone());
-            conversation.push(msg);
+            conversation.append_message(msg);
         }
         AgentEvent::ToolExecStart {
             tool_call_id,
@@ -68,7 +65,7 @@ pub fn handle_agent_event(
             args,
         } => {
             let summary = summarise_tool_args(tool_name.as_str(), args);
-            app.start_tool(tool_call_id.as_str(), tool_name.as_str(), &summary);
+            app.start_tool(tool_call_id, tool_name.as_str(), &summary);
         }
         AgentEvent::ToolExecEnd {
             tool_call_id,
@@ -105,7 +102,7 @@ pub fn handle_agent_event(
                 image_protos.insert((msg_idx, tc_idx), proto);
             }
             app.end_tool(
-                tool_call_id.as_str(),
+                tool_call_id,
                 tool_name.as_str(),
                 result.outcome,
                 output_text,
@@ -118,8 +115,7 @@ pub fn handle_agent_event(
                 outcome: result.outcome,
                 timestamp_ms: Timestamp::now(),
             });
-            session_tree.append_message(msg.clone());
-            conversation.push(msg);
+            conversation.append_message(msg);
         }
         AgentEvent::TurnStart { .. } => {
             // clear previous turn's tool panels (results are already inline in messages)

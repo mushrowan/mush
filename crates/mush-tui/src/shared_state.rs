@@ -8,17 +8,29 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
-use mush_agent::tool::{AgentTool, ToolResult};
+use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use thiserror::Error;
 
 /// how values are merged when multiple agents write to the same key
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Reducer {
     /// last write wins (default)
     #[default]
     Overwrite,
     /// append to a JSON array (creates one if key doesn't exist)
     Append,
+}
+
+#[derive(Debug, Error)]
+pub enum SharedStateError {
+    #[error("failed to serialise shared state value")]
+    Serialise(#[source] serde_json::Error),
+    #[error("failed to deserialise shared state value")]
+    Deserialise(#[source] serde_json::Error),
 }
 
 /// shared state store accessible by all panes
@@ -55,6 +67,15 @@ impl SharedState {
         self.fields.lock().unwrap().get(key).cloned()
     }
 
+    pub fn get_typed<T>(&self, key: &str) -> Result<Option<T>, SharedStateError>
+    where
+        T: DeserializeOwned,
+    {
+        self.get(key)
+            .map(|value| serde_json::from_value(value).map_err(SharedStateError::Deserialise))
+            .transpose()
+    }
+
     /// write a value, applying the configured reducer
     pub fn set(&self, key: &str, value: Value) {
         let reducer = self
@@ -88,6 +109,15 @@ impl SharedState {
         }
     }
 
+    pub fn set_typed<T>(&self, key: &str, value: T) -> Result<(), SharedStateError>
+    where
+        T: Serialize,
+    {
+        let value = serde_json::to_value(value).map_err(SharedStateError::Serialise)?;
+        self.set(key, value);
+        Ok(())
+    }
+
     /// delete a key
     pub fn remove(&self, key: &str) -> Option<Value> {
         self.fields.lock().unwrap().remove(key)
@@ -102,6 +132,20 @@ impl SharedState {
     pub fn snapshot(&self) -> HashMap<String, Value> {
         self.fields.lock().unwrap().clone()
     }
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadStateArgs {
+    key: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WriteStateArgs {
+    key: String,
+    value: Value,
+    reducer: Option<Reducer>,
 }
 
 /// tool for reading shared state
@@ -141,7 +185,12 @@ impl AgentTool for ReadStateTool {
         args: serde_json::Value,
     ) -> Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
         Box::pin(async move {
-            match args.get("key").and_then(|v| v.as_str()) {
+            let args = match parse_tool_args::<ReadStateArgs>(args) {
+                Ok(args) => args,
+                Err(error) => return error,
+            };
+
+            match args.key.as_deref() {
                 Some(key) => match self.state.get(key) {
                     Some(val) => ToolResult::text(serde_json::to_string_pretty(&val).unwrap()),
                     None => ToolResult::text(format!("key \"{key}\" not found")),
@@ -206,24 +255,17 @@ impl AgentTool for WriteStateTool {
         args: serde_json::Value,
     ) -> Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
         Box::pin(async move {
-            let Some(key) = args.get("key").and_then(|v| v.as_str()) else {
-                return ToolResult::error("key is required (string)");
-            };
-            let Some(value) = args.get("value").cloned() else {
-                return ToolResult::error("value is required");
+            let args = match parse_tool_args::<WriteStateArgs>(args) {
+                Ok(args) => args,
+                Err(error) => return error,
             };
 
-            // set reducer if specified
-            if let Some(reducer_str) = args.get("reducer").and_then(|v| v.as_str()) {
-                let reducer = match reducer_str {
-                    "append" => Reducer::Append,
-                    _ => Reducer::Overwrite,
-                };
-                self.state.set_reducer(key, reducer);
+            if let Some(reducer) = args.reducer {
+                self.state.set_reducer(&args.key, reducer);
             }
 
-            self.state.set(key, value);
-            ToolResult::text(format!("wrote to \"{key}\""))
+            self.state.set(&args.key, args.value);
+            ToolResult::text(format!("wrote to \"{}\"", args.key))
         })
     }
 }
@@ -231,6 +273,13 @@ impl AgentTool for WriteStateTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+    struct Progress {
+        percent: u8,
+        label: String,
+    }
 
     #[test]
     fn overwrite_reducer() {
@@ -273,9 +322,43 @@ mod tests {
     }
 
     #[test]
+    fn get_typed_round_trips() {
+        let state = SharedState::new();
+        state
+            .set_typed(
+                "progress",
+                Progress {
+                    percent: 42,
+                    label: "halfway".into(),
+                },
+            )
+            .unwrap();
+
+        let progress = state.get_typed::<Progress>("progress").unwrap();
+        assert_eq!(
+            progress,
+            Some(Progress {
+                percent: 42,
+                label: "halfway".into(),
+            })
+        );
+    }
+
+    #[test]
     fn get_missing_key() {
         let state = SharedState::new();
         assert_eq!(state.get("nope"), None);
+        assert_eq!(state.get_typed::<Progress>("nope").unwrap(), None);
+    }
+
+    #[test]
+    fn get_typed_reports_shape_mismatch() {
+        let state = SharedState::new();
+        state.set("progress", serde_json::json!(42));
+        assert!(matches!(
+            state.get_typed::<Progress>("progress"),
+            Err(SharedStateError::Deserialise(_))
+        ));
     }
 
     #[test]

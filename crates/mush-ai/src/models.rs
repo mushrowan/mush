@@ -2,7 +2,9 @@
 //!
 //! static definitions for known models. users can override via models.json.
 
-use crate::types::{Api, Cost, Dollars, InputModality, Model, ModelCost, Provider, TokenCount, Usage};
+use crate::types::{
+    Api, Cost, Dollars, InputModality, Model, ModelCost, Provider, TokenCount, Usage,
+};
 
 /// all built-in anthropic models
 #[must_use]

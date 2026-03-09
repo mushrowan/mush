@@ -214,11 +214,14 @@ fn handle_idle_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
                 return None;
             }
             let text = app.take_input();
-            if let Some(rest) = text.strip_prefix('/') {
-                let parts: Vec<&str> = rest.splitn(2, ' ').collect();
-                let name = parts[0].to_string();
-                let args = parts.get(1).unwrap_or(&"").to_string();
-                return Some(AppEvent::SlashCommand { name, args });
+            if text.starts_with('/') {
+                match crate::slash::parse(&text) {
+                    Ok(action) => return Some(AppEvent::SlashCommand { action }),
+                    Err(error) => {
+                        app.push_system_message(error.to_string());
+                        return None;
+                    }
+                }
             }
             Some(AppEvent::UserSubmit { text })
         }
@@ -539,8 +542,9 @@ fn handle_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
                 let id = meta.id.to_string();
                 app.close_session_picker();
                 Some(AppEvent::SlashCommand {
-                    name: "resume".into(),
-                    args: id,
+                    action: crate::slash::SlashAction::Resume {
+                        session_id: id.into(),
+                    },
                 })
             } else {
                 None
@@ -779,10 +783,9 @@ mod tests {
         app.cursor = 5;
         let event = handle_key(&mut app, key(KeyCode::Enter));
         match event {
-            Some(AppEvent::SlashCommand { name, args }) => {
-                assert_eq!(name, "help");
-                assert!(args.is_empty());
-            }
+            Some(AppEvent::SlashCommand {
+                action: crate::slash::SlashAction::Help,
+            }) => {}
             other => panic!("expected SlashCommand, got {other:?}"),
         }
     }
@@ -794,7 +797,9 @@ mod tests {
         app.cursor = 19;
         let event = handle_key(&mut app, key(KeyCode::Enter));
         match event {
-            Some(AppEvent::SlashCommand { name, args }) => {
+            Some(AppEvent::SlashCommand {
+                action: crate::slash::SlashAction::Other { name, args },
+            }) => {
                 assert_eq!(name, "review");
                 assert_eq!(args, "src/main.rs");
             }

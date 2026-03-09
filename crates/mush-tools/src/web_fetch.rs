@@ -1,11 +1,35 @@
 //! web fetch tool - fetch URL content and convert to markdown/text
 
-use mush_agent::tool::{AgentTool, ToolResult};
+use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
+use serde::Deserialize;
 
 const MAX_RESPONSE_SIZE: usize = 5 * 1024 * 1024; // 5MB
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const MAX_TIMEOUT_SECS: u64 = 120;
 const MAX_OUTPUT_CHARS: usize = 50_000;
+
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum FetchFormat {
+    #[default]
+    Markdown,
+    Text,
+    Html,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WebFetchArgs {
+    url: String,
+    #[serde(default)]
+    format: FetchFormat,
+    #[serde(default = "default_timeout_secs")]
+    timeout: u64,
+}
+
+const fn default_timeout_secs() -> u64 {
+    DEFAULT_TIMEOUT_SECS
+}
 
 pub struct WebFetchTool;
 
@@ -61,21 +85,16 @@ impl AgentTool for WebFetchTool {
         args: serde_json::Value,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
         Box::pin(async move {
-            let url = match args["url"].as_str() {
-                Some(u) => u,
-                None => return ToolResult::error("missing required parameter: url"),
+            let args = match parse_tool_args::<WebFetchArgs>(args) {
+                Ok(args) => args,
+                Err(error) => return error,
             };
 
-            if !url.starts_with("http://") && !url.starts_with("https://") {
+            if !args.url.starts_with("http://") && !args.url.starts_with("https://") {
                 return ToolResult::error("URL must start with http:// or https://");
             }
 
-            let format = args["format"].as_str().unwrap_or("markdown");
-            let timeout_secs = args["timeout"]
-                .as_u64()
-                .unwrap_or(DEFAULT_TIMEOUT_SECS)
-                .min(MAX_TIMEOUT_SECS);
-
+            let timeout_secs = args.timeout.min(MAX_TIMEOUT_SECS);
             let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(timeout_secs))
                 .redirect(reqwest::redirect::Policy::limited(10))
@@ -83,7 +102,7 @@ impl AgentTool for WebFetchTool {
                 .unwrap_or_else(|_| reqwest::Client::new());
 
             let response = match client
-                .get(url)
+                .get(&args.url)
                 .header("user-agent", "Mozilla/5.0 (compatible; mush/0.1)")
                 .header(
                     "accept",
@@ -106,7 +125,6 @@ impl AgentTool for WebFetchTool {
                 ));
             }
 
-            // check size
             if let Some(len) = response.content_length()
                 && len as usize > MAX_RESPONSE_SIZE
             {
@@ -133,13 +151,14 @@ impl AgentTool for WebFetchTool {
             let body = String::from_utf8_lossy(&bytes);
             let is_html = content_type.contains("text/html") || content_type.contains("xhtml");
 
-            let output = match format {
-                "markdown" if is_html => htmd::convert(&body).unwrap_or_else(|_| body.to_string()),
-                "text" if is_html => strip_html_tags(&body),
+            let output = match (args.format, is_html) {
+                (FetchFormat::Markdown, true) => {
+                    htmd::convert(&body).unwrap_or_else(|_| body.to_string())
+                }
+                (FetchFormat::Text, true) => strip_html_tags(&body),
                 _ => body.to_string(),
             };
 
-            // truncate if needed (find char boundary to avoid panic)
             let output = if output.len() > MAX_OUTPUT_CHARS {
                 let end = output.floor_char_boundary(MAX_OUTPUT_CHARS);
                 let truncated = &output[..end];
@@ -156,7 +175,6 @@ impl AgentTool for WebFetchTool {
     }
 }
 
-/// strip HTML tags, keeping just text content
 fn strip_html_tags(html: &str) -> String {
     let mut result = String::with_capacity(html.len());
     let mut in_tag = false;

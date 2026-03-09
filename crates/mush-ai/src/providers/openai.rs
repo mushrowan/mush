@@ -259,11 +259,14 @@ fn build_request_body(
                 // trim large tool results from older turns
                 let text = if is_old_turn && raw_text.len() > 1500 {
                     let preview_end = raw_text.floor_char_boundary(750);
-                    let tail_start = raw_text.ceil_char_boundary(raw_text.len().saturating_sub(375));
+                    let tail_start =
+                        raw_text.ceil_char_boundary(raw_text.len().saturating_sub(375));
                     let trimmed = raw_text.len() - preview_end - (raw_text.len() - tail_start);
                     format!(
                         "{}\n\n[... {} chars trimmed from old tool result ...]\n\n{}",
-                        &raw_text[..preview_end], trimmed, &raw_text[tail_start..]
+                        &raw_text[..preview_end],
+                        trimmed,
+                        &raw_text[tail_start..]
                     )
                 } else {
                     raw_text
@@ -413,7 +416,7 @@ fn parse_sse_stream(
             content: vec![],
             model: model_id.clone(),
             provider: provider_name.clone(),
-            api: api.clone(),
+            api,
             usage: Usage::default(),
             stop_reason: StopReason::Stop,
             error_message: None,

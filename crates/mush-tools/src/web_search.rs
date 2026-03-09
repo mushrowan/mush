@@ -1,11 +1,42 @@
 //! web search tool - search the web using Exa AI
 
-use mush_agent::tool::{AgentTool, ToolResult};
+use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
 use serde::Deserialize;
 
 const EXA_MCP_URL: &str = "https://mcp.exa.ai/mcp";
 const DEFAULT_NUM_RESULTS: u32 = 8;
 const TIMEOUT_SECS: u64 = 25;
+
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SearchType {
+    #[default]
+    Auto,
+    Fast,
+}
+
+impl SearchType {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Fast => "fast",
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WebSearchArgs {
+    query: String,
+    #[serde(default = "default_num_results")]
+    num_results: u32,
+    #[serde(rename = "type", default)]
+    search_type: SearchType,
+}
+
+const fn default_num_results() -> u32 {
+    DEFAULT_NUM_RESULTS
+}
 
 pub struct WebSearchTool;
 
@@ -82,15 +113,10 @@ impl AgentTool for WebSearchTool {
         args: serde_json::Value,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
         Box::pin(async move {
-            let query = match args["query"].as_str() {
-                Some(q) => q,
-                None => return ToolResult::error("missing required parameter: query"),
+            let args = match parse_tool_args::<WebSearchArgs>(args) {
+                Ok(args) => args,
+                Err(error) => return error,
             };
-
-            let num_results = args["num_results"]
-                .as_u64()
-                .unwrap_or(DEFAULT_NUM_RESULTS as u64) as u32;
-            let search_type = args["type"].as_str().unwrap_or("auto");
 
             let body = serde_json::json!({
                 "jsonrpc": "2.0",
@@ -99,9 +125,9 @@ impl AgentTool for WebSearchTool {
                 "params": {
                     "name": "web_search_exa",
                     "arguments": {
-                        "query": query,
-                        "type": search_type,
-                        "numResults": num_results,
+                        "query": args.query,
+                        "type": args.search_type.as_str(),
+                        "numResults": args.num_results,
                         "livecrawl": "fallback",
                     }
                 }
@@ -132,12 +158,10 @@ impl AgentTool for WebSearchTool {
                 Err(e) => return ToolResult::error(format!("failed to read response: {e}")),
             };
 
-            // parse SSE response - look for data: lines
             if let Some(result) = parse_sse_response(&text) {
                 return result;
             }
 
-            // try parsing as plain JSON
             let Ok(resp) = serde_json::from_str::<McpResponse>(&text) else {
                 return ToolResult::text("no results found. try a different query.");
             };
@@ -154,7 +178,6 @@ impl AgentTool for WebSearchTool {
     }
 }
 
-/// parse SSE (server-sent events) response format
 fn parse_sse_response(text: &str) -> Option<ToolResult> {
     for line in text.lines() {
         let Some(data) = line.strip_prefix("data: ") else {

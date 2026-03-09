@@ -145,7 +145,7 @@ mod tests {
         store.save(&session).unwrap();
         let loaded = store.load(&session.meta.id).unwrap();
         assert_eq!(loaded.meta.id, session.meta.id);
-        assert_eq!(loaded.messages.len(), 1);
+        assert_eq!(loaded.context().len(), 1);
     }
 
     #[test]

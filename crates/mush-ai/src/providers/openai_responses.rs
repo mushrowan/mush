@@ -219,7 +219,7 @@ fn build_request_body(
     let prompt_cache_key = if cache_retention == CacheRetention::None {
         None
     } else {
-        options.session_id.clone()
+        options.session_id.as_ref().map(ToString::to_string)
     };
 
     let prompt_cache_retention = match cache_retention {
@@ -529,7 +529,7 @@ fn build_headers(
         if let Some(session_id) = &options.session_id {
             headers.insert(
                 HeaderName::from_static("session_id"),
-                HeaderValue::from_str(session_id)?,
+                HeaderValue::from_str(session_id.as_ref())?,
             );
         }
     }
@@ -561,7 +561,6 @@ fn extract_account_id(token: &str) -> Option<String> {
                 .map(str::to_string)
         })
 }
-
 
 pub fn write_decode_snapshot(model_id: &str, provider: &str, bytes: &[u8]) -> Option<String> {
     if bytes.is_empty() {
@@ -639,7 +638,7 @@ fn parse_sse_stream(
             content: vec![],
             model: model_id.clone(),
             provider: provider_name.clone(),
-            api: api.clone(),
+            api,
             usage: Usage::default(),
             stop_reason: StopReason::Stop,
             error_message: None,
@@ -973,7 +972,9 @@ fn process_sse_event(
                         .unwrap_or(0);
 
                     output.usage = Usage {
-                        input_tokens: TokenCount::new(input_tokens.saturating_sub(cache_read_tokens)),
+                        input_tokens: TokenCount::new(
+                            input_tokens.saturating_sub(cache_read_tokens),
+                        ),
                         output_tokens: TokenCount::new(output_tokens),
                         cache_read_tokens: TokenCount::new(cache_read_tokens),
                         cache_write_tokens: TokenCount::ZERO,

@@ -13,7 +13,6 @@ pub struct SseRawEvent {
     pub data: String,
 }
 
-
 #[must_use]
 pub fn preview_bytes(bytes: &[u8], max_chars: usize) -> String {
     let text = String::from_utf8_lossy(bytes);

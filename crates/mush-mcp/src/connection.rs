@@ -119,9 +119,9 @@ impl McpManager {
     /// connect to all configured MCP servers
     pub async fn connect_all(
         configs: &HashMap<String, McpServerConfig>,
-    ) -> (Self, Vec<Box<dyn mush_agent::tool::AgentTool>>) {
+    ) -> (Self, mush_agent::tool::ToolRegistry) {
         let mut connections = HashMap::new();
-        let mut tools: Vec<Box<dyn mush_agent::tool::AgentTool>> = Vec::new();
+        let mut tools = mush_agent::tool::ToolRegistry::new();
 
         for (name, config) in configs {
             if !config.enabled {
@@ -132,7 +132,7 @@ impl McpManager {
                 Ok(conn) => {
                     let conn = Arc::new(conn);
                     for mcp_tool in &conn.tools {
-                        tools.push(Box::new(McpTool::new(
+                        tools.register_shared(std::sync::Arc::new(McpTool::new(
                             name,
                             mcp_tool.clone(),
                             Arc::clone(&conn),

@@ -3,9 +3,17 @@
 use std::path::PathBuf;
 use std::process::Stdio;
 
-use mush_agent::tool::{AgentTool, ToolResult};
+use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
+use serde::Deserialize;
 
 use crate::util::{resolve_path, truncate_lines};
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GlobArgs {
+    pattern: String,
+    path: Option<String>,
+}
 
 pub struct GlobTool {
     cwd: PathBuf,
@@ -52,18 +60,19 @@ impl AgentTool for GlobTool {
         args: serde_json::Value,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
         Box::pin(async move {
-            let pattern = match args["pattern"].as_str() {
-                Some(p) => p,
-                None => return ToolResult::error("missing required parameter: pattern"),
+            let args = match parse_tool_args::<GlobArgs>(args) {
+                Ok(args) => args,
+                Err(error) => return error,
             };
 
-            let search_dir = match args["path"].as_str() {
-                Some(p) => resolve_path(&self.cwd, p),
-                None => self.cwd.clone(),
-            };
+            let search_dir = args
+                .path
+                .as_deref()
+                .map(|path| resolve_path(&self.cwd, path))
+                .unwrap_or_else(|| self.cwd.clone());
 
             let mut cmd = tokio::process::Command::new("fd");
-            cmd.args(["--glob", pattern, "--type", "f"])
+            cmd.args(["--glob", &args.pattern, "--type", "f"])
                 .arg("--color=never")
                 .current_dir(&search_dir)
                 .stdout(Stdio::piped())
@@ -102,35 +111,32 @@ mod tests {
 
     #[tokio::test]
     async fn glob_finds_toml_files() {
-        let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .to_path_buf();
-        let tool = GlobTool::new(cwd);
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]").unwrap();
+        std::fs::create_dir(dir.path().join("nested")).unwrap();
+        std::fs::write(dir.path().join("nested/config.toml"), "x = 1").unwrap();
+        std::fs::write(dir.path().join("readme.md"), "hi").unwrap();
+
+        let tool = GlobTool::new(dir.path().to_path_buf());
         let result = tool
-            .execute(serde_json::json!({"pattern": "Cargo.toml"}))
+            .execute(serde_json::json!({ "pattern": "**/*.toml" }))
             .await;
-        assert!(result.outcome.is_success());
-        let text = match &result.content[0] {
-            mush_ai::types::ToolResultContentPart::Text(t) => &t.text,
-            _ => panic!("expected text"),
-        };
-        assert!(text.contains("Cargo.toml"), "got: {text}");
+        let text = crate::util::extract_text(&result);
+        assert!(text.contains("Cargo.toml"));
+        assert!(text.contains("nested/config.toml"));
+        assert!(!text.contains("readme.md"));
     }
 
     #[tokio::test]
     async fn glob_no_results() {
-        let tool = GlobTool::new(PathBuf::from("/tmp"));
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "x").unwrap();
+
+        let tool = GlobTool::new(dir.path().to_path_buf());
         let result = tool
-            .execute(serde_json::json!({"pattern": "*.nonexistent_extension_xyz"}))
+            .execute(serde_json::json!({ "pattern": "**/*.rs" }))
             .await;
-        assert!(result.outcome.is_success());
-        let text = match &result.content[0] {
-            mush_ai::types::ToolResultContentPart::Text(t) => &t.text,
-            _ => panic!("expected text"),
-        };
-        assert!(text.contains("no files found"));
+        let text = crate::util::extract_text(&result);
+        assert_eq!(text, "no files found");
     }
 }

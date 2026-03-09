@@ -3,9 +3,54 @@
 use std::path::PathBuf;
 use std::process::Stdio;
 
-use mush_agent::tool::{AgentTool, ToolResult};
+use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
+use serde::Deserialize;
 
 use crate::util::{resolve_path, truncate_lines};
+
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum GrepMode {
+    #[default]
+    Regex,
+    Literal,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum GrepOutput {
+    #[default]
+    Lines,
+    Count,
+    Files,
+    Json,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GrepArgs {
+    pattern: String,
+    path: Option<String>,
+    include: Option<String>,
+    #[serde(default)]
+    mode: GrepMode,
+    #[serde(default = "default_true")]
+    case_sensitive: bool,
+    #[serde(default)]
+    whole_word: bool,
+    #[serde(default)]
+    context_before: u64,
+    #[serde(default)]
+    context_after: u64,
+    #[serde(default)]
+    output: GrepOutput,
+    max_results: Option<usize>,
+    top_n: Option<usize>,
+}
+
+const fn default_true() -> bool {
+    true
+}
 
 pub struct GrepTool {
     cwd: PathBuf,
@@ -91,43 +136,34 @@ impl AgentTool for GrepTool {
         args: serde_json::Value,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
         Box::pin(async move {
-            let pattern = args["pattern"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string();
-            let path = args["path"].as_str().map(|s| s.to_string());
-            let include = args["include"].as_str().map(|s| s.to_string());
-            let mode = args["mode"].as_str().unwrap_or("regex");
-            let case_sensitive = args["case_sensitive"].as_bool().unwrap_or(true);
-            let whole_word = args["whole_word"].as_bool().unwrap_or(false);
-            let context_before = args["context_before"].as_u64().unwrap_or(0);
-            let context_after = args["context_after"].as_u64().unwrap_or(0);
-            let output_mode = args["output"].as_str().unwrap_or("lines");
-            let max_results = args["max_results"].as_u64().map(|n| n as usize);
-            let top_n = args["top_n"].as_u64().map(|n| n as usize);
+            let args = match parse_tool_args::<GrepArgs>(args) {
+                Ok(args) => args,
+                Err(error) => return error,
+            };
 
-            if pattern.is_empty() {
+            if args.pattern.is_empty() {
                 return ToolResult::error("pattern is required");
             }
 
-            let search_path = path
+            let search_path = args
+                .path
                 .as_deref()
-                .map(|p| resolve_path(&self.cwd, p))
+                .map(|path| resolve_path(&self.cwd, path))
                 .unwrap_or_else(|| self.cwd.clone());
 
             run_rg(
                 &self.cwd,
-                &pattern,
+                &args.pattern,
                 &search_path,
-                include.as_deref(),
-                mode,
-                case_sensitive,
-                whole_word,
-                context_before,
-                context_after,
-                output_mode,
-                max_results,
-                top_n,
+                args.include.as_deref(),
+                args.mode,
+                args.case_sensitive,
+                args.whole_word,
+                args.context_before,
+                args.context_after,
+                args.output,
+                args.max_results,
+                args.top_n,
             )
             .await
         })
@@ -140,12 +176,12 @@ async fn run_rg(
     pattern: &str,
     search_path: &std::path::Path,
     include: Option<&str>,
-    mode: &str,
+    mode: GrepMode,
     case_sensitive: bool,
     whole_word: bool,
     context_before: u64,
     context_after: u64,
-    output_mode: &str,
+    output_mode: GrepOutput,
     max_results: Option<usize>,
     top_n: Option<usize>,
 ) -> ToolResult {
@@ -163,19 +199,15 @@ async fn run_rg(
     let mut cmd = tokio::process::Command::new("rg");
 
     match output_mode {
-        "count" | "json" => {
-            // per-file match counts (json uses same rg output, formatted differently)
+        GrepOutput::Count | GrepOutput::Json => {
             cmd.arg("--count")
                 .arg("--color=never")
                 .arg("--with-filename");
         }
-        "files" => {
-            // just filenames
-            cmd.arg("--files-with-matches")
-                .arg("--color=never");
+        GrepOutput::Files => {
+            cmd.arg("--files-with-matches").arg("--color=never");
         }
-        _ => {
-            // default: full matching lines
+        GrepOutput::Lines => {
             cmd.arg("--no-heading")
                 .arg("--line-number")
                 .arg("--color=never")
@@ -184,7 +216,7 @@ async fn run_rg(
         }
     }
 
-    if mode == "literal" {
+    if matches!(mode, GrepMode::Literal) {
         cmd.arg("--fixed-strings");
     }
 
@@ -196,8 +228,7 @@ async fn run_rg(
         cmd.arg("--word-regexp");
     }
 
-    // context lines only make sense in default mode
-    if output_mode != "count" && output_mode != "files" {
+    if !matches!(output_mode, GrepOutput::Count | GrepOutput::Files) {
         if context_before > 0 {
             cmd.arg(format!("-B{context_before}"));
         }
@@ -236,7 +267,7 @@ async fn run_rg(
     let lines: Vec<&str> = stdout.lines().collect();
 
     match output_mode {
-        "count" | "json" => {
+        GrepOutput::Count | GrepOutput::Json => {
             let mut entries: Vec<(&str, u64)> = lines
                 .iter()
                 .filter_map(|line| {
@@ -248,14 +279,12 @@ async fn run_rg(
 
             let total_matches: u64 = entries.iter().map(|(_, c)| c).sum();
             let total_files = entries.len();
-
-            // top_n takes priority over max_results for count/json modes
             let effective_limit = top_n.or(max_results);
             if let Some(n) = effective_limit {
                 entries.truncate(n);
             }
 
-            if output_mode == "json" {
+            if matches!(output_mode, GrepOutput::Json) {
                 let items: Vec<serde_json::Value> = entries
                     .iter()
                     .map(|(path, count)| serde_json::json!({"file": path, "count": count}))
@@ -272,14 +301,15 @@ async fn run_rg(
                 } else {
                     String::new()
                 };
-                let mut out = format!("{total_matches} matches across {total_files} files{showing}\n");
+                let mut out =
+                    format!("{total_matches} matches across {total_files} files{showing}\n");
                 for (path, count) in &entries {
                     out.push_str(&format!("{path}: {count}\n"));
                 }
                 ToolResult::text(out)
             }
         }
-        "files" => {
+        GrepOutput::Files => {
             let mut file_lines = lines;
             let total = file_lines.len();
             if let Some(n) = max_results {
@@ -290,11 +320,12 @@ async fn run_rg(
             } else {
                 String::new()
             };
-            ToolResult::text(format!("{total} files{showing}\n\n{}", file_lines.join("\n")))
+            ToolResult::text(format!(
+                "{total} files{showing}\n\n{}",
+                file_lines.join("\n")
+            ))
         }
-        _ => {
-            ToolResult::text(truncate_lines(&lines, "matches"))
-        }
+        GrepOutput::Lines => ToolResult::text(truncate_lines(&lines, "matches")),
     }
 }
 
@@ -311,7 +342,11 @@ mod tests {
     #[tokio::test]
     async fn grep_finds_pattern() {
         let dir = temp_dir();
-        fs::write(dir.path().join("test.txt"), "hello world\nfoo bar\nhello again").unwrap();
+        fs::write(
+            dir.path().join("test.txt"),
+            "hello world\nfoo bar\nhello again",
+        )
+        .unwrap();
 
         let tool = GrepTool::new(dir.path().to_path_buf());
         let result = tool
@@ -382,7 +417,11 @@ mod tests {
     #[tokio::test]
     async fn grep_case_insensitive() {
         let dir = temp_dir();
-        fs::write(dir.path().join("test.txt"), "Hello World\nhello world\nHELLO").unwrap();
+        fs::write(
+            dir.path().join("test.txt"),
+            "Hello World\nhello world\nHELLO",
+        )
+        .unwrap();
 
         let tool = GrepTool::new(dir.path().to_path_buf());
         let result = tool

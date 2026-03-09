@@ -2,7 +2,9 @@
 
 use std::path::{Path, PathBuf};
 
-use mush_agent::tool::{AgentTool, ToolResult};
+use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
+use serde::Deserialize;
+use thiserror::Error;
 
 use crate::util::resolve_path;
 
@@ -20,6 +22,171 @@ fn truncate_line(line: &str, max: usize) -> &str {
     }
     // find a char boundary at or before max
     &line[..line.floor_char_boundary(max)]
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ReadOutput {
+    #[default]
+    Text,
+    Json,
+}
+
+impl ReadOutput {
+    fn is_json(self) -> bool {
+        matches!(self, Self::Json)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadArgs {
+    path: String,
+    offset: Option<usize>,
+    limit: Option<usize>,
+    start_line: Option<usize>,
+    end_line: Option<usize>,
+    around_line: Option<usize>,
+    context_before: Option<usize>,
+    context_after: Option<usize>,
+    #[serde(default)]
+    output: ReadOutput,
+}
+
+struct ResolvedReadArgs {
+    path: String,
+    offset: Option<usize>,
+    limit: Option<usize>,
+    output: ReadOutput,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+enum ReadArgsError {
+    #[error("end_line requires start_line")]
+    EndLineRequiresStartLine,
+    #[error("around_line cannot be combined with start_line or end_line")]
+    AroundLineConflictsWithSpan,
+    #[error("around_line cannot be combined with offset or limit")]
+    AroundLineConflictsWithOffsetLimit,
+    #[error("start_line cannot be combined with offset")]
+    StartLineConflictsWithOffset,
+    #[error("context_before/context_after require around_line")]
+    ContextRequiresAroundLine,
+    #[error("end_line cannot be combined with limit")]
+    EndLineConflictsWithLimit,
+    #[error("end_line ({end_line}) must be >= start_line ({start_line})")]
+    EndBeforeStart { start_line: usize, end_line: usize },
+}
+
+enum ReadWindow {
+    Offset {
+        offset: Option<usize>,
+        limit: Option<usize>,
+    },
+    Span {
+        start_line: usize,
+        limit: Option<usize>,
+    },
+    ExactSpan {
+        start_line: usize,
+        end_line: usize,
+    },
+    Around {
+        around_line: usize,
+        context_before: usize,
+        context_after: usize,
+    },
+}
+
+impl ReadWindow {
+    fn into_offset_limit(self) -> (Option<usize>, Option<usize>) {
+        match self {
+            Self::Offset { offset, limit } => (offset, limit),
+            Self::Span { start_line, limit } => (Some(start_line), limit),
+            Self::ExactSpan {
+                start_line,
+                end_line,
+            } => (Some(start_line), Some(end_line - start_line + 1)),
+            Self::Around {
+                around_line,
+                context_before,
+                context_after,
+            } => {
+                let start = around_line.saturating_sub(context_before).max(1);
+                let window = context_before + 1 + context_after;
+                (Some(start), Some(window))
+            }
+        }
+    }
+}
+
+impl ReadArgs {
+    fn resolve(self) -> Result<ResolvedReadArgs, ReadArgsError> {
+        let window = match (self.start_line, self.end_line, self.around_line) {
+            (_, Some(_), None) if self.start_line.is_none() => {
+                return Err(ReadArgsError::EndLineRequiresStartLine);
+            }
+            (_, _, Some(_)) if self.start_line.is_some() || self.end_line.is_some() => {
+                return Err(ReadArgsError::AroundLineConflictsWithSpan);
+            }
+            (_, _, Some(_)) if self.offset.is_some() || self.limit.is_some() => {
+                return Err(ReadArgsError::AroundLineConflictsWithOffsetLimit);
+            }
+            (_, _, Some(around_line))
+                if self.context_before.is_some() || self.context_after.is_some() =>
+            {
+                ReadWindow::Around {
+                    around_line,
+                    context_before: self.context_before.unwrap_or(20),
+                    context_after: self.context_after.unwrap_or(20),
+                }
+            }
+            (_, _, Some(around_line)) => ReadWindow::Around {
+                around_line,
+                context_before: 20,
+                context_after: 20,
+            },
+            (Some(_), _, _) if self.offset.is_some() => {
+                return Err(ReadArgsError::StartLineConflictsWithOffset);
+            }
+            (Some(_), _, _) if self.context_before.is_some() || self.context_after.is_some() => {
+                return Err(ReadArgsError::ContextRequiresAroundLine);
+            }
+            (Some(_), Some(_), _) if self.limit.is_some() => {
+                return Err(ReadArgsError::EndLineConflictsWithLimit);
+            }
+            (Some(start_line), Some(end_line), _) if end_line < start_line => {
+                return Err(ReadArgsError::EndBeforeStart {
+                    start_line,
+                    end_line,
+                });
+            }
+            (Some(start_line), Some(end_line), _) => ReadWindow::ExactSpan {
+                start_line,
+                end_line,
+            },
+            (Some(start_line), None, _) => ReadWindow::Span {
+                start_line,
+                limit: self.limit,
+            },
+            (None, Some(_), _) => return Err(ReadArgsError::EndLineRequiresStartLine),
+            (None, None, None) if self.context_before.is_some() || self.context_after.is_some() => {
+                return Err(ReadArgsError::ContextRequiresAroundLine);
+            }
+            (None, None, None) => ReadWindow::Offset {
+                offset: self.offset,
+                limit: self.limit,
+            },
+        };
+
+        let (offset, limit) = window.into_offset_limit();
+        Ok(ResolvedReadArgs {
+            path: self.path,
+            offset,
+            limit,
+            output: self.output,
+        })
+    }
 }
 
 pub struct ReadTool {
@@ -96,48 +263,23 @@ impl AgentTool for ReadTool {
         args: serde_json::Value,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
         Box::pin(async move {
-            let Some(path_str) = args["path"].as_str() else {
-                return ToolResult::error("missing required parameter: path");
+            let args = match parse_tool_args::<ReadArgs>(args) {
+                Ok(args) => args,
+                Err(error) => return error,
+            };
+            let args = match args.resolve() {
+                Ok(args) => args,
+                Err(error) => return ToolResult::error(error.to_string()),
             };
 
-            let path = resolve_path(&self.cwd, path_str);
-            let json_output = args["output"].as_str() == Some("json");
+            let path = resolve_path(&self.cwd, &args.path);
+            let json_output = args.output.is_json();
 
-            let start_line = args["start_line"].as_u64().map(|n| n as usize);
-            let end_line = args["end_line"].as_u64().map(|n| n as usize);
-            let around_line = args["around_line"].as_u64().map(|n| n as usize);
-            let context_before = args["context_before"].as_u64().map(|n| n as usize);
-            let context_after = args["context_after"].as_u64().map(|n| n as usize);
-
-            // resolve span params into offset/limit
-            let (offset, limit) = match (start_line, end_line, around_line) {
-                (_, Some(_), None) if start_line.is_none() => {
-                    return ToolResult::error("end_line requires start_line");
-                }
-                (Some(s), Some(e), _) if e < s => {
-                    return ToolResult::error(format!(
-                        "end_line ({e}) must be >= start_line ({s})"
-                    ));
-                }
-                (Some(s), Some(e), _) => (Some(s), Some(e - s + 1)),
-                (Some(s), None, _) => (Some(s), args["limit"].as_u64().map(|n| n as usize)),
-                (_, _, Some(a)) => {
-                    let before = context_before.unwrap_or(20);
-                    let after = context_after.unwrap_or(20);
-                    let start = a.saturating_sub(before);
-                    let window = before + 1 + after;
-                    (Some(start.max(1)), Some(window))
-                }
-                _ => {
-                    let offset = args["offset"].as_u64().map(|n| n as usize);
-                    let limit = args["limit"].as_u64().map(|n| n as usize);
-                    (offset, limit)
-                }
-            };
-
-            tokio::task::spawn_blocking(move || read_file(&path, offset, limit, json_output))
-                .await
-                .unwrap_or_else(|e| ToolResult::error(format!("task join error: {e}")))
+            tokio::task::spawn_blocking(move || {
+                read_file(&path, args.offset, args.limit, json_output)
+            })
+            .await
+            .unwrap_or_else(|e| ToolResult::error(format!("task join error: {e}")))
         })
     }
 }
@@ -148,7 +290,12 @@ fn is_image(path: &Path) -> bool {
         .is_some_and(|ext| IMAGE_EXTENSIONS.contains(&ext.to_lowercase().as_str()))
 }
 
-fn read_file(path: &Path, offset: Option<usize>, limit: Option<usize>, json_output: bool) -> ToolResult {
+fn read_file(
+    path: &Path,
+    offset: Option<usize>,
+    limit: Option<usize>,
+    json_output: bool,
+) -> ToolResult {
     if !path.exists() {
         return ToolResult::error(format!("file not found: {}", path.display()));
     }
@@ -380,7 +527,10 @@ mod tests {
     async fn read_start_end_window() {
         let dir = temp_dir();
         let file = dir.path().join("test.txt");
-        let content: String = (1..=20).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let content: String = (1..=20)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         fs::write(&file, &content).unwrap();
 
         let tool = super::ReadTool::new(dir.path().to_path_buf());
@@ -402,7 +552,10 @@ mod tests {
     async fn read_around_line_window() {
         let dir = temp_dir();
         let file = dir.path().join("test.txt");
-        let content: String = (1..=100).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let content: String = (1..=100)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         fs::write(&file, &content).unwrap();
 
         let tool = super::ReadTool::new(dir.path().to_path_buf());
@@ -426,7 +579,10 @@ mod tests {
     async fn read_around_line_default_context() {
         let dir = temp_dir();
         let file = dir.path().join("test.txt");
-        let content: String = (1..=100).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let content: String = (1..=100)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         fs::write(&file, &content).unwrap();
 
         let tool = super::ReadTool::new(dir.path().to_path_buf());
@@ -511,5 +667,29 @@ mod tests {
         let content = json["content"].as_str().unwrap();
         assert!(!content.contains("line 1"));
         assert!(content.contains("line 3"));
+    }
+
+    #[test]
+    fn read_args_resolve_returns_typed_error() {
+        let result = ReadArgs {
+            path: "todo.md".into(),
+            offset: None,
+            limit: None,
+            start_line: None,
+            end_line: Some(5),
+            around_line: None,
+            context_before: None,
+            context_after: None,
+            output: ReadOutput::Text,
+        }
+        .resolve();
+
+        match result {
+            Err(error) => {
+                assert_eq!(error, ReadArgsError::EndLineRequiresStartLine);
+                assert_eq!(error.to_string(), "end_line requires start_line");
+            }
+            Ok(_) => panic!("expected read args error"),
+        }
     }
 }

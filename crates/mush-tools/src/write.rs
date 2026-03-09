@@ -2,7 +2,17 @@
 
 use std::path::{Path, PathBuf};
 
-use mush_agent::tool::{AgentTool, ToolResult};
+use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
+use serde::Deserialize;
+
+use crate::util::resolve_path;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WriteArgs {
+    path: String,
+    content: String,
+}
 
 pub struct WriteTool {
     cwd: PathBuf,
@@ -48,19 +58,13 @@ impl AgentTool for WriteTool {
         args: serde_json::Value,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
         Box::pin(async move {
-            let Some(path_str) = args["path"].as_str() else {
-                return ToolResult::error("missing required parameter: path");
-            };
-            let Some(content) = args["content"].as_str() else {
-                return ToolResult::error("missing required parameter: content");
+            let args = match parse_tool_args::<WriteArgs>(args) {
+                Ok(args) => args,
+                Err(error) => return error,
             };
 
-            let path = if Path::new(path_str).is_absolute() {
-                PathBuf::from(path_str)
-            } else {
-                self.cwd.join(path_str)
-            };
-            let content = content.to_string();
+            let path = resolve_path(&self.cwd, &args.path);
+            let content = args.content;
 
             tokio::task::spawn_blocking(move || write_file(&path, &content))
                 .await
@@ -70,7 +74,6 @@ impl AgentTool for WriteTool {
 }
 
 fn write_file(path: &Path, content: &str) -> ToolResult {
-    // create parent dirs
     if let Some(parent) = path.parent()
         && let Err(e) = std::fs::create_dir_all(parent)
     {

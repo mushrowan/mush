@@ -8,6 +8,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use mush_ai::types::ToolCallId;
 use serde::Deserialize;
 
 use crate::pane::PaneId;
@@ -58,7 +59,7 @@ pub struct Conflict {
 #[derive(Clone)]
 pub struct FileTracker {
     /// pending tool operations: (pane_id, tool_call_id) -> resolved path
-    pending: Arc<Mutex<HashMap<(PaneId, String), PathBuf>>>,
+    pending: Arc<Mutex<HashMap<(PaneId, ToolCallId), PathBuf>>>,
     /// files modified by each pane: path -> set of pane ids
     modifications: Arc<Mutex<HashMap<PathBuf, BTreeSet<PaneId>>>>,
     /// advisory locks: path -> owning pane id
@@ -90,7 +91,7 @@ impl FileTracker {
     pub fn record_tool_start(
         &self,
         pane_id: PaneId,
-        tool_call_id: &str,
+        tool_call_id: &ToolCallId,
         tool_name: &str,
         args: &serde_json::Value,
     ) {
@@ -101,7 +102,7 @@ impl FileTracker {
             self.pending
                 .lock()
                 .unwrap()
-                .insert((pane_id, tool_call_id.into()), resolved);
+                .insert((pane_id, tool_call_id.clone()), resolved);
         }
     }
 
@@ -110,14 +111,14 @@ impl FileTracker {
     pub fn record_tool_end(
         &self,
         pane_id: PaneId,
-        tool_call_id: &str,
+        tool_call_id: &ToolCallId,
         success: bool,
     ) -> Option<Conflict> {
         let path = self
             .pending
             .lock()
             .unwrap()
-            .remove(&(pane_id, tool_call_id.into()))?;
+            .remove(&(pane_id, tool_call_id.clone()))?;
 
         if !success {
             return None;
@@ -220,13 +221,14 @@ mod tests {
         let ft = tracker();
         let p1 = PaneId::new(1);
 
+        let tool_call_id = ToolCallId::from("tc1");
         ft.record_tool_start(
             p1,
-            "tc1",
+            &tool_call_id,
             "write",
             &serde_json::json!({"path": "src/main.rs"}),
         );
-        let conflict = ft.record_tool_end(p1, "tc1", true);
+        let conflict = ft.record_tool_end(p1, &tool_call_id, true);
         assert!(conflict.is_none());
 
         let mods = ft.pane_modifications(p1);
@@ -240,24 +242,27 @@ mod tests {
         let p1 = PaneId::new(1);
         let p2 = PaneId::new(2);
 
+        let first_tool_call = ToolCallId::from("tc1");
+        let second_tool_call = ToolCallId::from("tc2");
+
         // pane 1 edits a file
         ft.record_tool_start(
             p1,
-            "tc1",
+            &first_tool_call,
             "edit",
             &serde_json::json!({"path": "src/lib.rs"}),
         );
-        let conflict = ft.record_tool_end(p1, "tc1", true);
+        let conflict = ft.record_tool_end(p1, &first_tool_call, true);
         assert!(conflict.is_none());
 
         // pane 2 edits the same file
         ft.record_tool_start(
             p2,
-            "tc2",
+            &second_tool_call,
             "write",
             &serde_json::json!({"path": "src/lib.rs"}),
         );
-        let conflict = ft.record_tool_end(p2, "tc2", true);
+        let conflict = ft.record_tool_end(p2, &second_tool_call, true);
         assert!(conflict.is_some());
 
         let c = conflict.unwrap();
@@ -271,11 +276,24 @@ mod tests {
         let p1 = PaneId::new(1);
         let p2 = PaneId::new(2);
 
-        ft.record_tool_start(p1, "tc1", "write", &serde_json::json!({"path": "a.rs"}));
-        ft.record_tool_end(p1, "tc1", true);
+        let first_tool_call = ToolCallId::from("tc1");
+        let second_tool_call = ToolCallId::from("tc2");
 
-        ft.record_tool_start(p2, "tc2", "write", &serde_json::json!({"path": "b.rs"}));
-        let conflict = ft.record_tool_end(p2, "tc2", true);
+        ft.record_tool_start(
+            p1,
+            &first_tool_call,
+            "write",
+            &serde_json::json!({"path": "a.rs"}),
+        );
+        ft.record_tool_end(p1, &first_tool_call, true);
+
+        ft.record_tool_start(
+            p2,
+            &second_tool_call,
+            "write",
+            &serde_json::json!({"path": "b.rs"}),
+        );
+        let conflict = ft.record_tool_end(p2, &second_tool_call, true);
         assert!(conflict.is_none());
     }
 
@@ -284,8 +302,14 @@ mod tests {
         let ft = tracker();
         let p1 = PaneId::new(1);
 
-        ft.record_tool_start(p1, "tc1", "write", &serde_json::json!({"path": "fail.rs"}));
-        let conflict = ft.record_tool_end(p1, "tc1", false);
+        let tool_call_id = ToolCallId::from("tc1");
+        ft.record_tool_start(
+            p1,
+            &tool_call_id,
+            "write",
+            &serde_json::json!({"path": "fail.rs"}),
+        );
+        let conflict = ft.record_tool_end(p1, &tool_call_id, false);
         assert!(conflict.is_none());
         assert!(ft.pane_modifications(p1).is_empty());
     }
@@ -295,9 +319,15 @@ mod tests {
         let ft = tracker();
         let p1 = PaneId::new(1);
 
-        ft.record_tool_start(p1, "tc1", "bash", &serde_json::json!({"command": "ls"}));
+        let tool_call_id = ToolCallId::from("tc1");
+        ft.record_tool_start(
+            p1,
+            &tool_call_id,
+            "bash",
+            &serde_json::json!({"command": "ls"}),
+        );
         // nothing pending, so record_tool_end is a no-op
-        let conflict = ft.record_tool_end(p1, "tc1", true);
+        let conflict = ft.record_tool_end(p1, &tool_call_id, true);
         assert!(conflict.is_none());
     }
 
@@ -335,10 +365,11 @@ mod tests {
         let ft = tracker();
         let p1 = PaneId::new(1);
 
+        let tool_call_id = ToolCallId::from("tc1");
         ft.lock(p1, "locked.rs").unwrap();
         ft.record_tool_start(
             p1,
-            "tc1",
+            &tool_call_id,
             "write",
             &serde_json::json!({"path": "pending.rs"}),
         );
@@ -347,7 +378,7 @@ mod tests {
 
         assert!(ft.list_locks().is_empty());
         // pending was cleaned, so tool_end is a no-op
-        assert!(ft.record_tool_end(p1, "tc1", true).is_none());
+        assert!(ft.record_tool_end(p1, &tool_call_id, true).is_none());
     }
 
     #[test]

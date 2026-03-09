@@ -190,7 +190,7 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
     } else {
         Session::new(setup.model.id.as_str(), &cwd_str)
     };
-    setup.options.session_id = Some(session.meta.id.to_string());
+    setup.options.session_id = Some(session.meta.id.clone());
 
     // add the user message
     let user_msg = Message::User(UserMessage {
@@ -224,8 +224,7 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
     let config = AgentConfig {
         model: setup.model.clone(),
         system_prompt: Some(setup.system_prompt),
-        tools: &setup.tools,
-        extra_tools: vec![],
+        tools: setup.tools.clone(),
         registry: &setup.registry,
         options: setup.options,
         max_turns: setup.max_turns,
@@ -235,7 +234,7 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
         confirm_tool: None,
     };
 
-    let mut stream = std::pin::pin!(agent_loop(config, session.messages.clone()));
+    let mut stream = std::pin::pin!(agent_loop(config, session.context()));
     let mut in_text = false;
 
     while let Some(event) = stream.next().await {
@@ -391,9 +390,9 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
     } else {
         Session::new(setup.model.id.as_str(), &cwd_str)
     };
-    let initial_messages = session.messages.clone();
+    let initial_messages = session.context();
     let session_id = session.meta.id.clone();
-    setup.options.session_id = Some(session_id.to_string());
+    setup.options.session_id = Some(session_id.clone());
 
     let theme = mush_tui::Theme::from_config(&setup.cfg.theme);
     let prompt_enricher = build_prompt_enricher(&setup.cwd);
@@ -430,13 +429,12 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         } else {
             let sid = session_id.clone();
             let cwd_s = cwd_str.clone();
-            Some(std::sync::Arc::new(move |msgs, tree, model_id| {
+            Some(std::sync::Arc::new(move |conversation, model_id| {
                 let store = SessionStore::new(SessionStore::default_dir());
                 let mut session = Session::new(model_id, &cwd_s);
                 session.meta.id = sid.clone();
-                session.messages = msgs.to_vec();
-                session.tree = tree.clone();
-                session.meta.message_count = msgs.len();
+                session.conversation = conversation.clone();
+                session.meta.message_count = session.context().len();
                 session.auto_title();
                 let _ = store.save(&session);
             }))
