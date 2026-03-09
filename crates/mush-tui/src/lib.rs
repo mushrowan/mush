@@ -1,6 +1,7 @@
 pub mod app;
 pub mod clipboard;
 pub mod config_watcher;
+mod conversation_display;
 pub mod event_handler;
 pub mod file_tracker;
 pub mod input;
@@ -11,14 +12,9 @@ pub mod notify;
 pub mod pane;
 pub mod path_utils;
 pub mod runner;
-mod runner_commands;
-mod runner_input;
-mod runner_panes;
-mod runner_render;
-mod runner_streams;
-mod runner_terminal;
 pub mod shared_state;
 pub mod slash;
+pub mod terminal_policy;
 pub mod theme;
 pub mod ui;
 pub mod widgets;
@@ -27,5 +23,9 @@ pub use app::{App, AppEvent, ThinkingDisplay};
 pub use file_tracker::IsolationMode;
 pub use runner::{
     HintMode, LastModelSaver, PromptEnricher, SessionSaver, ThinkingPrefsSaver, TuiConfig, run_tui,
+};
+pub use terminal_policy::{
+    IMAGE_PROBE_ENV, ImageProbeMode, KEYBOARD_ENHANCEMENT_ENV, KeyboardEnhancementMode,
+    MOUSE_TRACKING_ENV, MouseTrackingMode, TerminalPolicy, TerminalPolicyOverrides,
 };
 pub use theme::{Theme, ThemeConfig};

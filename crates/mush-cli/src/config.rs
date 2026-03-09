@@ -29,6 +29,7 @@ fn deserialise_thinking<'de, D: Deserializer<'de>>(
 
 pub use mush_tui::HintMode;
 pub use mush_tui::IsolationMode;
+pub use mush_tui::TerminalPolicy;
 
 /// top-level config
 #[derive(Debug, Default, Deserialize)]
@@ -58,6 +59,8 @@ pub struct Config {
     pub cache_timer: bool,
     /// multi-pane file isolation mode: none (detect-and-warn), worktree, jj
     pub isolation: IsolationMode,
+    /// terminal behaviour overrides
+    pub terminal: TerminalPolicy,
     pub api_keys: ApiKeys,
     pub theme: mush_tui::ThemeConfig,
     /// MCP server configurations keyed by name
@@ -262,6 +265,37 @@ openai = "sk-openai-test"
     fn isolation_defaults_to_none() {
         let config: Config = toml::from_str("").unwrap();
         assert_eq!(config.isolation, IsolationMode::None);
+    }
+
+    #[test]
+    fn parse_terminal_policy() {
+        let config: Config = toml::from_str(
+            r#"
+[terminal]
+keyboard_enhancement = "disabled"
+mouse_tracking = "disabled"
+image_probe = "disabled"
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.terminal.keyboard_enhancement,
+            mush_tui::KeyboardEnhancementMode::Disabled
+        );
+        assert_eq!(
+            config.terminal.mouse_tracking,
+            mush_tui::MouseTrackingMode::Disabled
+        );
+        assert_eq!(
+            config.terminal.image_probe,
+            mush_tui::ImageProbeMode::Disabled
+        );
+    }
+
+    #[test]
+    fn terminal_policy_defaults_match_tui_defaults() {
+        let config: Config = toml::from_str("").unwrap();
+        assert_eq!(config.terminal, TerminalPolicy::default());
     }
 
     #[test]

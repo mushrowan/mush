@@ -58,7 +58,7 @@ unicode-width = "0.2"
 crossterm = "0.29"
 
 # cli
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 
 # terminal
 atty = "0.2"

@@ -13,7 +13,7 @@ Reply with ONLY the title, no quotes, no punctuation at the end, all lowercase."
 
 /// generate a title from the first few messages using an LLM
 pub async fn generate_title(
-    messages: &[Message],
+    mut messages: Vec<Message>,
     registry: &ApiRegistry,
     model: &Model,
     options: &StreamOptions,
@@ -22,12 +22,11 @@ pub async fn generate_title(
         return None;
     }
 
-    // take at most the first 4 messages for title generation
-    let context_messages: Vec<Message> = messages.iter().take(4).cloned().collect();
+    messages.truncate(4);
 
     let context = LlmContext {
         system_prompt: Some(TITLE_PROMPT.to_string()),
-        messages: context_messages,
+        messages,
         tools: vec![],
     };
 

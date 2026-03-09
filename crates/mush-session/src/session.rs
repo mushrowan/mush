@@ -63,7 +63,7 @@ impl Session {
 
     pub fn push_message(&mut self, message: Message) {
         self.conversation.append_message(message);
-        self.meta.message_count = self.context().len();
+        self.meta.message_count = self.conversation.context_len();
         self.meta.updated_at = Timestamp::now();
     }
 
@@ -81,13 +81,19 @@ impl Session {
             return;
         }
 
-        let first_text = self.context().into_iter().find_map(|m| match m {
-            Message::User(u) => {
-                let t = u.text();
-                if t.is_empty() { None } else { Some(t) }
-            }
-            _ => None,
-        });
+        let first_text = self
+            .conversation
+            .user_messages_in_branch()
+            .into_iter()
+            .find_map(|entry| match &entry.kind {
+                crate::tree::EntryKind::Message {
+                    message: Message::User(user),
+                } => {
+                    let text = user.text();
+                    if text.is_empty() { None } else { Some(text) }
+                }
+                _ => None,
+            });
 
         if let Some(text) = first_text {
             self.meta.title = Some(clean_title(&text, 80));

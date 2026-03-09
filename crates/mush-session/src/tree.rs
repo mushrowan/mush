@@ -81,6 +81,25 @@ pub struct SessionTree {
     leaf_id: Option<EntryId>,
 }
 
+fn push_context_message(
+    messages: &mut Vec<Message>,
+    limit: Option<usize>,
+    message: Message,
+) -> bool {
+    if let Some(limit) = limit
+        && messages.len() >= limit
+    {
+        return false;
+    }
+
+    messages.push(message);
+    if let Some(limit) = limit {
+        messages.len() < limit
+    } else {
+        true
+    }
+}
+
 impl SessionTree {
     pub fn new() -> Self {
         Self {
@@ -168,35 +187,85 @@ impl SessionTree {
 
     /// build the conversation messages for the current branch (what the LLM sees)
     pub fn build_context(&self) -> Vec<Message> {
-        let branch = self.current_branch();
-        let mut messages = Vec::new();
+        self.collect_context(None)
+    }
 
-        // find latest compaction in the path
+    /// build at most the first `limit` visible context messages
+    pub fn build_context_prefix(&self, limit: usize) -> Vec<Message> {
+        self.collect_context(Some(limit))
+    }
+
+    /// count visible context messages without cloning them
+    pub fn context_len(&self) -> usize {
+        let branch = self.current_branch();
+
+        let compaction_idx = branch
+            .iter()
+            .rposition(|e| matches!(e.kind, EntryKind::Compaction { .. }));
+
+        let mut count = 0;
+        let start = if let Some(idx) = compaction_idx {
+            if let EntryKind::Compaction { first_kept_id, .. } = &branch[idx].kind {
+                count += 1;
+                if let Some(kept_pos) = branch.iter().position(|e| e.id == *first_kept_id) {
+                    count += branch[kept_pos..idx]
+                        .iter()
+                        .filter(|entry| matches!(entry.kind, EntryKind::Message { .. }))
+                        .count();
+                }
+            }
+            idx + 1
+        } else {
+            0
+        };
+
+        count
+            + branch[start..]
+                .iter()
+                .filter(|entry| {
+                    matches!(
+                        entry.kind,
+                        EntryKind::Message { .. } | EntryKind::BranchSummary { .. }
+                    )
+                })
+                .count()
+    }
+
+    fn collect_context(&self, limit: Option<usize>) -> Vec<Message> {
+        let branch = self.current_branch();
+        let max_messages = branch.len().saturating_add(1);
+        let capacity = limit.map_or(max_messages, |limit| limit.min(max_messages));
+        let mut messages = Vec::with_capacity(capacity);
+
         let compaction_idx = branch
             .iter()
             .rposition(|e| matches!(e.kind, EntryKind::Compaction { .. }));
 
         let start = if let Some(idx) = compaction_idx {
-            if let EntryKind::Compaction {
-                ref summary,
-                ref first_kept_id,
-            } = branch[idx].kind
+            if let EntryKind::Compaction { ref summary, .. } = branch[idx].kind
+                && !push_context_message(
+                    &mut messages,
+                    limit,
+                    Message::User(UserMessage {
+                        content: UserContent::Text(format!(
+                            "The conversation history before this point was compacted \
+                             into the following summary:\n\n<summary>\n{summary}\n</summary>"
+                        )),
+                        timestamp_ms: branch[idx].timestamp,
+                    }),
+                )
             {
-                // emit compaction summary as user message
-                messages.push(Message::User(UserMessage {
-                    content: UserContent::Text(format!(
-                        "The conversation history before this point was compacted \
-                         into the following summary:\n\n<summary>\n{summary}\n</summary>"
-                    )),
-                    timestamp_ms: branch[idx].timestamp,
-                }));
+                return messages;
+            }
 
-                // find the first kept entry and emit from there to compaction
-                if let Some(kept_pos) = branch.iter().position(|e| e.id == *first_kept_id) {
-                    for entry in &branch[kept_pos..idx] {
-                        if let EntryKind::Message { ref message } = entry.kind {
-                            messages.push(message.clone());
-                        }
+            if let EntryKind::Compaction { first_kept_id, .. } = &branch[idx].kind
+                && let Some(kept_pos) = branch.iter().position(|e| e.id == *first_kept_id)
+            {
+                for entry in &branch[kept_pos..idx] {
+                    if let EntryKind::Message { ref message } = entry.kind
+                        && !push_context_message(&mut messages, limit, message.clone())
+                    {
+                        return messages;
                     }
                 }
             }
@@ -205,20 +274,22 @@ impl SessionTree {
             0
         };
 
-        // emit entries after compaction (or all entries if no compaction)
         for entry in &branch[start..] {
-            match &entry.kind {
-                EntryKind::Message { message } => messages.push(message.clone()),
-                EntryKind::BranchSummary { summary, .. } => {
-                    messages.push(Message::User(UserMessage {
-                        content: UserContent::Text(format!(
-                            "Context from a previous conversation branch:\n\n\
-                             <branch_summary>\n{summary}\n</branch_summary>"
-                        )),
-                        timestamp_ms: entry.timestamp,
-                    }));
-                }
-                EntryKind::Compaction { .. } => {} // already handled above
+            let next = match &entry.kind {
+                EntryKind::Message { message } => Some(message.clone()),
+                EntryKind::BranchSummary { summary, .. } => Some(Message::User(UserMessage {
+                    content: UserContent::Text(format!(
+                        "Context from a previous conversation branch:\n\n\
+                         <branch_summary>\n{summary}\n</branch_summary>"
+                    )),
+                    timestamp_ms: entry.timestamp,
+                })),
+                EntryKind::Compaction { .. } => None,
+            };
+            if let Some(message) = next
+                && !push_context_message(&mut messages, limit, message)
+            {
+                return messages;
             }
         }
 
@@ -436,6 +507,29 @@ mod tests {
 
         let ctx = tree.build_context();
         assert_eq!(ctx.len(), 3); // u1 -> a1_v2 -> q2_v2
+    }
+
+    #[test]
+    fn context_len_matches_built_context() {
+        let mut tree = SessionTree::new();
+        let u1 = tree.append_message(user_msg("hello"));
+        tree.append_message(assistant_msg("hi"));
+        tree.append_message(user_msg("topic A"));
+        tree.append_message(assistant_msg("about topic A"));
+        tree.branch_with_summary(&u1, "discussed topic A briefly");
+
+        assert_eq!(tree.context_len(), tree.build_context().len());
+    }
+
+    #[test]
+    fn build_context_prefix_limits_clones() {
+        let mut tree = SessionTree::new();
+        tree.append_message(user_msg("q1"));
+        tree.append_message(assistant_msg("a1"));
+        tree.append_message(user_msg("q2"));
+
+        let prefix = tree.build_context_prefix(2);
+        assert_eq!(prefix, vec![user_msg("q1"), assistant_msg("a1")]);
     }
 
     #[test]

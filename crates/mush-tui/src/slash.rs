@@ -566,40 +566,7 @@ pub fn expand_template(prompt: &str) -> String {
 
 /// rebuild the TUI display from a conversation (used after branching/resuming)
 pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
-    app.clear_messages();
-    for msg in conversation {
-        match msg {
-            Message::User(u) => {
-                let text = match &u.content {
-                    UserContent::Text(t) => t.clone(),
-                    UserContent::Parts(parts) => parts
-                        .iter()
-                        .filter_map(|p| match p {
-                            UserContentPart::Text(t) => Some(t.text.as_str()),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                };
-                app.push_user_message(text);
-            }
-            Message::Assistant(a) => {
-                let text = a
-                    .content
-                    .iter()
-                    .filter_map(|c| match c {
-                        AssistantContentPart::Text(t) => Some(t.text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("");
-                app.start_streaming();
-                app.push_text_delta(&text);
-                app.finish_streaming(Some(a.usage), None);
-            }
-            _ => {}
-        }
-    }
+    crate::conversation_display::rebuild_display(app, conversation);
 }
 
 /// export conversation to a markdown file

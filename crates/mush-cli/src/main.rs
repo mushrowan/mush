@@ -71,6 +71,15 @@ struct Cli {
     /// don't save the session
     #[arg(long)]
     no_session: bool,
+
+    #[arg(long, hide = true, env = mush_tui::KEYBOARD_ENHANCEMENT_ENV)]
+    tui_keyboard_enhancement: Option<mush_tui::KeyboardEnhancementMode>,
+
+    #[arg(long, hide = true, env = mush_tui::MOUSE_TRACKING_ENV)]
+    tui_mouse_tracking: Option<mush_tui::MouseTrackingMode>,
+
+    #[arg(long, hide = true, env = mush_tui::IMAGE_PROBE_ENV)]
+    tui_image_probe: Option<mush_tui::ImageProbeMode>,
 }
 
 #[derive(clap::Subcommand)]
@@ -98,6 +107,16 @@ enum Command {
     },
     /// open config file in $EDITOR
     Config,
+}
+
+impl Cli {
+    fn terminal_policy_overrides(&self) -> mush_tui::TerminalPolicyOverrides {
+        mush_tui::TerminalPolicyOverrides {
+            keyboard_enhancement: self.tui_keyboard_enhancement,
+            mouse_tracking: self.tui_mouse_tracking,
+            image_probe: self.tui_image_probe,
+        }
+    }
 }
 
 #[tokio::main]
@@ -140,7 +159,7 @@ async fn main() -> Result<()> {
         Some(Command::Logout { provider }) => return commands::logout(provider),
         Some(Command::Models) => return commands::list_models(),
         Some(Command::Sessions) => return commands::list_sessions(),
-        Some(Command::Status) => return commands::status(),
+        Some(Command::Status) => return commands::status(cli.terminal_policy_overrides()),
         Some(Command::Delete { id }) => return commands::delete_session(&id),
         Some(Command::Config) => return commands::open_config(),
         None => {}
@@ -212,9 +231,16 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
             let m = compact_model.clone();
             let o = compact_options.clone();
             let ctx = ctx_tokens_for_transform.clone();
+            let input_len = msgs.len();
+            let owned = msgs.to_vec();
             Box::pin(async move {
                 let tokens = TokenCount::new(ctx.load(std::sync::atomic::Ordering::Relaxed));
-                auto_compact(msgs, tokens, context_window, reg_ref, &m, &o).await
+                let compacted = auto_compact(owned, tokens, context_window, reg_ref, &m, &o).await;
+                if compacted.len() < input_len {
+                    mush_agent::ContextTransformResult::Updated(compacted)
+                } else {
+                    mush_agent::ContextTransformResult::Unchanged
+                }
             })
         }))
     } else {
@@ -228,10 +254,10 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
         registry: &setup.registry,
         options: setup.options,
         max_turns: setup.max_turns,
-        get_steering: None,
-        get_follow_up: None,
-        transform_context: transform,
-        confirm_tool: None,
+        hooks: mush_agent::AgentHooks {
+            transform_context: transform,
+            ..mush_agent::AgentHooks::default()
+        },
     };
 
     let mut stream = std::pin::pin!(agent_loop(config, session.context()));
@@ -345,6 +371,7 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
 
 async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
     // shared state for streaming bash output to the TUI
+    let terminal_policy_overrides = cli.terminal_policy_overrides();
     let tool_output_live = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
     let sink_state = tool_output_live.clone();
     let output_sink: mush_tools::bash::OutputSink = std::sync::Arc::new(move |line: &str| {
@@ -398,6 +425,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
     let prompt_enricher = build_prompt_enricher(&setup.cwd);
 
     let hint_mode = setup.cfg.hint_mode;
+    let terminal_policy = setup.cfg.terminal.with_overrides(terminal_policy_overrides);
 
     let config_file = config::config_dir().join("config.toml");
     let provider_api_keys = setup.cfg.api_keys.to_map();
@@ -434,7 +462,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
                 let mut session = Session::new(model_id, &cwd_s);
                 session.meta.id = sid.clone();
                 session.conversation = conversation.clone();
-                session.meta.message_count = session.context().len();
+                session.meta.message_count = conversation.context_len();
                 session.auto_title();
                 let _ = store.save(&session);
             }))
@@ -463,6 +491,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
             }))
         },
         isolation_mode: setup.cfg.isolation,
+        terminal_policy,
     };
 
     mush_tui::run_tui(tui_config, &setup.tools, &setup.registry)
@@ -470,4 +499,74 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         .map_err(|e| eyre!("TUI error: {e}"))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{LazyLock, Mutex};
+
+    use super::*;
+
+    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in self.saved.drain(..) {
+                // serialised by ENV_LOCK in each test
+                unsafe {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+    }
+
+    fn with_env(vars: &[(&'static str, Option<&str>)]) -> EnvGuard {
+        let saved = vars
+            .iter()
+            .map(|(key, _)| (*key, std::env::var(key).ok()))
+            .collect::<Vec<_>>();
+        for (key, value) in vars {
+            // serialised by ENV_LOCK in each test
+            unsafe {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+        EnvGuard { saved }
+    }
+
+    #[test]
+    fn clap_env_overrides_feed_terminal_policy() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = with_env(&[
+            (mush_tui::KEYBOARD_ENHANCEMENT_ENV, Some("disabled")),
+            (mush_tui::MOUSE_TRACKING_ENV, Some("off")),
+            (mush_tui::IMAGE_PROBE_ENV, Some("false")),
+        ]);
+
+        let cli = Cli::try_parse_from(["mush"]).unwrap();
+        let overrides = cli.terminal_policy_overrides();
+
+        assert_eq!(
+            overrides.keyboard_enhancement,
+            Some(mush_tui::KeyboardEnhancementMode::Disabled)
+        );
+        assert_eq!(
+            overrides.mouse_tracking,
+            Some(mush_tui::MouseTrackingMode::Disabled)
+        );
+        assert_eq!(
+            overrides.image_probe,
+            Some(mush_tui::ImageProbeMode::Disabled)
+        );
+    }
 }

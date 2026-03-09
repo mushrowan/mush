@@ -1,0 +1,110 @@
+//! TUI runner - wires terminal, agent loop, and event handling together
+
+use std::io;
+
+use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
+
+mod commands;
+mod config;
+mod input;
+mod looping;
+mod panes;
+mod render;
+mod runtime;
+mod streams;
+mod terminal;
+
+use mush_agent::tool::ToolRegistry;
+use mush_ai::registry::ApiRegistry;
+
+pub use self::config::{
+    HintMode, LastModelSaver, PromptEnricher, SessionSaver, ThinkingPrefsSaver, TitleUpdater,
+    TuiConfig,
+};
+use self::input::LoopAction;
+use self::looping::run_loop_iteration;
+use self::render::draw_panes;
+use self::runtime::RunnerRuntime;
+use self::streams::{StreamDeps, StreamState, new_agent_streams, start_pending_streams};
+use self::terminal::{
+    TerminalStateGuard, cleanup, enter_tui_terminal, install_panic_cleanup_hook,
+    probe_image_picker, restore_terminal_state,
+};
+
+/// run the interactive TUI
+pub async fn run_tui(
+    mut tui_config: TuiConfig,
+    tools: &ToolRegistry,
+    registry: &ApiRegistry,
+) -> io::Result<()> {
+    restore_terminal_state();
+
+    let image_picker = probe_image_picker(tui_config.terminal_policy);
+    let mut terminal_guard = TerminalStateGuard::new();
+
+    enter_tui_terminal(tui_config.terminal_policy)?;
+    install_panic_cleanup_hook();
+
+    let backend = CrosstermBackend::new(io::stdout());
+    let mut terminal = Terminal::new(backend)?;
+    let (mut runtime, services) = RunnerRuntime::new(&mut tui_config).await;
+
+    draw_panes(&mut terminal, &mut runtime.pane_mgr, &image_picker)?;
+
+    let mut agent_streams = new_agent_streams();
+    let mut stream_state = StreamState::new();
+
+    'ui: loop {
+        start_pending_streams(
+            &mut agent_streams,
+            &mut stream_state,
+            &mut runtime.pane_mgr,
+            &mut runtime.pending_prompt,
+            StreamDeps {
+                default_model: tui_config.model.clone(),
+                system_prompt: tui_config.system_prompt.clone(),
+                options: tui_config.options.clone(),
+                max_turns: tui_config.max_turns,
+                prompt_enricher: tui_config.prompt_enricher.clone(),
+                hint_mode: tui_config.hint_mode,
+                provider_api_keys: tui_config.provider_api_keys.clone(),
+                confirm_tools: tui_config.confirm_tools,
+                auto_compact: tui_config.auto_compact,
+                tools,
+                registry,
+                message_bus: &services.message_bus,
+                shared_state: &services.shared_state,
+                file_tracker: &services.file_tracker,
+            },
+        )
+        .await;
+
+        let action = run_loop_iteration(
+            &mut agent_streams,
+            &mut stream_state,
+            &mut runtime,
+            &services,
+            &mut tui_config,
+            registry,
+            &image_picker,
+        )
+        .await?;
+        if matches!(action, LoopAction::Quit) {
+            break 'ui;
+        }
+
+        runtime.apply_config_reload(&mut tui_config);
+        if runtime.focused_should_quit() {
+            break;
+        }
+
+        runtime.tick_streaming_panes();
+        runtime.notify_cache_state(tui_config.cache_timer);
+        draw_panes(&mut terminal, &mut runtime.pane_mgr, &image_picker)?;
+    }
+
+    cleanup(&mut terminal)?;
+    terminal_guard.disarm();
+    Ok(())
+}
