@@ -258,6 +258,89 @@ pub(super) async fn fork_pane(
     });
 }
 
+/// process pending delegations: fork a pane for each and inject the task as prompt
+pub(super) fn process_delegations(
+    pane_mgr: &mut PaneManager,
+    tui_config: &TuiConfig,
+    bus: &crate::messaging::MessageBus,
+    queue: &crate::delegate::DelegationQueue,
+) {
+    let delegations: Vec<_> = {
+        let mut q = queue.lock().unwrap();
+        std::mem::take(&mut *q)
+    };
+
+    for del in delegations {
+        let new_id = pane_mgr.next_id();
+        let mut new_app = app_from_parent(pane_mgr.focused(), tui_config);
+
+        // resolve model tier or direct model id
+        if let Some(ref model_spec) = del.model {
+            let model_id = resolve_model_tier(model_spec, &tui_config.model_tiers);
+            if let Some(model) = mush_ai::models::find_model_by_id(&model_id) {
+                new_app.model_id = model.id.clone();
+                new_app.stats.context_window = model.context_window;
+            } else {
+                // unknown model, set id anyway (will fail at stream time with a clear error)
+                new_app.model_id = model_id.into();
+            }
+        }
+
+        let mut new_pane = crate::pane::Pane::new(new_id, new_app);
+        new_pane.label = Some(format!("task: {}", truncate_label(&del.task)));
+        new_pane.inbox = Some(bus.register(new_id));
+        new_pane.pending_prompt = Some(del.task);
+        pane_mgr.add_pane(new_pane);
+
+        // notify the delegating pane
+        let _ = bus.send(
+            del.from,
+            crate::messaging::InterPaneMessage {
+                from: new_id,
+                to: Some(del.from),
+                intent: crate::messaging::MessageIntent::Info,
+                content: format!(
+                    "sub-agent pane {} started working on task_id={}",
+                    new_id.as_u32(),
+                    del.task_id
+                ),
+                task_id: Some(del.task_id),
+                timestamp: mush_ai::types::Timestamp::now(),
+            },
+        );
+    }
+}
+
+/// create a fresh App inheriting display settings from a parent pane
+fn app_from_parent(parent: &crate::pane::Pane, tui_config: &TuiConfig) -> App {
+    let mut app = App::new(parent.app.model_id.clone(), parent.app.stats.context_window);
+    app.thinking_level = parent.app.thinking_level;
+    app.thinking_display = parent.app.thinking_display;
+    app.completions = parent.app.completions.clone();
+    app.slash_commands = parent.app.slash_commands.clone();
+    app.model_completions = parent.app.model_completions.clone();
+    app.cwd = parent.app.cwd.clone();
+    app.show_cost = tui_config.show_cost;
+    app
+}
+
+/// resolve a model spec: check tier map first, fall back to literal model id
+fn resolve_model_tier(spec: &str, tiers: &std::collections::HashMap<String, String>) -> String {
+    tiers
+        .get(spec)
+        .cloned()
+        .unwrap_or_else(|| spec.to_string())
+}
+
+fn truncate_label(s: &str) -> String {
+    let first_line = s.lines().next().unwrap_or(s);
+    if first_line.len() <= 40 {
+        first_line.to_string()
+    } else {
+        format!("{}…", &first_line[..39])
+    }
+}
+
 pub(super) async fn close_focused_pane(
     pane_mgr: &mut PaneManager,
     message_bus: &crate::messaging::MessageBus,
@@ -360,5 +443,21 @@ mod tests {
         assert_eq!(pane_mgr.panes().len(), 1);
         assert_eq!(pane_mgr.focused().id, PaneId::new(1));
         assert_eq!(message_bus.pane_ids(), vec![PaneId::new(1)]);
+    }
+
+    #[test]
+    fn resolve_tier_from_map() {
+        let mut tiers = std::collections::HashMap::new();
+        tiers.insert("fast".into(), "claude-haiku-3-5-20241022".into());
+        tiers.insert("strong".into(), "claude-opus-4-6".into());
+
+        assert_eq!(resolve_model_tier("fast", &tiers), "claude-haiku-3-5-20241022");
+        assert_eq!(resolve_model_tier("strong", &tiers), "claude-opus-4-6");
+    }
+
+    #[test]
+    fn resolve_tier_falls_back_to_literal() {
+        let tiers = std::collections::HashMap::new();
+        assert_eq!(resolve_model_tier("gpt-4o", &tiers), "gpt-4o");
     }
 }
