@@ -1,6 +1,8 @@
+mod frontmatter;
 pub mod hook;
 pub mod loader;
 pub mod prompts;
+pub mod rules;
 pub mod skills;
 pub mod types;
 

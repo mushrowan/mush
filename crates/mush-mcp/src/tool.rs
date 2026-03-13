@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use mush_agent::tool::{AgentTool, ToolResult};
-use rmcp::model::{RawContent, Tool as McpToolDef};
+use rmcp::model::Tool as McpToolDef;
 
 use crate::connection::McpConnection;
 
@@ -68,27 +68,7 @@ impl AgentTool for McpTool {
                 .call_tool(self.tool_name.clone(), args)
                 .await
             {
-                Ok(result) => {
-                    // convert MCP CallToolResult to our ToolResult
-                    let is_error = result.is_error.unwrap_or(false);
-                    let text: String = result
-                        .content
-                        .iter()
-                        .filter_map(|c| match &c.raw {
-                            RawContent::Text(t) => Some(t.text.as_str()),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-
-                    if is_error {
-                        ToolResult::error(text)
-                    } else if text.is_empty() {
-                        ToolResult::text("(no output)")
-                    } else {
-                        ToolResult::text(text)
-                    }
-                }
+                Ok(result) => crate::result::convert_call_result(result),
                 Err(e) => ToolResult::error(format!(
                     "MCP tool {} on {}: {e}",
                     self.tool_name, self.server_name
