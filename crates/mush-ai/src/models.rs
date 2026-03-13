@@ -196,23 +196,6 @@ pub fn openai_models() -> Vec<Model> {
             context_window: TokenCount::new(400_000),
             max_output_tokens: TokenCount::new(128_000),
         },
-        Model {
-            id: "gpt-5.2-mini".into(),
-            name: "GPT-5.2 Mini".into(),
-            api: Api::OpenaiResponses,
-            provider: Provider::Custom("openai".into()),
-            base_url: "https://api.openai.com/v1".into(),
-            reasoning: true,
-            input: vec![InputModality::Text, InputModality::Image],
-            cost: ModelCost {
-                input: 0.25,
-                output: 2.0,
-                cache_read: 0.025,
-                cache_write: 0.3125,
-            },
-            context_window: TokenCount::new(400_000),
-            max_output_tokens: TokenCount::new(64_000),
-        },
     ]
 }
 
