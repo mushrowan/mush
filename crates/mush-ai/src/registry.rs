@@ -35,16 +35,33 @@ pub enum ProviderError {
     #[error("invalid header value: {0}")]
     InvalidHeader(#[from] reqwest::header::InvalidHeaderValue),
 
-    #[error("{api} returned {status}: {body}")]
+    #[error("{api} returned {status} ({content_type}): {body}")]
     #[diagnostic(help("check your api key and model id"))]
     ApiError {
         api: &'static str,
         status: reqwest::StatusCode,
+        content_type: String,
         body: String,
     },
 
     #[error("{0}")]
     Other(String),
+}
+
+/// max bytes of API error body to include in the error message
+const MAX_ERROR_BODY: usize = 2000;
+
+/// truncate an error body for diagnostic display
+pub fn truncate_error_body(body: &str) -> String {
+    if body.len() <= MAX_ERROR_BODY {
+        body.to_string()
+    } else {
+        format!(
+            "{}... ({} bytes total)",
+            &body[..MAX_ERROR_BODY],
+            body.len()
+        )
+    }
 }
 
 impl ProviderError {
@@ -165,6 +182,7 @@ mod tests {
         let err = ProviderError::ApiError {
             api: "test",
             status: reqwest::StatusCode::TOO_MANY_REQUESTS,
+            content_type: "application/json".into(),
             body: "rate limited".into(),
         };
         assert!(err.is_retryable());
@@ -175,6 +193,7 @@ mod tests {
         let err = ProviderError::ApiError {
             api: "test",
             status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            content_type: "application/json".into(),
             body: "internal error".into(),
         };
         assert!(err.is_retryable());
@@ -185,6 +204,7 @@ mod tests {
         let err = ProviderError::ApiError {
             api: "test",
             status: reqwest::StatusCode::BAD_GATEWAY,
+            content_type: "text/html".into(),
             body: "bad gateway".into(),
         };
         assert!(err.is_retryable());
@@ -195,6 +215,7 @@ mod tests {
         let err = ProviderError::ApiError {
             api: "test",
             status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            content_type: "text/plain".into(),
             body: "unavailable".into(),
         };
         assert!(err.is_retryable());
@@ -205,6 +226,7 @@ mod tests {
         let err = ProviderError::ApiError {
             api: "test",
             status: reqwest::StatusCode::BAD_REQUEST,
+            content_type: "application/json".into(),
             body: "bad request".into(),
         };
         assert!(!err.is_retryable());
@@ -215,6 +237,7 @@ mod tests {
         let err = ProviderError::ApiError {
             api: "test",
             status: reqwest::StatusCode::UNAUTHORIZED,
+            content_type: "application/json".into(),
             body: "unauthorized".into(),
         };
         assert!(!err.is_retryable());
@@ -225,9 +248,24 @@ mod tests {
         let err = ProviderError::ApiError {
             api: "test",
             status: reqwest::StatusCode::FORBIDDEN,
+            content_type: "application/json".into(),
             body: "forbidden".into(),
         };
         assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn truncate_error_body_short() {
+        let body = "short error";
+        assert_eq!(truncate_error_body(body), "short error");
+    }
+
+    #[test]
+    fn truncate_error_body_long() {
+        let body = "x".repeat(5000);
+        let truncated = truncate_error_body(&body);
+        assert!(truncated.len() < body.len());
+        assert!(truncated.contains("5000 bytes total"));
     }
 
     #[test]

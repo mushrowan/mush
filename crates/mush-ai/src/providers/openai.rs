@@ -84,11 +84,12 @@ impl ApiProvider for OpenaiCompletionsProvider {
 
             if !status.is_success() {
                 let text = response.text().await.unwrap_or_default();
-                tracing::error!(%status, body = %text, "openai completions API error");
+                tracing::error!(%status, %content_type, body = %text, "openai completions API error");
                 return Err(ProviderError::ApiError {
                     api: "openai completions",
                     status,
-                    body: text,
+                    content_type,
+                    body: crate::registry::truncate_error_body(&text),
                 });
             }
 

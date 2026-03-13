@@ -234,7 +234,7 @@ pub fn openai_codex_models() -> Vec<Model> {
                 cache_read: 0.0,
                 cache_write: 0.0,
             },
-            context_window: TokenCount::new(400_000),
+            context_window: TokenCount::new(1_050_000),
             max_output_tokens: TokenCount::new(128_000),
         },
         Model {
