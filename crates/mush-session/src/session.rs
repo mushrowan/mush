@@ -239,4 +239,43 @@ mod tests {
         assert_eq!(restored.meta.id, session.meta.id);
         assert_eq!(restored.context().len(), 1);
     }
+
+    #[test]
+    fn session_with_panes_roundtrips() {
+        let mut session = Session::new("test-model", "/tmp");
+        session.push_message(Message::User(UserMessage {
+            content: UserContent::Text("main pane".into()),
+            timestamp_ms: Timestamp::zero(),
+        }));
+
+        let mut pane_conv = ConversationState::new();
+        pane_conv.append_message(Message::User(UserMessage {
+            content: UserContent::Text("pane 2".into()),
+            timestamp_ms: Timestamp::zero(),
+        }));
+        session.panes.push(PaneSession {
+            pane_id: PaneId::new(2),
+            label: Some("helper".into()),
+            model_id: "gpt-4o".into(),
+            conversation: pane_conv,
+        });
+
+        let json = serde_json::to_string(&session).unwrap();
+        let restored: Session = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.panes.len(), 1);
+        assert_eq!(restored.panes[0].pane_id, PaneId::new(2));
+        assert_eq!(restored.panes[0].label.as_deref(), Some("helper"));
+        assert_eq!(restored.panes[0].conversation.context().len(), 1);
+    }
+
+    #[test]
+    fn session_without_panes_omits_field() {
+        let session = Session::new("test-model", "/tmp");
+        let json = serde_json::to_string(&session).unwrap();
+        assert!(!json.contains("panes"));
+
+        // still deserialises fine (panes defaults to empty vec)
+        let restored: Session = serde_json::from_str(&json).unwrap();
+        assert!(restored.panes.is_empty());
+    }
 }
