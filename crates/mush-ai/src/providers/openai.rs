@@ -139,6 +139,20 @@ struct RequestToolFunction {
     parameters: serde_json::Value,
 }
 
+fn openai_reasoning_effort(model: &Model, level: ThinkingLevel) -> Option<String> {
+    if level == ThinkingLevel::Off || !model.reasoning {
+        return None;
+    }
+
+    Some(match level {
+        ThinkingLevel::Off => unreachable!(),
+        ThinkingLevel::Minimal | ThinkingLevel::Low => "low".into(),
+        ThinkingLevel::Medium => "medium".into(),
+        ThinkingLevel::High => "high".into(),
+        ThinkingLevel::Xhigh => "xhigh".into(),
+    })
+}
+
 fn build_request_body(
     model: &Model,
     system_prompt: &Option<String>,
@@ -300,17 +314,9 @@ fn build_request_body(
         )
     };
 
-    let reasoning_effort = match options.thinking {
-        Some(level) if level != ThinkingLevel::Off && model.reasoning => Some(match level {
-            ThinkingLevel::Off => unreachable!(),
-            ThinkingLevel::Minimal => "low".into(),
-            ThinkingLevel::Low => "low".into(),
-            ThinkingLevel::Medium => "medium".into(),
-            ThinkingLevel::High => "high".into(),
-            ThinkingLevel::Xhigh => "high".into(),
-        }),
-        _ => None,
-    };
+    let reasoning_effort = options
+        .thinking
+        .and_then(|level| openai_reasoning_effort(model, level));
 
     RequestBody {
         model: model.id.to_string(),

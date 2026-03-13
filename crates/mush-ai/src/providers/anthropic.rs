@@ -211,6 +211,8 @@ struct RequestBody {
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<ThinkingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    output_config: Option<OutputConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     cache_control: Option<CacheControl>,
 }
 
@@ -256,6 +258,11 @@ struct RequestTool {
     name: String,
     description: String,
     input_schema: serde_json::Value,
+}
+
+#[derive(Serialize)]
+struct OutputConfig {
+    effort: String,
 }
 
 fn build_request_body(
@@ -331,6 +338,12 @@ fn build_request_body(
         }
         _ => None,
     };
+    let output_config = options
+        .thinking
+        .and_then(anthropic_effort)
+        .map(|effort| OutputConfig {
+            effort: effort.into(),
+        });
 
     // temperature is incompatible with thinking
     let temperature = if thinking.is_none() {
@@ -356,6 +369,7 @@ fn build_request_body(
         tools: converted_tools,
         temperature,
         thinking,
+        output_config,
         cache_control,
     }
 }
@@ -382,12 +396,24 @@ fn anthropic_cache_control(
     })
 }
 
-/// opus 4.6 and sonnet 4.6 use adaptive thinking instead of budget tokens
+/// Claude 4.6 models use adaptive thinking; older Claude 4 models still use
+/// enabled+budget thinking. Keep this narrow until reasoning capabilities move
+/// into model metadata instead of living in provider code.
 fn supports_adaptive_thinking(model_id: &str) -> bool {
     model_id.contains("opus-4-6")
         || model_id.contains("opus-4.6")
         || model_id.contains("sonnet-4-6")
         || model_id.contains("sonnet-4.6")
+}
+
+fn anthropic_effort(level: ThinkingLevel) -> Option<&'static str> {
+    match level {
+        ThinkingLevel::Off => None,
+        ThinkingLevel::Minimal | ThinkingLevel::Low => Some("low"),
+        ThinkingLevel::Medium => Some("medium"),
+        ThinkingLevel::High => Some("high"),
+        ThinkingLevel::Xhigh => Some("max"),
+    }
 }
 
 fn thinking_budget(level: ThinkingLevel, max_tokens: u64) -> u64 {
@@ -1368,6 +1394,54 @@ mod tests {
         assert!(body.thinking.is_some());
         // temperature should be None when thinking is enabled
         assert!(body.temperature.is_none());
+    }
+
+    #[test]
+    fn opus_4_6_uses_adaptive_thinking_with_effort() {
+        let model = Model {
+            id: "claude-opus-4-6".into(),
+            name: "Claude Opus 4.6".into(),
+            reasoning: true,
+            ..test_model()
+        };
+        let options = StreamOptions {
+            thinking: Some(ThinkingLevel::Xhigh),
+            ..Default::default()
+        };
+
+        let body = build_request_body(&model, &None, &[], &[], &options, false);
+
+        assert!(matches!(
+            body.thinking,
+            Some(ThinkingConfig::Adaptive { .. })
+        ));
+        assert_eq!(
+            body.output_config.as_ref().map(|cfg| cfg.effort.as_str()),
+            Some("max")
+        );
+    }
+
+    #[test]
+    fn legacy_claude_keeps_budget_thinking_with_effort_output_config() {
+        let model = Model {
+            reasoning: true,
+            ..test_model()
+        };
+        let options = StreamOptions {
+            thinking: Some(ThinkingLevel::High),
+            ..Default::default()
+        };
+
+        let body = build_request_body(&model, &None, &[], &[], &options, false);
+
+        assert!(matches!(
+            body.thinking,
+            Some(ThinkingConfig::Enabled { .. })
+        ));
+        assert_eq!(
+            body.output_config.as_ref().map(|cfg| cfg.effort.as_str()),
+            Some("high")
+        );
     }
 
     #[test]
