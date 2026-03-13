@@ -545,7 +545,8 @@ fn handle_model_switch(
         let level = thinking_prefs
             .get(id)
             .copied()
-            .unwrap_or(ThinkingLevel::Off);
+            .unwrap_or(ThinkingLevel::Off)
+            .normalize_visible();
         app.thinking_level = level;
         if let Some(ref save_last_model) = tui_config.save_last_model {
             save_last_model(id);

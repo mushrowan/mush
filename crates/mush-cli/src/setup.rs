@@ -533,6 +533,7 @@ pub fn resolve_thinking(
         .get(model.id.as_ref())
         .copied()
         .or(cfg.thinking)
+        .map(ThinkingLevel::normalize_visible)
 }
 
 /// resolve API key for a model: env > config > oauth

@@ -709,10 +709,10 @@ mod tests {
 
         let event = handle_key(&mut app, ctrl(KeyCode::Char('t')));
         assert!(matches!(event, Some(AppEvent::CycleThinkingLevel)));
-        assert_eq!(app.thinking_level, ThinkingLevel::Minimal);
+        assert_eq!(app.thinking_level, ThinkingLevel::Low);
 
         handle_key(&mut app, ctrl(KeyCode::Char('t')));
-        assert_eq!(app.thinking_level, ThinkingLevel::Low);
+        assert_eq!(app.thinking_level, ThinkingLevel::Medium);
     }
 
     #[test]

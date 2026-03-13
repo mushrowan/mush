@@ -41,13 +41,13 @@ fn left_spans(app: &App) -> Vec<Span<'static>> {
         .fg(Color::DarkGray)
         .add_modifier(Modifier::DIM);
 
-    let thinking_label = match app.thinking_level {
+    let thinking_label = match app.thinking_level.normalize_visible() {
         ThinkingLevel::Off => "off",
-        ThinkingLevel::Minimal => "minimal",
         ThinkingLevel::Low => "low",
         ThinkingLevel::Medium => "medium",
         ThinkingLevel::High => "high",
         ThinkingLevel::Xhigh => "xhigh",
+        ThinkingLevel::Minimal => unreachable!(),
     };
 
     let mut spans = vec![Span::styled(" ", dim)];
