@@ -42,6 +42,7 @@ pub(super) struct RunnerServices {
     pub message_bus: crate::messaging::MessageBus,
     pub shared_state: crate::shared_state::SharedState,
     pub file_tracker: crate::file_tracker::FileTracker,
+    pub delegation_queue: crate::delegate::DelegationQueue,
 }
 
 pub(super) struct RunnerRuntime {
@@ -49,6 +50,7 @@ pub(super) struct RunnerRuntime {
     pub pane_mgr: PaneManager,
     pub thinking_prefs: HashMap<String, ThinkingLevel>,
     pub thinking_saver: Option<ThinkingPrefsSaver>,
+    pub lifecycle_hooks: mush_agent::LifecycleHooks,
     pub pending_prompt: Option<String>,
     _config_watcher: Option<RecommendedWatcher>,
     config_rx: Option<mpsc::Receiver<crate::theme::Theme>>,
@@ -67,6 +69,20 @@ impl RunnerRuntime {
         let file_tracker = crate::file_tracker::FileTracker::new(cwd.clone());
         let initial_inbox = message_bus.register(PaneId::new(1));
         pane_mgr.focused_mut().inbox = Some(initial_inbox);
+
+        // restore additional panes from saved session
+        for pane_snapshot in std::mem::take(&mut tui_config.initial_panes) {
+            let pane_id = pane_mgr.next_id();
+            let mut pane_app = build_initial_app(tui_config, &cwd);
+            pane_app.model_id = pane_snapshot.model_id.into();
+            let pane_conversation =
+                replay_initial_messages(&mut pane_app, &pane_snapshot.conversation.context());
+            let mut pane =
+                Pane::with_conversation(pane_id, pane_app, pane_conversation);
+            pane.label = pane_snapshot.label;
+            pane.inbox = Some(message_bus.register(pane_id));
+            pane_mgr.add_pane(pane);
+        }
 
         if matches!(
             tui_config.isolation_mode,
@@ -87,6 +103,7 @@ impl RunnerRuntime {
                 pane_mgr,
                 thinking_prefs: std::mem::take(&mut tui_config.thinking_prefs),
                 thinking_saver: tui_config.save_thinking_prefs.clone(),
+                lifecycle_hooks: tui_config.lifecycle_hooks.clone(),
                 pending_prompt: None,
                 _config_watcher,
                 config_rx,
@@ -95,6 +112,7 @@ impl RunnerRuntime {
                 message_bus,
                 shared_state,
                 file_tracker,
+                delegation_queue: crate::delegate::new_queue(),
             },
         )
     }
@@ -247,6 +265,7 @@ mod tests {
             },
             max_turns: 32,
             initial_messages: vec![],
+            initial_panes: vec![],
             theme: crate::theme::Theme::default(),
             prompt_enricher: None,
             hint_mode: crate::runner::HintMode::Message,
@@ -259,6 +278,7 @@ mod tests {
             update_title: None,
             confirm_tools: false,
             auto_compact: false,
+            auto_fork_compact: false,
             show_cost: true,
             debug_cache: false,
             cache_timer: true,
@@ -267,6 +287,13 @@ mod tests {
             log_buffer: None,
             isolation_mode: crate::file_tracker::IsolationMode::None,
             terminal_policy: crate::terminal_policy::TerminalPolicy::default(),
+            lifecycle_hooks: mush_agent::LifecycleHooks::default(),
+            cwd: std::path::PathBuf::from("/tmp"),
+            dynamic_system_context: None,
+            file_rules: None,
+            lsp_diagnostics: None,
+            agent_card: None,
+            model_tiers: HashMap::new(),
         }
     }
 

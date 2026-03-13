@@ -13,7 +13,7 @@ use mush_agent::{AgentConfig, AgentEvent, agent_loop, summarise_tool_args};
 use mush_ai::models;
 use mush_ai::stream::StreamEvent;
 use mush_ai::types::*;
-use mush_session::{Session, SessionStore};
+use mush_session::{PaneSession, Session, SessionStore};
 
 use mush_tui::TuiConfig;
 
@@ -188,7 +188,7 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
     .await?;
 
     // in print mode, hint is always prepended (one-shot, no transform loop)
-    let enricher = build_prompt_enricher(&setup.cwd);
+    let enricher = build_prompt_enricher(&setup.cwd, &setup.cfg.retrieval, &setup.tool_descriptions);
     let prompt = if setup.cfg.hint_mode != config::HintMode::None
         && let Some(ref enricher) = enricher
         && let Some(hint) = enricher(&prompt)
@@ -226,6 +226,8 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
     let reg_ref = &setup.registry;
     let context_tokens_shared = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let ctx_tokens_for_transform = context_tokens_shared.clone();
+    let lifecycle_hooks = std::sync::Arc::new(setup.lifecycle_hooks.clone());
+    let cwd = std::sync::Arc::new(setup.cwd.clone());
     let transform: Option<mush_agent::ContextTransform<'_>> = if setup.cfg.auto_compact {
         Some(Box::new(move |msgs| {
             let m = compact_model.clone();
@@ -233,9 +235,14 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
             let ctx = ctx_tokens_for_transform.clone();
             let input_len = msgs.len();
             let owned = msgs.to_vec();
+            let hooks = lifecycle_hooks.clone();
+            let cwd = cwd.clone();
             Box::pin(async move {
                 let tokens = TokenCount::new(ctx.load(std::sync::atomic::Ordering::Relaxed));
-                let compacted = auto_compact(owned, tokens, context_window, reg_ref, &m, &o).await;
+                let compacted = auto_compact(
+                    owned, tokens, context_window, reg_ref, &m, &o,
+                    Some(&hooks), Some(cwd.as_path()),
+                ).await;
                 if compacted.len() < input_len {
                     mush_agent::ContextTransformResult::Updated(compacted)
                 } else {
@@ -258,6 +265,11 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
             transform_context: transform,
             ..mush_agent::AgentHooks::default()
         },
+        lifecycle_hooks: setup.lifecycle_hooks,
+        cwd: Some(std::env::current_dir().unwrap_or_default()),
+        dynamic_system_context: None,
+        file_rules: None,
+        lsp_diagnostics: None,
     };
 
     let mut stream = std::pin::pin!(agent_loop(config, session.context()));
@@ -418,14 +430,36 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         Session::new(setup.model.id.as_str(), &cwd_str)
     };
     let initial_messages = session.context();
+    let initial_panes: Vec<mush_tui::PaneSnapshot> = session
+        .panes
+        .iter()
+        .map(|p| mush_tui::PaneSnapshot {
+            pane_id: p.pane_id,
+            label: p.label.clone(),
+            model_id: p.model_id.to_string(),
+            conversation: p.conversation.clone(),
+        })
+        .collect();
     let session_id = session.meta.id.clone();
     setup.options.session_id = Some(session_id.clone());
 
     let theme = mush_tui::Theme::from_config(&setup.cfg.theme);
-    let prompt_enricher = build_prompt_enricher(&setup.cwd);
+    let prompt_enricher = build_prompt_enricher(&setup.cwd, &setup.cfg.retrieval, &setup.tool_descriptions);
 
     let hint_mode = setup.cfg.hint_mode;
     let terminal_policy = setup.cfg.terminal.with_overrides(terminal_policy_overrides);
+
+    // build agent card before setup fields are moved into tui_config
+    let agent_card = {
+        let mut card = mush_agent::AgentCard::build(&setup.model.id, &setup.tools);
+        card.capabilities = mush_agent::Capabilities {
+            streaming: true,
+            multi_pane: true,
+            messaging: true,
+            lsp: setup.lsp_diagnostics.is_some(),
+        };
+        card
+    };
 
     let config_file = config::config_dir().join("config.toml");
     let provider_api_keys = setup.cfg.api_keys.to_map();
@@ -436,6 +470,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         options: setup.options,
         max_turns: setup.max_turns,
         initial_messages,
+        initial_panes,
         theme,
         prompt_enricher,
         hint_mode,
@@ -457,18 +492,29 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         } else {
             let sid = session_id.clone();
             let cwd_s = cwd_str.clone();
-            Some(std::sync::Arc::new(move |conversation, model_id| {
+            Some(std::sync::Arc::new(move |snapshot: mush_tui::SessionSnapshot| {
                 let store = SessionStore::new(SessionStore::default_dir());
-                let mut session = Session::new(model_id, &cwd_s);
+                let mut session = Session::new(&snapshot.model_id, &cwd_s);
                 session.meta.id = sid.clone();
-                session.conversation = conversation.clone();
-                session.meta.message_count = conversation.context_len();
+                session.conversation = snapshot.primary;
+                session.meta.message_count = session.conversation.context_len();
+                session.panes = snapshot
+                    .panes
+                    .into_iter()
+                    .map(|p| PaneSession {
+                        pane_id: p.pane_id,
+                        label: p.label,
+                        model_id: p.model_id.into(),
+                        conversation: p.conversation,
+                    })
+                    .collect();
                 session.auto_title();
                 let _ = store.save(&session);
             }))
         },
         confirm_tools: setup.cfg.confirm_tools,
         auto_compact: setup.cfg.auto_compact,
+        auto_fork_compact: setup.cfg.auto_fork_compact,
         show_cost: setup.cfg.show_cost,
         debug_cache: setup.debug_cache,
         cache_timer: setup.cfg.cache_timer,
@@ -492,6 +538,13 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         },
         isolation_mode: setup.cfg.isolation,
         terminal_policy,
+        lifecycle_hooks: setup.lifecycle_hooks,
+        cwd: std::env::current_dir().unwrap_or_default(),
+        dynamic_system_context: setup.repo_map_context.clone(),
+        file_rules: setup.file_rules.clone(),
+        lsp_diagnostics: setup.lsp_diagnostics.clone(),
+        agent_card: Some(agent_card),
+        model_tiers: setup.cfg.model_tiers.clone(),
     };
 
     mush_tui::run_tui(tui_config, &setup.tools, &setup.registry)

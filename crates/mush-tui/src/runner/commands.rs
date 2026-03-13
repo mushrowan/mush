@@ -18,6 +18,7 @@ pub(super) struct SlashEnv<'a> {
     pub registry: &'a ApiRegistry,
     pub message_bus: &'a crate::messaging::MessageBus,
     pub file_tracker: &'a FileTracker,
+    pub lifecycle_hooks: &'a mush_agent::LifecycleHooks,
     pub cwd: &'a Path,
     pub pending_prompt: &'a mut Option<String>,
 }
@@ -33,6 +34,7 @@ pub(super) async fn handle_slash_action(
         registry,
         message_bus,
         file_tracker,
+        lifecycle_hooks,
         cwd,
         pending_prompt,
     } = env;
@@ -49,6 +51,24 @@ pub(super) async fn handle_slash_action(
                     .unwrap_or_else(|| tui_config.model.clone()),
                 &tui_config.options,
                 registry,
+                Some(lifecycle_hooks),
+                Some(cwd),
+            )
+            .await;
+            state_changed = true;
+        }
+        SlashAction::ForkCompact => {
+            let pane = pane_mgr.focused_mut();
+            let (app, conversation, _) = pane.fields_mut();
+            slash::handle_fork_compact(
+                app,
+                conversation,
+                &models::find_model_by_id(app.model_id.as_str())
+                    .unwrap_or_else(|| tui_config.model.clone()),
+                &tui_config.options,
+                registry,
+                Some(lifecycle_hooks),
+                Some(cwd),
             )
             .await;
             state_changed = true;

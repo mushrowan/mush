@@ -68,6 +68,12 @@ pub(super) struct StreamDeps<'a> {
     pub message_bus: &'a crate::messaging::MessageBus,
     pub shared_state: &'a crate::shared_state::SharedState,
     pub file_tracker: &'a FileTracker,
+    pub lifecycle_hooks: mush_agent::LifecycleHooks,
+    pub cwd: std::path::PathBuf,
+    pub dynamic_system_context: Option<mush_agent::DynamicContext>,
+    pub file_rules: Option<mush_agent::FileRuleCallback>,
+    pub lsp_diagnostics: Option<mush_agent::DiagnosticCallback>,
+    pub delegation_queue: &'a crate::delegate::DelegationQueue,
 }
 
 impl StreamState {
@@ -289,10 +295,57 @@ pub(super) async fn handle_agent_event_side_effects(
         );
     }
 
-    if let Some(pane) = pane_mgr.pane(pane_id)
-        && let Some(ref saver) = tui_config.save_session
-    {
-        saver(&pane.conversation, &pane.app.model_id);
+    // auto fork-and-compact: fork the session tree and persist compacted state
+    if tui_config.auto_fork_compact {
+        auto_fork_compact(pane_mgr, pane_id, tui_config, registry).await;
+    }
+
+    if let Some(ref saver) = tui_config.save_session {
+        saver(build_session_snapshot(pane_mgr));
+    }
+}
+
+/// fork the session tree and compact the new branch when the conversation
+/// is approaching the context limit. the original uncompacted branch is
+/// preserved and navigable via /tree + /branch.
+async fn auto_fork_compact(
+    pane_mgr: &mut PaneManager,
+    pane_id: PaneId,
+    tui_config: &TuiConfig,
+    registry: &ApiRegistry,
+) {
+    let Some(pane) = pane_mgr.pane(pane_id) else {
+        return;
+    };
+
+    let context_tokens = pane.app.stats.context_tokens;
+    let context_window = tui_config.model.context_window;
+    let message_count = pane.conversation.context_len();
+
+    if !mush_session::compact::needs_compaction_at(context_tokens, context_window, message_count) {
+        return;
+    }
+
+    let pane = pane_mgr.pane_mut(pane_id).expect("pane exists after check");
+    let before = pane.conversation.context_len();
+
+    let result = crate::slash::fork_and_compact(
+        &mut pane.conversation,
+        "auto-forked",
+        &tui_config.model,
+        &tui_config.options,
+        registry,
+        Some(&tui_config.lifecycle_hooks),
+        Some(tui_config.cwd.as_path()),
+    )
+    .await;
+
+    if let Some((after, tokens_before, tokens_after)) = result {
+        let pane = pane_mgr.pane_mut(pane_id).expect("pane exists after compact");
+        crate::conversation_display::rebuild_display(&mut pane.app, &pane.conversation.context());
+        pane.app.status = Some(format!(
+            "auto-fork-compacted: {before} → {after} messages, ~{tokens_before} → ~{tokens_after} tokens (original preserved)",
+        ));
     }
 }
 
@@ -468,6 +521,8 @@ async fn start_stream_for_prompt<'a>(
         context_window,
         registry,
         context_tokens_shared.clone(),
+        deps.lifecycle_hooks.clone(),
+        deps.cwd.clone(),
     );
 
     let steering = build_steering_callback(steering_queue.clone());
@@ -487,7 +542,7 @@ async fn start_stream_for_prompt<'a>(
     call_options.thinking = Some(thinking_level);
 
     let extra_tools =
-        build_extra_tools(pane_mgr.is_multi_pane(), pane_id, message_bus, shared_state);
+        build_extra_tools(pane_mgr.is_multi_pane(), pane_id, message_bus, shared_state, deps.delegation_queue);
     let system_prompt = build_system_prompt(pane_mgr, pane_id, &deps.system_prompt);
     let pane_tools = pane_mgr
         .pane_mut(pane_id)
@@ -523,6 +578,11 @@ async fn start_stream_for_prompt<'a>(
             transform_context: transform,
             confirm_tool: confirm,
         },
+        lifecycle_hooks: deps.lifecycle_hooks.clone(),
+        cwd: Some(deps.cwd.clone()),
+        dynamic_system_context: deps.dynamic_system_context.clone(),
+        file_rules: deps.file_rules.clone(),
+        lsp_diagnostics: deps.lsp_diagnostics.clone(),
     };
 
     let stream = agent_loop(config, conversation_snapshot);
@@ -624,11 +684,15 @@ fn build_context_transform<'a>(
     context_window: TokenCount,
     registry: &'a ApiRegistry,
     context_tokens_shared: Arc<std::sync::atomic::AtomicU64>,
+    lifecycle_hooks: mush_agent::LifecycleHooks,
+    cwd: std::path::PathBuf,
 ) -> Option<mush_agent::ContextTransform<'a>> {
     let ctx_tokens_for_transform = context_tokens_shared;
     #[expect(clippy::type_complexity)]
     let compaction_cache: std::sync::Arc<tokio::sync::Mutex<Option<(usize, Vec<Message>)>>> =
         std::sync::Arc::new(tokio::sync::Mutex::new(None));
+    let hooks = Arc::new(lifecycle_hooks);
+    let cwd = Arc::new(cwd);
 
     Some(Box::new(move |messages| {
         let hint_match = enricher_arc
@@ -645,6 +709,8 @@ fn build_context_transform<'a>(
         let options = compact_options.clone();
         let cache = compaction_cache.clone();
         let ctx_tokens = ctx_tokens_for_transform.clone();
+        let hooks = hooks.clone();
+        let cwd = cwd.clone();
         Box::pin(async move {
             let mut replayed_cached_compaction = false;
             let mut fresh_compaction = false;
@@ -680,6 +746,8 @@ fn build_context_transform<'a>(
                     registry,
                     &model,
                     &options,
+                    Some(&hooks),
+                    Some(cwd.as_path()),
                 )
                 .await;
                 if compacted.len() < pre_len {
@@ -799,6 +867,7 @@ fn build_extra_tools(
     pane_id: PaneId,
     message_bus: &crate::messaging::MessageBus,
     shared_state: &crate::shared_state::SharedState,
+    delegation_queue: &crate::delegate::DelegationQueue,
 ) -> Vec<SharedTool> {
     let mut extra_tools = Vec::new();
     if is_multi_pane {
@@ -813,6 +882,11 @@ fn build_extra_tools(
             state: shared_state.clone(),
         }) as SharedTool);
     }
+    // delegate_task always available (spawns a new pane even from single-pane)
+    extra_tools.push(Arc::new(crate::delegate::DelegateTaskTool {
+        sender_id: pane_id,
+        queue: delegation_queue.clone(),
+    }) as SharedTool);
     extra_tools
 }
 
@@ -862,6 +936,28 @@ fn build_system_prompt(
     }
 
     system_prompt
+}
+
+/// build a snapshot of all pane conversations for session persistence
+pub(crate) fn build_session_snapshot(pane_mgr: &PaneManager) -> super::SessionSnapshot {
+    let primary = pane_mgr.focused();
+    let additional: Vec<super::PaneSnapshot> = pane_mgr
+        .panes()
+        .iter()
+        .filter(|p| p.id != primary.id)
+        .map(|p| super::PaneSnapshot {
+            pane_id: p.id,
+            label: p.label.clone(),
+            model_id: p.app.model_id.to_string(),
+            conversation: p.conversation.clone(),
+        })
+        .collect();
+
+    super::SessionSnapshot {
+        primary: primary.conversation.clone(),
+        model_id: primary.app.model_id.to_string(),
+        panes: additional,
+    }
 }
 
 #[cfg(test)]

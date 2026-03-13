@@ -52,6 +52,7 @@ fn input_parts<'a>(
         pane_mgr,
         thinking_prefs,
         thinking_saver,
+        lifecycle_hooks,
         cwd,
         pending_prompt,
         ..
@@ -65,6 +66,7 @@ fn input_parts<'a>(
             registry,
             message_bus: &services.message_bus,
             file_tracker: &services.file_tracker,
+            lifecycle_hooks,
             cwd,
             pending_prompt,
         },

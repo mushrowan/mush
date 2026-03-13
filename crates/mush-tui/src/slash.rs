@@ -1,5 +1,7 @@
 //! slash command handling for the TUI
 
+use std::fmt::Write;
+
 use mush_ai::models;
 use mush_ai::registry::ApiRegistry;
 use mush_ai::types::*;
@@ -9,6 +11,9 @@ use thiserror::Error;
 use crate::TuiConfig;
 use crate::app::App;
 use crate::runner::HintMode;
+
+/// minimum messages before compaction is worthwhile
+const MIN_MESSAGES_FOR_COMPACTION: usize = 4;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum SlashParseError {
@@ -26,6 +31,8 @@ pub enum SlashParseError {
     LockUsage,
     #[error("usage: /unlock <path>")]
     UnlockUsage,
+    #[error("usage: /task claim <id> <description> | /task release <id> | /task list")]
+    TaskUsage,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +46,7 @@ pub enum SlashAction {
     Branch { index: Option<usize> },
     Tree,
     Compact,
+    ForkCompact,
     Export { path: Option<String> },
     Undo,
     Search { query: String },
@@ -53,6 +61,10 @@ pub enum SlashAction {
     Label { text: Option<String> },
     Panes,
     Merge,
+    Card,
+    TaskClaim { id: String, description: String },
+    TaskRelease { id: String },
+    TaskList,
     Quit,
     Other { name: String, args: String },
 }
@@ -82,6 +94,7 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
             .map_err(|_| SlashParseError::BranchUsage),
         "tree" => Ok(SlashAction::Tree),
         "compact" => Ok(SlashAction::Compact),
+        "fork-compact" | "fc" => Ok(SlashAction::ForkCompact),
         "export" => Ok(SlashAction::Export {
             path: (!args.is_empty()).then(|| args.to_string()),
         }),
@@ -90,6 +103,7 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
             query: args.to_string(),
         }),
         "cost" => Ok(SlashAction::Cost),
+        "card" => Ok(SlashAction::Card),
         "logs" if args.is_empty() => Ok(SlashAction::Logs { count: 50 }),
         "logs" => args
             .parse::<usize>()
@@ -115,11 +129,34 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
         }),
         "panes" => Ok(SlashAction::Panes),
         "merge" => Ok(SlashAction::Merge),
+        "task" | "tasks" => parse_task_subcommand(args),
         "quit" | "exit" | "q" => Ok(SlashAction::Quit),
         other => Ok(SlashAction::Other {
             name: other.to_string(),
             args: args.to_string(),
         }),
+    }
+}
+
+fn parse_task_subcommand(args: &str) -> Result<SlashAction, SlashParseError> {
+    let (sub, rest) = split_name_and_args(args);
+    match sub {
+        "claim" => {
+            let (id, description) = split_name_and_args(rest);
+            if id.is_empty() || description.is_empty() {
+                Err(SlashParseError::TaskUsage)
+            } else {
+                Ok(SlashAction::TaskClaim {
+                    id: id.to_string(),
+                    description: description.to_string(),
+                })
+            }
+        }
+        "release" if !rest.is_empty() => Ok(SlashAction::TaskRelease {
+            id: rest.to_string(),
+        }),
+        "list" | "" => Ok(SlashAction::TaskList),
+        _ => Err(SlashParseError::TaskUsage),
     }
 }
 
@@ -150,6 +187,7 @@ pub fn handle(
             help.push_str("  /branch [n]    - branch from nth user message\n");
             help.push_str("  /tree          - show conversation tree\n");
             help.push_str("  /compact       - summarise old messages to free context\n");
+            help.push_str("  /fork-compact  - fork branch then compact (preserves original)\n");
             help.push_str("  /export [file] - save conversation as markdown\n");
             help.push_str("  /undo          - revert last turn\n");
             help.push_str("  /search [text] - search conversation (or ctrl+f)\n");
@@ -163,6 +201,8 @@ pub fn handle(
             help.push_str("  /locks         - list all file locks\n");
             help.push_str("  /label [text]  - set pane label (or auto-generate)\n");
             help.push_str("  /panes         - list all panes with status\n");
+            help.push_str("  /card          - show agent capability card\n");
+            help.push_str("  /task claim/release/list - cross-agent task locking\n");
             help.push_str("  /quit          - exit mush\n");
             help.push_str("\ntip: type a prompt template name (e.g. /review file.rs) to expand it");
             app.push_system_message(help);
@@ -320,6 +360,20 @@ pub fn handle(
             handle_undo(app, conversation);
             None
         }
+        SlashAction::Card => {
+            if let Some(card) = &tui_config.agent_card {
+                app.push_system_message(format!("agent card:\n```json\n{}\n```", card.to_json()));
+            } else {
+                app.push_system_message("no agent card available");
+            }
+            None
+        }
+        SlashAction::TaskClaim { .. }
+        | SlashAction::TaskRelease { .. }
+        | SlashAction::TaskList => {
+            handle_task(app, &tui_config.cwd, action);
+            None
+        }
         SlashAction::Quit => {
             app.should_quit = true;
             None
@@ -327,6 +381,50 @@ pub fn handle(
         SlashAction::Other { name, args } => try_template(app, name, args),
         _ => None,
     }
+}
+
+fn handle_task(app: &mut App, cwd: &std::path::Path, action: &SlashAction) {
+    let store = mush_agent::TaskStore::new(cwd);
+    let agent_id = std::process::id().to_string();
+
+    match action {
+        SlashAction::TaskClaim { id, description } => {
+            let lock = mush_agent::TaskLock {
+                id: id.clone(),
+                description: description.clone(),
+                agent: agent_id,
+                claimed_at: unix_timestamp(),
+                files: vec![],
+            };
+            match store.claim(&lock) {
+                Ok(()) => app.push_system_message(format!("claimed task: {id}")),
+                Err(e) => app.push_system_message(format!("failed: {e}")),
+            }
+        }
+        SlashAction::TaskRelease { id } => match store.release(id, &agent_id) {
+            Ok(()) => app.push_system_message(format!("released task: {id}")),
+            Err(e) => app.push_system_message(format!("failed: {e}")),
+        },
+        SlashAction::TaskList => match store.list() {
+            Ok(tasks) if tasks.is_empty() => app.push_system_message("no active tasks"),
+            Ok(tasks) => {
+                let mut msg = String::from("active tasks:\n");
+                for t in &tasks {
+                    writeln!(msg, "  {} (agent {}) - {}", t.id, t.agent, t.description).ok();
+                }
+                app.push_system_message(msg.trim_end().to_string());
+            }
+            Err(e) => app.push_system_message(format!("failed: {e}")),
+        },
+        _ => {}
+    }
+}
+
+fn unix_timestamp() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn show_tree(app: &mut App, conversation: &ConversationState) {
@@ -426,7 +524,13 @@ fn handle_model_switch(
     thinking_prefs: &std::collections::HashMap<String, ThinkingLevel>,
     args: &str,
 ) {
-    let id = args.trim();
+    let raw = args.trim();
+    // resolve tier name (e.g. "fast" → "claude-3-5-haiku-...") or use as-is
+    let id = tui_config
+        .model_tiers
+        .get(raw)
+        .map(|s| s.as_str())
+        .unwrap_or(raw);
     if let Some(new_model) = models::find_model_by_id(id) {
         app.model_id = id.into();
         app.stats.context_window = new_model.context_window;
@@ -454,7 +558,14 @@ fn handle_model_switch(
             .map(|m| format!("  {}", m.id))
             .collect::<Vec<_>>()
             .join("\n");
-        app.push_system_message(format!("unknown model: {id}\n\navailable:\n{available}"));
+        let mut msg = format!("unknown model: {raw}\n\navailable:\n{available}");
+        if !tui_config.model_tiers.is_empty() {
+            msg.push_str("\n\ntiers:");
+            for (tier, model_id) in &tui_config.model_tiers {
+                msg.push_str(&format!("\n  {tier} → {model_id}"));
+            }
+        }
+        app.push_system_message(msg);
     }
 }
 
@@ -628,34 +739,145 @@ pub async fn handle_compact(
     model: &Model,
     options: &StreamOptions,
     registry: &ApiRegistry,
+    lifecycle_hooks: Option<&mush_agent::LifecycleHooks>,
+    cwd: Option<&std::path::Path>,
 ) {
-    use mush_session::compact;
-
     let messages = conversation.context();
     let before = messages.len();
-    if before <= 4 {
+    if before <= MIN_MESSAGES_FOR_COMPACTION {
         app.push_system_message("conversation too short to compact");
         return;
     }
 
     app.status = Some("compacting...".into());
+    let (compacted_messages, tokens_before, tokens_after, summarised_count) =
+        run_compaction(messages, model, options, registry, lifecycle_hooks, cwd).await;
+
+    conversation.replace_messages(compacted_messages);
+    let after = conversation.context();
+    rebuild_display(app, &after);
+    app.status = Some(format!(
+        "compacted: {before} → {} messages, ~{tokens_before} → ~{tokens_after} tokens ({summarised_count} summarised)",
+        after.len(),
+    ));
+}
+
+/// fork the session tree then compact the new branch
+///
+/// the original conversation is preserved in the parent branch.
+/// a summary of the old branch is injected at the fork point so
+/// the LLM knows the branch happened.
+pub async fn handle_fork_compact(
+    app: &mut App,
+    conversation: &mut ConversationState,
+    model: &Model,
+    options: &StreamOptions,
+    registry: &ApiRegistry,
+    lifecycle_hooks: Option<&mush_agent::LifecycleHooks>,
+    cwd: Option<&std::path::Path>,
+) {
+    let before = conversation.context_len();
+    if before <= MIN_MESSAGES_FOR_COMPACTION {
+        app.push_system_message("conversation too short to fork-compact");
+        return;
+    }
+
+    app.status = Some("fork-compacting...".into());
+    let result = fork_and_compact(conversation, "forked", model, options, registry, lifecycle_hooks, cwd).await;
+    match result {
+        Some((after, tokens_before, tokens_after)) => {
+            rebuild_display(app, &conversation.context());
+            app.status = Some(format!(
+                "fork-compacted: {before} → {after} messages, ~{tokens_before} → ~{tokens_after} tokens (original preserved, /tree to navigate)",
+            ));
+        }
+        None => app.push_system_message("no conversation to fork"),
+    }
+}
+
+/// fork the session tree at the current leaf and compact the new branch.
+/// returns (after_count, tokens_before, tokens_after) or None if no leaf.
+pub async fn fork_and_compact(
+    conversation: &mut ConversationState,
+    label: &str,
+    model: &Model,
+    options: &StreamOptions,
+    registry: &ApiRegistry,
+    lifecycle_hooks: Option<&mush_agent::LifecycleHooks>,
+    cwd: Option<&std::path::Path>,
+) -> Option<(usize, usize, usize)> {
+    let messages = conversation.context();
+    let before = messages.len();
+
+    let leaf_id = conversation.leaf_id().cloned()?;
+
+    conversation.branch_with_summary(
+        &leaf_id,
+        format!("{label} from branch with {before} messages for compaction"),
+    );
+
+    let (compacted_messages, tokens_before, tokens_after, _) =
+        run_compaction(messages, model, options, registry, lifecycle_hooks, cwd).await;
+
+    conversation.replace_messages(compacted_messages);
+    Some((conversation.context_len(), tokens_before, tokens_after))
+}
+
+/// shared compaction + hook logic for /compact, /fork-compact, and auto-fork-compact
+///
+/// returns (compacted_messages, tokens_before, tokens_after, summarised_count)
+pub async fn run_compaction(
+    messages: Vec<Message>,
+    model: &Model,
+    options: &StreamOptions,
+    registry: &ApiRegistry,
+    lifecycle_hooks: Option<&mush_agent::LifecycleHooks>,
+    cwd: Option<&std::path::Path>,
+) -> (Vec<Message>, usize, usize, usize) {
+    use mush_session::compact;
+
     let tokens_before = compact::estimate_tokens(&messages);
     let result = compact::llm_compact(messages, registry, model, options, Some(10)).await;
+    let mut compacted = result.messages;
 
-    let tokens_after = compact::estimate_tokens(&result.messages);
-    conversation.replace_messages(result.messages);
-    let compacted = conversation.context();
-    rebuild_display(app, &compacted);
-    app.status = Some(format!(
-        "compacted: {before} → {} messages, ~{tokens_before} → ~{tokens_after} tokens ({} summarised)",
-        compacted.len(),
-        result.summarised_count,
-    ));
+    if let Some(hooks) = lifecycle_hooks
+        && !hooks.post_compaction.is_empty()
+    {
+        let hook_results = hooks.run_post_compaction(cwd).await;
+        let output: String = hook_results
+            .iter()
+            .filter(|r| !r.output.is_empty())
+            .map(|r| r.output.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !output.is_empty() {
+            compacted.push(Message::User(UserMessage {
+                content: UserContent::Text(format!(
+                    "[post-compaction hook output]\n{output}"
+                )),
+                timestamp_ms: Timestamp::now(),
+            }));
+        }
+        for r in &hook_results {
+            if !r.success {
+                tracing::warn!(command = %r.command, "post-compaction hook failed: {}", r.output);
+            }
+        }
+    }
+
+    let tokens_after = compact::estimate_tokens(&compacted);
+    (compacted, tokens_before, tokens_after, result.summarised_count)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_fork_compact() {
+        assert_eq!(parse("/fork-compact").unwrap(), SlashAction::ForkCompact);
+        assert_eq!(parse("/fc").unwrap(), SlashAction::ForkCompact);
+    }
 
     #[test]
     fn parse_model_action() {
@@ -673,6 +895,45 @@ mod tests {
             parse("/lock").unwrap_err().to_string(),
             "usage: /lock <path>"
         );
+    }
+
+    #[test]
+    fn parse_task_claim() {
+        assert_eq!(
+            parse("/task claim fix-auth rewrite the auth module").unwrap(),
+            SlashAction::TaskClaim {
+                id: "fix-auth".into(),
+                description: "rewrite the auth module".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_task_release() {
+        assert_eq!(
+            parse("/task release fix-auth").unwrap(),
+            SlashAction::TaskRelease {
+                id: "fix-auth".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_task_list() {
+        assert_eq!(parse("/task list").unwrap(), SlashAction::TaskList);
+        assert_eq!(parse("/task").unwrap(), SlashAction::TaskList);
+        assert_eq!(parse("/tasks").unwrap(), SlashAction::TaskList);
+    }
+
+    #[test]
+    fn parse_task_claim_needs_id_and_description() {
+        assert!(parse("/task claim").is_err());
+        assert!(parse("/task claim myid").is_err());
+    }
+
+    #[test]
+    fn parse_task_release_needs_id() {
+        assert!(parse("/task release").is_err());
     }
 
     #[test]

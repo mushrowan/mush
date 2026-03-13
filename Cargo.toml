@@ -1,6 +1,18 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+default-members = [
+  "crates/mush-agent",
+  "crates/mush-ai",
+  "crates/mush-cli",
+  "crates/mush-ext",
+  "crates/mush-lsp",
+  "crates/mush-mcp",
+  "crates/mush-session",
+  "crates/mush-tools",
+  "crates/mush-treesitter",
+  "crates/mush-tui",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -16,6 +28,8 @@ mush-session = { path = "crates/mush-session" }
 mush-ext = { path = "crates/mush-ext" }
 mush-mcp = { path = "crates/mush-mcp" }
 mush-tui = { path = "crates/mush-tui" }
+mush-treesitter = { path = "crates/mush-treesitter" }
+mush-lsp = { path = "crates/mush-lsp" }
 
 # async
 tokio = { version = "1", features = ["full"] }
@@ -79,3 +93,4 @@ urlencoding = "2"
 # testing
 pretty_assertions = "1"
 tempfile = "3"
+filetime = "0.2"

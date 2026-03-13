@@ -19,8 +19,8 @@ use mush_agent::tool::ToolRegistry;
 use mush_ai::registry::ApiRegistry;
 
 pub use self::config::{
-    HintMode, LastModelSaver, PromptEnricher, SessionSaver, ThinkingPrefsSaver, TitleUpdater,
-    TuiConfig,
+    HintMode, LastModelSaver, PaneSnapshot, PromptEnricher, SessionSaver, SessionSnapshot,
+    ThinkingPrefsSaver, TitleUpdater, TuiConfig,
 };
 use self::input::LoopAction;
 use self::looping::run_loop_iteration;
@@ -50,6 +50,19 @@ pub async fn run_tui(
     let mut terminal = Terminal::new(backend)?;
     let (mut runtime, services) = RunnerRuntime::new(&mut tui_config).await;
 
+    // start IPC listener if we have an agent card
+    let _ipc_listener = tui_config.agent_card.as_ref().and_then(|card| {
+        let card = std::sync::Arc::new(card.clone());
+        let sock = mush_agent::ipc::socket_path(&std::process::id().to_string());
+        match mush_agent::IpcListener::start(sock, card) {
+            Ok(listener) => Some(listener),
+            Err(e) => {
+                tracing::warn!("failed to start IPC listener: {e}");
+                None
+            }
+        }
+    });
+
     draw_panes(&mut terminal, &mut runtime.pane_mgr, &image_picker)?;
 
     let mut agent_streams = new_agent_streams();
@@ -76,6 +89,12 @@ pub async fn run_tui(
                 message_bus: &services.message_bus,
                 shared_state: &services.shared_state,
                 file_tracker: &services.file_tracker,
+                lifecycle_hooks: tui_config.lifecycle_hooks.clone(),
+                cwd: tui_config.cwd.clone(),
+                dynamic_system_context: tui_config.dynamic_system_context.clone(),
+                file_rules: tui_config.file_rules.clone(),
+                lsp_diagnostics: tui_config.lsp_diagnostics.clone(),
+                delegation_queue: &services.delegation_queue,
             },
         )
         .await;
@@ -98,6 +117,14 @@ pub async fn run_tui(
         if runtime.focused_should_quit() {
             break;
         }
+
+        // process pending delegations (fork panes for delegate_task tool calls)
+        panes::process_delegations(
+            &mut runtime.pane_mgr,
+            &tui_config,
+            &services.message_bus,
+            &services.delegation_queue,
+        );
 
         runtime.tick_streaming_panes();
         runtime.notify_cache_state(tui_config.cache_timer);
