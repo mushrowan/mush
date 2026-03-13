@@ -183,7 +183,11 @@ fn watch_config(
 
 fn build_initial_app(tui_config: &TuiConfig, cwd: &Path) -> App {
     let mut app = App::new(tui_config.model.id.clone(), tui_config.model.context_window);
-    app.thinking_level = tui_config.options.thinking.unwrap_or(ThinkingLevel::Off);
+    app.thinking_level = tui_config
+        .options
+        .thinking
+        .unwrap_or(ThinkingLevel::Off)
+        .normalize_visible();
     app.thinking_display = tui_config.thinking_display;
     app.show_cost = tui_config.show_cost;
     app.cache_ttl_secs = if tui_config.cache_timer {

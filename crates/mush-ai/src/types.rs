@@ -851,6 +851,18 @@ pub enum ThinkingLevel {
     Xhigh,
 }
 
+impl ThinkingLevel {
+    /// Keep `Minimal` for compatibility with older configs/runtime state, but
+    /// treat it as `Low` in visible mush controls and persisted visible prefs.
+    #[must_use]
+    pub const fn normalize_visible(self) -> Self {
+        match self {
+            Self::Minimal => Self::Low,
+            other => other,
+        }
+    }
+}
+
 // -- stream options --
 
 #[derive(Debug, Clone, Default)]
@@ -922,6 +934,12 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let back: Message = serde_json::from_str(&json).unwrap();
         assert_eq!(msg, back);
+    }
+
+    #[test]
+    fn thinking_level_normalize_visible_maps_minimal_to_low() {
+        assert_eq!(ThinkingLevel::Minimal.normalize_visible(), ThinkingLevel::Low);
+        assert_eq!(ThinkingLevel::High.normalize_visible(), ThinkingLevel::High);
     }
 
     #[test]

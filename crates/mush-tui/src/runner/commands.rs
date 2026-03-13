@@ -305,7 +305,7 @@ pub(super) fn save_thinking_pref(
     model_id: &str,
     level: ThinkingLevel,
 ) {
-    prefs.insert(model_id.to_string(), level);
+    prefs.insert(model_id.to_string(), level.normalize_visible());
     if let Some(saver) = saver {
         saver(prefs);
     }

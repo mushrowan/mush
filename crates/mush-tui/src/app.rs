@@ -1098,7 +1098,7 @@ impl App {
     /// cycle to the next thinking level
     pub fn cycle_thinking_level(&mut self) {
         self.thinking_level = match self.thinking_level {
-            ThinkingLevel::Off => ThinkingLevel::Minimal,
+            ThinkingLevel::Off => ThinkingLevel::Low,
             ThinkingLevel::Minimal => ThinkingLevel::Low,
             ThinkingLevel::Low => ThinkingLevel::Medium,
             ThinkingLevel::Medium => ThinkingLevel::High,

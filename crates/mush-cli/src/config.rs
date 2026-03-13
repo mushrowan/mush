@@ -307,7 +307,11 @@ pub fn load_thinking_prefs() -> HashMap<String, ThinkingLevel> {
         return HashMap::new();
     }
     match std::fs::read_to_string(&path) {
-        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+        Ok(content) => serde_json::from_str::<HashMap<String, ThinkingLevel>>(&content)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(model, level)| (model, level.normalize_visible()))
+            .collect(),
         Err(_) => HashMap::new(),
     }
 }
