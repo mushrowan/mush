@@ -93,11 +93,12 @@ impl ApiProvider for OpenaiResponsesProvider {
 
             if !status.is_success() {
                 let text = response.text().await.unwrap_or_default();
-                tracing::error!(%status, body = %text, "openai responses API error");
+                tracing::error!(%status, %content_type, body = %text, "openai responses API error");
                 return Err(ProviderError::ApiError {
                     api: "openai responses",
                     status,
-                    body: text,
+                    content_type,
+                    body: crate::registry::truncate_error_body(&text),
                 });
             }
 
@@ -230,7 +231,11 @@ fn build_request_body(
     };
 
     let tool_fields = if converted_tools.is_some() {
-        (Some("auto".into()), Some(true))
+        // codex endpoint (chatgpt.com/backend-api) doesn't support parallel_tool_calls
+        (
+            Some("auto".into()),
+            if is_codex { None } else { Some(true) },
+        )
     } else {
         (None, None)
     };

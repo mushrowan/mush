@@ -10,6 +10,7 @@ use mush_ai::types::ToolResultContentPart;
 use serde::Deserialize;
 
 const MAX_CALLS: usize = 25;
+const MAX_TOTAL_OUTPUT: usize = 100 * 1024; // 100KB combined output cap
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -132,6 +133,7 @@ impl AgentTool for BatchTool {
             let mut success_count = 0;
             let mut error_count = 0;
             let mut output = String::new();
+            let mut budget_exhausted = false;
 
             for (i, tool_name, result) in &results {
                 let truncated = match result {
@@ -153,19 +155,43 @@ impl AgentTool for BatchTool {
                     }
                 };
 
-                output.push_str(&format!("--- [{i}] {tool_name} ---\n"));
+                let header = format!("--- [{i}] {tool_name} ---\n");
+                let mut item_text = String::new();
                 for part in &truncated.content {
                     match part {
-                        ToolResultContentPart::Text(text) => output.push_str(&text.text),
-                        ToolResultContentPart::Image(_) => output.push_str("[image]"),
+                        ToolResultContentPart::Text(text) => item_text.push_str(&text.text),
+                        ToolResultContentPart::Image(_) => item_text.push_str("[image]"),
                     }
                 }
-                output.push_str("\n\n");
+
+                // check if adding this item would exceed the total output budget
+                let item_size = header.len() + item_text.len() + 2; // +2 for trailing newlines
+                if !budget_exhausted && output.len() + item_size > MAX_TOTAL_OUTPUT {
+                    budget_exhausted = true;
+                    // save the full combined output so far + this item to a file
+                    let remaining = results.len() - *i;
+                    output.push_str(&format!(
+                        "[...{remaining} more items omitted, output budget exceeded ({MAX_TOTAL_OUTPUT} bytes). \
+                         use the individual tools directly to see full output.]\n\n"
+                    ));
+                }
+
+                if budget_exhausted {
+                    // still count but only include a one-line summary
+                    output.push_str(&format!("--- [{i}] {tool_name} --- [omitted]\n"));
+                } else {
+                    output.push_str(&header);
+                    output.push_str(&item_text);
+                    output.push_str("\n\n");
+                }
             }
 
             output.push_str(&format!(
                 "batch: {success_count}/{total} succeeded, {error_count} failed"
             ));
+            if budget_exhausted {
+                output.push_str(" (output truncated, budget exceeded)");
+            }
             ToolResult::text(output)
         })
     }
@@ -277,6 +303,57 @@ mod tests {
         assert!(text.contains("Use grep to search"));
         assert!(text.contains("line 0"));
         assert!(text.contains("line 4999"));
+    }
+
+    #[tokio::test]
+    async fn total_output_budget_enforced() {
+        struct BigTool;
+
+        impl AgentTool for BigTool {
+            fn name(&self) -> &str {
+                "big"
+            }
+
+            fn label(&self) -> &str {
+                self.name()
+            }
+
+            fn description(&self) -> &str {
+                "big output"
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+
+            fn execute(
+                &self,
+                _params: serde_json::Value,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>>
+            {
+                // each call returns ~20KB
+                let text = "x".repeat(20_000);
+                Box::pin(async move { ToolResult::text(text) })
+            }
+        }
+
+        // 10 calls × 20KB = 200KB, should exceed the 100KB budget
+        let calls: Vec<_> = (0..10)
+            .map(|_| serde_json::json!({"tool": "big", "parameters": {}}))
+            .collect();
+        let tool = BatchTool::new(ToolRegistry::from_boxed(vec![Box::new(BigTool)]));
+        let result = tool
+            .execute(serde_json::json!({ "tool_calls": calls }))
+            .await;
+        let text = match &result.content[0] {
+            ToolResultContentPart::Text(t) => &t.text,
+            _ => panic!("expected text"),
+        };
+        assert!(text.contains("budget exceeded"));
+        assert!(text.contains("[omitted]"));
+        assert!(text.contains("batch: 10/10 succeeded, 0 failed"));
+        // combined output should be under 150KB (budget + overhead)
+        assert!(text.len() < 150_000);
     }
 
     #[tokio::test]
