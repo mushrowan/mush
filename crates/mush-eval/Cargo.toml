@@ -1,0 +1,20 @@
+[package]
+name = "mush-eval"
+description = "eval harness for context injection strategies"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["embeddings"]
+embeddings = ["mush-ext/embeddings"]
+
+[dependencies]
+mush-ai.workspace = true
+mush-ext.workspace = true
+mush-session.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+futures.workspace = true

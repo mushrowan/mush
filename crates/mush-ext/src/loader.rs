@@ -130,13 +130,7 @@ fn extract_tag(text: &str, tag: &str) -> Option<String> {
 ///
 /// extracts `name` and `description` fields
 fn parse_skill_frontmatter(content: &str) -> Option<(String, String)> {
-    let content = content.trim_start();
-    if !content.starts_with("---") {
-        return None;
-    }
-    let after_fence = &content[3..];
-    let end = after_fence.find("---")?;
-    let frontmatter = &after_fence[..end];
+    let (frontmatter, _) = crate::frontmatter::extract(content)?;
 
     let mut name = None;
     let mut description = None;
