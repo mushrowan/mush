@@ -158,6 +158,20 @@ struct RequestReasoning {
     summary: String,
 }
 
+fn openai_reasoning_effort(model: &Model, level: ThinkingLevel) -> Option<String> {
+    if level == ThinkingLevel::Off || !model.reasoning {
+        return None;
+    }
+
+    Some(match level {
+        ThinkingLevel::Off => unreachable!(),
+        ThinkingLevel::Minimal | ThinkingLevel::Low => "low".into(),
+        ThinkingLevel::Medium => "medium".into(),
+        ThinkingLevel::High => "high".into(),
+        ThinkingLevel::Xhigh => "xhigh".into(),
+    })
+}
+
 fn build_request_body(
     model: &Model,
     system_prompt: &Option<String>,
@@ -193,17 +207,9 @@ fn build_request_body(
         )
     };
 
-    let reasoning_effort = match options.thinking {
-        Some(level) if level != ThinkingLevel::Off && model.reasoning => Some(match level {
-            ThinkingLevel::Off => unreachable!(),
-            ThinkingLevel::Minimal => "minimal".into(),
-            ThinkingLevel::Low => "low".into(),
-            ThinkingLevel::Medium => "medium".into(),
-            ThinkingLevel::High => "high".into(),
-            ThinkingLevel::Xhigh => "high".into(),
-        }),
-        _ => None,
-    };
+    let reasoning_effort = options
+        .thinking
+        .and_then(|level| openai_reasoning_effort(model, level));
 
     let reasoning = reasoning_effort.map(|effort| RequestReasoning {
         effort,
@@ -1321,5 +1327,36 @@ mod tests {
         // system prompt should be in input as a developer message
         assert_eq!(body.input.len(), 1);
         assert_eq!(body.input[0]["role"], "developer");
+    }
+
+    #[test]
+    fn gpt_5_4_preserves_xhigh_reasoning_effort() {
+        let model = Model {
+            id: "gpt-5.4".into(),
+            name: "GPT-5.4".into(),
+            api: Api::OpenaiResponses,
+            provider: Provider::Custom("openai-codex".into()),
+            base_url: "https://chatgpt.com/backend-api".into(),
+            reasoning: true,
+            input: vec![InputModality::Text],
+            cost: ModelCost {
+                input: 0.0,
+                output: 0.0,
+                cache_read: 0.0,
+                cache_write: 0.0,
+            },
+            context_window: TokenCount::new(1_050_000),
+            max_output_tokens: TokenCount::new(128_000),
+        };
+        let options = StreamOptions {
+            thinking: Some(ThinkingLevel::Xhigh),
+            ..Default::default()
+        };
+
+        let body = build_request_body(&model, &None, &[], &[], &options, true);
+        assert_eq!(
+            body.reasoning.as_ref().map(|r| r.effort.as_str()),
+            Some("xhigh")
+        );
     }
 }
