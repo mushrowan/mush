@@ -340,7 +340,7 @@ fn build_request_body(
     };
     let output_config = options
         .thinking
-        .and_then(anthropic_effort)
+        .and_then(|level| anthropic_effort(&model.id, level))
         .map(|effort| OutputConfig {
             effort: effort.into(),
         });
@@ -406,13 +406,16 @@ fn supports_adaptive_thinking(model_id: &str) -> bool {
         || model_id.contains("sonnet-4.6")
 }
 
-fn anthropic_effort(level: ThinkingLevel) -> Option<&'static str> {
-    match level {
-        ThinkingLevel::Off => None,
-        ThinkingLevel::Minimal | ThinkingLevel::Low => Some("low"),
-        ThinkingLevel::Medium => Some("medium"),
-        ThinkingLevel::High => Some("high"),
-        ThinkingLevel::Xhigh => Some("max"),
+fn anthropic_effort(model_id: &str, level: ThinkingLevel) -> Option<&'static str> {
+    match (model_id, level) {
+        (_, ThinkingLevel::Off) => None,
+        (_, ThinkingLevel::Minimal | ThinkingLevel::Low) => Some("low"),
+        (_, ThinkingLevel::Medium) => Some("medium"),
+        (_, ThinkingLevel::High) => Some("high"),
+        // Model-specific effort support should eventually live in model metadata.
+        // For now, only the shipped Claude Opus 4.6 id gets Anthropic's `max`.
+        ("claude-opus-4-6", ThinkingLevel::Xhigh) => Some("max"),
+        (_, ThinkingLevel::Xhigh) => Some("high"),
     }
 }
 
@@ -1429,6 +1432,31 @@ mod tests {
         };
         let options = StreamOptions {
             thinking: Some(ThinkingLevel::High),
+            ..Default::default()
+        };
+
+        let body = build_request_body(&model, &None, &[], &[], &options, false);
+
+        assert!(matches!(
+            body.thinking,
+            Some(ThinkingConfig::Enabled { .. })
+        ));
+        assert_eq!(
+            body.output_config.as_ref().map(|cfg| cfg.effort.as_str()),
+            Some("high")
+        );
+    }
+
+    #[test]
+    fn opus_4_5_does_not_send_max_effort() {
+        let model = Model {
+            id: "claude-opus-4-5".into(),
+            name: "Claude Opus 4.5".into(),
+            reasoning: true,
+            ..test_model()
+        };
+        let options = StreamOptions {
+            thinking: Some(ThinkingLevel::Xhigh),
             ..Default::default()
         };
 

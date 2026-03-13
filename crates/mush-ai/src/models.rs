@@ -10,7 +10,6 @@ use crate::types::{
 #[must_use]
 pub fn anthropic_models() -> Vec<Model> {
     vec![
-        // current generation
         Model {
             id: "claude-opus-4-6".into(),
             name: "Claude Opus 4.6".into(),
@@ -27,6 +26,23 @@ pub fn anthropic_models() -> Vec<Model> {
             },
             context_window: TokenCount::new(200_000),
             max_output_tokens: TokenCount::new(128_000),
+        },
+        Model {
+            id: "claude-opus-4-5".into(),
+            name: "Claude Opus 4.5".into(),
+            api: Api::AnthropicMessages,
+            provider: Provider::Anthropic,
+            base_url: "https://api.anthropic.com".into(),
+            reasoning: true,
+            input: vec![InputModality::Text, InputModality::Image],
+            cost: ModelCost {
+                input: 5.0,
+                output: 25.0,
+                cache_read: 0.5,
+                cache_write: 6.25,
+            },
+            context_window: TokenCount::new(200_000),
+            max_output_tokens: TokenCount::new(64_000),
         },
         Model {
             id: "claude-sonnet-4-6".into(),
@@ -62,7 +78,6 @@ pub fn anthropic_models() -> Vec<Model> {
             context_window: TokenCount::new(200_000),
             max_output_tokens: TokenCount::new(64_000),
         },
-        // legacy
         Model {
             id: "claude-sonnet-4-20250514".into(),
             name: "Claude Sonnet 4".into(),
@@ -404,6 +419,13 @@ mod tests {
     fn find_model_by_id_alone() {
         let model = find_model_by_id("claude-sonnet-4-20250514");
         assert!(model.is_some());
+    }
+
+    #[test]
+    fn find_new_opus_4_5_model() {
+        let model = find_model_by_id("claude-opus-4-5");
+        assert!(model.is_some());
+        assert_eq!(model.unwrap().name, "Claude Opus 4.5");
     }
 
     #[test]
