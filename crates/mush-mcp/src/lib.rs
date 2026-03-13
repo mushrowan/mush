@@ -5,6 +5,8 @@
 
 mod config;
 mod connection;
+pub mod dynamic;
+mod result;
 mod tool;
 
 pub use config::{McpServerConfig, McpServerType};

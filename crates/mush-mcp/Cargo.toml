@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+mush-ai.workspace = true
 mush-agent.workspace = true
 tokio.workspace = true
 serde.workspace = true

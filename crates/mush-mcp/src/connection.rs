@@ -160,6 +160,14 @@ impl McpManager {
     pub fn connected_servers(&self) -> Vec<&str> {
         self.connections.keys().map(|s| s.as_str()).collect()
     }
+
+    /// get all connections as (name, connection) pairs for dynamic tool building
+    pub fn connections(&self) -> Vec<(String, Arc<McpConnection>)> {
+        self.connections
+            .iter()
+            .map(|(k, v)| (k.clone(), Arc::clone(v)))
+            .collect()
+    }
 }
 
 #[cfg(test)]
