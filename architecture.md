@@ -1,0 +1,314 @@
+# architecture
+
+detailed crate structure and module documentation.
+see AGENTS.md for workflow, conventions, and coding rules.
+
+## crate structure
+- `crates/mush-ai/` - unified multi-provider LLM streaming API
+- `crates/mush-agent/` - agent loop, tool execution, state management
+- `crates/mush-tools/` - built-in tools (read, write, edit, bash, grep, find, glob, ls, web_search, web_fetch, batch, apply_patch, list_skills, describe_skill, load_skill)
+- `crates/mush-session/` - session persistence, branching, compaction
+- `crates/mush-ext/` - extension trait definitions and loading
+- `crates/mush-mcp/` - MCP (Model Context Protocol) client
+- `crates/mush-treesitter/` - tree-sitter integration: language detection, parsing, symbol extraction
+- `crates/mush-tui/` - terminal UI (ratatui)
+- `crates/mush-cli/` - binary, config, CLI args
+
+## provider layer (mush-ai)
+- `ApiRegistry` holds registered `ApiProvider` trait objects keyed by `Api` enum
+- `Api` variants: `AnthropicMessages`, `OpenaiCompletions`, `OpenaiResponses`
+- `Model` struct: id, name, api, provider, base_url, cost, context_window, etc
+- `StreamEvent` enum: start, text_delta, thinking_delta, toolcall_delta, done, error
+- `LlmContext`: system prompt + messages + tool definitions passed to providers
+- `StreamOptions`: temperature, max_tokens, api_key, thinking level, session id, cache retention
+- `providers::sse` - shared SSE parser (byte-buffer→line→event), used by all providers
+- `providers::anthropic` - anthropic messages API, supports thinking, tool use, and prompt caching controls
+- `providers::openai` - openai chat completions API (also used by openrouter, xai, groq, etc)
+- `providers::openai_responses` - openai responses API + codex-compatible responses endpoint support, auto-truncation, old tool result trimming, codex-aware parameter filtering (e.g. parallel_tool_calls skipped for chatgpt.com/backend-api)
+- `env` module - api key resolution from env vars, oauth token detection
+- `ProviderError` - structured error with status, content_type, and bounded body snippet (2KB max via `truncate_error_body()`)
+- `models` module - static catalogue of anthropic, openrouter, openai responses, and openai-codex models
+
+## message types (mush-ai/types)
+- `Message` enum: `User`, `Assistant`, `ToolResult`
+- content parts: `TextContent`, `ThinkingContent`, `ImageContent`, `ToolCall`
+- convenience: `UserContent::text()`, `UserMessage::text()`, `AssistantMessage::text()`/`thinking()`
+- `Usage` tracks input/output/cache tokens, `Cost` tracks monetary cost
+- `StopReason`: stop, length, tool_use, error, aborted
+- validated newtypes (all with `Deref<Target=str>`, `Display`, `From<&str>`):
+  - `ModelId`, `ToolCallId`, `ToolName` - string newtypes via derive_more
+  - `BaseUrl` - trailing-slash normalisation, `join()` for path concatenation
+  - `ApiKey` - redacted Debug/Display, `is_oauth_token()`, `new()` returns `None` for empty
+  - `Temperature` - clamped to 0.0..=2.0, `Deref<Target=f32>`
+  - `Provider` enum: `Anthropic`, `OpenRouter`, `Custom(String)`
+  - `Timestamp` - millisecond unix timestamp wrapper
+
+## agent loop (mush-agent)
+- `AgentTool` trait: name, description, parameters_schema, async execute
+- `ToolResult` type with convenience constructors (text, error, image)
+- `ToolKey`: normalises tool names (lowercase, strip underscores) for registry lookup
+- `ToolRegistry`: ordered map of `ToolKey` -> `SharedTool`, case-insensitive lookup
+- `truncation` module: post-execute middleware that truncates large tool output (>2000 lines or 50KB)
+  - saves full output to `~/.local/share/mush/tool-output/`, 7 day retention
+  - `Direction::Middle` (default) keeps head + tail, also `Head` and `Tail`
+  - terse hint tells model to use grep/read on the saved file
+- `agent_loop()` function: streams events via async_stream
+- flow: stream assistant -> extract tool calls -> execute each -> truncate output -> append results -> repeat
+- `AgentEvent` enum for UI consumption: AgentStart/End, TurnStart/End, MessageStart/End, ToolExecStart/End, ToolOutput, StreamEvent, Error
+- `DynamicContext`: `Arc<dyn Fn() -> Option<String>>` callback for per-turn system prompt additions
+- `AgentConfig` bundles model + system prompt + tools + registry + options + dynamic_system_context
+- `AgentHooks` groups callback-driven runtime hooks
+  - steering
+  - follow-up
+  - context transform
+  - tool confirmation
+- `ContextTransformResult` distinguishes unchanged, visible transforms, and silent cached replays
+- `ConfirmCallback` + `ConfirmAction`: optional tool confirmation before execution (allow/deny)
+- `LifecycleHooks`: user-configured shell commands at lifecycle points
+  - `HookPoint`: PreSession, PreToolUse, PostToolUse, Stop, PostCompaction
+  - `LifecycleHook`: tool_match pattern, command, timeout, blocking flag
+  - tool matching: "*" for all, "edit|write" pipe-separated, case-insensitive
+  - PreSession: runs once at agent start, output injected as context
+  - PreToolUse: runs after confirmation, blocking failures return error to model
+  - PostToolUse: hook output appended to tool result (model sees linter errors)
+  - Stop: blocking failures inject feedback and continue the loop
+  - PostCompaction: runs after context compaction, output injected as user message
+  - configured via `[[hooks.pre_session]]`, `[[hooks.pre_tool_use]]`, etc. in config.toml
+- `DiagnosticCallback`: async file path → optional diagnostics text, injected after file-modifying tools
+- `card.rs`: `AgentCard` capability manifest (A2A-aligned)
+  - `AgentCard`: name, description, version, model, tools, capabilities, optional url
+  - `Capabilities`: streaming, multi_pane, messaging, lsp
+  - `AgentCard::build()` from model ID + tool registry
+  - serialisable to/from JSON, url omitted when None
+- `ipc/`: unix domain socket IPC for cross-process agent communication
+  - `IpcMessage`: id, from, kind (tagged enum)
+  - `IpcMessageKind`: GetCard, Card, UserMessage, Ack, Error
+  - `socket_path(session_id)`: `$XDG_RUNTIME_DIR/mush/<id>.sock`
+  - `discover_sockets()`: scan for active mush sessions
+  - `IpcListener`: binds UDS, spawns accept loop, handles GetCard requests
+  - newline-delimited JSON protocol, socket cleaned up on drop
+- `tasks.rs`: cross-process task locking for shared-codebase scenarios
+  - `TaskLock`: id, description, agent, claimed_at, optional files list
+  - `TaskStore`: claim (idempotent), release (ownership check), list (sorted by time)
+  - `file_conflicts()`: find tasks overlapping a given file path
+  - lock files stored as `.mush/tasks/<id>.json`
+
+## built-in tools (mush-tools)
+- read: file contents with offset/limit, start_line/end_line exact spans, around_line context view, image support (base64)
+- write: create/overwrite files, auto-create parent dirs
+- edit: surgical find-and-replace with expected_matches count and optional start_line/end_line range restriction
+- bash: shell execution with timeout, optional streaming output sink, process group isolation
+- grep: ripgrep (rg) wrapper, respects gitignore, search by content, top_n for count/json summaries
+- find: fd wrapper (regex), respects gitignore, search by filename
+- glob: fd with --glob flag, pattern matching like `**/*.rs`
+- ls: directory listing with sizes, dirs first
+- web_search: Exa AI search (free, no API key, SSE MCP protocol)
+- web_fetch: fetch URL content, HTML→markdown via htmd, size/timeout limits
+- apply_patch: codex-style patch format (*** Begin/End Patch), supports add/update/delete/move
+  - multi-pass line matching: exact → rstrip → trim → unicode-normalised
+  - context-seeking via `@@` lines, end-of-file anchoring
+- batch: parallel tool execution (up to 25 calls), partial failure tolerant
+  - 100KB total output budget, items beyond budget shown as one-line summaries
+  - per-item truncation via standard truncation module (utf-8 safe, line-based)
+  - self-truncating flag prevents double truncation by agent loop
+  - conditionally included (models with native parallel tool calls skip it)
+- skills: lazy skill routing tools (list_skills, describe_skill, load_skill)
+  - `SkillInfo`: lightweight (name, description, path) passed at construction
+  - `skill_tools(Vec<SkillInfo>)` creates all three with shared `Arc<Vec<SkillInfo>>` registry
+  - case-insensitive lookup via `find_skill()`, helpful not-found errors
+  - registered when `skill_loading = "lazy"` (default) in config
+- `util.rs`: shared helpers (resolve_path, truncate_lines, extract_text for tests)
+- `uses_patch_tool(model_id)`: GPT models (gpt-*, not gpt-4, not oss) use apply_patch instead of edit+write
+- `builtin_tools_with_options(cwd, sink, use_patch)` creates the tool set with conditional swap
+
+## session management (mush-session)
+- `ConversationState`: canonical conversation model wrapping `SessionTree`
+  - owns the tree, delegates append/branch/context operations
+  - `context()` builds a flat `Vec<Message>` view from current branch (leaf→root walk)
+  - `context_prefix(n)` for partial views (title generation, etc)
+  - `rebuild_display()` maps canonical conversation → `App.messages` (display-only, one-way)
+  - serialises with both flat messages and tree for backwards compat
+- `Session`: conversation history + metadata (id, title, model, cwd, timestamps)
+- `SessionStore`: file-based persistence (~/.local/share/mush/sessions/)
+- auto-title from first user message
+- save/load/list/delete operations
+- `compact.rs`: unified compaction with escalation (masking → LLM summarisation)
+  - `auto_compact()`: single entry point, returns `AutoCompactResult`
+  - `needs_compaction_at()`: check against `COMPACTION_THRESHOLD` (95%)
+  - `llm_compact()`: async, streams from registry, extracts text summary
+  - structured compaction prompt (goal/constraints/progress/decisions/next steps/critical context)
+  - fallback to structured dump if LLM call fails
+- `SessionTree`: append-only tree for conversation branching
+  - each entry has id + parent_id forming a tree structure
+  - `branch(from_id)`: move leaf pointer, next append creates a new branch
+  - `branch_with_summary()`: branch + inject summary of abandoned path
+  - `build_context()`: walk leaf→root to get messages for the LLM
+  - `current_branch()`, `tree()`, `is_branch_point()` for navigation
+  - serialised alongside session for persistence
+
+## tree-sitter integration (mush-treesitter)
+- `Language` enum: Rust, Python, JavaScript, TypeScript, Tsx, Go, C, Cpp, Java, Bash, Json, Toml, Yaml, Markdown, Html, Css, Nix
+- `Language::detect(path)`: file extension + filename heuristics for language detection
+- `Language::tree_sitter_language()`: returns the compiled grammar (feature-gated per language)
+- `ParserPool`: thread-safe pool of tree-sitter parsers, one per language, lazy creation
+  - file-level cache by canonical path + mtime (avoids re-parsing unchanged files)
+  - `invalidate(path)` and `invalidate_all()` for manual eviction
+- `SymbolInfo`: name, kind, file_path (Option), start/end line, start/end byte, signature
+- `SymbolKind`: Function, Method, Class, Struct, Enum, Interface, Trait, Impl, Module, Constant, Variable, Type, Import
+- `extract_symbols()`: query-based symbol extraction from parsed trees
+- `symbols_from_file()`: convenience parse + extract in one call, sets file_path on symbols
+- `references.rs`: extract all identifier-like nodes from AST (cross-file reference detection)
+- `repo_map.rs`: aider-style repository map
+  - `build_repo_map(root)`: walk repo, parse files, build reference graph, rank with PageRank
+  - `RepoMap` struct with `format(max_chars)` and `format_for_tokens(budget)`
+  - `IncrementalRepoMap`: persistent state, re-parses only changed files on update
+  - `build_from_data()`: shared core that builds a RepoMap from pre-parsed file data
+  - gitignore-aware file walking via `ignore` crate
+  - iterative PageRank (damping=0.85, 20 iterations), no external graph lib
+  - auto-included in system prompt via dynamic context
+- `watcher.rs`: file watcher for live repo map updates
+  - `RepoMapWatcher`: `notify`-based, debounced (500ms), keeps `SharedMapText` current
+  - `SharedMapText` (`Arc<RwLock<String>>`): shared formatted map text
+  - background thread processes batched file events
+  - falls back to one-shot static map if watcher cannot start
+- `chunking.rs`: AST-aware chunking for embeddings
+  - `Chunk`: text + file_path + symbol_name/kind + line range
+  - `ChunkOptions`: target_size, max_size, include_context toggle
+  - `chunk_file()`: parse with tree-sitter, split by symbol boundaries
+  - `chunk_source()`: chunk from already-read source bytes
+  - `chunk_text()`: fallback paragraph-based splitting for non-parseable files
+  - preamble extraction: lines before first definition (imports, module decls)
+  - large symbols split into sub-chunks with signature context prefix
+- per-language query patterns in `queries.rs` for all code languages
+- all grammar crates optional, enabled by default via `all-languages` feature
+- data formats (json, toml, yaml, markdown, html, css) support parsing but not symbol extraction
+
+## extension system (mush-ext)
+- `Extension` trait: on_discover, on_before_call, on_turn_complete, on_session_end
+- `HookRunner`: manages extensions, chains transforms, merges discoveries
+- `DiscoveredResources`: system prompt additions + custom tools
+- AGENTS.md discovery: walks up from cwd to home, also checks ~/.pi/agent/
+- skill parsing from `<available_skills>` blocks in AGENTS.md
+- `rules.rs`: per-file rule auto-attachment via glob patterns
+  - `Rule`: name, globs, content, path
+  - `RuleIndex`: compiled `GlobSet` for fast matching, dedup tracking via `Mutex<Vec<bool>>`
+  - `discover_rules(cwd)`: scans `.mush/rules/*.md` for files with glob frontmatter
+  - `parse_rule_frontmatter()`: extracts `globs: ["*.py"]` from yaml frontmatter
+  - injected via `FileRuleCallback` in agent loop when tools touch matching files
+- `frontmatter.rs`: shared yaml frontmatter extraction (used by rules, skills, prompts)
+- `context` module (behind `embeddings` feature): auto-context injection via local embeddings
+  - `EmbeddingModelChoice`: `CodeRankEmbed` (default, code-specialised) or `Gemma300M` (fallback)
+  - `ContextIndex`: embeds skill files at startup using CodeRankEmbed-137M (768-dim, INT8 ONNX)
+  - CodeRankEmbed loaded via `UserDefinedEmbeddingModel` + `hf-hub` download from HuggingFace
+  - model-specific query prefix: "Represent this query for searching relevant code: "
+  - on each user message, embeds query and finds relevant skills via cosine similarity
+  - matched skills auto-injected into system prompt (no need for agent to manually load them)
+  - `PromptEnricher` callback passed to TUI/print mode for per-message enrichment
+  - `build_skill_documents()`: uses AST-aware chunking (via mush-treesitter) for better embeddings
+  - `chunk_file_for_embedding()`: chunks arbitrary code files into symbol-aware `ContextDocument`s
+  - `source_path` on `ContextDocument` and `ContextMatch` for cross-tier deduplication
+  - `deduplicate_matches()`: per-file dedup keeping highest-scored result
+  - `exclude_known_files()`: filter results already in repo map (HashSet lookup)
+  - `DocumentKind` enum: Skill or Tool, carried on documents and matches
+  - `build_tool_documents()`: creates indexable documents from tool name/description pairs
+  - `format_auto_loaded()`: full skill content injection for high-confidence matches
+  - `format_tool_hint()`: MCP tool hint pointing to mcp_get_schemas
+  - `route_skill_matches()`: two-tier routing (auto-load vs hint) by score and kind
+
+## MCP client (mush-mcp)
+- `McpServerConfig`: local (stdio) or remote (streamable HTTP) server configs
+- `McpConnection`: connects to MCP server, lists tools, calls tools
+- `McpTool`: wraps MCP tools as `AgentTool` for the agent loop
+- `McpManager`: connects to all configured servers, collects tools
+- uses `rmcp` (official Rust MCP SDK) for protocol handling
+- config via `[mcp.<name>]` sections in config.toml
+- tools namespaced as `servername_toolname` to avoid collisions
+- `result.rs`: shared `convert_call_result()` for MCP→agent result conversion
+- `dynamic.rs`: meta-tools for on-demand MCP tool access
+  - `McpToolIndex`: tool info + definitions + connections, case-insensitive lookup
+  - `mcp_list_tools`: list names/descriptions with optional server filter
+  - `mcp_get_schemas`: full json schemas for selected tools
+  - `mcp_call_tool`: call any MCP tool by name with arguments
+  - `dynamic_mcp_tools()` factory creates all three with shared `Arc<McpToolIndex>`
+  - enabled via `dynamic_mcp = true` in config.toml
+
+## terminal UI (mush-tui)
+- `runner/mod.rs`: public `run_tui()` orchestration entrypoint
+- `runner/config.rs`: public TUI config types and callback aliases
+- `runner/terminal.rs`: terminal setup, restoration, panic-safe cleanup
+- `runner/looping.rs`: per-iteration idle and streaming loop handling
+- `runner/runtime.rs`: TUI bootstrap, resumed display replay, config watcher state, and per-frame housekeeping
+- `runner/commands.rs`: slash command execution and thinking-pref persistence helpers
+- `runner/input.rs`: terminal input dispatch and shared input dependencies
+- `runner/render.rs`: pane drawing, cursor placement, mouse scroll handling
+- `runner/panes.rs`: pane forking, inbox draining, sibling prompt building, isolation cleanup
+- `runner/streams.rs`: stream startup, stream bookkeeping, confirmation flow, steering and abort helpers
+- `terminal_policy.rs`: typed terminal policy, config shape, and env-driven overrides
+- `conversation_display.rs`: explicit canonical conversation → `App.messages` rebuild path
+- `event_handler.rs`: agent event→app mutations, auth resolution, hint injection, auto-compaction
+- `slash.rs`: typed slash parsing and command handling, template expansion, compact/fork-compact/export/undo/branch
+- `app.rs`: TUI state (messages, input, scroll, streaming, `TokenStats` for cost tracking)
+- `input.rs`: keyboard input handling, tab completion, streaming-aware input
+- inline image rendering: `ratatui-image` for sixel/kitty/iterm2/halfblocks protocol detection
+- config hot-reload: `notify` watches config.toml, live theme updates via channel
+- layout: message list + input box + status bar (ratatui)
+- widgets: `MessageList`, `InputBox`, `StatusBar` (all with TestBackend tests)
+- multi-pane agents: `PaneManager` manages independent agent panes with split views
+  - `pane.rs`, `messaging.rs`, `shared_state.rs`, `file_tracker.rs`, `isolation.rs`, `delegate.rs`
+  - ctrl+shift+enter to fork, ctrl+shift+left/right to resize
+  - /merge, /lock, /unlock, /locks, /panes, /broadcast, /label, /close slash commands
+  - `delegate_task` tool: spawn sub-agent panes via `DelegationQueue`
+  - session save/resume preserves all panes via `PaneSession` entries
+  - per-pane cost tracking with `/cost` breakdown
+
+## LSP integration (mush-lsp)
+- `transport.rs`: JSON-RPC framing over stdio (Content-Length headers), generic reader, concrete writer
+- `error.rs`: `LspError` enum (Transport, ServerExited, Request, NoServer, Timeout, SpawnFailed)
+- `client.rs`: `LspClient` manages a single LSP server connection
+  - spawns server process with kill_on_drop
+  - background reader task dispatches responses and notifications
+  - `request()`: JSON-RPC request with 30s timeout, pending map + oneshot channels
+  - `notify()`: JSON-RPC notification (no response)
+  - initialize/initialized handshake
+  - `did_open()`, `did_change()`, `did_save()`: document sync notifications
+  - `get_diagnostics()`: returns latest published diagnostics for a file
+  - `shutdown()`: graceful server shutdown (shutdown request + exit notification)
+  - `format_diagnostics()`: human-readable diagnostic output (file:line:col: severity: message)
+  - `dispatch_message()`: routes responses to pending requests, diagnostics to storage
+  - `path_to_uri()`, `language_id_for_path()`: LSP protocol helpers
+- `discovery.rs`: auto-detect installed LSP servers by scanning PATH
+  - `ServerConfig`: language + command + args
+  - `KNOWN_SERVERS`: rust-analyzer, pyright, pylsp, typescript-language-server, gopls, clangd, nil, nixd, jdtls, bash-language-server
+  - `discover()`: find all available servers (first per language wins)
+  - `discover_for_language()`: find server for a specific language
+- `registry.rs`: `LspRegistry` manages multiple clients, one per language, lazily spawned
+  - `diagnostics_for_file()`: open file in server, wait for diagnostics
+  - `notify_and_diagnose()`: notify change, return updated diagnostics
+  - `cached_diagnostics()`: return already-published diagnostics (no waiting)
+  - `add_override()`: user-configured server overrides
+  - crash recovery: `ServerExited` removes dead client, next use restarts
+  - `shutdown_all()`: graceful shutdown of all servers
+- `tools.rs`: LSP-backed agent tools
+  - `DiagnosticsTool`: `lsp_diagnostics` tool for on-demand file diagnostics
+  - `lsp_tools()`: factory creates all LSP tools sharing an `Arc<LspRegistry>`
+  - registered when `[lsp] diagnostics = true` in config
+- agent loop integration
+  - `DiagnosticCallback` type: async file path → optional diagnostics text
+  - `is_file_modifying_tool()`: gates injection to write/edit/apply_patch
+  - diagnostics appended as `[LSP diagnostics]` addendum to tool results
+  - `[lsp]` config section: `diagnostics = true/false`, `[lsp.servers.*]` overrides
+
+## CLI (mush-cli)
+- `main.rs`: CLI struct, `main()`, `print_mode()`, `tui_mode()`
+- `commands.rs`: subcommand handlers (models, sessions, delete, config, status, login, logout)
+- `setup.rs`: shared helpers (system prompt, prompt enricher, API key resolution, model defaults, auto-compact)
+- `config.rs`: config file parsing and persistence
+- print mode: `mush -p "prompt"` streams to stdout
+- TUI mode: `mush` launches interactive terminal
+- stdin pipe: `echo "code" | mush -p "review this"`
+- session resume: `mush -c <session-id> -p "continue"`
+- config file: ~/.config/mush/config.toml
+  - `cache_retention`: none|short|long
+  - `[terminal]` overrides
+  - `[retrieval]` tier toggles (repo_map, embeddings, context_budget, skill_loading, embedding_model)
+- AGENTS.md auto-discovered and injected into system prompt
