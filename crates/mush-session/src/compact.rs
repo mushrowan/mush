@@ -14,6 +14,9 @@ use mush_ai::types::*;
 /// how many recent messages to keep uncompacted
 const DEFAULT_KEEP_RECENT: usize = 10;
 
+/// how many recent assistant turns to keep full tool output for
+const DEFAULT_KEEP_OBSERVATIONS: usize = 5;
+
 /// result of compaction
 #[derive(Debug)]
 pub struct CompactionResult {
@@ -63,6 +66,92 @@ fn estimate_message_tokens(msg: &Message) -> usize {
             .sum(),
     };
     chars / 4
+}
+
+/// mask old tool result outputs while preserving the action history
+///
+/// walks the message list and replaces tool result content beyond
+/// `keep_recent_turns` assistant turns with a brief summary. the
+/// tool call itself (in the assistant message) is preserved so the
+/// model can see what actions were taken without the bulky output.
+///
+/// returns the number of tool results that were masked and the
+/// estimated token savings
+pub fn mask_observations(
+    messages: &mut [Message],
+    keep_recent_turns: Option<usize>,
+) -> ObservationMaskResult {
+    let keep = keep_recent_turns.unwrap_or(DEFAULT_KEEP_OBSERVATIONS);
+
+    // find the cutoff: the index of the `keep`th assistant message from
+    // the end. everything before this index is "old" and gets masked.
+    let mut assistant_count = 0;
+    let mut cutoff_index = 0;
+    let mut found = false;
+    for (i, msg) in messages.iter().enumerate().rev() {
+        if matches!(msg, Message::Assistant(_)) {
+            assistant_count += 1;
+            if assistant_count == keep {
+                cutoff_index = i;
+                found = true;
+                break;
+            }
+        }
+    }
+
+    if !found {
+        return ObservationMaskResult {
+            masked_count: 0,
+            tokens_saved: 0,
+        };
+    }
+
+    // mask tool results before the cutoff
+    let mut masked_count = 0;
+    let mut tokens_saved = 0;
+
+    for msg in &mut messages[..cutoff_index] {
+        if let Message::ToolResult(tr) = msg {
+            let old_tokens = estimate_message_tokens(&Message::ToolResult(tr.clone()));
+
+            // count lines in the original output
+            let line_count: usize = tr
+                .content
+                .iter()
+                .map(|p| match p {
+                    ToolResultContentPart::Text(t) => t.text.lines().count(),
+                    ToolResultContentPart::Image(_) => 1,
+                })
+                .sum();
+
+            let summary = format!(
+                "[tool output hidden: {} lines, tool: {}]",
+                line_count, tr.tool_name
+            );
+
+            tr.content = vec![ToolResultContentPart::Text(TextContent {
+                text: summary,
+            })];
+
+            let new_tokens = estimate_message_tokens(&Message::ToolResult(tr.clone()));
+            tokens_saved += old_tokens.saturating_sub(new_tokens);
+            masked_count += 1;
+        }
+    }
+
+    ObservationMaskResult {
+        masked_count,
+        tokens_saved,
+    }
+}
+
+/// result of observation masking
+#[derive(Debug)]
+pub struct ObservationMaskResult {
+    /// number of tool results that had their content replaced
+    pub masked_count: usize,
+    /// estimated tokens saved by masking
+    pub tokens_saved: usize,
 }
 
 fn truncate_with_ellipsis(text: &str, max_chars: usize) -> String {
@@ -248,10 +337,85 @@ Use this EXACT format:
 
 Keep each section concise. Preserve exact file paths, function names, and error messages.";
 
-/// check whether compaction is needed (estimated tokens > 75% of context window)
-pub fn needs_compaction(messages: &[Message], context_window: usize) -> bool {
-    let threshold = context_window * 3 / 4;
-    messages.len() > DEFAULT_KEEP_RECENT && estimate_tokens(messages) > threshold
+/// trigger compaction when context usage exceeds this percentage
+const COMPACTION_THRESHOLD: u64 = 95;
+
+/// check whether compaction is needed based on real API token counts
+///
+/// triggers at 95% of context window. also requires more than
+/// `DEFAULT_KEEP_RECENT` messages to avoid compacting tiny conversations.
+pub fn needs_compaction_at(
+    context_tokens: TokenCount,
+    context_window: TokenCount,
+    message_count: usize,
+) -> bool {
+    message_count > DEFAULT_KEEP_RECENT
+        && context_tokens.exceeds_fraction(context_window, COMPACTION_THRESHOLD, 100)
+}
+
+/// result of the auto_compact escalation
+#[derive(Debug)]
+pub struct AutoCompactResult {
+    /// the compacted message list
+    pub messages: Vec<Message>,
+    /// number of tool outputs masked (0 = no masking applied)
+    pub masked_count: usize,
+    /// estimated tokens saved by masking
+    pub mask_tokens_saved: usize,
+    /// number of messages that were summarised (0 = no LLM compaction)
+    pub summarised_count: usize,
+}
+
+/// escalating auto-compaction: masking then LLM summarisation
+///
+/// 1. mask old tool outputs (cheap, no LLM call)
+/// 2. if still over budget, LLM summarisation of old turns
+///
+/// callers handle post-compaction hooks separately since that
+/// requires mush-agent types this crate doesn't depend on.
+pub async fn auto_compact(
+    messages: Vec<Message>,
+    context_tokens: TokenCount,
+    context_window: TokenCount,
+    registry: &ApiRegistry,
+    model: &Model,
+    options: &StreamOptions,
+) -> AutoCompactResult {
+    if !needs_compaction_at(context_tokens, context_window, messages.len()) {
+        return AutoCompactResult {
+            messages,
+            masked_count: 0,
+            mask_tokens_saved: 0,
+            summarised_count: 0,
+        };
+    }
+
+    // step 1: mask old tool outputs
+    let mut messages = messages;
+    let mask_result = mask_observations(&mut messages, None);
+
+    if mask_result.masked_count > 0 {
+        // re-check if we're still over budget after masking
+        let threshold = (context_window.get() as usize) * COMPACTION_THRESHOLD as usize / 100;
+        if estimate_tokens(&messages) < threshold {
+            return AutoCompactResult {
+                messages,
+                masked_count: mask_result.masked_count,
+                mask_tokens_saved: mask_result.tokens_saved,
+                summarised_count: 0,
+            };
+        }
+    }
+
+    // step 2: LLM summarisation
+    let result = llm_compact(messages, registry, model, options, Some(DEFAULT_KEEP_RECENT)).await;
+
+    AutoCompactResult {
+        messages: result.messages,
+        masked_count: mask_result.masked_count,
+        mask_tokens_saved: mask_result.tokens_saved,
+        summarised_count: result.summarised_count,
+    }
 }
 
 /// compact messages using an LLM to generate the summary.
@@ -453,33 +617,32 @@ mod tests {
 
     #[test]
     fn needs_compaction_below_threshold() {
-        let msgs = vec![user_msg("hi"), assistant_msg("hello")];
-        // small messages, huge window — no compaction needed
-        assert!(!needs_compaction(&msgs, 200_000));
+        // 100 tokens used, 200k window, well under 95%
+        assert!(!needs_compaction_at(
+            TokenCount::new(100),
+            TokenCount::new(200_000),
+            20,
+        ));
     }
 
     #[test]
     fn needs_compaction_above_threshold() {
-        // each message ~250 tokens (1000 chars / 4), 20 messages = ~5000 tokens
-        let msgs: Vec<Message> = (0..20)
-            .map(|i| {
-                if i % 2 == 0 {
-                    user_msg(&"x".repeat(1000))
-                } else {
-                    assistant_msg(&"y".repeat(1000))
-                }
-            })
-            .collect();
-        // context window of 4000 tokens, 75% threshold = 3000
-        // 20 msgs * 250 tokens = 5000, which exceeds 3000
-        assert!(needs_compaction(&msgs, 4000));
+        // 9600 tokens used, 10k window = 96%, over 95% threshold
+        assert!(needs_compaction_at(
+            TokenCount::new(9600),
+            TokenCount::new(10_000),
+            20,
+        ));
     }
 
     #[test]
     fn needs_compaction_too_few_messages() {
-        // even if tokens are high, don't compact if <= keep_recent (10)
-        let msgs: Vec<Message> = (0..8).map(|_| user_msg(&"x".repeat(10_000))).collect();
-        assert!(!needs_compaction(&msgs, 100));
+        // high usage but only 8 messages, below DEFAULT_KEEP_RECENT
+        assert!(!needs_compaction_at(
+            TokenCount::new(9600),
+            TokenCount::new(10_000),
+            8,
+        ));
     }
 
     #[test]
@@ -583,12 +746,8 @@ mod tests {
 
     #[test]
     fn recompaction_triggers_after_compacted_conversation_grows() {
-        // context window sized so that kept messages fit comfortably,
-        // but a full conversation exceeds 75%
-        let context_window = 1000;
-        let keep = 4; // keep fewer messages to make post-compaction smaller
+        let keep = 4;
 
-        // build enough messages to exceed 75% threshold (750 tokens)
         let mut msgs: Vec<Message> = (0..20)
             .flat_map(|i| {
                 vec![
@@ -598,11 +757,12 @@ mod tests {
             })
             .collect();
 
+        // simulate token counts: 40 messages, lots of tokens
+        let estimated = estimate_tokens(&msgs);
+        let context_window = TokenCount::new((estimated * 100 / 96) as u64); // just barely over 95%
         assert!(
-            needs_compaction(&msgs, context_window),
-            "should need compaction: {} tokens, threshold {}",
-            estimate_tokens(&msgs),
-            context_window * 3 / 4,
+            needs_compaction_at(TokenCount::new(estimated as u64), context_window, msgs.len()),
+            "should need compaction: {estimated} tokens",
         );
 
         // compact with a short summary
@@ -610,13 +770,11 @@ mod tests {
         msgs = result.messages;
 
         // right after compaction, shouldn't need it again
-        // (summary + few kept messages should be well under threshold)
+        let post_estimated = estimate_tokens(&msgs);
         assert!(
-            !needs_compaction(&msgs, context_window),
-            "shouldn't need compaction right after: {} tokens in {} msgs, threshold {}",
-            estimate_tokens(&msgs),
+            !needs_compaction_at(TokenCount::new(post_estimated as u64), context_window, msgs.len()),
+            "shouldn't need compaction right after: {post_estimated} tokens in {} msgs",
             msgs.len(),
-            context_window * 3 / 4,
         );
 
         // add more messages until we exceed threshold again
@@ -629,21 +787,17 @@ mod tests {
             )));
         }
 
+        let regrown = estimate_tokens(&msgs);
         assert!(
-            needs_compaction(&msgs, context_window),
-            "should need re-compaction: {} tokens in {} msgs, threshold {}",
-            estimate_tokens(&msgs),
+            needs_compaction_at(TokenCount::new(regrown as u64), context_window, msgs.len()),
+            "should need re-compaction: {regrown} tokens in {} msgs",
             msgs.len(),
-            context_window * 3 / 4,
         );
 
         // compact again
         let result2 =
             compact_with_summary(msgs, "updated summary including follow-ups", Some(keep));
-        assert!(
-            result2.summarised_count > 0,
-            "should have summarised some messages"
-        );
+        assert!(result2.summarised_count > 0);
         assert!(result2.summary.contains("updated summary"));
     }
 
@@ -713,5 +867,139 @@ mod tests {
             !first_text.is_some_and(|t| t.contains("first summary")),
             "should not contain first summary anymore"
         );
+    }
+
+    fn tool_result_msg(tool_name: &str, output: &str) -> Message {
+        Message::ToolResult(ToolResultMessage {
+            tool_call_id: "tc_1".into(),
+            tool_name: tool_name.into(),
+            content: vec![ToolResultContentPart::Text(TextContent {
+                text: output.into(),
+            })],
+            outcome: ToolOutcome::Success,
+            timestamp_ms: Timestamp::zero(),
+        })
+    }
+
+    #[test]
+    fn mask_observations_basic() {
+        // 3 turns: old tool result should be masked, recent two kept
+        let big_output = (0..50).map(|i| format!("line {i}: some output text here")).collect::<Vec<_>>().join("\n");
+        let mut msgs = vec![
+            user_msg("q1"),
+            assistant_msg("calling tool"),
+            tool_result_msg("bash", &big_output),
+            user_msg("q2"),
+            assistant_msg("calling another tool"),
+            tool_result_msg("read", "file contents\nline2"),
+            user_msg("q3"),
+            assistant_msg("final answer"),
+        ];
+
+        let result = mask_observations(&mut msgs, Some(2));
+
+        // first tool result (turn 1) should be masked
+        assert_eq!(result.masked_count, 1);
+        assert!(result.tokens_saved > 0);
+
+        if let Message::ToolResult(tr) = &msgs[2] {
+            let text = &tr.content[0];
+            if let ToolResultContentPart::Text(t) = text {
+                assert!(
+                    t.text.contains("[tool output hidden:"),
+                    "should be masked: {}",
+                    t.text
+                );
+                assert!(t.text.contains("bash"), "should mention tool name");
+            }
+        } else {
+            panic!("expected tool result at index 2");
+        }
+
+        // second tool result (turn 2) should be kept
+        if let Message::ToolResult(tr) = &msgs[5] {
+            let text = &tr.content[0];
+            if let ToolResultContentPart::Text(t) = text {
+                assert!(
+                    t.text.contains("file contents"),
+                    "recent tool result should be preserved: {}",
+                    t.text
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mask_observations_nothing_to_mask() {
+        let mut msgs = vec![
+            user_msg("hi"),
+            assistant_msg("hello"),
+        ];
+
+        let result = mask_observations(&mut msgs, Some(5));
+        assert_eq!(result.masked_count, 0);
+        assert_eq!(result.tokens_saved, 0);
+    }
+
+    #[test]
+    fn mask_observations_preserves_structure() {
+        let mut msgs = vec![
+            user_msg("q1"),
+            assistant_msg("a1"),
+            tool_result_msg("bash", "output 1"),
+            user_msg("q2"),
+            assistant_msg("a2"),
+            tool_result_msg("read", "output 2"),
+            user_msg("q3"),
+            assistant_msg("a3"),
+            tool_result_msg("edit", "output 3"),
+        ];
+
+        mask_observations(&mut msgs, Some(1));
+
+        // message count unchanged
+        assert_eq!(msgs.len(), 9);
+        // types preserved
+        assert!(matches!(msgs[0], Message::User(_)));
+        assert!(matches!(msgs[1], Message::Assistant(_)));
+        assert!(matches!(msgs[2], Message::ToolResult(_)));
+    }
+
+    #[test]
+    fn mask_observations_counts_lines() {
+        let mut msgs = vec![
+            user_msg("q"),
+            assistant_msg("a"),
+            tool_result_msg("bash", "line1\nline2\nline3"),
+            user_msg("q2"),
+            assistant_msg("a2"),
+        ];
+
+        mask_observations(&mut msgs, Some(1));
+
+        if let Message::ToolResult(tr) = &msgs[2] {
+            if let ToolResultContentPart::Text(t) = &tr.content[0] {
+                assert!(
+                    t.text.contains("3 lines"),
+                    "should count lines: {}",
+                    t.text
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mask_observations_default_threshold() {
+        // with default keep (5), need >5 assistant turns to trigger masking
+        let mut msgs: Vec<Message> = Vec::new();
+        for i in 0..7 {
+            msgs.push(user_msg(&format!("q{i}")));
+            msgs.push(assistant_msg(&format!("a{i}")));
+            msgs.push(tool_result_msg("bash", &format!("output {i}")));
+        }
+
+        let result = mask_observations(&mut msgs, None);
+        // 7 turns, keep 5, so 2 should be masked
+        assert_eq!(result.masked_count, 2);
     }
 }
