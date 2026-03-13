@@ -49,6 +49,11 @@ pub enum AgentEvent {
     SteeringInjected { count: usize },
     /// follow-up messages continuing the loop
     FollowUpInjected { count: usize },
+    /// lifecycle hook ran
+    HookRan {
+        point: crate::hooks::HookPoint,
+        result: crate::hooks::HookResult,
+    },
     /// context was transformed (e.g. compacted)
     ContextTransformed {
         before_count: usize,
@@ -135,6 +140,25 @@ pub struct AgentHooks<'a> {
     pub confirm_tool: Option<ConfirmCallback<'a>>,
 }
 
+/// callback type for dynamic system prompt additions, called each turn
+pub type DynamicContext = std::sync::Arc<dyn Fn() -> Option<String> + Send + Sync>;
+
+/// callback type for file-triggered rule injection.
+/// given a file path from a tool call, returns any matching rule content
+/// that should be appended to the tool result.
+pub type FileRuleCallback = std::sync::Arc<dyn Fn(&std::path::Path) -> Option<String> + Send + Sync>;
+
+/// async callback for getting diagnostics after a file-modifying tool runs.
+/// receives the file path from tool arguments, returns formatted diagnostics
+/// to append to the tool result.
+pub type DiagnosticCallback = std::sync::Arc<
+    dyn Fn(
+            &std::path::Path,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send>>
+        + Send
+        + Sync,
+>;
+
 /// configuration for running the agent loop
 pub struct AgentConfig<'a> {
     pub model: Model,
@@ -145,6 +169,19 @@ pub struct AgentConfig<'a> {
     /// max tool-calling turns before forced stop (default: unlimited)
     pub max_turns: usize,
     pub hooks: AgentHooks<'a>,
+    /// user-configured lifecycle hooks (shell commands)
+    pub lifecycle_hooks: crate::hooks::LifecycleHooks,
+    /// working directory for lifecycle hook commands
+    pub cwd: Option<std::path::PathBuf>,
+    /// dynamic addition to system prompt, called before each LLM call.
+    /// used for repo map updates and other live context.
+    pub dynamic_system_context: Option<DynamicContext>,
+    /// file-triggered rule injection. when a tool touches a file,
+    /// this callback is checked for matching rules to append.
+    pub file_rules: Option<FileRuleCallback>,
+    /// LSP diagnostic injection. after file-modifying tools (write, edit,
+    /// apply_patch), queries the LSP server for diagnostics and appends them.
+    pub lsp_diagnostics: Option<DiagnosticCallback>,
 }
 
 /// run the agent loop, yielding events as they happen
@@ -160,6 +197,36 @@ pub fn agent_loop(
 
         let mut messages = initial_messages;
         let mut turn_index = 0;
+
+        // run pre-session hooks (once, before the first LLM call)
+        if !config.lifecycle_hooks.pre_session.is_empty() {
+            let results = config.lifecycle_hooks
+                .run_pre_session(config.cwd.as_deref())
+                .await;
+
+            for r in &results {
+                yield AgentEvent::HookRan {
+                    point: crate::hooks::HookPoint::PreSession,
+                    result: r.clone(),
+                };
+            }
+
+            // if any pre-session hook produced output, inject it as context
+            let all_output: String = results
+                .iter()
+                .filter(|r| !r.output.is_empty())
+                .map(|r| r.output.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !all_output.is_empty() {
+                messages.push(Message::User(UserMessage {
+                    content: UserContent::Text(format!(
+                        "[pre-session hook output]\n{all_output}"
+                    )),
+                    timestamp_ms: Timestamp::now(),
+                }));
+            }
+        }
 
         // check for steering at start (user may have typed while waiting)
         let mut pending: Vec<Message> = if let Some(ref get) = config.hooks.get_steering {
@@ -210,8 +277,20 @@ pub fn agent_loop(
                         parameters: t.parameters_schema(),
                     }).collect();
 
+                // compose system prompt from static base + dynamic suffix
+                let system_prompt = match (&config.system_prompt, &config.dynamic_system_context) {
+                    (Some(base), Some(suffix_fn)) => {
+                        if let Some(suffix) = suffix_fn() {
+                            Some(format!("{base}\n\n{suffix}"))
+                        } else {
+                            Some(base.clone())
+                        }
+                    }
+                    (base, _) => base.clone(),
+                };
+
                 let context = LlmContext {
-                    system_prompt: config.system_prompt.clone(),
+                    system_prompt,
                     messages: llm_messages,
                     tools: tool_defs,
                 };
@@ -319,6 +398,39 @@ pub fn agent_loop(
                     .collect();
 
                 if tool_calls.is_empty() {
+                    // run stop hooks before declaring done
+                    if !config.lifecycle_hooks.stop.is_empty() {
+                        let results = config.lifecycle_hooks
+                            .run_stop(config.cwd.as_deref())
+                            .await;
+
+                        for r in &results {
+                            yield AgentEvent::HookRan {
+                                point: crate::hooks::HookPoint::Stop,
+                                result: r.clone(),
+                            };
+                        }
+
+                        if crate::hooks::has_blocking_failure(&results) {
+                            if let Some(feedback) = crate::hooks::format_hook_results(
+                                &results,
+                                crate::hooks::HookPoint::Stop,
+                            ) {
+                                messages.push(Message::User(UserMessage {
+                                    content: UserContent::Text(feedback),
+                                    timestamp_ms: Timestamp::now(),
+                                }));
+                            }
+                            yield AgentEvent::TurnEnd { turn_index, message: assistant_msg };
+                            turn_index += 1;
+                            if turn_index >= config.max_turns {
+                                yield AgentEvent::MaxTurnsReached { max_turns: config.max_turns };
+                                break 'outer;
+                            }
+                            continue; // re-enter inner loop
+                        }
+                    }
+
                     yield AgentEvent::TurnEnd { turn_index, message: assistant_msg };
                     break; // no tools, exit inner loop
                 }
@@ -355,8 +467,52 @@ pub fn agent_loop(
                 }
 
                 if !confirmed.is_empty() {
-                    // emit start events for all confirmed tools
+                    // run pre-tool hooks and filter out blocked tools
+                    let mut allowed: Vec<&ToolCall> = Vec::new();
                     for tc in &confirmed {
+                        if !config.lifecycle_hooks.pre_tool_use.is_empty() {
+                            let hook_results = config.lifecycle_hooks
+                                .run_for_tool(
+                                    crate::hooks::HookPoint::PreToolUse,
+                                    tc.name.as_str(),
+                                    config.cwd.as_deref(),
+                                )
+                                .await;
+
+                            for r in &hook_results {
+                                yield AgentEvent::HookRan {
+                                    point: crate::hooks::HookPoint::PreToolUse,
+                                    result: r.clone(),
+                                };
+                            }
+
+                            if crate::hooks::has_blocking_failure(&hook_results) {
+                                // pre-hook blocked this tool, return feedback as tool result
+                                let feedback = crate::hooks::format_hook_results(
+                                    &hook_results,
+                                    crate::hooks::HookPoint::PreToolUse,
+                                ).unwrap_or_else(|| "pre-tool hook blocked execution".into());
+                                let result = ToolResult::error(feedback);
+                                yield AgentEvent::ToolExecEnd {
+                                    tool_call_id: tc.id.clone(),
+                                    tool_name: tc.name.clone(),
+                                    result: result.clone(),
+                                };
+                                messages.push(Message::ToolResult(ToolResultMessage {
+                                    tool_call_id: tc.id.clone(),
+                                    tool_name: tc.name.clone(),
+                                    content: result.content,
+                                    outcome: ToolOutcome::Error,
+                                    timestamp_ms: Timestamp::now(),
+                                }));
+                                continue;
+                            }
+                        }
+                        allowed.push(tc);
+                    }
+
+                    // emit start events for all allowed tools
+                    for tc in &allowed {
                         yield AgentEvent::ToolExecStart {
                             tool_call_id: tc.id.clone(),
                             tool_name: tc.name.clone(),
@@ -364,15 +520,64 @@ pub fn agent_loop(
                         };
                     }
 
-                    // execute all confirmed tools concurrently
-                    let futs: Vec<_> = confirmed
+                    // execute all allowed tools concurrently
+                    let futs: Vec<_> = allowed
                         .iter()
                         .map(|tc| execute_tool(&config.tools, tc))
                         .collect();
                     let results = futures::future::join_all(futs).await;
 
-                    // emit results and push to messages
-                    for (tc, result) in confirmed.iter().zip(results) {
+                    // emit results, run post-tool hooks, push to messages
+                    for (tc, mut result) in allowed.iter().zip(results) {
+                        // run post-tool hooks
+                        if !config.lifecycle_hooks.post_tool_use.is_empty() {
+                            let hook_results = config.lifecycle_hooks
+                                .run_for_tool(
+                                    crate::hooks::HookPoint::PostToolUse,
+                                    tc.name.as_str(),
+                                    config.cwd.as_deref(),
+                                )
+                                .await;
+
+                            for r in &hook_results {
+                                yield AgentEvent::HookRan {
+                                    point: crate::hooks::HookPoint::PostToolUse,
+                                    result: r.clone(),
+                                };
+                            }
+
+                            // append hook output to the tool result
+                            if let Some(feedback) = crate::hooks::format_hook_results(
+                                &hook_results,
+                                crate::hooks::HookPoint::PostToolUse,
+                            ) {
+                                result.content.push(ToolResultContentPart::Text(TextContent {
+                                    text: feedback,
+                                }));
+                            }
+                        }
+
+                        // check file rules for path-based tool calls
+                        if let Some(ref file_rules) = config.file_rules
+                            && let Some(path) = extract_file_path(&tc.arguments)
+                            && let Some(rule_text) = file_rules(&path)
+                        {
+                            result.content.push(ToolResultContentPart::Text(TextContent {
+                                text: format!("[auto-attached rules]\n{rule_text}"),
+                            }));
+                        }
+
+                        // inject LSP diagnostics for file-modifying tools
+                        if let Some(ref lsp_diag) = config.lsp_diagnostics
+                            && is_file_modifying_tool(tc.name.as_str())
+                            && let Some(path) = extract_file_path(&tc.arguments)
+                            && let Some(diag_text) = lsp_diag(&path).await
+                        {
+                            result.content.push(ToolResultContentPart::Text(TextContent {
+                                text: format!("[LSP diagnostics]\n{diag_text}"),
+                            }));
+                        }
+
                         yield AgentEvent::ToolExecEnd {
                             tool_call_id: tc.id.clone(),
                             tool_name: tc.name.clone(),
@@ -436,6 +641,20 @@ pub fn agent_loop(
     };
 
     Box::pin(stream)
+}
+
+/// extract a file path from tool call arguments
+///
+/// tools like read, write, edit, and apply_patch use a `path` field
+fn extract_file_path(args: &serde_json::Value) -> Option<std::path::PathBuf> {
+    args.get("path")
+        .and_then(|v| v.as_str())
+        .map(std::path::PathBuf::from)
+}
+
+/// tools that modify files on disk (diagnostics are relevant after these)
+fn is_file_modifying_tool(name: &str) -> bool {
+    matches!(name.to_lowercase().as_str(), "write" | "edit" | "apply_patch")
 }
 
 async fn execute_tool(tools: &ToolRegistry, tool_call: &ToolCall) -> ToolResult {
@@ -625,6 +844,11 @@ mod tests {
             options: StreamOptions::default(),
             max_turns: DEFAULT_MAX_TURNS,
             hooks: AgentHooks::default(),
+            lifecycle_hooks: crate::hooks::LifecycleHooks::default(),
+            cwd: None,
+            dynamic_system_context: None,
+            file_rules: None,
+            lsp_diagnostics: None,
         };
 
         let messages = vec![Message::User(UserMessage {
@@ -672,6 +896,11 @@ mod tests {
                 transform_context: Some(transform),
                 ..AgentHooks::default()
             },
+            lifecycle_hooks: crate::hooks::LifecycleHooks::default(),
+            cwd: None,
+            dynamic_system_context: None,
+            file_rules: None,
+            lsp_diagnostics: None,
         };
 
         let messages = vec![Message::User(UserMessage {
@@ -785,6 +1014,11 @@ mod tests {
                 get_follow_up: Some(get_follow_up),
                 ..AgentHooks::default()
             },
+            lifecycle_hooks: crate::hooks::LifecycleHooks::default(),
+            cwd: None,
+            dynamic_system_context: None,
+            file_rules: None,
+            lsp_diagnostics: None,
         };
 
         let messages = vec![Message::User(UserMessage {
@@ -816,5 +1050,16 @@ mod tests {
     #[test]
     fn config_defaults_are_sensible() {
         assert_eq!(DEFAULT_MAX_TURNS, usize::MAX);
+    }
+
+    #[test]
+    fn is_file_modifying_tool_matches_expected() {
+        assert!(is_file_modifying_tool("write"));
+        assert!(is_file_modifying_tool("Write"));
+        assert!(is_file_modifying_tool("edit"));
+        assert!(is_file_modifying_tool("apply_patch"));
+        assert!(!is_file_modifying_tool("read"));
+        assert!(!is_file_modifying_tool("bash"));
+        assert!(!is_file_modifying_tool("grep"));
     }
 }

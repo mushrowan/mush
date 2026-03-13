@@ -3,6 +3,7 @@ pub mod clipboard;
 pub mod config_watcher;
 mod conversation_display;
 pub mod event_handler;
+pub mod delegate;
 pub mod file_tracker;
 pub mod input;
 pub mod isolation;
@@ -22,7 +23,8 @@ pub mod widgets;
 pub use app::{App, AppEvent, ThinkingDisplay};
 pub use file_tracker::IsolationMode;
 pub use runner::{
-    HintMode, LastModelSaver, PromptEnricher, SessionSaver, ThinkingPrefsSaver, TuiConfig, run_tui,
+    HintMode, LastModelSaver, PaneSnapshot, PromptEnricher, SessionSaver, SessionSnapshot,
+    ThinkingPrefsSaver, TuiConfig, run_tui,
 };
 pub use terminal_policy::{
     IMAGE_PROBE_ENV, ImageProbeMode, KEYBOARD_ENHANCEMENT_ENV, KeyboardEnhancementMode,

@@ -51,6 +51,9 @@ pub struct Config {
     /// automatically compact conversation when approaching context limit (off by default)
     #[serde(default)]
     pub auto_compact: bool,
+    /// fork the session tree before auto-compacting (preserves uncompacted original)
+    #[serde(default)]
+    pub auto_fork_compact: bool,
     /// prompt for confirmation before executing tools (off by default)
     pub confirm_tools: bool,
     /// show dollar cost in status bar (off by default, toggle with /cost)
@@ -66,6 +69,163 @@ pub struct Config {
     /// MCP server configurations keyed by name
     #[serde(default)]
     pub mcp: std::collections::HashMap<String, mush_mcp::McpServerConfig>,
+    /// use dynamic meta-tools for MCP instead of loading all schemas (default false)
+    #[serde(default)]
+    pub dynamic_mcp: bool,
+    /// lifecycle hooks
+    #[serde(default)]
+    pub hooks: HooksConfig,
+    /// retrieval / auto-context settings
+    #[serde(default)]
+    pub retrieval: RetrievalConfig,
+    /// LSP integration settings
+    #[serde(default)]
+    pub lsp: LspConfig,
+    /// model tier aliases for delegation and multi-pane
+    #[serde(default)]
+    pub model_tiers: HashMap<String, String>,
+}
+
+/// lifecycle hook config sections
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct HooksConfig {
+    pub pre_session: Vec<HookEntry>,
+    pub pre_tool_use: Vec<HookEntry>,
+    pub post_tool_use: Vec<HookEntry>,
+    pub stop: Vec<HookEntry>,
+    pub post_compaction: Vec<HookEntry>,
+}
+
+/// a single hook entry in config
+#[derive(Debug, Deserialize)]
+pub struct HookEntry {
+    /// tool name pattern: "*" for all, "edit|write" for specific tools
+    #[serde(default = "default_match")]
+    pub r#match: String,
+    /// shell command to run
+    pub command: String,
+    /// timeout in seconds (default 30)
+    #[serde(default = "default_timeout")]
+    pub timeout: u64,
+    /// whether failure blocks the operation (default false)
+    #[serde(default)]
+    pub blocking: bool,
+}
+
+fn default_match() -> String {
+    "*".into()
+}
+
+fn default_timeout() -> u64 {
+    30
+}
+
+/// which local embedding model to use for semantic search
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EmbeddingModel {
+    /// nomic CodeRankEmbed-137M, code-specialised, fast
+    #[default]
+    Coderank,
+    /// google EmbeddingGemma-300M, general purpose, larger
+    Gemma,
+}
+
+/// LSP integration configuration
+#[derive(Debug, Default, Deserialize, Clone, PartialEq, Eq)]
+#[serde(default)]
+pub struct LspConfig {
+    /// enable auto-injecting diagnostics after file-modifying tools (default false)
+    pub diagnostics: bool,
+    /// custom server overrides, keyed by language name (e.g. "rust", "python")
+    #[serde(default)]
+    pub servers: HashMap<String, LspServerEntry>,
+}
+
+/// a custom LSP server config entry
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+pub struct LspServerEntry {
+    /// command to run
+    pub command: String,
+    /// command line arguments
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+/// how skills are loaded into context
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SkillLoading {
+    /// all skills eagerly loaded into system prompt
+    Eager,
+    /// skills loaded on demand via list/describe/load tools
+    #[default]
+    Lazy,
+}
+
+/// retrieval tier configuration
+///
+/// controls which auto-context sources are active and how much
+/// of the context budget they can use.
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+#[serde(default)]
+pub struct RetrievalConfig {
+    /// tier 1: tree-sitter repo map in system prompt
+    pub repo_map: bool,
+    /// tier 2: embedding-based skill matching per user message
+    pub embeddings: bool,
+    /// total token budget for all retrieval context (default 2048)
+    pub context_budget: usize,
+    /// how skills are loaded: "lazy" (default) or "eager"
+    pub skill_loading: SkillLoading,
+    /// which embedding model to use: "coderank" (default) or "gemma"
+    pub embedding_model: EmbeddingModel,
+    /// cosine similarity threshold for auto-loading full skill content (default 0.5)
+    #[serde(default = "default_auto_load_threshold")]
+    pub auto_load_threshold: f32,
+}
+
+fn default_auto_load_threshold() -> f32 {
+    0.5
+}
+
+impl Default for RetrievalConfig {
+    fn default() -> Self {
+        Self {
+            repo_map: true,
+            embeddings: true,
+            context_budget: 2048,
+            skill_loading: SkillLoading::default(),
+            embedding_model: EmbeddingModel::default(),
+            auto_load_threshold: default_auto_load_threshold(),
+        }
+    }
+}
+
+impl Config {
+    /// convert config hook entries into the agent's lifecycle hooks
+    pub fn lifecycle_hooks(&self) -> mush_agent::LifecycleHooks {
+        fn convert(entries: &[HookEntry]) -> Vec<mush_agent::LifecycleHook> {
+            entries
+                .iter()
+                .map(|e| mush_agent::LifecycleHook {
+                    tool_match: e.r#match.clone(),
+                    command: e.command.clone(),
+                    timeout: std::time::Duration::from_secs(e.timeout),
+                    blocking: e.blocking,
+                })
+                .collect()
+        }
+
+        mush_agent::LifecycleHooks {
+            pre_session: convert(&self.hooks.pre_session),
+            pre_tool_use: convert(&self.hooks.pre_tool_use),
+            post_tool_use: convert(&self.hooks.post_tool_use),
+            stop: convert(&self.hooks.stop),
+            post_compaction: convert(&self.hooks.post_compaction),
+        }
+    }
 }
 
 /// api key overrides from config file
@@ -329,6 +489,18 @@ image_probe = "disabled"
     }
 
     #[test]
+    fn auto_fork_compact_defaults_to_false() {
+        let config: Config = toml::from_str("").unwrap();
+        assert!(!config.auto_fork_compact);
+    }
+
+    #[test]
+    fn auto_fork_compact_can_be_enabled() {
+        let config: Config = toml::from_str("auto_fork_compact = true").unwrap();
+        assert!(config.auto_fork_compact);
+    }
+
+    #[test]
     fn cache_timer_defaults_to_false() {
         let config: Config = toml::from_str("").unwrap();
         assert!(!config.cache_timer);
@@ -380,5 +552,209 @@ enabled = false
         let serialised = serde_json::to_string(&prefs).unwrap();
         let prefs2: HashMap<String, ThinkingLevel> = serde_json::from_str(&serialised).unwrap();
         assert_eq!(prefs, prefs2);
+    }
+
+    #[test]
+    fn parse_lifecycle_hooks() {
+        let toml = r#"
+[[hooks.post_tool_use]]
+match = "edit|write"
+command = "cargo clippy --message-format=short 2>&1 | head -20"
+timeout = 15
+blocking = false
+
+[[hooks.post_tool_use]]
+match = "*"
+command = "echo done"
+
+[[hooks.stop]]
+command = "cargo test 2>&1 | tail -10"
+blocking = true
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.hooks.post_tool_use.len(), 2);
+        assert_eq!(config.hooks.post_tool_use[0].r#match, "edit|write");
+        assert_eq!(config.hooks.post_tool_use[0].timeout, 15);
+        assert!(!config.hooks.post_tool_use[0].blocking);
+        // second hook gets defaults
+        assert_eq!(config.hooks.post_tool_use[1].r#match, "*");
+        assert_eq!(config.hooks.post_tool_use[1].timeout, 30);
+        assert_eq!(config.hooks.stop.len(), 1);
+        assert!(config.hooks.stop[0].blocking);
+
+        // conversion to agent types
+        let lifecycle = config.lifecycle_hooks();
+        assert_eq!(lifecycle.post_tool_use.len(), 2);
+        assert_eq!(lifecycle.stop.len(), 1);
+        assert!(lifecycle.pre_tool_use.is_empty());
+        assert!(lifecycle.stop[0].blocking);
+    }
+
+    #[test]
+    fn hooks_default_to_empty() {
+        let config: Config = toml::from_str("").unwrap();
+        assert!(config.hooks.pre_tool_use.is_empty());
+        assert!(config.hooks.post_tool_use.is_empty());
+        assert!(config.hooks.stop.is_empty());
+        assert!(config.hooks.post_compaction.is_empty());
+        assert!(config.lifecycle_hooks().is_empty());
+    }
+
+    #[test]
+    fn retrieval_defaults_all_enabled() {
+        let config: Config = toml::from_str("").unwrap();
+        assert!(config.retrieval.repo_map);
+        assert!(config.retrieval.embeddings);
+        assert_eq!(config.retrieval.context_budget, 2048);
+    }
+
+    #[test]
+    fn retrieval_can_disable_tiers() {
+        let config: Config = toml::from_str(
+            r#"
+[retrieval]
+repo_map = false
+embeddings = false
+context_budget = 4096
+"#,
+        )
+        .unwrap();
+        assert!(!config.retrieval.repo_map);
+        assert!(!config.retrieval.embeddings);
+        assert_eq!(config.retrieval.context_budget, 4096);
+    }
+
+    #[test]
+    fn retrieval_skill_loading_defaults_to_lazy() {
+        let config: Config = toml::from_str("").unwrap();
+        assert_eq!(config.retrieval.skill_loading, SkillLoading::Lazy);
+    }
+
+    #[test]
+    fn retrieval_skill_loading_eager() {
+        let config: Config = toml::from_str(
+            r#"
+[retrieval]
+skill_loading = "eager"
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.retrieval.skill_loading, SkillLoading::Eager);
+    }
+
+    #[test]
+    fn retrieval_embedding_model_defaults_to_coderank() {
+        let config: Config = toml::from_str("").unwrap();
+        assert_eq!(config.retrieval.embedding_model, EmbeddingModel::Coderank);
+    }
+
+    #[test]
+    fn retrieval_embedding_model_gemma() {
+        let config: Config = toml::from_str(
+            r#"
+[retrieval]
+embedding_model = "gemma"
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.retrieval.embedding_model, EmbeddingModel::Gemma);
+    }
+
+    #[test]
+    fn retrieval_auto_load_threshold_defaults() {
+        let config: Config = toml::from_str("").unwrap();
+        assert!((config.retrieval.auto_load_threshold - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn retrieval_auto_load_threshold_custom() {
+        let config: Config = toml::from_str(
+            r#"
+[retrieval]
+auto_load_threshold = 0.7
+"#,
+        )
+        .unwrap();
+        assert!((config.retrieval.auto_load_threshold - 0.7).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn retrieval_partial_override() {
+        let config: Config = toml::from_str(
+            r#"
+[retrieval]
+embeddings = false
+"#,
+        )
+        .unwrap();
+        assert!(config.retrieval.repo_map); // default true
+        assert!(!config.retrieval.embeddings);
+        assert_eq!(config.retrieval.context_budget, 2048); // default
+    }
+
+    #[test]
+    fn parse_post_compaction_hooks() {
+        let toml = r#"
+[[hooks.post_compaction]]
+command = "cat .mush/rules.md"
+blocking = false
+
+[[hooks.post_compaction]]
+command = "echo critical rules here"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.hooks.post_compaction.len(), 2);
+        assert_eq!(config.hooks.post_compaction[0].command, "cat .mush/rules.md");
+
+        let lifecycle = config.lifecycle_hooks();
+        assert_eq!(lifecycle.post_compaction.len(), 2);
+        assert!(!lifecycle.is_empty());
+    }
+
+    #[test]
+    fn parse_lsp_config_defaults() {
+        let config: Config = toml::from_str("").unwrap();
+        assert!(!config.lsp.diagnostics);
+        assert!(config.lsp.servers.is_empty());
+    }
+
+    #[test]
+    fn parse_lsp_config_with_servers() {
+        let toml = r#"
+[lsp]
+diagnostics = true
+
+[lsp.servers.rust]
+command = "rust-analyzer"
+
+[lsp.servers.python]
+command = "pyright-langserver"
+args = ["--stdio"]
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(config.lsp.diagnostics);
+        assert_eq!(config.lsp.servers.len(), 2);
+        assert_eq!(config.lsp.servers["rust"].command, "rust-analyzer");
+        assert_eq!(config.lsp.servers["python"].args, vec!["--stdio"]);
+    }
+
+    #[test]
+    fn parse_model_tiers() {
+        let toml = r#"
+[model_tiers]
+fast = "claude-haiku-3-5-20241022"
+default = "claude-sonnet-4-20250514"
+strong = "claude-opus-4-6"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.model_tiers.len(), 3);
+        assert_eq!(config.model_tiers["fast"], "claude-haiku-3-5-20241022");
+        assert_eq!(config.model_tiers["strong"], "claude-opus-4-6");
+    }
+
+    #[test]
+    fn model_tiers_default_empty() {
+        let config: Config = toml::from_str("").unwrap();
+        assert!(config.model_tiers.is_empty());
     }
 }

@@ -238,7 +238,14 @@ fn oauth_account_id(provider_id: &str) -> Option<String> {
 }
 
 /// compact messages when approaching context limit.
-/// `context_tokens` is the actual API-reported input token count from the last call
+/// `context_tokens` is the actual API-reported input token count from the last call.
+///
+/// uses escalating strategy:
+/// compact messages when approaching context limit
+///
+/// delegates escalation (masking then LLM summarisation) to
+/// `mush_session::compact::auto_compact`, then runs post-compaction
+/// hooks if configured.
 pub async fn auto_compact(
     messages: Vec<Message>,
     context_tokens: TokenCount,
@@ -246,17 +253,74 @@ pub async fn auto_compact(
     registry: &mush_ai::registry::ApiRegistry,
     model: &Model,
     options: &StreamOptions,
+    lifecycle_hooks: Option<&mush_agent::LifecycleHooks>,
+    cwd: Option<&std::path::Path>,
 ) -> Vec<Message> {
-    use mush_session::compact;
+    let result = mush_session::compact::auto_compact(
+        messages,
+        context_tokens,
+        context_window,
+        registry,
+        model,
+        options,
+    )
+    .await;
 
-    // 95% of context window, using real token counts from the API
-    if !context_tokens.exceeds_fraction(context_window, 95, 100) || messages.len() <= 10 {
-        return messages;
+    if result.masked_count > 0 {
+        tracing::info!(
+            masked = result.masked_count,
+            tokens_saved = result.mask_tokens_saved,
+            "observation masking applied"
+        );
+    }
+    if result.summarised_count > 0 {
+        tracing::info!(
+            summarised = result.summarised_count,
+            "LLM compaction applied"
+        );
     }
 
-    compact::llm_compact(messages, registry, model, options, Some(10))
-        .await
-        .messages
+    let mut messages = result.messages;
+
+    // post-compaction hooks (needs mush-agent types, so handled here)
+    if let Some(hooks) = lifecycle_hooks
+        && !hooks.post_compaction.is_empty()
+    {
+        inject_post_compaction_hooks(hooks, cwd, &mut messages).await;
+    }
+
+    messages
+}
+
+/// run post-compaction hooks and inject output into context
+async fn inject_post_compaction_hooks(
+    hooks: &mush_agent::LifecycleHooks,
+    cwd: Option<&std::path::Path>,
+    messages: &mut Vec<Message>,
+) {
+    let results = hooks.run_post_compaction(cwd).await;
+    let output: String = results
+        .iter()
+        .filter(|r| !r.output.is_empty())
+        .map(|r| r.output.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if !output.is_empty() {
+        tracing::info!("post-compaction hook output injected into context");
+        messages.push(Message::User(UserMessage {
+            content: UserContent::Text(format!(
+                "[post-compaction hook output]\n{output}"
+            )),
+            timestamp_ms: Timestamp::now(),
+        }));
+    }
+
+    for r in &results {
+        if !r.success {
+            tracing::warn!(command = %r.command, "post-compaction hook failed: {}", r.output);
+        }
+    }
 }
 
 /// max chars to keep in masked tool result text

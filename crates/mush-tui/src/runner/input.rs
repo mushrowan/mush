@@ -32,6 +32,7 @@ pub(super) struct InputDeps<'a> {
     pub registry: &'a ApiRegistry,
     pub message_bus: &'a crate::messaging::MessageBus,
     pub file_tracker: &'a crate::file_tracker::FileTracker,
+    pub lifecycle_hooks: &'a mush_agent::LifecycleHooks,
     pub cwd: &'a Path,
     pub pending_prompt: &'a mut Option<String>,
 }
@@ -212,6 +213,7 @@ pub(super) async fn handle_idle_terminal_events(
                                     registry: deps.registry,
                                     message_bus: deps.message_bus,
                                     file_tracker: deps.file_tracker,
+                                    lifecycle_hooks: deps.lifecycle_hooks,
                                     cwd: deps.cwd,
                                     pending_prompt: deps.pending_prompt,
                                 },
@@ -219,8 +221,7 @@ pub(super) async fn handle_idle_terminal_events(
                             .await;
 
                             if state_changed && let Some(ref saver) = deps.tui_config.save_session {
-                                let pane = pane_mgr.focused();
-                                saver(&pane.conversation, &pane.app.model_id);
+                                saver(super::streams::build_session_snapshot(pane_mgr));
                             }
                         }
                         _ => {}

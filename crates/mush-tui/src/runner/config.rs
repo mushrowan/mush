@@ -29,8 +29,26 @@ pub type LastModelSaver = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
 /// callback to update session title
 pub type TitleUpdater = std::sync::Arc<dyn Fn(String) + Send + Sync>;
 
-/// callback to persist session state and selected model
-pub type SessionSaver = std::sync::Arc<dyn Fn(&ConversationState, &str) + Send + Sync>;
+/// snapshot of all pane conversations for session persistence
+pub struct SessionSnapshot {
+    /// primary pane conversation
+    pub primary: ConversationState,
+    /// primary pane model id
+    pub model_id: String,
+    /// additional panes (empty for single-pane sessions)
+    pub panes: Vec<PaneSnapshot>,
+}
+
+/// snapshot of a single additional pane
+pub struct PaneSnapshot {
+    pub pane_id: mush_ai::types::PaneId,
+    pub label: Option<String>,
+    pub model_id: String,
+    pub conversation: ConversationState,
+}
+
+/// callback to persist session state (all panes)
+pub type SessionSaver = std::sync::Arc<dyn Fn(SessionSnapshot) + Send + Sync>;
 
 /// configuration for the TUI runner (owned, 'static-friendly)
 pub struct TuiConfig {
@@ -40,6 +58,8 @@ pub struct TuiConfig {
     pub max_turns: usize,
     /// initial conversation history (for session resume)
     pub initial_messages: Vec<Message>,
+    /// additional panes to restore (for multi-pane session resume)
+    pub initial_panes: Vec<PaneSnapshot>,
     /// colour theme
     pub theme: crate::theme::Theme,
     /// optional callback to auto-inject context (e.g. skills) per user message
@@ -64,6 +84,8 @@ pub struct TuiConfig {
     pub confirm_tools: bool,
     /// automatically compact conversation when approaching context limit (off by default)
     pub auto_compact: bool,
+    /// fork the session tree before auto-compacting (preserves uncompacted original)
+    pub auto_fork_compact: bool,
     /// show dollar cost in status bar (off by default, toggle with /cost)
     pub show_cost: bool,
     /// emit system messages when cache reads are observed
@@ -80,4 +102,17 @@ pub struct TuiConfig {
     pub isolation_mode: crate::file_tracker::IsolationMode,
     /// terminal setup policy and overrides
     pub terminal_policy: crate::terminal_policy::TerminalPolicy,
+    /// user-configured lifecycle hooks
+    pub lifecycle_hooks: mush_agent::LifecycleHooks,
+    /// working directory for hook commands
+    pub cwd: std::path::PathBuf,
+    /// dynamic system prompt context (e.g. live repo map updates)
+    pub dynamic_system_context: Option<mush_agent::DynamicContext>,
+    pub file_rules: Option<mush_agent::FileRuleCallback>,
+    /// LSP diagnostic injection after file-modifying tools
+    pub lsp_diagnostics: Option<mush_agent::DiagnosticCallback>,
+    /// pre-built agent card for /card command and IPC
+    pub agent_card: Option<mush_agent::AgentCard>,
+    /// model tier aliases: "fast" → "claude-3-5-haiku-...", etc.
+    pub model_tiers: std::collections::HashMap<String, String>,
 }
