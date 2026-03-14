@@ -12,7 +12,7 @@ use std::sync::LazyLock;
 use std::cell::Cell;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{self, ThemeSet};
-use syntect::parsing::SyntaxSet;
+use syntect::parsing::{SyntaxReference, SyntaxSet};
 
 static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
 static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
@@ -21,6 +21,7 @@ static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
 thread_local! {
     static RENDER_CALLS: Cell<usize> = const { Cell::new(0) };
     static PARSE_INLINE_CALLS: Cell<usize> = const { Cell::new(0) };
+    static HIGHLIGHT_CODE_BLOCK_CALLS: Cell<usize> = const { Cell::new(0) };
 }
 
 /// render a markdown string to styled ratatui Text
@@ -44,7 +45,7 @@ pub fn render(source: &str) -> Text<'static> {
         if raw_line.starts_with("```") {
             if in_code_block {
                 // end code block - highlight and emit
-                let highlighted = highlight_code_block(&code_block_lines, &code_block_lang);
+                let highlighted = render_code_block(&code_block_lines, &code_block_lang);
                 lines.extend(highlighted);
                 code_block_lines.clear();
                 code_block_lang.clear();
@@ -131,7 +132,7 @@ pub fn render(source: &str) -> Text<'static> {
 
     // close any unclosed code block
     if in_code_block {
-        let highlighted = highlight_code_block(&code_block_lines, &code_block_lang);
+        let highlighted = render_code_block(&code_block_lines, &code_block_lang);
         lines.extend(highlighted);
     }
 
@@ -187,24 +188,46 @@ fn numbered_list_item(line: &str) -> Option<(&str, &str)> {
     Some((&line[..=dot_pos], &line[dot_pos + 2..]))
 }
 
-/// highlight a code block using syntect, falling back to plain style
-fn highlight_code_block(code_lines: &[String], lang: &str) -> Vec<Line<'static>> {
+fn render_code_block(code_lines: &[String], lang: &str) -> Vec<Line<'static>> {
     let ps = &*SYNTAX_SET;
-    let theme = &THEME_SET.themes["base16-ocean.dark"];
-
-    let syntax = if lang.is_empty() {
-        ps.find_syntax_plain_text()
-    } else {
-        ps.find_syntax_by_token(lang)
-            .unwrap_or_else(|| ps.find_syntax_plain_text())
+    let Some(syntax) = code_block_syntax(ps, lang) else {
+        return render_plain_code_block(code_lines);
     };
+    highlight_code_block(code_lines, syntax, ps)
+}
 
+fn code_block_syntax<'a>(ps: &'a SyntaxSet, lang: &str) -> Option<&'a SyntaxReference> {
+    (!lang.is_empty()).then_some(())?;
+    ps.find_syntax_by_token(lang)
+}
+
+fn render_plain_code_block(code_lines: &[String]) -> Vec<Line<'static>> {
+    let mut lines = Vec::with_capacity(code_lines.len());
+    for code_line in code_lines {
+        lines.push(Line::raw(format!("  {code_line}")));
+    }
+    lines
+}
+
+/// highlight a code block using syntect
+fn highlight_code_block(
+    code_lines: &[String],
+    syntax: &SyntaxReference,
+    ps: &SyntaxSet,
+) -> Vec<Line<'static>> {
+    #[cfg(test)]
+    HIGHLIGHT_CODE_BLOCK_CALLS.with(|calls| calls.set(calls.get() + 1));
+
+    let theme = &THEME_SET.themes["base16-ocean.dark"];
     let mut h = HighlightLines::new(syntax, theme);
     let mut lines = Vec::with_capacity(code_lines.len());
+    let mut line_with_nl = String::new();
 
     for code_line in code_lines {
         // append newline so syntect can track state across lines
-        let line_with_nl = format!("{code_line}\n");
+        line_with_nl.clear();
+        line_with_nl.push_str(code_line);
+        line_with_nl.push('\n');
         match h.highlight_line(&line_with_nl, ps) {
             Ok(ranges) => {
                 let mut spans: Vec<Span<'static>> = vec![Span::raw("  ")];
@@ -358,6 +381,16 @@ pub(crate) fn parse_inline_call_count() -> usize {
 }
 
 #[cfg(test)]
+pub(crate) fn reset_highlight_code_block_call_count() {
+    HIGHLIGHT_CODE_BLOCK_CALLS.with(|calls| calls.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn highlight_code_block_call_count() -> usize {
+    HIGHLIGHT_CODE_BLOCK_CALLS.with(Cell::get)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -452,6 +485,28 @@ mod tests {
         let text = render("```xyz\nhello world\n```");
         assert_eq!(text.lines.len(), 1);
         assert!(text.lines[0].to_string().contains("hello world"));
+    }
+
+    #[test]
+    fn plain_code_block_skips_syntax_highlighting() {
+        reset_highlight_code_block_call_count();
+
+        let text = render("```\nhello world\n```");
+
+        assert_eq!(text.lines.len(), 1);
+        assert!(text.lines[0].to_string().contains("hello world"));
+        assert_eq!(highlight_code_block_call_count(), 0);
+    }
+
+    #[test]
+    fn unknown_language_code_block_skips_syntax_highlighting() {
+        reset_highlight_code_block_call_count();
+
+        let text = render("```xyz\nhello world\n```");
+
+        assert_eq!(text.lines.len(), 1);
+        assert!(text.lines[0].to_string().contains("hello world"));
+        assert_eq!(highlight_code_block_call_count(), 0);
     }
 
     #[test]
