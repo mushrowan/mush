@@ -13,7 +13,9 @@ use crate::registry::{
 use crate::stream::StreamEvent;
 use crate::types::*;
 
-pub struct OpenaiCompletionsProvider;
+pub struct OpenaiCompletionsProvider {
+    pub client: reqwest::Client,
+}
 
 impl ApiProvider for OpenaiCompletionsProvider {
     fn api(&self) -> Api {
@@ -26,6 +28,7 @@ impl ApiProvider for OpenaiCompletionsProvider {
         let system_prompt = context.system_prompt.clone();
         let tools = context.tools.clone();
         let options = options.clone();
+        let client = self.client.clone();
 
         Box::pin(async move {
             let api_key = options
@@ -34,8 +37,6 @@ impl ApiProvider for OpenaiCompletionsProvider {
                 .or_else(|| env_api_key(&model.provider))
                 .ok_or_else(|| ProviderError::MissingApiKey(model.provider.clone()))?;
             let api_key_str = api_key.expose();
-
-            let client = reqwest::Client::new();
             let body =
                 build_request_body(&model, &system_prompt, &context_messages, &tools, &options);
 

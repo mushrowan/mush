@@ -54,7 +54,7 @@ impl OAuthUsage {
 /// cached usage poller with a shared http client
 pub struct UsagePoller {
     cached: Arc<Mutex<Option<CachedResult>>>,
-    client: Arc<tokio::sync::OnceCell<reqwest::Client>>,
+    client: reqwest::Client,
 }
 
 enum CachedResult {
@@ -67,35 +67,12 @@ enum CachedResult {
     },
 }
 
-impl Default for UsagePoller {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl UsagePoller {
-    pub fn new() -> Self {
+    pub fn new(client: reqwest::Client) -> Self {
         Self {
             cached: Arc::new(Mutex::new(None)),
-            client: Arc::new(tokio::sync::OnceCell::new()),
+            client,
         }
-    }
-
-    fn get_client(&self) -> Result<&reqwest::Client, OAuthError> {
-        // OnceCell::get returns existing, or we init lazily below
-        self.client.get().ok_or_else(|| {
-            OAuthError::TokenExchange("client not yet initialised".into())
-        })
-    }
-
-    async fn ensure_client(&self) -> Result<&reqwest::Client, OAuthError> {
-        self.client
-            .get_or_try_init(|| async {
-                reqwest::Client::builder()
-                    .build()
-                    .map_err(OAuthError::Http)
-            })
-            .await
     }
 
     /// get usage data, returning cached if fresh enough.
@@ -141,13 +118,10 @@ impl UsagePoller {
                     }
                 }
                 // return stale data if available
-                self.cached
-                    .lock()
-                    .ok()
-                    .and_then(|c| match c.as_ref() {
-                        Some(CachedResult::Ok { data, .. }) => Some(data.clone()),
-                        _ => None,
-                    })
+                self.cached.lock().ok().and_then(|c| match c.as_ref() {
+                    Some(CachedResult::Ok { data, .. }) => Some(data.clone()),
+                    _ => None,
+                })
             }
         }
     }
@@ -169,9 +143,8 @@ impl UsagePoller {
             .await?
             .ok_or_else(|| OAuthError::TokenExchange("no anthropic oauth token".into()))?;
 
-        let client = self.ensure_client().await?;
-
-        let response = client
+        let response = self
+            .client
             .get(USAGE_URL)
             .header("Authorization", format!("Bearer {token}"))
             .header("anthropic-beta", BETA_HEADER)
@@ -303,6 +276,6 @@ mod tests {
 
     #[test]
     fn poller_creates() {
-        let _poller = UsagePoller::new();
+        let _poller = UsagePoller::new(reqwest::Client::new());
     }
 }

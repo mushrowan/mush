@@ -115,4 +115,6 @@ pub struct TuiConfig {
     pub agent_card: Option<mush_agent::AgentCard>,
     /// model tier aliases: "fast" → "claude-3-5-haiku-...", etc.
     pub model_tiers: std::collections::HashMap<String, String>,
+    /// shared http client for usage polling and other http calls
+    pub http_client: Option<reqwest::Client>,
 }

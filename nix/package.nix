@@ -6,6 +6,7 @@
   onnxruntime,
   openssl,
   pkg-config,
+  cacert,
   enableEmbeddings ? false,
 }: let
   cargoExtraArgs =
@@ -49,6 +50,7 @@ in {
     // {
       inherit cargoArtifacts;
       nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ripgrep fd];
+      SSL_CERT_FILE = "${cacert}/etc/ssl/certs/ca-bundle.crt";
     });
 
   clippy = craneLib.cargoClippy (commonArgs
@@ -61,6 +63,7 @@ in {
     // {
       inherit cargoArtifacts;
       nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ripgrep fd];
+      SSL_CERT_FILE = "${cacert}/etc/ssl/certs/ca-bundle.crt";
     });
 
   fmt = craneLib.cargoFmt {

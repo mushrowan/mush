@@ -23,7 +23,9 @@ use crate::types::*;
 const DEFAULT_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api";
 const OPENAI_AUTH_CLAIM_PATH: &str = "https://api.openai.com/auth";
 
-pub struct OpenaiResponsesProvider;
+pub struct OpenaiResponsesProvider {
+    pub client: reqwest::Client,
+}
 
 impl ApiProvider for OpenaiResponsesProvider {
     fn api(&self) -> Api {
@@ -36,6 +38,7 @@ impl ApiProvider for OpenaiResponsesProvider {
         let system_prompt = context.system_prompt.clone();
         let tools = context.tools.clone();
         let options = options.clone();
+        let client = self.client.clone();
 
         Box::pin(async move {
             let api_key = options
@@ -56,10 +59,6 @@ impl ApiProvider for OpenaiResponsesProvider {
 
             let url = resolve_url(&model, is_codex);
             let headers = build_headers(&api_key, &options, is_codex)?;
-
-            tracing::debug!(model = %model.id, %url, codex = is_codex, "sending openai responses request");
-
-            let client = reqwest::Client::new();
             let response = client
                 .post(&url)
                 .headers(headers)

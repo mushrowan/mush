@@ -31,17 +31,13 @@ const fn default_timeout_secs() -> u64 {
     DEFAULT_TIMEOUT_SECS
 }
 
-pub struct WebFetchTool;
-
-impl Default for WebFetchTool {
-    fn default() -> Self {
-        Self
-    }
+pub struct WebFetchTool {
+    client: reqwest::Client,
 }
 
 impl WebFetchTool {
-    pub fn new() -> Self {
-        Self
+    pub fn new(client: reqwest::Client) -> Self {
+        Self { client }
     }
 }
 
@@ -99,14 +95,11 @@ impl AgentTool for WebFetchTool {
             }
 
             let timeout_secs = args.timeout.min(MAX_TIMEOUT_SECS);
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(timeout_secs))
-                .redirect(reqwest::redirect::Policy::limited(10))
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new());
 
-            let response = match client
+            let response = match self
+                .client
                 .get(&args.url)
+                .timeout(std::time::Duration::from_secs(timeout_secs))
                 .header("user-agent", "Mozilla/5.0 (compatible; mush/0.1)")
                 .header(
                     "accept",
@@ -211,7 +204,7 @@ mod tests {
 
     #[test]
     fn schema_has_required_url() {
-        let tool = WebFetchTool::new();
+        let tool = WebFetchTool::new(reqwest::Client::new());
         let schema = tool.parameters_schema();
         let required = schema["required"].as_array().unwrap();
         assert!(required.iter().any(|v| v == "url"));
@@ -236,7 +229,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_non_http_url() {
-        let tool = WebFetchTool::new();
+        let tool = WebFetchTool::new(reqwest::Client::new());
         let result = tool
             .execute(serde_json::json!({"url": "ftp://example.com"}))
             .await;

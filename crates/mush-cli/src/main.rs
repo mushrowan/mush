@@ -188,7 +188,8 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
     .await?;
 
     // in print mode, hint is always prepended (one-shot, no transform loop)
-    let enricher = build_prompt_enricher(&setup.cwd, &setup.cfg.retrieval, &setup.tool_descriptions);
+    let enricher =
+        build_prompt_enricher(&setup.cwd, &setup.cfg.retrieval, &setup.tool_descriptions);
     let prompt = if setup.cfg.hint_mode != config::HintMode::None
         && let Some(ref enricher) = enricher
         && let Some(hint) = enricher(&prompt)
@@ -240,9 +241,16 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
             Box::pin(async move {
                 let tokens = TokenCount::new(ctx.load(std::sync::atomic::Ordering::Relaxed));
                 let compacted = auto_compact(
-                    owned, tokens, context_window, reg_ref, &m, &o,
-                    Some(&hooks), Some(cwd.as_path()),
-                ).await;
+                    owned,
+                    tokens,
+                    context_window,
+                    reg_ref,
+                    &m,
+                    &o,
+                    Some(&hooks),
+                    Some(cwd.as_path()),
+                )
+                .await;
                 if compacted.len() < input_len {
                     mush_agent::ContextTransformResult::Updated(compacted)
                 } else {
@@ -444,7 +452,8 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
     setup.options.session_id = Some(session_id.clone());
 
     let theme = mush_tui::Theme::from_config(&setup.cfg.theme);
-    let prompt_enricher = build_prompt_enricher(&setup.cwd, &setup.cfg.retrieval, &setup.tool_descriptions);
+    let prompt_enricher =
+        build_prompt_enricher(&setup.cwd, &setup.cfg.retrieval, &setup.tool_descriptions);
 
     let hint_mode = setup.cfg.hint_mode;
     let terminal_policy = setup.cfg.terminal.with_overrides(terminal_policy_overrides);
@@ -492,25 +501,27 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         } else {
             let sid = session_id.clone();
             let cwd_s = cwd_str.clone();
-            Some(std::sync::Arc::new(move |snapshot: mush_tui::SessionSnapshot| {
-                let store = SessionStore::new(SessionStore::default_dir());
-                let mut session = Session::new(&snapshot.model_id, &cwd_s);
-                session.meta.id = sid.clone();
-                session.conversation = snapshot.primary;
-                session.meta.message_count = session.conversation.context_len();
-                session.panes = snapshot
-                    .panes
-                    .into_iter()
-                    .map(|p| PaneSession {
-                        pane_id: p.pane_id,
-                        label: p.label,
-                        model_id: p.model_id.into(),
-                        conversation: p.conversation,
-                    })
-                    .collect();
-                session.auto_title();
-                let _ = store.save(&session);
-            }))
+            Some(std::sync::Arc::new(
+                move |snapshot: mush_tui::SessionSnapshot| {
+                    let store = SessionStore::new(SessionStore::default_dir());
+                    let mut session = Session::new(&snapshot.model_id, &cwd_s);
+                    session.meta.id = sid.clone();
+                    session.conversation = snapshot.primary;
+                    session.meta.message_count = session.conversation.context_len();
+                    session.panes = snapshot
+                        .panes
+                        .into_iter()
+                        .map(|p| PaneSession {
+                            pane_id: p.pane_id,
+                            label: p.label,
+                            model_id: p.model_id.into(),
+                            conversation: p.conversation,
+                        })
+                        .collect();
+                    session.auto_title();
+                    let _ = store.save(&session);
+                },
+            ))
         },
         confirm_tools: setup.cfg.confirm_tools,
         auto_compact: setup.cfg.auto_compact,
@@ -545,6 +556,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         lsp_diagnostics: setup.lsp_diagnostics.clone(),
         agent_card: Some(agent_card),
         model_tiers: setup.cfg.model_tiers.clone(),
+        http_client: Some(setup.http_client.clone()),
     };
 
     mush_tui::run_tui(tui_config, &setup.tools, &setup.registry)

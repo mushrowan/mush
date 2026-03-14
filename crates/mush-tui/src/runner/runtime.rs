@@ -98,10 +98,12 @@ impl RunnerRuntime {
         let (_config_watcher, config_rx) = watch_config(tui_config.config_path.as_ref());
 
         // create usage poller if anthropic oauth credentials exist
-        let usage_poller = mush_ai::oauth::load_credentials()
-            .ok()
-            .filter(|store| store.providers.contains_key("anthropic"))
-            .map(|_| mush_ai::oauth::usage::UsagePoller::new());
+        let usage_poller = tui_config.http_client.as_ref().and_then(|client| {
+            mush_ai::oauth::load_credentials()
+                .ok()
+                .filter(|store| store.providers.contains_key("anthropic"))
+                .map(|_| mush_ai::oauth::usage::UsagePoller::new(client.clone()))
+        });
 
         (
             Self {
@@ -317,6 +319,7 @@ mod tests {
             lsp_diagnostics: None,
             agent_card: None,
             model_tiers: HashMap::new(),
+            http_client: None,
         }
     }
 

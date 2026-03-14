@@ -31,6 +31,8 @@ pub struct AppSetup {
     pub lsp_diagnostics: Option<mush_agent::DiagnosticCallback>,
     /// MCP tool name/description pairs for semantic search
     pub tool_descriptions: Vec<(String, String)>,
+    /// shared http client for all network calls
+    pub http_client: reqwest::Client,
     /// holds the watcher alive (dropped when AppSetup is dropped)
     _repo_map_watcher: Option<mush_treesitter::RepoMapWatcher>,
 }
@@ -62,8 +64,13 @@ impl AppSetup {
             )
         })?;
 
+        let http_client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::limited(10))
+            .build()
+            .expect("failed to build http client");
+
         let mut registry = ApiRegistry::new();
-        providers::register_builtins(&mut registry);
+        providers::register_builtins(&mut registry, http_client.clone());
 
         let cwd = std::env::current_dir()?;
 
@@ -77,6 +84,7 @@ impl AppSetup {
                 args.output_sink,
                 use_patch,
                 skip_batch,
+                http_client.clone(),
             )
         };
 
@@ -103,26 +111,33 @@ impl AppSetup {
         let project_context = loader::discover_project_context(&cwd);
 
         // register skill tools for strategies that use on-demand loading
-        if !args.no_tools && cfg.retrieval.context_strategy.needs_skill_tools() {
-            if !project_context.skills.is_empty() {
-                let skill_infos: Vec<mush_tools::skills::SkillInfo> = project_context
-                    .skills
-                    .iter()
-                    .map(|s| mush_tools::skills::SkillInfo {
-                        name: s.name.clone(),
-                        description: s.description.clone(),
-                        path: s.path.clone(),
-                    })
-                    .collect();
-                let skill_tools = mush_tools::skills::skill_tools(skill_infos);
-                tools.extend_shared(skill_tools.iter().cloned());
-            }
+        if !args.no_tools
+            && cfg.retrieval.context_strategy.needs_skill_tools()
+            && !project_context.skills.is_empty()
+        {
+            let skill_infos: Vec<mush_tools::skills::SkillInfo> = project_context
+                .skills
+                .iter()
+                .map(|s| mush_tools::skills::SkillInfo {
+                    name: s.name.clone(),
+                    description: s.description.clone(),
+                    path: s.path.clone(),
+                })
+                .collect();
+            let skill_tools = mush_tools::skills::skill_tools(skill_infos);
+            tools.extend_shared(skill_tools.iter().cloned());
         }
 
         let system_prompt = args
             .system
             .or(cfg.system_prompt.clone())
-            .unwrap_or_else(|| build_system_prompt_from_context(&project_context, &cwd, cfg.retrieval.context_strategy));
+            .unwrap_or_else(|| {
+                build_system_prompt_from_context(
+                    &project_context,
+                    &cwd,
+                    cfg.retrieval.context_strategy,
+                )
+            });
 
         let thinking_prefs = config::load_thinking_prefs();
         let thinking_level = resolve_thinking(args.thinking, &model, &thinking_prefs, &cfg);
@@ -155,12 +170,12 @@ impl AppSetup {
 
         // build LSP registry, diagnostic callback, and tools
         let (lsp_diagnostics, lsp_reg) = build_lsp_diagnostics(&cwd, &cfg);
-        if let Some(reg) = &lsp_reg {
-            if !args.no_tools {
-                let lsp_tool_list = mush_lsp::lsp_tools(reg.clone(), cwd.clone());
-                for tool in lsp_tool_list {
-                    tools.register_shared(std::sync::Arc::from(tool));
-                }
+        if let Some(reg) = &lsp_reg
+            && !args.no_tools
+        {
+            let lsp_tool_list = mush_lsp::lsp_tools(reg.clone(), cwd.clone());
+            for tool in lsp_tool_list {
+                tools.register_shared(std::sync::Arc::from(tool));
             }
         }
 
@@ -180,6 +195,7 @@ impl AppSetup {
             file_rules,
             lsp_diagnostics,
             tool_descriptions,
+            http_client,
             _repo_map_watcher,
         })
     }
@@ -320,7 +336,10 @@ fn build_file_rules(cwd: &std::path::Path) -> Option<mush_agent::FileRuleCallbac
 fn build_lsp_diagnostics(
     cwd: &std::path::Path,
     cfg: &config::Config,
-) -> (Option<mush_agent::DiagnosticCallback>, Option<std::sync::Arc<mush_lsp::LspRegistry>>) {
+) -> (
+    Option<mush_agent::DiagnosticCallback>,
+    Option<std::sync::Arc<mush_lsp::LspRegistry>>,
+) {
     if !cfg.lsp.diagnostics {
         return (None, None);
     }
@@ -343,19 +362,20 @@ fn build_lsp_diagnostics(
     eprintln!("\x1b[2mLSP diagnostics enabled\x1b[0m");
 
     let diag_registry = registry.clone();
-    let callback: mush_agent::DiagnosticCallback = std::sync::Arc::new(move |path: &std::path::Path| {
-        let registry = diag_registry.clone();
-        let path = path.to_path_buf();
-        Box::pin(async move {
-            let text = tokio::fs::read_to_string(&path).await.unwrap_or_default();
-            match registry.notify_and_diagnose(&path, &text).await {
-                Ok(diags) if !diags.is_empty() => {
-                    Some(mush_lsp::format_diagnostics(&path, &diags))
+    let callback: mush_agent::DiagnosticCallback =
+        std::sync::Arc::new(move |path: &std::path::Path| {
+            let registry = diag_registry.clone();
+            let path = path.to_path_buf();
+            Box::pin(async move {
+                let text = tokio::fs::read_to_string(&path).await.unwrap_or_default();
+                match registry.notify_and_diagnose(&path, &text).await {
+                    Ok(diags) if !diags.is_empty() => {
+                        Some(mush_lsp::format_diagnostics(&path, &diags))
+                    }
+                    _ => None,
                 }
-                _ => None,
-            }
-        })
-    });
+            })
+        });
 
     (Some(callback), Some(registry))
 }
@@ -386,7 +406,10 @@ fn parse_language_name(name: &str) -> Option<mush_treesitter::Language> {
 fn start_repo_map_watcher(
     cwd: &std::path::Path,
     token_budget: usize,
-) -> (Option<mush_agent::DynamicContext>, Option<mush_treesitter::RepoMapWatcher>) {
+) -> (
+    Option<mush_agent::DynamicContext>,
+    Option<mush_treesitter::RepoMapWatcher>,
+) {
     let watcher = match mush_treesitter::RepoMapWatcher::start(cwd, token_budget) {
         Some(w) => w,
         None => {
@@ -475,12 +498,11 @@ pub fn build_prompt_enricher(
     }
 
     let (model_choice, model_name) = match retrieval.embedding_model {
-        config::EmbeddingModel::Coderank => {
-            (context::EmbeddingModelChoice::CodeRankEmbed, "CodeRankEmbed")
-        }
-        config::EmbeddingModel::Gemma => {
-            (context::EmbeddingModelChoice::Gemma300M, "Gemma-300M")
-        }
+        config::EmbeddingModel::Coderank => (
+            context::EmbeddingModelChoice::CodeRankEmbed,
+            "CodeRankEmbed",
+        ),
+        config::EmbeddingModel::Gemma => (context::EmbeddingModelChoice::Gemma300M, "Gemma-300M"),
     };
 
     let include_hints = retrieval.context_strategy != config::ContextStrategy::EmbedInject;
@@ -489,7 +511,9 @@ pub fn build_prompt_enricher(
     match context::ContextIndex::build_with_model(docs, model_choice) {
         Ok(index) => {
             let index = Arc::new(index);
-            eprintln!("\x1b[2mindexed {doc_count} documents for auto-context ({model_name})\x1b[0m");
+            eprintln!(
+                "\x1b[2mindexed {doc_count} documents for auto-context ({model_name})\x1b[0m"
+            );
             let threshold = retrieval.auto_load_threshold;
             Some(Arc::new(move |query: &str| {
                 let matches = index.search(query, 3, 0.35);
@@ -624,6 +648,7 @@ pub fn list_models_short() -> String {
 
 /// compact messages when approaching context limit.
 /// uses escalating strategy: observation masking first, then LLM summarisation.
+#[allow(clippy::too_many_arguments)]
 pub async fn auto_compact(
     messages: Vec<Message>,
     context_tokens: TokenCount,
@@ -634,9 +659,15 @@ pub async fn auto_compact(
     lifecycle_hooks: Option<&mush_agent::LifecycleHooks>,
     cwd: Option<&std::path::Path>,
 ) -> Vec<Message> {
-    let result =
-        compact::auto_compact(messages, context_tokens, context_window, registry, model, options)
-            .await;
+    let result = compact::auto_compact(
+        messages,
+        context_tokens,
+        context_window,
+        registry,
+        model,
+        options,
+    )
+    .await;
 
     if result.masked_count > 0 {
         eprintln!(
@@ -668,15 +699,16 @@ pub async fn auto_compact(
         if !output.is_empty() {
             eprintln!("\x1b[2m(post-compaction hook output injected)\x1b[0m");
             messages.push(Message::User(UserMessage {
-                content: UserContent::Text(format!(
-                    "[post-compaction hook output]\n{output}"
-                )),
+                content: UserContent::Text(format!("[post-compaction hook output]\n{output}")),
                 timestamp_ms: Timestamp::now(),
             }));
         }
         for r in &results {
             if !r.success {
-                eprintln!("\x1b[33mwarning: post-compaction hook failed: {}\x1b[0m", r.command);
+                eprintln!(
+                    "\x1b[33mwarning: post-compaction hook failed: {}\x1b[0m",
+                    r.command
+                );
             }
         }
     }

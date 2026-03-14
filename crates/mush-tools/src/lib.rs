@@ -38,16 +38,17 @@ pub fn supports_native_parallel_calls(model_id: &str) -> bool {
 }
 
 /// create the full set of built-in tools for a given working directory
-pub fn builtin_tools(cwd: PathBuf) -> ToolRegistry {
-    builtin_tools_with_options(cwd, None, false, false)
+pub fn builtin_tools(cwd: PathBuf, http_client: reqwest::Client) -> ToolRegistry {
+    builtin_tools_with_options(cwd, None, false, false, http_client)
 }
 
 /// create built-in tools with an optional bash output sink for streaming
 pub fn builtin_tools_with_sink(
     cwd: PathBuf,
     output_sink: Option<bash::OutputSink>,
+    http_client: reqwest::Client,
 ) -> ToolRegistry {
-    builtin_tools_with_options(cwd, output_sink, false, false)
+    builtin_tools_with_options(cwd, output_sink, false, false, http_client)
 }
 
 /// create built-in tools with all options.
@@ -59,6 +60,7 @@ pub fn builtin_tools_with_options(
     output_sink: Option<bash::OutputSink>,
     use_patch: bool,
     skip_batch: bool,
+    http_client: reqwest::Client,
 ) -> ToolRegistry {
     let make_tools = |cwd: PathBuf| -> ToolRegistry {
         let bash_tool: SharedTool = {
@@ -77,8 +79,8 @@ pub fn builtin_tools_with_options(
             Arc::new(find::FindTool::new(cwd.clone())),
             Arc::new(glob::GlobTool::new(cwd.clone())),
             Arc::new(ls::LsTool::new(cwd.clone())),
-            Arc::new(web_search::WebSearchTool::new()),
-            Arc::new(web_fetch::WebFetchTool::new()),
+            Arc::new(web_search::WebSearchTool::new(http_client.clone())),
+            Arc::new(web_fetch::WebFetchTool::new(http_client.clone())),
             Arc::new(notify_user::NotifyUserTool::new()),
         ];
 
