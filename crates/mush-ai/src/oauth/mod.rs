@@ -8,6 +8,7 @@ pub mod anthropic;
 pub mod openai_codex;
 mod pkce;
 mod store;
+pub mod usage;
 
 pub use pkce::{PkceChallenge, generate_pkce};
 pub use store::{CredentialStore, OAuthCredentials, load_credentials, save_credentials};

@@ -2630,6 +2630,7 @@ version = "0.1.0"
 dependencies = [
  "async-stream",
  "base64 0.22.1",
+ "chrono",
  "derive_more",
  "futures",
  "getrandom 0.4.2",
@@ -2804,6 +2805,7 @@ name = "mush-tui"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "chrono",
  "crossterm",
  "futures",
  "image",

@@ -67,6 +67,7 @@ pub async fn run_tui(
 
     let mut agent_streams = new_agent_streams();
     let mut stream_state = StreamState::new();
+    let mut last_draw = std::time::Instant::now();
 
     'ui: loop {
         start_pending_streams(
@@ -128,7 +129,15 @@ pub async fn run_tui(
 
         runtime.tick_streaming_panes();
         runtime.notify_cache_state(tui_config.cache_timer);
-        draw_panes(&mut terminal, &mut runtime.pane_mgr, &image_picker)?;
+
+        // redraw on state changes, or every ~1s so timers tick
+        let should_draw = matches!(action, LoopAction::Redraw)
+            || last_draw.elapsed() >= std::time::Duration::from_secs(1);
+        if should_draw {
+            runtime.poll_usage().await;
+            draw_panes(&mut terminal, &mut runtime.pane_mgr, &image_picker)?;
+            last_draw = std::time::Instant::now();
+        }
     }
 
     cleanup(&mut terminal)?;
