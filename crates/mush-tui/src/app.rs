@@ -146,6 +146,23 @@ pub struct DisplayMessage {
     pub queued: bool,
 }
 
+impl DisplayMessage {
+    #[must_use]
+    pub fn new(role: MessageRole, content: impl Into<String>) -> Self {
+        Self {
+            role,
+            content: content.into(),
+            tool_calls: Vec::new(),
+            thinking: None,
+            thinking_expanded: false,
+            usage: None,
+            cost: None,
+            model_id: None,
+            queued: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MessageRole {
     User,
@@ -519,17 +536,8 @@ impl App {
 
     /// add a user message to the display
     pub fn push_user_message(&mut self, text: impl Into<String>) {
-        self.messages.push(DisplayMessage {
-            role: MessageRole::User,
-            content: text.into(),
-            tool_calls: vec![],
-            thinking: None,
-            thinking_expanded: false,
-            usage: None,
-            cost: None,
-            model_id: None,
-            queued: false,
-        });
+        self.messages
+            .push(DisplayMessage::new(MessageRole::User, text));
         self.scroll_offset = 0;
     }
 
@@ -550,15 +558,8 @@ impl App {
     /// add a queued steering message (shown dimmed until processed)
     pub fn push_queued_message(&mut self, text: impl Into<String>) {
         self.messages.push(DisplayMessage {
-            role: MessageRole::User,
-            content: text.into(),
-            tool_calls: vec![],
-            thinking: None,
-            thinking_expanded: false,
-            usage: None,
-            cost: None,
-            model_id: None,
             queued: true,
+            ..DisplayMessage::new(MessageRole::User, text)
         });
         self.scroll_offset = 0;
     }
@@ -770,15 +771,12 @@ impl App {
         let text = std::mem::take(&mut self.streaming_text);
 
         let assistant_msg = DisplayMessage {
-            role: MessageRole::Assistant,
-            content: text.trim_start_matches('\n').to_string(),
-            tool_calls: vec![],
             thinking,
             thinking_expanded: self.thinking_display == ThinkingDisplay::Expanded,
             usage,
             cost,
             model_id: Some(self.model_id.clone()),
-            queued: false,
+            ..DisplayMessage::new(MessageRole::Assistant, text.trim_start_matches('\n'))
         };
 
         // insert before any trailing queued (steering) messages so the
@@ -1165,17 +1163,8 @@ impl App {
 
     /// push a system message to the display
     pub fn push_system_message(&mut self, text: impl Into<String>) {
-        self.messages.push(DisplayMessage {
-            role: MessageRole::System,
-            content: text.into(),
-            tool_calls: vec![],
-            thinking: None,
-            thinking_expanded: false,
-            usage: None,
-            cost: None,
-            model_id: None,
-            queued: false,
-        });
+        self.messages
+            .push(DisplayMessage::new(MessageRole::System, text));
     }
 
     /// toggle thinking text visibility for the last assistant message
@@ -1594,17 +1583,8 @@ mod tests {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.push_user_message("do something");
         // simulate assistant message already pushed by finish_streaming
-        app.messages.push(DisplayMessage {
-            role: MessageRole::Assistant,
-            content: String::new(),
-            tool_calls: vec![],
-            thinking: None,
-            thinking_expanded: false,
-            usage: None,
-            cost: None,
-            model_id: None,
-            queued: false,
-        });
+        app.messages
+            .push(DisplayMessage::new(MessageRole::Assistant, ""));
 
         let tool_call_id = ToolCallId::from("tc_1");
         app.start_tool(&tool_call_id, "bash", "ls -la");
@@ -1764,17 +1744,8 @@ mod tests {
     #[test]
     fn tool_output_stored() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.messages.push(DisplayMessage {
-            role: MessageRole::Assistant,
-            content: String::new(),
-            tool_calls: vec![],
-            thinking: None,
-            thinking_expanded: false,
-            usage: None,
-            cost: None,
-            model_id: None,
-            queued: false,
-        });
+        app.messages
+            .push(DisplayMessage::new(MessageRole::Assistant, ""));
         let tool_call_id = ToolCallId::from("tc_1");
         app.start_tool(&tool_call_id, "read", "src/main.rs");
         app.end_tool(
@@ -1792,17 +1763,8 @@ mod tests {
     #[test]
     fn batch_tool_expands_into_sub_calls() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.messages.push(DisplayMessage {
-            role: MessageRole::Assistant,
-            content: String::new(),
-            tool_calls: vec![],
-            thinking: None,
-            thinking_expanded: false,
-            usage: None,
-            cost: None,
-            model_id: None,
-            queued: false,
-        });
+        app.messages
+            .push(DisplayMessage::new(MessageRole::Assistant, ""));
 
         let tc_id = ToolCallId::from("tc_batch");
         app.start_batch_tool(
@@ -1833,17 +1795,8 @@ mod tests {
     #[test]
     fn batch_end_distributes_results() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.messages.push(DisplayMessage {
-            role: MessageRole::Assistant,
-            content: String::new(),
-            tool_calls: vec![],
-            thinking: None,
-            thinking_expanded: false,
-            usage: None,
-            cost: None,
-            model_id: None,
-            queued: false,
-        });
+        app.messages
+            .push(DisplayMessage::new(MessageRole::Assistant, ""));
 
         let tc_id = ToolCallId::from("tc_batch");
         app.start_batch_tool(
@@ -2223,5 +2176,29 @@ batch: 1/2 succeeded, 1 failed";
         let status = ToolCallStatus::Running;
         let copied = status; // would fail if not Copy
         assert_eq!(status, copied);
+    }
+
+    #[test]
+    fn display_message_new_has_sane_defaults() {
+        let msg = DisplayMessage::new(MessageRole::User, "hello");
+        assert_eq!(msg.role, MessageRole::User);
+        assert_eq!(msg.content, "hello");
+        assert!(msg.tool_calls.is_empty());
+        assert!(msg.thinking.is_none());
+        assert!(!msg.thinking_expanded);
+        assert!(msg.usage.is_none());
+        assert!(msg.cost.is_none());
+        assert!(msg.model_id.is_none());
+        assert!(!msg.queued);
+    }
+
+    #[test]
+    fn display_message_new_with_struct_update() {
+        let msg = DisplayMessage {
+            queued: true,
+            ..DisplayMessage::new(MessageRole::User, "steer")
+        };
+        assert!(msg.queued);
+        assert_eq!(msg.content, "steer");
     }
 }
