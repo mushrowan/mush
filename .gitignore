@@ -13,5 +13,5 @@ opencode/
 .direnv/
 .fastembed_cache/
 
-# local reports
-/report.md
+# local docs (planning, progress, reports)
+/untracked-docs/
