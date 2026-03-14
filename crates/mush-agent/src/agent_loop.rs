@@ -664,12 +664,24 @@ fn is_file_modifying_tool(name: &str) -> bool {
 async fn execute_tool(tools: &ToolRegistry, tool_call: &ToolCall) -> ToolResult {
     match tools.get(tool_call.name.as_str()) {
         Some(tool) => {
-            tracing::debug!(tool = %tool_call.name, resolved = tool.name(), "executing tool");
+            let limit = tool.output_limit();
+            tracing::debug!(tool = %tool_call.name, resolved = tool.name(), ?limit, "executing tool");
             let result = tool.execute(tool_call.arguments.clone()).await;
+            let output_bytes: usize = result.content.iter().map(|p| match p {
+                mush_ai::types::ToolResultContentPart::Text(t) => t.text.len(),
+                mush_ai::types::ToolResultContentPart::Image(i) => i.data.len(),
+            }).sum();
+            tracing::debug!(
+                tool = %tool_call.name,
+                output_bytes,
+                outcome = ?result.outcome,
+                ?limit,
+                "tool finished, applying truncation"
+            );
             if result.outcome.is_error() {
                 tracing::warn!(tool = %tool_call.name, "tool returned error");
             }
-            crate::truncation::apply(result, tool.output_limit())
+            crate::truncation::apply(result, limit)
         }
         None => {
             tracing::error!(tool = %tool_call.name, "tool not found");

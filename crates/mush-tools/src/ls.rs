@@ -105,6 +105,13 @@ fn list_dir(path: &Path) -> ToolResult {
 
     let total_entries = entries.len();
     let capped = total_entries > MAX_ENTRIES;
+    tracing::debug!(
+        path = %path.display(),
+        total_entries,
+        capped,
+        max = MAX_ENTRIES,
+        "listing directory"
+    );
     if capped {
         entries.truncate(MAX_ENTRIES);
     }
