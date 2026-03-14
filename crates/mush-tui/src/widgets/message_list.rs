@@ -56,13 +56,6 @@ impl Widget for MessageList<'_> {
                 .use_type(WhichUse::Spin);
             let spinner_span = throbber.to_symbol_span(&self.app.throbber_state);
 
-            let stream_label = truncate_model_id(&self.app.model_id);
-            lines.push(Line::from(vec![Span::styled(
-                stream_label.to_string(),
-                Style::default()
-                    .fg(Color::Blue)
-                    .add_modifier(Modifier::BOLD),
-            )]));
 
             if !self.app.streaming_thinking.is_empty()
                 && self.app.thinking_display != crate::app::ThinkingDisplay::Hidden
@@ -148,12 +141,24 @@ impl Widget for MessageList<'_> {
             Vec::new()
         };
 
+        // bottom-anchor: when content is shorter than the viewport,
+        // pad with empty lines so messages sit near the input box
         let text = Text::from(lines);
+        let paragraph_tmp = Paragraph::new(text.clone()).wrap(Wrap { trim: false });
+        let content_lines = paragraph_tmp.line_count(area.width).min(u16::MAX as usize) as u16;
+        let visible = area.height;
 
-        // use ratatui's own word-wrap logic for accurate line count
+        let text = if content_lines < visible {
+            let pad = (visible - content_lines) as usize;
+            let mut padded = vec![Line::raw(""); pad];
+            padded.extend(text.lines);
+            Text::from(padded)
+        } else {
+            text
+        };
+
         let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
         let total_lines = paragraph.line_count(area.width).min(u16::MAX as usize) as u16;
-        let visible = area.height;
         let max_scroll = total_lines.saturating_sub(visible);
         let scroll = max_scroll.saturating_sub(self.app.scroll_offset);
 
@@ -192,15 +197,6 @@ impl Widget for MessageList<'_> {
     }
 }
 
-fn truncate_model_id(id: &str) -> &str {
-    // model ids are ASCII so byte slicing is safe, but guard anyway
-    if id.len() > 20 {
-        &id[..id.floor_char_boundary(20)]
-    } else {
-        id
-    }
-}
-
 /// height reserved for inline image rendering (in lines)
 const IMAGE_HEIGHT: u16 = 12;
 
@@ -231,50 +227,33 @@ fn render_message(
     image_placeholders: &mut Vec<ImagePlaceholder>,
     width: u16,
 ) {
-    let (label, label_style) = match msg.role {
-        MessageRole::User if msg.queued => (
-            "you (queued)".to_string(),
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::DIM),
-        ),
-        MessageRole::User => (
-            "you".to_string(),
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ),
-        MessageRole::Assistant => {
-            let name = msg
-                .model_id
-                .as_deref()
-                .map(|id| truncate_model_id(id))
-                .unwrap_or("mush");
-            (
-                name.to_string(),
-                Style::default()
-                    .fg(Color::Blue)
-                    .add_modifier(Modifier::BOLD),
-            )
-        }
-        MessageRole::System => ("system".to_string(), Style::default().fg(Color::Yellow)),
-    };
+    // user and assistant messages have no label line.
+    // user messages are distinguished by a subtle background.
+    // only system messages get a text label.
+    let is_user = matches!(msg.role, MessageRole::User);
 
-    let mut label_spans = Vec::new();
-    if sel.selected {
-        label_spans.push(Span::styled("▌ ", Style::default().fg(Color::Cyan)));
+    if matches!(msg.role, MessageRole::System) {
+        let mut label_spans = Vec::new();
+        if sel.selected {
+            label_spans.push(Span::styled("▌ ", Style::default().fg(Color::Cyan)));
+        }
+        label_spans.push(Span::styled(
+            "system",
+            Style::default().fg(Color::Yellow),
+        ));
+        lines.push(Line::from(label_spans));
+    } else if sel.selected {
+        let mut hint_spans = vec![Span::styled("▌", Style::default().fg(Color::Cyan))];
+        if sel.is_cursor {
+            let hint = if sel.has_visual {
+                " (y to copy range)"
+            } else {
+                " (v to select, y to copy)"
+            };
+            hint_spans.push(Span::styled(hint, Style::default().fg(Color::DarkGray)));
+        }
+        lines.push(Line::from(hint_spans));
     }
-    label_spans.push(Span::styled(label, label_style));
-    // show hint only on the cursor message
-    if sel.is_cursor {
-        let hint = if sel.has_visual {
-            " (y to copy range)"
-        } else {
-            " (v to select, y to copy)"
-        };
-        label_spans.push(Span::styled(hint, Style::default().fg(Color::DarkGray)));
-    }
-    lines.push(Line::from(label_spans));
 
     // thinking block
     if let Some(ref thinking) = msg.thinking {
@@ -313,6 +292,9 @@ fn render_message(
         }
     }
 
+    // user messages get a subtle background to distinguish them
+    let user_bg = Style::default().bg(Color::Rgb(35, 38, 45));
+
     // main content (markdown rendered)
     if msg.queued {
         let dim = Style::default()
@@ -320,6 +302,13 @@ fn render_message(
             .add_modifier(Modifier::DIM);
         for line in msg.content.lines() {
             lines.push(Line::styled(format!("  {line}"), dim));
+        }
+    } else if is_user {
+        for line in msg.content.lines() {
+            lines.push(Line::from(vec![Span::styled(
+                format!("  {line}"),
+                user_bg,
+            )]));
         }
     } else {
         let md_text = render_markdown(&msg.content);
@@ -444,11 +433,7 @@ const BOX_INDENT: usize = 2;
 const MIN_TOOL_BOX_WIDTH: u16 = 30;
 
 /// render a group of completed tool calls (same batch) as bordered boxes
-fn render_tool_box_group(
-    tools: &[&DisplayToolCall],
-    total_width: u16,
-    lines: &mut Vec<Line<'_>>,
-) {
+fn render_tool_box_group(tools: &[&DisplayToolCall], total_width: u16, lines: &mut Vec<Line<'_>>) {
     let usable = total_width.saturating_sub(BOX_INDENT as u16);
     if usable < 8 || tools.is_empty() {
         return;
@@ -485,15 +470,10 @@ fn render_single_tool_box(tc: &DisplayToolCall, width: usize, lines: &mut Vec<Li
     lines.push(Line::from(vec![
         indent.clone(),
         Span::styled("┌─", border),
-        Span::styled(
-            format!(" {icon} "),
-            Style::default().fg(colour),
-        ),
+        Span::styled(format!(" {icon} "), Style::default().fg(colour)),
         Span::styled(
             tc.name.clone(),
-            Style::default()
-                .fg(colour)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(colour).add_modifier(Modifier::BOLD),
         ),
         Span::styled(" ", border),
         Span::styled("─".repeat(fill), border),
@@ -528,11 +508,7 @@ fn render_single_tool_box(tc: &DisplayToolCall, width: usize, lines: &mut Vec<Li
 }
 
 /// render parallel tools side-by-side in a shared bordered box
-fn render_side_by_side_boxes(
-    tools: &[&DisplayToolCall],
-    width: usize,
-    lines: &mut Vec<Line<'_>>,
-) {
+fn render_side_by_side_boxes(tools: &[&DisplayToolCall], width: usize, lines: &mut Vec<Line<'_>>) {
     let n = tools.len();
     // each panel width (including its borders): divide evenly
     // total = panel_w * n + (n-1) separators... but we share borders
@@ -568,9 +544,7 @@ fn render_side_by_side_boxes(
         ));
         top_spans.push(Span::styled(
             tc.name.clone(),
-            Style::default()
-                .fg(colour)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(colour).add_modifier(Modifier::BOLD),
         ));
         top_spans.push(Span::styled(" ", border));
         top_spans.push(Span::styled("─".repeat(fill), border));
@@ -778,7 +752,6 @@ mod tests {
         app.push_user_message("hello world");
         let buf = render_app(&app, 40, 10);
         let content = buffer_to_string(&buf);
-        assert!(content.contains("you"));
         assert!(content.contains("hello world"));
     }
 
@@ -790,8 +763,6 @@ mod tests {
         app.finish_streaming(None, None);
         let buf = render_app(&app, 40, 10);
         let content = buffer_to_string(&buf);
-        // model_id is "test" (from App::new)
-        assert!(content.contains("test"));
         assert!(content.contains("i can help"));
     }
 
@@ -1027,7 +998,10 @@ mod tests {
         let buf = render_app(&app, 80, 10);
         let content = buffer_to_string(&buf);
         // side-by-side uses ┬ as a junction between panels
-        assert!(content.contains("┬"), "missing top junction (not side-by-side)");
+        assert!(
+            content.contains("┬"),
+            "missing top junction (not side-by-side)"
+        );
         assert!(content.contains("a.rs"), "missing first tool summary");
         assert!(content.contains("b.rs"), "missing second tool summary");
     }

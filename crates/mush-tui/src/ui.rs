@@ -214,10 +214,7 @@ mod tests {
         let buf = render_full(&app, 60, 20);
         let content = buffer_to_string(&buf);
 
-        assert!(content.contains("you"));
         assert!(content.contains("what is rust"));
-        // model id shown as label instead of "mush"
-        assert!(content.contains("claude-sonnet-4"));
         assert!(content.contains("systems programming"));
         assert!(content.contains("> "));
     }
