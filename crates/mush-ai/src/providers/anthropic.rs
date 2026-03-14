@@ -1106,12 +1106,6 @@ fn process_sse_event(
                 DeltaData::InputJsonDelta { partial_json } => {
                     if let Some(BlockState::ToolCall { json_buf, .. }) = blocks.last_mut() {
                         json_buf.push_str(&partial_json);
-                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_buf)
-                            && let Some(AssistantContentPart::ToolCall(tc)) =
-                                output.content.get_mut(content_index)
-                        {
-                            tc.arguments = parsed;
-                        }
                     }
                     events.push(StreamEvent::ToolCallDelta {
                         content_index,
@@ -1624,6 +1618,13 @@ mod tests {
             false,
             &[],
         );
+
+        match &output.content[0] {
+            AssistantContentPart::ToolCall(tc) => {
+                assert_eq!(tc.arguments, serde_json::json!({}));
+            }
+            other => panic!("expected tool call, got {other:?}"),
+        }
 
         let events = process_sse_event(
             SseEvent::ContentBlockStop { index: 0 },

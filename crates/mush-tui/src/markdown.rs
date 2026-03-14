@@ -193,102 +193,70 @@ fn syntect_to_style(style: highlighting::Style) -> Style {
 /// parse inline markdown: **bold**, *italic*, `code`, ***bold italic***
 fn parse_inline(text: &str) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
-    let mut chars = text.char_indices().peekable();
     let mut buf = String::new();
+    let mut offset = 0;
 
-    while let Some((i, ch)) = chars.next() {
+    while offset < text.len() {
+        let rest = &text[offset..];
+        let Some(ch) = rest.chars().next() else {
+            break;
+        };
+
         match ch {
             '`' => {
-                // inline code
-                if !buf.is_empty() {
-                    spans.push(Span::raw(std::mem::take(&mut buf)));
-                }
-                let mut code = String::new();
-                for (_, c) in chars.by_ref() {
-                    if c == '`' {
-                        break;
+                let code_rest = &rest[ch.len_utf8()..];
+                if let Some(end) = code_rest.find('`') {
+                    if !buf.is_empty() {
+                        spans.push(Span::raw(std::mem::take(&mut buf)));
                     }
-                    code.push(c);
+                    spans.push(Span::styled(
+                        code_rest[..end].to_string(),
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ));
+                    offset += ch.len_utf8() + end + ch.len_utf8();
+                } else {
+                    buf.push(ch);
+                    offset += ch.len_utf8();
                 }
-                spans.push(Span::styled(
-                    code,
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ));
             }
             '*' | '_' => {
-                // check for bold/italic
-                let marker = ch;
-                let remaining = &text[i..];
-                if remaining.starts_with("***") || remaining.starts_with("___") {
-                    // bold italic
-                    if !buf.is_empty() {
-                        spans.push(Span::raw(std::mem::take(&mut buf)));
-                    }
-                    chars.next(); // skip 2nd
-                    chars.next(); // skip 3rd
-                    let closing = format!("{marker}{marker}{marker}");
-                    let mut inner = String::new();
-                    for (_, c) in chars.by_ref() {
-                        let rest: String = inner.clone() + &c.to_string();
-                        if rest.ends_with(&closing) {
-                            inner = rest[..rest.len() - 3].to_string();
-                            break;
-                        }
-                        inner.push(c);
-                    }
-                    spans.push(Span::styled(
-                        inner,
+                let run_len = rest
+                    .chars()
+                    .take_while(|candidate| *candidate == ch)
+                    .take(3)
+                    .count();
+                let marker_width = ch.len_utf8();
+
+                let (delimiter_len, style) = if run_len >= 3 {
+                    (
+                        3,
                         Style::default().add_modifier(Modifier::BOLD | Modifier::ITALIC),
-                    ));
-                } else if remaining.starts_with("**") || remaining.starts_with("__") {
-                    // bold
-                    if !buf.is_empty() {
-                        spans.push(Span::raw(std::mem::take(&mut buf)));
-                    }
-                    chars.next(); // skip 2nd
-                    let closing = format!("{marker}{marker}");
-                    let mut inner = String::new();
-                    for (_, c) in chars.by_ref() {
-                        let rest: String = inner.clone() + &c.to_string();
-                        if rest.ends_with(&closing) {
-                            inner = rest[..rest.len() - 2].to_string();
-                            break;
-                        }
-                        inner.push(c);
-                    }
-                    spans.push(Span::styled(
-                        inner,
-                        Style::default().add_modifier(Modifier::BOLD),
-                    ));
+                    )
+                } else if run_len >= 2 {
+                    (2, Style::default().add_modifier(Modifier::BOLD))
                 } else {
-                    // italic (single marker)
+                    (1, Style::default().add_modifier(Modifier::ITALIC))
+                };
+
+                let delimiter = ch.to_string().repeat(delimiter_len);
+                let inner_rest = &rest[delimiter_len * marker_width..];
+                if let Some(end) = inner_rest.find(&delimiter) {
                     if !buf.is_empty() {
                         spans.push(Span::raw(std::mem::take(&mut buf)));
                     }
-                    let mut inner = String::new();
-                    let mut found = false;
-                    for (_, c) in chars.by_ref() {
-                        if c == marker {
-                            found = true;
-                            break;
-                        }
-                        inner.push(c);
-                    }
-                    if found {
-                        spans.push(Span::styled(
-                            inner,
-                            Style::default().add_modifier(Modifier::ITALIC),
-                        ));
-                    } else {
-                        // no closing marker, treat as literal
-                        buf.push(marker);
-                        buf.push_str(&inner);
-                    }
+                    spans.push(Span::styled(inner_rest[..end].to_string(), style));
+                    offset += delimiter_len * marker_width + end + delimiter_len * marker_width;
+                } else {
+                    buf.push_str(&delimiter);
+                    offset += delimiter_len * marker_width;
                 }
             }
-            _ => buf.push(ch),
+            _ => {
+                buf.push(ch);
+                offset += ch.len_utf8();
+            }
         }
     }
 
@@ -336,6 +304,20 @@ mod tests {
                 .add_modifier
                 .contains(Modifier::BOLD)
         );
+    }
+
+    #[test]
+    fn unmatched_bold_is_literal() {
+        let text = render("some **bold");
+        assert_eq!(text.lines.len(), 1);
+        assert_eq!(text.lines[0].to_string(), "some **bold");
+    }
+
+    #[test]
+    fn unmatched_bold_italic_is_literal() {
+        let text = render("some ***bold");
+        assert_eq!(text.lines.len(), 1);
+        assert_eq!(text.lines[0].to_string(), "some ***bold");
     }
 
     #[test]

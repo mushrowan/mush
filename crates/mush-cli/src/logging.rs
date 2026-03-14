@@ -1,5 +1,6 @@
 //! logging setup - file-based tracing with ring buffer for TUI viewing
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -16,7 +17,7 @@ pub struct LogBuffer {
 }
 
 struct LogBufferInner {
-    entries: Vec<String>,
+    entries: VecDeque<String>,
     capacity: usize,
 }
 
@@ -24,7 +25,7 @@ impl LogBuffer {
     pub fn new(capacity: usize) -> Self {
         Self {
             inner: Arc::new(Mutex::new(LogBufferInner {
-                entries: Vec::with_capacity(capacity),
+                entries: VecDeque::with_capacity(capacity),
                 capacity,
             })),
         }
@@ -34,7 +35,7 @@ impl LogBuffer {
     pub fn tail(&self, n: usize) -> Vec<String> {
         let inner = self.inner.lock().unwrap();
         let start = inner.entries.len().saturating_sub(n);
-        inner.entries[start..].to_vec()
+        inner.entries.iter().skip(start).cloned().collect()
     }
 }
 
@@ -45,10 +46,13 @@ impl std::io::Write for LogBuffer {
             let trimmed = s.trim_end();
             if !trimmed.is_empty() {
                 let mut inner = self.inner.lock().unwrap();
-                if inner.entries.len() >= inner.capacity {
-                    inner.entries.remove(0);
+                if inner.capacity == 0 {
+                    return Ok(buf.len());
                 }
-                inner.entries.push(trimmed.to_string());
+                if inner.entries.len() >= inner.capacity {
+                    inner.entries.pop_front();
+                }
+                inner.entries.push_back(trimmed.to_string());
             }
         }
         Ok(buf.len())
@@ -108,4 +112,35 @@ pub fn init_logging(config_filter: Option<&str>) -> (WorkerGuard, LogBuffer) {
         .init();
 
     (guard, log_buffer)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write as _;
+
+    use super::*;
+
+    #[test]
+    fn zero_capacity_ignores_writes() {
+        let mut buffer = LogBuffer::new(0);
+
+        buffer.write_all(b"hello\n").unwrap();
+        buffer.write_all(b"world\n").unwrap();
+
+        assert!(buffer.tail(10).is_empty());
+    }
+
+    #[test]
+    fn overflow_keeps_most_recent_entries() {
+        let mut buffer = LogBuffer::new(2);
+
+        buffer.write_all(b"one\n").unwrap();
+        buffer.write_all(b"two\n").unwrap();
+        buffer.write_all(b"three\n").unwrap();
+
+        assert_eq!(
+            buffer.tail(10),
+            vec!["two".to_string(), "three".to_string()]
+        );
+    }
 }
