@@ -73,8 +73,7 @@ pub fn handle_agent_event(
                             .iter()
                             .map(|c| {
                                 let name = c["tool"].as_str().unwrap_or("?").to_string();
-                                let sub_summary =
-                                    summarise_tool_args(&name, &c["parameters"]);
+                                let sub_summary = summarise_tool_args(&name, &c["parameters"]);
                                 (name, sub_summary)
                             })
                             .collect()
@@ -120,8 +119,7 @@ pub fn handle_agent_event(
                     && let Ok(dyn_image) = image::load_from_memory(data)
                 {
                     let msg_idx = app.messages.len().saturating_sub(1);
-                    let tc_idx =
-                        app.messages.last().map(|m| m.tool_calls.len()).unwrap_or(0);
+                    let tc_idx = app.messages.last().map(|m| m.tool_calls.len()).unwrap_or(0);
                     let proto = picker.new_resize_protocol(dyn_image);
                     image_protos.insert((msg_idx, tc_idx), proto);
                 }
@@ -271,6 +269,7 @@ fn oauth_account_id(provider_id: &str) -> Option<String> {
 /// delegates escalation (masking then LLM summarisation) to
 /// `mush_session::compact::auto_compact`, then runs post-compaction
 /// hooks if configured.
+#[allow(clippy::too_many_arguments)]
 pub async fn auto_compact(
     messages: Vec<Message>,
     context_tokens: TokenCount,
@@ -334,9 +333,7 @@ async fn inject_post_compaction_hooks(
     if !output.is_empty() {
         tracing::info!("post-compaction hook output injected into context");
         messages.push(Message::User(UserMessage {
-            content: UserContent::Text(format!(
-                "[post-compaction hook output]\n{output}"
-            )),
+            content: UserContent::Text(format!("[post-compaction hook output]\n{output}")),
             timestamp_ms: Timestamp::now(),
         }));
     }
@@ -360,7 +357,8 @@ const FORK_MASK_RECENT: usize = 3;
 ///
 /// this applies a deterministic transform to every tool result, so adding new
 /// messages does not rewrite older masked content on later turns
-pub fn mask_observations(messages: &mut [Message]) -> bool {
+#[cfg(test)]
+fn mask_observations(messages: &mut [Message]) -> bool {
     let mut changed = false;
     for msg in messages.iter_mut() {
         if let Message::ToolResult(tr) = msg {
@@ -370,7 +368,8 @@ pub fn mask_observations(messages: &mut [Message]) -> bool {
     changed
 }
 
-pub fn needs_observation_mask(messages: &[Message]) -> bool {
+#[cfg(test)]
+fn needs_observation_mask(messages: &[Message]) -> bool {
     messages.iter().any(|msg| match msg {
         Message::ToolResult(tr) => tool_result_needs_mask(&tr.content),
         _ => false,
@@ -400,6 +399,7 @@ fn mask_tool_result_content(content: &mut [ToolResultContentPart]) -> bool {
     changed
 }
 
+#[cfg(test)]
 fn tool_result_needs_mask(content: &[ToolResultContentPart]) -> bool {
     content.iter().any(|part| match part {
         ToolResultContentPart::Text(text) => text.text.len() > MASK_TRUNCATE_LEN,
