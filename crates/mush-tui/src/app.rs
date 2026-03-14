@@ -338,6 +338,8 @@ pub struct App {
     pub cache_expired_sent: bool,
     /// batch counter for grouping parallel tool calls
     current_tool_batch: u32,
+    /// oauth usage data (5h and 7d rolling windows)
+    pub oauth_usage: Option<mush_ai::oauth::usage::OAuthUsage>,
 }
 
 /// position computed during render for inline image overlay
@@ -457,6 +459,7 @@ impl App {
             cache_warn_sent: false,
             cache_expired_sent: false,
             current_tool_batch: 0,
+            oauth_usage: None,
         }
     }
 
@@ -668,11 +671,7 @@ impl App {
     }
 
     /// finish a batch tool, distributing results to individual sub-calls
-    pub fn end_batch_tool(
-        &mut self,
-        tool_call_id: &ToolCallId,
-        output: Option<&str>,
-    ) {
+    pub fn end_batch_tool(&mut self, tool_call_id: &ToolCallId, output: Option<&str>) {
         // mark the active tool as done
         if let Some(tool) = self
             .active_tools
@@ -1806,11 +1805,15 @@ mod tests {
         });
 
         let tc_id = ToolCallId::from("tc_batch");
-        app.start_batch_tool(&tc_id, "3 tool calls", &[
-            ("read".into(), "a.rs".into()),
-            ("read".into(), "b.rs".into()),
-            ("bash".into(), "cargo test".into()),
-        ]);
+        app.start_batch_tool(
+            &tc_id,
+            "3 tool calls",
+            &[
+                ("read".into(), "a.rs".into()),
+                ("read".into(), "b.rs".into()),
+                ("bash".into(), "cargo test".into()),
+            ],
+        );
 
         // one active tool for the live panel
         assert_eq!(app.active_tools.len(), 1);
@@ -1843,10 +1846,14 @@ mod tests {
         });
 
         let tc_id = ToolCallId::from("tc_batch");
-        app.start_batch_tool(&tc_id, "2 tool calls", &[
-            ("read".into(), "a.rs".into()),
-            ("bash".into(), "cargo test".into()),
-        ]);
+        app.start_batch_tool(
+            &tc_id,
+            "2 tool calls",
+            &[
+                ("read".into(), "a.rs".into()),
+                ("bash".into(), "cargo test".into()),
+            ],
+        );
 
         let output = "\
 --- [0] read [ok] ---
@@ -1863,7 +1870,13 @@ batch: 1/2 succeeded, 1 failed";
         assert_eq!(tcs[0].status, ToolCallStatus::Done);
         assert!(tcs[0].output_preview.as_ref().unwrap().contains("fn main"));
         assert_eq!(tcs[1].status, ToolCallStatus::Error);
-        assert!(tcs[1].output_preview.as_ref().unwrap().contains("could not compile"));
+        assert!(
+            tcs[1]
+                .output_preview
+                .as_ref()
+                .unwrap()
+                .contains("could not compile")
+        );
     }
 
     #[test]

@@ -60,11 +60,13 @@ fn left_spans(app: &App) -> Vec<Span<'static>> {
         ));
     }
 
+    let sep = Span::styled(" │ ", dim);
+
     spans.extend([
         Span::styled(app.model_id.to_string(), Style::default().fg(Color::Cyan)),
-        Span::styled(" • ", dim),
+        sep.clone(),
         Span::styled(
-            format!("thinking {thinking_label}"),
+            format!("thinking: {thinking_label}"),
             if app.thinking_level == ThinkingLevel::Off {
                 dim
             } else {
@@ -75,7 +77,7 @@ fn left_spans(app: &App) -> Vec<Span<'static>> {
 
     if app.stats.input_tokens > TokenCount::ZERO {
         spans.push(Span::styled(
-            format!(" | ↑{}", format_tokens(app.stats.input_tokens)),
+            format!(" ↑{}", format_tokens(app.stats.input_tokens)),
             dim,
         ));
     }
@@ -145,20 +147,40 @@ fn left_spans(app: &App) -> Vec<Span<'static>> {
             _ => String::new(),
         };
 
+        spans.push(sep.clone());
         spans.push(Span::styled(
-            format!(" | {ctx}/{window}{cache_suffix}"),
+            format!("{ctx}/{window}{cache_suffix}"),
             ctx_style,
         ));
     }
 
     if app.show_cost && app.stats.total_cost > Dollars::ZERO {
-        spans.push(Span::styled(format!(" | {}", app.stats.total_cost), dim));
+        spans.push(Span::styled(format!(" {}", app.stats.total_cost), dim));
+    }
+
+    // oauth usage bars
+    if let Some(ref usage) = app.oauth_usage {
+        if let Some(ref w) = usage.five_hour {
+            let pace = w.pace(mush_ai::oauth::usage::OAuthUsage::FIVE_HOUR);
+            spans.push(sep.clone());
+            spans.push(Span::styled("5h ", dim));
+            spans.extend(super::usage_bar::render_usage_bar(w.utilization, pace));
+            spans.push(Span::styled(format!(" {}%", w.utilization as u32), dim));
+        }
+        if let Some(ref w) = usage.seven_day {
+            let pace = w.pace(mush_ai::oauth::usage::OAuthUsage::SEVEN_DAY);
+            spans.push(sep.clone());
+            spans.push(Span::styled("7d ", dim));
+            spans.extend(super::usage_bar::render_usage_bar(w.utilization, pace));
+            spans.push(Span::styled(format!(" {}%", w.utilization as u32), dim));
+        }
     }
 
     if let Some(ref status) = app.status
         && status != "config reloaded"
     {
-        spans.push(Span::styled(format!(" | {status}"), dim));
+        spans.push(sep.clone());
+        spans.push(Span::styled(status.clone(), dim));
     }
 
     // scroll position indicator (only when scrolled away from bottom)
@@ -171,7 +193,7 @@ fn left_spans(app: &App) -> Vec<Span<'static>> {
             let from_top = max_scroll.saturating_sub(app.scroll_offset);
             let pct = (from_top as f64 / max_scroll as f64 * 100.0) as u16;
             spans.push(Span::styled(
-                format!(" | {pct}%"),
+                format!(" {pct}%"),
                 Style::default().fg(Color::Blue),
             ));
         }
@@ -179,8 +201,9 @@ fn left_spans(app: &App) -> Vec<Span<'static>> {
 
     // background pane alerts
     if let Some(ref alert) = app.background_alert {
+        spans.push(sep.clone());
         spans.push(Span::styled(
-            format!(" | {alert}"),
+            alert.clone(),
             Style::default().fg(Color::Yellow),
         ));
     }
@@ -318,7 +341,7 @@ mod tests {
         app.thinking_level = ThinkingLevel::High;
         let buf = render_status(&app, 120, 1);
         let content = buffer_to_string(&buf);
-        assert!(content.contains("thinking high"));
+        assert!(content.contains("thinking: high"));
     }
 
     #[test]
@@ -354,6 +377,40 @@ mod tests {
         assert!(result.starts_with('…'));
         assert!(result.ends_with("project"));
         assert!(result.len() <= 20);
+    }
+
+    #[test]
+    fn status_bar_uses_pipe_separators() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.stats.context_tokens = TokenCount::new(10_000);
+        let buf = render_status(&app, 120, 1);
+        let content = buffer_to_string(&buf);
+        // model │ thinking │ context
+        assert!(content.contains("│"), "missing │ separator: {content}");
+        assert!(content.contains("thinking:"), "missing thinking: label: {content}");
+    }
+
+    #[test]
+    fn status_bar_shows_usage_bars() {
+        use mush_ai::oauth::usage::{OAuthUsage, UsageWindow};
+
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.oauth_usage = Some(OAuthUsage {
+            five_hour: Some(UsageWindow {
+                utilization: 37.0,
+                resets_at: chrono::Utc::now() + chrono::TimeDelta::minutes(150),
+            }),
+            seven_day: Some(UsageWindow {
+                utilization: 26.0,
+                resets_at: chrono::Utc::now() + chrono::TimeDelta::days(4),
+            }),
+        });
+        let buf = render_status(&app, 160, 1);
+        let content = buffer_to_string(&buf);
+        assert!(content.contains("5h"), "missing 5h label: {content}");
+        assert!(content.contains("37%"), "missing 5h percentage: {content}");
+        assert!(content.contains("7d"), "missing 7d label: {content}");
+        assert!(content.contains("26%"), "missing 7d percentage: {content}");
     }
 
     fn render_status(app: &App, width: u16, height: u16) -> Buffer {

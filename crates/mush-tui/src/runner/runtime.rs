@@ -52,6 +52,7 @@ pub(super) struct RunnerRuntime {
     pub thinking_saver: Option<ThinkingPrefsSaver>,
     pub lifecycle_hooks: mush_agent::LifecycleHooks,
     pub pending_prompt: Option<String>,
+    pub usage_poller: Option<mush_ai::oauth::usage::UsagePoller>,
     _config_watcher: Option<RecommendedWatcher>,
     config_rx: Option<mpsc::Receiver<crate::theme::Theme>>,
 }
@@ -77,8 +78,7 @@ impl RunnerRuntime {
             pane_app.model_id = pane_snapshot.model_id.into();
             let pane_conversation =
                 replay_initial_messages(&mut pane_app, &pane_snapshot.conversation.context());
-            let mut pane =
-                Pane::with_conversation(pane_id, pane_app, pane_conversation);
+            let mut pane = Pane::with_conversation(pane_id, pane_app, pane_conversation);
             pane.label = pane_snapshot.label;
             pane.inbox = Some(message_bus.register(pane_id));
             pane_mgr.add_pane(pane);
@@ -97,6 +97,12 @@ impl RunnerRuntime {
 
         let (_config_watcher, config_rx) = watch_config(tui_config.config_path.as_ref());
 
+        // create usage poller if anthropic oauth credentials exist
+        let usage_poller = mush_ai::oauth::load_credentials()
+            .ok()
+            .filter(|store| store.providers.contains_key("anthropic"))
+            .map(|_| mush_ai::oauth::usage::UsagePoller::new());
+
         (
             Self {
                 cwd,
@@ -105,6 +111,7 @@ impl RunnerRuntime {
                 thinking_saver: tui_config.save_thinking_prefs.clone(),
                 lifecycle_hooks: tui_config.lifecycle_hooks.clone(),
                 pending_prompt: None,
+                usage_poller,
                 _config_watcher,
                 config_rx,
             },
@@ -160,6 +167,18 @@ impl RunnerRuntime {
                         Some(crate::notify::Sound::Attention),
                     );
                 }
+            }
+        }
+    }
+
+    /// poll oauth usage data and distribute to all panes
+    pub(super) async fn poll_usage(&mut self) {
+        let Some(ref poller) = self.usage_poller else {
+            return;
+        };
+        if let Some(usage) = poller.get_usage().await {
+            for pane in self.pane_mgr.panes_mut() {
+                pane.app.oauth_usage = Some(usage.clone());
             }
         }
     }
