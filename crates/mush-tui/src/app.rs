@@ -723,6 +723,8 @@ pub struct App {
     pub image_render_areas: RefCell<Vec<ImageRenderArea>>,
     /// cached markdown rendering for stable message content
     pub markdown_cache: RefCell<std::collections::HashMap<String, ratatui::text::Text<'static>>>,
+    /// cached markdown rendering for the current visible streaming text
+    pub stream_markdown_cache: RefCell<Option<(String, ratatui::text::Text<'static>)>>,
     /// working directory (with ~ for home)
     pub cwd: String,
     /// total content lines (set during render by MessageList)
@@ -829,6 +831,7 @@ impl App {
             search: SearchState::default(),
             image_render_areas: RefCell::new(Vec::new()),
             markdown_cache: RefCell::new(std::collections::HashMap::new()),
+            stream_markdown_cache: RefCell::new(None),
             cwd: {
                 let path = std::env::current_dir().unwrap_or_default();
                 match std::env::var("HOME") {
