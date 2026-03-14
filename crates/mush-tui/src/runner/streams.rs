@@ -381,8 +381,8 @@ pub(super) async fn abort_focused_stream(
     }
     if !restored.is_empty() {
         let text = restored.join("\n");
-        pane.app.input = text.clone();
-        pane.app.cursor = text.len();
+        pane.app.input.text = text.clone();
+        pane.app.input.cursor = text.len();
     }
 }
 
@@ -418,7 +418,7 @@ pub(super) async fn edit_last_queued_steering(
     let app = &mut pane_mgr.focused_mut().app;
 
     if let Some(queued_text) = app.pop_last_queued_message() {
-        let current_input = app.take_input();
+        let current_input = app.input.take_text();
         if !current_input.trim().is_empty() {
             app.push_queued_message(&current_input);
             if let Some(meta) = stream_state.meta(focused_id) {
@@ -432,9 +432,9 @@ pub(super) async fn edit_last_queued_steering(
             }
         }
 
-        app.input.clone_from(&queued_text);
-        app.cursor = app.input.len();
-        app.ensure_cursor_visible();
+        app.input.text.clone_from(&queued_text);
+        app.input.cursor = app.input.text.len();
+        app.input.ensure_cursor_visible();
 
         if let Some(meta) = stream_state.meta(focused_id) {
             let mut steering_queue = meta.steering_queue.lock().await;
@@ -661,10 +661,10 @@ fn append_prompt_and_snapshot(
     }
 
     let user_message = Message::User(UserMessage {
-        content: if app.pending_images.is_empty() {
+        content: if app.input.images.is_empty() {
             UserContent::Text(user_text)
         } else {
-            let images = app.take_images();
+            let images = app.input.take_images();
             let mut parts: Vec<UserContentPart> =
                 vec![UserContentPart::Text(TextContent { text: user_text })];
             for image in images {

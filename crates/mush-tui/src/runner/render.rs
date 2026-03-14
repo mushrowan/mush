@@ -134,7 +134,7 @@ pub(super) fn draw_panes(
         }
 
         let focused_app = &pane_mgr.panes()[focused_idx].app;
-        let streaming_idle = focused_app.is_busy() && focused_app.input.is_empty();
+        let streaming_idle = focused_app.is_busy() && focused_app.input.text.is_empty();
         if !streaming_idle
             && (focused_app.mode == app::AppMode::Normal
                 || focused_app.mode == app::AppMode::SlashComplete
@@ -148,9 +148,9 @@ pub(super) fn draw_panes(
         }
         if let Some(ref menu) = focused_app.slash_menu {
             let input_h = crate::ui::input_height(
-                &focused_app.input,
+                &focused_app.input.text,
                 focused_area.width,
-                &focused_app.pending_images,
+                &focused_app.input.images,
             );
             let tools_h = crate::widgets::tool_panels::tool_panels_height(
                 &focused_app.active_tools,
@@ -173,15 +173,15 @@ pub(super) fn handle_mouse(app: &mut App, mouse: MouseEvent) {
 
     match mouse.kind {
         MouseEventKind::ScrollUp => {
-            if app.is_mouse_over_input(mouse.column, mouse.row) {
-                app.scroll_input_by(-(SCROLL_LINES as i16));
+            if app.input.is_mouse_over(mouse.column, mouse.row) {
+                app.input.scroll_by(-(SCROLL_LINES as i16));
             } else {
                 app.scroll_offset = app.scroll_offset.saturating_add(SCROLL_LINES);
             }
         }
         MouseEventKind::ScrollDown => {
-            if app.is_mouse_over_input(mouse.column, mouse.row) {
-                app.scroll_input_by(SCROLL_LINES as i16);
+            if app.input.is_mouse_over(mouse.column, mouse.row) {
+                app.input.scroll_by(SCROLL_LINES as i16);
             } else {
                 app.scroll_offset = app.scroll_offset.saturating_sub(SCROLL_LINES);
                 if app.scroll_offset == 0 {
@@ -201,7 +201,7 @@ mod tests {
     #[test]
     fn mouse_scroll_over_messages_scrolls_conversation() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.input_area.set(ratatui::layout::Rect::new(0, 10, 40, 5));
+        app.input.area.set(ratatui::layout::Rect::new(0, 10, 40, 5));
         let before = app.scroll_offset;
         handle_mouse(
             &mut app,
@@ -218,10 +218,10 @@ mod tests {
     #[test]
     fn mouse_scroll_over_input_scrolls_input() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.input_area.set(ratatui::layout::Rect::new(0, 10, 40, 5));
-        app.input_visible_lines.set(2);
-        app.input_total_lines.set(8);
-        app.input_scroll.set(2);
+        app.input.area.set(ratatui::layout::Rect::new(0, 10, 40, 5));
+        app.input.visible_lines.set(2);
+        app.input.total_lines.set(8);
+        app.input.scroll.set(2);
 
         handle_mouse(
             &mut app,
@@ -232,7 +232,7 @@ mod tests {
                 modifiers: crossterm::event::KeyModifiers::NONE,
             },
         );
-        assert_eq!(app.input_scroll.get(), 0);
+        assert_eq!(app.input.scroll.get(), 0);
 
         handle_mouse(
             &mut app,
@@ -243,6 +243,6 @@ mod tests {
                 modifiers: crossterm::event::KeyModifiers::NONE,
             },
         );
-        assert_eq!(app.input_scroll.get(), 3);
+        assert_eq!(app.input.scroll.get(), 3);
     }
 }

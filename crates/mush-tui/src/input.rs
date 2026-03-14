@@ -9,11 +9,11 @@ use crate::app::{App, AppEvent, AppMode};
 // A trailing '\' escapes plain Enter into a literal newline, but only when the
 // cursor is at the end of the current line.
 fn should_escape_enter_to_newline(app: &App, key: KeyEvent) -> bool {
-    if key.code != KeyCode::Enter || !key.modifiers.is_empty() || app.cursor == 0 {
+    if key.code != KeyCode::Enter || !key.modifiers.is_empty() || app.input.cursor == 0 {
         return false;
     }
 
-    let current_line = &app.input[..app.cursor];
+    let current_line = &app.input.text[..app.input.cursor];
     let Some(last_char) = current_line.chars().next_back() else {
         return false;
     };
@@ -21,7 +21,7 @@ fn should_escape_enter_to_newline(app: &App, key: KeyEvent) -> bool {
         return false;
     }
 
-    app.input[app.cursor..].starts_with('\n') || app.cursor == app.input.len()
+    app.input.text[app.input.cursor..].starts_with('\n') || app.input.cursor == app.input.text.len()
 }
 /// handle a key event, mutating the app and optionally producing an event
 ///
@@ -39,8 +39,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         kind = ?key.kind,
         mode = ?app.mode,
         is_streaming = app.stream.active,
-        input_len = app.input.len(),
-        cursor = app.cursor,
+        input_len = app.input.text.len(),
+        cursor = app.input.cursor,
         "key event"
     );
 
@@ -137,18 +137,18 @@ fn handle_pane_keys(key: KeyEvent) -> Option<AppEvent> {
 fn handle_streaming_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     if key.code == KeyCode::Enter {
         if should_escape_enter_to_newline(app, key) {
-            app.input_backspace();
+            app.input.backspace();
             app.input_char('\n');
             return None;
         }
-        if app.input.trim().is_empty() {
+        if app.input.text.trim().is_empty() {
             return None;
         }
-        let text = app.take_input();
+        let text = app.input.take_text();
         if text.starts_with('/') {
-            app.input = text;
-            app.cursor = app.input.len();
-            app.ensure_cursor_visible();
+            app.input.text = text;
+            app.input.cursor = app.input.text.len();
+            app.input.ensure_cursor_visible();
             app.status = Some("slash commands unavailable while streaming".into());
             return None;
         }
@@ -187,7 +187,7 @@ fn handle_idle_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
 
         // tab completion / slash menu
         (_, KeyCode::Tab) | (KeyModifiers::SHIFT, KeyCode::BackTab) => {
-            if app.input.starts_with('/')
+            if app.input.text.starts_with('/')
                 && app.slash_menu.is_none()
                 && !app.slash_commands.is_empty()
             {
@@ -201,19 +201,19 @@ fn handle_idle_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         // submit (accept ghost text, parse slash commands)
         (_, KeyCode::Enter) => {
             if should_escape_enter_to_newline(app, key) {
-                app.input_backspace();
+                app.input.backspace();
                 app.input_char('\n');
                 return None;
             }
             if let Some(suffix) = app.ghost_text().map(|s| s.to_string()) {
-                app.input.push_str(&suffix);
-                app.cursor = app.input.len();
-                app.ensure_cursor_visible();
+                app.input.text.push_str(&suffix);
+                app.input.cursor = app.input.text.len();
+                app.input.ensure_cursor_visible();
             }
-            if app.input.trim().is_empty() {
+            if app.input.text.trim().is_empty() {
                 return None;
             }
-            let text = app.take_input();
+            let text = app.input.take_text();
             if text.starts_with('/') {
                 match crate::slash::parse(&text) {
                     Ok(action) => return Some(AppEvent::SlashCommand { action }),
@@ -228,10 +228,10 @@ fn handle_idle_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
 
         // ctrl+d: quit on empty, delete char otherwise
         (KeyModifiers::CONTROL, KeyCode::Char('d')) => {
-            if app.input.is_empty() {
+            if app.input.text.is_empty() {
                 return Some(AppEvent::Quit);
             }
-            app.input_delete();
+            app.input.delete();
             None
         }
 
@@ -266,27 +266,27 @@ fn handle_editing(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         // word deletion
         (KeyModifiers::CONTROL, KeyCode::Backspace)
         | (KeyModifiers::ALT, KeyCode::Backspace)
-        | (KeyModifiers::CONTROL, KeyCode::Char('w')) => app.delete_word_backward(),
-        (KeyModifiers::ALT, KeyCode::Char('d')) => app.delete_word_forward(),
-        (_, KeyCode::Backspace) => app.input_backspace(),
-        (_, KeyCode::Delete) => app.input_delete(),
+        | (KeyModifiers::CONTROL, KeyCode::Char('w')) => app.input.delete_word_backward(),
+        (KeyModifiers::ALT, KeyCode::Char('d')) => app.input.delete_word_forward(),
+        (_, KeyCode::Backspace) => app.input.backspace(),
+        (_, KeyCode::Delete) => app.input.delete(),
 
         // cursor movement
         (KeyModifiers::ALT, KeyCode::Left)
         | (KeyModifiers::CONTROL, KeyCode::Left)
-        | (KeyModifiers::ALT, KeyCode::Char('b')) => app.cursor_word_left(),
+        | (KeyModifiers::ALT, KeyCode::Char('b')) => app.input.cursor_word_left(),
         (KeyModifiers::ALT, KeyCode::Right)
         | (KeyModifiers::CONTROL, KeyCode::Right)
-        | (KeyModifiers::ALT, KeyCode::Char('f')) => app.cursor_word_right(),
-        (KeyModifiers::CONTROL, KeyCode::Char('b')) => app.cursor_left(),
-        (_, KeyCode::Left) => app.cursor_left(),
-        (_, KeyCode::Right) => app.cursor_right(),
-        (_, KeyCode::Home) | (KeyModifiers::CONTROL, KeyCode::Char('a')) => app.cursor_home(),
-        (_, KeyCode::End) | (KeyModifiers::CONTROL, KeyCode::Char('e')) => app.cursor_end(),
+        | (KeyModifiers::ALT, KeyCode::Char('f')) => app.input.cursor_word_right(),
+        (KeyModifiers::CONTROL, KeyCode::Char('b')) => app.input.cursor_left(),
+        (_, KeyCode::Left) => app.input.cursor_left(),
+        (_, KeyCode::Right) => app.input.cursor_right(),
+        (_, KeyCode::Home) | (KeyModifiers::CONTROL, KeyCode::Char('a')) => app.input.cursor_home(),
+        (_, KeyCode::End) | (KeyModifiers::CONTROL, KeyCode::Char('e')) => app.input.cursor_end(),
 
         // line editing
-        (KeyModifiers::CONTROL, KeyCode::Char('u')) => app.delete_to_start(),
-        (KeyModifiers::CONTROL, KeyCode::Char('k')) => app.delete_to_end(),
+        (KeyModifiers::CONTROL, KeyCode::Char('u')) => app.input.delete_to_start(),
+        (KeyModifiers::CONTROL, KeyCode::Char('k')) => app.input.delete_to_end(),
 
         // character input
         (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => app.input_char(c),
@@ -466,14 +466,14 @@ fn handle_slash_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             if let Some(ref menu) = app.slash_menu {
                 if menu.model_mode {
                     if let Some(model) = menu.model_matches.get(menu.selected) {
-                        app.input = format!("/model {}", model.id);
-                        app.cursor = app.input.len();
-                        app.ensure_cursor_visible();
+                        app.input.text = format!("/model {}", model.id);
+                        app.input.cursor = app.input.text.len();
+                        app.input.ensure_cursor_visible();
                     }
                 } else if let Some(cmd) = menu.matches.get(menu.selected) {
-                    app.input = format!("/{}", cmd.name);
-                    app.cursor = app.input.len();
-                    app.ensure_cursor_visible();
+                    app.input.text = format!("/{}", cmd.name);
+                    app.input.cursor = app.input.text.len();
+                    app.input.ensure_cursor_visible();
                 }
             }
             app.close_slash_menu();
@@ -501,8 +501,8 @@ fn handle_slash_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         }
         // backspace: edit input and update filter
         (_, KeyCode::Backspace) => {
-            app.input_backspace();
-            if app.input.is_empty() || !app.input.starts_with('/') {
+            app.input.backspace();
+            if app.input.text.is_empty() || !app.input.text.starts_with('/') {
                 app.close_slash_menu();
             } else {
                 app.update_slash_menu();
@@ -634,21 +634,21 @@ mod tests {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         handle_key(&mut app, key(KeyCode::Char('h')));
         handle_key(&mut app, key(KeyCode::Char('i')));
-        assert_eq!(app.input, "hi");
-        assert_eq!(app.cursor, 2);
+        assert_eq!(app.input.text, "hi");
+        assert_eq!(app.input.cursor, 2);
     }
 
     #[test]
     fn enter_submits_input() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.input = "hello".into();
-        app.cursor = 5;
+        app.input.text = "hello".into();
+        app.input.cursor = 5;
         let event = handle_key(&mut app, key(KeyCode::Enter));
         match event {
             Some(AppEvent::UserSubmit { text }) => assert_eq!(text, "hello"),
             other => panic!("expected UserSubmit, got {other:?}"),
         }
-        assert!(app.input.is_empty());
+        assert!(app.input.text.is_empty());
     }
 
     #[test]
@@ -661,33 +661,33 @@ mod tests {
     #[test]
     fn backspace_deletes() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.input = "abc".into();
-        app.cursor = 3;
+        app.input.text = "abc".into();
+        app.input.cursor = 3;
         handle_key(&mut app, key(KeyCode::Backspace));
-        assert_eq!(app.input, "ab");
+        assert_eq!(app.input.text, "ab");
     }
 
     #[test]
     fn ctrl_u_clears_line() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.input = "long text here".into();
-        app.cursor = 14;
+        app.input.text = "long text here".into();
+        app.input.cursor = 14;
         handle_key(&mut app, ctrl(KeyCode::Char('u')));
-        assert!(app.input.is_empty());
-        assert_eq!(app.cursor, 0);
+        assert!(app.input.text.is_empty());
+        assert_eq!(app.input.cursor, 0);
     }
 
     #[test]
     fn home_end_navigation() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.input = "hello".into();
-        app.cursor = 3;
+        app.input.text = "hello".into();
+        app.input.cursor = 3;
 
         handle_key(&mut app, key(KeyCode::Home));
-        assert_eq!(app.cursor, 0);
+        assert_eq!(app.input.cursor, 0);
 
         handle_key(&mut app, key(KeyCode::End));
-        assert_eq!(app.cursor, 5);
+        assert_eq!(app.input.cursor, 5);
     }
 
     #[test]
@@ -756,7 +756,7 @@ mod tests {
             },
         );
         assert!(event.is_none());
-        assert_eq!(app.input, "a\n");
+        assert_eq!(app.input.text, "a\n");
     }
 
     #[test]
@@ -773,14 +773,14 @@ mod tests {
             },
         );
         assert!(event.is_none());
-        assert_eq!(app.input, "a\n");
+        assert_eq!(app.input.text, "a\n");
     }
 
     #[test]
     fn slash_command_parsed() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.input = "/help".into();
-        app.cursor = 5;
+        app.input.text = "/help".into();
+        app.input.cursor = 5;
         let event = handle_key(&mut app, key(KeyCode::Enter));
         match event {
             Some(AppEvent::SlashCommand {
@@ -793,8 +793,8 @@ mod tests {
     #[test]
     fn slash_command_with_args() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.input = "/review src/main.rs".into();
-        app.cursor = 19;
+        app.input.text = "/review src/main.rs".into();
+        app.input.cursor = 19;
         let event = handle_key(&mut app, key(KeyCode::Enter));
         match event {
             Some(AppEvent::SlashCommand {
@@ -810,45 +810,45 @@ mod tests {
     #[test]
     fn enter_after_trailing_backslash_inserts_newline() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.input = "hello\\".into();
-        app.cursor = app.input.len();
+        app.input.text = "hello\\".into();
+        app.input.cursor = app.input.text.len();
 
         let event = handle_key(&mut app, key(KeyCode::Enter));
 
         assert!(event.is_none());
-        assert_eq!(app.input, "hello\n");
-        assert_eq!(app.cursor, app.input.len());
+        assert_eq!(app.input.text, "hello\n");
+        assert_eq!(app.input.cursor, app.input.text.len());
     }
 
     #[test]
     fn enter_after_backslash_mid_input_does_not_submit() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.input = "hello\\\nworld".into();
-        app.cursor = "hello\\".len();
+        app.input.text = "hello\\\nworld".into();
+        app.input.cursor = "hello\\".len();
 
         let event = handle_key(&mut app, key(KeyCode::Enter));
 
         assert!(event.is_none());
-        assert_eq!(app.input, "hello\n\nworld");
-        assert_eq!(app.cursor, "hello\n".len());
+        assert_eq!(app.input.text, "hello\n\nworld");
+        assert_eq!(app.input.cursor, "hello\n".len());
     }
 
     #[test]
     fn ctrl_w_deletes_word_backward() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.input = "hello world".into();
-        app.cursor = 11;
+        app.input.text = "hello world".into();
+        app.input.cursor = 11;
         handle_key(&mut app, ctrl(KeyCode::Char('w')));
-        assert_eq!(app.input, "hello ");
+        assert_eq!(app.input.text, "hello ");
     }
 
     #[test]
     fn ctrl_k_deletes_to_end() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.input = "hello world".into();
-        app.cursor = 5;
+        app.input.text = "hello world".into();
+        app.input.cursor = 5;
         handle_key(&mut app, ctrl(KeyCode::Char('k')));
-        assert_eq!(app.input, "hello");
+        assert_eq!(app.input.text, "hello");
     }
 
     #[test]
@@ -861,10 +861,10 @@ mod tests {
     #[test]
     fn ctrl_d_with_input_deletes_char() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.input = "abc".into();
-        app.cursor = 1;
+        app.input.text = "abc".into();
+        app.input.cursor = 1;
         handle_key(&mut app, ctrl(KeyCode::Char('d')));
-        assert_eq!(app.input, "ac");
+        assert_eq!(app.input.text, "ac");
     }
 
     #[test]
@@ -873,15 +873,15 @@ mod tests {
         app.stream.active = true;
         handle_key(&mut app, key(KeyCode::Char('h')));
         handle_key(&mut app, key(KeyCode::Char('i')));
-        assert_eq!(app.input, "hi");
+        assert_eq!(app.input.text, "hi");
     }
 
     #[test]
     fn submit_allowed_while_streaming() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.stream.active = true;
-        app.input = "steer this".into();
-        app.cursor = 10;
+        app.input.text = "steer this".into();
+        app.input.cursor = 10;
         let event = handle_key(&mut app, key(KeyCode::Enter));
         match event {
             Some(AppEvent::UserSubmit { text }) => assert_eq!(text, "steer this"),
@@ -893,12 +893,12 @@ mod tests {
     fn slash_commands_blocked_while_streaming() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.stream.active = true;
-        app.input = "/clear".into();
-        app.cursor = 6;
+        app.input.text = "/clear".into();
+        app.input.cursor = 6;
         let event = handle_key(&mut app, key(KeyCode::Enter));
         assert!(event.is_none());
         // input preserved so user can submit after streaming ends
-        assert_eq!(app.input, "/clear");
+        assert_eq!(app.input.text, "/clear");
         assert_eq!(
             app.status.as_deref(),
             Some("slash commands unavailable while streaming")
@@ -909,18 +909,18 @@ mod tests {
     fn tab_completes_slash_commands() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.completions = vec!["/help".into(), "/history".into(), "/clear".into()];
-        app.input = "/h".into();
-        app.cursor = 2;
+        app.input.text = "/h".into();
+        app.input.cursor = 2;
         handle_key(&mut app, key(KeyCode::Tab));
-        assert_eq!(app.input, "/help");
+        assert_eq!(app.input.text, "/help");
 
         // second tab cycles to next match
         handle_key(&mut app, key(KeyCode::Tab));
-        assert_eq!(app.input, "/history");
+        assert_eq!(app.input.text, "/history");
 
         // wraps around
         handle_key(&mut app, key(KeyCode::Tab));
-        assert_eq!(app.input, "/help");
+        assert_eq!(app.input.text, "/help");
     }
 
     #[test]
@@ -931,44 +931,44 @@ mod tests {
             "claude-opus-4-6".into(),
             "claude-sonnet-4-20250514".into(),
         ];
-        app.input = "/model claude-o".into();
-        app.cursor = 15;
+        app.input.text = "/model claude-o".into();
+        app.input.cursor = 15;
         handle_key(&mut app, key(KeyCode::Tab));
-        assert_eq!(app.input, "/model claude-opus-4-6");
+        assert_eq!(app.input.text, "/model claude-opus-4-6");
     }
 
     #[test]
     fn tab_no_match_does_nothing() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.completions = vec!["/help".into()];
-        app.input = "/zzz".into();
-        app.cursor = 4;
+        app.input.text = "/zzz".into();
+        app.input.cursor = 4;
         handle_key(&mut app, key(KeyCode::Tab));
-        assert_eq!(app.input, "/zzz");
+        assert_eq!(app.input.text, "/zzz");
     }
 
     #[test]
     fn tab_resets_on_typing() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.completions = vec!["/help".into(), "/history".into()];
-        app.input = "/h".into();
-        app.cursor = 2;
+        app.input.text = "/h".into();
+        app.input.cursor = 2;
         handle_key(&mut app, key(KeyCode::Tab));
-        assert_eq!(app.input, "/help");
+        assert_eq!(app.input.text, "/help");
 
         // typing resets completion state
         handle_key(&mut app, key(KeyCode::Char('x')));
-        assert_eq!(app.input, "/helpx");
+        assert_eq!(app.input.text, "/helpx");
     }
 
     #[test]
     fn tab_ignored_for_non_slash_input() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.completions = vec!["/help".into()];
-        app.input = "hello".into();
-        app.cursor = 5;
+        app.input.text = "hello".into();
+        app.input.cursor = 5;
         handle_key(&mut app, key(KeyCode::Tab));
-        assert_eq!(app.input, "hello"); // unchanged
+        assert_eq!(app.input.text, "hello"); // unchanged
     }
 
     #[test]
@@ -984,8 +984,8 @@ mod tests {
                 description: "clear chat".into(),
             },
         ];
-        app.input = "/".into();
-        app.cursor = 1;
+        app.input.text = "/".into();
+        app.input.cursor = 1;
         handle_key(&mut app, key(KeyCode::Tab));
         assert_eq!(app.mode, AppMode::SlashComplete);
         assert!(app.slash_menu.is_some());
@@ -1008,8 +1008,8 @@ mod tests {
                 description: "clear chat".into(),
             },
         ];
-        app.input = "/".into();
-        app.cursor = 1;
+        app.input.text = "/".into();
+        app.input.cursor = 1;
         handle_key(&mut app, key(KeyCode::Tab));
 
         // ctrl+j moves down
@@ -1023,7 +1023,7 @@ mod tests {
         // enter selects
         handle_key(&mut app, key(KeyCode::Enter));
         assert_eq!(app.mode, AppMode::Normal);
-        assert_eq!(app.input, "/help");
+        assert_eq!(app.input.text, "/help");
     }
 
     #[test]
@@ -1043,8 +1043,8 @@ mod tests {
                 description: "clear chat".into(),
             },
         ];
-        app.input = "/h".into();
-        app.cursor = 2;
+        app.input.text = "/h".into();
+        app.input.cursor = 2;
         handle_key(&mut app, key(KeyCode::Tab));
 
         // only /h* commands match
@@ -1075,8 +1075,8 @@ mod tests {
                 name: "Claude Sonnet 4".into(),
             },
         ];
-        app.input = "/model claude".into();
-        app.cursor = app.input.len();
+        app.input.text = "/model claude".into();
+        app.input.cursor = app.input.text.len();
 
         handle_key(&mut app, key(KeyCode::Tab));
 
@@ -1102,14 +1102,14 @@ mod tests {
                 name: "Claude Sonnet 4".into(),
             },
         ];
-        app.input = "/model claude".into();
-        app.cursor = app.input.len();
+        app.input.text = "/model claude".into();
+        app.input.cursor = app.input.text.len();
 
         handle_key(&mut app, key(KeyCode::Tab));
         handle_key(&mut app, ctrl(KeyCode::Char('j')));
         handle_key(&mut app, key(KeyCode::Enter));
 
-        assert_eq!(app.input, "/model claude-sonnet-4-20250514");
+        assert_eq!(app.input.text, "/model claude-sonnet-4-20250514");
     }
 
     #[test]
@@ -1129,8 +1129,8 @@ mod tests {
                 name: "Claude Sonnet 4".into(),
             },
         ];
-        app.input = "/model claude-".into();
-        app.cursor = app.input.len();
+        app.input.text = "/model claude-".into();
+        app.input.cursor = app.input.text.len();
 
         handle_key(&mut app, key(KeyCode::Tab));
         handle_key(&mut app, key(KeyCode::Char('o')));
@@ -1145,16 +1145,16 @@ mod tests {
     fn input_reinsert_while_streaming_keeps_cursor_visible() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.stream.active = true;
-        app.input_area.set(ratatui::layout::Rect::new(0, 0, 20, 12));
-        app.input_visible_lines.set(2);
-        app.input_total_lines.set(8);
-        app.input_scroll.set(0);
-        app.input = "/model a\nb\nc\nd".into();
-        app.cursor = app.input.len();
+        app.input.area.set(ratatui::layout::Rect::new(0, 0, 20, 12));
+        app.input.visible_lines.set(2);
+        app.input.total_lines.set(8);
+        app.input.scroll.set(0);
+        app.input.text = "/model a\nb\nc\nd".into();
+        app.input.cursor = app.input.text.len();
 
         handle_key(&mut app, key(KeyCode::Enter));
 
-        assert!(app.input_scroll.get() > 0);
+        assert!(app.input.scroll.get() > 0);
     }
 
     #[test]
@@ -1164,8 +1164,8 @@ mod tests {
             name: "help".into(),
             description: "show help".into(),
         }];
-        app.input = "/".into();
-        app.cursor = 1;
+        app.input.text = "/".into();
+        app.input.cursor = 1;
         handle_key(&mut app, key(KeyCode::Tab));
         assert_eq!(app.mode, AppMode::SlashComplete);
 
