@@ -75,6 +75,11 @@
       in {
         packages.default = craneOutputs.package;
         packages.with-embeddings = craneOutputsWithEmbeddings.package;
+        packages.debug = pkgs.writeShellScriptBin "mush-debug" ''
+          export RUST_LOG=debug
+          echo "logging to ''${XDG_DATA_HOME:-$HOME/.local/share}/mush/mush.log" >&2
+          exec ${craneOutputs.package}/bin/mush "$@"
+        '';
 
         checks = {
           inherit (craneOutputs) package clippy test fmt deny;

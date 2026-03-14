@@ -100,8 +100,23 @@ pub fn truncate(
     let total_bytes = full_text.len();
 
     if lines.len() <= max_lines && total_bytes <= max_bytes {
+        tracing::debug!(
+            lines = lines.len(),
+            bytes = total_bytes,
+            direction = ?direction,
+            "output within limits, no truncation"
+        );
         return result;
     }
+
+    tracing::info!(
+        lines = lines.len(),
+        bytes = total_bytes,
+        max_lines,
+        max_bytes,
+        direction = ?direction,
+        "truncating tool output"
+    );
 
     let saved_path = save_full_output(&full_text);
 
