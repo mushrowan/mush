@@ -101,6 +101,7 @@ urlencoding = "2"
 pretty_assertions = "1"
 tempfile = "3"
 filetime = "0.2"
+criterion = { version = "0.8", features = ["html_reports"] }
 
 [profile.profiling]
 inherits = "release"

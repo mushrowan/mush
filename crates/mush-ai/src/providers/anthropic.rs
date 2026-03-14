@@ -1187,6 +1187,68 @@ fn map_stop_reason(reason: &str) -> StopReason {
     }
 }
 
+#[doc(hidden)]
+pub fn benchmark_tool_call_deltas(chunk_count: usize, arg_bytes: usize) -> usize {
+    let (_, fragments) = super::bench_support::tool_call_json_fragments(chunk_count, arg_bytes);
+    let mut output = AssistantMessage {
+        content: vec![],
+        model: "bench".into(),
+        provider: Provider::Custom("bench".into()),
+        api: Api::AnthropicMessages,
+        usage: Usage::default(),
+        stop_reason: StopReason::Stop,
+        error_message: None,
+        timestamp_ms: Timestamp::zero(),
+    };
+    let mut blocks = Vec::new();
+
+    let _ = process_sse_event(
+        SseEvent::ContentBlockStart {
+            index: 0,
+            content_block: ContentBlockData::ToolUse {
+                id: "tc_1".into(),
+                name: "read".into(),
+            },
+        },
+        &mut output,
+        &mut blocks,
+        false,
+        &[],
+    );
+
+    for fragment in fragments {
+        let _ = process_sse_event(
+            SseEvent::ContentBlockDelta {
+                index: 0,
+                delta: DeltaData::InputJsonDelta {
+                    partial_json: fragment,
+                },
+            },
+            &mut output,
+            &mut blocks,
+            false,
+            &[],
+        );
+    }
+
+    let _ = process_sse_event(
+        SseEvent::ContentBlockStop { index: 0 },
+        &mut output,
+        &mut blocks,
+        false,
+        &[],
+    );
+
+    match output.content.first() {
+        Some(AssistantContentPart::ToolCall(tc)) => tc
+            .arguments
+            .get("payload")
+            .and_then(|value| value.as_str())
+            .map_or(0, str::len),
+        _ => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1762,6 +1824,11 @@ mod tests {
         let body = build_request_body(&model, &None, &[], &tools, &options, true);
         let tools = body.tools.unwrap();
         assert_eq!(tools[0].name, "Read");
+    }
+
+    #[test]
+    fn benchmark_tool_call_deltas_returns_payload_size() {
+        assert_eq!(benchmark_tool_call_deltas(8, 1024), 1024);
     }
 
     fn test_model() -> Model {

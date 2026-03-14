@@ -154,6 +154,30 @@ fn build_input_layout(
 }
 
 /// format an image token for inline display
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputLayoutSummary {
+    pub total_lines: u16,
+    pub cursor_visual_line: usize,
+    pub cursor_visual_col: usize,
+    pub image_span_count: usize,
+}
+
+#[doc(hidden)]
+pub fn benchmark_build_input_layout(
+    input: &str,
+    cursor: usize,
+    images: &[PendingImage],
+    content_width: usize,
+) -> InputLayoutSummary {
+    let layout = build_input_layout(input, cursor, images, content_width);
+    InputLayoutSummary {
+        total_lines: layout.total_lines,
+        cursor_visual_line: layout.cursor_visual_line,
+        cursor_visual_col: layout.cursor_visual_col,
+        image_span_count: layout.expanded.image_spans.len(),
+    }
+}
+
 fn image_token(img: Option<&crate::app::PendingImage>) -> String {
     match img.and_then(|i| i.dimensions) {
         Some((w, h)) => format!("[📷 {w}x{h}]"),
@@ -845,6 +869,15 @@ mod tests {
             content.contains("world"),
             "word 'world' should appear intact: {content}"
         );
+    }
+
+    #[test]
+    fn benchmark_layout_summary_reports_wrapping() {
+        let summary =
+            benchmark_build_input_layout("one two three four five six seven", 33, &[], 16);
+        assert!(summary.total_lines >= 3);
+        assert!(summary.cursor_visual_line >= 2);
+        assert!(summary.cursor_visual_col < 16);
     }
 
     fn render_input(app: &App, width: u16, height: u16) -> Buffer {

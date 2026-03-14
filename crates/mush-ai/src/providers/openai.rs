@@ -736,6 +736,54 @@ fn map_stop_reason(reason: &str) -> StopReason {
     }
 }
 
+#[doc(hidden)]
+pub fn benchmark_tool_call_deltas(chunk_count: usize, arg_bytes: usize) -> usize {
+    let (_, fragments) = super::bench_support::tool_call_json_fragments(chunk_count, arg_bytes);
+    let mut output = AssistantMessage {
+        content: vec![],
+        model: "bench".into(),
+        provider: Provider::Custom("bench".into()),
+        api: Api::OpenaiCompletions,
+        usage: Usage::default(),
+        stop_reason: StopReason::Stop,
+        error_message: None,
+        timestamp_ms: Timestamp::zero(),
+    };
+    let mut current = None;
+
+    for (index, fragment) in fragments.into_iter().enumerate() {
+        let chunk = ChunkResponse {
+            choices: vec![ChunkChoice {
+                delta: ChunkDelta {
+                    tool_calls: Some(vec![ChunkToolCall {
+                        id: (index == 0).then(|| "tc_1".into()),
+                        function: Some(ChunkToolFunction {
+                            name: (index == 0).then(|| "read".into()),
+                            arguments: Some(fragment),
+                        }),
+                    }]),
+                    ..Default::default()
+                },
+                finish_reason: None,
+            }],
+            usage: None,
+        };
+        let _ = process_chunk(chunk, &mut output, &mut current);
+    }
+
+    let mut sink = Vec::new();
+    let _ = finish_block_events(&mut current, &mut output, &mut sink);
+
+    match output.content.first() {
+        Some(AssistantContentPart::ToolCall(tc)) => tc
+            .arguments
+            .get("payload")
+            .and_then(|value| value.as_str())
+            .map_or(0, str::len),
+        _ => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1003,6 +1051,11 @@ mod tests {
         assert_eq!(output.usage.input_tokens, TokenCount::new(50)); // 150 - 100 cached
         assert_eq!(output.usage.output_tokens, TokenCount::new(50));
         assert_eq!(output.usage.cache_read_tokens, TokenCount::new(100));
+    }
+
+    #[test]
+    fn benchmark_tool_call_deltas_returns_payload_size() {
+        assert_eq!(benchmark_tool_call_deltas(8, 1024), 1024);
     }
 
     fn test_model() -> Model {
