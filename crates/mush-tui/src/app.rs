@@ -166,7 +166,7 @@ pub struct DisplayToolCall {
     pub batch: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolCallStatus {
     Running,
     Done,
@@ -735,7 +735,7 @@ impl App {
             .iter_mut()
             .find(|t| &t.tool_call_id == tool_call_id)
         {
-            tool.status = status.clone();
+            tool.status = status;
             tool.output = output.map(truncate_output);
             tool.live_output = None;
         }
@@ -2216,5 +2216,12 @@ batch: 1/2 succeeded, 1 failed";
         app.selection_anchor = Some(2);
         app.selected_message = Some(2);
         assert_eq!(app.selection_range(), Some((2, 2)));
+    }
+
+    #[test]
+    fn tool_call_status_is_copy() {
+        let status = ToolCallStatus::Running;
+        let copied = status; // would fail if not Copy
+        assert_eq!(status, copied);
     }
 }

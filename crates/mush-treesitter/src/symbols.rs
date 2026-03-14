@@ -145,8 +145,6 @@ pub fn extract_symbols(
     symbols
 }
 
-
-
 fn symbol_kind_from_capture(capture_name: &str) -> Option<SymbolKind> {
     match capture_name {
         "definition.function" => Some(SymbolKind::Function),
@@ -233,12 +231,21 @@ mod inner {}
         let symbols = parse_and_extract(Language::Rust, source);
         let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
 
-        assert!(names.contains(&"standalone"), "missing standalone: {names:?}");
-        assert!(names.contains(&"public_one"), "missing public_one: {names:?}");
+        assert!(
+            names.contains(&"standalone"),
+            "missing standalone: {names:?}"
+        );
+        assert!(
+            names.contains(&"public_one"),
+            "missing public_one: {names:?}"
+        );
         assert!(names.contains(&"Point"), "missing Point: {names:?}");
         assert!(names.contains(&"Direction"), "missing Direction: {names:?}");
         assert!(names.contains(&"Drawable"), "missing Drawable: {names:?}");
-        assert!(names.contains(&"new"), "missing new (impl method): {names:?}");
+        assert!(
+            names.contains(&"new"),
+            "missing new (impl method): {names:?}"
+        );
         assert!(names.contains(&"MAX"), "missing MAX: {names:?}");
         assert!(names.contains(&"inner"), "missing inner: {names:?}");
 
@@ -456,7 +463,10 @@ function deploy {
         let symbols = parse_and_extract(Language::Nix, source);
         let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
 
-        assert!(names.contains(&"description"), "missing description: {names:?}");
+        assert!(
+            names.contains(&"description"),
+            "missing description: {names:?}"
+        );
         assert!(names.contains(&"inputs"), "missing inputs: {names:?}");
         assert!(names.contains(&"outputs"), "missing outputs: {names:?}");
     }

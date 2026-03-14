@@ -19,7 +19,12 @@ pub fn query_for(language: Language) -> &'static str {
         Language::Bash => BASH,
         Language::Nix => NIX,
         // data formats and markup: no meaningful symbols to extract
-        Language::Json | Language::Toml | Language::Yaml | Language::Markdown | Language::Html | Language::Css => "",
+        Language::Json
+        | Language::Toml
+        | Language::Yaml
+        | Language::Markdown
+        | Language::Html
+        | Language::Css => "",
     }
 }
 

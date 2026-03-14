@@ -211,10 +211,7 @@ mod tests {
             Language::detect(Path::new("index.ts")),
             Some(Language::TypeScript)
         );
-        assert_eq!(
-            Language::detect(Path::new("main.go")),
-            Some(Language::Go)
-        );
+        assert_eq!(Language::detect(Path::new("main.go")), Some(Language::Go));
         assert_eq!(
             Language::detect(Path::new("config.toml")),
             Some(Language::Toml)
@@ -231,10 +228,7 @@ mod tests {
             Language::detect(Path::new("Makefile")),
             Some(Language::Bash)
         );
-        assert_eq!(
-            Language::detect(Path::new(".bashrc")),
-            Some(Language::Bash)
-        );
+        assert_eq!(Language::detect(Path::new(".bashrc")), Some(Language::Bash));
         assert_eq!(
             Language::detect(Path::new("flake.lock")),
             Some(Language::Json)

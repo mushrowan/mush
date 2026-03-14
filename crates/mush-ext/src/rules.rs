@@ -43,9 +43,9 @@ impl RuleIndex {
             }
         }
 
-        let globset = builder.build().unwrap_or_else(|_| {
-            GlobSetBuilder::new().build().unwrap()
-        });
+        let globset = builder
+            .build()
+            .unwrap_or_else(|_| GlobSetBuilder::new().build().unwrap());
         let injected = Mutex::new(vec![false; rules.len()]);
 
         Self {

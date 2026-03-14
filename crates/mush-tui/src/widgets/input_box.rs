@@ -574,8 +574,14 @@ mod tests {
         // top and bottom should be horizontal rules
         let top_row: String = (0..40).map(|x| buf[(x, 0)].symbol().to_string()).collect();
         let bot_row: String = (0..40).map(|x| buf[(x, 2)].symbol().to_string()).collect();
-        assert!(top_row.contains("─"), "top should be horizontal rule: {top_row}");
-        assert!(bot_row.contains("─"), "bottom should be horizontal rule: {bot_row}");
+        assert!(
+            top_row.contains("─"),
+            "top should be horizontal rule: {top_row}"
+        );
+        assert!(
+            bot_row.contains("─"),
+            "bottom should be horizontal rule: {bot_row}"
+        );
         // sides should NOT have │ border characters
         let left_mid = buf[(0, 1)].symbol();
         let right_mid = buf[(39, 1)].symbol();

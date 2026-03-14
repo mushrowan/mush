@@ -21,7 +21,10 @@ use super::{ThinkingPrefsSaver, TuiConfig};
 use crate::slash;
 
 pub(super) enum LoopAction {
+    /// nothing changed, skip redraw
     Continue,
+    /// state changed, redraw needed
+    Redraw,
     Quit,
 }
 
@@ -76,11 +79,11 @@ async fn handle_common_app_event(
                 &app.model_id,
                 app.thinking_level,
             );
-            Some(LoopAction::Continue)
+            Some(LoopAction::Redraw)
         }
         AppEvent::PasteImage => {
             paste_clipboard_image(&mut pane_mgr.focused_mut().app).await;
-            Some(LoopAction::Continue)
+            Some(LoopAction::Redraw)
         }
         AppEvent::SplitPane => {
             fork_pane(
@@ -90,27 +93,27 @@ async fn handle_common_app_event(
                 &deps.tui_config.tool_output_live,
             )
             .await;
-            Some(LoopAction::Continue)
+            Some(LoopAction::Redraw)
         }
         AppEvent::ClosePane => {
             close_focused_pane(pane_mgr, deps.message_bus, deps.file_tracker, deps.cwd).await;
-            Some(LoopAction::Continue)
+            Some(LoopAction::Redraw)
         }
         AppEvent::FocusNextPane => {
             pane_mgr.focus_next();
-            Some(LoopAction::Continue)
+            Some(LoopAction::Redraw)
         }
         AppEvent::FocusPrevPane => {
             pane_mgr.focus_prev();
-            Some(LoopAction::Continue)
+            Some(LoopAction::Redraw)
         }
         AppEvent::FocusPaneByIndex(index) => {
             pane_mgr.focus_index(*index);
-            Some(LoopAction::Continue)
+            Some(LoopAction::Redraw)
         }
         AppEvent::ResizePane(delta) => {
             pane_mgr.resize_focused(*delta);
-            Some(LoopAction::Continue)
+            Some(LoopAction::Redraw)
         }
         _ => None,
     }
@@ -237,7 +240,7 @@ pub(super) async fn handle_idle_terminal_events(
         }
     }
 
-    Ok(LoopAction::Continue)
+    Ok(LoopAction::Redraw)
 }
 
 async fn paste_clipboard_image(app: &mut App) {

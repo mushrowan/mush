@@ -23,7 +23,11 @@ const KNOWN_SERVERS: &[(&str, Language, &[&str])] = &[
     ("rust-analyzer", Language::Rust, &[]),
     ("pyright-langserver", Language::Python, &["--stdio"]),
     ("pylsp", Language::Python, &[]),
-    ("typescript-language-server", Language::TypeScript, &["--stdio"]),
+    (
+        "typescript-language-server",
+        Language::TypeScript,
+        &["--stdio"],
+    ),
     ("tsserver", Language::TypeScript, &[]),
     ("gopls", Language::Go, &[]),
     ("clangd", Language::C, &[]),

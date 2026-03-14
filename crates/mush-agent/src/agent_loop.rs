@@ -665,19 +665,26 @@ async fn execute_tool(tools: &ToolRegistry, tool_call: &ToolCall) -> ToolResult 
     match tools.get(tool_call.name.as_str()) {
         Some(tool) => {
             let limit = tool.output_limit();
-            tracing::debug!(tool = %tool_call.name, resolved = tool.name(), ?limit, "executing tool");
+            tracing::debug!(tool = %tool_call.name, resolved = tool.name(), ?limit, args = %tool_call.arguments, "executing tool");
             let result = tool.execute(tool_call.arguments.clone()).await;
-            let output_bytes: usize = result.content.iter().map(|p| match p {
-                mush_ai::types::ToolResultContentPart::Text(t) => t.text.len(),
-                mush_ai::types::ToolResultContentPart::Image(i) => i.data.len(),
-            }).sum();
+            let output_text: String = result
+                .content
+                .iter()
+                .filter_map(|p| match p {
+                    mush_ai::types::ToolResultContentPart::Text(t) => Some(t.text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
             tracing::debug!(
                 tool = %tool_call.name,
-                output_bytes,
+                output_bytes = output_text.len(),
+                output_lines = output_text.lines().count(),
                 outcome = ?result.outcome,
                 ?limit,
                 "tool finished, applying truncation"
             );
+            tracing::trace!(tool = %tool_call.name, output = %output_text, "tool output content");
             if result.outcome.is_error() {
                 tracing::warn!(tool = %tool_call.name, "tool returned error");
             }

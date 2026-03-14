@@ -342,8 +342,10 @@ pub fn build_skill_documents(skills: &[Skill]) -> Vec<ContextDocument> {
             sections
                 .into_iter()
                 .map(|section| {
-                    let embed_text =
-                        format!("{} ({}): {}\n\n{}", s.name, section.heading, s.description, section.body);
+                    let embed_text = format!(
+                        "{} ({}): {}\n\n{}",
+                        s.name, section.heading, s.description, section.body
+                    );
                     ContextDocument {
                         name: s.name.clone(),
                         description: s.description.clone(),
@@ -498,15 +500,19 @@ pub fn route_matches(
     let (tools, skills): (Vec<&ContextMatch>, Vec<&ContextMatch>) =
         matches.iter().partition(|m| m.kind == DocumentKind::Tool);
 
-    let (auto_load, hint_only): (Vec<&ContextMatch>, Vec<&ContextMatch>) =
-        skills.into_iter().partition(|m| m.score >= auto_load_threshold);
+    let (auto_load, hint_only): (Vec<&ContextMatch>, Vec<&ContextMatch>) = skills
+        .into_iter()
+        .partition(|m| m.score >= auto_load_threshold);
 
     let mut parts = Vec::new();
 
     if !auto_load.is_empty() {
         let mut out = String::from("[Auto-loaded skill instructions]\n");
         for m in &auto_load {
-            out.push_str(&format!("\n## {}\n{}\n\n{}\n", m.name, m.description, m.content));
+            out.push_str(&format!(
+                "\n## {}\n{}\n\n{}\n",
+                m.name, m.description, m.content
+            ));
         }
         parts.push(out);
     }
@@ -563,7 +569,11 @@ pub fn deduplicate_matches(matches: Vec<ContextMatch>) -> Vec<ContextMatch> {
     }
 
     let mut results: Vec<ContextMatch> = best_by_path.into_values().chain(pathless).collect();
-    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     results
 }
 
@@ -631,7 +641,10 @@ mod tests {
 
     #[test]
     fn default_model_is_coderank() {
-        assert_eq!(EmbeddingModelChoice::default(), EmbeddingModelChoice::CodeRankEmbed);
+        assert_eq!(
+            EmbeddingModelChoice::default(),
+            EmbeddingModelChoice::CodeRankEmbed
+        );
     }
 
     #[test]
@@ -820,7 +833,10 @@ mod tests {
         let routed = route_matches(&matches, 0.5, true);
         assert!(routed.contains("use cargo"), "skill content auto-loaded");
         assert!(routed.contains("mcp_git_commit"), "tool name in hint");
-        assert!(routed.contains("mcp_get_schemas"), "tool hint directs to schemas");
+        assert!(
+            routed.contains("mcp_get_schemas"),
+            "tool hint directs to schemas"
+        );
     }
 
     #[test]
@@ -960,7 +976,8 @@ pub fn run() {
         let docs = chunk_file_for_embedding(&path);
         assert!(!docs.is_empty(), "should produce chunks");
         assert!(
-            docs.iter().any(|d| d.name.contains("Config") || d.name.contains("run")),
+            docs.iter()
+                .any(|d| d.name.contains("Config") || d.name.contains("run")),
             "chunks should reference symbols: {:?}",
             docs.iter().map(|d| &d.name).collect::<Vec<_>>()
         );
@@ -1138,24 +1155,66 @@ pub fn run() {
             ("write", "create or overwrite a file with new content"),
             ("edit", "replace exact text in a file with new text"),
             ("bash", "execute a shell command and return stdout/stderr"),
-            ("web_search", "search the web and return results with titles and snippets"),
-            ("web_fetch", "fetch a URL and return its content as markdown or text"),
-            ("lsp_diagnostics", "get compiler errors and warnings from the language server"),
-            ("delegate_task", "spawn a sub-agent pane to work on a task independently"),
+            (
+                "web_search",
+                "search the web and return results with titles and snippets",
+            ),
+            (
+                "web_fetch",
+                "fetch a URL and return its content as markdown or text",
+            ),
+            (
+                "lsp_diagnostics",
+                "get compiler errors and warnings from the language server",
+            ),
+            (
+                "delegate_task",
+                "spawn a sub-agent pane to work on a task independently",
+            ),
             ("send_message", "send a message to another agent pane"),
-            ("read_state", "read from shared key-value state across panes"),
-            ("write_state", "write to shared key-value state across panes"),
+            (
+                "read_state",
+                "read from shared key-value state across panes",
+            ),
+            (
+                "write_state",
+                "write to shared key-value state across panes",
+            ),
         ];
 
         let skills: Vec<(&str, &str)> = vec![
-            ("jj", "jujutsu version control system reference and workflows"),
-            ("nix", "nix, nixos, and flake conventions and best practices"),
-            ("rust-idioms", "rust idioms, antipatterns, type-driven design, async patterns"),
-            ("nix-docker", "building docker/OCI images with nix dockerTools"),
-            ("azure-devops", "azure devops CLI for repos, pipelines, boards, PRs"),
-            ("pr-draft", "draft a pull request description respecting repo guidelines"),
-            ("remote-rebuild", "build and deploy nixos configurations to remote hosts"),
-            ("email-tidy", "organise and clean up protonmail inbox via himalaya CLI"),
+            (
+                "jj",
+                "jujutsu version control system reference and workflows",
+            ),
+            (
+                "nix",
+                "nix, nixos, and flake conventions and best practices",
+            ),
+            (
+                "rust-idioms",
+                "rust idioms, antipatterns, type-driven design, async patterns",
+            ),
+            (
+                "nix-docker",
+                "building docker/OCI images with nix dockerTools",
+            ),
+            (
+                "azure-devops",
+                "azure devops CLI for repos, pipelines, boards, PRs",
+            ),
+            (
+                "pr-draft",
+                "draft a pull request description respecting repo guidelines",
+            ),
+            (
+                "remote-rebuild",
+                "build and deploy nixos configurations to remote hosts",
+            ),
+            (
+                "email-tidy",
+                "organise and clean up protonmail inbox via himalaya CLI",
+            ),
         ];
 
         let mut docs = Vec::new();
@@ -1307,14 +1366,16 @@ pub fn run() {
     #[ignore]
     fn bench_lazy_vs_eager_tokens() {
         let docs = bench_documents();
-        let index =
-            ContextIndex::build_with_model(docs, EmbeddingModelChoice::CodeRankEmbed)
-                .expect("failed to build index");
+        let index = ContextIndex::build_with_model(docs, EmbeddingModelChoice::CodeRankEmbed)
+            .expect("failed to build index");
 
         let cases = bench_cases();
 
         eprintln!("\n=== lazy vs eager token usage ===");
-        eprintln!("{:50} {:>10} {:>10} {:>7}", "query", "eager", "lazy", "saved");
+        eprintln!(
+            "{:50} {:>10} {:>10} {:>7}",
+            "query", "eager", "lazy", "saved"
+        );
         eprintln!("{}", "-".repeat(80));
 
         let mut total_eager = 0usize;

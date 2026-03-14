@@ -38,7 +38,11 @@ pub enum TaskError {
     #[error("task '{task}' not found")]
     NotFound { task: String },
     #[error("task '{task}' owned by agent '{owner}', not '{requester}'")]
-    NotOwner { task: String, owner: String, requester: String },
+    NotOwner {
+        task: String,
+        owner: String,
+        requester: String,
+    },
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -65,8 +69,7 @@ impl TaskStore {
             });
         }
 
-        let json = serde_json::to_string_pretty(lock)
-            .expect("TaskLock is always serialisable");
+        let json = serde_json::to_string_pretty(lock).expect("TaskLock is always serialisable");
         std::fs::write(&path, json)?;
         Ok(())
     }
@@ -74,9 +77,9 @@ impl TaskStore {
     /// release a task. only the owning agent can release it
     pub fn release(&self, task_id: &str, agent: &str) -> Result<(), TaskError> {
         let path = self.lock_path(task_id);
-        let existing = self
-            .read_lock(&path)?
-            .ok_or_else(|| TaskError::NotFound { task: task_id.to_string() })?;
+        let existing = self.read_lock(&path)?.ok_or_else(|| TaskError::NotFound {
+            task: task_id.to_string(),
+        })?;
 
         if existing.agent != agent {
             return Err(TaskError::NotOwner {

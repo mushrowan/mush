@@ -306,7 +306,12 @@ impl AgentTool for McpCallToolTool {
             };
 
             let Some((server, tool_name, conn)) = self.index.find_connection(&args.name) else {
-                let available: Vec<_> = self.index.tools.iter().map(|t| t.full_name.as_str()).collect();
+                let available: Vec<_> = self
+                    .index
+                    .tools
+                    .iter()
+                    .map(|t| t.full_name.as_str())
+                    .collect();
                 return ToolResult::error(format!(
                     "tool '{}' not found. available: {}",
                     args.name,
@@ -320,18 +325,14 @@ impl AgentTool for McpCallToolTool {
 
             match conn.call_tool(tool_name.to_string(), args.arguments).await {
                 Ok(result) => crate::result::convert_call_result(result),
-                Err(e) => ToolResult::error(format!(
-                    "MCP call {tool_name} on {server}: {e}"
-                )),
+                Err(e) => ToolResult::error(format!("MCP call {tool_name} on {server}: {e}")),
             }
         })
     }
 }
 
 /// create the three dynamic MCP meta-tools
-pub fn dynamic_mcp_tools(
-    connections: &[(String, Arc<McpConnection>)],
-) -> Vec<Arc<dyn AgentTool>> {
+pub fn dynamic_mcp_tools(connections: &[(String, Arc<McpConnection>)]) -> Vec<Arc<dyn AgentTool>> {
     let index: SharedIndex = Arc::new(McpToolIndex::new(connections));
     vec![
         Arc::new(McpListToolsTool::new(Arc::clone(&index))),
@@ -369,9 +370,7 @@ mod tests {
     #[tokio::test]
     async fn call_tool_not_found() {
         let tool = McpCallToolTool::new(empty_index());
-        let result = tool
-            .execute(serde_json::json!({"name": "missing"}))
-            .await;
+        let result = tool.execute(serde_json::json!({"name": "missing"})).await;
         assert!(result.outcome.is_error());
         assert!(extract_text(&result).contains("not found"));
     }

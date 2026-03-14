@@ -299,7 +299,9 @@ mod tests {
     #[tokio::test]
     async fn run_successful_hook() {
         let hooks = post_hooks(vec![hook("*", "echo hello")]);
-        let results = hooks.run_for_tool(HookPoint::PostToolUse, "edit", None).await;
+        let results = hooks
+            .run_for_tool(HookPoint::PostToolUse, "edit", None)
+            .await;
         assert_eq!(results.len(), 1);
         assert!(results[0].success);
         assert!(!results[0].blocking);
@@ -309,7 +311,9 @@ mod tests {
     #[tokio::test]
     async fn run_failing_blocking_hook() {
         let hooks = post_hooks(vec![blocking_hook("*", "exit 1")]);
-        let results = hooks.run_for_tool(HookPoint::PostToolUse, "edit", None).await;
+        let results = hooks
+            .run_for_tool(HookPoint::PostToolUse, "edit", None)
+            .await;
         assert!(!results[0].success);
         assert!(results[0].blocking);
         assert!(has_blocking_failure(&results));
@@ -318,7 +322,9 @@ mod tests {
     #[tokio::test]
     async fn non_blocking_failure_does_not_block() {
         let hooks = post_hooks(vec![hook("*", "exit 1")]);
-        let results = hooks.run_for_tool(HookPoint::PostToolUse, "edit", None).await;
+        let results = hooks
+            .run_for_tool(HookPoint::PostToolUse, "edit", None)
+            .await;
         assert!(!results[0].success);
         assert!(!has_blocking_failure(&results));
     }
@@ -329,7 +335,9 @@ mod tests {
             timeout: Duration::from_millis(100),
             ..hook("*", "sleep 10")
         }]);
-        let results = hooks.run_for_tool(HookPoint::PostToolUse, "edit", None).await;
+        let results = hooks
+            .run_for_tool(HookPoint::PostToolUse, "edit", None)
+            .await;
         assert!(!results[0].success);
         assert!(results[0].output.contains("timed out"));
     }
@@ -338,10 +346,14 @@ mod tests {
     async fn hook_skips_non_matching_tools() {
         let hooks = post_hooks(vec![hook("edit|write", "echo matched")]);
 
-        let results = hooks.run_for_tool(HookPoint::PostToolUse, "bash", None).await;
+        let results = hooks
+            .run_for_tool(HookPoint::PostToolUse, "bash", None)
+            .await;
         assert!(results.is_empty());
 
-        let results = hooks.run_for_tool(HookPoint::PostToolUse, "edit", None).await;
+        let results = hooks
+            .run_for_tool(HookPoint::PostToolUse, "edit", None)
+            .await;
         assert_eq!(results.len(), 1);
     }
 
@@ -392,7 +404,9 @@ mod tests {
     #[tokio::test]
     async fn hook_captures_stderr() {
         let hooks = post_hooks(vec![hook("*", "echo error >&2")]);
-        let results = hooks.run_for_tool(HookPoint::PostToolUse, "edit", None).await;
+        let results = hooks
+            .run_for_tool(HookPoint::PostToolUse, "edit", None)
+            .await;
         assert!(results[0].output.contains("error"));
     }
 
@@ -436,7 +450,11 @@ mod tests {
     async fn hook_with_cwd() {
         let hooks = post_hooks(vec![hook("*", "pwd")]);
         let results = hooks
-            .run_for_tool(HookPoint::PostToolUse, "edit", Some(std::path::Path::new("/tmp")))
+            .run_for_tool(
+                HookPoint::PostToolUse,
+                "edit",
+                Some(std::path::Path::new("/tmp")),
+            )
             .await;
         assert!(results[0].success);
         assert!(results[0].output.contains("tmp"));

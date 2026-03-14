@@ -14,7 +14,7 @@ use super::OAuthError;
 
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const BETA_HEADER: &str = "oauth-2025-04-20";
-const MIN_POLL_INTERVAL: Duration = Duration::from_secs(60);
+const MIN_POLL_INTERVAL: Duration = Duration::from_secs(180);
 
 /// a single usage window (5-hour or 7-day)
 #[derive(Debug, Clone)]
@@ -98,6 +98,7 @@ impl UsagePoller {
 
         match self.fetch().await {
             Ok(usage) => {
+                tracing::debug!("usage fetch succeeded");
                 if let Ok(mut cache) = self.cached.lock() {
                     *cache = Some(CachedResult::Ok {
                         data: usage.clone(),
@@ -106,7 +107,8 @@ impl UsagePoller {
                 }
                 Some(usage)
             }
-            Err(_) => {
+            Err(ref e) => {
+                tracing::debug!(%e, "usage fetch failed");
                 // cache the error so we don't retry every second
                 if let Ok(mut cache) = self.cached.lock() {
                     // preserve stale data if we had it
@@ -155,7 +157,17 @@ impl UsagePoller {
 
         if !response.status().is_success() {
             let status = response.status();
+            let retry_after = response
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<u64>().ok());
             let text = response.text().await.unwrap_or_default();
+            tracing::debug!(
+                %status,
+                ?retry_after,
+                "usage api error"
+            );
             return Err(OAuthError::TokenExchange(format!(
                 "usage api returned {status}: {text}"
             )));

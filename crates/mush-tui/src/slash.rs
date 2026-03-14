@@ -368,9 +368,7 @@ pub fn handle(
             }
             None
         }
-        SlashAction::TaskClaim { .. }
-        | SlashAction::TaskRelease { .. }
-        | SlashAction::TaskList => {
+        SlashAction::TaskClaim { .. } | SlashAction::TaskRelease { .. } | SlashAction::TaskList => {
             handle_task(app, &tui_config.cwd, action);
             None
         }
@@ -784,7 +782,16 @@ pub async fn handle_fork_compact(
     }
 
     app.status = Some("fork-compacting...".into());
-    let result = fork_and_compact(conversation, "forked", model, options, registry, lifecycle_hooks, cwd).await;
+    let result = fork_and_compact(
+        conversation,
+        "forked",
+        model,
+        options,
+        registry,
+        lifecycle_hooks,
+        cwd,
+    )
+    .await;
     match result {
         Some((after, tokens_before, tokens_after)) => {
             rebuild_display(app, &conversation.context());
@@ -853,9 +860,7 @@ pub async fn run_compaction(
             .join("\n");
         if !output.is_empty() {
             compacted.push(Message::User(UserMessage {
-                content: UserContent::Text(format!(
-                    "[post-compaction hook output]\n{output}"
-                )),
+                content: UserContent::Text(format!("[post-compaction hook output]\n{output}")),
                 timestamp_ms: Timestamp::now(),
             }));
         }
@@ -867,7 +872,12 @@ pub async fn run_compaction(
     }
 
     let tokens_after = compact::estimate_tokens(&compacted);
-    (compacted, tokens_before, tokens_after, result.summarised_count)
+    (
+        compacted,
+        tokens_before,
+        tokens_after,
+        result.summarised_count,
+    )
 }
 
 #[cfg(test)]

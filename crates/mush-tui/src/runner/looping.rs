@@ -140,7 +140,7 @@ async fn handle_streaming_iteration(
         }
     }
 
-    Ok(LoopAction::Continue)
+    Ok(LoopAction::Redraw)
 }
 
 async fn handle_idle_iteration(

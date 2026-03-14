@@ -129,9 +129,7 @@ pub fn mask_observations(
                 line_count, tr.tool_name
             );
 
-            tr.content = vec![ToolResultContentPart::Text(TextContent {
-                text: summary,
-            })];
+            tr.content = vec![ToolResultContentPart::Text(TextContent { text: summary })];
 
             let new_tokens = estimate_message_tokens(&Message::ToolResult(tr.clone()));
             tokens_saved += old_tokens.saturating_sub(new_tokens);
@@ -408,7 +406,14 @@ pub async fn auto_compact(
     }
 
     // step 2: LLM summarisation
-    let result = llm_compact(messages, registry, model, options, Some(DEFAULT_KEEP_RECENT)).await;
+    let result = llm_compact(
+        messages,
+        registry,
+        model,
+        options,
+        Some(DEFAULT_KEEP_RECENT),
+    )
+    .await;
 
     AutoCompactResult {
         messages: result.messages,
@@ -761,7 +766,11 @@ mod tests {
         let estimated = estimate_tokens(&msgs);
         let context_window = TokenCount::new((estimated * 100 / 96) as u64); // just barely over 95%
         assert!(
-            needs_compaction_at(TokenCount::new(estimated as u64), context_window, msgs.len()),
+            needs_compaction_at(
+                TokenCount::new(estimated as u64),
+                context_window,
+                msgs.len()
+            ),
             "should need compaction: {estimated} tokens",
         );
 
@@ -772,7 +781,11 @@ mod tests {
         // right after compaction, shouldn't need it again
         let post_estimated = estimate_tokens(&msgs);
         assert!(
-            !needs_compaction_at(TokenCount::new(post_estimated as u64), context_window, msgs.len()),
+            !needs_compaction_at(
+                TokenCount::new(post_estimated as u64),
+                context_window,
+                msgs.len()
+            ),
             "shouldn't need compaction right after: {post_estimated} tokens in {} msgs",
             msgs.len(),
         );
@@ -884,7 +897,10 @@ mod tests {
     #[test]
     fn mask_observations_basic() {
         // 3 turns: old tool result should be masked, recent two kept
-        let big_output = (0..50).map(|i| format!("line {i}: some output text here")).collect::<Vec<_>>().join("\n");
+        let big_output = (0..50)
+            .map(|i| format!("line {i}: some output text here"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let mut msgs = vec![
             user_msg("q1"),
             assistant_msg("calling tool"),
@@ -931,10 +947,7 @@ mod tests {
 
     #[test]
     fn mask_observations_nothing_to_mask() {
-        let mut msgs = vec![
-            user_msg("hi"),
-            assistant_msg("hello"),
-        ];
+        let mut msgs = vec![user_msg("hi"), assistant_msg("hello")];
 
         let result = mask_observations(&mut msgs, Some(5));
         assert_eq!(result.masked_count, 0);
@@ -977,14 +990,10 @@ mod tests {
 
         mask_observations(&mut msgs, Some(1));
 
-        if let Message::ToolResult(tr) = &msgs[2] {
-            if let ToolResultContentPart::Text(t) = &tr.content[0] {
-                assert!(
-                    t.text.contains("3 lines"),
-                    "should count lines: {}",
-                    t.text
-                );
-            }
+        if let Message::ToolResult(tr) = &msgs[2]
+            && let ToolResultContentPart::Text(t) = &tr.content[0]
+        {
+            assert!(t.text.contains("3 lines"), "should count lines: {}", t.text);
         }
     }
 
