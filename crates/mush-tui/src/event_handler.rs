@@ -368,14 +368,6 @@ fn mask_observations(messages: &mut [Message]) -> bool {
     changed
 }
 
-#[cfg(test)]
-fn needs_observation_mask(messages: &[Message]) -> bool {
-    messages.iter().any(|msg| match msg {
-        Message::ToolResult(tr) => tool_result_needs_mask(&tr.content),
-        _ => false,
-    })
-}
-
 /// truncate text parts in a tool result, keeping a prefix + size note
 fn mask_tool_result_content(content: &mut [ToolResultContentPart]) -> bool {
     let mut changed = false;
@@ -397,14 +389,6 @@ fn mask_tool_result_content(content: &mut [ToolResultContentPart]) -> bool {
         }
     }
     changed
-}
-
-#[cfg(test)]
-fn tool_result_needs_mask(content: &[ToolResultContentPart]) -> bool {
-    content.iter().any(|part| match part {
-        ToolResultContentPart::Text(text) => text.text.len() > MASK_TRUNCATE_LEN,
-        ToolResultContentPart::Image(_) => true,
-    })
 }
 
 /// slim down a conversation for a forked pane.

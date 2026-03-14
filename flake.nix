@@ -64,12 +64,12 @@
 
         craneOutputs = import ./nix/package.nix {
           inherit craneLib src;
-          inherit (pkgs) ripgrep fd onnxruntime pkg-config openssl;
+          inherit (pkgs) ripgrep fd onnxruntime pkg-config openssl cacert;
         };
 
         craneOutputsWithEmbeddings = import ./nix/package.nix {
           inherit craneLib src;
-          inherit (pkgs) ripgrep fd onnxruntime pkg-config openssl;
+          inherit (pkgs) ripgrep fd onnxruntime pkg-config openssl cacert;
           enableEmbeddings = true;
         };
       in {
@@ -78,6 +78,7 @@
         packages.debug = pkgs.writeShellScriptBin "mush-debug" ''
           export RUST_LOG=''${RUST_LOG:-warn,mush_agent=debug,mush_ai=debug,mush_tools=debug,mush_tui=debug,mush_cli=debug,mush_ext=debug,mush_session=debug,mush_lsp=debug,mush_mcp=debug,mush_treesitter=debug}
           echo "logging to ''${XDG_DATA_HOME:-$HOME/.local/share}/mush/mush.log" >&2
+          echo "set RUST_LOG=...,mush_agent=trace,mush_ai=trace for full request/response bodies" >&2
           exec ${craneOutputs.package}/bin/mush "$@"
         '';
 

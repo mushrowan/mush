@@ -169,11 +169,13 @@ pub(super) async fn fork_pane(
                         });
                     let use_patch = mush_tools::uses_patch_tool(&model_id);
                     let skip_batch = mush_tools::supports_native_parallel_calls(&model_id);
+                    let pane_http = tui_config.http_client.clone().unwrap_or_default();
                     let pane_tools = mush_tools::builtin_tools_with_options(
                         info.path.clone(),
                         sink,
                         use_patch,
                         skip_batch,
+                        pane_http,
                     );
                     new_pane.tools = Some(pane_tools);
                     new_pane.cwd_override = Some(info.path.clone());
@@ -326,10 +328,7 @@ fn app_from_parent(parent: &crate::pane::Pane, tui_config: &TuiConfig) -> App {
 
 /// resolve a model spec: check tier map first, fall back to literal model id
 fn resolve_model_tier(spec: &str, tiers: &std::collections::HashMap<String, String>) -> String {
-    tiers
-        .get(spec)
-        .cloned()
-        .unwrap_or_else(|| spec.to_string())
+    tiers.get(spec).cloned().unwrap_or_else(|| spec.to_string())
 }
 
 fn truncate_label(s: &str) -> String {
@@ -451,7 +450,10 @@ mod tests {
         tiers.insert("fast".into(), "claude-haiku-3-5-20241022".into());
         tiers.insert("strong".into(), "claude-opus-4-6".into());
 
-        assert_eq!(resolve_model_tier("fast", &tiers), "claude-haiku-3-5-20241022");
+        assert_eq!(
+            resolve_model_tier("fast", &tiers),
+            "claude-haiku-3-5-20241022"
+        );
         assert_eq!(resolve_model_tier("strong", &tiers), "claude-opus-4-6");
     }
 

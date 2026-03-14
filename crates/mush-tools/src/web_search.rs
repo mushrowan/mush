@@ -38,17 +38,13 @@ const fn default_num_results() -> u32 {
     DEFAULT_NUM_RESULTS
 }
 
-pub struct WebSearchTool;
-
-impl Default for WebSearchTool {
-    fn default() -> Self {
-        Self
-    }
+pub struct WebSearchTool {
+    client: reqwest::Client,
 }
 
 impl WebSearchTool {
-    pub fn new() -> Self {
-        Self
+    pub fn new(client: reqwest::Client) -> Self {
+        Self { client }
     }
 }
 
@@ -133,8 +129,8 @@ impl AgentTool for WebSearchTool {
                 }
             });
 
-            let client = reqwest::Client::new();
-            let response = match client
+            let response = match self
+                .client
                 .post(EXA_MCP_URL)
                 .header("accept", "application/json, text/event-stream")
                 .header("content-type", "application/json")
@@ -204,7 +200,7 @@ mod tests {
 
     #[test]
     fn schema_has_required_query() {
-        let tool = WebSearchTool::new();
+        let tool = WebSearchTool::new(reqwest::Client::new());
         let schema = tool.parameters_schema();
         let required = schema["required"].as_array().unwrap();
         assert!(required.iter().any(|v| v == "query"));

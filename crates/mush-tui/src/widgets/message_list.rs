@@ -302,13 +302,17 @@ fn render_message(
         }
     } else if is_user {
         let w = width as usize;
+        // 1-space indent, so content wraps within w-1 chars
+        let content_width = w.saturating_sub(1);
         // blank padding line above
         lines.push(Line::from(Span::styled(" ".repeat(w), user_bg)));
         for line in msg.content.lines() {
-            let text = format!(" {line}");
-            let pad = w.saturating_sub(text.len());
-            let padded = format!("{text}{}", " ".repeat(pad));
-            lines.push(Line::from(Span::styled(padded, user_bg)));
+            for wrapped in wrap_text(line, content_width) {
+                let text = format!(" {wrapped}");
+                let pad = w.saturating_sub(text.chars().count());
+                let padded = format!("{text}{}", " ".repeat(pad));
+                lines.push(Line::from(Span::styled(padded, user_bg)));
+            }
         }
         // blank padding line below
         lines.push(Line::from(Span::styled(" ".repeat(w), user_bg)));

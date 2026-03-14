@@ -19,7 +19,6 @@ urlencoding.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
 miette.workspace = true
-tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

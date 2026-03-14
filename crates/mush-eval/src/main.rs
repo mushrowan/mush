@@ -33,8 +33,14 @@ fn skill_base() -> PathBuf {
 
 #[derive(Clone)]
 enum Backend {
-    Anthropic { model_id: String },
-    OpenAICompat { label: String, model_id: String, url: String },
+    Anthropic {
+        model_id: String,
+    },
+    OpenAICompat {
+        label: String,
+        model_id: String,
+        url: String,
+    },
 }
 
 impl Backend {
@@ -61,7 +67,11 @@ impl Backend {
                 Provider::Anthropic,
                 BaseUrl::new("https://api.anthropic.com"),
             ),
-            Self::OpenAICompat { model_id, url, label } => (
+            Self::OpenAICompat {
+                model_id,
+                url,
+                label,
+            } => (
                 model_id.clone(),
                 Api::OpenaiCompletions,
                 Provider::Custom(label.clone()),
@@ -226,10 +236,7 @@ fn load_skill_tool() -> ToolDefinition {
     }
 }
 
-fn handle_load_skill(
-    tool_input: &serde_json::Value,
-    skill_map: &HashMap<String, Skill>,
-) -> String {
+fn handle_load_skill(tool_input: &serde_json::Value, skill_map: &HashMap<String, Skill>) -> String {
     let name = tool_input
         .get("name")
         .and_then(|v| v.as_str())
@@ -575,15 +582,15 @@ async fn run_eval(
                 .handle_tool_call(&tc.name, &tc.arguments, skills)
                 .unwrap_or_else(|| "unknown tool".into());
 
-            context.messages.push(Message::ToolResult(ToolResultMessage {
-                tool_call_id: tc.id.clone(),
-                tool_name: tc.name.clone(),
-                content: vec![ToolResultContentPart::Text(TextContent {
-                    text: result,
-                })],
-                outcome: ToolOutcome::Success,
-                timestamp_ms: Timestamp::now(),
-            }));
+            context
+                .messages
+                .push(Message::ToolResult(ToolResultMessage {
+                    tool_call_id: tc.id.clone(),
+                    tool_name: tc.name.clone(),
+                    content: vec![ToolResultContentPart::Text(TextContent { text: result })],
+                    outcome: ToolOutcome::Success,
+                    timestamp_ms: Timestamp::now(),
+                }));
         }
     }
 
@@ -778,8 +785,9 @@ async fn main() {
     );
 
     // set up provider registry
+    let http_client = reqwest::Client::new();
     let mut registry = ApiRegistry::new();
-    providers::register_builtins(&mut registry);
+    providers::register_builtins(&mut registry, http_client);
 
     let model = backend.to_model();
 
@@ -818,10 +826,8 @@ async fn main() {
         })
         .collect();
 
-    let skill_map: HashMap<String, Skill> = skills
-        .iter()
-        .map(|s| (s.name.clone(), s.clone()))
-        .collect();
+    let skill_map: HashMap<String, Skill> =
+        skills.iter().map(|s| (s.name.clone(), s.clone())).collect();
 
     let index1 = mush_ext::context::ContextIndex::build(docs.clone())
         .expect("failed to build embedding index");
@@ -876,8 +882,15 @@ async fn main() {
     for problem in &problems {
         eprintln!("--- {} ---", problem.id);
         for strategy in &strategies {
-            let result =
-                run_eval(&registry, &model, &options, strategy.as_ref(), problem, &skills).await;
+            let result = run_eval(
+                &registry,
+                &model,
+                &options,
+                strategy.as_ref(),
+                problem,
+                &skills,
+            )
+            .await;
             let status = if result.passed { "✓" } else { "✗" };
             let in_tok = result.usage.input_tokens.get();
             let out_tok = result.usage.output_tokens.get();
@@ -939,8 +952,7 @@ async fn main() {
             total,
             passed as f64 / total as f64 * 100.0
         );
-        let avg_ms: u64 =
-            strat_results.iter().map(|r| r.latency_ms).sum::<u64>() / total as u64;
+        let avg_ms: u64 = strat_results.iter().map(|r| r.latency_ms).sum::<u64>() / total as u64;
         let total_in: u64 = strat_results
             .iter()
             .map(|r| r.usage.input_tokens.get())

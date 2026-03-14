@@ -66,7 +66,9 @@ fn from_claude_code_name(name: &str, tools: &[ToolDefinition]) -> String {
         .unwrap_or_else(|| name.to_string())
 }
 
-pub struct AnthropicProvider;
+pub struct AnthropicProvider {
+    pub client: reqwest::Client,
+}
 
 impl ApiProvider for AnthropicProvider {
     fn api(&self) -> Api {
@@ -79,6 +81,7 @@ impl ApiProvider for AnthropicProvider {
         let system_prompt = context.system_prompt.clone();
         let tools = context.tools.clone();
         let options = options.clone();
+        let client = self.client.clone();
 
         Box::pin(async move {
             let api_key = options
@@ -88,7 +91,6 @@ impl ApiProvider for AnthropicProvider {
                 .ok_or_else(|| ProviderError::MissingApiKey(Provider::Anthropic))?;
 
             let is_oauth = api_key.is_oauth_token();
-            let client = reqwest::Client::new();
 
             let body = build_request_body(
                 &model,
@@ -97,6 +99,11 @@ impl ApiProvider for AnthropicProvider {
                 &tools,
                 &options,
                 is_oauth,
+            );
+
+            tracing::trace!(
+                body = %serde_json::to_string_pretty(&body).unwrap_or_default(),
+                "anthropic request body"
             );
 
             let mut headers = HeaderMap::new();
