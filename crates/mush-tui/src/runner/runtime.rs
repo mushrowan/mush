@@ -168,7 +168,10 @@ impl RunnerRuntime {
                         "prompt cache has gone cold",
                         Some(crate::notify::Sound::Attention),
                     );
-                } else if remaining > 0 && remaining <= 60 && !pane.app.cache.warn_sent {
+                } else if remaining > 0
+                    && remaining <= crate::app::CACHE_WARN_SECS
+                    && !pane.app.cache.warn_sent
+                {
                     pane.app.cache.warn_sent = true;
                     crate::notify::send_with_sound(
                         "cache expiring soon",

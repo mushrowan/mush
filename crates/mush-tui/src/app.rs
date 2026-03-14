@@ -178,6 +178,21 @@ pub struct PendingImage {
 /// each occurrence maps to the Nth entry in pending_images (by order)
 pub const IMAGE_PLACEHOLDER: char = '\u{FFFC}';
 
+/// tick() runs at ~60fps, divide by this to get spinner update rate (~8fps)
+const TICK_DIVISOR: u8 = 8;
+
+/// ticks in one full unread-flash cycle (~1 second at 60fps)
+const UNREAD_FLASH_CYCLE: u8 = 60;
+
+/// ticks the flash indicator stays "on" within each cycle
+const UNREAD_FLASH_ON: u8 = 30;
+
+/// seconds before cache expiry to trigger a warning notification
+pub const CACHE_WARN_SECS: u16 = 60;
+
+/// seconds after cache expires to keep showing "cold" in status bar
+pub const CACHE_COLD_DISPLAY_SECS: u64 = 30;
+
 /// events that flow between the TUI and the agent
 #[derive(Debug, Clone)]
 pub enum AppEvent {
@@ -596,7 +611,7 @@ impl App {
     /// advance the spinner state (throttled to ~8fps from ~60fps frame rate)
     pub fn tick(&mut self) {
         self.tick_count = self.tick_count.wrapping_add(1);
-        if self.tick_count.is_multiple_of(8) {
+        if self.tick_count.is_multiple_of(TICK_DIVISOR) {
             self.throbber_state.calc_next();
         }
         if self.stream.active {
@@ -607,7 +622,7 @@ impl App {
     /// whether the unread flash indicator is in the "on" phase
     /// cycles at ~1hz (30 ticks on, 30 off at ~60fps)
     pub fn unread_flash_on(&self) -> bool {
-        self.tick_count % 60 < 30
+        self.tick_count % UNREAD_FLASH_CYCLE < UNREAD_FLASH_ON
     }
 
     /// whether the agent is currently active (streaming or executing tools)
@@ -2366,5 +2381,31 @@ batch: 1/2 succeeded, 1 failed";
         stream.text.push_str("just text");
         let (_, thinking) = stream.take();
         assert!(thinking.is_none());
+    }
+
+    #[test]
+    fn tick_throttles_spinner() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        let initial = app.throbber_state.clone();
+        // single tick should not advance (throttled)
+        app.tick();
+        // but TICK_DIVISOR ticks should advance
+        for _ in 1..TICK_DIVISOR {
+            app.tick();
+        }
+        assert_ne!(format!("{:?}", app.throbber_state), format!("{initial:?}"));
+    }
+
+    #[test]
+    fn unread_flash_cycle_works() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.has_unread = true;
+        // at tick 0, flash should be on
+        assert!(app.unread_flash_on());
+        // advance past the on-phase
+        for _ in 0..UNREAD_FLASH_ON {
+            app.tick();
+        }
+        assert!(!app.unread_flash_on());
     }
 }

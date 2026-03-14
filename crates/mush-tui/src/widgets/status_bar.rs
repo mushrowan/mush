@@ -118,7 +118,7 @@ fn left_spans(app: &App) -> Vec<Span<'static>> {
             dim
         } else {
             match cache_remaining {
-                Some(r) if r > 60 => Style::default().fg(Color::Green),
+                Some(r) if r > crate::app::CACHE_WARN_SECS => Style::default().fg(Color::Green),
                 Some(r) if r > 0 => Style::default().fg(Color::Yellow),
                 Some(0) => Style::default().fg(Color::DarkGray),
                 _ => dim,
@@ -135,7 +135,7 @@ fn left_spans(app: &App) -> Vec<Span<'static>> {
             Some(0) => {
                 // show "cold" briefly then fade out
                 let elapsed = app.cache.elapsed_secs().unwrap_or(0);
-                if elapsed < (app.cache.ttl_secs as u64) + 30 {
+                if elapsed < (app.cache.ttl_secs as u64) + crate::app::CACHE_COLD_DISPLAY_SECS {
                     " cold".into()
                 } else {
                     String::new()
