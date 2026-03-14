@@ -4,7 +4,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Widget};
+use ratatui::widgets::{Block, Borders, Padding, Paragraph, Widget};
 use unicode_width::UnicodeWidthChar;
 
 use crate::app::App;
@@ -275,7 +275,8 @@ impl Widget for InputBox<'_> {
         };
 
         let block = Block::default()
-            .borders(Borders::ALL)
+            .borders(Borders::TOP | Borders::BOTTOM)
+            .padding(Padding::horizontal(1))
             .border_style(Style::default().fg(border_colour));
 
         if content_width == 0 {
@@ -564,6 +565,22 @@ mod tests {
         let buf = render_input(&app, 40, 3);
         let content = buffer_to_string(&buf);
         assert!(content.contains("> "));
+    }
+
+    #[test]
+    fn input_box_has_no_side_borders() {
+        let app = App::new("test".into(), TokenCount::new(200_000));
+        let buf = render_input(&app, 40, 3);
+        // top and bottom should be horizontal rules
+        let top_row: String = (0..40).map(|x| buf[(x, 0)].symbol().to_string()).collect();
+        let bot_row: String = (0..40).map(|x| buf[(x, 2)].symbol().to_string()).collect();
+        assert!(top_row.contains("─"), "top should be horizontal rule: {top_row}");
+        assert!(bot_row.contains("─"), "bottom should be horizontal rule: {bot_row}");
+        // sides should NOT have │ border characters
+        let left_mid = buf[(0, 1)].symbol();
+        let right_mid = buf[(39, 1)].symbol();
+        assert_ne!(left_mid, "│", "left side should not have border");
+        assert_ne!(right_mid, "│", "right side should not have border");
     }
 
     #[test]
