@@ -13,7 +13,7 @@ ignore = "0.4"
 notify.workspace = true
 
 # grammar crates (all optional, default-enabled)
-tree-sitter-rust = { version = "0.23", optional = true }
+tree-sitter-rust = { version = "0.24", optional = true }
 tree-sitter-python = { version = "0.25", optional = true }
 tree-sitter-javascript = { version = "0.25", optional = true }
 tree-sitter-typescript = { version = "0.23", optional = true }
