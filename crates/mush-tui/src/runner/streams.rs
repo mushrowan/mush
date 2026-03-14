@@ -357,7 +357,7 @@ pub(super) async fn abort_focused_stream(
 ) {
     let focused_id = pane_mgr.focused().id;
     let app = &mut pane_mgr.focused_mut().app;
-    app.is_streaming = false;
+    app.stream.active = false;
     app.active_tools.clear();
     app.status = Some("aborted".into());
 

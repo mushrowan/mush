@@ -169,7 +169,7 @@ pub(super) async fn handle_slash_action(
             for (i, pane) in pane_mgr.panes().iter().enumerate() {
                 let idx = i + 1;
                 let label = pane.label.as_deref().unwrap_or("(unlabelled)");
-                let status = if pane.app.is_streaming {
+                let status = if pane.app.stream.active {
                     "streaming"
                 } else {
                     "idle"

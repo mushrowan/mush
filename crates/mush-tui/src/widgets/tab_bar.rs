@@ -98,7 +98,7 @@ mod tests {
     fn shows_busy_indicator() {
         let mut mgr = PaneManager::new(test_pane(1));
         let mut p2 = test_pane(2);
-        p2.app.is_streaming = true;
+        p2.app.stream.active = true;
         mgr.add_pane(p2);
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);

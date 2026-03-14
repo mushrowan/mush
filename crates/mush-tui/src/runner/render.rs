@@ -138,7 +138,7 @@ pub(super) fn draw_panes(
         if !streaming_idle
             && (focused_app.mode == app::AppMode::Normal
                 || focused_app.mode == app::AppMode::SlashComplete
-                || (focused_app.is_streaming && focused_app.mode != app::AppMode::ToolConfirm))
+                || (focused_app.stream.active && focused_app.mode != app::AppMode::ToolConfirm))
         {
             frame.set_cursor_position((cx, cy));
         }

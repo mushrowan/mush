@@ -47,7 +47,7 @@ impl Widget for MessageList<'_> {
         }
 
         // streaming content
-        if self.app.is_streaming {
+        if self.app.stream.active {
             let dim = Style::default()
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::DIM);
@@ -56,7 +56,7 @@ impl Widget for MessageList<'_> {
                 .use_type(WhichUse::Spin);
             let spinner_span = throbber.to_symbol_span(&self.app.throbber_state);
 
-            if !self.app.streaming_thinking.is_empty()
+            if !self.app.stream.thinking.is_empty()
                 && self.app.thinking_display != crate::app::ThinkingDisplay::Hidden
             {
                 lines.push(Line::from(vec![
@@ -70,7 +70,7 @@ impl Widget for MessageList<'_> {
                 }
                 lines.push(Line::raw(""));
             }
-            if !self.app.streaming_text.is_empty() {
+            if !self.app.stream.text.is_empty() {
                 let visible_text = self.app.visible_streaming_text();
                 let md_text = render_markdown(visible_text);
                 for line in md_text.lines {
@@ -79,7 +79,7 @@ impl Widget for MessageList<'_> {
                     lines.push(Line::from(spans));
                 }
             }
-            if self.app.streaming_text.is_empty() && self.app.streaming_thinking.is_empty() {
+            if self.app.stream.text.is_empty() && self.app.stream.thinking.is_empty() {
                 lines.push(Line::from(vec![
                     Span::raw(" "),
                     spinner_span.clone().style(dim),
@@ -89,13 +89,13 @@ impl Widget for MessageList<'_> {
         }
 
         // streaming tool args (model is building tool call, not yet executing)
-        if self.app.active_tools.is_empty() && !self.app.streaming_tool_args.is_empty() {
+        if self.app.active_tools.is_empty() && !self.app.stream.tool_args.is_empty() {
             let throbber = Throbber::default()
                 .throbber_set(BRAILLE_SIX)
                 .use_type(WhichUse::Spin);
             let spinner_span = throbber.to_symbol_span(&self.app.throbber_state);
             // show a truncated preview of the args being built
-            let preview = truncate_line(&self.app.streaming_tool_args, 60);
+            let preview = truncate_line(&self.app.stream.tool_args, 60);
             lines.push(Line::from(vec![
                 Span::raw(" "),
                 spinner_span.style(Style::default().fg(Color::DarkGray)),
