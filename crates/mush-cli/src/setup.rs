@@ -102,8 +102,8 @@ impl AppSetup {
         // discover project context once for both system prompt and skill tools
         let project_context = loader::discover_project_context(&cwd);
 
-        // register skill tools when lazy loading is configured
-        if !args.no_tools && cfg.retrieval.skill_loading == config::SkillLoading::Lazy {
+        // register skill tools for strategies that use on-demand loading
+        if !args.no_tools && cfg.retrieval.context_strategy.needs_skill_tools() {
             if !project_context.skills.is_empty() {
                 let skill_infos: Vec<mush_tools::skills::SkillInfo> = project_context
                     .skills
@@ -122,7 +122,7 @@ impl AppSetup {
         let system_prompt = args
             .system
             .or(cfg.system_prompt.clone())
-            .unwrap_or_else(|| build_system_prompt_from_context(&project_context, &cwd, cfg.retrieval.skill_loading));
+            .unwrap_or_else(|| build_system_prompt_from_context(&project_context, &cwd, cfg.retrieval.context_strategy));
 
         let thinking_prefs = config::load_thinking_prefs();
         let thinking_level = resolve_thinking(args.thinking, &model, &thinking_prefs, &cfg);
@@ -231,7 +231,7 @@ pub fn format_error(error: &str) -> String {
 fn build_system_prompt_from_context(
     context: &loader::ProjectContext,
     cwd: &std::path::Path,
-    skill_loading: config::SkillLoading,
+    strategy: config::ContextStrategy,
 ) -> String {
     let cwd_str = cwd.display();
     let mut prompt = format!(
@@ -257,10 +257,10 @@ fn build_system_prompt_from_context(
     }
 
     if !context.skills.is_empty() {
-        match skill_loading {
-            config::SkillLoading::Eager => {
+        match strategy {
+            config::ContextStrategy::Prepended => {
                 prompt.push_str(
-                    "\n\nThe following skills provide specialized instructions for specific tasks.\n\
+                    "\n\nThe following skills provide specialised instructions for specific tasks.\n\
                      When a skill is relevant to the request, follow its instructions.\n",
                 );
                 for skill in &context.skills {
@@ -272,11 +272,17 @@ fn build_system_prompt_from_context(
                     }
                 }
             }
-            config::SkillLoading::Lazy => {
+            config::ContextStrategy::Summaries | config::ContextStrategy::Embedded => {
                 prompt.push_str(
                     "\n\nSpecialised skills are available. Use the list_skills tool to \
                      see what's available, then load_skill to read the full instructions \
                      when a task matches a skill's description.\n",
+                );
+            }
+            config::ContextStrategy::EmbedInject => {
+                prompt.push_str(
+                    "\n\nSpecialised skill instructions may be automatically provided \
+                     with your messages when relevant to the task.\n",
                 );
             }
         }
@@ -428,7 +434,7 @@ pub fn build_prompt_enricher(
     retrieval: &config::RetrievalConfig,
     tool_descriptions: &[(String, String)],
 ) -> Option<mush_tui::PromptEnricher> {
-    if !retrieval.embeddings {
+    if !retrieval.context_strategy.needs_embeddings() {
         return None;
     }
     use mush_ext::context;
@@ -477,18 +483,20 @@ pub fn build_prompt_enricher(
         }
     };
 
+    let include_hints = retrieval.context_strategy != config::ContextStrategy::EmbedInject;
+
     let doc_count = docs.len();
     match context::ContextIndex::build_with_model(docs, model_choice) {
         Ok(index) => {
             let index = Arc::new(index);
-            eprintln!("\x1b[2mindexed {doc_count} skills for auto-context ({model_name})\x1b[0m");
+            eprintln!("\x1b[2mindexed {doc_count} documents for auto-context ({model_name})\x1b[0m");
             let threshold = retrieval.auto_load_threshold;
             Some(Arc::new(move |query: &str| {
                 let matches = index.search(query, 3, 0.35);
                 if matches.is_empty() {
                     None
                 } else {
-                    Some(context::route_matches(&matches, threshold))
+                    Some(context::route_matches(&matches, threshold, include_hints))
                 }
             }))
         }

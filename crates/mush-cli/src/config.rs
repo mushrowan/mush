@@ -153,15 +153,37 @@ pub struct LspServerEntry {
     pub args: Vec<String>,
 }
 
-/// how skills are loaded into context
+/// how skills are discovered and injected into context
+///
+/// each strategy trades off token cost vs accuracy vs latency:
+/// - `prepended`: all skills in system prompt (expensive, no latency)
+/// - `summaries`: names + descriptions in prompt, load_skill tool on demand
+/// - `embedded`: embedding hints + load_skill tool (requires embeddings feature)
+/// - `embed_inject`: auto-inject from embeddings, no tools needed (cheapest)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SkillLoading {
-    /// all skills eagerly loaded into system prompt
-    Eager,
-    /// skills loaded on demand via list/describe/load tools
+#[serde(rename_all = "snake_case")]
+pub enum ContextStrategy {
+    /// all skill bodies dumped into the system prompt
+    Prepended,
+    /// names + descriptions listed, load_skill tool for on-demand reading
+    Summaries,
+    /// embedding similarity hints + load_skill tool
+    Embedded,
+    /// embedding auto-injects matched skill content, no tools needed
     #[default]
-    Lazy,
+    EmbedInject,
+}
+
+impl ContextStrategy {
+    /// whether this strategy requires the embeddings feature
+    pub fn needs_embeddings(self) -> bool {
+        matches!(self, Self::Embedded | Self::EmbedInject)
+    }
+
+    /// whether this strategy registers skill tools (list/describe/load)
+    pub fn needs_skill_tools(self) -> bool {
+        matches!(self, Self::Summaries | Self::Embedded)
+    }
 }
 
 /// retrieval tier configuration
@@ -173,12 +195,10 @@ pub enum SkillLoading {
 pub struct RetrievalConfig {
     /// tier 1: tree-sitter repo map in system prompt
     pub repo_map: bool,
-    /// tier 2: embedding-based skill matching per user message
-    pub embeddings: bool,
     /// total token budget for all retrieval context (default 2048)
     pub context_budget: usize,
-    /// how skills are loaded: "lazy" (default) or "eager"
-    pub skill_loading: SkillLoading,
+    /// how skills are discovered and injected
+    pub context_strategy: ContextStrategy,
     /// which embedding model to use: "coderank" (default) or "gemma"
     pub embedding_model: EmbeddingModel,
     /// cosine similarity threshold for auto-loading full skill content (default 0.5)
@@ -194,9 +214,8 @@ impl Default for RetrievalConfig {
     fn default() -> Self {
         Self {
             repo_map: true,
-            embeddings: true,
             context_budget: 2048,
-            skill_loading: SkillLoading::default(),
+            context_strategy: ContextStrategy::default(),
             embedding_model: EmbeddingModel::default(),
             auto_load_threshold: default_auto_load_threshold(),
         }
@@ -605,51 +624,43 @@ blocking = true
     }
 
     #[test]
-    fn retrieval_defaults_all_enabled() {
+    fn retrieval_defaults() {
         let config: Config = toml::from_str("").unwrap();
         assert!(config.retrieval.repo_map);
-        assert!(config.retrieval.embeddings);
         assert_eq!(config.retrieval.context_budget, 2048);
-    }
-
-    #[test]
-    fn retrieval_can_disable_tiers() {
-        let config: Config = toml::from_str(
-            r#"
-[retrieval]
-repo_map = false
-embeddings = false
-context_budget = 4096
-"#,
-        )
-        .unwrap();
-        assert!(!config.retrieval.repo_map);
-        assert!(!config.retrieval.embeddings);
-        assert_eq!(config.retrieval.context_budget, 4096);
-    }
-
-    #[test]
-    fn retrieval_skill_loading_defaults_to_lazy() {
-        let config: Config = toml::from_str("").unwrap();
-        assert_eq!(config.retrieval.skill_loading, SkillLoading::Lazy);
-    }
-
-    #[test]
-    fn retrieval_skill_loading_eager() {
-        let config: Config = toml::from_str(
-            r#"
-[retrieval]
-skill_loading = "eager"
-"#,
-        )
-        .unwrap();
-        assert_eq!(config.retrieval.skill_loading, SkillLoading::Eager);
-    }
-
-    #[test]
-    fn retrieval_embedding_model_defaults_to_coderank() {
-        let config: Config = toml::from_str("").unwrap();
+        assert_eq!(config.retrieval.context_strategy, ContextStrategy::EmbedInject);
         assert_eq!(config.retrieval.embedding_model, EmbeddingModel::Coderank);
+        assert!((config.retrieval.auto_load_threshold - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn retrieval_context_strategy_all_variants() {
+        for (input, expected) in [
+            ("prepended", ContextStrategy::Prepended),
+            ("summaries", ContextStrategy::Summaries),
+            ("embedded", ContextStrategy::Embedded),
+            ("embed_inject", ContextStrategy::EmbedInject),
+        ] {
+            let toml = format!("[retrieval]\ncontext_strategy = \"{input}\"");
+            let config: Config = toml::from_str(&toml).unwrap();
+            assert_eq!(config.retrieval.context_strategy, expected, "failed for {input}");
+        }
+    }
+
+    #[test]
+    fn context_strategy_needs_embeddings() {
+        assert!(!ContextStrategy::Prepended.needs_embeddings());
+        assert!(!ContextStrategy::Summaries.needs_embeddings());
+        assert!(ContextStrategy::Embedded.needs_embeddings());
+        assert!(ContextStrategy::EmbedInject.needs_embeddings());
+    }
+
+    #[test]
+    fn context_strategy_needs_skill_tools() {
+        assert!(!ContextStrategy::Prepended.needs_skill_tools());
+        assert!(ContextStrategy::Summaries.needs_skill_tools());
+        assert!(ContextStrategy::Embedded.needs_skill_tools());
+        assert!(!ContextStrategy::EmbedInject.needs_skill_tools());
     }
 
     #[test]
@@ -662,12 +673,6 @@ embedding_model = "gemma"
         )
         .unwrap();
         assert_eq!(config.retrieval.embedding_model, EmbeddingModel::Gemma);
-    }
-
-    #[test]
-    fn retrieval_auto_load_threshold_defaults() {
-        let config: Config = toml::from_str("").unwrap();
-        assert!((config.retrieval.auto_load_threshold - 0.5).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -687,12 +692,12 @@ auto_load_threshold = 0.7
         let config: Config = toml::from_str(
             r#"
 [retrieval]
-embeddings = false
+context_strategy = "prepended"
 "#,
         )
         .unwrap();
-        assert!(config.retrieval.repo_map); // default true
-        assert!(!config.retrieval.embeddings);
+        assert!(config.retrieval.repo_map); // default
+        assert_eq!(config.retrieval.context_strategy, ContextStrategy::Prepended);
         assert_eq!(config.retrieval.context_budget, 2048); // default
     }
 
