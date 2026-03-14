@@ -3,7 +3,6 @@
 //! supports both direct openai `/responses` and codex subscription
 //! (`chatgpt.com/backend-api/codex/responses`) style endpoints.
 
-use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -637,6 +636,51 @@ struct ActiveBlock {
     block: CurrentBlock,
 }
 
+#[derive(Debug, Default)]
+struct ActiveBlocks {
+    entries: Vec<(u64, ActiveBlock)>,
+}
+
+impl ActiveBlocks {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn insert(&mut self, output_index: u64, block: ActiveBlock) {
+        if let Some((_, active_block)) = self
+            .entries
+            .iter_mut()
+            .find(|(index, _)| *index == output_index)
+        {
+            *active_block = block;
+            return;
+        }
+
+        self.entries.push((output_index, block));
+    }
+
+    fn get_mut(&mut self, output_index: u64) -> Option<&mut ActiveBlock> {
+        self.entries
+            .iter_mut()
+            .find(|(index, _)| *index == output_index)
+            .map(|(_, block)| block)
+    }
+
+    fn remove(&mut self, output_index: u64) -> Option<ActiveBlock> {
+        let entry_index = self
+            .entries
+            .iter()
+            .position(|(index, _)| *index == output_index)?;
+        Some(self.entries.swap_remove(entry_index).1)
+    }
+
+    fn take_sorted(&mut self) -> Vec<ActiveBlock> {
+        let mut remaining = std::mem::take(&mut self.entries);
+        remaining.sort_by_key(|(_, block)| block.content_index);
+        remaining.into_iter().map(|(_, block)| block).collect()
+    }
+}
+
 fn parse_sse_stream(
     response: reqwest::Response,
     model_id: ModelId,
@@ -655,7 +699,7 @@ fn parse_sse_stream(
             timestamp_ms: Timestamp::now(),
         };
 
-        let mut active: HashMap<u64, ActiveBlock> = HashMap::new();
+        let mut active = ActiveBlocks::new();
         let mut parser = super::sse::SseParser::new();
         let mut raw_capture: Vec<u8> = Vec::new();
         const MAX_CAPTURE_BYTES: usize = 128 * 1024;
@@ -772,23 +816,20 @@ fn process_sse_event(
     event_name: Option<&str>,
     json: serde_json::Value,
     output: &mut AssistantMessage,
-    active: &mut HashMap<u64, ActiveBlock>,
+    active: &mut ActiveBlocks,
 ) -> Vec<StreamEvent> {
     let mut events = Vec::new();
 
-    let event_type = event_name.map(str::to_string).or_else(|| {
-        json.get("type")
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
-    });
+    let event_type = event_name.or_else(|| json.get("type").and_then(|value| value.as_str()));
 
     let Some(event_type) = event_type else {
         return events;
     };
 
-    match event_type.as_str() {
+    match event_type {
         "response.output_item.added" => {
-            let item = json.get("item").cloned().unwrap_or_default();
+            let null = serde_json::Value::Null;
+            let item = json.get("item").unwrap_or(&null);
             let output_index = json
                 .get("output_index")
                 .and_then(|v| v.as_u64())
@@ -884,7 +925,7 @@ fn process_sse_event(
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
 
-            if let Some(active_block) = active.get_mut(&output_index)
+            if let Some(active_block) = active.get_mut(output_index)
                 && let CurrentBlock::Text { text } = &mut active_block.block
             {
                 text.push_str(&delta);
@@ -910,7 +951,7 @@ fn process_sse_event(
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
 
-            if let Some(active_block) = active.get_mut(&output_index)
+            if let Some(active_block) = active.get_mut(output_index)
                 && let CurrentBlock::Thinking { text } = &mut active_block.block
             {
                 text.push_str(&delta);
@@ -937,7 +978,7 @@ fn process_sse_event(
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
 
-            if let Some(active_block) = active.get_mut(&output_index)
+            if let Some(active_block) = active.get_mut(output_index)
                 && let CurrentBlock::ToolCall { args_buf, .. } = &mut active_block.block
             {
                 args_buf.push_str(&delta);
@@ -952,7 +993,7 @@ fn process_sse_event(
                 .get("output_index")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
-            if let Some(active_block) = active.remove(&output_index) {
+            if let Some(active_block) = active.remove(output_index) {
                 let item = json.get("item");
                 finish_block(item, active_block, output, &mut events);
             }
@@ -1103,11 +1144,8 @@ fn finish_block(
     }
 }
 
-fn finish_all_blocks(active: &mut HashMap<u64, ActiveBlock>, output: &mut AssistantMessage) {
-    let mut remaining = active.drain().map(|(_, block)| block).collect::<Vec<_>>();
-    remaining.sort_by_key(|b| b.content_index);
-
-    for block in remaining {
+fn finish_all_blocks(active: &mut ActiveBlocks, output: &mut AssistantMessage) {
+    for block in active.take_sorted() {
         let mut sink = Vec::new();
         finish_block(None, block, output, &mut sink);
     }
@@ -1137,7 +1175,7 @@ pub fn benchmark_tool_call_deltas(chunk_count: usize, arg_bytes: usize) -> usize
         error_message: None,
         timestamp_ms: Timestamp::zero(),
     };
-    let mut active = HashMap::new();
+    let mut active = ActiveBlocks::new();
 
     let first = fragments
         .first()
@@ -1334,7 +1372,7 @@ mod tests {
             error_message: None,
             timestamp_ms: Timestamp::zero(),
         };
-        let mut active = std::collections::HashMap::new();
+        let mut active = ActiveBlocks::new();
 
         let start = process_sse_event(
             Some("response.output_item.added"),
@@ -1409,6 +1447,90 @@ mod tests {
     #[test]
     fn benchmark_tool_call_deltas_returns_payload_size() {
         assert_eq!(benchmark_tool_call_deltas(8, 1024), 1024);
+    }
+
+    #[test]
+    fn active_blocks_replace_existing_output_index() {
+        let mut active = ActiveBlocks::new();
+        active.insert(
+            7,
+            ActiveBlock {
+                content_index: 0,
+                block: CurrentBlock::Text {
+                    text: "first".into(),
+                },
+            },
+        );
+        active.insert(
+            7,
+            ActiveBlock {
+                content_index: 1,
+                block: CurrentBlock::Text {
+                    text: "second".into(),
+                },
+            },
+        );
+
+        let Some(block) = active.remove(7) else {
+            panic!("expected active block")
+        };
+        assert_eq!(block.content_index, 1);
+    }
+
+    #[test]
+    fn finish_all_blocks_keeps_content_order_with_sparse_indexes() {
+        let mut output = AssistantMessage {
+            content: vec![
+                AssistantContentPart::Thinking(ThinkingContent::Thinking {
+                    thinking: String::new(),
+                    signature: None,
+                }),
+                AssistantContentPart::Text(TextContent {
+                    text: String::new(),
+                }),
+            ],
+            model: "test".into(),
+            provider: Provider::Custom("test".into()),
+            api: Api::OpenaiResponses,
+            usage: Usage::default(),
+            stop_reason: StopReason::Stop,
+            error_message: None,
+            timestamp_ms: Timestamp::zero(),
+        };
+        let mut active = ActiveBlocks::new();
+        active.insert(
+            42,
+            ActiveBlock {
+                content_index: 1,
+                block: CurrentBlock::Text {
+                    text: "hello".into(),
+                },
+            },
+        );
+        active.insert(
+            3,
+            ActiveBlock {
+                content_index: 0,
+                block: CurrentBlock::Thinking {
+                    text: "thinking".into(),
+                },
+            },
+        );
+
+        finish_all_blocks(&mut active, &mut output);
+
+        match &output.content[0] {
+            AssistantContentPart::Thinking(ThinkingContent::Thinking { thinking, .. }) => {
+                assert_eq!(thinking, "thinking");
+            }
+            other => panic!("expected thinking, got {other:?}"),
+        }
+        match &output.content[1] {
+            AssistantContentPart::Text(TextContent { text }) => {
+                assert_eq!(text, "hello");
+            }
+            other => panic!("expected text, got {other:?}"),
+        }
     }
 
     fn codex_model() -> Model {
