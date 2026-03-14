@@ -28,6 +28,55 @@ pub fn cache_ttl_secs(provider: &Provider, retention: Option<&CacheRetention>) -
     }
 }
 
+/// tracks prompt cache warmth with countdown and notification flags
+#[derive(Debug, Clone)]
+pub struct CacheTimer {
+    /// cache TTL in seconds (determined from provider/retention config)
+    pub ttl_secs: u16,
+    /// when the cache was last active (read or write)
+    last_active: Option<Instant>,
+    /// whether we already sent a "cache expiring soon" notification
+    pub warn_sent: bool,
+    /// whether we already sent a "cache expired" notification
+    pub expired_sent: bool,
+}
+
+impl CacheTimer {
+    #[must_use]
+    pub fn new(ttl_secs: u16) -> Self {
+        Self {
+            ttl_secs,
+            last_active: None,
+            warn_sent: false,
+            expired_sent: false,
+        }
+    }
+
+    /// refresh the cache warmth timer (call when cache_read or cache_write > 0)
+    pub fn refresh(&mut self) {
+        self.last_active = Some(Instant::now());
+        self.warn_sent = false;
+        self.expired_sent = false;
+    }
+
+    /// seconds remaining before cache expires, None if no active cache
+    #[must_use]
+    pub fn remaining_secs(&self) -> Option<u16> {
+        let elapsed = self.last_active?.elapsed().as_secs() as u16;
+        if elapsed >= self.ttl_secs {
+            Some(0)
+        } else {
+            Some(self.ttl_secs - elapsed)
+        }
+    }
+
+    /// seconds since last cache activity, None if never active
+    #[must_use]
+    pub fn elapsed_secs(&self) -> Option<u64> {
+        self.last_active.map(|t| t.elapsed().as_secs())
+    }
+}
+
 /// an image attached to the next user message (not yet sent)
 #[derive(Debug, Clone)]
 pub struct PendingImage {
@@ -345,14 +394,8 @@ pub struct App {
     pub pane_info: Option<(u16, u16)>,
     /// background pane alert text (e.g. "pane 2: busy")
     pub background_alert: Option<String>,
-    /// when the cache was last active (read or write), for countdown timer
-    pub cache_last_active: Option<Instant>,
-    /// cache TTL in seconds (determined from provider/retention config)
-    pub cache_ttl_secs: u16,
-    /// whether we already sent a "cache expiring soon" notification
-    pub cache_warn_sent: bool,
-    /// whether we already sent a "cache expired" notification
-    pub cache_expired_sent: bool,
+    /// prompt cache warmth tracking
+    pub cache: CacheTimer,
     /// batch counter for grouping parallel tool calls
     current_tool_batch: u32,
     /// oauth usage data (5h and 7d rolling windows)
@@ -471,30 +514,9 @@ impl App {
             input_area: Cell::new(Rect::default()),
             pane_info: None,
             background_alert: None,
-            cache_last_active: None,
-            cache_ttl_secs: 300,
-            cache_warn_sent: false,
-            cache_expired_sent: false,
+            cache: CacheTimer::new(300),
             current_tool_batch: 0,
             oauth_usage: None,
-        }
-    }
-
-    /// refresh the cache warmth timer (call when cache_read or cache_write > 0)
-    pub fn refresh_cache_timer(&mut self) {
-        self.cache_last_active = Some(Instant::now());
-        self.cache_warn_sent = false;
-        self.cache_expired_sent = false;
-    }
-
-    /// seconds remaining before cache expires, None if no active cache
-    pub fn cache_remaining_secs(&self) -> Option<u16> {
-        let last = self.cache_last_active?;
-        let elapsed = last.elapsed().as_secs() as u16;
-        if elapsed >= self.cache_ttl_secs {
-            Some(0)
-        } else {
-            Some(self.cache_ttl_secs - elapsed)
         }
     }
 
@@ -2105,11 +2127,11 @@ batch: 1/2 succeeded, 1 failed";
     #[test]
     fn cache_remaining_countdown() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        assert!(app.cache_remaining_secs().is_none());
+        assert!(app.cache.remaining_secs().is_none());
 
-        app.cache_ttl_secs = 300;
-        app.refresh_cache_timer();
-        let remaining = app.cache_remaining_secs().unwrap();
+        app.cache.ttl_secs = 300;
+        app.cache.refresh();
+        let remaining = app.cache.remaining_secs().unwrap();
         // just refreshed, should be very close to 300
         assert!((298..=300).contains(&remaining));
     }
@@ -2200,5 +2222,39 @@ batch: 1/2 succeeded, 1 failed";
         };
         assert!(msg.queued);
         assert_eq!(msg.content, "steer");
+    }
+
+    #[test]
+    fn cache_timer_inactive_by_default() {
+        let timer = CacheTimer::new(300);
+        assert!(timer.remaining_secs().is_none());
+        assert!(timer.elapsed_secs().is_none());
+        assert!(!timer.warn_sent);
+        assert!(!timer.expired_sent);
+    }
+
+    #[test]
+    fn cache_timer_refresh_starts_countdown() {
+        let mut timer = CacheTimer::new(300);
+        timer.refresh();
+        let remaining = timer.remaining_secs().unwrap();
+        assert!((298..=300).contains(&remaining));
+        assert!(timer.elapsed_secs().unwrap() <= 2);
+    }
+
+    #[test]
+    fn cache_timer_refresh_resets_flags() {
+        let mut timer = CacheTimer::new(300);
+        timer.warn_sent = true;
+        timer.expired_sent = true;
+        timer.refresh();
+        assert!(!timer.warn_sent);
+        assert!(!timer.expired_sent);
+    }
+
+    #[test]
+    fn cache_timer_disabled_when_zero_ttl() {
+        let timer = CacheTimer::new(0);
+        assert_eq!(timer.ttl_secs, 0);
     }
 }

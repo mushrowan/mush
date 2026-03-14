@@ -141,7 +141,7 @@ pub(super) async fn fork_pane(
     new_app.model_completions = model_completions;
     new_app.cwd = cwd.clone();
     new_app.show_cost = tui_config.show_cost;
-    new_app.cache_ttl_secs = if tui_config.cache_timer {
+    new_app.cache.ttl_secs = if tui_config.cache_timer {
         crate::app::cache_ttl_secs(
             &tui_config.model.provider,
             tui_config.options.cache_retention.as_ref(),

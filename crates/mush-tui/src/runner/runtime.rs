@@ -160,16 +160,16 @@ impl RunnerRuntime {
         }
 
         for pane in self.pane_mgr.panes_mut() {
-            if let Some(remaining) = pane.app.cache_remaining_secs() {
-                if remaining == 0 && !pane.app.cache_expired_sent {
-                    pane.app.cache_expired_sent = true;
+            if let Some(remaining) = pane.app.cache.remaining_secs() {
+                if remaining == 0 && !pane.app.cache.expired_sent {
+                    pane.app.cache.expired_sent = true;
                     crate::notify::send_with_sound(
                         "cache expired",
                         "prompt cache has gone cold",
                         Some(crate::notify::Sound::Attention),
                     );
-                } else if remaining > 0 && remaining <= 60 && !pane.app.cache_warn_sent {
-                    pane.app.cache_warn_sent = true;
+                } else if remaining > 0 && remaining <= 60 && !pane.app.cache.warn_sent {
+                    pane.app.cache.warn_sent = true;
                     crate::notify::send_with_sound(
                         "cache expiring soon",
                         &format!("prompt cache expires in {remaining}s"),
@@ -222,7 +222,7 @@ fn build_initial_app(tui_config: &TuiConfig, cwd: &Path) -> App {
         .normalize_visible();
     app.thinking_display = tui_config.thinking_display;
     app.show_cost = tui_config.show_cost;
-    app.cache_ttl_secs = if tui_config.cache_timer {
+    app.cache.ttl_secs = if tui_config.cache_timer {
         app::cache_ttl_secs(
             &tui_config.model.provider,
             tui_config.options.cache_retention.as_ref(),
@@ -370,7 +370,7 @@ mod tests {
         assert_eq!(app.thinking_level, ThinkingLevel::Medium);
         assert_eq!(app.thinking_display, crate::app::ThinkingDisplay::Collapse);
         assert!(app.show_cost);
-        assert!(app.cache_ttl_secs > 0);
+        assert!(app.cache.ttl_secs > 0);
         assert!(app.completions.iter().any(|item| item == "/help"));
         assert!(app.slash_commands.iter().any(|cmd| cmd.name == "help"));
         assert!(
