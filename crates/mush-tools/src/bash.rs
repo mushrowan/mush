@@ -68,8 +68,12 @@ impl AgentTool for BashTool {
     }
     fn description(&self) -> &str {
         "Execute a bash command in the current working directory. Returns stdout and stderr. \
-         Output is truncated to last 2000 lines or 50KB (whichever is hit first). Optionally \
-         provide a timeout in seconds."
+         Output is truncated to the last 2000 lines or 50KB (whichever is hit first). \
+         If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds."
+    }
+
+    fn output_limit(&self) -> mush_agent::tool::OutputLimit {
+        mush_agent::tool::OutputLimit::Tail
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -343,5 +347,12 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(json["exit_code"], 42);
         assert!(json["stderr"].as_str().unwrap().contains("oops"));
+    }
+
+    #[test]
+    fn output_limit_is_tail() {
+        use mush_agent::tool::OutputLimit;
+        let tool = BashTool::new(PathBuf::from("."));
+        assert_eq!(tool.output_limit(), OutputLimit::Tail);
     }
 }

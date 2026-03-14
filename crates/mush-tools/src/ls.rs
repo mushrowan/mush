@@ -7,6 +7,8 @@ use serde::Deserialize;
 
 use crate::util::resolve_path;
 
+const MAX_ENTRIES: usize = 500;
+
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LsArgs {
@@ -32,7 +34,12 @@ impl AgentTool for LsTool {
     }
     fn description(&self) -> &str {
         "List files and directories. Shows file sizes and types. \
-         Defaults to the current working directory."
+         Returns at most 500 entries. Defaults to the current working directory. \
+         Use find or glob to filter large directories."
+    }
+
+    fn output_limit(&self) -> mush_agent::tool::OutputLimit {
+        mush_agent::tool::OutputLimit::SelfManaged
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -96,6 +103,12 @@ fn list_dir(path: &Path) -> ToolResult {
         return ToolResult::text("(empty directory)");
     }
 
+    let total_entries = entries.len();
+    let capped = total_entries > MAX_ENTRIES;
+    if capped {
+        entries.truncate(MAX_ENTRIES);
+    }
+
     let mut lines = Vec::new();
 
     for entry in &entries {
@@ -118,7 +131,15 @@ fn list_dir(path: &Path) -> ToolResult {
         lines.push(format!("{size:>8}  {name}{type_indicator}"));
     }
 
-    ToolResult::text(lines.join("\n"))
+    let mut output = lines.join("\n");
+    if capped {
+        let omitted = total_entries - MAX_ENTRIES;
+        output.push_str(&format!(
+            "\n\n[{omitted} more entries. use find or glob to filter.]"
+        ));
+    }
+
+    ToolResult::text(output)
 }
 
 fn format_size(bytes: u64) -> String {
@@ -186,6 +207,28 @@ mod tests {
         let lines: Vec<&str> = text.lines().collect();
         assert!(lines[0].contains("zzz_dir/"));
         assert!(lines[1].contains("aaa_file.txt"));
+    }
+
+    #[test]
+    fn large_directory_capped_at_max_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..600 {
+            fs::write(dir.path().join(format!("file_{i:04}.txt")), "x").unwrap();
+        }
+        let result = list_dir(dir.path());
+        let text = extract_text(&result);
+        let content_lines: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
+        // 500 entries + 1 hint line
+        assert!(content_lines.len() <= MAX_ENTRIES + 1);
+        assert!(text.contains("more entries"));
+        assert!(text.contains("find or glob"));
+    }
+
+    #[test]
+    fn output_limit_is_self_managed() {
+        use mush_agent::tool::OutputLimit;
+        let tool = LsTool::new(PathBuf::from("."));
+        assert_eq!(tool.output_limit(), OutputLimit::SelfManaged);
     }
 
     #[test]
