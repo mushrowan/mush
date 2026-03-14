@@ -791,11 +791,6 @@ mod tests {
     fn usage_line_shows_reuse_and_write_ratios() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.messages.push(DisplayMessage {
-            role: MessageRole::Assistant,
-            content: "done".into(),
-            tool_calls: vec![],
-            thinking: None,
-            thinking_expanded: false,
             usage: Some(Usage {
                 input_tokens: TokenCount::new(100),
                 output_tokens: TokenCount::new(20),
@@ -803,8 +798,7 @@ mod tests {
                 cache_write_tokens: TokenCount::new(50),
             }),
             cost: Some(Dollars::new(0.0012)),
-            model_id: None,
-            queued: false,
+            ..DisplayMessage::new(MessageRole::Assistant, "done")
         });
 
         let buf = render_app(&app, 70, 10);
@@ -819,8 +813,6 @@ mod tests {
     fn tool_calls_render() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.messages.push(DisplayMessage {
-            role: MessageRole::Assistant,
-            content: "let me check".into(),
             tool_calls: vec![
                 crate::app::DisplayToolCall {
                     name: "bash".into(),
@@ -839,12 +831,7 @@ mod tests {
                     batch: 2,
                 },
             ],
-            thinking: None,
-            thinking_expanded: false,
-            usage: None,
-            cost: None,
-            model_id: None,
-            queued: false,
+            ..DisplayMessage::new(MessageRole::Assistant, "let me check")
         });
         let buf = render_app(&app, 50, 15);
         let content = buffer_to_string(&buf);
@@ -856,17 +843,10 @@ mod tests {
     fn thinking_shows_collapsed() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.messages.push(DisplayMessage {
-            role: MessageRole::Assistant,
-            content: "the answer is 42".into(),
-            tool_calls: vec![],
             thinking: Some(
                 "first i need to consider the question deeply and think about it".into(),
             ),
-            thinking_expanded: false,
-            usage: None,
-            cost: None,
-            model_id: None,
-            queued: false,
+            ..DisplayMessage::new(MessageRole::Assistant, "the answer is 42")
         });
         let buf = render_app(&app, 60, 10);
         let content = buffer_to_string(&buf);
@@ -878,8 +858,6 @@ mod tests {
     fn image_reserves_space_and_produces_render_area() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.messages.push(DisplayMessage {
-            role: MessageRole::Assistant,
-            content: "here is the image".into(),
             tool_calls: vec![crate::app::DisplayToolCall {
                 name: "read".into(),
                 summary: "photo.png".into(),
@@ -888,12 +866,7 @@ mod tests {
                 image_data: Some(vec![0u8; 100]), // dummy bytes
                 batch: 1,
             }],
-            thinking: None,
-            thinking_expanded: false,
-            usage: None,
-            cost: None,
-            model_id: None,
-            queued: false,
+            ..DisplayMessage::new(MessageRole::Assistant, "here is the image")
         });
         let buf = render_app(&app, 60, 30);
         let content = buffer_to_string(&buf);
@@ -914,8 +887,6 @@ mod tests {
     fn completed_tool_renders_bordered_box() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.messages.push(DisplayMessage {
-            role: MessageRole::Assistant,
-            content: "checking".into(),
             tool_calls: vec![crate::app::DisplayToolCall {
                 name: "bash".into(),
                 summary: "cargo test".into(),
@@ -924,12 +895,7 @@ mod tests {
                 image_data: None,
                 batch: 1,
             }],
-            thinking: None,
-            thinking_expanded: false,
-            usage: None,
-            cost: None,
-            model_id: None,
-            queued: false,
+            ..DisplayMessage::new(MessageRole::Assistant, "checking")
         });
         let buf = render_app(&app, 50, 10);
         let content = buffer_to_string(&buf);
@@ -945,8 +911,6 @@ mod tests {
     fn failed_tool_renders_red_bordered_box() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.messages.push(DisplayMessage {
-            role: MessageRole::Assistant,
-            content: "checking".into(),
             tool_calls: vec![crate::app::DisplayToolCall {
                 name: "bash".into(),
                 summary: "cargo check".into(),
@@ -955,12 +919,7 @@ mod tests {
                 image_data: None,
                 batch: 1,
             }],
-            thinking: None,
-            thinking_expanded: false,
-            usage: None,
-            cost: None,
-            model_id: None,
-            queued: false,
+            ..DisplayMessage::new(MessageRole::Assistant, "checking")
         });
         let buf = render_app(&app, 60, 12);
         let content = buffer_to_string(&buf);
@@ -973,8 +932,6 @@ mod tests {
     fn parallel_tools_render_side_by_side() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.messages.push(DisplayMessage {
-            role: MessageRole::Assistant,
-            content: "reading".into(),
             tool_calls: vec![
                 crate::app::DisplayToolCall {
                     name: "read".into(),
@@ -993,12 +950,7 @@ mod tests {
                     batch: 1, // same batch = parallel
                 },
             ],
-            thinking: None,
-            thinking_expanded: false,
-            usage: None,
-            cost: None,
-            model_id: None,
-            queued: false,
+            ..DisplayMessage::new(MessageRole::Assistant, "reading")
         });
         // 80 wide: each panel gets ~39 cols, > MIN_TOOL_BOX_WIDTH (30)
         let buf = render_app(&app, 80, 10);
@@ -1016,8 +968,6 @@ mod tests {
     fn parallel_tools_stack_when_narrow() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.messages.push(DisplayMessage {
-            role: MessageRole::Assistant,
-            content: "reading".into(),
             tool_calls: vec![
                 crate::app::DisplayToolCall {
                     name: "read".into(),
@@ -1036,12 +986,7 @@ mod tests {
                     batch: 1,
                 },
             ],
-            thinking: None,
-            thinking_expanded: false,
-            usage: None,
-            cost: None,
-            model_id: None,
-            queued: false,
+            ..DisplayMessage::new(MessageRole::Assistant, "reading")
         });
         // 40 wide: each panel would be ~19 cols, < MIN_TOOL_BOX_WIDTH (30)
         let buf = render_app(&app, 40, 12);
@@ -1056,8 +1001,6 @@ mod tests {
     fn error_tool_box_has_red_border() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.messages.push(DisplayMessage {
-            role: MessageRole::Assistant,
-            content: "reading".into(),
             tool_calls: vec![crate::app::DisplayToolCall {
                 name: "read".into(),
                 summary: "missing.rs".into(),
@@ -1066,12 +1009,7 @@ mod tests {
                 image_data: None,
                 batch: 1,
             }],
-            thinking: None,
-            thinking_expanded: false,
-            usage: None,
-            cost: None,
-            model_id: None,
-            queued: false,
+            ..DisplayMessage::new(MessageRole::Assistant, "reading")
         });
         let buf = render_app(&app, 50, 10);
         // check that the top-left corner cell has red foreground
@@ -1119,8 +1057,6 @@ mod tests {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         let long_path = "/home/rowan/dev/mush/crates/mush-tui/src/widgets/message_list.rs";
         app.messages.push(DisplayMessage {
-            role: MessageRole::Assistant,
-            content: "reading".into(),
             tool_calls: vec![crate::app::DisplayToolCall {
                 name: "read".into(),
                 summary: long_path.into(),
@@ -1129,12 +1065,7 @@ mod tests {
                 image_data: None,
                 batch: 1,
             }],
-            thinking: None,
-            thinking_expanded: false,
-            usage: None,
-            cost: None,
-            model_id: None,
-            queued: false,
+            ..DisplayMessage::new(MessageRole::Assistant, "reading")
         });
         // narrow box: path won't fit on one line
         let buf = render_app(&app, 40, 12);

@@ -82,15 +82,15 @@ pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
                 }
 
                 app.messages.push(DisplayMessage {
-                    role: MessageRole::Assistant,
-                    content: assistant.text().trim_start_matches('\n').to_string(),
                     tool_calls,
                     thinking: assistant.thinking(),
                     thinking_expanded: app.thinking_display == ThinkingDisplay::Expanded,
                     usage: Some(assistant.usage),
-                    cost: None,
                     model_id: Some(assistant.model.clone()),
-                    queued: false,
+                    ..DisplayMessage::new(
+                        MessageRole::Assistant,
+                        assistant.text().trim_start_matches('\n'),
+                    )
                 });
                 app.stats.update(&assistant.usage, None);
             }
