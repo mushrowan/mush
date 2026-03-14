@@ -341,7 +341,9 @@ async fn auto_fork_compact(
     .await;
 
     if let Some((after, tokens_before, tokens_after)) = result {
-        let pane = pane_mgr.pane_mut(pane_id).expect("pane exists after compact");
+        let pane = pane_mgr
+            .pane_mut(pane_id)
+            .expect("pane exists after compact");
         crate::conversation_display::rebuild_display(&mut pane.app, &pane.conversation.context());
         pane.app.status = Some(format!(
             "auto-fork-compacted: {before} → {after} messages, ~{tokens_before} → ~{tokens_after} tokens (original preserved)",
@@ -541,8 +543,13 @@ async fn start_stream_for_prompt<'a>(
     call_options.account_id = account_id;
     call_options.thinking = Some(thinking_level);
 
-    let extra_tools =
-        build_extra_tools(pane_mgr.is_multi_pane(), pane_id, message_bus, shared_state, deps.delegation_queue);
+    let extra_tools = build_extra_tools(
+        pane_mgr.is_multi_pane(),
+        pane_id,
+        message_bus,
+        shared_state,
+        deps.delegation_queue,
+    );
     let system_prompt = build_system_prompt(pane_mgr, pane_id, &deps.system_prompt);
     let pane_tools = pane_mgr
         .pane_mut(pane_id)
@@ -676,6 +683,7 @@ fn append_prompt_and_snapshot(
     conversation.context()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_context_transform<'a>(
     enricher_arc: Option<PromptEnricher>,
     compact_model: Model,
@@ -698,8 +706,7 @@ fn build_context_transform<'a>(
         let hint_match = enricher_arc
             .as_ref()
             .is_some_and(|enricher| event_handler::would_inject_hint(messages, enricher.as_ref()));
-        let needs_mask = event_handler::needs_observation_mask(messages);
-        let owned_messages = if do_auto_compact || hint_match || needs_mask {
+        let owned_messages = if do_auto_compact || hint_match {
             Some(messages.to_vec())
         } else {
             None
@@ -758,7 +765,7 @@ fn build_context_transform<'a>(
                 maybe_msgs = Some(compacted);
             }
 
-            if !fresh_compaction && !replayed_cached_compaction && !hint_match && !needs_mask {
+            if !fresh_compaction && !replayed_cached_compaction && !hint_match {
                 return mush_agent::ContextTransformResult::Unchanged;
             }
 
@@ -770,7 +777,6 @@ fn build_context_transform<'a>(
             if let Some(ref enricher) = enricher {
                 changed |= event_handler::inject_hint(&mut msgs, enricher.as_ref());
             }
-            changed |= event_handler::mask_observations(&mut msgs);
 
             if fresh_compaction {
                 mush_agent::ContextTransformResult::Updated(msgs)
