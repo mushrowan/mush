@@ -18,14 +18,20 @@ fn bench_markdown(c: &mut Criterion) {
 }
 
 fn bench_code_blocks(c: &mut Criterion) {
-    let rust_source = rust_code_block_fixture();
-    let plain_source = plain_code_block_fixture();
-    let unknown_source = unknown_code_block_fixture();
+    let rust_small_source = rust_code_block_fixture(24);
+    let rust_large_source = rust_code_block_fixture(96);
+    let plain_source = plain_code_block_fixture(96);
+    let unknown_source = unknown_code_block_fixture(96);
     let mut group = c.benchmark_group("code_block");
 
-    group.throughput(Throughput::Bytes(rust_source.len() as u64));
-    group.bench_function("render_rust", |b| {
-        b.iter(|| markdown::render(black_box(rust_source.as_str())))
+    group.throughput(Throughput::Bytes(rust_small_source.len() as u64));
+    group.bench_function("render_rust_small", |b| {
+        b.iter(|| markdown::render(black_box(rust_small_source.as_str())))
+    });
+
+    group.throughput(Throughput::Bytes(rust_large_source.len() as u64));
+    group.bench_function("render_rust_large", |b| {
+        b.iter(|| markdown::render(black_box(rust_large_source.as_str())))
     });
 
     group.throughput(Throughput::Bytes(plain_source.len() as u64));
@@ -92,24 +98,24 @@ fn render_markdown_cached(source: &str) {
     section.repeat(24)
 }
 
-fn rust_code_block_fixture() -> String {
-    format!("```rust\n{}```\n", code_block_body_fixture())
+fn rust_code_block_fixture(repeat: usize) -> String {
+    format!("```rust\n{}```\n", code_block_body_fixture(repeat))
 }
 
-fn plain_code_block_fixture() -> String {
-    format!("```\n{}```\n", code_block_body_fixture())
+fn plain_code_block_fixture(repeat: usize) -> String {
+    format!("```\n{}```\n", code_block_body_fixture(repeat))
 }
 
-fn unknown_code_block_fixture() -> String {
-    format!("```unknown\n{}```\n", code_block_body_fixture())
+fn unknown_code_block_fixture(repeat: usize) -> String {
+    format!("```unknown\n{}```\n", code_block_body_fixture(repeat))
 }
 
-fn code_block_body_fixture() -> String {
+fn code_block_body_fixture(repeat: usize) -> String {
     let line = r#"fn render_markdown_cached(source: &str) {
     println!("{source}");
 }
 "#;
-    line.repeat(96)
+    line.repeat(repeat)
 }
 
 fn input_fixture() -> (String, Vec<PendingImage>) {
