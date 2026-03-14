@@ -481,10 +481,16 @@ pub fn chunk_file_for_embedding(path: &Path) -> Vec<ContextDocument> {
 
 /// route matches into auto-loaded content, skill hints, and tool hints
 /// based on score and document kind.
+///
 /// skills above `auto_load_threshold` get full content injected.
-/// skills below the threshold get a brief hint.
-/// tools always get a hint pointing to mcp_get_schemas.
-pub fn route_matches(matches: &[ContextMatch], auto_load_threshold: f32) -> String {
+/// when `include_hints` is true, skills below the threshold get a brief
+/// hint and tools get a pointer to mcp_get_schemas. when false, only
+/// auto-loaded content is returned (used by embed_inject strategy).
+pub fn route_matches(
+    matches: &[ContextMatch],
+    auto_load_threshold: f32,
+    include_hints: bool,
+) -> String {
     if matches.is_empty() {
         return String::new();
     }
@@ -505,25 +511,27 @@ pub fn route_matches(matches: &[ContextMatch], auto_load_threshold: f32) -> Stri
         parts.push(out);
     }
 
-    if !hint_only.is_empty() {
-        let names: Vec<&str> = hint_only.iter().map(|m| m.name.as_str()).collect();
-        parts.push(format!(
-            "[relevant skills: {}. follow their instructions from the system prompt.]",
-            names.join(", ")
-        ));
-    }
+    if include_hints {
+        if !hint_only.is_empty() {
+            let names: Vec<&str> = hint_only.iter().map(|m| m.name.as_str()).collect();
+            parts.push(format!(
+                "[relevant skills: {}. follow their instructions from the system prompt.]",
+                names.join(", ")
+            ));
+        }
 
-    if !tools.is_empty() {
-        let names: Vec<&str> = tools.iter().map(|m| m.name.as_str()).collect();
-        let descs: Vec<String> = tools
-            .iter()
-            .map(|m| format!("  - {}: {}", m.name, m.description))
-            .collect();
-        parts.push(format!(
-            "[relevant MCP tools: {}. use mcp_get_schemas to see their parameters.]\n{}",
-            names.join(", "),
-            descs.join("\n"),
-        ));
+        if !tools.is_empty() {
+            let names: Vec<&str> = tools.iter().map(|m| m.name.as_str()).collect();
+            let descs: Vec<String> = tools
+                .iter()
+                .map(|m| format!("  - {}: {}", m.name, m.description))
+                .collect();
+            parts.push(format!(
+                "[relevant MCP tools: {}. use mcp_get_schemas to see their parameters.]\n{}",
+                names.join(", "),
+                descs.join("\n"),
+            ));
+        }
     }
 
     parts.join("\n")
@@ -765,7 +773,7 @@ mod tests {
             },
         ];
 
-        let routed = route_matches(&matches, 0.5);
+        let routed = route_matches(&matches, 0.5, true);
         // rust (0.7) should be auto-loaded, nix (0.4) should be hint-only
         assert!(routed.contains("use cargo for builds"));
         assert!(routed.contains("[relevant skills: nix"));
@@ -783,7 +791,7 @@ mod tests {
             kind: DocumentKind::default(),
         }];
 
-        let routed = route_matches(&matches, 0.5);
+        let routed = route_matches(&matches, 0.5, true);
         assert!(routed.contains("use cargo"));
         assert!(!routed.contains("[relevant skills:"));
     }
@@ -809,7 +817,7 @@ mod tests {
             },
         ];
 
-        let routed = route_matches(&matches, 0.5);
+        let routed = route_matches(&matches, 0.5, true);
         assert!(routed.contains("use cargo"), "skill content auto-loaded");
         assert!(routed.contains("mcp_git_commit"), "tool name in hint");
         assert!(routed.contains("mcp_get_schemas"), "tool hint directs to schemas");
@@ -826,9 +834,48 @@ mod tests {
             kind: DocumentKind::default(),
         }];
 
-        let routed = route_matches(&matches, 0.5);
+        let routed = route_matches(&matches, 0.5, true);
         assert!(!routed.contains("use cargo"));
         assert!(routed.contains("[relevant skills: rust"));
+    }
+
+    #[test]
+    fn route_matches_inject_only_skips_hints() {
+        let matches = vec![
+            ContextMatch {
+                name: "rust".into(),
+                description: "rust conventions".into(),
+                content: "use cargo for builds".into(),
+                score: 0.7,
+                source_path: None,
+                kind: DocumentKind::Skill,
+            },
+            ContextMatch {
+                name: "nix".into(),
+                description: "nix stuff".into(),
+                content: "use flakes".into(),
+                score: 0.4,
+                source_path: None,
+                kind: DocumentKind::Skill,
+            },
+            ContextMatch {
+                name: "mcp_git_commit".into(),
+                description: "create a git commit".into(),
+                content: "".into(),
+                score: 0.6,
+                source_path: None,
+                kind: DocumentKind::Tool,
+            },
+        ];
+
+        let routed = route_matches(&matches, 0.5, false);
+        // auto-loaded skill still present
+        assert!(routed.contains("use cargo for builds"));
+        // below-threshold skill hint suppressed
+        assert!(!routed.contains("nix"));
+        // tool hint suppressed
+        assert!(!routed.contains("mcp_git_commit"));
+        assert!(!routed.contains("mcp_get_schemas"));
     }
 
     // -- integration tests (require model download) --
@@ -1277,9 +1324,9 @@ pub fn run() {
             let results = index.search(case.query, 5, 0.0);
 
             // eager: inject full content for all matches
-            let eager = route_matches(&results, 0.0);
+            let eager = route_matches(&results, 0.0, true);
             // lazy: use the configured threshold (0.5)
-            let lazy = route_matches(&results, 0.5);
+            let lazy = route_matches(&results, 0.5, true);
 
             // rough token estimate: chars / 4
             let eager_tokens = eager.len() / 4;

@@ -481,7 +481,7 @@ impl Strategy for EmbeddedNoToolStrategy {
                 m.kind
             );
         }
-        let routed = mush_ext::context::route_matches(&matches, 0.3);
+        let routed = mush_ext::context::route_matches(&matches, 0.3, false);
 
         let mut system = String::from("you are a coding assistant. answer concisely.");
         if !routed.is_empty() {
