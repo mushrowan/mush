@@ -43,8 +43,7 @@ pub enum IpcMessageKind {
 
 /// compute the socket path for a session
 pub fn socket_path(session_id: &str) -> PathBuf {
-    mush_runtime_dir()
-        .join(format!("{session_id}.sock"))
+    mush_runtime_dir().join(format!("{session_id}.sock"))
 }
 
 /// list all active mush sockets (for discovery)

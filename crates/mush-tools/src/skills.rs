@@ -209,14 +209,8 @@ impl AgentTool for LoadSkillTool {
             };
 
             match std::fs::read_to_string(&s.path) {
-                Ok(content) => ToolResult::text(format!(
-                    "# skill: {}\n\n{}",
-                    s.name, content
-                )),
-                Err(e) => ToolResult::error(format!(
-                    "failed to read {}: {e}",
-                    s.path.display()
-                )),
+                Ok(content) => ToolResult::text(format!("# skill: {}\n\n{}", s.name, content)),
+                Err(e) => ToolResult::error(format!("failed to read {}: {e}", s.path.display())),
             }
         })
     }
@@ -273,9 +267,7 @@ mod tests {
     #[tokio::test]
     async fn describe_skill_found() {
         let tools = skill_tools(test_skills());
-        let result = tools[1]
-            .execute(serde_json::json!({"name": "nix"}))
-            .await;
+        let result = tools[1].execute(serde_json::json!({"name": "nix"})).await;
         let text = extract_text(&result);
         assert!(text.contains("name: nix"));
         assert!(text.contains("Nix flake conventions"));
@@ -316,9 +308,7 @@ mod tests {
     #[tokio::test]
     async fn load_skill_missing_file() {
         let tools = skill_tools(test_skills());
-        let result = tools[2]
-            .execute(serde_json::json!({"name": "nix"}))
-            .await;
+        let result = tools[2].execute(serde_json::json!({"name": "nix"})).await;
         assert_eq!(result.outcome, ToolOutcome::Error);
         assert!(extract_text(&result).contains("failed to read"));
     }
@@ -335,9 +325,7 @@ mod tests {
             path: skill_path,
         }];
         let tools = skill_tools(skills);
-        let result = tools[2]
-            .execute(serde_json::json!({"name": "test"}))
-            .await;
+        let result = tools[2].execute(serde_json::json!({"name": "test"})).await;
         let text = extract_text(&result);
         assert!(text.contains("# skill: test"));
         assert!(text.contains("some content"));

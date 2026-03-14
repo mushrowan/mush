@@ -176,6 +176,7 @@ pub enum ContextStrategy {
 
 impl ContextStrategy {
     /// whether this strategy requires the embeddings feature
+    #[cfg(feature = "embeddings")]
     pub fn needs_embeddings(self) -> bool {
         matches!(self, Self::Embedded | Self::EmbedInject)
     }
@@ -628,7 +629,10 @@ blocking = true
         let config: Config = toml::from_str("").unwrap();
         assert!(config.retrieval.repo_map);
         assert_eq!(config.retrieval.context_budget, 2048);
-        assert_eq!(config.retrieval.context_strategy, ContextStrategy::EmbedInject);
+        assert_eq!(
+            config.retrieval.context_strategy,
+            ContextStrategy::EmbedInject
+        );
         assert_eq!(config.retrieval.embedding_model, EmbeddingModel::Coderank);
         assert!((config.retrieval.auto_load_threshold - 0.5).abs() < f32::EPSILON);
     }
@@ -643,11 +647,15 @@ blocking = true
         ] {
             let toml = format!("[retrieval]\ncontext_strategy = \"{input}\"");
             let config: Config = toml::from_str(&toml).unwrap();
-            assert_eq!(config.retrieval.context_strategy, expected, "failed for {input}");
+            assert_eq!(
+                config.retrieval.context_strategy, expected,
+                "failed for {input}"
+            );
         }
     }
 
     #[test]
+    #[cfg(feature = "embeddings")]
     fn context_strategy_needs_embeddings() {
         assert!(!ContextStrategy::Prepended.needs_embeddings());
         assert!(!ContextStrategy::Summaries.needs_embeddings());
@@ -697,7 +705,10 @@ context_strategy = "prepended"
         )
         .unwrap();
         assert!(config.retrieval.repo_map); // default
-        assert_eq!(config.retrieval.context_strategy, ContextStrategy::Prepended);
+        assert_eq!(
+            config.retrieval.context_strategy,
+            ContextStrategy::Prepended
+        );
         assert_eq!(config.retrieval.context_budget, 2048); // default
     }
 
@@ -713,7 +724,10 @@ command = "echo critical rules here"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.hooks.post_compaction.len(), 2);
-        assert_eq!(config.hooks.post_compaction[0].command, "cat .mush/rules.md");
+        assert_eq!(
+            config.hooks.post_compaction[0].command,
+            "cat .mush/rules.md"
+        );
 
         let lifecycle = config.lifecycle_hooks();
         assert_eq!(lifecycle.post_compaction.len(), 2);

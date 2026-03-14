@@ -57,7 +57,11 @@ impl ParserPool {
     }
 
     /// parse source code for a given language (no caching)
-    pub fn parse(&self, language: Language, source: &[u8]) -> Result<tree_sitter::Tree, ParseError> {
+    pub fn parse(
+        &self,
+        language: Language,
+        source: &[u8],
+    ) -> Result<tree_sitter::Tree, ParseError> {
         let ts_lang = language
             .tree_sitter_language()
             .ok_or(ParseError::GrammarNotAvailable(language))?;
@@ -82,9 +86,13 @@ impl ParserPool {
 
     /// parse a file and extract its symbols in one call.
     /// uses the tree cache for unchanged files.
-    pub fn symbols_from_file(&self, path: &Path) -> Result<(Language, Vec<SymbolInfo>), ParseError> {
+    pub fn symbols_from_file(
+        &self,
+        path: &Path,
+    ) -> Result<(Language, Vec<SymbolInfo>), ParseError> {
         let cached = self.parse_file_cached(path)?;
-        let syms = symbols::extract_symbols(cached.language, &cached.source, &cached.tree, Some(path));
+        let syms =
+            symbols::extract_symbols(cached.language, &cached.source, &cached.tree, Some(path));
         Ok((cached.language, syms))
     }
 
@@ -98,7 +106,11 @@ impl ParserPool {
 
         // check cache
         if let Some(mtime) = mtime
-            && let Some(entry) = self.tree_cache.lock().unwrap_or_else(|e| e.into_inner()).get(&canon)
+            && let Some(entry) = self
+                .tree_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&canon)
             && entry.mtime == mtime
             && entry.language == language
         {
@@ -114,15 +126,22 @@ impl ParserPool {
 
         if let Some(mtime) = mtime {
             let mut cache = self.tree_cache.lock().unwrap_or_else(|e| e.into_inner());
-            cache.insert(canon, CachedTree {
-                language,
-                source: source.clone(),
-                tree: tree.clone(),
-                mtime,
-            });
+            cache.insert(
+                canon,
+                CachedTree {
+                    language,
+                    source: source.clone(),
+                    tree: tree.clone(),
+                    mtime,
+                },
+            );
         }
 
-        Ok(CachedTreeRef { language, source, tree })
+        Ok(CachedTreeRef {
+            language,
+            source,
+            tree,
+        })
     }
 
     /// remove a file from the tree cache
@@ -140,7 +159,10 @@ impl ParserPool {
 
     /// number of files currently cached
     pub fn cached_file_count(&self) -> usize {
-        self.tree_cache.lock().unwrap_or_else(|e| e.into_inner()).len()
+        self.tree_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
     }
 }
 
@@ -152,16 +174,8 @@ impl Default for ParserPool {
 
 impl std::fmt::Debug for ParserPool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let parser_count = self
-            .parsers
-            .lock()
-            .map(|p| p.len())
-            .unwrap_or(0);
-        let cache_count = self
-            .tree_cache
-            .lock()
-            .map(|c| c.len())
-            .unwrap_or(0);
+        let parser_count = self.parsers.lock().map(|p| p.len()).unwrap_or(0);
+        let cache_count = self.tree_cache.lock().map(|c| c.len()).unwrap_or(0);
         f.debug_struct("ParserPool")
             .field("cached_parsers", &parser_count)
             .field("cached_files", &cache_count)

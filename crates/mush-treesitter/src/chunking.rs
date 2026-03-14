@@ -159,7 +159,11 @@ fn extract_preamble(lines: &[&str], symbols: &[SymbolInfo]) -> String {
 
     let text: String = lines[..first_def_line].join("\n");
     let trimmed = text.trim();
-    if trimmed.is_empty() { String::new() } else { trimmed.to_string() }
+    if trimmed.is_empty() {
+        String::new()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn join_lines(lines: &[&str], start: usize, end: usize) -> String {
@@ -282,7 +286,11 @@ fn accumulate_lines(
     let mut chunk_start = 0;
 
     for (i, line) in lines.iter().enumerate() {
-        let addition = if current.is_empty() { line.len() } else { line.len() + 1 };
+        let addition = if current.is_empty() {
+            line.len()
+        } else {
+            line.len() + 1
+        };
 
         // split at paragraph boundaries when over target
         let at_boundary = line.trim().is_empty() && !current.is_empty();
@@ -368,7 +376,11 @@ mod tests {
             include_context: true,
         };
         let chunks = chunk_text(Path::new("test.txt"), &text, &opts);
-        assert!(chunks.len() >= 2, "should split: got {} chunks", chunks.len());
+        assert!(
+            chunks.len() >= 2,
+            "should split: got {} chunks",
+            chunks.len()
+        );
     }
 
     #[test]
@@ -407,7 +419,10 @@ pub fn run(config: Config) {
         let chunks = chunk_file(&path, &default_opts());
         assert!(!chunks.is_empty(), "should produce chunks");
 
-        let names: Vec<_> = chunks.iter().filter_map(|c| c.symbol_name.as_deref()).collect();
+        let names: Vec<_> = chunks
+            .iter()
+            .filter_map(|c| c.symbol_name.as_deref())
+            .collect();
         assert!(names.contains(&"Config"), "missing Config: {names:?}");
         assert!(names.contains(&"run"), "missing run: {names:?}");
     }
@@ -434,7 +449,9 @@ pub fn process(map: HashMap<String, String>) -> Result<()> {
         };
         let chunks = chunk_file(&path, &opts);
 
-        let fn_chunk = chunks.iter().find(|c| c.symbol_name.as_deref() == Some("process"));
+        let fn_chunk = chunks
+            .iter()
+            .find(|c| c.symbol_name.as_deref() == Some("process"));
         assert!(fn_chunk.is_some(), "should have process chunk");
         let text = &fn_chunk.unwrap().text;
         assert!(
@@ -464,7 +481,9 @@ pub fn hello() {
         };
         let chunks = chunk_file(&path, &opts);
 
-        let fn_chunk = chunks.iter().find(|c| c.symbol_name.as_deref() == Some("hello"));
+        let fn_chunk = chunks
+            .iter()
+            .find(|c| c.symbol_name.as_deref() == Some("hello"));
         assert!(fn_chunk.is_some());
         assert!(
             !fn_chunk.unwrap().text.contains("use std::io"),
@@ -492,7 +511,10 @@ pub fn beta() {}
             assert_eq!(chunk.file_path, path);
         }
 
-        let alpha = chunks.iter().find(|c| c.symbol_name.as_deref() == Some("alpha")).unwrap();
+        let alpha = chunks
+            .iter()
+            .find(|c| c.symbol_name.as_deref() == Some("alpha"))
+            .unwrap();
         assert_eq!(alpha.symbol_kind, Some(SymbolKind::Function));
         assert_eq!(alpha.start_line, 0);
     }
@@ -522,7 +544,10 @@ def main():
         let chunks = chunk_file(&path, &default_opts());
         assert!(!chunks.is_empty(), "should produce chunks for python");
 
-        let names: Vec<_> = chunks.iter().filter_map(|c| c.symbol_name.as_deref()).collect();
+        let names: Vec<_> = chunks
+            .iter()
+            .filter_map(|c| c.symbol_name.as_deref())
+            .collect();
         assert!(
             names.contains(&"Server") || names.contains(&"main"),
             "should find python symbols: {names:?}"

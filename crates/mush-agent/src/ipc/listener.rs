@@ -79,9 +79,15 @@ async fn handle_connection(
 
         let kind = match msg.kind {
             IpcMessageKind::GetCard => IpcMessageKind::Card(card.clone()),
-            _ => IpcMessageKind::Ack { message_id: msg.id.clone() },
+            _ => IpcMessageKind::Ack {
+                message_id: msg.id.clone(),
+            },
         };
-        let response = IpcMessage { id: msg.id, from: "mush".into(), kind };
+        let response = IpcMessage {
+            id: msg.id,
+            from: "mush".into(),
+            kind,
+        };
 
         let mut json = serde_json::to_string(&response)?;
         json.push('\n');

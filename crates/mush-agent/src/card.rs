@@ -98,14 +98,21 @@ mod tests {
 
         struct DummyTool;
         impl AgentTool for DummyTool {
-            fn name(&self) -> &str { "read" }
-            fn label(&self) -> &str { "Read" }
-            fn description(&self) -> &str { "read a file" }
+            fn name(&self) -> &str {
+                "read"
+            }
+            fn label(&self) -> &str {
+                "Read"
+            }
+            fn description(&self) -> &str {
+                "read a file"
+            }
             fn parameters_schema(&self) -> serde_json::Value {
                 serde_json::json!({"type": "object"})
             }
             fn execute(
-                &self, _: serde_json::Value,
+                &self,
+                _: serde_json::Value,
             ) -> Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
                 Box::pin(async { ToolResult::text("ok") })
             }
@@ -143,8 +150,4 @@ mod tests {
         let parsed: AgentCard = serde_json::from_str(&json).unwrap();
         assert_eq!(card, parsed);
     }
-
-
-
-
 }

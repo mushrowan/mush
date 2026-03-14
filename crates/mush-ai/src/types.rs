@@ -938,7 +938,10 @@ mod tests {
 
     #[test]
     fn thinking_level_normalize_visible_maps_minimal_to_low() {
-        assert_eq!(ThinkingLevel::Minimal.normalize_visible(), ThinkingLevel::Low);
+        assert_eq!(
+            ThinkingLevel::Minimal.normalize_visible(),
+            ThinkingLevel::Low
+        );
         assert_eq!(ThinkingLevel::High.normalize_visible(), ThinkingLevel::High);
     }
 

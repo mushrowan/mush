@@ -81,10 +81,7 @@ impl RepoMapWatcher {
                     if let Ok(mut text) = map_text_clone.write() {
                         *text = new_text;
                     }
-                    tracing::debug!(
-                        files = guard.incr_map.map().files.len(),
-                        "repo map updated"
-                    );
+                    tracing::debug!(files = guard.incr_map.map().files.len(), "repo map updated");
                 }
             }
         });
@@ -96,9 +93,7 @@ impl RepoMapWatcher {
             let dominated = |kind: &EventKind| {
                 matches!(
                     kind,
-                    EventKind::Modify(_)
-                        | EventKind::Create(_)
-                        | EventKind::Remove(_)
+                    EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
                 )
             };
 
@@ -109,9 +104,7 @@ impl RepoMapWatcher {
             let relevant: Vec<PathBuf> = event
                 .paths
                 .into_iter()
-                .filter(|p| {
-                    p.is_relative() || p.starts_with(&root_owned)
-                })
+                .filter(|p| p.is_relative() || p.starts_with(&root_owned))
                 .filter(|p| Language::detect(p).is_some())
                 .collect();
 
@@ -180,7 +173,10 @@ mod tests {
         let text = watcher.map_text().read().unwrap();
 
         assert!(text.contains("lib.rs"), "initial map should contain lib.rs");
-        assert!(text.contains("hello"), "initial map should contain hello fn");
+        assert!(
+            text.contains("hello"),
+            "initial map should contain hello fn"
+        );
     }
 
     #[test]
@@ -193,7 +189,10 @@ mod tests {
         // verify initial state
         {
             let text = watcher.map_text().read().unwrap();
-            assert!(!text.contains("goodbye"), "should not contain goodbye initially");
+            assert!(
+                !text.contains("goodbye"),
+                "should not contain goodbye initially"
+            );
         }
 
         // add a new file

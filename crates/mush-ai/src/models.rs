@@ -193,25 +193,23 @@ pub fn openrouter_models() -> Vec<Model> {
 /// all built-in openai api-key models (responses API)
 #[must_use]
 pub fn openai_models() -> Vec<Model> {
-    vec![
-        Model {
-            id: "gpt-5.2".into(),
-            name: "GPT-5.2".into(),
-            api: Api::OpenaiResponses,
-            provider: Provider::Custom("openai".into()),
-            base_url: "https://api.openai.com/v1".into(),
-            reasoning: true,
-            input: vec![InputModality::Text, InputModality::Image],
-            cost: ModelCost {
-                input: 1.25,
-                output: 10.0,
-                cache_read: 0.125,
-                cache_write: 1.5625,
-            },
-            context_window: TokenCount::new(400_000),
-            max_output_tokens: TokenCount::new(128_000),
+    vec![Model {
+        id: "gpt-5.2".into(),
+        name: "GPT-5.2".into(),
+        api: Api::OpenaiResponses,
+        provider: Provider::Custom("openai".into()),
+        base_url: "https://api.openai.com/v1".into(),
+        reasoning: true,
+        input: vec![InputModality::Text, InputModality::Image],
+        cost: ModelCost {
+            input: 1.25,
+            output: 10.0,
+            cache_read: 0.125,
+            cache_write: 1.5625,
         },
-    ]
+        context_window: TokenCount::new(400_000),
+        max_output_tokens: TokenCount::new(128_000),
+    }]
 }
 
 /// all built-in openai codex subscription models (chatgpt oauth)

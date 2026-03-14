@@ -126,11 +126,9 @@ impl LspRegistry {
         language: Language,
         result: Result<(), LspError>,
     ) -> Result<(), LspError> {
-        if let Err(ref e) = result {
-            if matches!(e, LspError::ServerExited) {
-                tracing::warn!(language = ?language, "LSP server crashed, removing");
-                clients.remove(&language);
-            }
+        if let Err(ref e @ LspError::ServerExited) = result {
+            tracing::warn!(language = ?language, error = %e, "LSP server crashed, removing");
+            clients.remove(&language);
         }
         result
     }

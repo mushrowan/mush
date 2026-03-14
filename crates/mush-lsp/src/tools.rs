@@ -81,23 +81,14 @@ impl AgentTool for DiagnosticsTool {
 }
 
 /// create all LSP tools sharing a single registry
-pub fn lsp_tools(
-    registry: Arc<LspRegistry>,
-    cwd: PathBuf,
-) -> Vec<Box<dyn AgentTool>> {
-    vec![
-        Box::new(DiagnosticsTool::new(registry, cwd)),
-    ]
+pub fn lsp_tools(registry: Arc<LspRegistry>, cwd: PathBuf) -> Vec<Box<dyn AgentTool>> {
+    vec![Box::new(DiagnosticsTool::new(registry, cwd))]
 }
 
 // same as mush_tools::util::resolve_path (can't depend on mush-tools here)
 fn resolve_path(cwd: &std::path::Path, path_str: &str) -> PathBuf {
     let p = PathBuf::from(path_str);
-    if p.is_absolute() {
-        p
-    } else {
-        cwd.join(p)
-    }
+    if p.is_absolute() { p } else { cwd.join(p) }
 }
 
 #[cfg(test)]
@@ -111,7 +102,12 @@ mod tests {
         assert_eq!(tool.name(), "lsp_diagnostics");
         let schema = tool.parameters_schema();
         assert_eq!(schema["properties"]["path"]["type"], "string");
-        assert!(schema["required"].as_array().unwrap().contains(&json!("path")));
+        assert!(
+            schema["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("path"))
+        );
     }
 
     #[tokio::test]

@@ -45,6 +45,10 @@ pub(super) struct RunnerServices {
     pub delegation_queue: crate::delegate::DelegationQueue,
 }
 
+/// how often the TUI calls into the usage poller (the poller itself
+/// has its own internal cache interval for actual HTTP requests)
+const USAGE_POLL_TICK: std::time::Duration = std::time::Duration::from_secs(60);
+
 pub(super) struct RunnerRuntime {
     pub cwd: PathBuf,
     pub pane_mgr: PaneManager,
@@ -53,6 +57,7 @@ pub(super) struct RunnerRuntime {
     pub lifecycle_hooks: mush_agent::LifecycleHooks,
     pub pending_prompt: Option<String>,
     pub usage_poller: Option<mush_ai::oauth::usage::UsagePoller>,
+    last_usage_poll: std::time::Instant,
     _config_watcher: Option<RecommendedWatcher>,
     config_rx: Option<mpsc::Receiver<crate::theme::Theme>>,
 }
@@ -104,6 +109,7 @@ impl RunnerRuntime {
                 .filter(|store| store.providers.contains_key("anthropic"))
                 .map(|_| mush_ai::oauth::usage::UsagePoller::new(client.clone()))
         });
+        tracing::debug!(has_poller = usage_poller.is_some(), "usage poller setup");
 
         (
             Self {
@@ -114,6 +120,7 @@ impl RunnerRuntime {
                 lifecycle_hooks: tui_config.lifecycle_hooks.clone(),
                 pending_prompt: None,
                 usage_poller,
+                last_usage_poll: std::time::Instant::now() - USAGE_POLL_TICK,
                 _config_watcher,
                 config_rx,
             },
@@ -175,6 +182,10 @@ impl RunnerRuntime {
 
     /// poll oauth usage data and distribute to all panes
     pub(super) async fn poll_usage(&mut self) {
+        if self.last_usage_poll.elapsed() < USAGE_POLL_TICK {
+            return;
+        }
+        self.last_usage_poll = std::time::Instant::now();
         let Some(ref poller) = self.usage_poller else {
             return;
         };

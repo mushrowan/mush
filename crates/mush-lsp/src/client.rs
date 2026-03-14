@@ -54,12 +54,14 @@ impl LspClient {
             .spawn()
             .map_err(|e| LspError::SpawnFailed(format!("{}: {e}", config.command)))?;
 
-        let stdin = process.stdin.take().ok_or_else(|| {
-            LspError::SpawnFailed("failed to capture server stdin".into())
-        })?;
-        let stdout = process.stdout.take().ok_or_else(|| {
-            LspError::SpawnFailed("failed to capture server stdout".into())
-        })?;
+        let stdin = process
+            .stdin
+            .take()
+            .ok_or_else(|| LspError::SpawnFailed("failed to capture server stdin".into()))?;
+        let stdout = process
+            .stdout
+            .take()
+            .ok_or_else(|| LspError::SpawnFailed("failed to capture server stdout".into()))?;
 
         let writer = Arc::new(Mutex::new(stdin));
         let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<Value>>>> =
@@ -222,7 +224,15 @@ pub fn format_diagnostics(path: &Path, diagnostics: &[Diagnostic]) -> String {
         };
         let line = d.range.start.line + 1;
         let col = d.range.start.character + 1;
-        let _ = writeln!(out, "{}:{}:{}: {}: {}", path.display(), line, col, severity, d.message);
+        let _ = writeln!(
+            out,
+            "{}:{}:{}: {}: {}",
+            path.display(),
+            line,
+            col,
+            severity,
+            d.message
+        );
     }
     out
 }

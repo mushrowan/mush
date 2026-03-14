@@ -45,8 +45,7 @@ pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
                             let first_tc_idx = tool_calls.len();
                             for sub in &sub_calls {
                                 let name = sub["tool"].as_str().unwrap_or("?").to_string();
-                                let summary =
-                                    summarise_tool_args(&name, &sub["parameters"]);
+                                let summary = summarise_tool_args(&name, &sub["parameters"]);
                                 tool_calls.push(DisplayToolCall {
                                     name,
                                     summary,
@@ -77,8 +76,7 @@ pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
                                 image_data: None,
                                 batch: batch_counter,
                             });
-                            tool_call_positions
-                                .insert(tool_call.id.clone(), (msg_idx, tc_idx));
+                            tool_call_positions.insert(tool_call.id.clone(), (msg_idx, tc_idx));
                         }
                     }
                 }

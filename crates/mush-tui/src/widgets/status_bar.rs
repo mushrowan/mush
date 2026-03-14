@@ -387,7 +387,10 @@ mod tests {
         let content = buffer_to_string(&buf);
         // model │ thinking │ context
         assert!(content.contains("│"), "missing │ separator: {content}");
-        assert!(content.contains("thinking:"), "missing thinking: label: {content}");
+        assert!(
+            content.contains("thinking:"),
+            "missing thinking: label: {content}"
+        );
     }
 
     #[test]

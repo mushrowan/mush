@@ -107,8 +107,11 @@ fn rank_symbols(
             // score by how many files define this name (proxy for importance)
             // higher-level constructs (structs, traits, classes) get a bonus
             let kind_bonus = match sym.kind {
-                SymbolKind::Class | SymbolKind::Struct | SymbolKind::Trait
-                | SymbolKind::Interface | SymbolKind::Enum => 2,
+                SymbolKind::Class
+                | SymbolKind::Struct
+                | SymbolKind::Trait
+                | SymbolKind::Interface
+                | SymbolKind::Enum => 2,
                 SymbolKind::Function | SymbolKind::Method => 1,
                 SymbolKind::Module => 3,
                 _ => 0,
@@ -121,7 +124,10 @@ fn rank_symbols(
         })
         .collect();
 
-    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.start_line.cmp(&b.1.start_line)));
+    scored.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| a.1.start_line.cmp(&b.1.start_line))
+    });
     scored.into_iter().map(|(_, sym)| sym.clone()).collect()
 }
 
@@ -317,11 +323,8 @@ fn build_from_data(root: &Path, file_data: &HashMap<PathBuf, FileData>) -> RepoM
     }
 
     // build file-level edges
-    let file_indices: HashMap<&PathBuf, usize> = file_data
-        .keys()
-        .enumerate()
-        .map(|(i, p)| (p, i))
-        .collect();
+    let file_indices: HashMap<&PathBuf, usize> =
+        file_data.keys().enumerate().map(|(i, p)| (p, i)).collect();
     let n = file_indices.len();
 
     let mut edges: Vec<(usize, usize)> = Vec::new();
@@ -449,7 +452,11 @@ impl Server {
         assert!(!map.files.is_empty(), "map should have files");
 
         // all three files should be present
-        let paths: Vec<_> = map.files.iter().map(|f| f.path.display().to_string()).collect();
+        let paths: Vec<_> = map
+            .files
+            .iter()
+            .map(|f| f.path.display().to_string())
+            .collect();
         assert!(
             paths.iter().any(|p| p.contains("lib.rs")),
             "missing lib.rs: {paths:?}"
@@ -479,10 +486,17 @@ impl Server {
             .expect("config.rs should be in the map");
 
         // it should have a non-trivial rank
-        assert!(config_entry.rank > 0.0, "config.rs should have positive rank");
+        assert!(
+            config_entry.rank > 0.0,
+            "config.rs should have positive rank"
+        );
 
         // Config struct should be among its symbols
-        let sym_names: Vec<_> = config_entry.symbols.iter().map(|s| s.name.as_str()).collect();
+        let sym_names: Vec<_> = config_entry
+            .symbols
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
         assert!(
             sym_names.contains(&"Config"),
             "Config should be a symbol: {sym_names:?}"
@@ -498,8 +512,14 @@ impl Server {
         let text = map.format(10_000);
 
         assert!(!text.is_empty());
-        assert!(text.contains("config.rs"), "output should contain config.rs");
-        assert!(text.contains("Config"), "output should contain Config symbol");
+        assert!(
+            text.contains("config.rs"),
+            "output should contain config.rs"
+        );
+        assert!(
+            text.contains("Config"),
+            "output should contain Config symbol"
+        );
     }
 
     #[test]
@@ -510,7 +530,11 @@ impl Server {
         let map = build_repo_map(dir.path());
         let text = map.format(100); // very small budget
 
-        assert!(text.len() <= 200, "output should be near budget: {}", text.len());
+        assert!(
+            text.len() <= 200,
+            "output should be near budget: {}",
+            text.len()
+        );
     }
 
     #[test]
@@ -617,7 +641,10 @@ impl Config {
 
         let mut incr = IncrementalRepoMap::new(dir.path());
         assert!(
-            incr.map().files.iter().any(|f| f.path.display().to_string().contains("server.rs")),
+            incr.map()
+                .files
+                .iter()
+                .any(|f| f.path.display().to_string().contains("server.rs")),
             "server.rs should be in initial map"
         );
 
@@ -628,7 +655,11 @@ impl Config {
         assert!(changed, "removal should report change");
 
         assert!(
-            !incr.map().files.iter().any(|f| f.path.display().to_string().contains("server.rs")),
+            !incr
+                .map()
+                .files
+                .iter()
+                .any(|f| f.path.display().to_string().contains("server.rs")),
             "server.rs should be gone after removal"
         );
     }
@@ -659,7 +690,10 @@ pub fn helper() -> String {
             "should have more files after adding"
         );
         assert!(
-            incr.map().files.iter().any(|f| f.path.display().to_string().contains("utils.rs")),
+            incr.map()
+                .files
+                .iter()
+                .any(|f| f.path.display().to_string().contains("utils.rs")),
             "utils.rs should be in map"
         );
     }

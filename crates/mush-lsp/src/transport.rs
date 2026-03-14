@@ -17,12 +17,12 @@ pub async fn read_message<R: tokio::io::AsyncRead + Unpin>(
 ) -> Result<serde_json::Value, LspError> {
     let content_length = read_headers(reader).await?;
     let mut buf = vec![0u8; content_length];
-    reader.read_exact(&mut buf).await.map_err(|e| {
-        LspError::Transport(format!("failed to read message body: {e}"))
-    })?;
-    serde_json::from_slice(&buf).map_err(|e| {
-        LspError::Transport(format!("invalid JSON in message body: {e}"))
-    })
+    reader
+        .read_exact(&mut buf)
+        .await
+        .map_err(|e| LspError::Transport(format!("failed to read message body: {e}")))?;
+    serde_json::from_slice(&buf)
+        .map_err(|e| LspError::Transport(format!("invalid JSON in message body: {e}")))
 }
 
 /// write a JSON-RPC message to the server's stdin
@@ -30,19 +30,21 @@ pub async fn write_message(
     writer: &mut tokio::process::ChildStdin,
     message: &serde_json::Value,
 ) -> Result<(), LspError> {
-    let body = serde_json::to_string(message).map_err(|e| {
-        LspError::Transport(format!("failed to serialise message: {e}"))
-    })?;
+    let body = serde_json::to_string(message)
+        .map_err(|e| LspError::Transport(format!("failed to serialise message: {e}")))?;
     let header = format!("Content-Length: {}\r\n\r\n", body.len());
-    writer.write_all(header.as_bytes()).await.map_err(|e| {
-        LspError::Transport(format!("failed to write header: {e}"))
-    })?;
-    writer.write_all(body.as_bytes()).await.map_err(|e| {
-        LspError::Transport(format!("failed to write body: {e}"))
-    })?;
-    writer.flush().await.map_err(|e| {
-        LspError::Transport(format!("failed to flush: {e}"))
-    })?;
+    writer
+        .write_all(header.as_bytes())
+        .await
+        .map_err(|e| LspError::Transport(format!("failed to write header: {e}")))?;
+    writer
+        .write_all(body.as_bytes())
+        .await
+        .map_err(|e| LspError::Transport(format!("failed to write body: {e}")))?;
+    writer
+        .flush()
+        .await
+        .map_err(|e| LspError::Transport(format!("failed to flush: {e}")))?;
     Ok(())
 }
 
@@ -53,9 +55,10 @@ async fn read_headers<R: tokio::io::AsyncRead + Unpin>(
     let mut content_length: Option<usize> = None;
     loop {
         let mut line = String::new();
-        let n = reader.read_line(&mut line).await.map_err(|e| {
-            LspError::Transport(format!("failed to read header line: {e}"))
-        })?;
+        let n = reader
+            .read_line(&mut line)
+            .await
+            .map_err(|e| LspError::Transport(format!("failed to read header line: {e}")))?;
         if n == 0 {
             return Err(LspError::ServerExited);
         }
@@ -69,9 +72,7 @@ async fn read_headers<R: tokio::io::AsyncRead + Unpin>(
             })?);
         }
     }
-    content_length.ok_or_else(|| {
-        LspError::Transport("missing Content-Length header".into())
-    })
+    content_length.ok_or_else(|| LspError::Transport("missing Content-Length header".into()))
 }
 
 #[cfg(test)]
