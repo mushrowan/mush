@@ -35,7 +35,7 @@ impl<'a> Ui<'a> {
 
     /// get the cursor position for the terminal
     pub fn cursor_position(&self, area: Rect) -> (u16, u16) {
-        let input_h = input_height(&self.app.input.text, area.width, &self.app.input.images);
+        let input_h = input_height(&self.app.input, area.width);
         let tools_h = tool_panels_height(&self.app.active_tools, area.width);
         let status_h = if self.hide_status {
             0
@@ -57,23 +57,14 @@ pub struct LayoutRegions {
 }
 
 /// compute wrapped line count for input text, accounting for newlines and images
-pub fn input_height(input: &str, area_width: u16, images: &[crate::app::PendingImage]) -> u16 {
-    // inner width of the bordered block (left + right border = 2 columns)
+pub fn input_height(input: &crate::app::InputBuffer, area_width: u16) -> u16 {
     let content_width = area_width.saturating_sub(2) as usize;
     if content_width == 0 {
         return 3;
     }
-    // expand image placeholders so wrapping accounts for token width
-    let expanded = crate::widgets::input_box::expand_input(input, 0, images);
-    // use the same word-wrap algorithm as the input box renderer
-    let mut total_lines: usize = 0;
-    for (i, line) in expanded.text.split('\n').enumerate() {
-        let indent = if i == 0 { 2 } else { 0 }; // "> " prompt
-        let segments = crate::widgets::input_box::word_wrap_segments(line, content_width, indent);
-        total_lines += segments.len();
-    }
-    // +2 for borders, cap at 12 lines so it doesn't eat the whole screen
-    (total_lines as u16 + 2).min(12)
+
+    let layout = input.layout(content_width);
+    (layout.total_lines + 2).min(12)
 }
 
 /// compute the main layout
@@ -116,7 +107,7 @@ pub fn layout(area: Rect, input_h: u16, tools_h: u16, status_h: u16) -> LayoutRe
 
 impl Widget for Ui<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let input_h = input_height(&self.app.input.text, area.width, &self.app.input.images);
+        let input_h = input_height(&self.app.input, area.width);
         let tools_h = tool_panels_height(&self.app.active_tools, area.width);
         let status_h = if self.hide_status {
             0
@@ -152,29 +143,29 @@ mod tests {
     #[test]
     fn input_height_short_text() {
         // "hi" in an 80-wide box: 1 line + 2 borders = 3
-        assert_eq!(input_height("hi", 80, &[]), 3);
+        assert_eq!(input_height_for("hi", 80, vec![]), 3);
     }
 
     #[test]
     fn input_height_wrapping() {
         // 100 chars in a 20-wide box: content_width=18, effective=102, ceil(102/18)+1=6+2=8
         let text = "a".repeat(100);
-        assert_eq!(input_height(&text, 20, &[]), 8);
+        assert_eq!(input_height_for(&text, 20, vec![]), 8);
     }
 
     #[test]
     fn input_height_capped() {
         // 1000 chars in a 20-wide box would be 65 lines, but capped at 12
         let text = "a".repeat(1000);
-        assert_eq!(input_height(&text, 20, &[]), 12);
+        assert_eq!(input_height_for(&text, 20, vec![]), 12);
     }
 
     #[test]
     fn input_height_multiline() {
         // "hello\nworld" in a 40-wide box: 2 lines + 2 borders = 4
-        assert_eq!(input_height("hello\nworld", 40, &[]), 4);
+        assert_eq!(input_height_for("hello\nworld", 40, vec![]), 4);
         // three newlines = 4 lines + 2 borders = 6
-        assert_eq!(input_height("a\nb\nc\nd", 40, &[]), 6);
+        assert_eq!(input_height_for("a\nb\nc\nd", 40, vec![]), 6);
     }
 
     #[test]
@@ -189,7 +180,7 @@ mod tests {
         // image token is inline, doesn't add a whole line
         let input = format!("hi{IMAGE_PLACEHOLDER}");
         // "hi[📷 100x200]" = ~16 chars, fits in 80-wide box = 1 line + 2 borders = 3
-        assert_eq!(input_height(&input, 80, &[img]), 3);
+        assert_eq!(input_height_for(&input, 80, vec![img]), 3);
     }
 
     #[test]
@@ -242,6 +233,45 @@ mod tests {
         assert_eq!(y, 21);
         // x: 0 + 1 (border) + 2 ("> ") + 5 (cursor) = 8
         assert_eq!(x, 8);
+    }
+
+    #[test]
+    fn input_layout_cache_reuses_layout_across_cursor_and_render() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.input.text = "one two three four five six seven eight nine ten".into();
+        app.input.cursor = app.input.text.len();
+        app.input.reset_layout_builds();
+
+        let area = Rect::new(0, 0, 20, 8);
+        let _ = Ui::new(&app).cursor_position(area);
+        let _buf = render_full(&app, 20, 8);
+
+        assert_eq!(app.input.layout_builds(), 1);
+    }
+
+    #[test]
+    fn input_layout_cache_refreshes_after_text_change() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.input.text = "hello".into();
+        app.input.cursor = app.input.text.len();
+        app.input.reset_layout_builds();
+
+        assert_eq!(input_height(&app.input, 20), 3);
+        assert_eq!(app.input.layout_builds(), 1);
+
+        app.input.text.push('!');
+        app.input.cursor = app.input.text.len();
+
+        assert_eq!(input_height(&app.input, 20), 3);
+        assert_eq!(app.input.layout_builds(), 2);
+    }
+
+    fn input_height_for(text: &str, width: u16, images: Vec<crate::app::PendingImage>) -> u16 {
+        let mut input = crate::app::InputBuffer::new();
+        input.text = text.to_string();
+        input.cursor = input.text.len();
+        input.images = images;
+        input_height(&input, width)
     }
 
     fn render_full(app: &App, width: u16, height: u16) -> Buffer {

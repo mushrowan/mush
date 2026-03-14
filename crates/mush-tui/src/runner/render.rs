@@ -147,11 +147,7 @@ pub(super) fn draw_panes(
             widgets::session_picker::render(frame, picker);
         }
         if let Some(ref menu) = focused_app.slash_menu {
-            let input_h = crate::ui::input_height(
-                &focused_app.input.text,
-                focused_area.width,
-                &focused_app.input.images,
-            );
+            let input_h = crate::ui::input_height(&focused_app.input, focused_area.width);
             let tools_h = crate::widgets::tool_panels::tool_panels_height(
                 &focused_app.active_tools,
                 focused_area.width,
