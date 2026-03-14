@@ -14,6 +14,9 @@ pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
     app.clear_messages();
 
     let mut tool_call_positions = HashMap::<ToolCallId, (usize, usize)>::new();
+    // (tool_call_id, msg_idx, first_tc_idx, sub_call_count)
+    let mut batch_tool_ids: Vec<(ToolCallId, usize, usize, usize)> = Vec::new();
+    let mut batch_counter: u32 = 0;
     for message in conversation {
         match message {
             Message::User(user) => app.push_user_message(user.text()),
@@ -21,20 +24,62 @@ pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
                 let msg_idx = app.messages.len();
                 let mut tool_calls = Vec::new();
 
+                let has_tools = assistant
+                    .content
+                    .iter()
+                    .any(|p| matches!(p, AssistantContentPart::ToolCall(_)));
+                if has_tools {
+                    batch_counter += 1;
+                }
+
                 for part in &assistant.content {
                     if let AssistantContentPart::ToolCall(tool_call) = part {
-                        let tc_idx = tool_calls.len();
-                        tool_calls.push(DisplayToolCall {
-                            name: tool_call.name.to_string(),
-                            summary: summarise_tool_args(
-                                tool_call.name.as_str(),
-                                &tool_call.arguments,
-                            ),
-                            status: ToolCallStatus::Running,
-                            output_preview: None,
-                            image_data: None,
-                        });
-                        tool_call_positions.insert(tool_call.id.clone(), (msg_idx, tc_idx));
+                        if tool_call.name.as_str().eq_ignore_ascii_case("batch") {
+                            // expand batch into individual sub-call entries
+                            let sub_calls = tool_call.arguments["tool_calls"]
+                                .as_array()
+                                .cloned()
+                                .unwrap_or_default();
+                            // track the batch tool_call_id so apply_tool_result
+                            // can parse and distribute the combined output later
+                            let first_tc_idx = tool_calls.len();
+                            for sub in &sub_calls {
+                                let name = sub["tool"].as_str().unwrap_or("?").to_string();
+                                let summary =
+                                    summarise_tool_args(&name, &sub["parameters"]);
+                                tool_calls.push(DisplayToolCall {
+                                    name,
+                                    summary,
+                                    status: ToolCallStatus::Running,
+                                    output_preview: None,
+                                    image_data: None,
+                                    batch: batch_counter,
+                                });
+                            }
+                            // map the batch id to (msg_idx, first_tc_idx) with a
+                            // special marker so apply_tool_result knows to expand
+                            batch_tool_ids.push((
+                                tool_call.id.clone(),
+                                msg_idx,
+                                first_tc_idx,
+                                sub_calls.len(),
+                            ));
+                        } else {
+                            let tc_idx = tool_calls.len();
+                            tool_calls.push(DisplayToolCall {
+                                name: tool_call.name.to_string(),
+                                summary: summarise_tool_args(
+                                    tool_call.name.as_str(),
+                                    &tool_call.arguments,
+                                ),
+                                status: ToolCallStatus::Running,
+                                output_preview: None,
+                                image_data: None,
+                                batch: batch_counter,
+                            });
+                            tool_call_positions
+                                .insert(tool_call.id.clone(), (msg_idx, tc_idx));
+                        }
                     }
                 }
 
@@ -52,7 +97,16 @@ pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
                 app.stats.update(&assistant.usage, None);
             }
             Message::ToolResult(result) => {
-                apply_tool_result(app, &tool_call_positions, result);
+                // check if this is a batch result
+                if let Some(pos) = batch_tool_ids
+                    .iter()
+                    .position(|(id, _, _, _)| *id == result.tool_call_id)
+                {
+                    let (_, msg_idx, first_tc, count) = batch_tool_ids.remove(pos);
+                    apply_batch_result(app, msg_idx, first_tc, count, result);
+                } else {
+                    apply_tool_result(app, &tool_call_positions, result);
+                }
             }
         }
     }
@@ -81,6 +135,54 @@ fn apply_tool_result(
 
     tool_call.status = display_tool_status(result.outcome);
     tool_call.output_preview = tool_result_preview(&result.content);
+}
+
+/// distribute a batch tool result to individual sub-call display entries
+fn apply_batch_result(
+    app: &mut App,
+    msg_idx: usize,
+    first_tc: usize,
+    count: usize,
+    result: &ToolResultMessage,
+) {
+    let text = result
+        .content
+        .iter()
+        .filter_map(|p| match p {
+            ToolResultContentPart::Text(t) => Some(t.text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("");
+
+    let sections = crate::app::parse_batch_output(&text);
+
+    let Some(message) = app.messages.get_mut(msg_idx) else {
+        return;
+    };
+
+    for (i, section) in sections.iter().enumerate() {
+        let tc_idx = first_tc + i;
+        if tc_idx >= first_tc + count {
+            break;
+        }
+        if let Some(tc) = message.tool_calls.get_mut(tc_idx) {
+            tc.status = if section.is_error {
+                ToolCallStatus::Error
+            } else {
+                ToolCallStatus::Done
+            };
+            if !section.content.is_empty() {
+                tc.output_preview = Some(crate::app::truncate_output(&section.content));
+            }
+        }
+    }
+    // mark any remaining unmatched sub-calls as done
+    for i in sections.len()..count {
+        if let Some(tc) = message.tool_calls.get_mut(first_tc + i) {
+            tc.status = ToolCallStatus::Done;
+        }
+    }
 }
 
 fn display_tool_status(outcome: ToolOutcome) -> ToolCallStatus {

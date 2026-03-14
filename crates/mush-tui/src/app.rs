@@ -162,6 +162,8 @@ pub struct DisplayToolCall {
     pub output_preview: Option<String>,
     /// raw image bytes from tool result (for inline rendering)
     pub image_data: Option<Vec<u8>>,
+    /// tools with the same batch ran in parallel
+    pub batch: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -334,6 +336,8 @@ pub struct App {
     pub cache_warn_sent: bool,
     /// whether we already sent a "cache expired" notification
     pub cache_expired_sent: bool,
+    /// batch counter for grouping parallel tool calls
+    current_tool_batch: u32,
 }
 
 /// position computed during render for inline image overlay
@@ -452,6 +456,7 @@ impl App {
             cache_ttl_secs: 300,
             cache_warn_sent: false,
             cache_expired_sent: false,
+            current_tool_batch: 0,
         }
     }
 
@@ -599,6 +604,14 @@ impl App {
 
     /// mark a tool as being executed
     pub fn start_tool(&mut self, tool_call_id: &ToolCallId, name: &str, summary: &str) {
+        // new batch when no tools are currently running
+        let has_running = self
+            .active_tools
+            .iter()
+            .any(|t| t.status == ToolCallStatus::Running);
+        if !has_running {
+            self.current_tool_batch += 1;
+        }
         self.active_tools.push(ActiveToolState {
             tool_call_id: tool_call_id.clone(),
             name: name.to_string(),
@@ -616,7 +629,90 @@ impl App {
                 status: ToolCallStatus::Running,
                 output_preview: None,
                 image_data: None,
+                batch: self.current_tool_batch,
             });
+        }
+    }
+
+    /// expand a batch tool into individual sub-tool display entries
+    pub fn start_batch_tool(
+        &mut self,
+        tool_call_id: &ToolCallId,
+        summary: &str,
+        sub_calls: &[(String, String)], // (tool_name, summary) per sub-call
+    ) {
+        self.current_tool_batch += 1;
+        // one active tool state for the live panel
+        self.active_tools.push(ActiveToolState {
+            tool_call_id: tool_call_id.clone(),
+            name: "batch".to_string(),
+            summary: summary.to_string(),
+            live_output: None,
+            status: ToolCallStatus::Running,
+            output: None,
+        });
+        self.streaming_tool_args.clear();
+        // individual display entries for message history
+        if let Some(last) = self.messages.last_mut() {
+            for (name, sub_summary) in sub_calls {
+                last.tool_calls.push(DisplayToolCall {
+                    name: name.clone(),
+                    summary: sub_summary.clone(),
+                    status: ToolCallStatus::Running,
+                    output_preview: None,
+                    image_data: None,
+                    batch: self.current_tool_batch,
+                });
+            }
+        }
+    }
+
+    /// finish a batch tool, distributing results to individual sub-calls
+    pub fn end_batch_tool(
+        &mut self,
+        tool_call_id: &ToolCallId,
+        output: Option<&str>,
+    ) {
+        // mark the active tool as done
+        if let Some(tool) = self
+            .active_tools
+            .iter_mut()
+            .find(|t| &t.tool_call_id == tool_call_id)
+        {
+            tool.status = ToolCallStatus::Done;
+            tool.output = output.map(truncate_output);
+            tool.live_output = None;
+        }
+        // parse output into per-sub-call sections and update display entries
+        let Some(text) = output else { return };
+        let sections = parse_batch_output(text);
+        if let Some(last) = self.messages.last_mut() {
+            // find the running batch sub-calls (they're the last N running entries)
+            let running: Vec<usize> = last
+                .tool_calls
+                .iter()
+                .enumerate()
+                .filter(|(_, tc)| tc.status == ToolCallStatus::Running)
+                .map(|(i, _)| i)
+                .collect();
+
+            for (section_idx, section) in sections.iter().enumerate() {
+                if let Some(&tc_idx) = running.get(section_idx) {
+                    let tc = &mut last.tool_calls[tc_idx];
+                    tc.status = if section.is_error {
+                        ToolCallStatus::Error
+                    } else {
+                        ToolCallStatus::Done
+                    };
+                    if !section.content.is_empty() {
+                        tc.output_preview = Some(truncate_output(&section.content));
+                    }
+                }
+            }
+            // mark any remaining unmatched sub-calls as done
+            for &idx in running.iter().skip(sections.len()) {
+                last.tool_calls[idx].status = ToolCallStatus::Done;
+            }
         }
     }
 
@@ -1318,6 +1414,53 @@ const MAX_PREVIEW_LINES: usize = 12;
 /// max chars per preview line
 const MAX_PREVIEW_LINE_LEN: usize = 120;
 
+/// parsed section from batch tool output
+pub(crate) struct BatchSection {
+    pub is_error: bool,
+    pub content: String,
+}
+
+/// parse batch output into per-sub-call sections
+///
+/// format: `--- [N] ToolName [ok|error] ---\ncontent\n\n`
+pub(crate) fn parse_batch_output(text: &str) -> Vec<BatchSection> {
+    let mut sections = Vec::new();
+    let lines: Vec<&str> = text.lines().collect();
+    let mut i = 0;
+
+    while i < lines.len() {
+        let line = lines[i];
+        // match header: "--- [N] ToolName [ok|error] ---"
+        if line.starts_with("--- [") && line.ends_with("] ---") {
+            let is_error = line.contains("[error]");
+            i += 1;
+            // collect content until next header or summary line
+            let mut content = String::new();
+            while i < lines.len() {
+                let next = lines[i];
+                if (next.starts_with("--- [") && next.ends_with("] ---"))
+                    || next.starts_with("batch: ")
+                {
+                    break;
+                }
+                if !content.is_empty() {
+                    content.push('\n');
+                }
+                content.push_str(next);
+                i += 1;
+            }
+            sections.push(BatchSection {
+                is_error,
+                content: content.trim().to_string(),
+            });
+        } else {
+            i += 1;
+        }
+    }
+
+    sections
+}
+
 pub(crate) fn truncate_output(output: &str) -> String {
     let lines: Vec<&str> = output.lines().collect();
     let total = lines.len();
@@ -1645,6 +1788,101 @@ mod tests {
         let tc = &app.messages.last().unwrap().tool_calls[0];
         assert!(tc.output_preview.is_some());
         assert!(tc.output_preview.as_ref().unwrap().contains("fn main()"));
+    }
+
+    #[test]
+    fn batch_tool_expands_into_sub_calls() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.messages.push(DisplayMessage {
+            role: MessageRole::Assistant,
+            content: String::new(),
+            tool_calls: vec![],
+            thinking: None,
+            thinking_expanded: false,
+            usage: None,
+            cost: None,
+            model_id: None,
+            queued: false,
+        });
+
+        let tc_id = ToolCallId::from("tc_batch");
+        app.start_batch_tool(&tc_id, "3 tool calls", &[
+            ("read".into(), "a.rs".into()),
+            ("read".into(), "b.rs".into()),
+            ("bash".into(), "cargo test".into()),
+        ]);
+
+        // one active tool for the live panel
+        assert_eq!(app.active_tools.len(), 1);
+        assert_eq!(app.active_tools[0].name, "batch");
+        // three display entries in the message
+        let tcs = &app.messages.last().unwrap().tool_calls;
+        assert_eq!(tcs.len(), 3);
+        assert_eq!(tcs[0].name, "read");
+        assert_eq!(tcs[1].name, "read");
+        assert_eq!(tcs[2].name, "bash");
+        // all same batch
+        assert_eq!(tcs[0].batch, tcs[1].batch);
+        assert_eq!(tcs[1].batch, tcs[2].batch);
+        assert!(tcs.iter().all(|t| t.status == ToolCallStatus::Running));
+    }
+
+    #[test]
+    fn batch_end_distributes_results() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.messages.push(DisplayMessage {
+            role: MessageRole::Assistant,
+            content: String::new(),
+            tool_calls: vec![],
+            thinking: None,
+            thinking_expanded: false,
+            usage: None,
+            cost: None,
+            model_id: None,
+            queued: false,
+        });
+
+        let tc_id = ToolCallId::from("tc_batch");
+        app.start_batch_tool(&tc_id, "2 tool calls", &[
+            ("read".into(), "a.rs".into()),
+            ("bash".into(), "cargo test".into()),
+        ]);
+
+        let output = "\
+--- [0] read [ok] ---
+fn main() {}
+
+--- [1] bash [error] ---
+error: could not compile
+
+batch: 1/2 succeeded, 1 failed";
+
+        app.end_batch_tool(&tc_id, Some(output));
+
+        let tcs = &app.messages.last().unwrap().tool_calls;
+        assert_eq!(tcs[0].status, ToolCallStatus::Done);
+        assert!(tcs[0].output_preview.as_ref().unwrap().contains("fn main"));
+        assert_eq!(tcs[1].status, ToolCallStatus::Error);
+        assert!(tcs[1].output_preview.as_ref().unwrap().contains("could not compile"));
+    }
+
+    #[test]
+    fn parse_batch_output_splits_sections() {
+        let text = "\
+--- [0] read [ok] ---
+content a
+
+--- [1] bash [error] ---
+error text
+
+batch: 1/2 succeeded, 1 failed";
+
+        let sections = parse_batch_output(text);
+        assert_eq!(sections.len(), 2);
+        assert!(!sections[0].is_error);
+        assert_eq!(sections[0].content, "content a");
+        assert!(sections[1].is_error);
+        assert_eq!(sections[1].content, "error text");
     }
 
     #[test]
