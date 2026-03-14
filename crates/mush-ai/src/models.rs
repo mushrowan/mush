@@ -24,7 +24,7 @@ pub fn anthropic_models() -> Vec<Model> {
                 cache_read: 0.5,
                 cache_write: 6.25,
             },
-            context_window: TokenCount::new(200_000),
+            context_window: TokenCount::new(1_000_000),
             max_output_tokens: TokenCount::new(128_000),
         },
         Model {
@@ -58,7 +58,7 @@ pub fn anthropic_models() -> Vec<Model> {
                 cache_read: 0.3,
                 cache_write: 3.75,
             },
-            context_window: TokenCount::new(200_000),
+            context_window: TokenCount::new(1_000_000),
             max_output_tokens: TokenCount::new(64_000),
         },
         Model {
