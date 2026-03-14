@@ -2,9 +2,32 @@
 //!
 //! static definitions for known models. users can override via models.json.
 
+use std::path::PathBuf;
+use std::sync::{LazyLock, Mutex};
+use std::time::SystemTime;
+
 use crate::types::{
     Api, Cost, Dollars, InputModality, Model, ModelCost, Provider, TokenCount, Usage,
 };
+
+#[derive(Debug, Clone)]
+struct UserModelsCache {
+    path: PathBuf,
+    modified: Option<SystemTime>,
+    models: Vec<Model>,
+}
+
+static BUILTIN_MODELS: LazyLock<Vec<Model>> = LazyLock::new(|| {
+    let mut models = Vec::new();
+    models.extend(anthropic_models());
+    models.extend(openrouter_models());
+    models.extend(openai_models());
+    models.extend(openai_codex_models());
+    models
+});
+
+static USER_MODELS_CACHE: LazyLock<Mutex<Option<UserModelsCache>>> =
+    LazyLock::new(|| Mutex::new(None));
 
 /// all built-in anthropic models
 #[must_use]
@@ -273,12 +296,7 @@ pub fn openai_codex_models() -> Vec<Model> {
 /// all built-in models across all providers
 #[must_use]
 pub fn all_models() -> Vec<Model> {
-    let mut models = Vec::new();
-    models.extend(anthropic_models());
-    models.extend(openrouter_models());
-    models.extend(openai_models());
-    models.extend(openai_codex_models());
-    models
+    BUILTIN_MODELS.clone()
 }
 
 /// all models including user overrides from models.json
@@ -318,13 +336,32 @@ pub fn find_model_by_id(id: &str) -> Option<Model> {
 /// load user-defined models from ~/.config/mush/models.json
 fn load_user_models() -> Vec<Model> {
     let path = user_models_path();
-    if !path.exists() {
-        return vec![];
+    let modified = std::fs::metadata(&path)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok());
+
+    if let Ok(cache) = USER_MODELS_CACHE.lock()
+        && let Some(cached) = cache.as_ref()
+        && cached.path == path
+        && cached.modified == modified
+    {
+        return cached.models.clone();
     }
-    std::fs::read_to_string(&path)
+
+    let models = std::fs::read_to_string(&path)
         .ok()
         .and_then(|content| serde_json::from_str::<Vec<Model>>(&content).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+
+    if let Ok(mut cache) = USER_MODELS_CACHE.lock() {
+        *cache = Some(UserModelsCache {
+            path,
+            modified,
+            models: models.clone(),
+        });
+    }
+
+    models
 }
 
 fn user_models_path() -> std::path::PathBuf {
@@ -336,6 +373,13 @@ fn user_models_path() -> std::path::PathBuf {
         std::path::PathBuf::from(home).join(".config/mush/models.json")
     } else {
         std::path::PathBuf::from(".mush/models.json")
+    }
+}
+
+#[cfg(test)]
+fn clear_user_models_cache() {
+    if let Ok(mut cache) = USER_MODELS_CACHE.lock() {
+        *cache = None;
     }
 }
 
@@ -363,7 +407,36 @@ pub fn calculate_cost(model: &Model, usage: &Usage) -> Cost {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{LazyLock, Mutex};
+
     use super::*;
+
+    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    struct EnvGuard {
+        saved: Option<String>,
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            clear_user_models_cache();
+            unsafe {
+                match self.saved.take() {
+                    Some(value) => std::env::set_var("MUSH_CONFIG_DIR", value),
+                    None => std::env::remove_var("MUSH_CONFIG_DIR"),
+                }
+            }
+        }
+    }
+
+    fn set_models_dir(path: &std::path::Path) -> EnvGuard {
+        let saved = std::env::var("MUSH_CONFIG_DIR").ok();
+        clear_user_models_cache();
+        unsafe {
+            std::env::set_var("MUSH_CONFIG_DIR", path);
+        }
+        EnvGuard { saved }
+    }
 
     #[test]
     fn anthropic_models_exist() {
@@ -568,6 +641,44 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].id.as_str(), "custom/test");
         assert_eq!(loaded[0].name, "Custom Test");
+    }
+
+    #[test]
+    fn cached_user_models_reload_after_file_change() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = set_models_dir(dir.path());
+        let path = dir.path().join("models.json");
+
+        let first = vec![Model {
+            id: "custom/test".into(),
+            name: "First".into(),
+            api: Api::OpenaiCompletions,
+            provider: Provider::Custom("test".into()),
+            base_url: "https://test.api.com".into(),
+            reasoning: false,
+            input: vec![InputModality::Text],
+            cost: ModelCost {
+                input: 1.0,
+                output: 2.0,
+                cache_read: 0.0,
+                cache_write: 0.0,
+            },
+            context_window: TokenCount::new(128_000),
+            max_output_tokens: TokenCount::new(4096),
+        }];
+        std::fs::write(&path, serde_json::to_string(&first).unwrap()).unwrap();
+        assert_eq!(find_model_by_id("custom/test").unwrap().name, "First");
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        let second = vec![Model {
+            name: "Second".into(),
+            ..first[0].clone()
+        }];
+        std::fs::write(&path, serde_json::to_string(&second).unwrap()).unwrap();
+
+        assert_eq!(find_model_by_id("custom/test").unwrap().name, "Second");
     }
 
     #[test]

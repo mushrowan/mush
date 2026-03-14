@@ -858,8 +858,7 @@ fn process_sse_event(
                         .push(AssistantContentPart::ToolCall(ToolCall {
                             id: ToolCallId::from(id.clone()),
                             name: ToolName::from(name.clone()),
-                            arguments: serde_json::from_str::<serde_json::Value>(&args_buf)
-                                .unwrap_or_else(|_| serde_json::json!({})),
+                            arguments: serde_json::json!({}),
                         }));
 
                     active.insert(
@@ -942,12 +941,6 @@ fn process_sse_event(
                 && let CurrentBlock::ToolCall { args_buf, .. } = &mut active_block.block
             {
                 args_buf.push_str(&delta);
-                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(args_buf)
-                    && let Some(AssistantContentPart::ToolCall(tc)) =
-                        output.content.get_mut(active_block.content_index)
-                {
-                    tc.arguments = parsed;
-                }
                 events.push(StreamEvent::ToolCallDelta {
                     content_index: active_block.content_index,
                     delta,
@@ -1253,6 +1246,90 @@ mod tests {
         assert_eq!(map_response_status("completed"), StopReason::Stop);
         assert_eq!(map_response_status("incomplete"), StopReason::Length);
         assert_eq!(map_response_status("failed"), StopReason::Error);
+    }
+
+    #[test]
+    fn tool_call_args_materialise_at_block_end() {
+        let mut output = AssistantMessage {
+            content: vec![],
+            model: "test".into(),
+            provider: Provider::Custom("test".into()),
+            api: Api::OpenaiResponses,
+            usage: Usage::default(),
+            stop_reason: StopReason::Stop,
+            error_message: None,
+            timestamp_ms: Timestamp::zero(),
+        };
+        let mut active = std::collections::HashMap::new();
+
+        let start = process_sse_event(
+            Some("response.output_item.added"),
+            serde_json::json!({
+                "output_index": 0,
+                "item": {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "id": "item_1",
+                    "name": "read",
+                    "arguments": r#"{"path":""#,
+                }
+            }),
+            &mut output,
+            &mut active,
+        );
+        assert!(
+            start
+                .iter()
+                .any(|event| matches!(event, StreamEvent::ToolCallStart { .. }))
+        );
+
+        let delta = process_sse_event(
+            Some("response.function_call_arguments.delta"),
+            serde_json::json!({
+                "output_index": 0,
+                "delta": r#"foo.rs"}"#,
+            }),
+            &mut output,
+            &mut active,
+        );
+        assert!(
+            delta
+                .iter()
+                .any(|event| matches!(event, StreamEvent::ToolCallDelta { .. }))
+        );
+
+        match &output.content[0] {
+            AssistantContentPart::ToolCall(tc) => {
+                assert_eq!(tc.arguments, serde_json::json!({}));
+            }
+            other => panic!("expected tool call, got {other:?}"),
+        }
+
+        let done = process_sse_event(
+            Some("response.output_item.done"),
+            serde_json::json!({
+                "output_index": 0,
+                "item": {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "id": "item_1",
+                    "name": "read",
+                    "arguments": r#"{"path":"foo.rs"}"#,
+                }
+            }),
+            &mut output,
+            &mut active,
+        );
+
+        match &done[0] {
+            StreamEvent::ToolCallEnd {
+                name, arguments, ..
+            } => {
+                assert_eq!(name, "read");
+                assert_eq!(arguments["path"], "foo.rs");
+            }
+            other => panic!("expected ToolCallEnd, got {other:?}"),
+        }
     }
 
     fn codex_model() -> Model {

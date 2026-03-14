@@ -42,7 +42,15 @@ impl Widget for MessageList<'_> {
                 is_cursor: in_scroll_mode && self.app.selected_message == Some(i),
                 has_visual: self.app.has_selection(),
             };
-            render_message(msg, i, &mut lines, sel, &mut image_placeholders, area.width);
+            render_message(
+                self.app,
+                msg,
+                i,
+                &mut lines,
+                sel,
+                &mut image_placeholders,
+                area.width,
+            );
             lines.push(Line::raw(""));
         }
 
@@ -72,7 +80,7 @@ impl Widget for MessageList<'_> {
             }
             if !self.app.stream.text.is_empty() {
                 let visible_text = self.app.visible_streaming_text();
-                let md_text = render_markdown(visible_text);
+                let md_text = crate::markdown::render(visible_text);
                 for line in md_text.lines {
                     let mut spans: Vec<Span<'_>> = vec![Span::raw(" ")];
                     spans.extend(line.spans);
@@ -115,7 +123,15 @@ impl Widget for MessageList<'_> {
                 is_cursor: in_scroll_mode && self.app.selected_message == Some(i),
                 has_visual: self.app.has_selection(),
             };
-            render_message(msg, i, &mut lines, sel, &mut image_placeholders, area.width);
+            render_message(
+                self.app,
+                msg,
+                i,
+                &mut lines,
+                sel,
+                &mut image_placeholders,
+                area.width,
+            );
             lines.push(Line::raw(""));
         }
 
@@ -219,6 +235,7 @@ struct SelectionHint {
 
 #[allow(clippy::too_many_arguments)]
 fn render_message(
+    app: &App,
     msg: &DisplayMessage,
     msg_idx: usize,
     lines: &mut Vec<Line<'_>>,
@@ -317,7 +334,7 @@ fn render_message(
         // blank padding line below
         lines.push(Line::from(Span::styled(" ".repeat(w), user_bg)));
     } else {
-        let md_text = render_markdown(&msg.content);
+        let md_text = render_markdown_cached(app, &msg.content);
         for line in md_text.lines {
             let mut spans: Vec<Span<'_>> = vec![Span::raw(" ")];
             spans.extend(line.spans);
@@ -423,11 +440,20 @@ fn truncate_line(s: &str, max: usize) -> String {
 }
 
 /// render markdown text to styled ratatui Text
-fn render_markdown(source: &str) -> Text<'static> {
+fn render_markdown_cached(app: &App, source: &str) -> Text<'static> {
     if source.is_empty() {
         return Text::default();
     }
-    crate::markdown::render(source)
+
+    if let Some(cached) = app.markdown_cache.borrow().get(source).cloned() {
+        return cached;
+    }
+
+    let rendered = crate::markdown::render(source);
+    app.markdown_cache
+        .borrow_mut()
+        .insert(source.to_string(), rendered.clone());
+    rendered
 }
 
 // -- bordered tool boxes for completed tool calls --

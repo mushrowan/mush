@@ -662,11 +662,6 @@ fn process_chunk(
             {
                 args_buf.push_str(&args);
                 let idx = output.content.len().saturating_sub(1);
-                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(args_buf)
-                    && let Some(AssistantContentPart::ToolCall(tc)) = output.content.get_mut(idx)
-                {
-                    tc.arguments = parsed;
-                }
                 events.push(StreamEvent::ToolCallDelta {
                     content_index: idx,
                     delta: args,
@@ -967,6 +962,13 @@ mod tests {
             usage: None,
         };
         process_chunk(chunk, &mut output, &mut current);
+
+        match &output.content[0] {
+            AssistantContentPart::ToolCall(tc) => {
+                assert_eq!(tc.arguments, serde_json::json!({}));
+            }
+            other => panic!("expected tool call, got {other:?}"),
+        }
 
         // finish
         let mut events = Vec::new();
