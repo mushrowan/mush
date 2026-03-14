@@ -602,7 +602,7 @@ mod tests {
     #[test]
     fn input_box_streaming_shows_dots_when_empty() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.is_streaming = true;
+        app.stream.active = true;
         let buf = render_input(&app, 40, 3);
         let content = buffer_to_string(&buf);
         assert!(content.contains("..."));
@@ -611,7 +611,7 @@ mod tests {
     #[test]
     fn input_box_streaming_shows_prompt_when_typing() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.is_streaming = true;
+        app.stream.active = true;
         app.input = "hold on".into();
         app.cursor = 7;
         let buf = render_input(&app, 40, 3);

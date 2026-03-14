@@ -38,7 +38,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         modifiers = ?key.modifiers,
         kind = ?key.kind,
         mode = ?app.mode,
-        is_streaming = app.is_streaming,
+        is_streaming = app.stream.active,
         input_len = app.input.len(),
         cursor = app.cursor,
         "key event"
@@ -61,7 +61,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     // 2. global bindings
     match (key.modifiers, key.code) {
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => return Some(AppEvent::Quit),
-        (_, KeyCode::Esc) if app.is_streaming => return Some(AppEvent::Abort),
+        (_, KeyCode::Esc) if app.stream.active => return Some(AppEvent::Abort),
         (_, KeyCode::Esc) if app.scroll_offset > 0 => {
             app.scroll_to_bottom();
             return None;
@@ -99,7 +99,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     }
 
     // 5. streaming vs idle dispatch
-    if app.is_streaming {
+    if app.stream.active {
         handle_streaming_keys(app, key)
     } else {
         handle_idle_keys(app, key)
@@ -617,7 +617,7 @@ mod tests {
     #[test]
     fn escape_aborts_when_streaming() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.is_streaming = true;
+        app.stream.active = true;
         let event = handle_key(&mut app, key(KeyCode::Esc));
         assert!(matches!(event, Some(AppEvent::Abort)));
     }
@@ -870,7 +870,7 @@ mod tests {
     #[test]
     fn typing_allowed_while_streaming() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.is_streaming = true;
+        app.stream.active = true;
         handle_key(&mut app, key(KeyCode::Char('h')));
         handle_key(&mut app, key(KeyCode::Char('i')));
         assert_eq!(app.input, "hi");
@@ -879,7 +879,7 @@ mod tests {
     #[test]
     fn submit_allowed_while_streaming() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.is_streaming = true;
+        app.stream.active = true;
         app.input = "steer this".into();
         app.cursor = 10;
         let event = handle_key(&mut app, key(KeyCode::Enter));
@@ -892,7 +892,7 @@ mod tests {
     #[test]
     fn slash_commands_blocked_while_streaming() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.is_streaming = true;
+        app.stream.active = true;
         app.input = "/clear".into();
         app.cursor = 6;
         let event = handle_key(&mut app, key(KeyCode::Enter));
@@ -1144,7 +1144,7 @@ mod tests {
     #[test]
     fn input_reinsert_while_streaming_keeps_cursor_visible() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.is_streaming = true;
+        app.stream.active = true;
         app.input_area.set(ratatui::layout::Rect::new(0, 0, 20, 12));
         app.input_visible_lines.set(2);
         app.input_total_lines.set(8);
@@ -1244,7 +1244,7 @@ mod tests {
     #[test]
     fn pane_keys_work_while_streaming() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.is_streaming = true;
+        app.stream.active = true;
 
         // alt+number should still focus panes
         let event = handle_key(&mut app, alt(KeyCode::Char('2')));

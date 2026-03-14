@@ -77,6 +77,94 @@ impl CacheTimer {
     }
 }
 
+/// tracks the in-progress assistant response (text, thinking, tool args)
+#[derive(Debug, Clone)]
+pub struct StreamingState {
+    /// current text being streamed in
+    pub text: String,
+    /// current thinking being streamed in
+    pub thinking: String,
+    /// whether we're currently streaming a response
+    pub active: bool,
+    /// tool args streaming in (partial JSON from ToolCallDelta)
+    pub tool_args: String,
+    /// chars of text currently visible (typewriter effect)
+    visible_text_chars: usize,
+    /// chars of thinking currently visible (typewriter effect)
+    visible_thinking_chars: usize,
+}
+
+impl StreamingState {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            text: String::new(),
+            thinking: String::new(),
+            active: false,
+            tool_args: String::new(),
+            visible_text_chars: 0,
+            visible_thinking_chars: 0,
+        }
+    }
+
+    /// begin streaming a new assistant message
+    pub fn start(&mut self) {
+        self.active = true;
+        self.text.clear();
+        self.thinking.clear();
+        self.tool_args.clear();
+        self.visible_text_chars = 0;
+        self.visible_thinking_chars = 0;
+    }
+
+    /// visible portion of streaming text (typewriter effect)
+    #[must_use]
+    pub fn visible_text(&self) -> &str {
+        char_prefix(&self.text, self.visible_text_chars)
+    }
+
+    /// visible portion of streaming thinking (typewriter effect)
+    #[must_use]
+    pub fn visible_thinking(&self) -> &str {
+        char_prefix(&self.thinking, self.visible_thinking_chars)
+    }
+
+    /// advance typewriter: move visible chars towards full buffer
+    pub fn advance_typewriter(&mut self) {
+        let text_total = self.text.chars().count();
+        if self.visible_text_chars < text_total {
+            let remaining = text_total - self.visible_text_chars;
+            self.visible_text_chars += remaining.div_ceil(2).max(1);
+        }
+        let think_total = self.thinking.chars().count();
+        if self.visible_thinking_chars < think_total {
+            let remaining = think_total - self.visible_thinking_chars;
+            self.visible_thinking_chars += remaining.div_ceil(2).max(1);
+        }
+    }
+
+    /// finish streaming: take the text and thinking, deactivate
+    pub fn take(&mut self) -> (String, Option<String>) {
+        self.active = false;
+        let thinking = if self.thinking.is_empty() {
+            None
+        } else {
+            Some(std::mem::take(&mut self.thinking))
+        };
+        let text = std::mem::take(&mut self.text);
+        self.tool_args.clear();
+        self.visible_text_chars = 0;
+        self.visible_thinking_chars = 0;
+        (text, thinking)
+    }
+}
+
+impl Default for StreamingState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// an image attached to the next user message (not yet sent)
 #[derive(Debug, Clone)]
 pub struct PendingImage {
@@ -306,12 +394,8 @@ impl TokenStats {
 pub struct App {
     /// conversation messages for display
     pub messages: Vec<DisplayMessage>,
-    /// current text being streamed in
-    pub streaming_text: String,
-    /// current thinking being streamed in
-    pub streaming_thinking: String,
-    /// whether we're currently streaming a response
-    pub is_streaming: bool,
+    /// in-progress assistant response
+    pub stream: StreamingState,
     /// user input buffer
     pub input: String,
     /// cursor position in input
@@ -328,12 +412,6 @@ pub struct App {
     pub status: Option<String>,
     /// currently executing tools (for side-by-side panel display)
     pub active_tools: Vec<ActiveToolState>,
-    /// tool args streaming in (partial JSON from ToolCallDelta)
-    pub streaming_tool_args: String,
-    /// chars of streaming_text currently visible (typewriter effect)
-    visible_text_chars: usize,
-    /// chars of streaming_thinking currently visible (typewriter effect)
-    visible_thinking_chars: usize,
     /// spinner state for animations
     pub throbber_state: ThrobberState,
     /// frame counter for throttling spinner speed
@@ -461,9 +539,7 @@ impl App {
     pub fn new(model_id: ModelId, context_window: TokenCount) -> Self {
         Self {
             messages: Vec::new(),
-            streaming_text: String::new(),
-            streaming_thinking: String::new(),
-            is_streaming: false,
+            stream: StreamingState::new(),
             input: String::new(),
             cursor: 0,
             scroll_offset: 0,
@@ -472,9 +548,6 @@ impl App {
             should_quit: false,
             status: None,
             active_tools: Vec::new(),
-            streaming_tool_args: String::new(),
-            visible_text_chars: 0,
-            visible_thinking_chars: 0,
             throbber_state: ThrobberState::default(),
             tick_count: 0,
             thinking_level: ThinkingLevel::Off,
@@ -526,18 +599,8 @@ impl App {
         if self.tick_count.is_multiple_of(8) {
             self.throbber_state.calc_next();
         }
-        // typewriter: advance visible chars towards full buffer using exponential ease
-        if self.is_streaming {
-            let text_total = self.streaming_text.chars().count();
-            if self.visible_text_chars < text_total {
-                let remaining = text_total - self.visible_text_chars;
-                self.visible_text_chars += remaining.div_ceil(2).max(1);
-            }
-            let think_total = self.streaming_thinking.chars().count();
-            if self.visible_thinking_chars < think_total {
-                let remaining = think_total - self.visible_thinking_chars;
-                self.visible_thinking_chars += remaining.div_ceil(2).max(1);
-            }
+        if self.stream.active {
+            self.stream.advance_typewriter();
         }
     }
 
@@ -549,7 +612,7 @@ impl App {
 
     /// whether the agent is currently active (streaming or executing tools)
     pub fn is_busy(&self) -> bool {
-        self.is_streaming
+        self.stream.active
             || self
                 .active_tools
                 .iter()
@@ -595,37 +658,33 @@ impl App {
 
     /// start streaming a new assistant message
     pub fn start_streaming(&mut self) {
-        self.is_streaming = true;
-        self.streaming_text.clear();
-        self.streaming_thinking.clear();
-        self.visible_text_chars = 0;
-        self.visible_thinking_chars = 0;
+        self.stream.start();
         self.scroll_offset = 0;
     }
 
     /// append text delta to the current stream
     pub fn push_text_delta(&mut self, delta: &str) {
-        self.streaming_text.push_str(delta);
+        self.stream.text.push_str(delta);
     }
 
     /// append thinking delta to the current stream
     pub fn push_thinking_delta(&mut self, delta: &str) {
-        self.streaming_thinking.push_str(delta);
+        self.stream.thinking.push_str(delta);
     }
 
     /// visible portion of streaming text (typewriter effect)
     pub fn visible_streaming_text(&self) -> &str {
-        char_prefix(&self.streaming_text, self.visible_text_chars)
+        self.stream.visible_text()
     }
 
     /// visible portion of streaming thinking (typewriter effect)
     pub fn visible_streaming_thinking(&self) -> &str {
-        char_prefix(&self.streaming_thinking, self.visible_thinking_chars)
+        self.stream.visible_thinking()
     }
 
     /// accumulate streaming tool call arguments
     pub fn push_tool_args_delta(&mut self, delta: &str) {
-        self.streaming_tool_args.push_str(delta);
+        self.stream.tool_args.push_str(delta);
     }
 
     /// mark a tool as being executed
@@ -646,7 +705,7 @@ impl App {
             status: ToolCallStatus::Running,
             output: None,
         });
-        self.streaming_tool_args.clear();
+        self.stream.tool_args.clear();
         // add to the last message's tool calls if we have one in progress
         if let Some(last) = self.messages.last_mut() {
             last.tool_calls.push(DisplayToolCall {
@@ -677,7 +736,7 @@ impl App {
             status: ToolCallStatus::Running,
             output: None,
         });
-        self.streaming_tool_args.clear();
+        self.stream.tool_args.clear();
         // individual display entries for message history
         if let Some(last) = self.messages.last_mut() {
             for (name, sub_summary) in sub_calls {
@@ -784,13 +843,7 @@ impl App {
 
     /// finish streaming, create the assistant message
     pub fn finish_streaming(&mut self, usage: Option<Usage>, cost: Option<Dollars>) {
-        self.is_streaming = false;
-        let thinking = if self.streaming_thinking.is_empty() {
-            None
-        } else {
-            Some(std::mem::take(&mut self.streaming_thinking))
-        };
-        let text = std::mem::take(&mut self.streaming_text);
+        let (text, thinking) = self.stream.take();
 
         let assistant_msg = DisplayMessage {
             thinking,
@@ -1153,10 +1206,7 @@ impl App {
     /// clear all messages (for /clear command)
     pub fn clear_messages(&mut self) {
         self.messages.clear();
-        self.streaming_text.clear();
-        self.streaming_thinking.clear();
-        self.visible_text_chars = 0;
-        self.visible_thinking_chars = 0;
+        self.stream = StreamingState::new();
         self.scroll_offset = 0;
         self.stats.reset();
         self.pending_images.clear();
@@ -1509,7 +1559,7 @@ mod tests {
     fn new_app_is_empty() {
         let app = App::new("test-model".into(), TokenCount::new(200_000));
         assert!(app.messages.is_empty());
-        assert!(!app.is_streaming);
+        assert!(!app.stream.active);
         assert!(app.input.is_empty());
         assert_eq!(app.cursor, 0);
     }
@@ -1527,17 +1577,17 @@ mod tests {
     fn streaming_lifecycle() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.start_streaming();
-        assert!(app.is_streaming);
+        assert!(app.stream.active);
 
         app.push_text_delta("hello ");
         app.push_text_delta("world");
-        assert_eq!(app.streaming_text, "hello world");
+        assert_eq!(app.stream.text, "hello world");
 
         app.finish_streaming(None, None);
-        assert!(!app.is_streaming);
+        assert!(!app.stream.active);
         assert_eq!(app.messages.len(), 1);
         assert_eq!(app.messages[0].content, "hello world");
-        assert!(app.streaming_text.is_empty());
+        assert!(app.stream.text.is_empty());
     }
 
     #[test]
@@ -2049,12 +2099,12 @@ batch: 1/2 succeeded, 1 failed";
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.push_tool_args_delta("{\"path\":");
         app.push_tool_args_delta("\"src/");
-        assert_eq!(app.streaming_tool_args, "{\"path\":\"src/");
+        assert_eq!(app.stream.tool_args, "{\"path\":\"src/");
 
         // start_tool clears the buffer
         let tool_call_id = ToolCallId::from("tc_1");
         app.start_tool(&tool_call_id, "read", "src/main.rs");
-        assert!(app.streaming_tool_args.is_empty());
+        assert!(app.stream.tool_args.is_empty());
     }
 
     #[test]
@@ -2256,5 +2306,65 @@ batch: 1/2 succeeded, 1 failed";
     fn cache_timer_disabled_when_zero_ttl() {
         let timer = CacheTimer::new(0);
         assert_eq!(timer.ttl_secs, 0);
+    }
+
+    #[test]
+    fn streaming_state_starts_inactive() {
+        let stream = StreamingState::new();
+        assert!(!stream.active);
+        assert!(stream.text.is_empty());
+        assert!(stream.thinking.is_empty());
+        assert!(stream.tool_args.is_empty());
+    }
+
+    #[test]
+    fn streaming_state_start_clears_and_activates() {
+        let mut stream = StreamingState::new();
+        stream.text.push_str("leftover");
+        stream.start();
+        assert!(stream.active);
+        assert!(stream.text.is_empty());
+        assert!(stream.thinking.is_empty());
+    }
+
+    #[test]
+    fn streaming_state_visible_text_typewriter() {
+        let mut stream = StreamingState::new();
+        stream.start();
+        stream.text.push_str("hello world");
+        // before advance, nothing visible
+        assert_eq!(stream.visible_text(), "");
+        // advance once
+        stream.advance_typewriter();
+        let visible = stream.visible_text();
+        assert!(!visible.is_empty());
+        assert!(visible.len() <= "hello world".len());
+        // enough advances catch up
+        for _ in 0..20 {
+            stream.advance_typewriter();
+        }
+        assert_eq!(stream.visible_text(), "hello world");
+    }
+
+    #[test]
+    fn streaming_state_take_returns_content() {
+        let mut stream = StreamingState::new();
+        stream.start();
+        stream.text.push_str("answer");
+        stream.thinking.push_str("reasoning");
+        let (text, thinking) = stream.take();
+        assert_eq!(text, "answer");
+        assert_eq!(thinking.as_deref(), Some("reasoning"));
+        assert!(!stream.active);
+        assert!(stream.text.is_empty());
+    }
+
+    #[test]
+    fn streaming_state_take_no_thinking_returns_none() {
+        let mut stream = StreamingState::new();
+        stream.start();
+        stream.text.push_str("just text");
+        let (_, thinking) = stream.take();
+        assert!(thinking.is_none());
     }
 }

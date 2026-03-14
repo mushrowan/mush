@@ -143,7 +143,7 @@ pub fn handle_agent_event(
         AgentEvent::TurnStart { .. } => {
             // clear previous turn's tool panels (results are already inline in messages)
             app.active_tools.clear();
-            if !app.is_streaming {
+            if !app.stream.active {
                 app.start_streaming();
             }
         }
@@ -163,16 +163,16 @@ pub fn handle_agent_event(
             ));
         }
         AgentEvent::MaxTurnsReached { max_turns } => {
-            app.is_streaming = false;
+            app.stream.active = false;
             app.status = Some(format!("hit max turns limit ({max_turns})"));
         }
         AgentEvent::Error { error } => {
-            app.is_streaming = false;
+            app.stream.active = false;
             tracing::error!(%error, "agent error");
             app.status = Some(format!("error: {error}"));
         }
         AgentEvent::AgentEnd => {
-            app.is_streaming = false;
+            app.stream.active = false;
             app.active_tools.clear();
         }
         _ => {}

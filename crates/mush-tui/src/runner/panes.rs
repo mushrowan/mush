@@ -36,7 +36,7 @@ pub(super) async fn drain_inboxes(pane_mgr: &mut PaneManager) {
                 task_suffix,
                 msg.content,
             );
-            if pane.app.is_streaming {
+            if pane.app.stream.active {
                 let steering_msg = Message::User(UserMessage {
                     content: UserContent::Text(text.clone()),
                     timestamp_ms: msg.timestamp,
