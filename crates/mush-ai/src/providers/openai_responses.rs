@@ -1123,6 +1123,80 @@ fn map_response_status(status: &str) -> StopReason {
     }
 }
 
+#[doc(hidden)]
+pub fn benchmark_tool_call_deltas(chunk_count: usize, arg_bytes: usize) -> usize {
+    let (full_json, fragments) =
+        super::bench_support::tool_call_json_fragments(chunk_count, arg_bytes);
+    let mut output = AssistantMessage {
+        content: vec![],
+        model: "bench".into(),
+        provider: Provider::Custom("bench".into()),
+        api: Api::OpenaiResponses,
+        usage: Usage::default(),
+        stop_reason: StopReason::Stop,
+        error_message: None,
+        timestamp_ms: Timestamp::zero(),
+    };
+    let mut active = HashMap::new();
+
+    let first = fragments
+        .first()
+        .cloned()
+        .unwrap_or_else(|| full_json.clone());
+    let _ = process_sse_event(
+        Some("response.output_item.added"),
+        serde_json::json!({
+            "output_index": 0,
+            "item": {
+                "type": "function_call",
+                "call_id": "call_1",
+                "id": "item_1",
+                "name": "read",
+                "arguments": first,
+            }
+        }),
+        &mut output,
+        &mut active,
+    );
+
+    for fragment in fragments.into_iter().skip(1) {
+        let _ = process_sse_event(
+            Some("response.function_call_arguments.delta"),
+            serde_json::json!({
+                "output_index": 0,
+                "delta": fragment,
+            }),
+            &mut output,
+            &mut active,
+        );
+    }
+
+    let _ = process_sse_event(
+        Some("response.output_item.done"),
+        serde_json::json!({
+            "output_index": 0,
+            "item": {
+                "type": "function_call",
+                "call_id": "call_1",
+                "id": "item_1",
+                "name": "read",
+                "arguments": full_json,
+            }
+        }),
+        &mut output,
+        &mut active,
+    );
+
+    match output.content.first() {
+        Some(AssistantContentPart::ToolCall(tc)) => tc
+            .arguments
+            .get("payload")
+            .and_then(|value| value.as_str())
+            .map_or(0, str::len),
+        _ => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1330,6 +1404,11 @@ mod tests {
             }
             other => panic!("expected ToolCallEnd, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn benchmark_tool_call_deltas_returns_payload_size() {
+        assert_eq!(benchmark_tool_call_deltas(8, 1024), 1024);
     }
 
     fn codex_model() -> Model {

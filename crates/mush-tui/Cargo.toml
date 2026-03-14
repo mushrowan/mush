@@ -38,4 +38,9 @@ ratatui-image = { version = "10.0.6", default-features = false, features = [
 
 [dev-dependencies]
 chrono.workspace = true
+criterion.workspace = true
 pretty_assertions.workspace = true
+
+[[bench]]
+name = "render_hot_paths"
+harness = false

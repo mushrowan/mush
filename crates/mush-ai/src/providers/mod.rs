@@ -1,4 +1,5 @@
 pub mod anthropic;
+pub(crate) mod bench_support;
 pub mod openai;
 pub mod openai_responses;
 pub mod sse;
