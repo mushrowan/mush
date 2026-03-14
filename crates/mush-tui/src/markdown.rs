@@ -20,12 +20,21 @@ static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
 #[cfg(test)]
 thread_local! {
     static RENDER_CALLS: Cell<usize> = const { Cell::new(0) };
+    static PARSE_INLINE_CALLS: Cell<usize> = const { Cell::new(0) };
 }
 
 /// render a markdown string to styled ratatui Text
 pub fn render(source: &str) -> Text<'static> {
     #[cfg(test)]
     RENDER_CALLS.with(|calls| calls.set(calls.get() + 1));
+
+    if source.is_empty() {
+        return Text::default();
+    }
+    if is_plain_text_document(source) {
+        return render_plain_text(source);
+    }
+
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut in_code_block = false;
     let mut code_block_lang = String::new();
@@ -96,23 +105,18 @@ pub fn render(source: &str) -> Text<'static> {
             .or_else(|| raw_line.strip_prefix("* "))
         {
             let mut spans = vec![Span::styled("• ", Style::default().fg(Color::Cyan))];
-            spans.extend(parse_inline(rest));
+            spans.extend(render_inline_spans(rest));
             lines.push(Line::from(spans));
             continue;
         }
 
         // numbered list items
-        if let Some(dot_pos) = raw_line.find(". ")
-            && dot_pos <= 3
-            && raw_line[..dot_pos].chars().all(|c| c.is_ascii_digit())
-        {
-            let prefix = &raw_line[..=dot_pos];
-            let rest = &raw_line[dot_pos + 2..];
+        if let Some((prefix, rest)) = numbered_list_item(raw_line) {
             let mut spans = vec![Span::styled(
                 format!("{prefix} "),
                 Style::default().fg(Color::Cyan),
             )];
-            spans.extend(parse_inline(rest));
+            spans.extend(render_inline_spans(rest));
             lines.push(Line::from(spans));
             continue;
         }
@@ -121,7 +125,7 @@ pub fn render(source: &str) -> Text<'static> {
         if raw_line.is_empty() {
             lines.push(Line::raw(""));
         } else {
-            lines.push(Line::from(parse_inline(raw_line)));
+            lines.push(Line::from(render_inline_spans(raw_line)));
         }
     }
 
@@ -132,6 +136,55 @@ pub fn render(source: &str) -> Text<'static> {
     }
 
     Text::from(lines)
+}
+
+fn render_plain_text(source: &str) -> Text<'static> {
+    let lines = source
+        .lines()
+        .map(|line| Line::raw(line.to_string()))
+        .collect::<Vec<_>>();
+    Text::from(lines)
+}
+
+fn render_inline_spans(text: &str) -> Vec<Span<'static>> {
+    if needs_inline_parsing(text) {
+        parse_inline(text)
+    } else {
+        vec![Span::raw(text.to_string())]
+    }
+}
+
+fn is_plain_text_document(source: &str) -> bool {
+    source.lines().all(is_plain_text_line)
+}
+
+fn is_plain_text_line(line: &str) -> bool {
+    line.is_empty()
+        || (!needs_inline_parsing(line)
+            && !line.starts_with("```")
+            && !line.starts_with("### ")
+            && !line.starts_with("## ")
+            && !line.starts_with("# ")
+            && !line.starts_with("- ")
+            && !line.starts_with("* ")
+            && line != "---"
+            && line != "***"
+            && line != "___"
+            && numbered_list_item(line).is_none())
+}
+
+fn needs_inline_parsing(text: &str) -> bool {
+    text.as_bytes()
+        .iter()
+        .any(|byte| matches!(*byte, b'`' | b'*' | b'_'))
+}
+
+fn numbered_list_item(line: &str) -> Option<(&str, &str)> {
+    let dot_pos = line.find(". ")?;
+    if dot_pos > 3 || !line[..dot_pos].chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some((&line[..=dot_pos], &line[dot_pos + 2..]))
 }
 
 /// highlight a code block using syntect, falling back to plain style
@@ -202,6 +255,9 @@ fn syntect_to_style(style: highlighting::Style) -> Style {
 
 /// parse inline markdown: **bold**, *italic*, `code`, ***bold italic***
 fn parse_inline(text: &str) -> Vec<Span<'static>> {
+    #[cfg(test)]
+    PARSE_INLINE_CALLS.with(|calls| calls.set(calls.get() + 1));
+
     let mut spans = Vec::new();
     let mut buf = String::new();
     let mut offset = 0;
@@ -289,6 +345,16 @@ pub(crate) fn reset_render_call_count() {
 #[cfg(test)]
 pub(crate) fn render_call_count() -> usize {
     RENDER_CALLS.with(Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_parse_inline_call_count() {
+    PARSE_INLINE_CALLS.with(|calls| calls.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn parse_inline_call_count() -> usize {
+    PARSE_INLINE_CALLS.with(Cell::get)
 }
 
 #[cfg(test)]
@@ -414,6 +480,26 @@ mod tests {
     fn empty_input() {
         let text = render("");
         assert!(text.lines.is_empty());
+    }
+
+    #[test]
+    fn plain_lines_skip_inline_parser() {
+        reset_parse_inline_call_count();
+
+        let text = render("alpha\nbeta\ngamma");
+
+        assert_eq!(text.lines.len(), 3);
+        assert_eq!(parse_inline_call_count(), 0);
+    }
+
+    #[test]
+    fn only_formatted_lines_use_inline_parser() {
+        reset_parse_inline_call_count();
+
+        let text = render("alpha\n**beta**\ngamma");
+
+        assert_eq!(text.lines.len(), 3);
+        assert_eq!(parse_inline_call_count(), 1);
     }
 
     #[test]
