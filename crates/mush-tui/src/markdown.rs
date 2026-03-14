@@ -17,6 +17,8 @@ use syntect::parsing::{SyntaxReference, SyntaxSet};
 static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
 static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
 
+const MAX_HIGHLIGHTED_CODE_BLOCK_LINES: usize = 64;
+
 #[cfg(test)]
 thread_local! {
     static RENDER_CALLS: Cell<usize> = const { Cell::new(0) };
@@ -193,6 +195,9 @@ fn render_code_block(code_lines: &[String], lang: &str) -> Vec<Line<'static>> {
     let Some(syntax) = code_block_syntax(ps, lang) else {
         return render_plain_code_block(code_lines);
     };
+    if code_lines.len() > MAX_HIGHLIGHTED_CODE_BLOCK_LINES {
+        return render_plain_code_block(code_lines);
+    }
     highlight_code_block(code_lines, syntax, ps)
 }
 
@@ -506,6 +511,18 @@ mod tests {
 
         assert_eq!(text.lines.len(), 1);
         assert!(text.lines[0].to_string().contains("hello world"));
+        assert_eq!(highlight_code_block_call_count(), 0);
+    }
+
+    #[test]
+    fn large_known_language_code_block_skips_syntax_highlighting() {
+        reset_highlight_code_block_call_count();
+        let source = format!("```rust\n{}```", "let x = 42;\n".repeat(80));
+
+        let text = render(&source);
+
+        assert_eq!(text.lines.len(), 80);
+        assert!(text.lines[0].to_string().contains("let x = 42;"));
         assert_eq!(highlight_code_block_call_count(), 0);
     }
 
