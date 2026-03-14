@@ -94,8 +94,7 @@ pub(super) async fn fork_pane(
 ) {
     let prompt = {
         let app = &mut pane_mgr.focused_mut().app;
-        let text = std::mem::take(&mut app.input);
-        app.cursor = 0;
+        let text = app.input.take_text();
         if text.is_empty() {
             None
         } else {

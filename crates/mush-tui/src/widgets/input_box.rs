@@ -219,11 +219,15 @@ impl<'a> InputBox<'a> {
             return (area.x + 1, area.y + 1);
         }
 
-        let expanded = expand_input(&self.app.input, self.app.cursor, &self.app.pending_images);
+        let expanded = expand_input(
+            &self.app.input.text,
+            self.app.input.cursor,
+            &self.app.input.images,
+        );
         let (visual_line, visual_col) =
             cursor_visual_position(&expanded.text, expanded.cursor, content_width);
 
-        let scroll = self.app.input_scroll.get() as usize;
+        let scroll = self.app.input.scroll.get() as usize;
         let visible_line = visual_line.saturating_sub(scroll);
 
         let x = area.x + 1 + visual_col as u16;
@@ -237,7 +241,7 @@ impl<'a> InputBox<'a> {
 
 impl Widget for InputBox<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let streaming_idle = self.app.is_busy() && self.app.input.is_empty();
+        let streaming_idle = self.app.is_busy() && self.app.input.text.is_empty();
         let prompt = if streaming_idle { "..." } else { "> " };
         let style = if streaming_idle {
             Style::default().fg(Color::DarkGray)
@@ -255,7 +259,7 @@ impl Widget for InputBox<'_> {
 
         // border colour signals whose turn it is and whether there are unread messages
         let border_colour = if self.app.has_unread && !streaming_idle {
-            if self.app.input.is_empty() {
+            if self.app.input.text.is_empty() {
                 // empty input + unread: blink between blue and default
                 if self.app.unread_flash_on() {
                     Color::Blue
@@ -280,14 +284,18 @@ impl Widget for InputBox<'_> {
             .border_style(Style::default().fg(border_colour));
 
         if content_width == 0 {
-            self.app.input_visible_lines.set(0);
-            self.app.input_total_lines.set(0);
-            self.app.input_scroll.set(0);
+            self.app.input.visible_lines.set(0);
+            self.app.input.total_lines.set(0);
+            self.app.input.scroll.set(0);
             Paragraph::new("").block(block).render(area, buf);
             return;
         }
 
-        let expanded = expand_input(&self.app.input, self.app.cursor, &self.app.pending_images);
+        let expanded = expand_input(
+            &self.app.input.text,
+            self.app.input.cursor,
+            &self.app.input.images,
+        );
         let display_lines: Vec<&str> = expanded.text.split('\n').collect();
         let mut lines: Vec<Line<'_>> = Vec::new();
         let image_style = Style::default().fg(Color::Magenta);
@@ -334,12 +342,12 @@ impl Widget for InputBox<'_> {
 
         let total_lines = lines.len().min(u16::MAX as usize) as u16;
         let visible_lines = area.height.saturating_sub(2);
-        self.app.input_total_lines.set(total_lines);
-        self.app.input_visible_lines.set(visible_lines);
+        self.app.input.total_lines.set(total_lines);
+        self.app.input.visible_lines.set(visible_lines);
 
         let max_scroll = total_lines.saturating_sub(visible_lines);
-        let scroll = self.app.input_scroll.get().min(max_scroll);
-        self.app.input_scroll.set(scroll);
+        let scroll = self.app.input.scroll.get().min(max_scroll);
+        self.app.input.scroll.set(scroll);
 
         let text = ratatui::text::Text::from(lines);
         Paragraph::new(text)
@@ -497,8 +505,8 @@ mod tests {
     fn cursor_position_multibyte_char() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         // "a¬b" - cursor after ¬ (byte offset 3, but visual col 2)
-        app.input = "a¬b".into();
-        app.cursor = 3; // byte offset after ¬
+        app.input.text = "a¬b".into();
+        app.input.cursor = 3; // byte offset after ¬
         let input_box = InputBox::new(&app);
         let area = Rect::new(0, 10, 40, 3);
         let (x, _y) = input_box.cursor_position(area);
@@ -543,20 +551,20 @@ mod tests {
         use crate::clipboard::ClipboardImage;
         use mush_ai::types::ImageMimeType;
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.input = "hello".into();
-        app.cursor = 5;
+        app.input.text = "hello".into();
+        app.input.cursor = 5;
         // simulate pasting an image (inserts placeholder at cursor)
-        app.add_image(ClipboardImage {
+        app.input.add_image(ClipboardImage {
             bytes: vec![],
             mime_type: ImageMimeType::Png,
         });
-        assert_eq!(app.pending_images.len(), 1);
-        assert!(app.input.contains(IMAGE_PLACEHOLDER));
+        assert_eq!(app.input.images.len(), 1);
+        assert!(app.input.text.contains(IMAGE_PLACEHOLDER));
         // backspace should remove the placeholder and the image
-        app.input_backspace();
-        assert_eq!(app.pending_images.len(), 0);
-        assert!(!app.input.contains(IMAGE_PLACEHOLDER));
-        assert_eq!(app.input, "hello");
+        app.input.backspace();
+        assert_eq!(app.input.images.len(), 0);
+        assert!(!app.input.text.contains(IMAGE_PLACEHOLDER));
+        assert_eq!(app.input.text, "hello");
     }
 
     #[test]
@@ -592,8 +600,8 @@ mod tests {
     #[test]
     fn input_box_renders_text() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.input = "hello world".into();
-        app.cursor = 11;
+        app.input.text = "hello world".into();
+        app.input.cursor = 11;
         let buf = render_input(&app, 40, 3);
         let content = buffer_to_string(&buf);
         assert!(content.contains("hello world"));
@@ -612,8 +620,8 @@ mod tests {
     fn input_box_streaming_shows_prompt_when_typing() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.stream.active = true;
-        app.input = "hold on".into();
-        app.cursor = 7;
+        app.input.text = "hold on".into();
+        app.input.cursor = 7;
         let buf = render_input(&app, 40, 3);
         let content = buffer_to_string(&buf);
         assert!(content.contains("> hold on"));
@@ -623,8 +631,8 @@ mod tests {
     #[test]
     fn cursor_position_calculation() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.input = "hello".into();
-        app.cursor = 3;
+        app.input.text = "hello".into();
+        app.input.cursor = 3;
         let input_box = InputBox::new(&app);
         let area = Rect::new(0, 10, 40, 3);
         let (x, y) = input_box.cursor_position(area);
@@ -638,8 +646,8 @@ mod tests {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         // "this is a long prompt that wraps around!!!" in a 20-wide box
         // content_width = 18
-        app.input = "this is a long prompt that wraps around!!!".into();
-        app.cursor = 42;
+        app.input.text = "this is a long prompt that wraps around!!!".into();
+        app.input.cursor = 42;
         let input_box = InputBox::new(&app);
         let area = Rect::new(0, 0, 20, 8);
         let (x, y) = input_box.cursor_position(area);
@@ -656,8 +664,8 @@ mod tests {
     fn input_box_shows_ghost_completion() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.completions = vec!["/help".into(), "/history".into()];
-        app.input = "/h".into();
-        app.cursor = 2;
+        app.input.text = "/h".into();
+        app.input.cursor = 2;
         let buf = render_input(&app, 40, 3);
         let content = buffer_to_string(&buf);
         assert!(content.contains("/help"));
@@ -666,8 +674,8 @@ mod tests {
     #[test]
     fn cursor_position_multiline() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.input = "hello\nworld".into();
-        app.cursor = 11;
+        app.input.text = "hello\nworld".into();
+        app.input.cursor = 11;
         let input_box = InputBox::new(&app);
         let area = Rect::new(0, 0, 40, 5);
         let (x, y) = input_box.cursor_position(area);
@@ -678,8 +686,8 @@ mod tests {
     #[test]
     fn cursor_position_after_newline() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.input = "hello\n".into();
-        app.cursor = 6;
+        app.input.text = "hello\n".into();
+        app.input.cursor = 6;
         let input_box = InputBox::new(&app);
         let area = Rect::new(0, 0, 40, 5);
         let (x, y) = input_box.cursor_position(area);
@@ -690,9 +698,9 @@ mod tests {
     #[test]
     fn cursor_position_applies_input_scroll() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.input = "one two three four five six seven eight nine ten".into();
-        app.cursor = app.input.len();
-        app.input_scroll.set(1);
+        app.input.text = "one two three four five six seven eight nine ten".into();
+        app.input.cursor = app.input.text.len();
+        app.input.scroll.set(1);
         let input_box = InputBox::new(&app);
         let area = Rect::new(0, 0, 20, 6);
         let (_x, y) = input_box.cursor_position(area);
@@ -702,13 +710,13 @@ mod tests {
     #[test]
     fn input_box_updates_input_scroll_metrics() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.input = "line1\nline2\nline3\nline4\nline5".into();
-        app.cursor = app.input.len();
-        app.input_scroll.set(99);
+        app.input.text = "line1\nline2\nline3\nline4\nline5".into();
+        app.input.cursor = app.input.text.len();
+        app.input.scroll.set(99);
         let _buf = render_input(&app, 20, 4);
-        assert_eq!(app.input_visible_lines.get(), 2);
-        assert!(app.input_total_lines.get() >= 5);
-        assert!(app.input_scroll.get() <= app.input_total_lines.get());
+        assert_eq!(app.input.visible_lines.get(), 2);
+        assert!(app.input.total_lines.get() >= 5);
+        assert!(app.input.scroll.get() <= app.input.total_lines.get());
     }
 
     #[test]
@@ -716,8 +724,8 @@ mod tests {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         // in a 22-wide box (content_width=20), "hello world foo bar baz"
         // should wrap at word boundaries, not mid-word
-        app.input = "hello world foo bar baz".into();
-        app.cursor = 23;
+        app.input.text = "hello world foo bar baz".into();
+        app.input.cursor = 23;
         let buf = render_input(&app, 22, 5);
         let content = buffer_to_string(&buf);
         // "world" should not be split across lines

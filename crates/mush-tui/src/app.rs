@@ -174,6 +174,272 @@ pub struct PendingImage {
     pub dimensions: Option<(u32, u32)>,
 }
 
+/// user input buffer with cursor, images, and scroll state
+#[derive(Debug)]
+pub struct InputBuffer {
+    /// the input text
+    pub text: String,
+    /// cursor byte position in text
+    pub cursor: usize,
+    /// images attached to the next user message (not yet sent)
+    pub images: Vec<PendingImage>,
+    /// current input scroll offset (lines from top)
+    pub scroll: Cell<u16>,
+    /// total wrapped input lines (set during render by InputBox)
+    pub total_lines: Cell<u16>,
+    /// visible input lines (set during render by InputBox)
+    pub visible_lines: Cell<u16>,
+    /// latest input area rect (set during render by Ui)
+    pub area: Cell<Rect>,
+}
+
+impl InputBuffer {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            text: String::new(),
+            cursor: 0,
+            images: Vec::new(),
+            scroll: Cell::new(0),
+            total_lines: Cell::new(0),
+            visible_lines: Cell::new(0),
+            area: Cell::new(Rect::default()),
+        }
+    }
+
+    pub fn insert_char(&mut self, c: char) {
+        self.text.insert(self.cursor, c);
+        self.cursor += c.len_utf8();
+        self.ensure_cursor_visible();
+    }
+
+    pub fn backspace(&mut self) {
+        if self.cursor > 0 {
+            let prev = self.text[..self.cursor]
+                .char_indices()
+                .next_back()
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            self.remove_images_in_range(prev, self.cursor);
+            self.text.drain(prev..self.cursor);
+            self.cursor = prev;
+            self.ensure_cursor_visible();
+        }
+    }
+
+    pub fn delete(&mut self) {
+        if self.cursor < self.text.len() {
+            let next = self.text[self.cursor..]
+                .char_indices()
+                .nth(1)
+                .map(|(i, _)| self.cursor + i)
+                .unwrap_or(self.text.len());
+            self.remove_images_in_range(self.cursor, next);
+            self.text.drain(self.cursor..next);
+            self.ensure_cursor_visible();
+        }
+    }
+
+    pub fn cursor_left(&mut self) {
+        if self.cursor > 0 {
+            self.cursor = self.text[..self.cursor]
+                .char_indices()
+                .next_back()
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            self.ensure_cursor_visible();
+        }
+    }
+
+    pub fn cursor_right(&mut self) {
+        if self.cursor < self.text.len() {
+            self.cursor = self.text[self.cursor..]
+                .char_indices()
+                .nth(1)
+                .map(|(i, _)| self.cursor + i)
+                .unwrap_or(self.text.len());
+            self.ensure_cursor_visible();
+        }
+    }
+
+    pub fn cursor_word_left(&mut self) {
+        self.cursor = word_boundary_left(&self.text, self.cursor);
+        self.ensure_cursor_visible();
+    }
+
+    pub fn cursor_word_right(&mut self) {
+        self.cursor = word_boundary_right(&self.text, self.cursor);
+        self.ensure_cursor_visible();
+    }
+
+    pub fn cursor_home(&mut self) {
+        self.cursor = 0;
+        self.ensure_cursor_visible();
+    }
+
+    pub fn cursor_end(&mut self) {
+        self.cursor = self.text.len();
+        self.ensure_cursor_visible();
+    }
+
+    pub fn delete_word_backward(&mut self) {
+        let boundary = word_boundary_left(&self.text, self.cursor);
+        self.remove_images_in_range(boundary, self.cursor);
+        self.text.drain(boundary..self.cursor);
+        self.cursor = boundary;
+        self.ensure_cursor_visible();
+    }
+
+    pub fn delete_word_forward(&mut self) {
+        let boundary = word_boundary_right(&self.text, self.cursor);
+        self.remove_images_in_range(self.cursor, boundary);
+        self.text.drain(self.cursor..boundary);
+        self.ensure_cursor_visible();
+    }
+
+    pub fn delete_to_end(&mut self) {
+        self.remove_images_in_range(self.cursor, self.text.len());
+        self.text.truncate(self.cursor);
+        self.ensure_cursor_visible();
+    }
+
+    pub fn delete_to_start(&mut self) {
+        self.remove_images_in_range(0, self.cursor);
+        self.text.drain(..self.cursor);
+        self.cursor = 0;
+        self.ensure_cursor_visible();
+    }
+
+    /// take the input text, clearing the buffer and returning text without
+    /// image placeholders
+    pub fn take_text(&mut self) -> String {
+        self.cursor = 0;
+        self.scroll.set(0);
+        let input = std::mem::take(&mut self.text);
+        input.replace(IMAGE_PLACEHOLDER, "")
+    }
+
+    /// take pending images (clearing them from the buffer)
+    pub fn take_images(&mut self) -> Vec<PendingImage> {
+        std::mem::take(&mut self.images)
+    }
+
+    /// add a clipboard image, inserting a placeholder at the cursor
+    pub fn add_image(&mut self, image: ClipboardImage) {
+        let dimensions = image::load_from_memory(&image.bytes)
+            .ok()
+            .map(|img| (img.width(), img.height()));
+        self.images.push(PendingImage {
+            data: image.bytes,
+            mime_type: image.mime_type,
+            dimensions,
+        });
+        self.text.insert(self.cursor, IMAGE_PLACEHOLDER);
+        self.cursor += IMAGE_PLACEHOLDER.len_utf8();
+        self.ensure_cursor_visible();
+    }
+
+    /// remove the last pending image (and its placeholder in the input)
+    pub fn remove_last_image(&mut self) {
+        if self.images.pop().is_some()
+            && let Some(pos) = self.text.rfind(IMAGE_PLACEHOLDER)
+        {
+            let end = pos + IMAGE_PLACEHOLDER.len_utf8();
+            self.text.drain(pos..end);
+            if self.cursor > pos {
+                self.cursor = self.cursor.saturating_sub(IMAGE_PLACEHOLDER.len_utf8());
+            }
+            self.ensure_cursor_visible();
+        }
+    }
+
+    /// ensure input scroll keeps the cursor visible
+    pub fn ensure_cursor_visible(&self) {
+        let content_width = self.area.get().width.saturating_sub(2);
+        let visible = self.visible_lines.get();
+        if content_width == 0 || visible == 0 {
+            self.scroll.set(0);
+            return;
+        }
+
+        let expanded =
+            crate::widgets::input_box::expand_input(&self.text, self.cursor, &self.images);
+        let cursor_line = crate::widgets::input_box::cursor_visual_line(
+            &expanded.text,
+            expanded.cursor,
+            content_width as usize,
+        ) as u16;
+
+        let total = expanded
+            .text
+            .split('\n')
+            .enumerate()
+            .map(|(i, line)| {
+                let indent = if i == 0 { 2 } else { 0 };
+                crate::widgets::input_box::word_wrap_segments(line, content_width as usize, indent)
+                    .len() as u16
+            })
+            .sum::<u16>()
+            .max(1);
+        self.total_lines.set(total);
+
+        let mut current_scroll = self.scroll.get();
+        if cursor_line < current_scroll {
+            current_scroll = cursor_line;
+        } else {
+            let bottom = current_scroll.saturating_add(visible.saturating_sub(1));
+            if cursor_line > bottom {
+                current_scroll = cursor_line.saturating_sub(visible.saturating_sub(1));
+            }
+        }
+
+        let max_scroll = total.saturating_sub(visible);
+        self.scroll.set(current_scroll.min(max_scroll));
+    }
+
+    /// scroll the input viewport by delta lines
+    pub fn scroll_by(&self, delta: i16) {
+        let visible = self.visible_lines.get();
+        let total = self.total_lines.get();
+        let max_scroll = total.saturating_sub(visible);
+        let current = self.scroll.get() as i16;
+        let next = (current + delta).clamp(0, max_scroll as i16) as u16;
+        self.scroll.set(next);
+    }
+
+    /// whether the mouse position is over the input box
+    pub fn is_mouse_over(&self, column: u16, row: u16) -> bool {
+        self.area
+            .get()
+            .contains(ratatui::layout::Position::new(column, row))
+    }
+
+    /// remove pending images whose placeholders fall within text[start..end]
+    fn remove_images_in_range(&mut self, start: usize, end: usize) {
+        let range = &self.text[start..end];
+        if !range.contains(IMAGE_PLACEHOLDER) {
+            return;
+        }
+        let prior = self.text[..start]
+            .chars()
+            .filter(|c| *c == IMAGE_PLACEHOLDER)
+            .count();
+        let count = range.chars().filter(|c| *c == IMAGE_PLACEHOLDER).count();
+        for i in (0..count).rev() {
+            let idx = prior + i;
+            if idx < self.images.len() {
+                self.images.remove(idx);
+            }
+        }
+    }
+}
+
+impl Default for InputBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// object replacement character, marks image positions in input text.
 /// each occurrence maps to the Nth entry in pending_images (by order)
 pub const IMAGE_PLACEHOLDER: char = '\u{FFFC}';
@@ -411,10 +677,8 @@ pub struct App {
     pub messages: Vec<DisplayMessage>,
     /// in-progress assistant response
     pub stream: StreamingState,
-    /// user input buffer
-    pub input: String,
-    /// cursor position in input
-    pub cursor: usize,
+    /// user input buffer with cursor, images, scroll
+    pub input: InputBuffer,
     /// vertical scroll offset (lines from bottom)
     pub scroll_offset: u16,
     /// model id being used
@@ -467,22 +731,12 @@ pub struct App {
     pub search: SearchState,
     /// image render positions (populated by MessageList during render)
     pub image_render_areas: RefCell<Vec<ImageRenderArea>>,
-    /// images attached to the next user message (not yet sent)
-    pub pending_images: Vec<PendingImage>,
     /// working directory (with ~ for home)
     pub cwd: String,
     /// total content lines (set during render by MessageList)
     pub total_content_lines: Cell<u16>,
     /// visible area height (set during render by MessageList)
     pub visible_area_height: Cell<u16>,
-    /// current input scroll offset (lines from top)
-    pub input_scroll: Cell<u16>,
-    /// total wrapped input lines (set during render by InputBox)
-    pub input_total_lines: Cell<u16>,
-    /// visible input lines excluding borders (set during render by InputBox)
-    pub input_visible_lines: Cell<u16>,
-    /// latest input area rect (set during render by Ui)
-    pub input_area: Cell<Rect>,
     /// pane info: (this pane index 1-based, total panes), None when single pane
     pub pane_info: Option<(u16, u16)>,
     /// background pane alert text (e.g. "pane 2: busy")
@@ -555,8 +809,7 @@ impl App {
         Self {
             messages: Vec::new(),
             stream: StreamingState::new(),
-            input: String::new(),
-            cursor: 0,
+            input: InputBuffer::new(),
             scroll_offset: 0,
             model_id,
             stats: TokenStats::new(context_window),
@@ -583,7 +836,6 @@ impl App {
             selection_anchor: None,
             search: SearchState::default(),
             image_render_areas: RefCell::new(Vec::new()),
-            pending_images: Vec::new(),
             cwd: {
                 let path = std::env::current_dir().unwrap_or_default();
                 match std::env::var("HOME") {
@@ -596,10 +848,6 @@ impl App {
             },
             total_content_lines: Cell::new(0),
             visible_area_height: Cell::new(0),
-            input_scroll: Cell::new(0),
-            input_total_lines: Cell::new(0),
-            input_visible_lines: Cell::new(0),
-            input_area: Cell::new(Rect::default()),
             pane_info: None,
             background_alert: None,
             cache: CacheTimer::new(300),
@@ -889,150 +1137,35 @@ impl App {
         }
     }
 
-    /// insert a character at the cursor
+    /// insert a character at the cursor (clears tab completion)
     pub fn input_char(&mut self, c: char) {
         self.tab_state = None;
-        self.input.insert(self.cursor, c);
-        self.cursor += c.len_utf8();
-        self.ensure_cursor_visible();
-    }
-
-    /// delete character before cursor
-    pub fn input_backspace(&mut self) {
-        if self.cursor > 0 {
-            let prev = self.input[..self.cursor]
-                .char_indices()
-                .next_back()
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-            self.remove_images_in_range(prev, self.cursor);
-            self.input.drain(prev..self.cursor);
-            self.cursor = prev;
-            self.ensure_cursor_visible();
-        }
-    }
-
-    /// delete character at cursor
-    pub fn input_delete(&mut self) {
-        if self.cursor < self.input.len() {
-            let next = self.input[self.cursor..]
-                .char_indices()
-                .nth(1)
-                .map(|(i, _)| self.cursor + i)
-                .unwrap_or(self.input.len());
-            self.remove_images_in_range(self.cursor, next);
-            self.input.drain(self.cursor..next);
-            self.ensure_cursor_visible();
-        }
-    }
-
-    /// move cursor left
-    pub fn cursor_left(&mut self) {
-        if self.cursor > 0 {
-            self.cursor = self.input[..self.cursor]
-                .char_indices()
-                .next_back()
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-            self.ensure_cursor_visible();
-        }
-    }
-
-    /// move cursor right
-    pub fn cursor_right(&mut self) {
-        if self.cursor < self.input.len() {
-            self.cursor = self.input[self.cursor..]
-                .char_indices()
-                .nth(1)
-                .map(|(i, _)| self.cursor + i)
-                .unwrap_or(self.input.len());
-            self.ensure_cursor_visible();
-        }
-    }
-
-    /// move cursor one word left
-    pub fn cursor_word_left(&mut self) {
-        self.cursor = word_boundary_left(&self.input, self.cursor);
-        self.ensure_cursor_visible();
-    }
-
-    /// move cursor one word right
-    pub fn cursor_word_right(&mut self) {
-        self.cursor = word_boundary_right(&self.input, self.cursor);
-        self.ensure_cursor_visible();
-    }
-
-    /// move cursor to start
-    pub fn cursor_home(&mut self) {
-        self.cursor = 0;
-        self.ensure_cursor_visible();
-    }
-
-    /// move cursor to end
-    pub fn cursor_end(&mut self) {
-        self.cursor = self.input.len();
-        self.ensure_cursor_visible();
-    }
-
-    /// delete word before cursor
-    pub fn delete_word_backward(&mut self) {
-        let boundary = word_boundary_left(&self.input, self.cursor);
-        self.remove_images_in_range(boundary, self.cursor);
-        self.input.drain(boundary..self.cursor);
-        self.cursor = boundary;
-        self.ensure_cursor_visible();
-    }
-
-    /// delete word after cursor
-    pub fn delete_word_forward(&mut self) {
-        let boundary = word_boundary_right(&self.input, self.cursor);
-        self.remove_images_in_range(self.cursor, boundary);
-        self.input.drain(self.cursor..boundary);
-        self.ensure_cursor_visible();
-    }
-
-    /// delete from cursor to end of line
-    pub fn delete_to_end(&mut self) {
-        self.remove_images_in_range(self.cursor, self.input.len());
-        self.input.truncate(self.cursor);
-        self.ensure_cursor_visible();
-    }
-
-    /// delete from cursor to start of line
-    pub fn delete_to_start(&mut self) {
-        self.remove_images_in_range(0, self.cursor);
-        self.input.drain(..self.cursor);
-        self.cursor = 0;
-        self.ensure_cursor_visible();
+        self.input.insert_char(c);
     }
 
     /// cycle through tab completions for the current input
     pub fn tab_complete(&mut self) {
         if let Some(ref mut state) = self.tab_state {
-            // already completing: cycle to next match
             state.index = (state.index + 1) % state.matches.len();
             let replacement = &state.matches[state.index];
-            self.input = replacement.clone();
-            self.cursor = self.input.len();
-            self.ensure_cursor_visible();
+            self.input.text = replacement.clone();
+            self.input.cursor = self.input.text.len();
+            self.input.ensure_cursor_visible();
             return;
         }
 
-        // start a new completion
-        let input = self.input.as_str();
-        let matches: Vec<String> = if let Some(rest) = input.strip_prefix("/model ") {
-            // complete model ids
+        let text = self.input.text.as_str();
+        let matches: Vec<String> = if let Some(rest) = text.strip_prefix("/model ") {
             self.completions
                 .iter()
                 .filter(|c| !c.starts_with('/'))
                 .filter(|c| c.starts_with(rest))
                 .map(|c| format!("/model {c}"))
                 .collect()
-        } else if input.starts_with('/') {
-            // complete slash commands
+        } else if text.starts_with('/') {
             self.completions
                 .iter()
-                .filter(|c| c.starts_with(input))
+                .filter(|c| c.starts_with(text))
                 .cloned()
                 .collect()
         } else {
@@ -1045,14 +1178,14 @@ impl App {
 
         let first = matches[0].clone();
         self.tab_state = Some(TabState { matches, index: 0 });
-        self.input = first;
-        self.cursor = self.input.len();
-        self.ensure_cursor_visible();
+        self.input.text = first;
+        self.input.cursor = self.input.text.len();
+        self.input.ensure_cursor_visible();
     }
 
     /// open the slash command completion menu, filtering by current input
     pub fn open_slash_menu(&mut self) {
-        let prefix = self.input.as_str();
+        let prefix = self.input.text.as_str();
 
         if let Some(rest) = prefix.strip_prefix("/model ") {
             let query = rest.to_lowercase();
@@ -1103,7 +1236,7 @@ impl App {
     /// update the slash menu filter based on current input
     pub fn update_slash_menu(&mut self) {
         if let Some(ref mut menu) = self.slash_menu {
-            let prefix = self.input.as_str();
+            let prefix = self.input.text.as_str();
 
             if let Some(rest) = prefix.strip_prefix("/model ") {
                 let query = rest.to_lowercase();
@@ -1192,26 +1325,24 @@ impl App {
     /// return ghost completion suffix for inline hint (dimmed text after cursor).
     /// only shown when cursor is at end and no active tab cycle.
     pub fn ghost_text(&self) -> Option<&str> {
-        // don't show ghost while actively cycling completions
         if self.tab_state.is_some() {
             return None;
         }
-        // only when cursor is at the end
-        if self.cursor != self.input.len() || self.input.is_empty() {
+        if self.input.cursor != self.input.text.len() || self.input.text.is_empty() {
             return None;
         }
-        let input = self.input.as_str();
-        let candidate = if let Some(rest) = input.strip_prefix("/model ") {
+        let text = self.input.text.as_str();
+        let candidate = if let Some(rest) = text.strip_prefix("/model ") {
             self.completions
                 .iter()
                 .filter(|c| !c.starts_with('/'))
                 .find(|c| c.starts_with(rest))
                 .map(|c| &c[rest.len()..])
-        } else if input.starts_with('/') {
+        } else if text.starts_with('/') {
             self.completions
                 .iter()
-                .find(|c| c.starts_with(input) && c.len() > input.len())
-                .map(|c| &c[input.len()..])
+                .find(|c| c.starts_with(text) && c.len() > text.len())
+                .map(|c| &c[text.len()..])
         } else {
             None
         };
@@ -1224,28 +1355,7 @@ impl App {
         self.stream = StreamingState::new();
         self.scroll_offset = 0;
         self.stats.reset();
-        self.pending_images.clear();
-    }
-
-    /// remove pending images whose placeholders fall within input[start..end]
-    fn remove_images_in_range(&mut self, start: usize, end: usize) {
-        let range = &self.input[start..end];
-        if !range.contains(IMAGE_PLACEHOLDER) {
-            return;
-        }
-        // image index = number of placeholders before this one
-        let prior = self.input[..start]
-            .chars()
-            .filter(|c| *c == IMAGE_PLACEHOLDER)
-            .count();
-        // count how many placeholders are in the range, remove in reverse
-        let count = range.chars().filter(|c| *c == IMAGE_PLACEHOLDER).count();
-        for i in (0..count).rev() {
-            let idx = prior + i;
-            if idx < self.pending_images.len() {
-                self.pending_images.remove(idx);
-            }
-        }
+        self.input.images.clear();
     }
 
     /// push a system message to the display
@@ -1278,49 +1388,6 @@ impl App {
         };
     }
 
-    /// take the input text and reset (strips image placeholders)
-    pub fn take_input(&mut self) -> String {
-        self.cursor = 0;
-        self.input_scroll.set(0);
-        let input = std::mem::take(&mut self.input);
-        input.replace(IMAGE_PLACEHOLDER, "")
-    }
-
-    /// add a clipboard image to pending attachments, inserting a
-    /// placeholder at the cursor so it appears inline in the input
-    pub fn add_image(&mut self, image: ClipboardImage) {
-        let dimensions = image::load_from_memory(&image.bytes)
-            .ok()
-            .map(|img| (img.width(), img.height()));
-        self.pending_images.push(PendingImage {
-            data: image.bytes,
-            mime_type: image.mime_type,
-            dimensions,
-        });
-        self.input.insert(self.cursor, IMAGE_PLACEHOLDER);
-        self.cursor += IMAGE_PLACEHOLDER.len_utf8();
-        self.ensure_cursor_visible();
-    }
-
-    /// take pending images (clearing them from the app)
-    pub fn take_images(&mut self) -> Vec<PendingImage> {
-        std::mem::take(&mut self.pending_images)
-    }
-
-    /// remove the last pending image (and its placeholder in the input)
-    pub fn remove_last_image(&mut self) {
-        if self.pending_images.pop().is_some()
-            && let Some(pos) = self.input.rfind(IMAGE_PLACEHOLDER)
-        {
-            let end = pos + IMAGE_PLACEHOLDER.len_utf8();
-            self.input.drain(pos..end);
-            if self.cursor > pos {
-                self.cursor = self.cursor.saturating_sub(IMAGE_PLACEHOLDER.len_utf8());
-            }
-            self.ensure_cursor_visible();
-        }
-    }
-
     /// open the session picker with the given sessions
     pub fn open_session_picker(&mut self, sessions: Vec<SessionMeta>, cwd: String) {
         self.session_picker = Some(SessionPickerState {
@@ -1344,67 +1411,6 @@ impl App {
         let picker = self.session_picker.as_ref()?;
         let filtered = filtered_sessions(picker);
         filtered.get(picker.selected).copied()
-    }
-
-    /// ensure input scroll keeps the cursor visible
-    pub fn ensure_cursor_visible(&self) {
-        let content_width = self.input_area.get().width.saturating_sub(2);
-        let visible_lines = self.input_visible_lines.get();
-        if content_width == 0 || visible_lines == 0 {
-            self.input_scroll.set(0);
-            return;
-        }
-
-        let expanded =
-            crate::widgets::input_box::expand_input(&self.input, self.cursor, &self.pending_images);
-        let cursor_line = crate::widgets::input_box::cursor_visual_line(
-            &expanded.text,
-            expanded.cursor,
-            content_width as usize,
-        ) as u16;
-
-        let total = expanded
-            .text
-            .split('\n')
-            .enumerate()
-            .map(|(i, line)| {
-                let indent = if i == 0 { 2 } else { 0 };
-                crate::widgets::input_box::word_wrap_segments(line, content_width as usize, indent)
-                    .len() as u16
-            })
-            .sum::<u16>()
-            .max(1);
-        self.input_total_lines.set(total);
-
-        let mut scroll = self.input_scroll.get();
-        if cursor_line < scroll {
-            scroll = cursor_line;
-        } else {
-            let bottom = scroll.saturating_add(visible_lines.saturating_sub(1));
-            if cursor_line > bottom {
-                scroll = cursor_line.saturating_sub(visible_lines.saturating_sub(1));
-            }
-        }
-
-        let max_scroll = total.saturating_sub(visible_lines);
-        self.input_scroll.set(scroll.min(max_scroll));
-    }
-
-    /// scroll the input viewport by delta lines
-    pub fn scroll_input_by(&self, delta: i16) {
-        let visible = self.input_visible_lines.get();
-        let total = self.input_total_lines.get();
-        let max_scroll = total.saturating_sub(visible);
-        let current = self.input_scroll.get() as i16;
-        let next = (current + delta).clamp(0, max_scroll as i16) as u16;
-        self.input_scroll.set(next);
-    }
-
-    /// whether the mouse position is over the input box
-    pub fn is_mouse_over_input(&self, column: u16, row: u16) -> bool {
-        self.input_area
-            .get()
-            .contains(ratatui::layout::Position::new(column, row))
     }
 }
 
@@ -1575,8 +1581,8 @@ mod tests {
         let app = App::new("test-model".into(), TokenCount::new(200_000));
         assert!(app.messages.is_empty());
         assert!(!app.stream.active);
-        assert!(app.input.is_empty());
-        assert_eq!(app.cursor, 0);
+        assert!(app.input.text.is_empty());
+        assert_eq!(app.input.cursor, 0);
     }
 
     #[test]
@@ -1711,16 +1717,16 @@ mod tests {
     #[test]
     fn ensure_cursor_visible_recomputes_total_when_stale() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.input_area.set(Rect::new(0, 0, 20, 8));
-        app.input_visible_lines.set(2);
-        app.input_total_lines.set(2); // stale from previous render
-        app.input = "one\ntwo\nthree\nfour\nfive".into();
-        app.cursor = app.input.len();
+        app.input.area.set(Rect::new(0, 0, 20, 8));
+        app.input.visible_lines.set(2);
+        app.input.total_lines.set(2); // stale from previous render
+        app.input.text = "one\ntwo\nthree\nfour\nfive".into();
+        app.input.cursor = app.input.text.len();
 
-        app.ensure_cursor_visible();
+        app.input.ensure_cursor_visible();
 
-        assert!(app.input_total_lines.get() >= 5);
-        assert!(app.input_scroll.get() > 0);
+        assert!(app.input.total_lines.get() >= 5);
+        assert!(app.input.scroll.get() > 0);
     }
 
     #[test]
@@ -1728,41 +1734,41 @@ mod tests {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.input_char('h');
         app.input_char('i');
-        assert_eq!(app.input, "hi");
-        assert_eq!(app.cursor, 2);
+        assert_eq!(app.input.text, "hi");
+        assert_eq!(app.input.cursor, 2);
 
-        app.cursor_left();
-        assert_eq!(app.cursor, 1);
+        app.input.cursor_left();
+        assert_eq!(app.input.cursor, 1);
         app.input_char('!');
-        assert_eq!(app.input, "h!i");
+        assert_eq!(app.input.text, "h!i");
 
-        app.cursor_home();
-        assert_eq!(app.cursor, 0);
-        app.cursor_end();
-        assert_eq!(app.cursor, 3);
+        app.input.cursor_home();
+        assert_eq!(app.input.cursor, 0);
+        app.input.cursor_end();
+        assert_eq!(app.input.cursor, 3);
 
-        app.input_backspace();
-        assert_eq!(app.input, "h!");
+        app.input.backspace();
+        assert_eq!(app.input.text, "h!");
     }
 
     #[test]
     fn input_delete() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.input = "abc".into();
-        app.cursor = 1;
-        app.input_delete();
-        assert_eq!(app.input, "ac");
+        app.input.text = "abc".into();
+        app.input.cursor = 1;
+        app.input.delete();
+        assert_eq!(app.input.text, "ac");
     }
 
     #[test]
     fn take_input_resets() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.input = "hello".into();
-        app.cursor = 3;
-        let text = app.take_input();
+        app.input.text = "hello".into();
+        app.input.cursor = 3;
+        let text = app.input.take_text();
         assert_eq!(text, "hello");
-        assert!(app.input.is_empty());
-        assert_eq!(app.cursor, 0);
+        assert!(app.input.text.is_empty());
+        assert_eq!(app.input.cursor, 0);
     }
 
     #[test]
@@ -2008,8 +2014,8 @@ batch: 1/2 succeeded, 1 failed";
         app.input_char('a');
         app.input_char('\n');
         app.input_char('b');
-        assert_eq!(app.input, "a\nb");
-        assert_eq!(app.cursor, 3);
+        assert_eq!(app.input.text, "a\nb");
+        assert_eq!(app.input.cursor, 3);
     }
 
     #[test]
@@ -2407,5 +2413,47 @@ batch: 1/2 succeeded, 1 failed";
             app.tick();
         }
         assert!(!app.unread_flash_on());
+    }
+
+    #[test]
+    fn input_buffer_basic_editing() {
+        let mut buf = InputBuffer::new();
+        buf.insert_char('h');
+        buf.insert_char('i');
+        assert_eq!(buf.text, "hi");
+        assert_eq!(buf.cursor, 2);
+
+        buf.backspace();
+        assert_eq!(buf.text, "h");
+        assert_eq!(buf.cursor, 1);
+
+        buf.cursor_home();
+        assert_eq!(buf.cursor, 0);
+
+        buf.cursor_end();
+        assert_eq!(buf.cursor, 1);
+    }
+
+    #[test]
+    fn input_buffer_take_returns_and_clears() {
+        let mut buf = InputBuffer::new();
+        buf.insert_char('x');
+        let taken = buf.take_text();
+        assert_eq!(taken, "x");
+        assert!(buf.text.is_empty());
+        assert_eq!(buf.cursor, 0);
+    }
+
+    #[test]
+    fn input_buffer_word_navigation() {
+        let mut buf = InputBuffer::new();
+        buf.text = "hello world foo".into();
+        buf.cursor = buf.text.len();
+
+        buf.cursor_word_left();
+        assert_eq!(buf.cursor, 12); // before "foo"
+
+        buf.cursor_word_left();
+        assert_eq!(buf.cursor, 6); // before "world"
     }
 }

@@ -249,8 +249,8 @@ async fn paste_clipboard_image(app: &mut App) {
         Ok(Some(image)) => {
             let mime = image.mime_type.as_str();
             let size = image.bytes.len();
-            app.add_image(image);
-            let n = app.pending_images.len();
+            app.input.add_image(image);
+            let n = app.input.images.len();
             let kb = size / 1024;
             app.status = Some(format!("{n} image(s) attached ({mime}, {kb}kb)"));
         }
