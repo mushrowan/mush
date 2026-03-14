@@ -64,8 +64,27 @@ pub fn handle_agent_event(
             tool_name,
             args,
         } => {
-            let summary = summarise_tool_args(tool_name.as_str(), args);
-            app.start_tool(tool_call_id, tool_name.as_str(), &summary);
+            if tool_name.as_str().eq_ignore_ascii_case("batch") {
+                let summary = summarise_tool_args("batch", args);
+                let sub_calls: Vec<(String, String)> = args["tool_calls"]
+                    .as_array()
+                    .map(|calls| {
+                        calls
+                            .iter()
+                            .map(|c| {
+                                let name = c["tool"].as_str().unwrap_or("?").to_string();
+                                let sub_summary =
+                                    summarise_tool_args(&name, &c["parameters"]);
+                                (name, sub_summary)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                app.start_batch_tool(tool_call_id, &summary, &sub_calls);
+            } else {
+                let summary = summarise_tool_args(tool_name.as_str(), args);
+                app.start_tool(tool_call_id, tool_name.as_str(), &summary);
+            }
         }
         AgentEvent::ToolExecEnd {
             tool_call_id,
@@ -81,33 +100,39 @@ pub fn handle_agent_event(
                 ToolResultContentPart::Text(t) => Some(t.text.as_str()),
                 _ => None,
             });
-            // extract image data from tool result (base64 → raw bytes)
-            let image_data = result.content.iter().find_map(|p| match p {
-                ToolResultContentPart::Image(img) => {
-                    use base64::Engine;
-                    base64::engine::general_purpose::STANDARD
-                        .decode(&img.data)
-                        .ok()
+
+            if tool_name.as_str().eq_ignore_ascii_case("batch") {
+                app.end_batch_tool(tool_call_id, output_text);
+            } else {
+                // extract image data from tool result (base64 → raw bytes)
+                let image_data = result.content.iter().find_map(|p| match p {
+                    ToolResultContentPart::Image(img) => {
+                        use base64::Engine;
+                        base64::engine::general_purpose::STANDARD
+                            .decode(&img.data)
+                            .ok()
+                    }
+                    _ => None,
+                });
+                // create image protocol for inline rendering
+                if let Some(ref data) = image_data
+                    && let Some(picker) = image_picker
+                    && let Ok(dyn_image) = image::load_from_memory(data)
+                {
+                    let msg_idx = app.messages.len().saturating_sub(1);
+                    let tc_idx =
+                        app.messages.last().map(|m| m.tool_calls.len()).unwrap_or(0);
+                    let proto = picker.new_resize_protocol(dyn_image);
+                    image_protos.insert((msg_idx, tc_idx), proto);
                 }
-                _ => None,
-            });
-            // create image protocol for inline rendering
-            if let Some(ref data) = image_data
-                && let Some(picker) = image_picker
-                && let Ok(dyn_image) = image::load_from_memory(data)
-            {
-                let msg_idx = app.messages.len().saturating_sub(1);
-                let tc_idx = app.messages.last().map(|m| m.tool_calls.len()).unwrap_or(0);
-                let proto = picker.new_resize_protocol(dyn_image);
-                image_protos.insert((msg_idx, tc_idx), proto);
+                app.end_tool(
+                    tool_call_id,
+                    tool_name.as_str(),
+                    result.outcome,
+                    output_text,
+                    image_data,
+                );
             }
-            app.end_tool(
-                tool_call_id,
-                tool_name.as_str(),
-                result.outcome,
-                output_text,
-                image_data,
-            );
             let msg = Message::ToolResult(ToolResultMessage {
                 tool_call_id: tool_call_id.clone(),
                 tool_name: tool_name.clone(),

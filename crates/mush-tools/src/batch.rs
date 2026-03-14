@@ -155,7 +155,9 @@ impl AgentTool for BatchTool {
                     }
                 };
 
-                let header = format!("--- [{i}] {tool_name} ---\n");
+                let is_error = truncated.outcome.is_error();
+                let status = if is_error { "error" } else { "ok" };
+                let header = format!("--- [{i}] {tool_name} [{status}] ---\n");
                 let mut item_text = String::new();
                 for part in &truncated.content {
                     match part {
@@ -168,7 +170,6 @@ impl AgentTool for BatchTool {
                 let item_size = header.len() + item_text.len() + 2; // +2 for trailing newlines
                 if !budget_exhausted && output.len() + item_size > MAX_TOTAL_OUTPUT {
                     budget_exhausted = true;
-                    // save the full combined output so far + this item to a file
                     let remaining = results.len() - *i;
                     output.push_str(&format!(
                         "[...{remaining} more items omitted, output budget exceeded ({MAX_TOTAL_OUTPUT} bytes). \
@@ -177,8 +178,7 @@ impl AgentTool for BatchTool {
                 }
 
                 if budget_exhausted {
-                    // still count but only include a one-line summary
-                    output.push_str(&format!("--- [{i}] {tool_name} --- [omitted]\n"));
+                    output.push_str(&format!("--- [{i}] {tool_name} [{status}] --- [omitted]\n"));
                 } else {
                     output.push_str(&header);
                     output.push_str(&item_text);

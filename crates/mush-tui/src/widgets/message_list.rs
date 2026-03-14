@@ -10,7 +10,9 @@ use throbber_widgets_tui::{BRAILLE_SIX, Throbber, WhichUse};
 
 use mush_ai::types::TokenCount;
 
-use crate::app::{App, DisplayMessage, ImageRenderArea, MessageRole, ToolCallStatus};
+use crate::app::{
+    App, DisplayMessage, DisplayToolCall, ImageRenderArea, MessageRole, ToolCallStatus,
+};
 
 /// renders the full message list including any active stream
 pub struct MessageList<'a> {
@@ -328,47 +330,58 @@ fn render_message(
         }
     }
 
-    // tool calls (skip running ones, they're shown in the tool panels)
-    for (tc_idx, tc) in msg.tool_calls.iter().enumerate() {
-        if tc.status == ToolCallStatus::Running {
-            continue;
+    // tool calls: group by batch, render as bordered boxes
+    // skip running tools (they're shown in the live tool panels)
+    let completed: Vec<(usize, &DisplayToolCall)> = msg
+        .tool_calls
+        .iter()
+        .enumerate()
+        .filter(|(_, tc)| tc.status != ToolCallStatus::Running)
+        .collect();
+
+    // group consecutive tools with the same batch
+    let mut i = 0;
+    while i < completed.len() {
+        let batch = completed[i].1.batch;
+        let group_start = i;
+        while i < completed.len() && completed[i].1.batch == batch {
+            i += 1;
         }
-        let (icon, colour) = match tc.status {
-            ToolCallStatus::Running => unreachable!(),
-            ToolCallStatus::Done => ("✓", Color::Green),
-            ToolCallStatus::Error => ("✗", Color::Red),
-        };
-        lines.push(Line::from(vec![
-            Span::styled(format!("  {icon} "), Style::default().fg(colour)),
-            Span::styled(tc.name.clone(), Style::default().fg(colour)),
-            Span::raw(" "),
-            Span::styled(tc.summary.clone(), Style::default().fg(Color::DarkGray)),
-        ]));
-        // image: reserve space for inline rendering
-        if tc.image_data.is_some() {
-            image_placeholders.push(ImagePlaceholder {
-                msg_idx,
-                tc_idx,
-                line_idx: lines.len(),
-            });
-            // first line: label
-            lines.push(Line::from(vec![
-                Span::styled("    📷 ", Style::default()),
-                Span::styled(
-                    "image",
-                    Style::default()
-                        .fg(Color::Magenta)
-                        .add_modifier(Modifier::ITALIC),
-                ),
-            ]));
-            // remaining lines: blank space for the image overlay
-            for _ in 1..IMAGE_HEIGHT {
-                lines.push(Line::raw(""));
+        let group = &completed[group_start..i];
+
+        // collect image placeholders before rendering the group
+        for &(tc_idx, tc) in group {
+            if tc.image_data.is_some() {
+                image_placeholders.push(ImagePlaceholder {
+                    msg_idx,
+                    tc_idx,
+                    line_idx: lines.len(),
+                });
             }
         }
-        // tool output preview with diff colouring
-        if let Some(ref output) = tc.output_preview {
-            render_diff_output(output, lines, width);
+
+        render_tool_box_group(
+            &group.iter().map(|(_, tc)| *tc).collect::<Vec<_>>(),
+            width,
+            lines,
+        );
+
+        // after the boxes, render any image placeholders
+        for &(_, tc) in group {
+            if tc.image_data.is_some() {
+                lines.push(Line::from(vec![
+                    Span::styled("    📷 ", Style::default()),
+                    Span::styled(
+                        "image",
+                        Style::default()
+                            .fg(Color::Magenta)
+                            .add_modifier(Modifier::ITALIC),
+                    ),
+                ]));
+                for _ in 1..IMAGE_HEIGHT {
+                    lines.push(Line::raw(""));
+                }
+            }
         }
     }
 
@@ -422,101 +435,312 @@ fn render_markdown(source: &str) -> Text<'static> {
     crate::markdown::render(source)
 }
 
-/// minimum usable width for side-by-side diff (indent + two panels + separator)
-const SIDE_BY_SIDE_MIN_WIDTH: u16 = 60;
+// -- bordered tool boxes for completed tool calls --
 
-/// render tool output, using side-by-side layout for diffs when wide enough
-fn render_diff_output(output: &str, lines: &mut Vec<Line<'_>>, width: u16) {
-    let indent = 4;
-    let all_lines: Vec<&str> = output.lines().collect();
+/// indent for tool boxes (matches message content indent)
+const BOX_INDENT: usize = 2;
 
-    // check if this looks like a diff (has + or - prefixed lines)
-    let has_removed = all_lines.iter().any(|l| l.starts_with("- "));
-    let has_added = all_lines.iter().any(|l| l.starts_with("+ "));
-    let is_diff = has_removed && has_added;
+/// minimum width per panel for side-by-side tool boxes
+const MIN_TOOL_BOX_WIDTH: u16 = 30;
 
-    if !is_diff || width < SIDE_BY_SIDE_MIN_WIDTH {
-        // fall back to unified diff / plain output
-        for line in &all_lines {
-            let style = if line.starts_with("+ ") {
-                Style::default().fg(Color::Green)
-            } else if line.starts_with("- ") {
-                Style::default().fg(Color::Red)
-            } else {
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::DIM)
-            };
-            lines.push(Line::styled(format!("{:indent$}{line}", ""), style));
-        }
+/// render a group of completed tool calls (same batch) as bordered boxes
+fn render_tool_box_group(
+    tools: &[&DisplayToolCall],
+    total_width: u16,
+    lines: &mut Vec<Line<'_>>,
+) {
+    let usable = total_width.saturating_sub(BOX_INDENT as u16);
+    if usable < 8 || tools.is_empty() {
         return;
     }
 
-    // collect removed and added lines
-    let removed: Vec<&str> = all_lines
-        .iter()
-        .filter(|l| l.starts_with("- "))
-        .map(|l| l.strip_prefix("- ").unwrap_or(l))
-        .collect();
-    let added: Vec<&str> = all_lines
-        .iter()
-        .filter(|l| l.starts_with("+ "))
-        .map(|l| l.strip_prefix("+ ").unwrap_or(l))
-        .collect();
+    let n = tools.len();
+    let side_by_side = n > 1 && usable / n as u16 >= MIN_TOOL_BOX_WIDTH;
 
-    // also pass through any non-diff lines (e.g. "edited path/to/file") first
-    for line in &all_lines {
-        if !line.starts_with("+ ") && !line.starts_with("- ") {
-            lines.push(Line::styled(
-                format!("{:indent$}{line}", ""),
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::DIM),
-            ));
+    if side_by_side {
+        render_side_by_side_boxes(tools, usable as usize, lines);
+    } else {
+        for tool in tools {
+            render_single_tool_box(tool, usable as usize, lines);
         }
     }
+}
 
-    // each panel gets half the available width (minus indent, separator)
-    let usable = (width as usize).saturating_sub(indent + 3); // 3 for " │ "
-    let half = usable / 2;
-    let row_count = removed.len().max(added.len());
-
-    let red = Style::default().fg(Color::Red);
-    let green = Style::default().fg(Color::Green);
+/// render one completed tool as a bordered box
+fn render_single_tool_box(tc: &DisplayToolCall, width: usize, lines: &mut Vec<Line<'_>>) {
+    let (icon, colour) = tool_icon_colour(tc);
+    let border = Style::default().fg(colour);
     let dim = Style::default()
         .fg(Color::DarkGray)
         .add_modifier(Modifier::DIM);
 
-    for i in 0..row_count {
-        let left = removed.get(i).copied().unwrap_or("");
-        let right = added.get(i).copied().unwrap_or("");
+    // title: " ✓ name "
+    let title_text = format!(" {icon} {} ", tc.name);
+    let title_chars = title_text.chars().count();
+    // ┌─ + title + ─...─ + ┐  (width total)
+    let fill = width.saturating_sub(title_chars + 3); // 3 = ┌─ + ┐
 
-        // truncate to fit panel width (char-safe)
-        let left_display = if left.chars().count() > half {
-            let truncated: String = left.chars().take(half.saturating_sub(1)).collect();
-            format!("{truncated}…")
-        } else {
-            left.to_string()
-        };
-        let right_display = if right.chars().count() > half {
-            let truncated: String = right.chars().take(half.saturating_sub(1)).collect();
-            format!("{truncated}…")
-        } else {
-            right.to_string()
-        };
+    // top border
+    let indent = Span::raw(" ".repeat(BOX_INDENT));
+    lines.push(Line::from(vec![
+        indent.clone(),
+        Span::styled("┌─", border),
+        Span::styled(
+            format!(" {icon} "),
+            Style::default().fg(colour),
+        ),
+        Span::styled(
+            tc.name.clone(),
+            Style::default()
+                .fg(colour)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" ", border),
+        Span::styled("─".repeat(fill), border),
+        Span::styled("┐", border),
+    ]));
 
-        let left_style = if left.is_empty() { dim } else { red };
-        let right_style = if right.is_empty() { dim } else { green };
+    // content: summary line
+    let inner = width.saturating_sub(4); // │ + space + space + │
+    push_box_content_line(&tc.summary, inner, border, dim, &indent, lines);
 
-        let pad_left = half.saturating_sub(left_display.len());
-        let spans = vec![
-            Span::raw(" ".repeat(indent)),
-            Span::styled(left_display, left_style),
-            Span::raw(" ".repeat(pad_left)),
-            Span::styled(" │ ", dim),
-            Span::styled(right_display, right_style),
-        ];
+    // content: output preview with diff colouring
+    if let Some(ref output) = tc.output_preview {
+        for text_line in output.lines() {
+            push_box_content_line(
+                text_line,
+                inner,
+                border,
+                diff_line_style(text_line, dim),
+                &indent,
+                lines,
+            );
+        }
+    }
+
+    // bottom border
+    lines.push(Line::from(vec![
+        indent,
+        Span::styled("└", border),
+        Span::styled("─".repeat(width.saturating_sub(2)), border),
+        Span::styled("┘", border),
+    ]));
+}
+
+/// render parallel tools side-by-side in a shared bordered box
+fn render_side_by_side_boxes(
+    tools: &[&DisplayToolCall],
+    width: usize,
+    lines: &mut Vec<Line<'_>>,
+) {
+    let n = tools.len();
+    // each panel width (including its borders): divide evenly
+    // total = panel_w * n + (n-1) separators... but we share borders
+    // shared layout: ┌─ a ─┬─ b ─┐ = width total
+    // each panel inner = (width - n - 1) / n
+    let inner_total = width.saturating_sub(n + 1); // n+1 border chars (│ or ┬/┴)
+    let panel_inner = inner_total / n;
+    let remainder = inner_total % n;
+
+    let dim = Style::default()
+        .fg(Color::DarkGray)
+        .add_modifier(Modifier::DIM);
+    let indent = Span::raw(" ".repeat(BOX_INDENT));
+
+    // determine border colour per panel
+    let colours: Vec<Color> = tools.iter().map(|tc| tool_icon_colour(tc).1).collect();
+
+    // -- top border --
+    let mut top_spans = vec![indent.clone()];
+    for (i, tc) in tools.iter().enumerate() {
+        let (icon, colour) = tool_icon_colour(tc);
+        let border = Style::default().fg(colour);
+        let corner = if i == 0 { "┌─" } else { "┬─" };
+        let title = format!(" {icon} {} ", tc.name);
+        let title_chars = title.chars().count();
+        let pw = panel_inner + if i < remainder { 1 } else { 0 };
+        let fill = pw.saturating_sub(title_chars + 1); // 1 for the ─ after corner
+
+        top_spans.push(Span::styled(corner, border));
+        top_spans.push(Span::styled(
+            format!(" {icon} "),
+            Style::default().fg(colour),
+        ));
+        top_spans.push(Span::styled(
+            tc.name.clone(),
+            Style::default()
+                .fg(colour)
+                .add_modifier(Modifier::BOLD),
+        ));
+        top_spans.push(Span::styled(" ", border));
+        top_spans.push(Span::styled("─".repeat(fill), border));
+    }
+    top_spans.push(Span::styled(
+        "┐",
+        Style::default().fg(*colours.last().unwrap_or(&Color::DarkGray)),
+    ));
+    lines.push(Line::from(top_spans));
+
+    // -- content rows: max of content heights across panels --
+    // pre-wrap content per panel to fit panel width
+    let panel_contents: Vec<Vec<String>> = tools
+        .iter()
+        .enumerate()
+        .map(|(i, tc)| {
+            let pw = panel_inner + if i < remainder { 1 } else { 0 };
+            let mut content = Vec::new();
+            for wrapped in wrap_text(&tc.summary, pw) {
+                content.push(wrapped);
+            }
+            if let Some(ref output) = tc.output_preview {
+                for line in output.lines() {
+                    for wrapped in wrap_text(line, pw) {
+                        content.push(wrapped);
+                    }
+                }
+            }
+            content
+        })
+        .collect();
+
+    let max_rows = panel_contents.iter().map(|c| c.len()).max().unwrap_or(0);
+
+    for row in 0..max_rows {
+        let mut spans = vec![indent.clone()];
+        for (i, content) in panel_contents.iter().enumerate() {
+            let pw = panel_inner + if i < remainder { 1 } else { 0 };
+            let border = Style::default().fg(colours[i]);
+            spans.push(Span::styled("│", border));
+
+            let text = content.get(row).map(|s| s.as_str()).unwrap_or("");
+            let style = diff_line_style(text, dim);
+            let pad = pw.saturating_sub(text.chars().count());
+            spans.push(Span::styled(format!(" {text}"), style));
+            spans.push(Span::raw(" ".repeat(pad)));
+        }
+        spans.push(Span::styled(
+            "│",
+            Style::default().fg(*colours.last().unwrap_or(&Color::DarkGray)),
+        ));
         lines.push(Line::from(spans));
+    }
+
+    // -- bottom border --
+    let mut bot_spans = vec![indent];
+    for (i, _) in tools.iter().enumerate() {
+        let border = Style::default().fg(colours[i]);
+        let pw = panel_inner + if i < remainder { 1 } else { 0 };
+        let corner = if i == 0 { "└" } else { "┴" };
+        bot_spans.push(Span::styled(corner, border));
+        bot_spans.push(Span::styled("─".repeat(pw), border));
+    }
+    bot_spans.push(Span::styled(
+        "┘",
+        Style::default().fg(*colours.last().unwrap_or(&Color::DarkGray)),
+    ));
+    lines.push(Line::from(bot_spans));
+}
+
+/// push a styled content line inside a bordered box, wrapping if needed
+fn push_box_content_line<'a>(
+    text: &str,
+    inner_width: usize,
+    border: Style,
+    style: Style,
+    indent: &Span<'a>,
+    lines: &mut Vec<Line<'a>>,
+) {
+    for wrapped in wrap_text(text, inner_width) {
+        let pad = inner_width.saturating_sub(wrapped.chars().count());
+        lines.push(Line::from(vec![
+            indent.clone(),
+            Span::styled("│ ", border),
+            Span::styled(wrapped, style),
+            Span::raw(" ".repeat(pad)),
+            Span::styled(" │", border),
+        ]));
+    }
+}
+
+/// wrap text to fit within `width` chars, breaking at spaces first,
+/// then character-wise for words longer than the width
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    if width == 0 || text.is_empty() {
+        return vec![text.to_string()];
+    }
+    if text.chars().count() <= width {
+        return vec![text.to_string()];
+    }
+
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut current_len: usize = 0;
+
+    for word in text.split(' ') {
+        let word_len = word.chars().count();
+
+        if word_len > width {
+            // push current line first
+            if !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+                current_len = 0;
+            }
+            // character-wrap the long word
+            let mut remaining = word;
+            while !remaining.is_empty() {
+                let end = remaining
+                    .char_indices()
+                    .nth(width)
+                    .map_or(remaining.len(), |(i, _)| i);
+                let chunk = &remaining[..end];
+                remaining = &remaining[end..];
+                if remaining.is_empty() {
+                    // last chunk becomes current line so next word can join
+                    current = chunk.to_string();
+                    current_len = chunk.chars().count();
+                } else {
+                    lines.push(chunk.to_string());
+                }
+            }
+        } else if current.is_empty() {
+            current = word.to_string();
+            current_len = word_len;
+        } else if current_len + 1 + word_len <= width {
+            current.push(' ');
+            current.push_str(word);
+            current_len += 1 + word_len;
+        } else {
+            lines.push(std::mem::take(&mut current));
+            current = word.to_string();
+            current_len = word_len;
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
+/// get icon and colour for a completed tool call
+fn tool_icon_colour(tc: &DisplayToolCall) -> (&'static str, Color) {
+    match tc.status {
+        ToolCallStatus::Done => ("✓", Color::Green),
+        ToolCallStatus::Error => ("✗", Color::Red),
+        ToolCallStatus::Running => ("⣾", Color::Cyan),
+    }
+}
+
+/// style for a line of tool output (diff-aware)
+fn diff_line_style(line: &str, fallback: Style) -> Style {
+    if line.starts_with("+ ") {
+        Style::default().fg(Color::Green)
+    } else if line.starts_with("- ") {
+        Style::default().fg(Color::Red)
+    } else {
+        fallback
     }
 }
 
@@ -627,6 +851,7 @@ mod tests {
                     status: ToolCallStatus::Done,
                     output_preview: Some("file1.txt\nfile2.txt".into()),
                     image_data: None,
+                    batch: 1,
                 },
                 crate::app::DisplayToolCall {
                     name: "read".into(),
@@ -634,6 +859,7 @@ mod tests {
                     status: ToolCallStatus::Error,
                     output_preview: None,
                     image_data: None,
+                    batch: 2,
                 },
             ],
             thinking: None,
@@ -683,6 +909,7 @@ mod tests {
                 status: ToolCallStatus::Done,
                 output_preview: None,
                 image_data: Some(vec![0u8; 100]), // dummy bytes
+                batch: 1,
             }],
             thinking: None,
             thinking_expanded: false,
@@ -704,6 +931,241 @@ mod tests {
         // area should have reasonable dimensions
         assert!(areas[0].area.height > 0);
         assert!(areas[0].area.width > 0);
+    }
+
+    #[test]
+    fn completed_tool_renders_bordered_box() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.messages.push(DisplayMessage {
+            role: MessageRole::Assistant,
+            content: "checking".into(),
+            tool_calls: vec![crate::app::DisplayToolCall {
+                name: "bash".into(),
+                summary: "cargo test".into(),
+                status: ToolCallStatus::Done,
+                output_preview: None,
+                image_data: None,
+                batch: 1,
+            }],
+            thinking: None,
+            thinking_expanded: false,
+            usage: None,
+            cost: None,
+            model_id: None,
+            queued: false,
+        });
+        let buf = render_app(&app, 50, 10);
+        let content = buffer_to_string(&buf);
+        // bordered box with green tick and tool name in title
+        assert!(content.contains("┌"), "missing top-left corner");
+        assert!(content.contains("✓"), "missing tick");
+        assert!(content.contains("bash"), "missing tool name");
+        assert!(content.contains("cargo test"), "missing summary");
+        assert!(content.contains("└"), "missing bottom-left corner");
+    }
+
+    #[test]
+    fn failed_tool_renders_red_bordered_box() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.messages.push(DisplayMessage {
+            role: MessageRole::Assistant,
+            content: "checking".into(),
+            tool_calls: vec![crate::app::DisplayToolCall {
+                name: "bash".into(),
+                summary: "cargo check".into(),
+                status: ToolCallStatus::Error,
+                output_preview: Some("error[E0063]: missing field".into()),
+                image_data: None,
+                batch: 1,
+            }],
+            thinking: None,
+            thinking_expanded: false,
+            usage: None,
+            cost: None,
+            model_id: None,
+            queued: false,
+        });
+        let buf = render_app(&app, 60, 12);
+        let content = buffer_to_string(&buf);
+        assert!(content.contains("✗"), "missing cross");
+        assert!(content.contains("bash"), "missing tool name");
+        assert!(content.contains("error"), "missing error output");
+    }
+
+    #[test]
+    fn parallel_tools_render_side_by_side() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.messages.push(DisplayMessage {
+            role: MessageRole::Assistant,
+            content: "reading".into(),
+            tool_calls: vec![
+                crate::app::DisplayToolCall {
+                    name: "read".into(),
+                    summary: "a.rs".into(),
+                    status: ToolCallStatus::Done,
+                    output_preview: None,
+                    image_data: None,
+                    batch: 1,
+                },
+                crate::app::DisplayToolCall {
+                    name: "read".into(),
+                    summary: "b.rs".into(),
+                    status: ToolCallStatus::Done,
+                    output_preview: None,
+                    image_data: None,
+                    batch: 1, // same batch = parallel
+                },
+            ],
+            thinking: None,
+            thinking_expanded: false,
+            usage: None,
+            cost: None,
+            model_id: None,
+            queued: false,
+        });
+        // 80 wide: each panel gets ~39 cols, > MIN_TOOL_BOX_WIDTH (30)
+        let buf = render_app(&app, 80, 10);
+        let content = buffer_to_string(&buf);
+        // side-by-side uses ┬ as a junction between panels
+        assert!(content.contains("┬"), "missing top junction (not side-by-side)");
+        assert!(content.contains("a.rs"), "missing first tool summary");
+        assert!(content.contains("b.rs"), "missing second tool summary");
+    }
+
+    #[test]
+    fn parallel_tools_stack_when_narrow() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.messages.push(DisplayMessage {
+            role: MessageRole::Assistant,
+            content: "reading".into(),
+            tool_calls: vec![
+                crate::app::DisplayToolCall {
+                    name: "read".into(),
+                    summary: "a.rs".into(),
+                    status: ToolCallStatus::Done,
+                    output_preview: None,
+                    image_data: None,
+                    batch: 1,
+                },
+                crate::app::DisplayToolCall {
+                    name: "read".into(),
+                    summary: "b.rs".into(),
+                    status: ToolCallStatus::Done,
+                    output_preview: None,
+                    image_data: None,
+                    batch: 1,
+                },
+            ],
+            thinking: None,
+            thinking_expanded: false,
+            usage: None,
+            cost: None,
+            model_id: None,
+            queued: false,
+        });
+        // 40 wide: each panel would be ~19 cols, < MIN_TOOL_BOX_WIDTH (30)
+        let buf = render_app(&app, 40, 12);
+        let content = buffer_to_string(&buf);
+        // stacked: no junction, two separate boxes
+        assert!(!content.contains("┬"), "should not be side-by-side");
+        assert!(content.contains("a.rs"), "missing first tool");
+        assert!(content.contains("b.rs"), "missing second tool");
+    }
+
+    #[test]
+    fn error_tool_box_has_red_border() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.messages.push(DisplayMessage {
+            role: MessageRole::Assistant,
+            content: "reading".into(),
+            tool_calls: vec![crate::app::DisplayToolCall {
+                name: "read".into(),
+                summary: "missing.rs".into(),
+                status: ToolCallStatus::Error,
+                output_preview: Some("file not found".into()),
+                image_data: None,
+                batch: 1,
+            }],
+            thinking: None,
+            thinking_expanded: false,
+            usage: None,
+            cost: None,
+            model_id: None,
+            queued: false,
+        });
+        let buf = render_app(&app, 50, 10);
+        // check that the top-left corner cell has red foreground
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                let cell = &buf[(x, y)];
+                if cell.symbol() == "┌" {
+                    assert_eq!(
+                        cell.fg,
+                        Color::Red,
+                        "border should be red for error tool at ({x}, {y})"
+                    );
+                    return;
+                }
+            }
+        }
+        panic!("no ┌ found in rendered output");
+    }
+
+    #[test]
+    fn wrap_text_short_line_unchanged() {
+        assert_eq!(wrap_text("hello", 20), vec!["hello"]);
+    }
+
+    #[test]
+    fn wrap_text_breaks_at_word_boundary() {
+        assert_eq!(wrap_text("hello world foo", 11), vec!["hello world", "foo"]);
+    }
+
+    #[test]
+    fn wrap_text_long_word_char_wraps() {
+        assert_eq!(
+            wrap_text("/very/long/path/name", 10),
+            vec!["/very/long", "/path/name"]
+        );
+    }
+
+    #[test]
+    fn wrap_text_empty() {
+        assert_eq!(wrap_text("", 10), vec![""]);
+    }
+
+    #[test]
+    fn tool_box_wraps_long_summary() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        let long_path = "/home/rowan/dev/mush/crates/mush-tui/src/widgets/message_list.rs";
+        app.messages.push(DisplayMessage {
+            role: MessageRole::Assistant,
+            content: "reading".into(),
+            tool_calls: vec![crate::app::DisplayToolCall {
+                name: "read".into(),
+                summary: long_path.into(),
+                status: ToolCallStatus::Done,
+                output_preview: None,
+                image_data: None,
+                batch: 1,
+            }],
+            thinking: None,
+            thinking_expanded: false,
+            usage: None,
+            cost: None,
+            model_id: None,
+            queued: false,
+        });
+        // narrow box: path won't fit on one line
+        let buf = render_app(&app, 40, 12);
+        let content = buffer_to_string(&buf);
+        // full path should be visible (wrapped, not truncated)
+        assert!(
+            content.contains("message_list.rs"),
+            "path end should be visible after wrapping"
+        );
+        // no ellipsis
+        assert!(!content.contains("…"), "should wrap, not truncate");
     }
 
     /// helper: convert buffer to string for assertions
