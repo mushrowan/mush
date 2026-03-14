@@ -56,18 +56,17 @@ impl Widget for MessageList<'_> {
                 .use_type(WhichUse::Spin);
             let spinner_span = throbber.to_symbol_span(&self.app.throbber_state);
 
-
             if !self.app.streaming_thinking.is_empty()
                 && self.app.thinking_display != crate::app::ThinkingDisplay::Hidden
             {
                 lines.push(Line::from(vec![
-                    Span::raw("  "),
+                    Span::raw(" "),
                     spinner_span.clone().style(dim),
                     Span::styled(" thinking", dim),
                 ]));
                 let visible_thinking = self.app.visible_streaming_thinking();
                 for line in visible_thinking.lines() {
-                    lines.push(Line::styled(format!("  {line}"), dim));
+                    lines.push(Line::styled(format!(" {line}"), dim));
                 }
                 lines.push(Line::raw(""));
             }
@@ -75,14 +74,14 @@ impl Widget for MessageList<'_> {
                 let visible_text = self.app.visible_streaming_text();
                 let md_text = render_markdown(visible_text);
                 for line in md_text.lines {
-                    let mut spans: Vec<Span<'_>> = vec![Span::raw("  ")];
+                    let mut spans: Vec<Span<'_>> = vec![Span::raw(" ")];
                     spans.extend(line.spans);
                     lines.push(Line::from(spans));
                 }
             }
             if self.app.streaming_text.is_empty() && self.app.streaming_thinking.is_empty() {
                 lines.push(Line::from(vec![
-                    Span::raw("  "),
+                    Span::raw(" "),
                     spinner_span.clone().style(dim),
                     Span::styled(" working", dim),
                 ]));
@@ -98,7 +97,7 @@ impl Widget for MessageList<'_> {
             // show a truncated preview of the args being built
             let preview = truncate_line(&self.app.streaming_tool_args, 60);
             lines.push(Line::from(vec![
-                Span::raw("  "),
+                Span::raw(" "),
                 spinner_span.style(Style::default().fg(Color::DarkGray)),
                 Span::styled(" building ", Style::default().fg(Color::DarkGray)),
                 Span::styled(preview, Style::default().fg(Color::DarkGray)),
@@ -237,10 +236,7 @@ fn render_message(
         if sel.selected {
             label_spans.push(Span::styled("▌ ", Style::default().fg(Color::Cyan)));
         }
-        label_spans.push(Span::styled(
-            "system",
-            Style::default().fg(Color::Yellow),
-        ));
+        label_spans.push(Span::styled("system", Style::default().fg(Color::Yellow)));
         lines.push(Line::from(label_spans));
     } else if sel.selected {
         let mut hint_spans = vec![Span::styled("▌", Style::default().fg(Color::Cyan))];
@@ -260,7 +256,7 @@ fn render_message(
         if msg.thinking_expanded {
             for line in thinking.lines() {
                 lines.push(Line::styled(
-                    format!("  {line}"),
+                    format!(" {line}"),
                     Style::default()
                         .fg(Color::DarkGray)
                         .add_modifier(Modifier::DIM),
@@ -275,7 +271,7 @@ fn render_message(
                 preview.to_string()
             };
             lines.push(Line::from(vec![
-                Span::styled("  💭 ", Style::default().fg(Color::DarkGray)),
+                Span::styled(" 💭 ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
                     trimmed,
                     Style::default()
@@ -292,8 +288,9 @@ fn render_message(
         }
     }
 
-    // user messages get a subtle background to distinguish them
-    let user_bg = Style::default().bg(Color::Rgb(35, 38, 45));
+    // user messages get a subtle background (#343541, same as pi)
+    // padded to full width so the bg spans the entire line
+    let user_bg = Style::default().bg(Color::Rgb(52, 53, 65));
 
     // main content (markdown rendered)
     if msg.queued {
@@ -301,19 +298,24 @@ fn render_message(
             .fg(Color::DarkGray)
             .add_modifier(Modifier::DIM);
         for line in msg.content.lines() {
-            lines.push(Line::styled(format!("  {line}"), dim));
+            lines.push(Line::styled(format!(" {line}"), dim));
         }
     } else if is_user {
+        let w = width as usize;
+        // blank padding line above
+        lines.push(Line::from(Span::styled(" ".repeat(w), user_bg)));
         for line in msg.content.lines() {
-            lines.push(Line::from(vec![Span::styled(
-                format!("  {line}"),
-                user_bg,
-            )]));
+            let text = format!(" {line}");
+            let pad = w.saturating_sub(text.len());
+            let padded = format!("{text}{}", " ".repeat(pad));
+            lines.push(Line::from(Span::styled(padded, user_bg)));
         }
+        // blank padding line below
+        lines.push(Line::from(Span::styled(" ".repeat(w), user_bg)));
     } else {
         let md_text = render_markdown(&msg.content);
         for line in md_text.lines {
-            let mut spans: Vec<Span<'_>> = vec![Span::raw("  ")];
+            let mut spans: Vec<Span<'_>> = vec![Span::raw(" ")];
             spans.extend(line.spans);
             lines.push(Line::from(spans));
         }
@@ -378,7 +380,7 @@ fn render_message(
     if let Some(ref usage) = msg.usage {
         let total = usage.total_tokens();
         if total > TokenCount::ZERO {
-            let mut parts = vec![format!("  {total}tok")];
+            let mut parts = vec![format!(" {total}tok")];
             let reuse_base = usage.cache_read_tokens + usage.input_tokens;
             if reuse_base > TokenCount::ZERO {
                 let reuse_pct = usage.cache_read_tokens.percent_of(reuse_base) as u32;
@@ -427,7 +429,7 @@ fn render_markdown(source: &str) -> Text<'static> {
 // -- bordered tool boxes for completed tool calls --
 
 /// indent for tool boxes (matches message content indent)
-const BOX_INDENT: usize = 2;
+const BOX_INDENT: usize = 1;
 
 /// minimum width per panel for side-by-side tool boxes
 const MIN_TOOL_BOX_WIDTH: u16 = 30;
