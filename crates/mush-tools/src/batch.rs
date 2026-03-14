@@ -76,6 +76,10 @@ impl AgentTool for BatchTool {
         })
     }
 
+    fn output_limit(&self) -> mush_agent::tool::OutputLimit {
+        mush_agent::tool::OutputLimit::SelfManaged
+    }
+
     fn execute(
         &self,
         params: serde_json::Value,
@@ -108,6 +112,7 @@ impl AgentTool for BatchTool {
                         return (
                             i,
                             call.tool,
+                            None,
                             Err("cannot nest batch inside batch".to_string()),
                         );
                     }
@@ -118,13 +123,15 @@ impl AgentTool for BatchTool {
                             return (
                                 i,
                                 call.tool.clone(),
+                                None,
                                 Err(format!("unknown tool: {}", call.tool)),
                             );
                         }
                     };
 
+                    let limit = tool.output_limit();
                     let result = tool.execute(call.parameters).await;
-                    (i, call.tool, Ok(result))
+                    (i, call.tool, Some(limit), Ok(result))
                 })
                 .collect();
 
@@ -135,7 +142,7 @@ impl AgentTool for BatchTool {
             let mut output = String::new();
             let mut budget_exhausted = false;
 
-            for (i, tool_name, result) in &results {
+            for (i, tool_name, limit, result) in &results {
                 let truncated = match result {
                     Ok(result) => {
                         if result.outcome.is_error() {
@@ -143,11 +150,7 @@ impl AgentTool for BatchTool {
                         } else {
                             success_count += 1;
                         }
-                        if truncation::self_truncating(tool_name) {
-                            result.clone()
-                        } else {
-                            truncation::truncate_tool_output(result.clone())
-                        }
+                        truncation::apply(result.clone(), limit.unwrap_or_default())
                     }
                     Err(error) => {
                         error_count += 1;

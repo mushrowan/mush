@@ -258,6 +258,10 @@ impl AgentTool for ReadTool {
         })
     }
 
+    fn output_limit(&self) -> mush_agent::tool::OutputLimit {
+        mush_agent::tool::OutputLimit::SelfManaged
+    }
+
     fn execute(
         &self,
         args: serde_json::Value,

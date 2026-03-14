@@ -146,7 +146,8 @@ pub type DynamicContext = std::sync::Arc<dyn Fn() -> Option<String> + Send + Syn
 /// callback type for file-triggered rule injection.
 /// given a file path from a tool call, returns any matching rule content
 /// that should be appended to the tool result.
-pub type FileRuleCallback = std::sync::Arc<dyn Fn(&std::path::Path) -> Option<String> + Send + Sync>;
+pub type FileRuleCallback =
+    std::sync::Arc<dyn Fn(&std::path::Path) -> Option<String> + Send + Sync>;
 
 /// async callback for getting diagnostics after a file-modifying tool runs.
 /// receives the file path from tool arguments, returns formatted diagnostics
@@ -654,7 +655,10 @@ fn extract_file_path(args: &serde_json::Value) -> Option<std::path::PathBuf> {
 
 /// tools that modify files on disk (diagnostics are relevant after these)
 fn is_file_modifying_tool(name: &str) -> bool {
-    matches!(name.to_lowercase().as_str(), "write" | "edit" | "apply_patch")
+    matches!(
+        name.to_lowercase().as_str(),
+        "write" | "edit" | "apply_patch"
+    )
 }
 
 async fn execute_tool(tools: &ToolRegistry, tool_call: &ToolCall) -> ToolResult {
@@ -665,13 +669,7 @@ async fn execute_tool(tools: &ToolRegistry, tool_call: &ToolCall) -> ToolResult 
             if result.outcome.is_error() {
                 tracing::warn!(tool = %tool_call.name, "tool returned error");
             }
-            // skip truncation for tools that handle their own output limits
-            // (read already caps at 2000 lines / 50KB with line numbers)
-            if crate::truncation::self_truncating(tool.name()) {
-                result
-            } else {
-                crate::truncation::truncate_tool_output(result)
-            }
+            crate::truncation::apply(result, tool.output_limit())
         }
         None => {
             tracing::error!(tool = %tool_call.name, "tool not found");

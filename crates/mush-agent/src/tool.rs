@@ -49,6 +49,20 @@ impl ToolResult {
     }
 }
 
+/// how a tool's output should be truncated when it exceeds limits
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OutputLimit {
+    /// tool handles its own truncation, skip agent-loop truncation
+    SelfManaged,
+    /// keep the start (file reads, directory listings)
+    Head,
+    /// keep the end (command output, logs)
+    Tail,
+    /// keep head + tail with gap marker
+    #[default]
+    Middle,
+}
+
 /// trait for tools that the agent can invoke
 ///
 /// tools are given a json arguments object and return a result.
@@ -71,6 +85,12 @@ pub trait AgentTool: Send + Sync {
         &self,
         args: serde_json::Value,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>>;
+
+    /// how this tool's output should be truncated by the agent loop.
+    /// tools that manage their own limits return `SelfManaged`.
+    fn output_limit(&self) -> OutputLimit {
+        OutputLimit::Middle
+    }
 }
 
 pub type SharedTool = Arc<dyn AgentTool>;
@@ -275,6 +295,12 @@ mod tests {
                 ToolResult::text(text.to_uppercase())
             })
         }
+    }
+
+    #[test]
+    fn default_output_limit_is_middle() {
+        let tool = EchoTool;
+        assert_eq!(tool.output_limit(), OutputLimit::Middle);
     }
 
     #[tokio::test]
