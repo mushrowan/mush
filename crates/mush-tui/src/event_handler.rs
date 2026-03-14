@@ -48,7 +48,7 @@ pub fn handle_agent_event(
             if message.usage.cache_read_tokens > TokenCount::ZERO
                 || message.usage.cache_write_tokens > TokenCount::ZERO
             {
-                app.refresh_cache_timer();
+                app.cache.refresh();
             }
             if debug_cache && message.usage.cache_read_tokens > TokenCount::ZERO {
                 app.push_system_message(format!(

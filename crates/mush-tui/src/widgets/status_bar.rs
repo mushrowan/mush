@@ -109,11 +109,11 @@ fn left_spans(app: &App) -> Vec<Span<'static>> {
             .percent_of(app.stats.context_window) as u64;
 
         // colour by cache warmth, with context pressure overriding
-        let cache_remaining = app.cache_remaining_secs();
+        let cache_remaining = app.cache.remaining_secs();
         let ctx_style = if pct > 75 {
             // context pressure always takes priority
             Style::default().fg(Color::Red)
-        } else if app.cache_ttl_secs == 0 {
+        } else if app.cache.ttl_secs == 0 {
             // caching disabled for this provider/retention
             dim
         } else {
@@ -134,11 +134,8 @@ fn left_spans(app: &App) -> Vec<Span<'static>> {
             }
             Some(0) => {
                 // show "cold" briefly then fade out
-                let elapsed = app
-                    .cache_last_active
-                    .map(|t| t.elapsed().as_secs())
-                    .unwrap_or(0);
-                if elapsed < (app.cache_ttl_secs as u64) + 30 {
+                let elapsed = app.cache.elapsed_secs().unwrap_or(0);
+                if elapsed < (app.cache.ttl_secs as u64) + 30 {
                     " cold".into()
                 } else {
                     String::new()
@@ -360,9 +357,9 @@ mod tests {
     #[test]
     fn status_bar_shows_cache_countdown() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.cache_ttl_secs = 300;
+        app.cache.ttl_secs = 300;
         app.stats.context_tokens = TokenCount::new(10_000);
-        app.refresh_cache_timer();
+        app.cache.refresh();
         let buf = render_status(&app, 120, 1);
         let content = buffer_to_string(&buf);
         // should show "10k/200k 4:59" or similar

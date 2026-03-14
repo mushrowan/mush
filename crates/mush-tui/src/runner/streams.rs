@@ -285,7 +285,7 @@ pub(super) async fn handle_agent_event_side_effects(
 
     if tui_config.cache_timer
         && let Some(pane) = pane_mgr.pane(pane_id)
-        && let Some(remaining) = pane.app.cache_remaining_secs()
+        && let Some(remaining) = pane.app.cache.remaining_secs()
         && remaining > 60
     {
         crate::notify::send_with_sound(
