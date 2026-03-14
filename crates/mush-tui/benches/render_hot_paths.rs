@@ -17,6 +17,30 @@ fn bench_markdown(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_code_blocks(c: &mut Criterion) {
+    let rust_source = rust_code_block_fixture();
+    let plain_source = plain_code_block_fixture();
+    let unknown_source = unknown_code_block_fixture();
+    let mut group = c.benchmark_group("code_block");
+
+    group.throughput(Throughput::Bytes(rust_source.len() as u64));
+    group.bench_function("render_rust", |b| {
+        b.iter(|| markdown::render(black_box(rust_source.as_str())))
+    });
+
+    group.throughput(Throughput::Bytes(plain_source.len() as u64));
+    group.bench_function("render_plain", |b| {
+        b.iter(|| markdown::render(black_box(plain_source.as_str())))
+    });
+
+    group.throughput(Throughput::Bytes(unknown_source.len() as u64));
+    group.bench_function("render_unknown", |b| {
+        b.iter(|| markdown::render(black_box(unknown_source.as_str())))
+    });
+
+    group.finish();
+}
+
 fn bench_input_layout(c: &mut Criterion) {
     let (input, images) = input_fixture();
     let cursor = input.len();
@@ -68,6 +92,26 @@ fn render_markdown_cached(source: &str) {
     section.repeat(24)
 }
 
+fn rust_code_block_fixture() -> String {
+    format!("```rust\n{}```\n", code_block_body_fixture())
+}
+
+fn plain_code_block_fixture() -> String {
+    format!("```\n{}```\n", code_block_body_fixture())
+}
+
+fn unknown_code_block_fixture() -> String {
+    format!("```unknown\n{}```\n", code_block_body_fixture())
+}
+
+fn code_block_body_fixture() -> String {
+    let line = r#"fn render_markdown_cached(source: &str) {
+    println!("{source}");
+}
+"#;
+    line.repeat(96)
+}
+
 fn input_fixture() -> (String, Vec<PendingImage>) {
     let image = PendingImage {
         data: vec![],
@@ -80,5 +124,10 @@ fn input_fixture() -> (String, Vec<PendingImage>) {
     (input.repeat(8), vec![image; 8])
 }
 
-criterion_group!(benches, bench_markdown, bench_input_layout);
+criterion_group!(
+    benches,
+    bench_markdown,
+    bench_code_blocks,
+    bench_input_layout
+);
 criterion_main!(benches);
