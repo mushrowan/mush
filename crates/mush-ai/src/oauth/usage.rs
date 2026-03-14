@@ -51,14 +51,20 @@ impl OAuthUsage {
     pub const SEVEN_DAY: chrono::TimeDelta = chrono::TimeDelta::weeks(1);
 }
 
-/// cached usage poller
+/// cached usage poller with a shared http client
 pub struct UsagePoller {
-    cached: Arc<Mutex<Option<CachedUsage>>>,
+    cached: Arc<Mutex<Option<CachedResult>>>,
+    client: Arc<tokio::sync::OnceCell<reqwest::Client>>,
 }
 
-struct CachedUsage {
-    data: OAuthUsage,
-    fetched_at: Instant,
+enum CachedResult {
+    Ok {
+        data: OAuthUsage,
+        fetched_at: Instant,
+    },
+    Err {
+        fetched_at: Instant,
+    },
 }
 
 impl Default for UsagePoller {
@@ -71,7 +77,25 @@ impl UsagePoller {
     pub fn new() -> Self {
         Self {
             cached: Arc::new(Mutex::new(None)),
+            client: Arc::new(tokio::sync::OnceCell::new()),
         }
+    }
+
+    fn get_client(&self) -> Result<&reqwest::Client, OAuthError> {
+        // OnceCell::get returns existing, or we init lazily below
+        self.client.get().ok_or_else(|| {
+            OAuthError::TokenExchange("client not yet initialised".into())
+        })
+    }
+
+    async fn ensure_client(&self) -> Result<&reqwest::Client, OAuthError> {
+        self.client
+            .get_or_try_init(|| async {
+                reqwest::Client::builder()
+                    .build()
+                    .map_err(OAuthError::Http)
+            })
+            .await
     }
 
     /// get usage data, returning cached if fresh enough.
@@ -80,17 +104,25 @@ impl UsagePoller {
         // check cache under a short lock
         {
             let cache = self.cached.lock().ok()?;
-            if let Some(ref cached) = *cache
-                && cached.fetched_at.elapsed() < MIN_POLL_INTERVAL
-            {
-                return Some(cached.data.clone());
+            match cache.as_ref() {
+                Some(CachedResult::Ok { data, fetched_at })
+                    if fetched_at.elapsed() < MIN_POLL_INTERVAL =>
+                {
+                    return Some(data.clone());
+                }
+                Some(CachedResult::Err { fetched_at })
+                    if fetched_at.elapsed() < MIN_POLL_INTERVAL =>
+                {
+                    return None;
+                }
+                _ => {}
             }
         }
 
         match self.fetch().await {
             Ok(usage) => {
                 if let Ok(mut cache) = self.cached.lock() {
-                    *cache = Some(CachedUsage {
+                    *cache = Some(CachedResult::Ok {
                         data: usage.clone(),
                         fetched_at: Instant::now(),
                     });
@@ -98,11 +130,24 @@ impl UsagePoller {
                 Some(usage)
             }
             Err(_) => {
-                // on error, return stale cache if available
+                // cache the error so we don't retry every second
+                if let Ok(mut cache) = self.cached.lock() {
+                    // preserve stale data if we had it
+                    let had_data = matches!(cache.as_ref(), Some(CachedResult::Ok { .. }));
+                    if !had_data {
+                        *cache = Some(CachedResult::Err {
+                            fetched_at: Instant::now(),
+                        });
+                    }
+                }
+                // return stale data if available
                 self.cached
                     .lock()
                     .ok()
-                    .and_then(|c| c.as_ref().map(|c| c.data.clone()))
+                    .and_then(|c| match c.as_ref() {
+                        Some(CachedResult::Ok { data, .. }) => Some(data.clone()),
+                        _ => None,
+                    })
             }
         }
     }
@@ -112,7 +157,7 @@ impl UsagePoller {
         if let Ok(usage) = self.fetch().await
             && let Ok(mut cache) = self.cached.lock()
         {
-            *cache = Some(CachedUsage {
+            *cache = Some(CachedResult::Ok {
                 data: usage,
                 fetched_at: Instant::now(),
             });
@@ -124,9 +169,7 @@ impl UsagePoller {
             .await?
             .ok_or_else(|| OAuthError::TokenExchange("no anthropic oauth token".into()))?;
 
-        let client = reqwest::Client::builder()
-            .build()
-            .map_err(OAuthError::Http)?;
+        let client = self.ensure_client().await?;
 
         let response = client
             .get(USAGE_URL)
