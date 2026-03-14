@@ -1,5 +1,7 @@
 //! input box widget - text entry with cursor
 
+use std::cell::Ref;
+
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
@@ -7,7 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Padding, Paragraph, Widget};
 use unicode_width::UnicodeWidthChar;
 
-use crate::app::App;
+use crate::app::{App, InputBuffer, PendingImage};
 
 /// display width of a char (0 for control chars, 2 for CJK/emoji, 1 otherwise)
 fn char_width(ch: char) -> usize {
@@ -15,11 +17,140 @@ fn char_width(ch: char) -> usize {
 }
 
 /// expanded input with image placeholders replaced by display tokens
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExpandedInput {
     pub text: String,
     pub cursor: usize,
     /// (start, end) byte ranges in `text` that are image tokens
     pub image_spans: Vec<(usize, usize)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InputLayoutKey {
+    text: String,
+    cursor: usize,
+    image_dimensions: Vec<Option<(u32, u32)>>,
+    content_width: usize,
+}
+
+impl InputLayoutKey {
+    fn from_input(input: &InputBuffer, content_width: usize) -> Self {
+        Self {
+            text: input.text.clone(),
+            cursor: input.cursor,
+            image_dimensions: input.images.iter().map(|image| image.dimensions).collect(),
+            content_width,
+        }
+    }
+
+    fn matches(&self, input: &InputBuffer, content_width: usize) -> bool {
+        self.content_width == content_width
+            && self.cursor == input.cursor
+            && self.text == input.text
+            && self
+                .image_dimensions
+                .iter()
+                .copied()
+                .eq(input.images.iter().map(|image| image.dimensions))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct InputLayoutCache {
+    key: InputLayoutKey,
+    layout: InputLayout,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WrappedInputLine {
+    pub start: usize,
+    pub end: usize,
+    pub show_prompt: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct InputLayout {
+    pub expanded: ExpandedInput,
+    pub wrapped_lines: Vec<WrappedInputLine>,
+    pub total_lines: u16,
+    pub cursor_visual_line: usize,
+    pub cursor_visual_col: usize,
+}
+
+impl InputBuffer {
+    pub(crate) fn layout(&self, content_width: usize) -> Ref<'_, InputLayout> {
+        let needs_rebuild = self
+            .layout_cache
+            .borrow()
+            .as_ref()
+            .is_none_or(|cache| !cache.key.matches(self, content_width));
+
+        if needs_rebuild {
+            #[cfg(test)]
+            self.layout_builds.set(self.layout_builds.get() + 1);
+
+            let key = InputLayoutKey::from_input(self, content_width);
+            let layout = build_input_layout(&self.text, self.cursor, &self.images, content_width);
+            *self.layout_cache.borrow_mut() = Some(InputLayoutCache { key, layout });
+        }
+
+        Ref::map(self.layout_cache.borrow(), |cache| {
+            if let Some(cache) = cache.as_ref() {
+                &cache.layout
+            } else {
+                unreachable!("layout cache should be populated")
+            }
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reset_layout_builds(&self) {
+        self.layout_builds.set(0);
+        self.layout_cache.borrow_mut().take();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn layout_builds(&self) -> u32 {
+        self.layout_builds.get()
+    }
+}
+
+fn build_input_layout(
+    input: &str,
+    cursor: usize,
+    images: &[PendingImage],
+    content_width: usize,
+) -> InputLayout {
+    let expanded = expand_input(input, cursor, images);
+    let (cursor_visual_line, cursor_visual_col) =
+        cursor_visual_position(&expanded.text, expanded.cursor, content_width);
+    let mut wrapped_lines = Vec::new();
+    let mut global_offset = 0usize;
+
+    for (line_idx, line_text) in expanded.text.split('\n').enumerate() {
+        let indent = if line_idx == 0 { 2 } else { 0 };
+        let segments = word_wrap_segments(line_text, content_width, indent);
+
+        for (seg_idx, seg) in segments.iter().enumerate() {
+            wrapped_lines.push(WrappedInputLine {
+                start: global_offset + seg.start,
+                end: global_offset + seg.end,
+                show_prompt: line_idx == 0 && seg_idx == 0,
+            });
+        }
+
+        global_offset += line_text.len() + 1;
+    }
+
+    let total_lines = wrapped_lines.len().max(1).min(u16::MAX as usize) as u16;
+
+    InputLayout {
+        expanded,
+        wrapped_lines,
+        total_lines,
+        cursor_visual_line,
+        cursor_visual_col,
+    }
 }
 
 /// format an image token for inline display
@@ -219,13 +350,9 @@ impl<'a> InputBox<'a> {
             return (area.x + 1, area.y + 1);
         }
 
-        let expanded = expand_input(
-            &self.app.input.text,
-            self.app.input.cursor,
-            &self.app.input.images,
-        );
-        let (visual_line, visual_col) =
-            cursor_visual_position(&expanded.text, expanded.cursor, content_width);
+        let layout = self.app.input.layout(content_width);
+        let visual_line = layout.cursor_visual_line;
+        let visual_col = layout.cursor_visual_col;
 
         let scroll = self.app.input.scroll.get() as usize;
         let visible_line = visual_line.saturating_sub(scroll);
@@ -291,56 +418,41 @@ impl Widget for InputBox<'_> {
             return;
         }
 
-        let expanded = expand_input(
-            &self.app.input.text,
-            self.app.input.cursor,
-            &self.app.input.images,
-        );
-        let display_lines: Vec<&str> = expanded.text.split('\n').collect();
+        let layout = self.app.input.layout(content_width);
         let mut lines: Vec<Line<'_>> = Vec::new();
         let image_style = Style::default().fg(Color::Magenta);
-        let mut global_offset = 0usize;
 
-        for (line_idx, line_text) in display_lines.iter().enumerate() {
-            let is_first = line_idx == 0;
-            let is_last = line_idx == display_lines.len() - 1;
-            let indent = if is_first { prompt.len() } else { 0 };
-            let segments = word_wrap_segments(line_text, content_width, indent);
+        for (line_idx, line) in layout.wrapped_lines.iter().enumerate() {
+            let mut spans: Vec<Span<'_>> = Vec::new();
 
-            for (seg_i, seg) in segments.iter().enumerate() {
-                let mut spans: Vec<Span<'_>> = Vec::new();
-
-                if is_first && seg_i == 0 {
-                    spans.push(Span::styled(prompt.to_string(), prompt_style));
-                }
-
-                let seg_text = &line_text[seg.start..seg.end];
-                if !seg_text.is_empty() {
-                    spans.extend(styled_with_images(
-                        seg_text,
-                        global_offset + seg.start,
-                        &expanded.image_spans,
-                        style,
-                        image_style,
-                    ));
-                }
-
-                if is_last
-                    && seg_i == segments.len() - 1
-                    && let Some(ghost) = self.app.ghost_text()
-                {
-                    spans.push(Span::styled(
-                        ghost.to_string(),
-                        Style::default().fg(Color::DarkGray),
-                    ));
-                }
-
-                lines.push(Line::from(spans));
+            if line.show_prompt {
+                spans.push(Span::styled(prompt.to_string(), prompt_style));
             }
-            global_offset += line_text.len() + 1;
+
+            let seg_text = &layout.expanded.text[line.start..line.end];
+            if !seg_text.is_empty() {
+                spans.extend(styled_with_images(
+                    seg_text,
+                    line.start,
+                    &layout.expanded.image_spans,
+                    style,
+                    image_style,
+                ));
+            }
+
+            if line_idx == layout.wrapped_lines.len() - 1
+                && let Some(ghost) = self.app.ghost_text()
+            {
+                spans.push(Span::styled(
+                    ghost.to_string(),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+
+            lines.push(Line::from(spans));
         }
 
-        let total_lines = lines.len().min(u16::MAX as usize) as u16;
+        let total_lines = layout.total_lines;
         let visible_lines = area.height.saturating_sub(2);
         self.app.input.total_lines.set(total_lines);
         self.app.input.visible_lines.set(visible_lines);

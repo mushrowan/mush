@@ -14,6 +14,7 @@ use crate::types::{
 struct UserModelsCache {
     path: PathBuf,
     modified: Option<SystemTime>,
+    size: Option<u64>,
     models: Vec<Model>,
 }
 
@@ -336,14 +337,17 @@ pub fn find_model_by_id(id: &str) -> Option<Model> {
 /// load user-defined models from ~/.config/mush/models.json
 fn load_user_models() -> Vec<Model> {
     let path = user_models_path();
-    let modified = std::fs::metadata(&path)
-        .ok()
+    let metadata = std::fs::metadata(&path).ok();
+    let modified = metadata
+        .as_ref()
         .and_then(|metadata| metadata.modified().ok());
+    let size = metadata.as_ref().map(std::fs::Metadata::len);
 
     if let Ok(cache) = USER_MODELS_CACHE.lock()
         && let Some(cached) = cache.as_ref()
         && cached.path == path
         && cached.modified == modified
+        && cached.size == size
     {
         return cached.models.clone();
     }
@@ -357,6 +361,7 @@ fn load_user_models() -> Vec<Model> {
         *cache = Some(UserModelsCache {
             path,
             modified,
+            size,
             models: models.clone(),
         });
     }

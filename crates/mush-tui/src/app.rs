@@ -191,6 +191,9 @@ pub struct InputBuffer {
     pub visible_lines: Cell<u16>,
     /// latest input area rect (set during render by Ui)
     pub area: Cell<Rect>,
+    pub(crate) layout_cache: RefCell<Option<crate::widgets::input_box::InputLayoutCache>>,
+    #[cfg(test)]
+    pub(crate) layout_builds: Cell<u32>,
 }
 
 impl InputBuffer {
@@ -204,6 +207,9 @@ impl InputBuffer {
             total_lines: Cell::new(0),
             visible_lines: Cell::new(0),
             area: Cell::new(Rect::default()),
+            layout_cache: RefCell::new(None),
+            #[cfg(test)]
+            layout_builds: Cell::new(0),
         }
     }
 
@@ -362,25 +368,9 @@ impl InputBuffer {
             return;
         }
 
-        let expanded =
-            crate::widgets::input_box::expand_input(&self.text, self.cursor, &self.images);
-        let cursor_line = crate::widgets::input_box::cursor_visual_line(
-            &expanded.text,
-            expanded.cursor,
-            content_width as usize,
-        ) as u16;
-
-        let total = expanded
-            .text
-            .split('\n')
-            .enumerate()
-            .map(|(i, line)| {
-                let indent = if i == 0 { 2 } else { 0 };
-                crate::widgets::input_box::word_wrap_segments(line, content_width as usize, indent)
-                    .len() as u16
-            })
-            .sum::<u16>()
-            .max(1);
+        let layout = self.layout(content_width as usize);
+        let cursor_line = layout.cursor_visual_line as u16;
+        let total = layout.total_lines;
         self.total_lines.set(total);
 
         let mut current_scroll = self.scroll.get();
