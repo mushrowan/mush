@@ -7,6 +7,9 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use std::sync::LazyLock;
+
+#[cfg(test)]
+use std::cell::Cell;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{self, ThemeSet};
 use syntect::parsing::SyntaxSet;
@@ -14,8 +17,15 @@ use syntect::parsing::SyntaxSet;
 static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
 static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
 
+#[cfg(test)]
+thread_local! {
+    static RENDER_CALLS: Cell<usize> = const { Cell::new(0) };
+}
+
 /// render a markdown string to styled ratatui Text
 pub fn render(source: &str) -> Text<'static> {
+    #[cfg(test)]
+    RENDER_CALLS.with(|calls| calls.set(calls.get() + 1));
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut in_code_block = false;
     let mut code_block_lang = String::new();
@@ -269,6 +279,16 @@ fn parse_inline(text: &str) -> Vec<Span<'static>> {
     }
 
     spans
+}
+
+#[cfg(test)]
+pub(crate) fn reset_render_call_count() {
+    RENDER_CALLS.with(|calls| calls.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn render_call_count() -> usize {
+    RENDER_CALLS.with(Cell::get)
 }
 
 #[cfg(test)]

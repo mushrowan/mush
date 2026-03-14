@@ -80,7 +80,7 @@ impl Widget for MessageList<'_> {
             }
             if !self.app.stream.text.is_empty() {
                 let visible_text = self.app.visible_streaming_text();
-                let md_text = crate::markdown::render(visible_text);
+                let md_text = render_streaming_markdown_cached(self.app, visible_text);
                 for line in md_text.lines {
                     let mut spans: Vec<Span<'_>> = vec![Span::raw(" ")];
                     spans.extend(line.spans);
@@ -456,6 +456,22 @@ fn render_markdown_cached(app: &App, source: &str) -> Text<'static> {
     rendered
 }
 
+fn render_streaming_markdown_cached(app: &App, source: &str) -> Text<'static> {
+    if source.is_empty() {
+        return Text::default();
+    }
+
+    if let Some((cached_source, cached)) = app.stream_markdown_cache.borrow().as_ref()
+        && cached_source == source
+    {
+        return cached.clone();
+    }
+
+    let rendered = crate::markdown::render(source);
+    *app.stream_markdown_cache.borrow_mut() = Some((source.to_string(), rendered.clone()));
+    rendered
+}
+
 // -- bordered tool boxes for completed tool calls --
 
 /// indent for tool boxes (matches message content indent)
@@ -811,6 +827,22 @@ mod tests {
         let buf = render_app(&app, 40, 10);
         let content = buffer_to_string(&buf);
         assert!(content.contains("partial"));
+    }
+
+    #[test]
+    fn streaming_markdown_is_reused_when_visible_text_is_unchanged() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.start_streaming();
+        app.push_text_delta("**cached**");
+        for _ in 0..10 {
+            app.tick();
+        }
+
+        crate::markdown::reset_render_call_count();
+        let _ = render_app(&app, 40, 10);
+        let _ = render_app(&app, 40, 10);
+
+        assert_eq!(crate::markdown::render_call_count(), 1);
     }
 
     #[test]
