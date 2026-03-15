@@ -29,8 +29,13 @@ pub struct Skill {
 
 /// scan for AGENTS.md in the project directory and up to home
 pub fn find_agents_md(cwd: &Path) -> Vec<AgentsMd> {
-    let mut results = Vec::new();
     let home = std::env::var_os("HOME").map(PathBuf::from);
+    find_agents_md_with_home(cwd, home.as_deref())
+}
+
+/// testable inner implementation that accepts an explicit home directory
+fn find_agents_md_with_home(cwd: &Path, home: Option<&Path>) -> Vec<AgentsMd> {
+    let mut results = Vec::new();
 
     // walk up from cwd to home
     let mut dir = Some(cwd.to_path_buf());
@@ -46,22 +51,22 @@ pub fn find_agents_md(cwd: &Path) -> Vec<AgentsMd> {
         }
 
         // stop at home directory
-        if home.as_ref().is_some_and(|h| &d == h) {
+        if home.is_some_and(|h| d == h) {
             break;
         }
 
         dir = d.parent().map(|p| p.to_path_buf());
     }
 
-    // also check ~/.pi/agent/AGENTS.md (pi compat)
-    if let Some(ref h) = home {
-        let pi_agents = h.join(".pi/agent/AGENTS.md");
-        if pi_agents.is_file()
-            && !results.iter().any(|a| a.path == pi_agents)
-            && let Ok(content) = std::fs::read_to_string(&pi_agents)
+    // also check ~/.config/mush/AGENTS.md (user-global)
+    if let Some(h) = home {
+        let mush_agents = h.join(".config/mush/AGENTS.md");
+        if mush_agents.is_file()
+            && !results.iter().any(|a| a.path == mush_agents)
+            && let Ok(content) = std::fs::read_to_string(&mush_agents)
         {
             results.push(AgentsMd {
-                path: pi_agents,
+                path: mush_agents,
                 content,
             });
         }
@@ -186,10 +191,16 @@ fn scan_skills_dir(dir: &Path) -> Vec<Skill> {
 ///
 /// discovers skills from:
 /// 1. `<available_skills>` blocks in AGENTS.md files (explicit)
-/// 2. `~/.pi/agent/skills/` directory (user-global, pi-compatible)
-/// 3. `.pi/skills/` in the project directory (project-local)
+/// 2. `~/.config/mush/skills/` directory (user-global)
+/// 3. `.mush/skills/` in the project directory (project-local)
 pub fn discover_project_context(cwd: &Path) -> ProjectContext {
-    let agents_md = find_agents_md(cwd);
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    discover_project_context_with_home(cwd, home.as_deref())
+}
+
+/// testable inner implementation that accepts an explicit home directory
+pub fn discover_project_context_with_home(cwd: &Path, home: Option<&Path>) -> ProjectContext {
+    let agents_md = find_agents_md_with_home(cwd, home);
 
     let mut skills = Vec::new();
     let mut seen_names = std::collections::HashSet::new();
@@ -202,9 +213,9 @@ pub fn discover_project_context(cwd: &Path) -> ProjectContext {
         }
     }
 
-    // user-global skills directory (~/.pi/agent/skills/)
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-        let global_skills = home.join(".pi/agent/skills");
+    // user-global skills directory (~/.config/mush/skills/)
+    if let Some(home) = home {
+        let global_skills = home.join(".config/mush/skills");
         for skill in scan_skills_dir(&global_skills) {
             if seen_names.insert(skill.name.clone()) {
                 skills.push(skill);
@@ -212,8 +223,8 @@ pub fn discover_project_context(cwd: &Path) -> ProjectContext {
         }
     }
 
-    // project-local skills (.pi/skills/)
-    let project_skills = cwd.join(".pi/skills");
+    // project-local skills (.mush/skills/)
+    let project_skills = cwd.join(".mush/skills");
     for skill in scan_skills_dir(&project_skills) {
         if seen_names.insert(skill.name.clone()) {
             skills.push(skill);
@@ -236,12 +247,12 @@ some preamble
   <skill>
     <name>rust</name>
     <description>Rust conventions</description>
-    <location>/home/user/.pi/agent/skills/rust/SKILL.md</location>
+    <location>/home/user/.config/mush/skills/rust/SKILL.md</location>
   </skill>
   <skill>
     <name>nix</name>
     <description>Nix best practices</description>
-    <location>/home/user/.pi/agent/skills/nix/SKILL.md</location>
+    <location>/home/user/.config/mush/skills/nix/SKILL.md</location>
   </skill>
 </available_skills>
 
@@ -279,6 +290,66 @@ more content
         let results = find_agents_md(dir.path());
         assert!(!results.is_empty());
         assert!(results.last().unwrap().content.contains("test agents"));
+    }
+
+    #[test]
+    fn discover_global_uses_mush_config_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+
+        // set up ~/.config/mush/AGENTS.md
+        let mush_agents = home.join(".config/mush/AGENTS.md");
+        std::fs::create_dir_all(mush_agents.parent().unwrap()).unwrap();
+        std::fs::write(&mush_agents, "# mush agents").unwrap();
+
+        // set up ~/.config/mush/skills/
+        let mush_skills = home.join(".config/mush/skills/rust");
+        std::fs::create_dir_all(&mush_skills).unwrap();
+        std::fs::write(
+            mush_skills.join("SKILL.md"),
+            "---\nname: rust\ndescription: Rust conventions\n---\ncontent",
+        )
+        .unwrap();
+
+        let cwd = home.join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let ctx = discover_project_context_with_home(&cwd, Some(home));
+
+        assert!(
+            ctx.agents_md.iter().any(|a| a.path == mush_agents),
+            "expected to find ~/.config/mush/AGENTS.md, got: {:?}",
+            ctx.agents_md.iter().map(|a| &a.path).collect::<Vec<_>>()
+        );
+        assert!(
+            ctx.skills.iter().any(|s| s.name == "rust"),
+            "expected to find rust skill from ~/.config/mush/skills/"
+        );
+    }
+
+    #[test]
+    fn discover_project_local_uses_mush_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let cwd = home.join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        // set up .mush/skills/ (project-local)
+        let skill_dir = cwd.join(".mush/skills/local-only");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: local-only\ndescription: test skill\n---\ncontent",
+        )
+        .unwrap();
+
+        // use fake home so we don't pick up real skills
+        let ctx = discover_project_context_with_home(&cwd, Some(home));
+        assert!(
+            ctx.skills.iter().any(|s| s.name == "local-only"),
+            "expected to find local-only skill from .mush/skills/, got: {:?}",
+            ctx.skills.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
     }
 
     #[test]
