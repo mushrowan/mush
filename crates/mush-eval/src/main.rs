@@ -10,7 +10,7 @@
 //!   embed+summary  - embedded hints + summaries + load_skill tool
 //!   embed_inject   - no tool, embedding auto-injects full skill body
 
-mod collect;
+use mush_eval::collect;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
