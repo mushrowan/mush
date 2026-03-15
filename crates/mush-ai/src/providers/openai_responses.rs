@@ -615,6 +615,90 @@ fn decode_jwt_payload(token: &str) -> Option<serde_json::Value> {
     serde_json::from_slice::<serde_json::Value>(&decoded).ok()
 }
 
+// typed event structs for hot-path deserialization (avoids serde_json::Value lookups)
+
+#[derive(serde::Deserialize)]
+struct DeltaEvent {
+    #[serde(default)]
+    output_index: u64,
+    #[serde(default)]
+    delta: String,
+}
+
+#[derive(serde::Deserialize)]
+struct OutputIndexEvent {
+    #[serde(default)]
+    output_index: u64,
+    #[serde(default)]
+    item: Option<serde_json::Value>,
+}
+
+#[derive(serde::Deserialize)]
+struct OutputItemAddedEvent {
+    #[serde(default)]
+    output_index: u64,
+    #[serde(default)]
+    item: Option<AddedItem>,
+}
+
+#[derive(serde::Deserialize)]
+struct AddedItem {
+    #[serde(rename = "type")]
+    item_type: Option<String>,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    call_id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct CompletedEvent {
+    #[serde(default)]
+    response: Option<CompletedResponse>,
+}
+
+#[derive(serde::Deserialize)]
+struct CompletedResponse {
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    usage: Option<CompletedUsage>,
+}
+
+#[derive(serde::Deserialize)]
+struct CompletedUsage {
+    #[serde(default)]
+    input_tokens: u64,
+    #[serde(default)]
+    output_tokens: u64,
+    #[serde(default)]
+    input_tokens_details: Option<InputTokensDetails>,
+}
+
+#[derive(serde::Deserialize)]
+struct InputTokensDetails {
+    #[serde(default)]
+    cached_tokens: u64,
+}
+
+#[derive(serde::Deserialize)]
+struct ErrorEvent {
+    #[serde(default)]
+    error: Option<ErrorDetail>,
+    #[serde(default)]
+    message: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct ErrorDetail {
+    #[serde(default)]
+    message: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 enum CurrentBlock {
     Text {
@@ -740,10 +824,10 @@ fn parse_sse_stream(
                         if data == "[DONE]" {
                             continue;
                         }
-                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                        if data.starts_with('{') {
                             for event in process_sse_event(
                                 raw.event.as_deref(),
-                                json,
+                                data,
                                 &mut output,
                                 &mut active,
                             ) {
@@ -814,35 +898,111 @@ fn parse_sse_stream(
 
 fn process_sse_event(
     event_name: Option<&str>,
-    json: serde_json::Value,
+    data: &str,
     output: &mut AssistantMessage,
     active: &mut ActiveBlocks,
 ) -> Vec<StreamEvent> {
     let mut events = Vec::new();
 
-    let event_type = event_name.or_else(|| json.get("type").and_then(|value| value.as_str()));
-
-    let Some(event_type) = event_type else {
-        return events;
+    // for events without an explicit SSE event name, fall back to json "type" field
+    let event_type = match event_name {
+        Some(name) => name,
+        None => {
+            // only parse enough to get the type field
+            if let Some(start) = data.find("\"type\"") {
+                let rest = &data[start + 6..];
+                if let Some(colon) = rest.find(':') {
+                    let after = rest[colon + 1..].trim_start();
+                    if after.starts_with('"') {
+                        let s = &after[1..];
+                        if let Some(end) = s.find('"') {
+                            &s[..end]
+                        } else {
+                            return events;
+                        }
+                    } else {
+                        return events;
+                    }
+                } else {
+                    return events;
+                }
+            } else {
+                return events;
+            }
+        }
     };
 
     match event_type {
+        // delta events are the hot path, use typed deserialization
+        "response.output_text.delta" | "response.refusal.delta" => {
+            let Ok(ev) = serde_json::from_str::<DeltaEvent>(data) else {
+                return events;
+            };
+            if let Some(active_block) = active.get_mut(ev.output_index)
+                && let CurrentBlock::Text { text } = &mut active_block.block
+            {
+                text.push_str(&ev.delta);
+                if let Some(AssistantContentPart::Text(content)) =
+                    output.content.get_mut(active_block.content_index)
+                {
+                    content.text.push_str(&ev.delta);
+                }
+                events.push(StreamEvent::TextDelta {
+                    content_index: active_block.content_index,
+                    delta: ev.delta,
+                });
+            }
+        }
+        "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+            let Ok(ev) = serde_json::from_str::<DeltaEvent>(data) else {
+                return events;
+            };
+            if let Some(active_block) = active.get_mut(ev.output_index)
+                && let CurrentBlock::Thinking { text } = &mut active_block.block
+            {
+                text.push_str(&ev.delta);
+                if let Some(AssistantContentPart::Thinking(content)) =
+                    output.content.get_mut(active_block.content_index)
+                    && let Some(buf) = content.text_mut()
+                {
+                    buf.push_str(&ev.delta);
+                }
+                events.push(StreamEvent::ThinkingDelta {
+                    content_index: active_block.content_index,
+                    delta: ev.delta,
+                });
+            }
+        }
+        "response.function_call_arguments.delta" => {
+            let Ok(ev) = serde_json::from_str::<DeltaEvent>(data) else {
+                return events;
+            };
+            if let Some(active_block) = active.get_mut(ev.output_index)
+                && let CurrentBlock::ToolCall { args_buf, .. } = &mut active_block.block
+            {
+                args_buf.push_str(&ev.delta);
+                events.push(StreamEvent::ToolCallDelta {
+                    content_index: active_block.content_index,
+                    delta: ev.delta,
+                });
+            }
+        }
+        // less frequent events
         "response.output_item.added" => {
-            let null = serde_json::Value::Null;
-            let item = json.get("item").unwrap_or(&null);
-            let output_index = json
-                .get("output_index")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-
-            match item.get("type").and_then(|v| v.as_str()) {
+            let Ok(ev) = serde_json::from_str::<OutputItemAddedEvent>(data) else {
+                return events;
+            };
+            let Some(item) = ev.item else {
+                return events;
+            };
+            match item.item_type.as_deref() {
                 Some("message") => {
                     let content_index = output.content.len();
                     output.content.push(AssistantContentPart::Text(TextContent {
                         text: String::new(),
                     }));
                     active.insert(
-                        output_index,
+                        ev.output_index,
                         ActiveBlock {
                             content_index,
                             block: CurrentBlock::Text {
@@ -861,7 +1021,7 @@ fn process_sse_event(
                         },
                     ));
                     active.insert(
-                        output_index,
+                        ev.output_index,
                         ActiveBlock {
                             content_index,
                             block: CurrentBlock::Thinking {
@@ -872,26 +1032,15 @@ fn process_sse_event(
                     events.push(StreamEvent::ThinkingStart { content_index });
                 }
                 Some("function_call") => {
-                    let call_id = item
-                        .get("call_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default();
-                    let item_id = item.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+                    let call_id = item.call_id.as_deref().unwrap_or_default();
+                    let item_id = item.id.as_deref().unwrap_or_default();
                     let id = if item_id.is_empty() {
                         call_id.to_string()
                     } else {
                         format!("{call_id}|{item_id}")
                     };
-                    let name = item
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string();
-                    let args_buf = item
-                        .get("arguments")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string();
+                    let name = item.name.unwrap_or_default();
+                    let args_buf = item.arguments.unwrap_or_default();
 
                     let content_index = output.content.len();
                     output
@@ -903,7 +1052,7 @@ fn process_sse_event(
                         }));
 
                     active.insert(
-                        output_index,
+                        ev.output_index,
                         ActiveBlock {
                             content_index,
                             block: CurrentBlock::ToolCall { id, name, args_buf },
@@ -914,123 +1063,32 @@ fn process_sse_event(
                 _ => {}
             }
         }
-        "response.output_text.delta" | "response.refusal.delta" => {
-            let delta = json
-                .get("delta")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
-            let output_index = json
-                .get("output_index")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-
-            if let Some(active_block) = active.get_mut(output_index)
-                && let CurrentBlock::Text { text } = &mut active_block.block
-            {
-                text.push_str(&delta);
-                if let Some(AssistantContentPart::Text(content)) =
-                    output.content.get_mut(active_block.content_index)
-                {
-                    content.text.push_str(&delta);
-                }
-                events.push(StreamEvent::TextDelta {
-                    content_index: active_block.content_index,
-                    delta,
-                });
-            }
-        }
-        "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
-            let delta = json
-                .get("delta")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
-            let output_index = json
-                .get("output_index")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-
-            if let Some(active_block) = active.get_mut(output_index)
-                && let CurrentBlock::Thinking { text } = &mut active_block.block
-            {
-                text.push_str(&delta);
-                if let Some(AssistantContentPart::Thinking(content)) =
-                    output.content.get_mut(active_block.content_index)
-                    && let Some(buf) = content.text_mut()
-                {
-                    buf.push_str(&delta);
-                }
-                events.push(StreamEvent::ThinkingDelta {
-                    content_index: active_block.content_index,
-                    delta,
-                });
-            }
-        }
-        "response.function_call_arguments.delta" => {
-            let delta = json
-                .get("delta")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
-            let output_index = json
-                .get("output_index")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-
-            if let Some(active_block) = active.get_mut(output_index)
-                && let CurrentBlock::ToolCall { args_buf, .. } = &mut active_block.block
-            {
-                args_buf.push_str(&delta);
-                events.push(StreamEvent::ToolCallDelta {
-                    content_index: active_block.content_index,
-                    delta,
-                });
-            }
-        }
         "response.output_item.done" => {
-            let output_index = json
-                .get("output_index")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            if let Some(active_block) = active.remove(output_index) {
-                let item = json.get("item");
-                finish_block(item, active_block, output, &mut events);
+            let Ok(ev) = serde_json::from_str::<OutputIndexEvent>(data) else {
+                return events;
+            };
+            if let Some(active_block) = active.remove(ev.output_index) {
+                finish_block(ev.item.as_ref(), active_block, output, &mut events);
             }
         }
         "response.completed" => {
-            if let Some(response) = json.get("response") {
-                if let Some(usage) = response.get("usage") {
-                    let input_tokens = usage
-                        .get("input_tokens")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    let output_tokens = usage
-                        .get("output_tokens")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    let cache_read_tokens = usage
-                        .get("input_tokens_details")
-                        .and_then(|v| v.get("cached_tokens"))
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-
+            let Ok(ev) = serde_json::from_str::<CompletedEvent>(data) else {
+                return events;
+            };
+            if let Some(response) = ev.response {
+                if let Some(usage) = response.usage {
+                    let cache_read = usage.input_tokens_details.map_or(0, |d| d.cached_tokens);
                     output.usage = Usage {
                         input_tokens: TokenCount::new(
-                            input_tokens.saturating_sub(cache_read_tokens),
+                            usage.input_tokens.saturating_sub(cache_read),
                         ),
-                        output_tokens: TokenCount::new(output_tokens),
-                        cache_read_tokens: TokenCount::new(cache_read_tokens),
+                        output_tokens: TokenCount::new(usage.output_tokens),
+                        cache_read_tokens: TokenCount::new(cache_read),
                         cache_write_tokens: TokenCount::ZERO,
                     };
                 }
-
-                output.stop_reason = map_response_status(
-                    response
-                        .get("status")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("completed"),
-                );
+                output.stop_reason =
+                    map_response_status(response.status.as_deref().unwrap_or("completed"));
             }
         }
         "response.incomplete" => {
@@ -1039,17 +1097,15 @@ fn process_sse_event(
         "response.failed" | "error" => {
             finish_all_blocks(active, output);
             output.stop_reason = StopReason::Error;
-            output.error_message = json
-                .get("error")
-                .and_then(|e| e.get("message"))
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-                .or_else(|| {
-                    json.get("message")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string)
-                })
-                .or_else(|| Some("openai responses stream failed".into()));
+            if let Ok(ev) = serde_json::from_str::<ErrorEvent>(data) {
+                output.error_message = ev
+                    .error
+                    .and_then(|e| e.message)
+                    .or(ev.message)
+                    .or_else(|| Some("openai responses stream failed".into()));
+            } else {
+                output.error_message = Some("openai responses stream failed".into());
+            }
             events.push(StreamEvent::Error {
                 reason: StopReason::Error,
                 message: output.clone(),
@@ -1181,29 +1237,38 @@ pub fn benchmark_tool_call_deltas(chunk_count: usize, arg_bytes: usize) -> usize
         .first()
         .cloned()
         .unwrap_or_else(|| full_json.clone());
+
+    // pre-build JSON strings (simulates SSE data arriving as &str)
+    let added = format!(
+        r#"{{"output_index":0,"item":{{"type":"function_call","call_id":"call_1","id":"item_1","name":"read","arguments":{}}}}}"#,
+        serde_json::to_string(&first).unwrap_or_default()
+    );
+    let delta_strings: Vec<String> = fragments
+        .iter()
+        .skip(1)
+        .map(|f| {
+            format!(
+                r#"{{"output_index":0,"delta":{}}}"#,
+                serde_json::to_string(f).unwrap_or_default()
+            )
+        })
+        .collect();
+    let done = format!(
+        r#"{{"output_index":0,"item":{{"type":"function_call","call_id":"call_1","id":"item_1","name":"read","arguments":{}}}}}"#,
+        serde_json::to_string(&full_json).unwrap_or_default()
+    );
+
     let _ = process_sse_event(
         Some("response.output_item.added"),
-        serde_json::json!({
-            "output_index": 0,
-            "item": {
-                "type": "function_call",
-                "call_id": "call_1",
-                "id": "item_1",
-                "name": "read",
-                "arguments": first,
-            }
-        }),
+        &added,
         &mut output,
         &mut active,
     );
 
-    for fragment in fragments.into_iter().skip(1) {
+    for delta_json in &delta_strings {
         let _ = process_sse_event(
             Some("response.function_call_arguments.delta"),
-            serde_json::json!({
-                "output_index": 0,
-                "delta": fragment,
-            }),
+            delta_json,
             &mut output,
             &mut active,
         );
@@ -1211,16 +1276,7 @@ pub fn benchmark_tool_call_deltas(chunk_count: usize, arg_bytes: usize) -> usize
 
     let _ = process_sse_event(
         Some("response.output_item.done"),
-        serde_json::json!({
-            "output_index": 0,
-            "item": {
-                "type": "function_call",
-                "call_id": "call_1",
-                "id": "item_1",
-                "name": "read",
-                "arguments": full_json,
-            }
-        }),
+        &done,
         &mut output,
         &mut active,
     );
@@ -1374,18 +1430,20 @@ mod tests {
         };
         let mut active = ActiveBlocks::new();
 
+        let added = serde_json::json!({
+            "output_index": 0,
+            "item": {
+                "type": "function_call",
+                "call_id": "call_1",
+                "id": "item_1",
+                "name": "read",
+                "arguments": r#"{"path":""#,
+            }
+        })
+        .to_string();
         let start = process_sse_event(
             Some("response.output_item.added"),
-            serde_json::json!({
-                "output_index": 0,
-                "item": {
-                    "type": "function_call",
-                    "call_id": "call_1",
-                    "id": "item_1",
-                    "name": "read",
-                    "arguments": r#"{"path":""#,
-                }
-            }),
+            &added,
             &mut output,
             &mut active,
         );
@@ -1395,12 +1453,14 @@ mod tests {
                 .any(|event| matches!(event, StreamEvent::ToolCallStart { .. }))
         );
 
+        let delta_json = serde_json::json!({
+            "output_index": 0,
+            "delta": r#"foo.rs"}"#,
+        })
+        .to_string();
         let delta = process_sse_event(
             Some("response.function_call_arguments.delta"),
-            serde_json::json!({
-                "output_index": 0,
-                "delta": r#"foo.rs"}"#,
-            }),
+            &delta_json,
             &mut output,
             &mut active,
         );
@@ -1417,18 +1477,20 @@ mod tests {
             other => panic!("expected tool call, got {other:?}"),
         }
 
+        let done_json = serde_json::json!({
+            "output_index": 0,
+            "item": {
+                "type": "function_call",
+                "call_id": "call_1",
+                "id": "item_1",
+                "name": "read",
+                "arguments": r#"{"path":"foo.rs"}"#,
+            }
+        })
+        .to_string();
         let done = process_sse_event(
             Some("response.output_item.done"),
-            serde_json::json!({
-                "output_index": 0,
-                "item": {
-                    "type": "function_call",
-                    "call_id": "call_1",
-                    "id": "item_1",
-                    "name": "read",
-                    "arguments": r#"{"path":"foo.rs"}"#,
-                }
-            }),
+            &done_json,
             &mut output,
             &mut active,
         );
