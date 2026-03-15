@@ -10,6 +10,14 @@
 #       type = "local";
 #       command = ["uvx" "mcp-server-git"];
 #     };
+#     agentsMd = ''
+#       # global instructions
+#       - british spelling
+#     '';
+#     skills.rust-idioms = {
+#       description = "Rust idioms and best practices";
+#       content = "prefer Result over unwrap";
+#     };
 #   };
 self: {
   config,
@@ -19,6 +27,46 @@ self: {
 }: let
   cfg = config.programs.mush;
   tomlFormat = pkgs.formats.toml {};
+
+  # structured skill with separate description and content
+  skillModule = lib.types.submodule {
+    options = {
+      description = lib.mkOption {
+        type = lib.types.str;
+        description = "short description shown in skill listings";
+        example = "Rust idioms and best practices";
+      };
+
+      content = lib.mkOption {
+        type = lib.types.str;
+        description = "skill body (markdown below the frontmatter)";
+        example = ''
+          ## When to use me
+          Use this skill when writing Rust code.
+
+          ## Conventions
+          - prefer Result over unwrap
+        '';
+      };
+    };
+  };
+
+  # accept either a raw SKILL.md string (with frontmatter) or a
+  # structured { description, content } attrset
+  skillType = lib.types.either lib.types.str skillModule;
+
+  # normalise either form into the final SKILL.md text
+  skillToText = name: skill:
+    if lib.isString skill
+    then skill
+    else ''
+      ---
+      name: ${name}
+      description: ${skill.description}
+      ---
+
+      ${skill.content}
+    '';
 
   colourType = lib.types.nullOr lib.types.str;
   colourOption = description:
@@ -282,6 +330,45 @@ in {
       '';
     };
 
+    agentsMd = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = ''
+        # global agent instructions
+        - british spelling
+        - no em dashes or semicolons
+      '';
+      description = ''
+        content for ~/.config/mush/AGENTS.md (user-global agent instructions).
+        mush loads this alongside any project-level AGENTS.md files
+      '';
+    };
+
+    skills = lib.mkOption {
+      type = lib.types.attrsOf skillType;
+      default = {};
+      example = lib.literalExpression ''
+        {
+          # raw SKILL.md text (e.g. from builtins.readFile)
+          jj = builtins.readFile ./skills/jj.md;
+
+          # structured form (frontmatter is generated)
+          rust-idioms = {
+            description = "Rust idioms and best practices";
+            content = '''
+              ## When to use me
+              Use when writing or reviewing Rust code.
+            ''';
+          };
+        }
+      '';
+      description = ''
+        skills to install in ~/.config/mush/skills/. each key becomes a
+        subdirectory containing a SKILL.md. accepts either a raw markdown
+        string (with yaml frontmatter) or a { description, content } set
+      '';
+    };
+
     settings = lib.mkOption {
       inherit (tomlFormat) type;
       default = {};
@@ -295,8 +382,19 @@ in {
   config = lib.mkIf cfg.enable {
     home.packages = [cfg.package];
 
-    xdg.configFile."mush/config.toml" = lib.mkIf (tomlSettings != {}) {
-      source = tomlFormat.generate "mush-config" tomlSettings;
-    };
+    xdg.configFile =
+      {
+        "mush/config.toml" = lib.mkIf (tomlSettings != {}) {
+          source = tomlFormat.generate "mush-config" tomlSettings;
+        };
+      }
+      // lib.optionalAttrs (cfg.agentsMd != null) {
+        "mush/AGENTS.md".text = cfg.agentsMd;
+      }
+      // lib.mapAttrs' (name: skill:
+        lib.nameValuePair "mush/skills/${name}/SKILL.md" {
+          text = skillToText name skill;
+        })
+      cfg.skills;
   };
 }
