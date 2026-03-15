@@ -27,14 +27,32 @@ pub struct Skill {
     pub path: PathBuf,
 }
 
+/// resolve the mush config directory (XDG-aware)
+fn resolve_config_dir() -> Option<PathBuf> {
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
+        return Some(PathBuf::from(xdg).join("mush"));
+    }
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config/mush"))
+}
+
+/// derive config dir from an explicit home (for testing, no env vars)
+fn config_dir_from_home(home: &Path) -> PathBuf {
+    home.join(".config/mush")
+}
+
 /// scan for AGENTS.md in the project directory and up to home
 pub fn find_agents_md(cwd: &Path) -> Vec<AgentsMd> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    find_agents_md_with_home(cwd, home.as_deref())
+    let config_dir = resolve_config_dir();
+    find_agents_md_inner(cwd, home.as_deref(), config_dir.as_deref())
 }
 
-/// testable inner implementation that accepts an explicit home directory
-fn find_agents_md_with_home(cwd: &Path, home: Option<&Path>) -> Vec<AgentsMd> {
+/// inner implementation with explicit home and config dir
+fn find_agents_md_inner(
+    cwd: &Path,
+    home: Option<&Path>,
+    config_dir: Option<&Path>,
+) -> Vec<AgentsMd> {
     let mut results = Vec::new();
 
     // walk up from cwd to home
@@ -59,8 +77,8 @@ fn find_agents_md_with_home(cwd: &Path, home: Option<&Path>) -> Vec<AgentsMd> {
     }
 
     // also check ~/.config/mush/AGENTS.md (user-global)
-    if let Some(h) = home {
-        let mush_agents = h.join(".config/mush/AGENTS.md");
+    if let Some(cd) = config_dir {
+        let mush_agents = cd.join("AGENTS.md");
         if mush_agents.is_file()
             && !results.iter().any(|a| a.path == mush_agents)
             && let Ok(content) = std::fs::read_to_string(&mush_agents)
@@ -195,12 +213,22 @@ fn scan_skills_dir(dir: &Path) -> Vec<Skill> {
 /// 3. `.mush/skills/` in the project directory (project-local)
 pub fn discover_project_context(cwd: &Path) -> ProjectContext {
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    discover_project_context_with_home(cwd, home.as_deref())
+    let config_dir = resolve_config_dir();
+    discover_project_context_inner(cwd, home.as_deref(), config_dir.as_deref())
 }
 
-/// testable inner implementation that accepts an explicit home directory
+/// testable variant that accepts an explicit home directory
 pub fn discover_project_context_with_home(cwd: &Path, home: Option<&Path>) -> ProjectContext {
-    let agents_md = find_agents_md_with_home(cwd, home);
+    let config_dir = home.map(config_dir_from_home);
+    discover_project_context_inner(cwd, home, config_dir.as_deref())
+}
+
+fn discover_project_context_inner(
+    cwd: &Path,
+    home: Option<&Path>,
+    config_dir: Option<&Path>,
+) -> ProjectContext {
+    let agents_md = find_agents_md_inner(cwd, home, config_dir);
 
     let mut skills = Vec::new();
     let mut seen_names = std::collections::HashSet::new();
@@ -214,9 +242,8 @@ pub fn discover_project_context_with_home(cwd: &Path, home: Option<&Path>) -> Pr
     }
 
     // user-global skills directory (~/.config/mush/skills/)
-    if let Some(home) = home {
-        let global_skills = home.join(".config/mush/skills");
-        for skill in scan_skills_dir(&global_skills) {
+    if let Some(cd) = config_dir {
+        for skill in scan_skills_dir(&cd.join("skills")) {
             if seen_names.insert(skill.name.clone()) {
                 skills.push(skill);
             }
