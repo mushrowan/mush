@@ -45,11 +45,18 @@ fn credentials_path() -> PathBuf {
 
 /// load credentials from disk
 pub fn load_credentials() -> Result<CredentialStore, OAuthError> {
-    let path = credentials_path();
+    load_credentials_from(&credentials_path())
+}
+
+/// load credentials from a specific path
+pub fn load_credentials_from(path: &PathBuf) -> Result<CredentialStore, OAuthError> {
     if !path.exists() {
         return Ok(CredentialStore::default());
     }
     let content = std::fs::read_to_string(path)?;
+    if content.trim().is_empty() {
+        return Ok(CredentialStore::default());
+    }
     let store: CredentialStore = serde_json::from_str(&content)?;
     Ok(store)
 }
@@ -111,6 +118,41 @@ mod tests {
         let json = serde_json::to_string(&store).unwrap();
         let restored: CredentialStore = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.providers["anthropic"].access_token, "acc");
+    }
+
+    #[test]
+    fn empty_json_is_parse_error() {
+        let result: Result<CredentialStore, _> = serde_json::from_str("");
+        assert!(result.is_err(), "empty string should fail to parse");
+    }
+
+    #[test]
+    fn load_credentials_handles_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("oauth.json");
+        std::fs::write(&path, "").unwrap();
+
+        let store = load_credentials_from(&path).unwrap();
+        assert!(store.providers.is_empty());
+    }
+
+    #[test]
+    fn load_credentials_handles_whitespace_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("oauth.json");
+        std::fs::write(&path, "  \n  ").unwrap();
+
+        let store = load_credentials_from(&path).unwrap();
+        assert!(store.providers.is_empty());
+    }
+
+    #[test]
+    fn load_credentials_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nonexistent.json");
+
+        let store = load_credentials_from(&path).unwrap();
+        assert!(store.providers.is_empty());
     }
 
     #[test]
