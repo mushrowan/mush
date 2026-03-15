@@ -26,7 +26,7 @@ const MAX_TOKENS: u64 = 2048;
 const SKILL_DIR: &str = env!("HOME");
 
 fn skill_base() -> PathBuf {
-    PathBuf::from(SKILL_DIR).join(".pi/agent/skills")
+    PathBuf::from(SKILL_DIR).join(".config/mush/skills")
 }
 
 // ── backend ─────────────────────────────────────────────────────────────────
