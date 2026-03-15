@@ -333,6 +333,7 @@ mod tests {
             lsp_diagnostics: None,
             agent_card: None,
             model_tiers: HashMap::new(),
+            compaction_model: None,
             http_client: None,
         }
     }

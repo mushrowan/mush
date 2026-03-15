@@ -74,6 +74,8 @@ pub(super) struct StreamDeps<'a> {
     pub file_rules: Option<mush_agent::FileRuleCallback>,
     pub lsp_diagnostics: Option<mush_agent::DiagnosticCallback>,
     pub delegation_queue: &'a crate::delegate::DelegationQueue,
+    /// separate model + options for compaction (None = use active model)
+    pub compaction_model: Option<(Model, StreamOptions)>,
 }
 
 impl StreamState {
@@ -329,11 +331,16 @@ async fn auto_fork_compact(
     let pane = pane_mgr.pane_mut(pane_id).expect("pane exists after check");
     let before = pane.conversation.context_len();
 
+    let (compact_model, compact_options) = tui_config
+        .compaction_model
+        .as_ref()
+        .map(|(m, o)| (m, o))
+        .unwrap_or((&tui_config.model, &tui_config.options));
     let result = crate::slash::fork_and_compact(
         &mut pane.conversation,
         "auto-forked",
-        &tui_config.model,
-        &tui_config.options,
+        compact_model,
+        compact_options,
         registry,
         Some(&tui_config.lifecycle_hooks),
         Some(tui_config.cwd.as_path()),
@@ -507,8 +514,10 @@ async fn start_stream_for_prompt<'a>(
     } else {
         None
     };
-    let compact_model = model.clone();
-    let compact_options = deps.options.clone();
+    let (compact_model, compact_options) = deps
+        .compaction_model
+        .clone()
+        .unwrap_or_else(|| (model.clone(), deps.options.clone()));
     let do_auto_compact = deps.auto_compact;
     let initial_ctx = pane_mgr
         .pane(pane_id)

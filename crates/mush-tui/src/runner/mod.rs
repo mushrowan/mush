@@ -96,6 +96,7 @@ pub async fn run_tui(
                 file_rules: tui_config.file_rules.clone(),
                 lsp_diagnostics: tui_config.lsp_diagnostics.clone(),
                 delegation_queue: &services.delegation_queue,
+                compaction_model: tui_config.compaction_model.clone(),
             },
         )
         .await;

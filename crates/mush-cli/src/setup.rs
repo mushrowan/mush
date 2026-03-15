@@ -14,6 +14,8 @@ use crate::config;
 pub struct AppSetup {
     pub cfg: config::Config,
     pub model: Model,
+    /// separate model + options for compaction (None = use active model)
+    pub compaction_model: Option<(Model, StreamOptions)>,
     pub registry: ApiRegistry,
     pub cwd: std::path::PathBuf,
     pub system_prompt: String,
@@ -151,6 +153,22 @@ impl AppSetup {
 
         resolve_api_key(&mut options, &model, &cfg).await;
 
+        // resolve optional compaction model
+        let compaction_model = if let Some(ref id) = cfg.compaction_model {
+            let m = models::find_model_by_id(id).unwrap_or_else(|| {
+                eprintln!(
+                    "\x1b[33mwarning: unknown compaction_model '{id}', falling back to active model\x1b[0m"
+                );
+                model.clone()
+            });
+            // resolve api key for the compaction model too
+            let mut compact_opts = options.clone();
+            resolve_api_key(&mut compact_opts, &m, &cfg).await;
+            Some((m, compact_opts))
+        } else {
+            None
+        };
+
         let max_turns = args
             .max_turns
             .or(cfg.max_turns)
@@ -182,6 +200,7 @@ impl AppSetup {
         Ok(Self {
             cfg,
             model,
+            compaction_model,
             registry,
             cwd,
             system_prompt,

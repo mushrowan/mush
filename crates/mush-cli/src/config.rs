@@ -84,6 +84,8 @@ pub struct Config {
     /// model tier aliases for delegation and multi-pane
     #[serde(default)]
     pub model_tiers: HashMap<String, String>,
+    /// optional model to use for compaction (defaults to the active model)
+    pub compaction_model: Option<String>,
 }
 
 /// lifecycle hook config sections
@@ -779,5 +781,20 @@ strong = "claude-opus-4-6"
     fn model_tiers_default_empty() {
         let config: Config = toml::from_str("").unwrap();
         assert!(config.model_tiers.is_empty());
+    }
+
+    #[test]
+    fn compaction_model_defaults_to_none() {
+        let config: Config = toml::from_str("").unwrap();
+        assert!(config.compaction_model.is_none());
+    }
+
+    #[test]
+    fn compaction_model_can_be_set() {
+        let config: Config = toml::from_str(r#"compaction_model = "openai/gpt-5-nano""#).unwrap();
+        assert_eq!(
+            config.compaction_model.as_deref(),
+            Some("openai/gpt-5-nano")
+        );
     }
 }

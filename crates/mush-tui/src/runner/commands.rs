@@ -44,12 +44,20 @@ pub(super) async fn handle_slash_action(
         SlashAction::Compact => {
             let pane = pane_mgr.focused_mut();
             let (app, conversation, _) = pane.fields_mut();
+            let (compact_model, compact_options) = tui_config
+                .compaction_model
+                .as_ref()
+                .map(|(m, o)| (m.clone(), o.clone()))
+                .unwrap_or_else(|| {
+                    let m = models::find_model_by_id(app.model_id.as_str())
+                        .unwrap_or_else(|| tui_config.model.clone());
+                    (m, tui_config.options.clone())
+                });
             slash::handle_compact(
                 app,
                 conversation,
-                &models::find_model_by_id(app.model_id.as_str())
-                    .unwrap_or_else(|| tui_config.model.clone()),
-                &tui_config.options,
+                &compact_model,
+                &compact_options,
                 registry,
                 Some(lifecycle_hooks),
                 Some(cwd),
@@ -60,12 +68,20 @@ pub(super) async fn handle_slash_action(
         SlashAction::ForkCompact => {
             let pane = pane_mgr.focused_mut();
             let (app, conversation, _) = pane.fields_mut();
+            let (compact_model, compact_options) = tui_config
+                .compaction_model
+                .as_ref()
+                .map(|(m, o)| (m.clone(), o.clone()))
+                .unwrap_or_else(|| {
+                    let m = models::find_model_by_id(app.model_id.as_str())
+                        .unwrap_or_else(|| tui_config.model.clone());
+                    (m, tui_config.options.clone())
+                });
             slash::handle_fork_compact(
                 app,
                 conversation,
-                &models::find_model_by_id(app.model_id.as_str())
-                    .unwrap_or_else(|| tui_config.model.clone()),
-                &tui_config.options,
+                &compact_model,
+                &compact_options,
                 registry,
                 Some(lifecycle_hooks),
                 Some(cwd),
