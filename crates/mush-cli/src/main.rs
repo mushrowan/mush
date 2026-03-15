@@ -221,9 +221,11 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
     session.auto_title();
 
     // auto-compact when approaching context limit
-    let context_window = setup.model.context_window;
-    let compact_model = setup.model.clone();
-    let compact_options = setup.options.clone();
+    let (compact_model, compact_options) = setup
+        .compaction_model
+        .clone()
+        .unwrap_or_else(|| (setup.model.clone(), setup.options.clone()));
+    let context_window = compact_model.context_window.max(setup.model.context_window);
     let reg_ref = &setup.registry;
     let context_tokens_shared = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let ctx_tokens_for_transform = context_tokens_shared.clone();
@@ -556,6 +558,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         lsp_diagnostics: setup.lsp_diagnostics.clone(),
         agent_card: Some(agent_card),
         model_tiers: setup.cfg.model_tiers.clone(),
+        compaction_model: setup.compaction_model.clone(),
         http_client: Some(setup.http_client.clone()),
     };
 
