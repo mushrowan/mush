@@ -913,8 +913,7 @@ fn process_sse_event(
                 let rest = &data[start + 6..];
                 if let Some(colon) = rest.find(':') {
                     let after = rest[colon + 1..].trim_start();
-                    if after.starts_with('"') {
-                        let s = &after[1..];
+                    if let Some(s) = after.strip_prefix('"') {
                         if let Some(end) = s.find('"') {
                             &s[..end]
                         } else {
