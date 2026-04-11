@@ -4,6 +4,7 @@ description = "eval harness for context injection strategies"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 [features]
 default = ["embeddings"]

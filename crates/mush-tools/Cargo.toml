@@ -4,6 +4,7 @@ description = "built-in tools (read, write, edit, bash, grep, find, ls)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 [dependencies]
 mush-ai.workspace = true

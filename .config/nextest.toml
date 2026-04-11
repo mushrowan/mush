@@ -1,0 +1,29 @@
+# nextest repository configuration
+# https://nexte.st/docs/configuration/reference/
+
+[store]
+dir = "target/nextest"
+
+# local development: fail fast, all cores
+[profile.default]
+fail-fast = true
+slow-timeout = { period = "60s", terminate-after = 2 }
+
+# explicit fast profile for `cargo x check fast`
+[profile.fast]
+fail-fast = true
+retries = 0
+slow-timeout = { period = "30s", terminate-after = 2 }
+
+# ci / nix flake check: run everything
+[profile.full]
+fail-fast = false
+retries = 1
+slow-timeout = { period = "60s", terminate-after = 4 }
+status-level = "all"
+final-status-level = "slow"
+
+# isolation for slow integration tests
+[[profile.default.overrides]]
+filter = "test(/slow/) or test(/integration/)"
+slow-timeout = { period = "120s", terminate-after = 2 }

@@ -49,6 +49,7 @@ in {
   package = craneLib.buildPackage (commonArgs
     // {
       inherit cargoArtifacts;
+      doCheck = false;
       nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ripgrep fd];
       SSL_CERT_FILE = "${cacert}/etc/ssl/certs/ca-bundle.crt";
     });
@@ -72,6 +73,11 @@ in {
   };
 
   deny = craneLib.cargoDeny (commonArgs
+    // {
+      inherit cargoArtifacts;
+    });
+
+  doctest = craneLib.cargoDocTest (commonArgs
     // {
       inherit cargoArtifacts;
     });

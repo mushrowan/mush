@@ -1,0 +1,7 @@
+[alias]
+x = "run --manifest-path crates/xtask/Cargo.toml --"
+xtask = "run --manifest-path crates/xtask/Cargo.toml --"
+
+# uncomment when workspace feature unification cache misses become a problem
+# [unstable]
+# feature-unification = "workspace"

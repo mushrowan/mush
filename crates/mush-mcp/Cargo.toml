@@ -4,6 +4,7 @@ description = "MCP (Model Context Protocol) client for mush"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 [dependencies]
 mush-ai.workspace = true
