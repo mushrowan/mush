@@ -4,6 +4,7 @@ description = "terminal UI for mush"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 [dependencies]
 mush-ai.workspace = true

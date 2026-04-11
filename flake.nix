@@ -83,7 +83,7 @@
         '';
 
         checks = {
-          inherit (craneOutputs) package clippy test fmt deny;
+          inherit (craneOutputs) package clippy test fmt deny doctest;
         };
 
         devShells.default = import ./nix/devshell.nix {

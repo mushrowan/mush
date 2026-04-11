@@ -3,6 +3,7 @@ name = "mush-lsp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 [dependencies]
 lsp-types = "0.97"
