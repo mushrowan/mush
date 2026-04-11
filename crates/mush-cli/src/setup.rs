@@ -262,6 +262,28 @@ pub fn format_error(error: &str) -> String {
     }
 }
 
+fn format_available_skills(skills: &[loader::Skill]) -> String {
+    let mut skills = skills.to_vec();
+    skills.sort_by(|left, right| left.name.cmp(&right.name));
+
+    let mut out = String::from("<available_skills>\n");
+    for skill in skills {
+        out.push_str("  <skill>\n");
+        out.push_str(&format!("    <name>{}</name>\n", skill.name));
+        out.push_str(&format!(
+            "    <description>{}</description>\n",
+            skill.description
+        ));
+        out.push_str(&format!(
+            "    <location>{}</location>\n",
+            skill.path.display()
+        ));
+        out.push_str("  </skill>\n");
+    }
+    out.push_str("</available_skills>");
+    out
+}
+
 /// build the default system prompt from pre-discovered project context
 fn build_system_prompt_from_context(
     context: &loader::ProjectContext,
@@ -309,10 +331,10 @@ fn build_system_prompt_from_context(
             }
             config::ContextStrategy::Summaries | config::ContextStrategy::Embedded => {
                 prompt.push_str(
-                    "\n\nSpecialised skills are available. Use the list_skills tool to \
-                     see what's available, then load_skill to read the full instructions \
-                     when a task matches a skill's description.\n",
+                    "\n\nSkills provide specialised instructions for specific tasks. \
+                     Use the skill tool to load a skill when a task matches its description.\n\n",
                 );
+                prompt.push_str(&format_available_skills(&context.skills));
             }
             config::ContextStrategy::EmbedInject => {
                 prompt.push_str(
@@ -733,4 +755,45 @@ pub async fn auto_compact(
     }
 
     messages
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mush_ext::loader::{ProjectContext, Skill};
+
+    #[test]
+    fn summaries_prompt_lists_available_skills() {
+        let context = ProjectContext {
+            agents_md: vec![],
+            skills: vec![
+                Skill {
+                    name: "zeta".into(),
+                    description: "zeta skill".into(),
+                    path: "/tmp/zeta/SKILL.md".into(),
+                },
+                Skill {
+                    name: "alpha".into(),
+                    description: "alpha skill".into(),
+                    path: "/tmp/alpha/SKILL.md".into(),
+                },
+            ],
+        };
+
+        let prompt = build_system_prompt_from_context(
+            &context,
+            std::path::Path::new("/repo"),
+            config::ContextStrategy::Summaries,
+        );
+
+        let alpha = prompt.find("<name>alpha</name>").unwrap();
+        let zeta = prompt.find("<name>zeta</name>").unwrap();
+
+        assert!(prompt.contains("<available_skills>"));
+        assert!(prompt.contains("<description>alpha skill</description>"));
+        assert!(prompt.contains("<location>/tmp/alpha/SKILL.md</location>"));
+        assert!(prompt.contains("Use the skill tool to load a skill"));
+        assert!(!prompt.contains("load_skill"));
+        assert!(alpha < zeta);
+    }
 }

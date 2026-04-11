@@ -158,21 +158,21 @@ pub struct LspServerEntry {
 /// how skills are discovered and injected into context
 ///
 /// each strategy trades off token cost vs accuracy vs latency:
-/// - `prepended`: all skills in system prompt (expensive, no latency)
-/// - `summaries`: names + descriptions in prompt, load_skill tool on demand
-/// - `embedded`: embedding hints + load_skill tool (requires embeddings feature)
-/// - `embed_inject`: auto-inject from embeddings, no tools needed (cheapest)
+/// - `prepended`: all skills in system prompt
+/// - `summaries`: skill catalogue in prompt, `skill` tool on demand
+/// - `embedded`: skill catalogue plus embedding hints, `skill` tool on demand
+/// - `embed_inject`: auto-inject from embeddings, no tool needed
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextStrategy {
     /// all skill bodies dumped into the system prompt
     Prepended,
-    /// names + descriptions listed, load_skill tool for on-demand reading
-    Summaries,
-    /// embedding similarity hints + load_skill tool
-    Embedded,
-    /// embedding auto-injects matched skill content, no tools needed
+    /// names + descriptions listed, `skill` tool for on-demand reading
     #[default]
+    Summaries,
+    /// embedding similarity hints + `skill` tool
+    Embedded,
+    /// embedding auto-injects matched skill content, no tool needed
     EmbedInject,
 }
 
@@ -633,7 +633,7 @@ blocking = true
         assert_eq!(config.retrieval.context_budget, 2048);
         assert_eq!(
             config.retrieval.context_strategy,
-            ContextStrategy::EmbedInject
+            ContextStrategy::Summaries
         );
         assert_eq!(config.retrieval.embedding_model, EmbeddingModel::Coderank);
         assert!((config.retrieval.auto_load_threshold - 0.5).abs() < f32::EPSILON);
