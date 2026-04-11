@@ -210,7 +210,7 @@ fn scan_skills_dir(dir: &Path) -> Vec<Skill> {
 /// discovers skills from:
 /// 1. `<available_skills>` blocks in AGENTS.md files (explicit)
 /// 2. `~/.config/mush/skills/` directory (user-global)
-/// 3. `.mush/skills/` in the project directory (project-local)
+/// 3. ancestor `.mush/skills/` directories between cwd and home
 pub fn discover_project_context(cwd: &Path) -> ProjectContext {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let config_dir = resolve_config_dir();
@@ -223,6 +223,36 @@ pub fn discover_project_context_with_home(cwd: &Path, home: Option<&Path>) -> Pr
     discover_project_context_inner(cwd, home, config_dir.as_deref())
 }
 
+fn ancestor_dirs_to_home(cwd: &Path, home: Option<&Path>) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let mut current = Some(cwd.to_path_buf());
+
+    while let Some(dir) = current {
+        dirs.push(dir.clone());
+        if home.is_some_and(|home| dir == home) {
+            break;
+        }
+        current = dir.parent().map(Path::to_path_buf);
+    }
+
+    dirs.reverse();
+    dirs
+}
+
+fn upsert_skill(
+    skills: &mut Vec<Skill>,
+    positions: &mut std::collections::HashMap<String, usize>,
+    skill: Skill,
+) {
+    let key = skill.name.to_lowercase();
+    if let Some(index) = positions.get(&key).copied() {
+        skills[index] = skill;
+    } else {
+        positions.insert(key, skills.len());
+        skills.push(skill);
+    }
+}
+
 fn discover_project_context_inner(
     cwd: &Path,
     home: Option<&Path>,
@@ -231,30 +261,26 @@ fn discover_project_context_inner(
     let agents_md = find_agents_md_inner(cwd, home, config_dir);
 
     let mut skills = Vec::new();
-    let mut seen_names = std::collections::HashSet::new();
+    let mut positions = std::collections::HashMap::new();
 
     // explicit skills from AGENTS.md
     for agents in &agents_md {
         for skill in parse_skills_from_agents_md(&agents.content) {
-            seen_names.insert(skill.name.clone());
-            skills.push(skill);
+            upsert_skill(&mut skills, &mut positions, skill);
         }
     }
 
     // user-global skills directory (~/.config/mush/skills/)
     if let Some(cd) = config_dir {
         for skill in scan_skills_dir(&cd.join("skills")) {
-            if seen_names.insert(skill.name.clone()) {
-                skills.push(skill);
-            }
+            upsert_skill(&mut skills, &mut positions, skill);
         }
     }
 
-    // project-local skills (.mush/skills/)
-    let project_skills = cwd.join(".mush/skills");
-    for skill in scan_skills_dir(&project_skills) {
-        if seen_names.insert(skill.name.clone()) {
-            skills.push(skill);
+    // repo-local skills from ancestor .mush/skills/ directories
+    for dir in ancestor_dirs_to_home(cwd, home) {
+        for skill in scan_skills_dir(&dir.join(".mush/skills")) {
+            upsert_skill(&mut skills, &mut positions, skill);
         }
     }
 
@@ -377,6 +403,72 @@ more content
             "expected to find local-only skill from .mush/skills/, got: {:?}",
             ctx.skills.iter().map(|s| &s.name).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn discover_project_local_walks_up_for_mush_skills() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let repo = home.join("repo");
+        let cwd = repo.join("src/bin");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let root_skill = repo.join(".mush/skills/root-only");
+        std::fs::create_dir_all(&root_skill).unwrap();
+        std::fs::write(
+            root_skill.join("SKILL.md"),
+            "---\nname: root-only\ndescription: root skill\n---\ncontent",
+        )
+        .unwrap();
+
+        let nested_skill = repo.join("src/.mush/skills/nested-only");
+        std::fs::create_dir_all(&nested_skill).unwrap();
+        std::fs::write(
+            nested_skill.join("SKILL.md"),
+            "---\nname: nested-only\ndescription: nested skill\n---\ncontent",
+        )
+        .unwrap();
+
+        let ctx = discover_project_context_with_home(&cwd, Some(home));
+        let names: Vec<_> = ctx.skills.iter().map(|skill| skill.name.as_str()).collect();
+
+        assert!(names.contains(&"root-only"));
+        assert!(names.contains(&"nested-only"));
+    }
+
+    #[test]
+    fn discover_project_local_prefers_nearest_duplicate_skill_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let repo = home.join("repo");
+        let cwd = repo.join("src/bin");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let root_skill = repo.join(".mush/skills/shared");
+        std::fs::create_dir_all(&root_skill).unwrap();
+        std::fs::write(
+            root_skill.join("SKILL.md"),
+            "---\nname: shared\ndescription: root version\n---\ncontent",
+        )
+        .unwrap();
+
+        let nested_skill = repo.join("src/.mush/skills/shared");
+        std::fs::create_dir_all(&nested_skill).unwrap();
+        std::fs::write(
+            nested_skill.join("SKILL.md"),
+            "---\nname: shared\ndescription: nested version\n---\ncontent",
+        )
+        .unwrap();
+
+        let ctx = discover_project_context_with_home(&cwd, Some(home));
+        let skill = ctx
+            .skills
+            .iter()
+            .find(|skill| skill.name == "shared")
+            .unwrap();
+
+        assert_eq!(skill.description, "nested version");
+        assert_eq!(skill.path, nested_skill.join("SKILL.md"));
     }
 
     #[test]
