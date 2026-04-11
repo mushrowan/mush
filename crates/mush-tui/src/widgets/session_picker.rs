@@ -2,14 +2,15 @@
 
 use crate::app::{SessionPickerState, SessionScope, filtered_sessions};
 use crate::path_utils::shorten_path;
+use crate::theme::Theme;
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding};
 
 /// render the session picker as a centred overlay
-pub fn render(frame: &mut Frame, picker: &SessionPickerState) {
+pub fn render(frame: &mut Frame, picker: &SessionPickerState, theme: &Theme) {
     let area = frame.area();
 
     // centre the picker, 80% width, 60% height
@@ -31,7 +32,7 @@ pub fn render(frame: &mut Frame, picker: &SessionPickerState) {
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
+        .border_style(theme.search_border)
         .padding(Padding::horizontal(1));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
@@ -42,14 +43,14 @@ pub fn render(frame: &mut Frame, picker: &SessionPickerState) {
 
     // filter line
     let filter_line = Line::from(vec![
-        Span::styled("filter: ", Style::default().fg(Color::DarkGray)),
+        Span::styled("filter: ", theme.dim),
         Span::styled(
             if picker.filter.is_empty() {
                 "…"
             } else {
                 &picker.filter
             },
-            Style::default().fg(Color::White),
+            Style::default(),
         ),
     ]);
     frame.render_widget(filter_line, Rect::new(inner.x, inner.y, inner.width, 1));
@@ -60,17 +61,14 @@ pub fn render(frame: &mut Frame, picker: &SessionPickerState) {
         SessionScope::AllDirs => "this dir",
     };
     let hint = Line::from(vec![
-        Span::styled("tab", Style::default().fg(Color::Cyan)),
-        Span::styled(
-            format!(" {scope_label}  "),
-            Style::default().fg(Color::DarkGray),
-        ),
-        Span::styled("↑↓", Style::default().fg(Color::Cyan)),
-        Span::styled(" navigate  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("enter", Style::default().fg(Color::Cyan)),
-        Span::styled(" resume  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("esc", Style::default().fg(Color::Cyan)),
-        Span::styled(" close", Style::default().fg(Color::DarkGray)),
+        Span::styled("tab", theme.selection_marker),
+        Span::styled(format!(" {scope_label}  "), theme.dim),
+        Span::styled("↑↓", theme.selection_marker),
+        Span::styled(" navigate  ", theme.dim),
+        Span::styled("enter", theme.selection_marker),
+        Span::styled(" resume  ", theme.dim),
+        Span::styled("esc", theme.selection_marker),
+        Span::styled(" close", theme.dim),
     ]);
     frame.render_widget(hint, Rect::new(inner.x, inner.y + 1, inner.width, 1));
 
@@ -97,13 +95,10 @@ pub fn render(frame: &mut Frame, picker: &SessionPickerState) {
 
         let prefix = if is_selected { "▸ " } else { "  " };
         let style = if is_selected {
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
+            theme.picker_selected.add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::White)
+            Style::default()
         };
-        let dim = Style::default().fg(Color::DarkGray);
 
         // build right-side metadata
         let cwd_display = if show_cwd {
@@ -134,7 +129,7 @@ pub fn render(frame: &mut Frame, picker: &SessionPickerState) {
             Span::styled(prefix, style),
             Span::styled(title_display, style),
             Span::raw(" ".repeat(padding)),
-            Span::styled(meta_right, dim),
+            Span::styled(meta_right, theme.dim),
         ]));
     }
 
@@ -143,7 +138,7 @@ pub fn render(frame: &mut Frame, picker: &SessionPickerState) {
             SessionScope::ThisDir => "  no sessions in this directory — press tab for all",
             SessionScope::AllDirs => "  no sessions found",
         };
-        lines.push(Line::styled(msg, Style::default().fg(Color::DarkGray)));
+        lines.push(Line::styled(msg, theme.dim));
     }
 
     let text = ratatui::text::Text::from(lines);

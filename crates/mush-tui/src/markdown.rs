@@ -8,6 +8,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use std::sync::LazyLock;
 
+use crate::theme::Theme;
+
 #[cfg(test)]
 use std::cell::Cell;
 use syntect::easy::HighlightLines;
@@ -27,7 +29,7 @@ thread_local! {
 }
 
 /// render a markdown string to styled ratatui Text
-pub fn render(source: &str) -> Text<'static> {
+pub fn render(source: &str, theme: &Theme) -> Text<'static> {
     #[cfg(test)]
     RENDER_CALLS.with(|calls| calls.set(calls.get() + 1));
 
@@ -47,7 +49,7 @@ pub fn render(source: &str) -> Text<'static> {
         if raw_line.starts_with("```") {
             if in_code_block {
                 // end code block - highlight and emit
-                let highlighted = render_code_block(&code_block_lines, &code_block_lang);
+                let highlighted = render_code_block(&code_block_lines, &code_block_lang, theme);
                 lines.extend(highlighted);
                 code_block_lines.clear();
                 code_block_lang.clear();
@@ -66,39 +68,24 @@ pub fn render(source: &str) -> Text<'static> {
 
         // headings
         if let Some(rest) = raw_line.strip_prefix("### ") {
-            lines.push(Line::styled(
-                rest.to_string(),
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
-            ));
+            lines.push(Line::styled(rest.to_string(), theme.heading_h3));
             continue;
         }
         if let Some(rest) = raw_line.strip_prefix("## ") {
-            lines.push(Line::styled(
-                rest.to_string(),
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
-            ));
+            lines.push(Line::styled(rest.to_string(), theme.heading));
             continue;
         }
         if let Some(rest) = raw_line.strip_prefix("# ") {
             lines.push(Line::styled(
                 rest.to_string(),
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+                theme.heading.add_modifier(Modifier::UNDERLINED),
             ));
             continue;
         }
 
         // horizontal rule
         if raw_line == "---" || raw_line == "***" || raw_line == "___" {
-            lines.push(Line::styled(
-                "─".repeat(40),
-                Style::default().fg(Color::DarkGray),
-            ));
+            lines.push(Line::styled("─".repeat(40), theme.horizontal_rule));
             continue;
         }
 
@@ -107,19 +94,16 @@ pub fn render(source: &str) -> Text<'static> {
             .strip_prefix("- ")
             .or_else(|| raw_line.strip_prefix("* "))
         {
-            let mut spans = vec![Span::styled("• ", Style::default().fg(Color::Cyan))];
-            spans.extend(render_inline_spans(rest));
+            let mut spans = vec![Span::styled("• ", theme.list_bullet)];
+            spans.extend(render_inline_spans(rest, theme));
             lines.push(Line::from(spans));
             continue;
         }
 
         // numbered list items
         if let Some((prefix, rest)) = numbered_list_item(raw_line) {
-            let mut spans = vec![Span::styled(
-                format!("{prefix} "),
-                Style::default().fg(Color::Cyan),
-            )];
-            spans.extend(render_inline_spans(rest));
+            let mut spans = vec![Span::styled(format!("{prefix} "), theme.list_bullet)];
+            spans.extend(render_inline_spans(rest, theme));
             lines.push(Line::from(spans));
             continue;
         }
@@ -128,13 +112,13 @@ pub fn render(source: &str) -> Text<'static> {
         if raw_line.is_empty() {
             lines.push(Line::raw(""));
         } else {
-            lines.push(Line::from(render_inline_spans(raw_line)));
+            lines.push(Line::from(render_inline_spans(raw_line, theme)));
         }
     }
 
     // close any unclosed code block
     if in_code_block {
-        let highlighted = render_code_block(&code_block_lines, &code_block_lang);
+        let highlighted = render_code_block(&code_block_lines, &code_block_lang, theme);
         lines.extend(highlighted);
     }
 
@@ -149,9 +133,9 @@ fn render_plain_text(source: &str) -> Text<'static> {
     Text::from(lines)
 }
 
-fn render_inline_spans(text: &str) -> Vec<Span<'static>> {
+fn render_inline_spans(text: &str, theme: &Theme) -> Vec<Span<'static>> {
     if needs_inline_parsing(text) {
-        parse_inline(text)
+        parse_inline(text, theme)
     } else {
         vec![Span::raw(text.to_string())]
     }
@@ -190,7 +174,7 @@ fn numbered_list_item(line: &str) -> Option<(&str, &str)> {
     Some((&line[..=dot_pos], &line[dot_pos + 2..]))
 }
 
-fn render_code_block(code_lines: &[String], lang: &str) -> Vec<Line<'static>> {
+fn render_code_block(code_lines: &[String], lang: &str, theme: &Theme) -> Vec<Line<'static>> {
     let ps = &*SYNTAX_SET;
     let Some(syntax) = code_block_syntax(ps, lang) else {
         return render_plain_code_block(code_lines);
@@ -198,7 +182,7 @@ fn render_code_block(code_lines: &[String], lang: &str) -> Vec<Line<'static>> {
     if code_lines.len() > MAX_HIGHLIGHTED_CODE_BLOCK_LINES {
         return render_plain_code_block(code_lines);
     }
-    highlight_code_block(code_lines, syntax, ps)
+    highlight_code_block(code_lines, syntax, ps, theme)
 }
 
 fn code_block_syntax<'a>(ps: &'a SyntaxSet, lang: &str) -> Option<&'a SyntaxReference> {
@@ -219,6 +203,7 @@ fn highlight_code_block(
     code_lines: &[String],
     syntax: &SyntaxReference,
     ps: &SyntaxSet,
+    ui_theme: &Theme,
 ) -> Vec<Line<'static>> {
     #[cfg(test)]
     HIGHLIGHT_CODE_BLOCK_CALLS.with(|calls| calls.set(calls.get() + 1));
@@ -246,10 +231,7 @@ fn highlight_code_block(
                 lines.push(Line::from(spans));
             }
             Err(_) => {
-                lines.push(Line::styled(
-                    format!("  {code_line}"),
-                    Style::default().fg(Color::Yellow),
-                ));
+                lines.push(Line::styled(format!("  {code_line}"), ui_theme.code_block));
             }
         }
     }
@@ -282,7 +264,7 @@ fn syntect_to_style(style: highlighting::Style) -> Style {
 }
 
 /// parse inline markdown: **bold**, *italic*, `code`, ***bold italic***
-fn parse_inline(text: &str) -> Vec<Span<'static>> {
+fn parse_inline(text: &str, theme: &Theme) -> Vec<Span<'static>> {
     #[cfg(test)]
     PARSE_INLINE_CALLS.with(|calls| calls.set(calls.get() + 1));
 
@@ -305,9 +287,7 @@ fn parse_inline(text: &str) -> Vec<Span<'static>> {
                     }
                     spans.push(Span::styled(
                         code_rest[..end].to_string(),
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
+                        theme.inline_code,
                     ));
                     offset += ch.len_utf8() + end + ch.len_utf8();
                 } else {
@@ -324,14 +304,11 @@ fn parse_inline(text: &str) -> Vec<Span<'static>> {
                 let marker_width = ch.len_utf8();
 
                 let (delimiter_len, style) = if run_len >= 3 {
-                    (
-                        3,
-                        Style::default().add_modifier(Modifier::BOLD | Modifier::ITALIC),
-                    )
+                    (3, theme.bold.patch(theme.italic))
                 } else if run_len >= 2 {
-                    (2, Style::default().add_modifier(Modifier::BOLD))
+                    (2, theme.bold)
                 } else {
-                    (1, Style::default().add_modifier(Modifier::ITALIC))
+                    (1, theme.italic)
                 };
 
                 let delimiter = ch.to_string().repeat(delimiter_len);
@@ -399,16 +376,20 @@ pub(crate) fn highlight_code_block_call_count() -> usize {
 mod tests {
     use super::*;
 
+    fn t() -> Theme {
+        Theme::default()
+    }
+
     #[test]
     fn plain_text() {
-        let text = render("hello world");
+        let text = render("hello world", &t());
         assert_eq!(text.lines.len(), 1);
         assert_eq!(text.lines[0].to_string(), "hello world");
     }
 
     #[test]
     fn headings() {
-        let text = render("# heading 1\n## heading 2\n### heading 3");
+        let text = render("# heading 1\n## heading 2\n### heading 3", &t());
         assert_eq!(text.lines.len(), 3);
         assert_eq!(text.lines[0].to_string(), "heading 1");
         assert_eq!(text.lines[1].to_string(), "heading 2");
@@ -417,7 +398,7 @@ mod tests {
 
     #[test]
     fn bold_text() {
-        let text = render("some **bold** text");
+        let text = render("some **bold** text", &t());
         assert_eq!(text.lines.len(), 1);
         assert_eq!(text.lines[0].to_string(), "some bold text");
         // the middle span should be bold
@@ -432,21 +413,21 @@ mod tests {
 
     #[test]
     fn unmatched_bold_is_literal() {
-        let text = render("some **bold");
+        let text = render("some **bold", &t());
         assert_eq!(text.lines.len(), 1);
         assert_eq!(text.lines[0].to_string(), "some **bold");
     }
 
     #[test]
     fn unmatched_bold_italic_is_literal() {
-        let text = render("some ***bold");
+        let text = render("some ***bold", &t());
         assert_eq!(text.lines.len(), 1);
         assert_eq!(text.lines[0].to_string(), "some ***bold");
     }
 
     #[test]
     fn italic_text() {
-        let text = render("some *italic* text");
+        let text = render("some *italic* text", &t());
         assert_eq!(text.lines.len(), 1);
         assert_eq!(text.lines[0].spans.len(), 3);
         assert!(
@@ -459,14 +440,14 @@ mod tests {
 
     #[test]
     fn inline_code() {
-        let text = render("use `cargo build`");
+        let text = render("use `cargo build`", &t());
         assert_eq!(text.lines.len(), 1);
         assert_eq!(text.lines[0].to_string(), "use cargo build");
     }
 
     #[test]
     fn code_block() {
-        let text = render("```rust\nfn main() {}\n```");
+        let text = render("```rust\nfn main() {}\n```", &t());
         assert_eq!(text.lines.len(), 1);
         // content should be indented with syntax highlighting applied
         let content = text.lines[0].to_string();
@@ -475,7 +456,7 @@ mod tests {
 
     #[test]
     fn code_block_has_colour() {
-        let text = render("```rust\nlet x = 42;\n```");
+        let text = render("```rust\nlet x = 42;\n```", &t());
         assert_eq!(text.lines.len(), 1);
         // should have multiple spans (indentation + highlighted tokens)
         assert!(
@@ -487,7 +468,7 @@ mod tests {
 
     #[test]
     fn code_block_unknown_lang() {
-        let text = render("```xyz\nhello world\n```");
+        let text = render("```xyz\nhello world\n```", &t());
         assert_eq!(text.lines.len(), 1);
         assert!(text.lines[0].to_string().contains("hello world"));
     }
@@ -496,7 +477,7 @@ mod tests {
     fn plain_code_block_skips_syntax_highlighting() {
         reset_highlight_code_block_call_count();
 
-        let text = render("```\nhello world\n```");
+        let text = render("```\nhello world\n```", &t());
 
         assert_eq!(text.lines.len(), 1);
         assert!(text.lines[0].to_string().contains("hello world"));
@@ -507,7 +488,7 @@ mod tests {
     fn unknown_language_code_block_skips_syntax_highlighting() {
         reset_highlight_code_block_call_count();
 
-        let text = render("```xyz\nhello world\n```");
+        let text = render("```xyz\nhello world\n```", &t());
 
         assert_eq!(text.lines.len(), 1);
         assert!(text.lines[0].to_string().contains("hello world"));
@@ -519,7 +500,7 @@ mod tests {
         reset_highlight_code_block_call_count();
         let source = format!("```rust\n{}```", "let x = 42;\n".repeat(80));
 
-        let text = render(&source);
+        let text = render(&source, &t());
 
         assert_eq!(text.lines.len(), 80);
         assert!(text.lines[0].to_string().contains("let x = 42;"));
@@ -528,7 +509,7 @@ mod tests {
 
     #[test]
     fn unordered_list() {
-        let text = render("- item one\n- item two");
+        let text = render("- item one\n- item two", &t());
         assert_eq!(text.lines.len(), 2);
         assert!(text.lines[0].to_string().contains("item one"));
         assert!(text.lines[1].to_string().contains("item two"));
@@ -536,21 +517,21 @@ mod tests {
 
     #[test]
     fn numbered_list() {
-        let text = render("1. first\n2. second");
+        let text = render("1. first\n2. second", &t());
         assert_eq!(text.lines.len(), 2);
         assert!(text.lines[0].to_string().contains("first"));
     }
 
     #[test]
     fn horizontal_rule() {
-        let text = render("above\n---\nbelow");
+        let text = render("above\n---\nbelow", &t());
         assert_eq!(text.lines.len(), 3);
         assert!(text.lines[1].to_string().contains("─"));
     }
 
     #[test]
     fn empty_input() {
-        let text = render("");
+        let text = render("", &t());
         assert!(text.lines.is_empty());
     }
 
@@ -558,7 +539,7 @@ mod tests {
     fn plain_lines_skip_inline_parser() {
         reset_parse_inline_call_count();
 
-        let text = render("alpha\nbeta\ngamma");
+        let text = render("alpha\nbeta\ngamma", &t());
 
         assert_eq!(text.lines.len(), 3);
         assert_eq!(parse_inline_call_count(), 0);
@@ -568,7 +549,7 @@ mod tests {
     fn only_formatted_lines_use_inline_parser() {
         reset_parse_inline_call_count();
 
-        let text = render("alpha\n**beta**\ngamma");
+        let text = render("alpha\n**beta**\ngamma", &t());
 
         assert_eq!(text.lines.len(), 3);
         assert_eq!(parse_inline_call_count(), 1);
@@ -576,7 +557,7 @@ mod tests {
 
     #[test]
     fn mixed_content() {
-        let text = render("# title\n\nsome **bold** and `code`\n\n- a list item");
+        let text = render("# title\n\nsome **bold** and `code`\n\n- a list item", &t());
         assert!(text.lines.len() >= 4);
     }
 }

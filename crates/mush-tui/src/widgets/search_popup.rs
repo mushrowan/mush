@@ -2,7 +2,7 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Widget};
 
@@ -36,7 +36,7 @@ impl Widget for SearchPopup<'_> {
         let block = Block::default()
             .title(" search ")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan));
+            .border_style(self.app.theme.search_border);
         let inner = block.inner(popup);
         block.render(popup, buf);
 
@@ -56,9 +56,9 @@ impl Widget for SearchPopup<'_> {
 
         // input line
         let query_spans = vec![
-            Span::styled("/ ", Style::default().fg(Color::Cyan)),
+            Span::styled("/ ", self.app.theme.search_border),
             Span::raw(&self.app.search.query),
-            Span::styled("▏", Style::default().fg(Color::Cyan)),
+            Span::styled("▏", self.app.theme.search_border),
         ];
         Paragraph::new(Line::from(query_spans)).render(input_area, buf);
 
@@ -72,11 +72,7 @@ impl Widget for SearchPopup<'_> {
                 if match_count == 1 { "" } else { "es" }
             )
         };
-        Paragraph::new(Line::styled(
-            divider_text,
-            Style::default().fg(Color::DarkGray),
-        ))
-        .render(divider_area, buf);
+        Paragraph::new(Line::styled(divider_text, self.app.theme.dim)).render(divider_area, buf);
 
         // results list
         let items: Vec<ListItem> = self
@@ -108,9 +104,7 @@ impl Widget for SearchPopup<'_> {
 
                 let selected = i == self.app.search.selected;
                 let style = if selected {
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD)
+                    self.app.theme.picker_selected.add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
                 };
@@ -118,7 +112,7 @@ impl Widget for SearchPopup<'_> {
 
                 ListItem::new(Line::from(vec![
                     Span::styled(marker, style),
-                    Span::styled(format!("{role}: "), Style::default().fg(Color::DarkGray)),
+                    Span::styled(format!("{role}: "), self.app.theme.dim),
                     Span::styled(truncated, style),
                 ]))
             })

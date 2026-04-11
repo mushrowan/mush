@@ -118,8 +118,12 @@ impl Widget for Ui<'_> {
         self.app.input.area.set(regions.input);
         MessageList::new(self.app).render(regions.messages, buf);
         if let Some(tools_area) = regions.tools {
-            ToolPanels::new(&self.app.active_tools, &self.app.throbber_state)
-                .render(tools_area, buf);
+            ToolPanels::new(
+                &self.app.active_tools,
+                &self.app.throbber_state,
+                &self.app.theme,
+            )
+            .render(tools_area, buf);
         }
         InputBox::new(self.app).render(regions.input, buf);
         if !self.hide_status {

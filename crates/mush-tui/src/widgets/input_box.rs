@@ -4,7 +4,7 @@ use std::cell::Ref;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Padding, Paragraph, Widget};
 use unicode_width::UnicodeWidthChar;
@@ -395,44 +395,44 @@ impl Widget for InputBox<'_> {
         let streaming_idle = self.app.is_busy() && self.app.input.text.is_empty();
         let prompt = if streaming_idle { "..." } else { "> " };
         let style = if streaming_idle {
-            Style::default().fg(Color::DarkGray)
+            self.app.theme.dim
         } else {
             Style::default()
         };
 
-        let prompt_style = Style::default().fg(if streaming_idle {
-            Color::DarkGray
+        let prompt_style = if streaming_idle {
+            self.app.theme.dim
         } else {
-            Color::Cyan
-        });
+            self.app.theme.input_border_active
+        };
 
         let content_width = area.width.saturating_sub(2) as usize;
 
         // border colour signals whose turn it is and whether there are unread messages
-        let border_colour = if self.app.has_unread && !streaming_idle {
+        let border_style = if self.app.has_unread && !streaming_idle {
             if self.app.input.text.is_empty() {
-                // empty input + unread: blink between blue and default
+                // empty input + unread: blink between active and highlight
                 if self.app.unread_flash_on() {
-                    Color::Blue
+                    self.app.theme.scroll_indicator
                 } else {
-                    Color::Cyan
+                    self.app.theme.input_border_active
                 }
             } else {
-                // typing + unread: solid blue (distinct from normal cyan)
-                Color::Blue
+                // typing + unread: solid highlight
+                self.app.theme.scroll_indicator
             }
         } else if self.app.is_busy() {
-            // agent's turn: muted border whether idle or typing
-            Color::DarkGray
+            // agent's turn: muted border
+            self.app.theme.input_border
         } else {
             // our turn, no unread: normal
-            Color::Cyan
+            self.app.theme.input_border_active
         };
 
         let block = Block::default()
             .borders(Borders::TOP | Borders::BOTTOM)
             .padding(Padding::horizontal(1))
-            .border_style(Style::default().fg(border_colour));
+            .border_style(border_style);
 
         if content_width == 0 {
             self.app.input.visible_lines.set(0);
@@ -444,7 +444,7 @@ impl Widget for InputBox<'_> {
 
         let layout = self.app.input.layout(content_width);
         let mut lines: Vec<Line<'_>> = Vec::new();
-        let image_style = Style::default().fg(Color::Magenta);
+        let image_style = self.app.theme.image_label;
 
         for (line_idx, line) in layout.wrapped_lines.iter().enumerate() {
             let mut spans: Vec<Span<'_>> = Vec::new();
@@ -467,10 +467,7 @@ impl Widget for InputBox<'_> {
             if line_idx == layout.wrapped_lines.len() - 1
                 && let Some(ghost) = self.app.ghost_text()
             {
-                spans.push(Span::styled(
-                    ghost.to_string(),
-                    Style::default().fg(Color::DarkGray),
-                ));
+                spans.push(Span::styled(ghost.to_string(), self.app.theme.dim));
             }
 
             lines.push(Line::from(spans));
