@@ -258,7 +258,9 @@ fn render_message(
     } else if sel.selected {
         let mut hint_spans = vec![Span::styled("▌", Style::default().fg(Color::Cyan))];
         if sel.is_cursor {
-            let hint = if sel.has_visual {
+            let hint = if app.scroll_unit == crate::app::ScrollUnit::Block {
+                " (y to copy block, b for messages)"
+            } else if sel.has_visual {
                 " (y to copy range)"
             } else {
                 " (v to select, y to copy)"
@@ -334,11 +336,44 @@ fn render_message(
         // blank padding line below
         lines.push(Line::from(Span::styled(" ".repeat(w), user_bg)));
     } else {
+        // determine if a code block in this message is selected
+        let highlight_block = if app.mode == crate::app::AppMode::Scroll
+            && app.scroll_unit == crate::app::ScrollUnit::Block
+        {
+            if let Some(sel) = app.selected_block {
+                let blocks = app.code_blocks();
+                blocks.get(sel).filter(|b| b.msg_idx == msg_idx).map(|_| {
+                    blocks[..sel]
+                        .iter()
+                        .filter(|b| b.msg_idx == msg_idx)
+                        .count()
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let md_text = render_markdown_cached(app, &msg.content);
-        for line in md_text.lines {
+        let block_ranges = if highlight_block.is_some() {
+            code_block_line_ranges(&msg.content)
+        } else {
+            Vec::new()
+        };
+        let highlight_range = highlight_block.and_then(|b| block_ranges.get(b).copied());
+
+        for (i, line) in md_text.lines.into_iter().enumerate() {
             let mut spans: Vec<Span<'_>> = vec![Span::raw(" ")];
             spans.extend(line.spans);
-            lines.push(Line::from(spans));
+            let mut rendered = Line::from(spans);
+            if let Some((start, end)) = highlight_range
+                && i >= start
+                && i < end
+            {
+                rendered = rendered.style(Style::default().bg(BLOCK_HIGHLIGHT_BG));
+            }
+            lines.push(rendered);
         }
     }
 
@@ -768,6 +803,39 @@ fn diff_line_style(line: &str, fallback: Style) -> Style {
     }
 }
 
+/// background for highlighted code block in scroll mode
+const BLOCK_HIGHLIGHT_BG: Color = Color::Rgb(30, 40, 60);
+
+/// compute rendered-line ranges for each fenced code block in source
+/// returns (start, end) where start is inclusive, end is exclusive
+fn code_block_line_ranges(source: &str) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut in_block = false;
+    let mut rendered_idx = 0;
+    let mut block_start = 0;
+
+    for line in source.lines() {
+        if line.starts_with("```") {
+            if in_block {
+                ranges.push((block_start, rendered_idx));
+                in_block = false;
+            } else {
+                block_start = rendered_idx;
+                in_block = true;
+            }
+            // fence markers are consumed, not rendered
+            continue;
+        }
+        rendered_idx += 1;
+    }
+
+    if in_block && rendered_idx > block_start {
+        ranges.push((block_start, rendered_idx));
+    }
+
+    ranges
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1089,6 +1157,42 @@ mod tests {
                 box_lines[i]
             );
         }
+    }
+
+    #[test]
+    fn selected_code_block_gets_highlight() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.messages.push(DisplayMessage::new(
+            MessageRole::Assistant,
+            "here:\n```bash\nrm -rf mything\n```\nand:\n```python\nprint(42)\n```",
+        ));
+        // enter scroll mode with block selected
+        app.mode = crate::app::AppMode::Scroll;
+        app.scroll_unit = crate::app::ScrollUnit::Block;
+        app.selected_block = Some(0); // first block (bash)
+
+        let buf = render_app(&app, 60, 20);
+
+        // find the cell that renders "rm" and check it has a bg colour
+        let mut found_highlight = false;
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                let cell = &buf[(x, y)];
+                if cell.symbol() == "r" {
+                    // check the next cell is "m" to confirm it's "rm"
+                    if x + 1 < buf.area.width && buf[(x + 1, y)].symbol() == "m" {
+                        // selected block should have a non-default background
+                        if cell.bg != Color::Reset {
+                            found_highlight = true;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            found_highlight,
+            "selected code block should have a background highlight"
+        );
     }
 
     #[test]

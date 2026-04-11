@@ -402,6 +402,11 @@ fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
                     && sel + 1 < blocks.len()
                 {
                     app.selected_block = Some(sel + 1);
+                    app.selected_message = Some(blocks[sel + 1].msg_idx);
+                    app.scroll_offset = app.scroll_offset.saturating_sub(3);
+                    if app.scroll_offset == 0 {
+                        app.has_unread = false;
+                    }
                 }
             } else {
                 // message mode
@@ -419,8 +424,12 @@ fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         (_, KeyCode::Char('k')) | (_, KeyCode::Up) => {
             if app.scroll_unit == ScrollUnit::Block {
                 // move to previous code block
+                let blocks = app.code_blocks();
                 if let Some(sel) = app.selected_block {
-                    app.selected_block = Some(sel.saturating_sub(1));
+                    let new_sel = sel.saturating_sub(1);
+                    app.selected_block = Some(new_sel);
+                    app.selected_message = Some(blocks[new_sel].msg_idx);
+                    app.scroll_offset = app.scroll_offset.saturating_add(3);
                 }
             } else {
                 // message mode

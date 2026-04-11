@@ -180,6 +180,19 @@ fn left_spans(app: &App) -> Vec<Span<'static>> {
         spans.push(Span::styled(status.clone(), dim));
     }
 
+    // scroll mode indicator
+    if app.mode == crate::app::AppMode::Scroll {
+        let unit_label = match app.scroll_unit {
+            crate::app::ScrollUnit::Block => "blocks",
+            crate::app::ScrollUnit::Message => "messages",
+        };
+        spans.push(sep.clone());
+        spans.push(Span::styled(
+            format!("scroll: {unit_label} (b)"),
+            Style::default().fg(Color::Blue),
+        ));
+    }
+
     // scroll position indicator (only when scrolled away from bottom)
     if app.scroll_offset > 0 {
         let total = app.total_content_lines.get();
@@ -434,5 +447,31 @@ mod tests {
             s.push('\n');
         }
         s
+    }
+
+    #[test]
+    fn status_bar_shows_scroll_block_mode() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.mode = crate::app::AppMode::Scroll;
+        app.scroll_unit = crate::app::ScrollUnit::Block;
+        let buf = render_status(&app, 120, 1);
+        let content = buffer_to_string(&buf);
+        assert!(
+            content.contains("blocks"),
+            "missing block mode indicator: {content}"
+        );
+    }
+
+    #[test]
+    fn status_bar_shows_scroll_message_mode() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.mode = crate::app::AppMode::Scroll;
+        app.scroll_unit = crate::app::ScrollUnit::Message;
+        let buf = render_status(&app, 120, 1);
+        let content = buffer_to_string(&buf);
+        assert!(
+            content.contains("messages"),
+            "missing message mode indicator: {content}"
+        );
     }
 }
