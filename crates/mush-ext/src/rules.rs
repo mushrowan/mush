@@ -85,16 +85,28 @@ impl RuleIndex {
             }
         };
 
-        // glob matches
-        for &glob_idx in &self.globset.matches(path) {
-            try_rule(self.glob_to_rule[glob_idx]);
-        }
+        let glob_matches: Vec<usize> = self
+            .globset
+            .matches(path)
+            .into_iter()
+            .map(|glob_idx| self.glob_to_rule[glob_idx])
+            .collect();
 
-        // language matches via tree-sitter detection
-        if let Some(lang) = mush_treesitter::Language::detect(path) {
-            let lang_name = lang.name().to_lowercase();
-            if let Some(rule_indices) = self.lang_to_rules.get(&lang_name) {
-                for &rule_idx in rule_indices {
+        let language_matches = mush_treesitter::Language::detect(path)
+            .map(|lang| lang.name().to_lowercase())
+            .and_then(|lang_name| self.lang_to_rules.get(&lang_name).cloned())
+            .unwrap_or_default();
+
+        if language_matches.is_empty() {
+            for rule_idx in glob_matches {
+                try_rule(rule_idx);
+            }
+        } else {
+            for rule_idx in language_matches {
+                try_rule(rule_idx);
+            }
+            for rule_idx in glob_matches {
+                if !self.rules[rule_idx].languages.is_empty() {
                     try_rule(rule_idx);
                 }
             }
@@ -432,6 +444,32 @@ use type hints
         let matched = index.match_file(Path::new("app.ts"));
         assert_eq!(matched.len(), 1);
         assert_eq!(matched[0].name, "web");
+    }
+
+    #[test]
+    fn language_specific_rules_override_common_rules() {
+        let rules = vec![
+            Rule {
+                name: "common-rust".into(),
+                globs: vec!["*.rs".into()],
+                languages: vec![],
+                content: "common rust rules".into(),
+                path: PathBuf::from("rules/common-rust.md"),
+            },
+            Rule {
+                name: "rust".into(),
+                globs: vec![],
+                languages: vec!["rust".into()],
+                content: "specific rust rules".into(),
+                path: PathBuf::from("rules/rust.md"),
+            },
+        ];
+        let index = RuleIndex::new(rules);
+
+        let matched = index.match_file(Path::new("src/lib.rs"));
+        let names: Vec<_> = matched.iter().map(|rule| rule.name.as_str()).collect();
+
+        assert_eq!(names, vec!["rust"]);
     }
 
     #[test]
