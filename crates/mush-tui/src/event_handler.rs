@@ -164,12 +164,12 @@ pub fn handle_agent_event(
         }
         AgentEvent::MaxTurnsReached { max_turns } => {
             app.stream.active = false;
-            app.status = Some(format!("hit max turns limit ({max_turns})"));
+            app.push_system_message(format!("hit max turns limit ({max_turns})"));
         }
         AgentEvent::Error { error } => {
             app.stream.active = false;
             tracing::error!(%error, "agent error");
-            app.status = Some(format!("error: {error}"));
+            app.push_system_message(format!("error: {error}"));
         }
         AgentEvent::AgentEnd => {
             app.stream.active = false;
@@ -632,5 +632,59 @@ mod tests {
             })
             .count();
         assert_eq!(full_outputs, FORK_MASK_RECENT);
+    }
+
+    #[test]
+    fn agent_error_becomes_system_message() {
+        use crate::app::{App, MessageRole};
+        use mush_ai::types::TokenCount;
+
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        let mut conversation = ConversationState::new();
+        let mut image_protos = std::collections::HashMap::new();
+        let model = mush_ai::models::all_models().first().unwrap().clone();
+        let mut ctx = EventCtx {
+            app: &mut app,
+            conversation: &mut conversation,
+            image_protos: &mut image_protos,
+        };
+
+        let event = AgentEvent::Error {
+            error: "anthropic returned 400 Bad Request".into(),
+        };
+        handle_agent_event(&mut ctx, &event, &model, false, &None);
+
+        // error should appear as a system message, not in the status bar
+        assert!(
+            ctx.app.status.is_none(),
+            "error should not be in status bar"
+        );
+        let last = ctx.app.messages.last().expect("should have a message");
+        assert_eq!(last.role, MessageRole::System);
+        assert!(last.content.contains("400 Bad Request"));
+    }
+
+    #[test]
+    fn max_turns_becomes_system_message() {
+        use crate::app::{App, MessageRole};
+        use mush_ai::types::TokenCount;
+
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        let mut conversation = ConversationState::new();
+        let mut image_protos = std::collections::HashMap::new();
+        let model = mush_ai::models::all_models().first().unwrap().clone();
+        let mut ctx = EventCtx {
+            app: &mut app,
+            conversation: &mut conversation,
+            image_protos: &mut image_protos,
+        };
+
+        let event = AgentEvent::MaxTurnsReached { max_turns: 10 };
+        handle_agent_event(&mut ctx, &event, &model, false, &None);
+
+        assert!(ctx.app.status.is_none(), "should not be in status bar");
+        let last = ctx.app.messages.last().expect("should have a message");
+        assert_eq!(last.role, MessageRole::System);
+        assert!(last.content.contains("max turns"));
     }
 }
