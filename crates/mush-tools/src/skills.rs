@@ -1,19 +1,12 @@
-//! lazy skill routing tools
-//!
-//! three tools that let the agent discover and load skills on demand
-//! instead of eagerly injecting all skill content into the system prompt.
-//!
-//! - `list_skills`: returns names and one-line descriptions
-//! - `describe_skill`: returns full metadata for a named skill
-//! - `load_skill`: reads the full SKILL.md content
+//! progressive skill loading tool
 
-use std::path::PathBuf;
+use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
+use mush_agent::tool::{AgentTool, OutputLimit, ToolResult, parse_tool_args};
 use serde::Deserialize;
 
-/// lightweight skill info passed at construction time
 #[derive(Debug, Clone)]
 pub struct SkillInfo {
     pub name: String,
@@ -21,94 +14,34 @@ pub struct SkillInfo {
     pub path: PathBuf,
 }
 
-/// shared skill registry for all three tools
 type SkillRegistry = Arc<Vec<SkillInfo>>;
 
-// -- list_skills --
-
-pub struct ListSkillsTool {
-    skills: SkillRegistry,
-}
-
-impl ListSkillsTool {
-    pub fn new(skills: SkillRegistry) -> Self {
-        Self { skills }
-    }
-}
-
-impl AgentTool for ListSkillsTool {
-    fn name(&self) -> &str {
-        "list_skills"
-    }
-    fn label(&self) -> &str {
-        "Skills"
-    }
-    fn description(&self) -> &str {
-        "List available skills with their names and one-line descriptions. \
-         Use this to discover what specialised instructions are available \
-         before loading them."
-    }
-
-    fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {}
-        })
-    }
-
-    fn execute(
-        &self,
-        _args: serde_json::Value,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
-        Box::pin(async move {
-            if self.skills.is_empty() {
-                return ToolResult::text("no skills available");
-            }
-            let listing: String = self
-                .skills
-                .iter()
-                .map(|s| format!("- {}: {}", s.name, s.description))
-                .collect::<Vec<_>>()
-                .join("\n");
-            ToolResult::text(format!(
-                "{} skills available:\n{listing}",
-                self.skills.len()
-            ))
-        })
-    }
-}
-
-// -- describe_skill --
-
-/// shared args for describe_skill and load_skill
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NameArgs {
     name: String,
 }
 
-/// schema for tools that take a skill name
 fn name_param_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "properties": {
             "name": {
                 "type": "string",
-                "description": "skill name (from list_skills)"
+                "description": "skill name from the available skills list"
             }
         },
         "required": ["name"]
     })
 }
 
-/// case-insensitive skill lookup, returns the skill or a not-found error
 fn find_skill<'a>(skills: &'a [SkillInfo], name: &str) -> Result<&'a SkillInfo, ToolResult> {
     let query = name.to_lowercase();
     skills
         .iter()
-        .find(|s| s.name.to_lowercase() == query)
+        .find(|skill| skill.name.to_lowercase() == query)
         .ok_or_else(|| {
-            let available: Vec<_> = skills.iter().map(|s| s.name.as_str()).collect();
+            let available: Vec<_> = skills.iter().map(|skill| skill.name.as_str()).collect();
             ToolResult::error(format!(
                 "skill '{name}' not found. available: {}",
                 available.join(", ")
@@ -116,81 +49,76 @@ fn find_skill<'a>(skills: &'a [SkillInfo], name: &str) -> Result<&'a SkillInfo, 
         })
 }
 
-pub struct DescribeSkillTool {
-    skills: SkillRegistry,
+fn skill_base_dir(path: &Path) -> PathBuf {
+    path.parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| path.to_path_buf())
 }
 
-impl DescribeSkillTool {
-    pub fn new(skills: SkillRegistry) -> Self {
-        Self { skills }
-    }
-}
+fn sample_skill_files(root: &Path, limit: usize) -> Vec<String> {
+    let mut queue = VecDeque::from([root.to_path_buf()]);
+    let mut files = Vec::new();
 
-impl AgentTool for DescribeSkillTool {
-    fn name(&self) -> &str {
-        "describe_skill"
-    }
-    fn label(&self) -> &str {
-        "Skill Info"
-    }
-    fn description(&self) -> &str {
-        "Get detailed information about a specific skill including its \
-         description and file path. Use list_skills first to see available names."
-    }
+    while let Some(dir) = queue.pop_front() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
 
-    fn parameters_schema(&self) -> serde_json::Value {
-        name_param_schema()
-    }
+        let mut entries: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
+        entries.sort();
 
-    fn execute(
-        &self,
-        args: serde_json::Value,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
-        Box::pin(async move {
-            let args = match parse_tool_args::<NameArgs>(args) {
-                Ok(args) => args,
-                Err(error) => return error,
-            };
-
-            match find_skill(&self.skills, &args.name) {
-                Ok(s) => ToolResult::text(format!(
-                    "name: {}\ndescription: {}\npath: {}\n\nuse load_skill to read the full content",
-                    s.name,
-                    s.description,
-                    s.path.display()
-                )),
-                Err(e) => e,
+        for path in entries {
+            if files.len() >= limit {
+                return files;
             }
-        })
+
+            if path.is_dir() {
+                queue.push_back(path);
+                continue;
+            }
+
+            if path.file_name().is_some_and(|name| name == "SKILL.md") {
+                continue;
+            }
+
+            if let Ok(relative) = path.strip_prefix(root) {
+                files.push(relative.to_string_lossy().replace('\\', "/"));
+            }
+        }
     }
+
+    files
 }
 
-// -- load_skill --
-
-pub struct LoadSkillTool {
+pub struct SkillTool {
     skills: SkillRegistry,
 }
 
-impl LoadSkillTool {
+impl SkillTool {
     pub fn new(skills: SkillRegistry) -> Self {
         Self { skills }
     }
 }
 
-impl AgentTool for LoadSkillTool {
+impl AgentTool for SkillTool {
     fn name(&self) -> &str {
-        "load_skill"
+        "skill"
     }
+
     fn label(&self) -> &str {
         "Skill"
     }
+
     fn description(&self) -> &str {
-        "Load the full content of a skill's SKILL.md file. \
-         Use list_skills to see available skills first."
+        "Load a specialised skill with task-specific instructions and bundled resources"
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         name_param_schema()
+    }
+
+    fn output_limit(&self) -> OutputLimit {
+        OutputLimit::SelfManaged
     }
 
     fn execute(
@@ -203,27 +131,48 @@ impl AgentTool for LoadSkillTool {
                 Err(error) => return error,
             };
 
-            let s = match find_skill(&self.skills, &args.name) {
-                Ok(s) => s,
-                Err(e) => return e,
+            let skill = match find_skill(&self.skills, &args.name) {
+                Ok(skill) => skill,
+                Err(error) => return error,
             };
 
-            match std::fs::read_to_string(&s.path) {
-                Ok(content) => ToolResult::text(format!("# skill: {}\n\n{}", s.name, content)),
-                Err(e) => ToolResult::error(format!("failed to read {}: {e}", s.path.display())),
+            let content = match std::fs::read_to_string(&skill.path) {
+                Ok(content) => content,
+                Err(error) => {
+                    return ToolResult::error(format!(
+                        "failed to read {}: {error}",
+                        skill.path.display()
+                    ));
+                }
+            };
+
+            let base_dir = skill_base_dir(&skill.path);
+            let files = sample_skill_files(&base_dir, 10);
+
+            let mut output = format!(
+                "<skill_content name=\"{}\">\n# Skill: {}\n\n{}\n\nBase directory for this skill: {}\nRelative paths in this skill are resolved from this directory",
+                skill.name,
+                skill.name,
+                content.trim(),
+                base_dir.display()
+            );
+
+            if !files.is_empty() {
+                output.push_str("\n\n<skill_files>\n");
+                output.push_str(&files.join("\n"));
+                output.push_str("\n</skill_files>");
             }
+
+            output.push_str("\n</skill_content>");
+
+            ToolResult::text(output)
         })
     }
 }
 
-/// create the three skill tools from a list of skill infos
 pub fn skill_tools(skills: Vec<SkillInfo>) -> Vec<Arc<dyn AgentTool>> {
     let registry: SkillRegistry = Arc::new(skills);
-    vec![
-        Arc::new(ListSkillsTool::new(Arc::clone(&registry))),
-        Arc::new(DescribeSkillTool::new(Arc::clone(&registry))),
-        Arc::new(LoadSkillTool::new(registry)),
-    ]
+    vec![Arc::new(SkillTool::new(registry))]
 }
 
 #[cfg(test)]
@@ -248,86 +197,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_skills_shows_all() {
+    async fn skill_tools_register_single_skill_tool() {
         let tools = skill_tools(test_skills());
-        let result = tools[0].execute(serde_json::json!({})).await;
-        let text = extract_text(&result);
-        assert!(text.contains("2 skills available"));
-        assert!(text.contains("rust-idioms: Rust idioms"));
-        assert!(text.contains("nix: Nix flake"));
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name(), "skill");
     }
 
     #[tokio::test]
-    async fn list_skills_empty() {
-        let tools = skill_tools(vec![]);
-        let result = tools[0].execute(serde_json::json!({})).await;
-        assert_eq!(extract_text(&result), "no skills available");
-    }
-
-    #[tokio::test]
-    async fn describe_skill_found() {
+    async fn skill_tool_not_found_lists_available_skills() {
         let tools = skill_tools(test_skills());
-        let result = tools[1].execute(serde_json::json!({"name": "nix"})).await;
-        let text = extract_text(&result);
-        assert!(text.contains("name: nix"));
-        assert!(text.contains("Nix flake conventions"));
-        assert!(text.contains("use load_skill"));
-    }
-
-    #[tokio::test]
-    async fn describe_skill_case_insensitive() {
-        let tools = skill_tools(test_skills());
-        let result = tools[1]
-            .execute(serde_json::json!({"name": "Rust-Idioms"}))
-            .await;
-        let text = extract_text(&result);
-        assert!(text.contains("name: rust-idioms"));
-    }
-
-    #[tokio::test]
-    async fn describe_skill_not_found() {
-        let tools = skill_tools(test_skills());
-        let result = tools[1]
+        let result = tools[0]
             .execute(serde_json::json!({"name": "docker"}))
             .await;
+        assert_eq!(result.outcome, ToolOutcome::Error);
         let text = extract_text(&result);
         assert!(text.contains("not found"));
         assert!(text.contains("rust-idioms, nix"));
     }
 
     #[tokio::test]
-    async fn load_skill_not_found() {
-        let tools = skill_tools(test_skills());
-        let result = tools[2]
-            .execute(serde_json::json!({"name": "missing"}))
-            .await;
-        assert_eq!(result.outcome, ToolOutcome::Error);
-        assert!(extract_text(&result).contains("not found"));
-    }
-
-    #[tokio::test]
-    async fn load_skill_missing_file() {
-        let tools = skill_tools(test_skills());
-        let result = tools[2].execute(serde_json::json!({"name": "nix"})).await;
-        assert_eq!(result.outcome, ToolOutcome::Error);
-        assert!(extract_text(&result).contains("failed to read"));
-    }
-
-    #[tokio::test]
-    async fn load_skill_reads_file() {
+    async fn skill_tool_loads_content_with_base_dir_and_files() {
         let dir = tempfile::tempdir().unwrap();
-        let skill_path = dir.path().join("SKILL.md");
-        std::fs::write(&skill_path, "# test skill\nsome content").unwrap();
+        let skill_dir = dir.path().join("tool-skill");
+        let skill_path = skill_dir.join("SKILL.md");
+        std::fs::create_dir_all(skill_dir.join("scripts")).unwrap();
+        std::fs::create_dir_all(skill_dir.join("references")).unwrap();
+        std::fs::write(
+            &skill_path,
+            "---\nname: tool-skill\ndescription: Skill for tool tests\n---\n\n# Tool Skill\n\nUse this skill\n",
+        )
+        .unwrap();
+        std::fs::write(skill_dir.join("scripts/demo.txt"), "demo").unwrap();
+        std::fs::write(skill_dir.join("references/notes.md"), "notes").unwrap();
 
-        let skills = vec![SkillInfo {
-            name: "test".into(),
-            description: "a test skill".into(),
+        let tools = skill_tools(vec![SkillInfo {
+            name: "tool-skill".into(),
+            description: "Skill for tool tests".into(),
             path: skill_path,
-        }];
-        let tools = skill_tools(skills);
-        let result = tools[2].execute(serde_json::json!({"name": "test"})).await;
+        }]);
+        let result = tools[0]
+            .execute(serde_json::json!({"name": "tool-skill"}))
+            .await;
         let text = extract_text(&result);
-        assert!(text.contains("# skill: test"));
-        assert!(text.contains("some content"));
+
+        assert!(text.contains("<skill_content name=\"tool-skill\">"));
+        assert!(text.contains("# Skill: tool-skill"));
+        assert!(text.contains("Base directory for this skill:"));
+        assert!(text.contains("<skill_files>"));
+        assert!(text.contains("scripts/demo.txt"));
+        assert!(text.contains("references/notes.md"));
     }
 }
