@@ -90,13 +90,38 @@ fn sample_skill_files(root: &Path, limit: usize) -> Vec<String> {
     files
 }
 
+fn format_skill_tool_description(skills: &[SkillInfo]) -> String {
+    if skills.is_empty() {
+        return "Load a specialised skill with task-specific instructions and bundled resources"
+            .into();
+    }
+
+    let mut listed = skills.to_vec();
+    listed.sort_by(|left, right| left.name.cmp(&right.name));
+
+    let mut description = String::from(
+        "Load a specialised skill with task-specific instructions and bundled resources\n\navailable skills:\n",
+    );
+
+    for skill in listed {
+        description.push_str(&format!("- {}: {}\n", skill.name, skill.description));
+    }
+
+    description.trim_end().to_string()
+}
+
 pub struct SkillTool {
     skills: SkillRegistry,
+    description: String,
 }
 
 impl SkillTool {
     pub fn new(skills: SkillRegistry) -> Self {
-        Self { skills }
+        let description = format_skill_tool_description(skills.as_ref());
+        Self {
+            skills,
+            description,
+        }
     }
 }
 
@@ -110,7 +135,7 @@ impl AgentTool for SkillTool {
     }
 
     fn description(&self) -> &str {
-        "Load a specialised skill with task-specific instructions and bundled resources"
+        &self.description
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -201,6 +226,17 @@ mod tests {
         let tools = skill_tools(test_skills());
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name(), "skill");
+    }
+
+    #[tokio::test]
+    async fn skill_tool_description_lists_available_skills() {
+        let tools = skill_tools(test_skills());
+        let description = tools[0].description();
+
+        assert!(description.contains("available skills"));
+        assert!(description.contains("nix: Nix flake conventions"));
+        assert!(description.contains("rust-idioms: Rust idioms and patterns reference"));
+        assert!(description.find("nix:").unwrap() < description.find("rust-idioms:").unwrap());
     }
 
     #[tokio::test]
