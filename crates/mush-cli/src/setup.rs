@@ -284,8 +284,26 @@ fn format_available_skills(skills: &[loader::Skill]) -> String {
     out
 }
 
-fn explicit_skill_mentions(query: &str, skills: &[loader::Skill]) -> Vec<String> {
-    let mut seen = std::collections::HashSet::new();
+fn is_skill_name_char(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')
+}
+
+fn whole_word_match_positions(query: &str, skill_name: &str) -> Vec<usize> {
+    let mut positions = Vec::new();
+
+    for (start, _) in query.match_indices(skill_name) {
+        let end = start + skill_name.len();
+        let before_ok = start == 0 || !is_skill_name_char(query.as_bytes()[start - 1]);
+        let after_ok = end == query.len() || !is_skill_name_char(query.as_bytes()[end]);
+        if before_ok && after_ok {
+            positions.push(start);
+        }
+    }
+
+    positions
+}
+
+fn explicit_skill_mentions(query: &str, skills: &[loader::Skill]) -> Vec<(usize, String)> {
     let mut matches = Vec::new();
     let bytes = query.as_bytes();
     let mut index = 0;
@@ -298,13 +316,8 @@ fn explicit_skill_mentions(query: &str, skills: &[loader::Skill]) -> Vec<String>
 
         let start = index + 1;
         let mut end = start;
-        while end < bytes.len() {
-            let byte = bytes[end];
-            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_') {
-                end += 1;
-            } else {
-                break;
-            }
+        while end < bytes.len() && is_skill_name_char(bytes[end]) {
+            end += 1;
         }
 
         if end > start {
@@ -312,9 +325,8 @@ fn explicit_skill_mentions(query: &str, skills: &[loader::Skill]) -> Vec<String>
             if let Some(skill) = skills
                 .iter()
                 .find(|skill| skill.name.eq_ignore_ascii_case(mention))
-                && seen.insert(skill.name.to_lowercase())
             {
-                matches.push(skill.name.clone());
+                matches.push((index, skill.name.clone()));
             }
             index = end;
         } else {
@@ -325,14 +337,65 @@ fn explicit_skill_mentions(query: &str, skills: &[loader::Skill]) -> Vec<String>
     matches
 }
 
+fn has_plain_skill_cue(query: &str, start: usize, end: usize) -> bool {
+    const BEFORE_CUES: [&str; 8] = [
+        "use", "using", "with", "follow", "load", "apply", "need", "needs",
+    ];
+    const AFTER_CUES: [&str; 3] = ["skill", "workflow", "instructions"];
+
+    let before_words: Vec<_> = query[..start].split_whitespace().rev().take(3).collect();
+    if before_words.iter().any(|word| BEFORE_CUES.contains(word)) {
+        return true;
+    }
+
+    query[end..]
+        .split_whitespace()
+        .next()
+        .is_some_and(|word| AFTER_CUES.contains(&word))
+}
+
+fn plain_skill_mentions(query: &str, skills: &[loader::Skill]) -> Vec<(usize, String)> {
+    let query = query.to_lowercase();
+    let mut matches = Vec::new();
+
+    for skill in skills {
+        let skill_name = skill.name.to_lowercase();
+        let distinctive = skill_name.contains(['-', '_']) || skill_name.len() > 6;
+        for start in whole_word_match_positions(&query, &skill_name) {
+            let end = start + skill_name.len();
+            if distinctive || has_plain_skill_cue(&query, start, end) {
+                matches.push((start, skill.name.clone()));
+                break;
+            }
+        }
+    }
+
+    matches
+}
+
+fn requested_skill_mentions(query: &str, skills: &[loader::Skill]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut matches = explicit_skill_mentions(query, skills);
+    matches.extend(plain_skill_mentions(query, skills));
+    matches.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+
+    matches
+        .into_iter()
+        .filter_map(|(_, name)| {
+            let key = name.to_lowercase();
+            seen.insert(key).then_some(name)
+        })
+        .collect()
+}
+
 fn explicit_skill_hint(query: &str, skills: &[loader::Skill]) -> Option<String> {
-    let matches = explicit_skill_mentions(query, skills);
+    let matches = requested_skill_mentions(query, skills);
     if matches.is_empty() {
         return None;
     }
 
     Some(format!(
-        "[relevant skills: {}. the user explicitly requested them with $skill-name. use the skill tool to load them before answering.]",
+        "[relevant skills: {}. the user explicitly requested them. use the skill tool to load them before answering.]",
         matches.join(", ")
     ))
 }
@@ -422,25 +485,63 @@ fn build_system_prompt_from_context(
     prompt
 }
 
-/// build file rule callback from `.mush/rules/` directory
-fn build_file_rules(cwd: &std::path::Path) -> Option<mush_agent::FileRuleCallback> {
-    let rules = mush_ext::rules::discover_rules(cwd);
-    if rules.is_empty() {
+fn format_nested_agents(cwd: &std::path::Path, agents: &[loader::AgentsMd]) -> Option<String> {
+    if agents.is_empty() {
         return None;
     }
-    let count = rules.len();
-    let index = std::sync::Arc::new(mush_ext::rules::RuleIndex::new(rules));
-    eprintln!("\x1b[2mfound {count} rule files in .mush/rules/\x1b[0m");
+
+    let text: Vec<_> = agents
+        .iter()
+        .map(|agents| {
+            let path = agents.path.strip_prefix(cwd).unwrap_or(&agents.path);
+            format!("## {}\n{}", path.display(), agents.content.trim())
+        })
+        .collect();
+    Some(text.join("\n\n"))
+}
+
+/// build file context callback from nested AGENTS.md and `.mush/rules/`
+fn build_file_rules(cwd: &std::path::Path) -> Option<mush_agent::FileRuleCallback> {
+    let rules = mush_ext::rules::discover_rules(cwd);
+    let rule_index = if rules.is_empty() {
+        None
+    } else {
+        let count = rules.len();
+        eprintln!("\x1b[2mfound {count} rule files in .mush/rules/\x1b[0m");
+        Some(std::sync::Arc::new(mush_ext::rules::RuleIndex::new(rules)))
+    };
+
+    let cwd = cwd.to_path_buf();
     Some(std::sync::Arc::new(move |path: &std::path::Path| {
-        let matched = index.match_file(path);
-        if matched.is_empty() {
-            return None;
+        let resolved = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            cwd.join(path)
+        };
+
+        let nested_agents = loader::find_nested_agents_md(&cwd, &resolved);
+        let mut parts = Vec::new();
+
+        if let Some(text) = format_nested_agents(&cwd, &nested_agents) {
+            parts.push(text);
         }
-        let text: Vec<_> = matched
-            .iter()
-            .map(|r| format!("## {} rules\n{}", r.name, r.content))
-            .collect();
-        Some(text.join("\n\n"))
+
+        if let Some(index) = &rule_index {
+            let matched = index.match_file(path);
+            if !matched.is_empty() {
+                let text: Vec<_> = matched
+                    .iter()
+                    .map(|rule| format!("## {} rules\n{}", rule.name, rule.content))
+                    .collect();
+                parts.push(text.join("\n\n"));
+            }
+        }
+
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join("\n\n"))
+        }
     }))
 }
 
@@ -934,5 +1035,53 @@ mod tests {
 
         assert!(hint.starts_with("[relevant skills: zeta, alpha."));
         assert!(hint.contains("use the skill tool"));
+    }
+
+    #[test]
+    fn plain_skill_mentions_produce_hint() {
+        let hint = explicit_skill_hint(
+            "please use nix for this flake",
+            &[Skill {
+                name: "nix".into(),
+                description: "nix skill".into(),
+                path: "/tmp/nix/SKILL.md".into(),
+            }],
+        )
+        .unwrap();
+
+        assert!(hint.contains("[relevant skills: nix."));
+    }
+
+    #[test]
+    fn plain_skill_mentions_ignore_substrings() {
+        let hint = explicit_skill_hint(
+            "this unix socket is acting up",
+            &[Skill {
+                name: "nix".into(),
+                description: "nix skill".into(),
+                path: "/tmp/nix/SKILL.md".into(),
+            }],
+        );
+
+        assert!(hint.is_none());
+    }
+
+    #[test]
+    fn file_context_includes_nested_agents_without_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("repo");
+        let nested = cwd.join("src/lib");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(
+            cwd.join("src/AGENTS.md"),
+            "# nested agents\nuse the local workflow\n",
+        )
+        .unwrap();
+
+        let callback = build_file_rules(&cwd).unwrap();
+        let text = callback(std::path::Path::new("src/lib/main.rs")).unwrap();
+
+        assert!(text.contains("nested agents"));
+        assert!(text.contains("use the local workflow"));
     }
 }

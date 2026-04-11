@@ -3,7 +3,7 @@
 //! finds AGENTS.md files and skill directories to build the
 //! system prompt with project context.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// discovered project context from AGENTS.md and skills
 #[derive(Debug, Default)]
@@ -45,6 +45,42 @@ pub fn find_agents_md(cwd: &Path) -> Vec<AgentsMd> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let config_dir = resolve_config_dir();
     find_agents_md_inner(cwd, home.as_deref(), config_dir.as_deref())
+}
+
+/// scan for nested AGENTS.md files between cwd and a target path
+pub fn find_nested_agents_md(cwd: &Path, target: &Path) -> Vec<AgentsMd> {
+    let target_dir = if target.is_dir() {
+        target
+    } else if let Some(parent) = target.parent() {
+        parent
+    } else {
+        return Vec::new();
+    };
+
+    let Ok(relative) = target_dir.strip_prefix(cwd) else {
+        return Vec::new();
+    };
+
+    let mut current = cwd.to_path_buf();
+    let mut results = Vec::new();
+
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            continue;
+        };
+        current.push(name);
+        let agents_path = current.join("AGENTS.md");
+        if agents_path.is_file()
+            && let Ok(content) = std::fs::read_to_string(&agents_path)
+        {
+            results.push(AgentsMd {
+                path: agents_path,
+                content,
+            });
+        }
+    }
+
+    results
 }
 
 /// inner implementation with explicit home and config dir
@@ -343,6 +379,24 @@ more content
         let results = find_agents_md(dir.path());
         assert!(!results.is_empty());
         assert!(results.last().unwrap().content.contains("test agents"));
+    }
+
+    #[test]
+    fn find_nested_agents_md_walks_from_cwd_to_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("repo");
+        let target_dir = cwd.join("src/lib");
+        std::fs::create_dir_all(&target_dir).unwrap();
+        std::fs::write(cwd.join("src/AGENTS.md"), "# src agents").unwrap();
+        std::fs::write(target_dir.join("AGENTS.md"), "# lib agents").unwrap();
+
+        let found = find_nested_agents_md(&cwd, &target_dir.join("main.rs"));
+        let paths: Vec<_> = found.iter().map(|agents| agents.path.clone()).collect();
+
+        assert_eq!(
+            paths,
+            vec![cwd.join("src/AGENTS.md"), target_dir.join("AGENTS.md")]
+        );
     }
 
     #[test]
