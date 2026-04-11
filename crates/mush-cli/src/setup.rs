@@ -85,7 +85,6 @@ impl AppSetup {
                 cwd.clone(),
                 args.output_sink,
                 use_patch,
-                skip_batch,
                 http_client.clone(),
             )
         };
@@ -195,6 +194,11 @@ impl AppSetup {
             for tool in lsp_tool_list {
                 tools.register_shared(std::sync::Arc::from(tool));
             }
+        }
+
+        // add batch tool last so it can dispatch to skill, MCP, LSP tools
+        if !args.no_tools && !skip_batch {
+            mush_tools::add_batch_tool(&mut tools);
         }
 
         Ok(Self {

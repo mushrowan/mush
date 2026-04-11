@@ -39,7 +39,9 @@ pub fn supports_native_parallel_calls(model_id: &str) -> bool {
 
 /// create the full set of built-in tools for a given working directory
 pub fn builtin_tools(cwd: PathBuf, http_client: reqwest::Client) -> ToolRegistry {
-    builtin_tools_with_options(cwd, None, false, false, http_client)
+    let mut tools = builtin_tools_with_options(cwd, None, false, http_client);
+    add_batch_tool(&mut tools);
+    tools
 }
 
 /// create built-in tools with an optional bash output sink for streaming
@@ -48,58 +50,56 @@ pub fn builtin_tools_with_sink(
     output_sink: Option<bash::OutputSink>,
     http_client: reqwest::Client,
 ) -> ToolRegistry {
-    builtin_tools_with_options(cwd, output_sink, false, false, http_client)
+    let mut tools = builtin_tools_with_options(cwd, output_sink, false, http_client);
+    add_batch_tool(&mut tools);
+    tools
 }
 
 /// create built-in tools with all options.
 /// when `use_patch` is true, apply_patch replaces edit + write (for GPT models).
-/// when `skip_batch` is true, the batch tool is omitted (for models with native
-/// parallel tool calls).
+///
+/// does NOT include the batch tool. call `add_batch_tool` after registering
+/// all additional tools (skill, MCP, LSP) so batch can access them all.
 pub fn builtin_tools_with_options(
     cwd: PathBuf,
     output_sink: Option<bash::OutputSink>,
     use_patch: bool,
-    skip_batch: bool,
     http_client: reqwest::Client,
 ) -> ToolRegistry {
-    let make_tools = |cwd: PathBuf| -> ToolRegistry {
-        let bash_tool: SharedTool = {
-            let tool = bash::BashTool::new(cwd.clone());
-            if let Some(ref sink) = output_sink {
-                Arc::new(tool.with_output_sink(sink.clone()))
-            } else {
-                Arc::new(tool)
-            }
-        };
-
-        let mut tools: Vec<SharedTool> = vec![
-            Arc::new(read::ReadTool::new(cwd.clone())),
-            bash_tool,
-            Arc::new(grep::GrepTool::new(cwd.clone())),
-            Arc::new(find::FindTool::new(cwd.clone())),
-            Arc::new(glob::GlobTool::new(cwd.clone())),
-            Arc::new(ls::LsTool::new(cwd.clone())),
-            Arc::new(web_search::WebSearchTool::new(http_client.clone())),
-            Arc::new(web_fetch::WebFetchTool::new(http_client.clone())),
-            Arc::new(notify_user::NotifyUserTool::new()),
-        ];
-
-        if use_patch {
-            tools.push(Arc::new(apply_patch::ApplyPatchTool::new(cwd)));
+    let bash_tool: SharedTool = {
+        let tool = bash::BashTool::new(cwd.clone());
+        if let Some(ref sink) = output_sink {
+            Arc::new(tool.with_output_sink(sink.clone()))
         } else {
-            tools.push(Arc::new(write::WriteTool::new(cwd.clone())));
-            tools.push(Arc::new(edit::EditTool::new(cwd)));
+            Arc::new(tool)
         }
-
-        ToolRegistry::from_shared(tools)
     };
 
-    if skip_batch {
-        make_tools(cwd)
+    let mut tools: Vec<SharedTool> = vec![
+        Arc::new(read::ReadTool::new(cwd.clone())),
+        bash_tool,
+        Arc::new(grep::GrepTool::new(cwd.clone())),
+        Arc::new(find::FindTool::new(cwd.clone())),
+        Arc::new(glob::GlobTool::new(cwd.clone())),
+        Arc::new(ls::LsTool::new(cwd.clone())),
+        Arc::new(web_search::WebSearchTool::new(http_client.clone())),
+        Arc::new(web_fetch::WebFetchTool::new(http_client.clone())),
+        Arc::new(notify_user::NotifyUserTool::new()),
+    ];
+
+    if use_patch {
+        tools.push(Arc::new(apply_patch::ApplyPatchTool::new(cwd)));
     } else {
-        let inner_tools = make_tools(cwd.clone());
-        let mut tools = make_tools(cwd);
-        tools.register_shared(Arc::new(batch::BatchTool::new(inner_tools)));
-        tools
+        tools.push(Arc::new(write::WriteTool::new(cwd.clone())));
+        tools.push(Arc::new(edit::EditTool::new(cwd)));
     }
+
+    ToolRegistry::from_shared(tools)
+}
+
+/// add the batch tool to a registry, giving it access to all currently
+/// registered tools. call this after all tools have been added so batch
+/// can dispatch to skill, MCP, LSP tools etc.
+pub fn add_batch_tool(registry: &mut ToolRegistry) {
+    registry.register_shared(Arc::new(batch::BatchTool::new(registry.clone())));
 }
