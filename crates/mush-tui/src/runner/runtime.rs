@@ -138,6 +138,9 @@ impl RunnerRuntime {
             && let Ok(new_theme) = rx.try_recv()
         {
             tui_config.theme = new_theme;
+            for pane in self.pane_mgr.panes_mut() {
+                pane.app.theme = tui_config.theme.clone();
+            }
             self.pane_mgr.focused_mut().app.status = Some("config reloaded".into());
         }
     }
@@ -225,6 +228,7 @@ fn build_initial_app(tui_config: &TuiConfig, cwd: &Path) -> App {
         .normalize_visible();
     app.thinking_display = tui_config.thinking_display;
     app.show_cost = tui_config.show_cost;
+    app.theme = tui_config.theme.clone();
     app.cache.ttl_secs = if tui_config.cache_timer {
         app::cache_ttl_secs(
             &tui_config.model.provider,

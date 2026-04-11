@@ -88,9 +88,12 @@ pub(super) fn draw_panes(
                 let sep_x = pane.area.x.saturating_sub(1);
                 let is_adjacent_to_focus = i == focused_idx || i == focused_idx + 1;
                 let style = if is_adjacent_to_focus {
-                    ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray)
+                    pane_mgr.panes()[focused_idx]
+                        .app
+                        .theme
+                        .pane_separator_active
                 } else {
-                    ratatui::style::Style::default().fg(ratatui::style::Color::Rgb(50, 50, 50))
+                    pane_mgr.panes()[focused_idx].app.theme.pane_separator
                 };
                 for y in panes_area.y..panes_area.y + panes_area.height {
                     if let Some(cell) = buf.cell_mut(ratatui::layout::Position::new(sep_x, y)) {
@@ -144,7 +147,7 @@ pub(super) fn draw_panes(
         }
 
         if let Some(ref picker) = focused_app.session_picker {
-            widgets::session_picker::render(frame, picker);
+            widgets::session_picker::render(frame, picker, &focused_app.theme);
         }
         if let Some(ref menu) = focused_app.slash_menu {
             let input_h = crate::ui::input_height(&focused_app.input, focused_area.width);
@@ -158,7 +161,7 @@ pub(super) fn draw_panes(
                 crate::widgets::status_bar::status_bar_height(focused_app, focused_area.width)
             };
             let regions = crate::ui::layout(focused_area, input_h, tools_h, status_h);
-            widgets::slash_menu::render(frame, menu, regions.input);
+            widgets::slash_menu::render(frame, menu, regions.input, &focused_app.theme);
         }
     })?;
     Ok(())

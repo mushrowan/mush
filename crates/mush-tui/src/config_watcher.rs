@@ -36,7 +36,7 @@ pub fn watch_config(config_path: PathBuf) -> Option<(RecommendedWatcher, mpsc::R
 fn reload_theme(config_path: &std::path::Path) -> Option<Theme> {
     let content = std::fs::read_to_string(config_path).ok()?;
     let config: ConfigWithTheme = toml::from_str(&content).ok()?;
-    Some(Theme::from_config(&config.theme))
+    Some(crate::theme::auto_theme(&config.theme))
 }
 
 /// minimal config struct just for extracting the theme section

@@ -4,7 +4,7 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Modifier};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
@@ -28,6 +28,7 @@ impl Widget for TabBar<'_> {
         }
 
         let focused_idx = self.pane_mgr.focused_index();
+        let theme = &self.pane_mgr.panes()[focused_idx].app.theme;
         let mut spans = Vec::new();
 
         for (i, pane) in self.pane_mgr.panes().iter().enumerate() {
@@ -45,16 +46,16 @@ impl Widget for TabBar<'_> {
             };
 
             let style = if is_focused {
-                Style::default()
-                    .fg(Color::Black)
+                theme
+                    .tab_active
                     .bg(Color::White)
                     .add_modifier(Modifier::BOLD)
             } else if pane.app.has_unread {
-                Style::default().fg(Color::Yellow)
+                theme.unread
             } else if pane.app.is_busy() {
-                Style::default().fg(Color::Cyan)
+                theme.tab_busy
             } else {
-                Style::default().fg(Color::DarkGray)
+                theme.tab_inactive
             };
 
             spans.push(Span::styled(text, style));

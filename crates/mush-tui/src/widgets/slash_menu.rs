@@ -3,14 +3,15 @@
 //! renders a popup above the input box showing matching commands with descriptions
 
 use crate::app::SlashMenuState;
+use crate::theme::Theme;
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding};
 
 /// render the slash menu as a popup above the input area
-pub fn render(frame: &mut Frame, menu: &SlashMenuState, input_area: Rect) {
+pub fn render(frame: &mut Frame, menu: &SlashMenuState, input_area: Rect, theme: &Theme) {
     let item_count = if menu.model_mode {
         menu.model_matches.len()
     } else {
@@ -28,7 +29,7 @@ pub fn render(frame: &mut Frame, menu: &SlashMenuState, input_area: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray))
+        .border_style(theme.input_border)
         .padding(Padding::horizontal(1));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
@@ -53,13 +54,10 @@ pub fn render(frame: &mut Frame, menu: &SlashMenuState, input_area: Rect) {
             let is_selected = i == menu.selected;
 
             let id_style = if is_selected {
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
+                theme.picker_selected.add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::White)
+                Style::default()
             };
-            let name_style = Style::default().fg(Color::DarkGray);
             let prefix = if is_selected { "▸ " } else { "  " };
 
             let id_text = format!("/model {}", model.id);
@@ -69,7 +67,7 @@ pub fn render(frame: &mut Frame, menu: &SlashMenuState, input_area: Rect) {
                 Span::styled(prefix, id_style),
                 Span::styled(id_text, id_style),
                 Span::raw(" ".repeat(pad)),
-                Span::styled(&model.name, name_style),
+                Span::styled(&model.name, theme.menu_description),
             ]));
         }
     } else {
@@ -77,13 +75,10 @@ pub fn render(frame: &mut Frame, menu: &SlashMenuState, input_area: Rect) {
             let is_selected = i == menu.selected;
 
             let name_style = if is_selected {
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
+                theme.picker_selected.add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::White)
+                Style::default()
             };
-            let desc_style = Style::default().fg(Color::DarkGray);
             let prefix = if is_selected { "▸ " } else { "  " };
 
             let name_text = format!("/{}", cmd.name);
@@ -93,7 +88,7 @@ pub fn render(frame: &mut Frame, menu: &SlashMenuState, input_area: Rect) {
                 Span::styled(prefix, name_style),
                 Span::styled(name_text, name_style),
                 Span::raw(" ".repeat(pad)),
-                Span::styled(&cmd.description, desc_style),
+                Span::styled(&cmd.description, theme.menu_description),
             ]));
         }
     }

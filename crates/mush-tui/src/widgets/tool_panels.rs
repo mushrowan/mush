@@ -2,13 +2,14 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget, Wrap};
 
 use throbber_widgets_tui::{BRAILLE_SIX, Throbber, ThrobberState, WhichUse};
 
 use crate::app::{ActiveToolState, ToolCallStatus};
+use crate::theme::Theme;
 
 /// minimum width per tool panel before stacking vertically
 const MIN_PANEL_WIDTH: u16 = 30;
@@ -17,13 +18,19 @@ const MIN_PANEL_WIDTH: u16 = 30;
 pub struct ToolPanels<'a> {
     tools: &'a [ActiveToolState],
     throbber_state: &'a ThrobberState,
+    theme: &'a Theme,
 }
 
 impl<'a> ToolPanels<'a> {
-    pub fn new(tools: &'a [ActiveToolState], throbber_state: &'a ThrobberState) -> Self {
+    pub fn new(
+        tools: &'a [ActiveToolState],
+        throbber_state: &'a ThrobberState,
+        theme: &'a Theme,
+    ) -> Self {
         Self {
             tools,
             throbber_state,
+            theme,
         }
     }
 }
@@ -44,7 +51,7 @@ impl Widget for ToolPanels<'_> {
                 (0..n).map(|_| Constraint::Ratio(1, n as u32)).collect();
             let cols = Layout::horizontal(&constraints).split(area);
             for (i, tool) in self.tools.iter().enumerate() {
-                render_panel(tool, self.throbber_state, cols[i], buf);
+                render_panel(tool, self.throbber_state, self.theme, cols[i], buf);
             }
         } else {
             // stack vertically, divide height equally
@@ -52,7 +59,7 @@ impl Widget for ToolPanels<'_> {
                 (0..n).map(|_| Constraint::Ratio(1, n as u32)).collect();
             let rows = Layout::vertical(&constraints).split(area);
             for (i, tool) in self.tools.iter().enumerate() {
-                render_panel(tool, self.throbber_state, rows[i], buf);
+                render_panel(tool, self.throbber_state, self.theme, rows[i], buf);
             }
         }
     }
@@ -61,6 +68,7 @@ impl Widget for ToolPanels<'_> {
 fn render_panel(
     tool: &ActiveToolState,
     throbber_state: &ThrobberState,
+    theme: &Theme,
     area: Rect,
     buf: &mut Buffer,
 ) {
@@ -71,17 +79,20 @@ fn render_panel(
                 .use_type(WhichUse::Spin);
             let spinner = throbber.to_symbol_span(throbber_state);
             (
-                spinner.style(Style::default().fg(Color::Cyan)),
-                Color::DarkGray,
+                spinner.style(theme.tool_running),
+                theme
+                    .input_border
+                    .fg
+                    .unwrap_or(ratatui::style::Color::DarkGray),
             )
         }
         ToolCallStatus::Done => (
-            Span::styled("✓", Style::default().fg(Color::Green)),
-            Color::Green,
+            Span::styled("✓", theme.tool_done),
+            theme.tool_done.fg.unwrap_or(ratatui::style::Color::Green),
         ),
         ToolCallStatus::Error => (
-            Span::styled("✗", Style::default().fg(Color::Red)),
-            Color::Red,
+            Span::styled("✗", theme.tool_error),
+            theme.tool_error.fg.unwrap_or(ratatui::style::Color::Red),
         ),
     };
 
@@ -110,14 +121,10 @@ fn render_panel(
         return;
     }
 
-    let dim = Style::default()
-        .fg(Color::DarkGray)
-        .add_modifier(Modifier::DIM);
-
     let mut lines: Vec<Line<'_>> = Vec::new();
 
     // summary line (args)
-    lines.push(Line::styled(tool.summary.as_str(), dim));
+    lines.push(Line::styled(tool.summary.as_str(), theme.dim));
 
     // show output: live output for running, final output for done
     let output = match tool.status {
@@ -128,11 +135,11 @@ fn render_panel(
         lines.push(Line::raw(""));
         for line in text.lines() {
             let style = if line.starts_with("+ ") {
-                Style::default().fg(Color::Green)
+                theme.diff_added
             } else if line.starts_with("- ") {
-                Style::default().fg(Color::Red)
+                theme.diff_removed
             } else {
-                dim
+                theme.dim
             };
             lines.push(Line::styled(line, style));
         }
@@ -169,12 +176,13 @@ mod tests {
 
     fn render_panels(tools: &[ActiveToolState], width: u16, height: u16) -> Buffer {
         let state = ThrobberState::default();
+        let theme = Theme::default();
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| {
                 let area = frame.area();
-                frame.render_widget(ToolPanels::new(tools, &state), area);
+                frame.render_widget(ToolPanels::new(tools, &state, &theme), area);
             })
             .unwrap();
         terminal.backend().buffer().clone()

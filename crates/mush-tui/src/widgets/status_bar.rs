@@ -2,7 +2,6 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
@@ -37,9 +36,7 @@ fn confirm_text(app: &App) -> Option<String> {
 
 /// build the left-side info spans
 fn left_spans(app: &App) -> Vec<Span<'static>> {
-    let dim = Style::default()
-        .fg(Color::DarkGray)
-        .add_modifier(Modifier::DIM);
+    let dim = app.theme.dim;
 
     let thinking_label = match app.thinking_level.normalize_visible() {
         ThinkingLevel::Off => "off",
@@ -56,21 +53,21 @@ fn left_spans(app: &App) -> Vec<Span<'static>> {
     if let Some((pane_idx, pane_count)) = app.pane_info {
         spans.push(Span::styled(
             format!("[{pane_idx}/{pane_count}] "),
-            Style::default().fg(Color::Cyan),
+            app.theme.status_model,
         ));
     }
 
     let sep = Span::styled(" │ ", dim);
 
     spans.extend([
-        Span::styled(app.model_id.to_string(), Style::default().fg(Color::Cyan)),
+        Span::styled(app.model_id.to_string(), app.theme.status_model),
         sep.clone(),
         Span::styled(
             format!("thinking: {thinking_label}"),
             if app.thinking_level == ThinkingLevel::Off {
                 dim
             } else {
-                Style::default().fg(Color::Cyan)
+                app.theme.status_model
             },
         ),
     ]);
@@ -112,15 +109,15 @@ fn left_spans(app: &App) -> Vec<Span<'static>> {
         let cache_remaining = app.cache.remaining_secs();
         let ctx_style = if pct > 75 {
             // context pressure always takes priority
-            Style::default().fg(Color::Red)
+            app.theme.context_danger
         } else if app.cache.ttl_secs == 0 {
             // caching disabled for this provider/retention
             dim
         } else {
             match cache_remaining {
-                Some(r) if r > crate::app::CACHE_WARN_SECS => Style::default().fg(Color::Green),
-                Some(r) if r > 0 => Style::default().fg(Color::Yellow),
-                Some(0) => Style::default().fg(Color::DarkGray),
+                Some(r) if r > crate::app::CACHE_WARN_SECS => app.theme.context_ok,
+                Some(r) if r > 0 => app.theme.context_warn,
+                Some(0) => app.theme.context_cold,
                 _ => dim,
             }
         };
@@ -189,7 +186,7 @@ fn left_spans(app: &App) -> Vec<Span<'static>> {
         spans.push(sep.clone());
         spans.push(Span::styled(
             format!("scroll: {unit_label} (b)"),
-            Style::default().fg(Color::Blue),
+            app.theme.scroll_indicator,
         ));
     }
 
@@ -202,20 +199,14 @@ fn left_spans(app: &App) -> Vec<Span<'static>> {
             // scroll_offset is lines from bottom, convert to percentage from top
             let from_top = max_scroll.saturating_sub(app.scroll_offset);
             let pct = (from_top as f64 / max_scroll as f64 * 100.0) as u16;
-            spans.push(Span::styled(
-                format!(" {pct}%"),
-                Style::default().fg(Color::Blue),
-            ));
+            spans.push(Span::styled(format!(" {pct}%"), app.theme.scroll_indicator));
         }
     }
 
     // background pane alerts
     if let Some(ref alert) = app.background_alert {
         spans.push(sep.clone());
-        spans.push(Span::styled(
-            alert.clone(),
-            Style::default().fg(Color::Yellow),
-        ));
+        spans.push(Span::styled(alert.clone(), app.theme.alert));
     }
 
     spans
@@ -250,9 +241,7 @@ impl<'a> StatusBar<'a> {
 
 impl Widget for StatusBar<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let dim = Style::default()
-            .fg(Color::DarkGray)
-            .add_modifier(Modifier::DIM);
+        let dim = self.app.theme.dim;
 
         let mut spans = left_spans(self.app);
         let right_text = truncate_path(&self.app.cwd, 30);
@@ -265,15 +254,12 @@ impl Widget for StatusBar<'_> {
             let padding = (area.width as usize).saturating_sub(left_len + right_text.len() + 1);
             if padding > 0 {
                 spans.push(Span::styled(" ".repeat(padding), dim));
-                spans.push(Span::styled(
-                    right_text,
-                    Style::default().fg(Color::DarkGray),
-                ));
+                spans.push(Span::styled(right_text, self.app.theme.status_dim));
             }
             let line1 = Line::from(spans);
             let line2 = Line::from(vec![
                 Span::styled(" ", dim),
-                Span::styled(confirm_str.clone(), Style::default().fg(Color::Yellow)),
+                Span::styled(confirm_str.clone(), self.app.theme.confirm),
             ]);
             Paragraph::new(vec![line1, line2]).render(area, buf);
             return;
@@ -283,10 +269,7 @@ impl Widget for StatusBar<'_> {
         let padding = (area.width as usize).saturating_sub(left_len + right_text.len() + 1);
         if padding > 0 {
             spans.push(Span::styled(" ".repeat(padding), dim));
-            spans.push(Span::styled(
-                right_text,
-                Style::default().fg(Color::DarkGray),
-            ));
+            spans.push(Span::styled(right_text, self.app.theme.status_dim));
         }
 
         Paragraph::new(Line::from(spans)).render(area, buf);

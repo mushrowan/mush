@@ -766,6 +766,8 @@ pub struct App {
     current_tool_batch: u32,
     /// oauth usage data (5h and 7d rolling windows)
     pub oauth_usage: Option<mush_ai::oauth::usage::OAuthUsage>,
+    /// colour theme for all widgets
+    pub theme: crate::theme::Theme,
 }
 
 /// position computed during render for inline image overlay
@@ -876,6 +878,7 @@ impl App {
             cache: CacheTimer::new(300),
             current_tool_batch: 0,
             oauth_usage: None,
+            theme: crate::theme::Theme::default(),
         }
     }
 

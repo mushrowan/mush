@@ -4,15 +4,17 @@ use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use mush_ai::types::ImageMimeType;
 use mush_tui::app::{IMAGE_PLACEHOLDER, InputBuffer, PendingImage};
 use mush_tui::markdown;
+use mush_tui::theme::Theme;
 use mush_tui::ui;
 use mush_tui::widgets::input_box::benchmark_build_input_layout;
 
 fn bench_markdown(c: &mut Criterion) {
     let source = markdown_fixture();
+    let theme = Theme::default();
     let mut group = c.benchmark_group("markdown");
     group.throughput(Throughput::Bytes(source.len() as u64));
     group.bench_function("render_large", |b| {
-        b.iter(|| markdown::render(black_box(source.as_str())))
+        b.iter(|| markdown::render(black_box(source.as_str()), black_box(&theme)))
     });
     group.finish();
 }
@@ -22,26 +24,27 @@ fn bench_code_blocks(c: &mut Criterion) {
     let rust_large_source = rust_code_block_fixture(96);
     let plain_source = plain_code_block_fixture(96);
     let unknown_source = unknown_code_block_fixture(96);
+    let theme = Theme::default();
     let mut group = c.benchmark_group("code_block");
 
     group.throughput(Throughput::Bytes(rust_small_source.len() as u64));
     group.bench_function("render_rust_small", |b| {
-        b.iter(|| markdown::render(black_box(rust_small_source.as_str())))
+        b.iter(|| markdown::render(black_box(rust_small_source.as_str()), black_box(&theme)))
     });
 
     group.throughput(Throughput::Bytes(rust_large_source.len() as u64));
     group.bench_function("render_rust_large", |b| {
-        b.iter(|| markdown::render(black_box(rust_large_source.as_str())))
+        b.iter(|| markdown::render(black_box(rust_large_source.as_str()), black_box(&theme)))
     });
 
     group.throughput(Throughput::Bytes(plain_source.len() as u64));
     group.bench_function("render_plain", |b| {
-        b.iter(|| markdown::render(black_box(plain_source.as_str())))
+        b.iter(|| markdown::render(black_box(plain_source.as_str()), black_box(&theme)))
     });
 
     group.throughput(Throughput::Bytes(unknown_source.len() as u64));
     group.bench_function("render_unknown", |b| {
-        b.iter(|| markdown::render(black_box(unknown_source.as_str())))
+        b.iter(|| markdown::render(black_box(unknown_source.as_str()), black_box(&theme)))
     });
 
     group.finish();

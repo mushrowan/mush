@@ -13,6 +13,7 @@ use mush_ai::types::TokenCount;
 use crate::app::{
     App, DisplayMessage, DisplayToolCall, ImageRenderArea, MessageRole, ToolCallStatus,
 };
+use crate::theme::Theme;
 
 /// renders the full message list including any active stream
 pub struct MessageList<'a> {
@@ -56,9 +57,7 @@ impl Widget for MessageList<'_> {
 
         // streaming content
         if self.app.stream.active {
-            let dim = Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::DIM);
+            let dim = self.app.theme.dim;
             let throbber = Throbber::default()
                 .throbber_set(BRAILLE_SIX)
                 .use_type(WhichUse::Spin);
@@ -106,9 +105,9 @@ impl Widget for MessageList<'_> {
             let preview = truncate_line(&self.app.stream.tool_args, 60);
             lines.push(Line::from(vec![
                 Span::raw(" "),
-                spinner_span.style(Style::default().fg(Color::DarkGray)),
-                Span::styled(" building ", Style::default().fg(Color::DarkGray)),
-                Span::styled(preview, Style::default().fg(Color::DarkGray)),
+                spinner_span.style(self.app.theme.dim),
+                Span::styled(" building ", self.app.theme.dim),
+                Span::styled(preview, self.app.theme.dim),
             ]));
         }
 
@@ -251,12 +250,12 @@ fn render_message(
     if matches!(msg.role, MessageRole::System) {
         let mut label_spans = Vec::new();
         if sel.selected {
-            label_spans.push(Span::styled("▌ ", Style::default().fg(Color::Cyan)));
+            label_spans.push(Span::styled("▌ ", app.theme.selection_marker));
         }
-        label_spans.push(Span::styled("system", Style::default().fg(Color::Yellow)));
+        label_spans.push(Span::styled("system", app.theme.system_label));
         lines.push(Line::from(label_spans));
     } else if sel.selected {
-        let mut hint_spans = vec![Span::styled("▌", Style::default().fg(Color::Cyan))];
+        let mut hint_spans = vec![Span::styled("▌", app.theme.selection_marker)];
         if sel.is_cursor {
             let hint = if app.scroll_unit == crate::app::ScrollUnit::Block {
                 " (y to copy block, b for messages)"
@@ -265,7 +264,7 @@ fn render_message(
             } else {
                 " (v to select, y to copy)"
             };
-            hint_spans.push(Span::styled(hint, Style::default().fg(Color::DarkGray)));
+            hint_spans.push(Span::styled(hint, app.theme.scroll_hint));
         }
         lines.push(Line::from(hint_spans));
     }
@@ -274,12 +273,7 @@ fn render_message(
     if let Some(ref thinking) = msg.thinking {
         if msg.thinking_expanded {
             for line in thinking.lines() {
-                lines.push(Line::styled(
-                    format!(" {line}"),
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .add_modifier(Modifier::DIM),
-                ));
+                lines.push(Line::styled(format!(" {line}"), app.theme.dim));
             }
         } else {
             let preview = thinking.lines().next().unwrap_or("...");
@@ -290,32 +284,16 @@ fn render_message(
                 preview.to_string()
             };
             lines.push(Line::from(vec![
-                Span::styled(" 💭 ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    trimmed,
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .add_modifier(Modifier::DIM),
-                ),
-                Span::styled(
-                    " [ctrl+o]",
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .add_modifier(Modifier::DIM),
-                ),
+                Span::styled(" 💭 ", app.theme.thinking),
+                Span::styled(trimmed, app.theme.dim),
+                Span::styled(" [ctrl+o]", app.theme.dim),
             ]));
         }
     }
 
-    // user messages get a subtle background (#343541, same as pi)
-    // padded to full width so the bg spans the entire line
-    let user_bg = Style::default().bg(Color::Rgb(52, 53, 65));
-
     // main content (markdown rendered)
     if msg.queued {
-        let dim = Style::default()
-            .fg(Color::DarkGray)
-            .add_modifier(Modifier::DIM);
+        let dim = app.theme.dim;
         for line in msg.content.lines() {
             lines.push(Line::styled(format!(" {line}"), dim));
         }
@@ -324,17 +302,23 @@ fn render_message(
         // 1-space indent, so content wraps within w-1 chars
         let content_width = w.saturating_sub(1);
         // blank padding line above
-        lines.push(Line::from(Span::styled(" ".repeat(w), user_bg)));
+        lines.push(Line::from(Span::styled(
+            " ".repeat(w),
+            app.theme.user_msg_bg,
+        )));
         for line in msg.content.lines() {
             for wrapped in wrap_text(line, content_width) {
                 let text = format!(" {wrapped}");
                 let pad = w.saturating_sub(text.chars().count());
                 let padded = format!("{text}{}", " ".repeat(pad));
-                lines.push(Line::from(Span::styled(padded, user_bg)));
+                lines.push(Line::from(Span::styled(padded, app.theme.user_msg_bg)));
             }
         }
         // blank padding line below
-        lines.push(Line::from(Span::styled(" ".repeat(w), user_bg)));
+        lines.push(Line::from(Span::styled(
+            " ".repeat(w),
+            app.theme.user_msg_bg,
+        )));
     } else {
         // determine if a code block in this message is selected
         let highlight_block = if app.mode == crate::app::AppMode::Scroll
@@ -371,7 +355,7 @@ fn render_message(
                 && i >= start
                 && i < end
             {
-                rendered = rendered.style(Style::default().bg(BLOCK_HIGHLIGHT_BG));
+                rendered = rendered.style(Style::default().bg(app.theme.block_highlight_bg));
             }
             lines.push(rendered);
         }
@@ -411,6 +395,7 @@ fn render_message(
             &group.iter().map(|(_, tc)| *tc).collect::<Vec<_>>(),
             width,
             lines,
+            &app.theme,
         );
 
         // after the boxes, render any image placeholders
@@ -418,12 +403,7 @@ fn render_message(
             if tc.image_data.is_some() {
                 lines.push(Line::from(vec![
                     Span::styled("    📷 ", Style::default()),
-                    Span::styled(
-                        "image",
-                        Style::default()
-                            .fg(Color::Magenta)
-                            .add_modifier(Modifier::ITALIC),
-                    ),
+                    Span::styled("image", app.theme.image_label),
                 ]));
                 for _ in 1..IMAGE_HEIGHT {
                     lines.push(Line::raw(""));
@@ -451,12 +431,7 @@ fn render_message(
             if let Some(c) = msg.cost {
                 parts.push(format!("{c}"));
             }
-            lines.push(Line::styled(
-                parts.join(" | "),
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::DIM),
-            ));
+            lines.push(Line::styled(parts.join(" | "), app.theme.usage));
         }
     }
 }
@@ -484,7 +459,7 @@ fn render_markdown_cached(app: &App, source: &str) -> Text<'static> {
         return cached;
     }
 
-    let rendered = crate::markdown::render(source);
+    let rendered = crate::markdown::render(source, &app.theme);
     app.markdown_cache
         .borrow_mut()
         .insert(source.to_string(), rendered.clone());
@@ -502,7 +477,7 @@ fn render_streaming_markdown_cached(app: &App, source: &str) -> Text<'static> {
         return cached.clone();
     }
 
-    let rendered = crate::markdown::render(source);
+    let rendered = crate::markdown::render(source, &app.theme);
     *app.stream_markdown_cache.borrow_mut() = Some((source.to_string(), rendered.clone()));
     rendered
 }
@@ -516,7 +491,12 @@ const BOX_INDENT: usize = 1;
 const MIN_TOOL_BOX_WIDTH: u16 = 30;
 
 /// render a group of completed tool calls (same batch) as bordered boxes
-fn render_tool_box_group(tools: &[&DisplayToolCall], total_width: u16, lines: &mut Vec<Line<'_>>) {
+fn render_tool_box_group(
+    tools: &[&DisplayToolCall],
+    total_width: u16,
+    lines: &mut Vec<Line<'_>>,
+    theme: &Theme,
+) {
     let usable = total_width.saturating_sub(BOX_INDENT as u16);
     if usable < 8 || tools.is_empty() {
         return;
@@ -526,21 +506,24 @@ fn render_tool_box_group(tools: &[&DisplayToolCall], total_width: u16, lines: &m
     let side_by_side = n > 1 && usable / n as u16 >= MIN_TOOL_BOX_WIDTH;
 
     if side_by_side {
-        render_side_by_side_boxes(tools, usable as usize, lines);
+        render_side_by_side_boxes(tools, usable as usize, lines, theme);
     } else {
         for tool in tools {
-            render_single_tool_box(tool, usable as usize, lines);
+            render_single_tool_box(tool, usable as usize, lines, theme);
         }
     }
 }
 
 /// render one completed tool as a bordered box
-fn render_single_tool_box(tc: &DisplayToolCall, width: usize, lines: &mut Vec<Line<'_>>) {
-    let (icon, colour) = tool_icon_colour(tc);
+fn render_single_tool_box(
+    tc: &DisplayToolCall,
+    width: usize,
+    lines: &mut Vec<Line<'_>>,
+    theme: &Theme,
+) {
+    let (icon, colour) = tool_icon_colour(tc, theme);
     let border = Style::default().fg(colour);
-    let dim = Style::default()
-        .fg(Color::DarkGray)
-        .add_modifier(Modifier::DIM);
+    let dim = theme.dim;
 
     // title: " ✓ name "
     let title_text = format!(" {icon} {} ", tc.name);
@@ -574,7 +557,7 @@ fn render_single_tool_box(tc: &DisplayToolCall, width: usize, lines: &mut Vec<Li
                 text_line,
                 inner,
                 border,
-                diff_line_style(text_line, dim),
+                diff_line_style(text_line, theme),
                 &indent,
                 lines,
             );
@@ -591,7 +574,12 @@ fn render_single_tool_box(tc: &DisplayToolCall, width: usize, lines: &mut Vec<Li
 }
 
 /// render parallel tools side-by-side in a shared bordered box
-fn render_side_by_side_boxes(tools: &[&DisplayToolCall], width: usize, lines: &mut Vec<Line<'_>>) {
+fn render_side_by_side_boxes(
+    tools: &[&DisplayToolCall],
+    width: usize,
+    lines: &mut Vec<Line<'_>>,
+    theme: &Theme,
+) {
     let n = tools.len();
     // each panel width (including its borders): divide evenly
     // total = panel_w * n + (n-1) separators... but we share borders
@@ -601,18 +589,18 @@ fn render_side_by_side_boxes(tools: &[&DisplayToolCall], width: usize, lines: &m
     let panel_inner = inner_total / n;
     let remainder = inner_total % n;
 
-    let dim = Style::default()
-        .fg(Color::DarkGray)
-        .add_modifier(Modifier::DIM);
     let indent = Span::raw(" ".repeat(BOX_INDENT));
 
     // determine border colour per panel
-    let colours: Vec<Color> = tools.iter().map(|tc| tool_icon_colour(tc).1).collect();
+    let colours: Vec<Color> = tools
+        .iter()
+        .map(|tc| tool_icon_colour(tc, theme).1)
+        .collect();
 
     // -- top border --
     let mut top_spans = vec![indent.clone()];
     for (i, tc) in tools.iter().enumerate() {
-        let (icon, colour) = tool_icon_colour(tc);
+        let (icon, colour) = tool_icon_colour(tc, theme);
         let border = Style::default().fg(colour);
         let corner = if i == 0 { "┌─" } else { "┬─" };
         let title = format!(" {icon} {} ", tc.name);
@@ -671,7 +659,7 @@ fn render_side_by_side_boxes(tools: &[&DisplayToolCall], width: usize, lines: &m
             spans.push(Span::styled("│", border));
 
             let text = content.get(row).map(|s| s.as_str()).unwrap_or("");
-            let style = diff_line_style(text, dim);
+            let style = diff_line_style(text, theme);
             let used = text.chars().count() + 1; // +1 for leading space
             let pad = pw.saturating_sub(used);
             spans.push(Span::styled(format!(" {text}"), style));
@@ -784,27 +772,24 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
 }
 
 /// get icon and colour for a completed tool call
-fn tool_icon_colour(tc: &DisplayToolCall) -> (&'static str, Color) {
+fn tool_icon_colour(tc: &DisplayToolCall, theme: &Theme) -> (&'static str, Color) {
     match tc.status {
-        ToolCallStatus::Done => ("✓", Color::Green),
-        ToolCallStatus::Error => ("✗", Color::Red),
-        ToolCallStatus::Running => ("⣾", Color::Cyan),
+        ToolCallStatus::Done => ("✓", theme.tool_done.fg.unwrap_or(Color::Green)),
+        ToolCallStatus::Error => ("✗", theme.tool_error.fg.unwrap_or(Color::Red)),
+        ToolCallStatus::Running => ("⣾", theme.tool_running.fg.unwrap_or(Color::Cyan)),
     }
 }
 
 /// style for a line of tool output (diff-aware)
-fn diff_line_style(line: &str, fallback: Style) -> Style {
+fn diff_line_style(line: &str, theme: &Theme) -> Style {
     if line.starts_with("+ ") {
-        Style::default().fg(Color::Green)
+        theme.diff_added
     } else if line.starts_with("- ") {
-        Style::default().fg(Color::Red)
+        theme.diff_removed
     } else {
-        fallback
+        theme.dim
     }
 }
-
-/// background for highlighted code block in scroll mode
-const BLOCK_HIGHLIGHT_BG: Color = Color::Rgb(30, 40, 60);
 
 /// compute rendered-line ranges for each fenced code block in source
 /// returns (start, end) where start is inclusive, end is exclusive
