@@ -610,13 +610,14 @@ fn render_side_by_side_boxes(tools: &[&DisplayToolCall], width: usize, lines: &m
         .enumerate()
         .map(|(i, tc)| {
             let pw = panel_inner + if i < remainder { 1 } else { 0 };
+            let text_width = pw.saturating_sub(1); // reserve 1 for leading space
             let mut content = Vec::new();
-            for wrapped in wrap_text(&tc.summary, pw) {
+            for wrapped in wrap_text(&tc.summary, text_width) {
                 content.push(wrapped);
             }
             if let Some(ref output) = tc.output_preview {
                 for line in output.lines() {
-                    for wrapped in wrap_text(line, pw) {
+                    for wrapped in wrap_text(line, text_width) {
                         content.push(wrapped);
                     }
                 }
@@ -636,7 +637,8 @@ fn render_side_by_side_boxes(tools: &[&DisplayToolCall], width: usize, lines: &m
 
             let text = content.get(row).map(|s| s.as_str()).unwrap_or("");
             let style = diff_line_style(text, dim);
-            let pad = pw.saturating_sub(text.chars().count());
+            let used = text.chars().count() + 1; // +1 for leading space
+            let pad = pw.saturating_sub(used);
             spans.push(Span::styled(format!(" {text}"), style));
             spans.push(Span::raw(" ".repeat(pad)));
         }
@@ -1020,6 +1022,73 @@ mod tests {
         );
         assert!(content.contains("a.rs"), "missing first tool summary");
         assert!(content.contains("b.rs"), "missing second tool summary");
+    }
+
+    #[test]
+    fn side_by_side_box_lines_have_equal_width() {
+        // regression: content rows were 1 char wider per panel than borders
+        // because the leading space in " {text}" wasn't accounted for in padding
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.messages.push(DisplayMessage {
+            tool_calls: vec![
+                crate::app::DisplayToolCall {
+                    name: "read".into(),
+                    summary: "file.rs".into(),
+                    status: ToolCallStatus::Done,
+                    output_preview: Some("L1: hello\nL2: world".into()),
+                    image_data: None,
+                    batch: 1,
+                },
+                crate::app::DisplayToolCall {
+                    name: "read".into(),
+                    summary: "other.rs".into(),
+                    status: ToolCallStatus::Done,
+                    output_preview: Some("L1: foo\nL2: bar".into()),
+                    image_data: None,
+                    batch: 1,
+                },
+            ],
+            ..DisplayMessage::new(MessageRole::Assistant, "reading files")
+        });
+        let buf = render_app(&app, 100, 20);
+        let content = buffer_to_string(&buf);
+
+        // find lines that belong to the box (contain box-drawing chars)
+        let box_lines: Vec<&str> = content
+            .lines()
+            .filter(|l| {
+                let t = l.trim();
+                t.starts_with('┌') || t.starts_with('│') || t.starts_with('└')
+            })
+            .collect();
+
+        assert!(
+            box_lines.len() >= 3,
+            "expected at least top + content + bottom, got {}",
+            box_lines.len()
+        );
+
+        // find the char-column of the rightmost non-whitespace on each line
+        let right_edges: Vec<usize> = box_lines
+            .iter()
+            .map(|l| {
+                l.chars()
+                    .collect::<Vec<_>>()
+                    .iter()
+                    .rposition(|c| !c.is_whitespace())
+                    .map(|pos| pos + 1)
+                    .unwrap_or(0)
+            })
+            .collect();
+
+        let first = right_edges[0];
+        for (i, &edge) in right_edges.iter().enumerate() {
+            assert_eq!(
+                edge, first,
+                "box line {i} right edge at col {edge} != expected {first}\n  line: {:?}\n  all edges: {right_edges:?}",
+                box_lines[i]
+            );
+        }
     }
 
     #[test]
