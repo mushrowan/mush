@@ -182,6 +182,15 @@ fn handle_idle_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             if !app.messages.is_empty() {
                 app.selected_message = Some(app.messages.len() - 1);
             }
+            // initialise block selection when entering in block mode
+            if app.scroll_unit == crate::app::ScrollUnit::Block {
+                let blocks = app.code_blocks();
+                app.selected_block = if blocks.is_empty() {
+                    None
+                } else {
+                    Some(blocks.len() - 1)
+                };
+            }
             None
         }
 
@@ -345,6 +354,8 @@ fn handle_search_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
 }
 
 fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
+    use crate::app::ScrollUnit;
+
     match (key.modifiers, key.code) {
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => return Some(AppEvent::Quit),
         (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('s')) => {
@@ -354,10 +365,29 @@ fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             } else {
                 app.mode = AppMode::Normal;
                 app.selected_message = None;
+                app.selected_block = None;
             }
         }
-        (_, KeyCode::Char('v')) => {
-            // toggle visual selection
+        (_, KeyCode::Char('b')) => {
+            app.scroll_unit = match app.scroll_unit {
+                ScrollUnit::Message => {
+                    // switching to block mode, initialise selection
+                    let blocks = app.code_blocks();
+                    app.selected_block = if blocks.is_empty() {
+                        None
+                    } else {
+                        Some(blocks.len() - 1)
+                    };
+                    ScrollUnit::Block
+                }
+                ScrollUnit::Block => {
+                    app.selected_block = None;
+                    ScrollUnit::Message
+                }
+            };
+        }
+        (_, KeyCode::Char('v')) if app.scroll_unit == ScrollUnit::Message => {
+            // toggle visual selection (message mode only)
             if app.selection_anchor.is_some() {
                 app.selection_anchor = None;
             } else {
@@ -365,37 +395,82 @@ fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             }
         }
         (_, KeyCode::Char('j')) | (_, KeyCode::Down) => {
-            app.scroll_offset = app.scroll_offset.saturating_sub(3);
-            if app.scroll_offset == 0 {
-                app.has_unread = false;
-            }
-            // move selection down
-            if let Some(sel) = app.selected_message
-                && sel + 1 < app.messages.len()
-            {
-                app.selected_message = Some(sel + 1);
+            if app.scroll_unit == ScrollUnit::Block {
+                // move to next code block
+                let blocks = app.code_blocks();
+                if let Some(sel) = app.selected_block
+                    && sel + 1 < blocks.len()
+                {
+                    app.selected_block = Some(sel + 1);
+                }
+            } else {
+                // message mode
+                app.scroll_offset = app.scroll_offset.saturating_sub(3);
+                if app.scroll_offset == 0 {
+                    app.has_unread = false;
+                }
+                if let Some(sel) = app.selected_message
+                    && sel + 1 < app.messages.len()
+                {
+                    app.selected_message = Some(sel + 1);
+                }
             }
         }
         (_, KeyCode::Char('k')) | (_, KeyCode::Up) => {
-            app.scroll_offset = app.scroll_offset.saturating_add(3);
-            // move selection up
-            if let Some(sel) = app.selected_message {
-                app.selected_message = Some(sel.saturating_sub(1));
+            if app.scroll_unit == ScrollUnit::Block {
+                // move to previous code block
+                if let Some(sel) = app.selected_block {
+                    app.selected_block = Some(sel.saturating_sub(1));
+                }
+            } else {
+                // message mode
+                app.scroll_offset = app.scroll_offset.saturating_add(3);
+                if let Some(sel) = app.selected_message {
+                    app.selected_message = Some(sel.saturating_sub(1));
+                }
             }
         }
         (_, KeyCode::Char('G')) => {
             app.scroll_to_bottom();
+            if app.scroll_unit == ScrollUnit::Block {
+                let blocks = app.code_blocks();
+                app.selected_block = if blocks.is_empty() {
+                    None
+                } else {
+                    Some(blocks.len() - 1)
+                };
+            }
             if !app.messages.is_empty() {
                 app.selected_message = Some(app.messages.len() - 1);
             }
         }
         (_, KeyCode::Char('g')) => {
-            // scroll to top
             app.scroll_offset = u16::MAX;
+            if app.scroll_unit == ScrollUnit::Block {
+                let blocks = app.code_blocks();
+                app.selected_block = if blocks.is_empty() { None } else { Some(0) };
+            }
             app.selected_message = Some(0);
         }
         (_, KeyCode::Char('y')) => {
-            if let Some((start, end)) = app.selection_range() {
+            if app.scroll_unit == ScrollUnit::Block {
+                // copy selected code block
+                let blocks = app.code_blocks();
+                if let Some(sel) = app.selected_block
+                    && let Some(block) = blocks.get(sel)
+                {
+                    if copy_to_clipboard(&block.content) {
+                        let label = block
+                            .lang
+                            .as_deref()
+                            .map(|l| format!("{l} block"))
+                            .unwrap_or_else(|| "code block".into());
+                        app.status = Some(format!("copied {label}"));
+                    } else {
+                        app.status = Some("clipboard copy failed".into());
+                    }
+                }
+            } else if let Some((start, end)) = app.selection_range() {
                 // copy visual selection range
                 let text: String = app.messages[start..=end]
                     .iter()
@@ -1294,8 +1369,9 @@ mod tests {
         app.push_user_message("two");
         app.push_user_message("three");
 
-        // enter scroll mode
+        // enter scroll mode then switch to message mode
         handle_key(&mut app, ctrl(KeyCode::Char('s')));
+        handle_key(&mut app, key(KeyCode::Char('b')));
         assert_eq!(app.mode, AppMode::Scroll);
         assert_eq!(app.selected_message, Some(2));
         assert!(app.selection_anchor.is_none());
@@ -1317,7 +1393,7 @@ mod tests {
         app.push_user_message("three");
 
         handle_key(&mut app, ctrl(KeyCode::Char('s')));
-        // cursor on message 2 (last)
+        handle_key(&mut app, key(KeyCode::Char('b'))); // switch to message mode
         assert_eq!(app.selected_message, Some(2));
 
         // start visual selection at message 2
@@ -1340,6 +1416,7 @@ mod tests {
         app.push_user_message("two");
 
         handle_key(&mut app, ctrl(KeyCode::Char('s')));
+        handle_key(&mut app, key(KeyCode::Char('b'))); // switch to message mode
         handle_key(&mut app, key(KeyCode::Char('v')));
         assert!(app.selection_anchor.is_some());
 
@@ -1359,6 +1436,7 @@ mod tests {
         app.push_user_message("one");
 
         handle_key(&mut app, ctrl(KeyCode::Char('s')));
+        handle_key(&mut app, key(KeyCode::Char('b'))); // switch to message mode
         handle_key(&mut app, key(KeyCode::Char('v')));
         assert!(app.selection_anchor.is_some());
 
@@ -1366,5 +1444,58 @@ mod tests {
         handle_key(&mut app, key(KeyCode::Esc));
         assert!(app.selection_anchor.is_none());
         assert_eq!(app.mode, AppMode::Scroll);
+    }
+
+    #[test]
+    fn scroll_mode_b_toggles_scroll_unit() {
+        use crate::app::ScrollUnit;
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.push_user_message("hello");
+
+        handle_key(&mut app, ctrl(KeyCode::Char('s')));
+        assert_eq!(app.mode, AppMode::Scroll);
+
+        // default is Block
+        assert_eq!(app.scroll_unit, ScrollUnit::Block);
+
+        // b toggles to Message
+        handle_key(&mut app, key(KeyCode::Char('b')));
+        assert_eq!(app.scroll_unit, ScrollUnit::Message);
+
+        // b again toggles back to Block
+        handle_key(&mut app, key(KeyCode::Char('b')));
+        assert_eq!(app.scroll_unit, ScrollUnit::Block);
+    }
+
+    #[test]
+    fn scroll_mode_block_jk_navigates_code_blocks() {
+        use crate::app::ScrollUnit;
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.start_streaming();
+        app.push_text_delta("here:\n```bash\nrm -rf mything\n```\nand:\n```python\nprint(42)\n```");
+        app.finish_streaming(None, None);
+
+        // enter scroll mode (default: Block)
+        handle_key(&mut app, ctrl(KeyCode::Char('s')));
+        assert_eq!(app.scroll_unit, ScrollUnit::Block);
+
+        // should start on the last block
+        assert_eq!(app.selected_block, Some(1));
+
+        // k moves to previous block
+        handle_key(&mut app, key(KeyCode::Char('k')));
+        assert_eq!(app.selected_block, Some(0));
+
+        // k at start stays at 0
+        handle_key(&mut app, key(KeyCode::Char('k')));
+        assert_eq!(app.selected_block, Some(0));
+
+        // j moves forward
+        handle_key(&mut app, key(KeyCode::Char('j')));
+        assert_eq!(app.selected_block, Some(1));
+
+        // j at end stays at last
+        handle_key(&mut app, key(KeyCode::Char('j')));
+        assert_eq!(app.selected_block, Some(1));
     }
 }

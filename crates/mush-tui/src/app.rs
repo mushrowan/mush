@@ -517,6 +517,27 @@ pub enum AppMode {
     Search,
 }
 
+/// what j/k navigates in scroll mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScrollUnit {
+    /// navigate between messages
+    Message,
+    /// navigate between fenced code blocks
+    #[default]
+    Block,
+}
+
+/// a fenced code block extracted from conversation messages
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeBlock {
+    /// index into app.messages
+    pub msg_idx: usize,
+    /// raw content (no fences, no indent)
+    pub content: String,
+    /// language tag from the opening fence
+    pub lang: Option<String>,
+}
+
 /// session picker scope
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionScope {
@@ -717,6 +738,10 @@ pub struct App {
     pub selected_message: Option<usize>,
     /// anchor for visual selection range (v in scroll mode)
     pub selection_anchor: Option<usize>,
+    /// what j/k navigates in scroll mode
+    pub scroll_unit: ScrollUnit,
+    /// selected code block index in block scroll mode
+    pub selected_block: Option<usize>,
     /// search state
     pub search: SearchState,
     /// image render positions (populated by MessageList during render)
@@ -828,6 +853,8 @@ impl App {
             show_cost: false,
             selected_message: None,
             selection_anchor: None,
+            scroll_unit: ScrollUnit::default(),
+            selected_block: None,
             search: SearchState::default(),
             image_render_areas: RefCell::new(Vec::new()),
             markdown_cache: RefCell::new(std::collections::HashMap::new()),
@@ -1295,6 +1322,52 @@ impl App {
         let anchor = self.selection_anchor?;
         let cursor = self.selected_message?;
         Some((anchor.min(cursor), anchor.max(cursor)))
+    }
+
+    /// extract all fenced code blocks from conversation messages
+    pub fn code_blocks(&self) -> Vec<CodeBlock> {
+        let mut blocks = Vec::new();
+        for (msg_idx, msg) in self.messages.iter().enumerate() {
+            let mut in_block = false;
+            let mut lang = None;
+            let mut lines: Vec<&str> = Vec::new();
+
+            for raw_line in msg.content.lines() {
+                if raw_line.starts_with("```") {
+                    if in_block {
+                        blocks.push(CodeBlock {
+                            msg_idx,
+                            content: lines.join("\n"),
+                            lang: lang.take(),
+                        });
+                        lines.clear();
+                        in_block = false;
+                    } else {
+                        let tag = raw_line.trim_start_matches('`').trim();
+                        lang = if tag.is_empty() {
+                            None
+                        } else {
+                            Some(tag.to_string())
+                        };
+                        in_block = true;
+                    }
+                    continue;
+                }
+                if in_block {
+                    lines.push(raw_line);
+                }
+            }
+
+            // unclosed fence
+            if in_block && !lines.is_empty() {
+                blocks.push(CodeBlock {
+                    msg_idx,
+                    content: lines.join("\n"),
+                    lang: lang.take(),
+                });
+            }
+        }
+        blocks
     }
 
     /// update search matches based on current query
@@ -2451,5 +2524,49 @@ batch: 1/2 succeeded, 1 failed";
 
         buf.cursor_word_left();
         assert_eq!(buf.cursor, 6); // before "world"
+    }
+
+    #[test]
+    fn code_blocks_extracts_fenced_blocks() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.messages.push(DisplayMessage::new(
+            MessageRole::Assistant,
+            "here:\n```bash\nrm -rf mything\n```\nand also:\n```python\nprint(\"hello\")\n```",
+        ));
+        app.messages
+            .push(DisplayMessage::new(MessageRole::User, "nice"));
+        app.messages.push(DisplayMessage::new(
+            MessageRole::Assistant,
+            "one more:\n```\nplain block\n```",
+        ));
+
+        let blocks = app.code_blocks();
+        assert_eq!(blocks.len(), 3);
+
+        assert_eq!(blocks[0].msg_idx, 0);
+        assert_eq!(blocks[0].content, "rm -rf mything");
+        assert_eq!(blocks[0].lang.as_deref(), Some("bash"));
+
+        assert_eq!(blocks[1].msg_idx, 0);
+        assert_eq!(blocks[1].content, "print(\"hello\")");
+        assert_eq!(blocks[1].lang.as_deref(), Some("python"));
+
+        assert_eq!(blocks[2].msg_idx, 2);
+        assert_eq!(blocks[2].content, "plain block");
+        assert_eq!(blocks[2].lang, None);
+    }
+
+    #[test]
+    fn code_blocks_handles_unclosed_fence() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.messages.push(DisplayMessage::new(
+            MessageRole::Assistant,
+            "streaming:\n```rust\nfn main() {}",
+        ));
+
+        let blocks = app.code_blocks();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].content, "fn main() {}");
+        assert_eq!(blocks[0].lang.as_deref(), Some("rust"));
     }
 }
