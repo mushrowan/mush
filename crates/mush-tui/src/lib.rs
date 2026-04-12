@@ -17,6 +17,7 @@ pub mod notify;
 pub mod pane;
 pub mod path_utils;
 pub mod runner;
+pub mod session_picker;
 pub mod shared_state;
 pub mod slash;
 pub mod streaming;

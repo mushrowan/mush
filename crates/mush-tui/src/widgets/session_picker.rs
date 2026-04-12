@@ -1,7 +1,7 @@
 //! session picker overlay widget
 
-use crate::app::{SessionPickerState, SessionScope, filtered_sessions};
 use crate::path_utils::shorten_path;
+use crate::session_picker::{SessionPickerState, SessionScope, filtered_sessions};
 use crate::theme::Theme;
 use ratatui::Frame;
 use ratatui::layout::Rect;

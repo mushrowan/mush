@@ -20,6 +20,7 @@ pub use crate::display_types::{
     MessageRowRange, ToolCallStatus,
 };
 pub use crate::input_buffer::{IMAGE_PLACEHOLDER, InputBuffer, PendingImage};
+pub use crate::session_picker::{SessionPickerState, SessionScope, filtered_sessions};
 pub use crate::streaming::StreamingState;
 
 /// tick() runs at ~60fps, divide by this to get spinner update rate (~8fps)
@@ -52,26 +53,6 @@ pub enum ScrollUnit {
     /// navigate between fenced code blocks
     #[default]
     Block,
-}
-
-/// session picker scope
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionScope {
-    /// sessions from current working directory only
-    ThisDir,
-    /// all sessions across all directories
-    AllDirs,
-}
-
-/// state for the session picker overlay
-#[derive(Debug, Clone)]
-pub struct SessionPickerState {
-    pub sessions: Vec<SessionMeta>,
-    pub selected: usize,
-    pub filter: String,
-    pub scope: SessionScope,
-    /// current working directory for scope filtering
-    pub cwd: String,
 }
 
 /// the main app state
@@ -897,13 +878,7 @@ impl App {
 
     /// open the session picker with the given sessions
     pub fn open_session_picker(&mut self, sessions: Vec<SessionMeta>, cwd: String) {
-        self.session_picker = Some(SessionPickerState {
-            sessions,
-            selected: 0,
-            filter: String::new(),
-            scope: SessionScope::ThisDir,
-            cwd,
-        });
+        self.session_picker = Some(SessionPickerState::new(sessions, cwd));
         self.mode = AppMode::SessionPicker;
     }
 
@@ -918,37 +893,6 @@ impl App {
         let picker = self.session_picker.as_ref()?;
         let filtered = filtered_sessions(picker);
         filtered.get(picker.selected).copied()
-    }
-}
-
-/// get sessions matching the current filter and scope
-#[must_use]
-pub fn filtered_sessions(picker: &SessionPickerState) -> Vec<&SessionMeta> {
-    let scope_filtered: Vec<&SessionMeta> = match picker.scope {
-        SessionScope::ThisDir => picker
-            .sessions
-            .iter()
-            .filter(|s| s.cwd == picker.cwd)
-            .collect(),
-        SessionScope::AllDirs => picker.sessions.iter().collect(),
-    };
-
-    if picker.filter.is_empty() {
-        scope_filtered
-    } else {
-        let filter_lower = picker.filter.to_lowercase();
-        scope_filtered
-            .into_iter()
-            .filter(|s| {
-                s.title
-                    .as_deref()
-                    .unwrap_or("")
-                    .to_lowercase()
-                    .contains(&filter_lower)
-                    || s.id.contains(&filter_lower)
-                    || s.cwd.to_lowercase().contains(&filter_lower)
-            })
-            .collect()
     }
 }
 
