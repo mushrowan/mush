@@ -33,6 +33,7 @@ impl RepoMapWatcher {
     ///
     /// builds the initial repo map and starts a file watcher.
     /// returns None if the watcher cannot be created.
+    #[tracing::instrument(name = "repo_map_watcher", skip_all)]
     pub fn start(root: &Path, token_budget: usize) -> Option<Self> {
         let incr_map = IncrementalRepoMap::new(root);
         let initial_text = incr_map.map().format_for_tokens(token_budget);

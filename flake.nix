@@ -72,6 +72,12 @@
           inherit (pkgs) ripgrep fd onnxruntime pkg-config openssl cacert;
           enableEmbeddings = true;
         };
+
+        craneOutputsProfiling = import ./nix/package.nix {
+          inherit craneLib src;
+          inherit (pkgs) ripgrep fd onnxruntime pkg-config openssl cacert;
+          enableProfiling = true;
+        };
       in {
         packages.default = craneOutputs.package;
         packages.with-embeddings = craneOutputsWithEmbeddings.package;
@@ -80,6 +86,22 @@
           echo "logging to ''${XDG_DATA_HOME:-$HOME/.local/share}/mush/mush.log" >&2
           echo "set RUST_LOG=...,mush_agent=trace,mush_ai=trace for full request/response bodies" >&2
           exec ${craneOutputs.package}/bin/mush "$@"
+        '';
+        packages.profiler = pkgs.writeShellScriptBin "mush-profiler" ''
+          export RUST_LOG=''${RUST_LOG:-warn,mush_agent=info,mush_ai=info,mush_tools=info,mush_tui=info,mush_cli=info,mush_ext=info,mush_mcp=info,mush_treesitter=info}
+          export MUSH_TRACE=true
+          export MUSH_PROFILE_STARTUP=true
+          echo "profiling: tracing timeline + startup phases enabled" >&2
+          echo "trace output: ''${XDG_DATA_HOME:-$HOME/.local/share}/mush/mush-trace-$$.json" >&2
+          echo "open traces at https://ui.perfetto.dev" >&2
+          echo "" >&2
+          exec ${craneOutputsProfiling.package}/bin/mush "$@"
+        '';
+        packages.samply = pkgs.writeShellScriptBin "mush-samply" ''
+          echo "sampling profiler: cpu flamegraph via samply" >&2
+          echo "firefox profiler will open automatically" >&2
+          echo "" >&2
+          exec ${pkgs.samply}/bin/samply record ${craneOutputsProfiling.package}/bin/mush "$@"
         '';
 
         checks = {

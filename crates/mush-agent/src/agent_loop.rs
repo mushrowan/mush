@@ -250,6 +250,9 @@ pub fn agent_loop(
                 yield AgentEvent::TurnStart { turn_index };
 
                 // apply context transform before LLM call
+                tracing::info_span!("agent_turn", turn = turn_index).in_scope(|| {
+                    tracing::info!("turn started");
+                });
                 let llm_messages = if let Some(ref transform) = config.hooks.transform_context {
                     let before = messages.len();
                     match transform(&messages).await {
@@ -661,6 +664,7 @@ fn is_file_modifying_tool(name: &str) -> bool {
     )
 }
 
+#[tracing::instrument(name = "tool_exec", skip_all, fields(tool = %tool_call.name))]
 async fn execute_tool(tools: &ToolRegistry, tool_call: &ToolCall) -> ToolResult {
     match tools.get(tool_call.name.as_str()) {
         Some(tool) => {

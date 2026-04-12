@@ -247,6 +247,8 @@ fn scan_skills_dir(dir: &Path) -> Vec<Skill> {
 /// 1. `<available_skills>` blocks in AGENTS.md files (explicit)
 /// 2. `~/.config/mush/skills/` directory (user-global)
 /// 3. ancestor `.mush/skills/` directories between cwd and home
+/// discover project context once for both system prompt and skill tools
+#[tracing::instrument(name = "discover_context", skip_all)]
 pub fn discover_project_context(cwd: &Path) -> ProjectContext {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let config_dir = resolve_config_dir();

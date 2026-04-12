@@ -34,6 +34,7 @@ pub struct McpConnection {
 
 impl McpConnection {
     /// connect to an MCP server
+    #[tracing::instrument(name = "mcp_connect", skip_all, fields(server = %name))]
     pub async fn connect(name: &str, config: &McpServerConfig) -> Result<Self, McpError> {
         if !config.enabled {
             return Err(McpError::Disabled);
@@ -94,6 +95,7 @@ impl McpConnection {
     }
 
     /// call a tool on this server
+    #[tracing::instrument(name = "mcp_call", skip_all, fields(tool = %name))]
     pub async fn call_tool(
         &self,
         name: String,
@@ -117,6 +119,7 @@ pub struct McpManager {
 
 impl McpManager {
     /// connect to all configured MCP servers
+    #[tracing::instrument(name = "mcp_connect_all", skip_all)]
     pub async fn connect_all(
         configs: &HashMap<String, McpServerConfig>,
     ) -> (Self, mush_agent::tool::ToolRegistry) {

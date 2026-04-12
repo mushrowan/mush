@@ -54,6 +54,7 @@ pub struct SetupArgs {
 
 impl AppSetup {
     /// build shared state from CLI args
+    #[tracing::instrument(name = "startup", skip_all)]
     pub async fn init(args: SetupArgs) -> Result<(Self, Option<crate::timing::StartupReport>)> {
         let mut timer = args.timer;
 

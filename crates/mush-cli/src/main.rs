@@ -77,6 +77,10 @@ struct Cli {
     #[arg(long, env = "MUSH_PROFILE_STARTUP")]
     profile_startup: bool,
 
+    /// enable chrome tracing timeline (requires profiling build)
+    #[arg(long, env = "MUSH_TRACE")]
+    trace: bool,
+
     #[arg(long, hide = true, env = mush_tui::KEYBOARD_ENHANCEMENT_ENV)]
     tui_keyboard_enhancement: Option<mush_tui::KeyboardEnhancementMode>,
 
@@ -128,13 +132,12 @@ impl Cli {
 async fn main() -> Result<()> {
     color_eyre::install()?;
     let cfg = config::load_config();
-    let (_log_guard, log_buffer) = logging::init_logging(cfg.log_filter.as_deref());
+    let cli = Cli::parse();
+    let (_log_guards, log_buffer) = logging::init_logging(cfg.log_filter.as_deref(), cli.trace);
     tracing::info!("mush starting");
 
     // clean up old tool output files
     mush_agent::truncation::cleanup();
-
-    let cli = Cli::parse();
 
     // read from stdin if piped
     let stdin_prompt = if !atty::is(atty::Stream::Stdin) {

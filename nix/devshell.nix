@@ -19,6 +19,7 @@ craneLib.devShell {
     pkg-config
     openssl
     onnxruntime
+    samply
   ];
 
   env = {

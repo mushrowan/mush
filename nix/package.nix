@@ -8,39 +8,61 @@
   pkg-config,
   cacert,
   enableEmbeddings ? false,
+  enableProfiling ? false,
 }: let
+  featureFlags =
+    (
+      if enableEmbeddings
+      then ["embeddings"]
+      else []
+    )
+    ++ (
+      if enableProfiling
+      then ["profiling"]
+      else []
+    );
+
   cargoExtraArgs =
-    if enableEmbeddings
-    then "--features embeddings"
-    else "";
+    if featureFlags == []
+    then ""
+    else "--features " + builtins.concatStringsSep "," featureFlags;
 
-  commonArgs = {
-    inherit src cargoExtraArgs;
-    pname = "mush";
-    version = "0.1.0";
-    strictDeps = true;
+  commonArgs =
+    {
+      inherit src cargoExtraArgs;
+      pname = "mush";
+      version = "0.1.0";
+      strictDeps = true;
 
-    nativeBuildInputs = [pkg-config];
-    buildInputs =
-      [openssl]
-      ++ (
-        if enableEmbeddings
-        then [onnxruntime]
-        else []
-      );
+      nativeBuildInputs = [pkg-config];
+      buildInputs =
+        [openssl]
+        ++ (
+          if enableEmbeddings
+          then [onnxruntime]
+          else []
+        );
 
-    env =
-      {}
-      // (
-        if enableEmbeddings
-        then {
-          # point ort at nix-provided onnxruntime instead of downloading
-          ORT_LIB_LOCATION = "${onnxruntime}/lib";
-          ORT_PREFER_DYNAMIC_LINK = "1";
-        }
-        else {}
-      );
-  };
+      env =
+        {}
+        // (
+          if enableEmbeddings
+          then {
+            # point ort at nix-provided onnxruntime instead of downloading
+            ORT_LIB_LOCATION = "${onnxruntime}/lib";
+            ORT_PREFER_DYNAMIC_LINK = "1";
+          }
+          else {}
+        );
+    }
+    // (
+      if enableProfiling
+      then {
+        # use the profiling cargo profile (release + debug symbols)
+        CARGO_PROFILE = "profiling";
+      }
+      else {}
+    );
 
   cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 in {
