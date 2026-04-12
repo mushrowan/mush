@@ -24,7 +24,7 @@ pub(super) async fn run_loop_iteration(
     image_picker: &Option<ratatui_image::picker::Picker>,
 ) -> io::Result<LoopAction> {
     if agent_streams.is_empty() {
-        handle_idle_iteration(runtime, services, tui_config, registry).await
+        handle_idle_iteration(stream_state, runtime, services, tui_config, registry).await
     } else {
         handle_streaming_iteration(
             agent_streams,
@@ -104,7 +104,7 @@ async fn handle_streaming_iteration(
         _ = tick => {
             poll_confirmation_prompt(&mut runtime.pane_mgr, stream_state).await;
             poll_live_tool_output(&mut runtime.pane_mgr, &tui_config.tool_output_live);
-            drain_inboxes(&mut runtime.pane_mgr).await;
+            drain_inboxes(&mut runtime.pane_mgr, stream_state).await;
 
             let (pane_mgr, mut deps) = input_parts(runtime, services, tui_config, registry);
             let action = handle_streaming_terminal_events(pane_mgr, stream_state, &mut deps).await?;
@@ -168,12 +168,13 @@ async fn dispatch_agent_event(
 }
 
 async fn handle_idle_iteration(
+    stream_state: &StreamState,
     runtime: &mut RunnerRuntime,
     services: &RunnerServices,
     tui_config: &mut TuiConfig,
     registry: &ApiRegistry,
 ) -> io::Result<LoopAction> {
-    drain_inboxes(&mut runtime.pane_mgr).await;
+    drain_inboxes(&mut runtime.pane_mgr, stream_state).await;
 
     let (pane_mgr, mut deps) = input_parts(runtime, services, tui_config, registry);
     handle_idle_terminal_events(pane_mgr, &mut deps).await
