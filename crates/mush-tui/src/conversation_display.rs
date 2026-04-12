@@ -9,6 +9,7 @@ use mush_ai::types::{
 use crate::app::{
     App, DisplayMessage, DisplayToolCall, MessageRole, ThinkingDisplay, ToolCallStatus,
 };
+use crate::batch_output::{parse_batch_output, truncate_output};
 
 pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
     app.clear_messages();
@@ -153,7 +154,7 @@ fn apply_batch_result(
         .collect::<Vec<_>>()
         .join("");
 
-    let sections = crate::app::parse_batch_output(&text);
+    let sections = parse_batch_output(&text);
 
     let Some(message) = app.messages.get_mut(msg_idx) else {
         return;
@@ -171,7 +172,7 @@ fn apply_batch_result(
                 ToolCallStatus::Done
             };
             if !section.content.is_empty() {
-                tc.output_preview = Some(crate::app::truncate_output(&section.content));
+                tc.output_preview = Some(truncate_output(&section.content));
             }
         }
     }
@@ -201,7 +202,7 @@ fn tool_result_preview(content: &[ToolResultContentPart]) -> Option<String> {
         .collect::<Vec<_>>()
         .join("");
     if !text.is_empty() {
-        return Some(crate::app::truncate_output(&text));
+        return Some(truncate_output(&text));
     }
 
     content
