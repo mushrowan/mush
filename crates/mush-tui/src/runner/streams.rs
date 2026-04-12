@@ -305,6 +305,74 @@ pub(super) async fn handle_agent_event_side_effects(
     if let Some(ref saver) = tui_config.save_session {
         saver(build_session_snapshot(pane_mgr));
     }
+
+    // delegation panes: send result back to parent and auto-close
+    complete_delegation(pane_mgr, pane_id, tui_config);
+}
+
+/// if pane is a delegation pane, send the last assistant message back to the
+/// parent and remove the pane. returns true if the pane was a delegation.
+fn complete_delegation(
+    pane_mgr: &mut PaneManager,
+    pane_id: PaneId,
+    tui_config: &TuiConfig,
+) -> bool {
+    let Some(pane) = pane_mgr.pane(pane_id) else {
+        return false;
+    };
+    let Some(del) = pane.delegation.clone() else {
+        return false;
+    };
+
+    let result_text = pane
+        .conversation
+        .context()
+        .into_iter()
+        .rev()
+        .find_map(|msg| match msg {
+            Message::Assistant(a) => {
+                let text = a.text();
+                if text.is_empty() { None } else { Some(text) }
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| "(delegation completed with no text result)".into());
+
+    // notify parent pane
+    if let Some(parent) = pane_mgr.pane_mut(del.from_pane) {
+        let display = format!(
+            "✓ delegation result (task_id={}): {}",
+            del.task_id,
+            truncate_result(&result_text, 500),
+        );
+        parent.app.push_system_message(display);
+
+        // inject the full result as a user message so the parent agent sees it
+        let steering_msg = Message::User(mush_ai::types::UserMessage {
+            content: mush_ai::types::UserContent::Text(format!(
+                "[delegation result task_id={}]\n{}",
+                del.task_id, result_text,
+            )),
+            timestamp_ms: mush_ai::types::Timestamp::now(),
+        });
+        parent.conversation.append_message(steering_msg);
+    }
+
+    // save before closing so the result is persisted
+    if let Some(ref saver) = tui_config.save_session {
+        saver(build_session_snapshot(pane_mgr));
+    }
+
+    pane_mgr.remove_pane(pane_id);
+    true
+}
+
+fn truncate_result(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}…", &s[..max - 1])
+    }
 }
 
 /// fork the session tree and compact the new branch when the conversation
@@ -587,7 +655,7 @@ async fn start_stream_for_prompt<'a>(
         tools: tool_registry,
         registry,
         options: call_options,
-        max_turns: deps.max_turns,
+        max_turns: effective_max_turns(pane_mgr, pane_id, deps.max_turns),
         hooks: mush_agent::AgentHooks {
             get_steering: steering,
             get_follow_up: follow_up,
@@ -623,6 +691,18 @@ fn pane_thinking_level(pane_mgr: &PaneManager, pane_id: PaneId) -> ThinkingLevel
         .pane(pane_id)
         .map(|pane| pane.app.thinking_level)
         .unwrap_or(ThinkingLevel::Off)
+}
+
+/// resolve effective max_turns: delegation panes are capped
+fn effective_max_turns(pane_mgr: &PaneManager, pane_id: PaneId, default: usize) -> usize {
+    if pane_mgr
+        .pane(pane_id)
+        .is_some_and(|p| p.delegation.is_some())
+    {
+        default.min(crate::pane::DELEGATION_MAX_TURNS)
+    } else {
+        default
+    }
 }
 
 fn append_prompt_and_snapshot(
@@ -1148,5 +1228,140 @@ mod tests {
                 .as_deref(),
             Some("running")
         );
+    }
+
+    #[test]
+    fn effective_max_turns_caps_delegation_panes() {
+        use crate::pane::DelegationInfo;
+
+        let mut pane_mgr = PaneManager::new(Pane::new(PaneId::new(1), app()));
+
+        // normal pane uses default
+        assert_eq!(effective_max_turns(&pane_mgr, PaneId::new(1), 32), 32);
+
+        // delegation pane gets capped
+        let mut del_pane = Pane::new(PaneId::new(2), app());
+        del_pane.delegation = Some(DelegationInfo {
+            from_pane: PaneId::new(1),
+            task_id: "del-1".into(),
+        });
+        pane_mgr.add_pane(del_pane);
+        assert_eq!(
+            effective_max_turns(&pane_mgr, PaneId::new(2), 32),
+            crate::pane::DELEGATION_MAX_TURNS
+        );
+
+        // if default is lower than cap, use default
+        assert_eq!(effective_max_turns(&pane_mgr, PaneId::new(2), 5), 5);
+    }
+
+    fn test_tui_config() -> super::super::TuiConfig {
+        let model = models::all_models_with_user().into_iter().next().unwrap();
+        super::super::TuiConfig {
+            model,
+            system_prompt: None,
+            options: mush_ai::types::StreamOptions::default(),
+            max_turns: 32,
+            initial_messages: vec![],
+            initial_panes: vec![],
+            theme: crate::theme::Theme::default(),
+            prompt_enricher: None,
+            hint_mode: crate::runner::HintMode::Message,
+            config_path: None,
+            provider_api_keys: std::collections::HashMap::new(),
+            thinking_prefs: std::collections::HashMap::new(),
+            save_thinking_prefs: None,
+            save_last_model: None,
+            save_session: None,
+            update_title: None,
+            confirm_tools: false,
+            auto_compact: false,
+            auto_fork_compact: false,
+            show_cost: false,
+            debug_cache: false,
+            cache_timer: false,
+            thinking_display: crate::app::ThinkingDisplay::Collapse,
+            tool_output_live: None,
+            log_buffer: None,
+            isolation_mode: crate::file_tracker::IsolationMode::None,
+            terminal_policy: crate::terminal_policy::TerminalPolicy::default(),
+            lifecycle_hooks: mush_agent::LifecycleHooks::default(),
+            cwd: std::path::PathBuf::from("/tmp"),
+            dynamic_system_context: None,
+            file_rules: None,
+            lsp_diagnostics: None,
+            agent_card: None,
+            model_tiers: std::collections::HashMap::new(),
+            compaction_model: None,
+            http_client: None,
+        }
+    }
+
+    #[test]
+    fn complete_delegation_sends_result_and_removes_pane() {
+        use crate::pane::DelegationInfo;
+        use mush_ai::types::*;
+
+        let mut pane_mgr = PaneManager::new(Pane::new(PaneId::new(1), app()));
+
+        let mut del_pane = Pane::new(PaneId::new(2), app());
+        del_pane.delegation = Some(DelegationInfo {
+            from_pane: PaneId::new(1),
+            task_id: "del-result".into(),
+        });
+        // add an assistant message so there's a result to send back
+        let model = models::all_models_with_user().into_iter().next().unwrap();
+        del_pane
+            .conversation
+            .append_message(Message::Assistant(AssistantMessage {
+                content: vec![AssistantContentPart::Text(TextContent {
+                    text: "found 3 issues in main.rs".into(),
+                })],
+                model: model.id,
+                provider: Provider::Anthropic,
+                api: Api::AnthropicMessages,
+                usage: Usage::default(),
+                stop_reason: StopReason::Stop,
+                error_message: None,
+                timestamp_ms: Timestamp::zero(),
+            }));
+        pane_mgr.add_pane(del_pane);
+
+        let tui_config = test_tui_config();
+        let completed = complete_delegation(&mut pane_mgr, PaneId::new(2), &tui_config);
+
+        assert!(completed);
+        // delegation pane was removed
+        assert_eq!(pane_mgr.pane_count(), 1);
+        assert!(pane_mgr.pane(PaneId::new(2)).is_none());
+
+        // parent got a system message with the result
+        let parent = pane_mgr.pane(PaneId::new(1)).unwrap();
+        let has_result_msg = parent.app.messages.iter().any(|m| {
+            m.content.contains("delegation result") && m.content.contains("found 3 issues")
+        });
+        assert!(has_result_msg, "parent should have result message");
+
+        // parent conversation got the result injected
+        let ctx = parent.conversation.context();
+        let has_injected = ctx.iter().any(|msg| {
+            matches!(
+                msg,
+                Message::User(u) if u.text().contains("delegation result")
+            )
+        });
+        assert!(
+            has_injected,
+            "parent conversation should have injected result"
+        );
+    }
+
+    #[test]
+    fn complete_delegation_skips_normal_panes() {
+        let mut pane_mgr = PaneManager::new(Pane::new(PaneId::new(1), app()));
+        let tui_config = test_tui_config();
+        let completed = complete_delegation(&mut pane_mgr, PaneId::new(1), &tui_config);
+        assert!(!completed);
+        assert_eq!(pane_mgr.pane_count(), 1);
     }
 }

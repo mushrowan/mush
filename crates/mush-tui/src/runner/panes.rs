@@ -293,6 +293,10 @@ pub(super) fn process_delegations(
         new_pane.label = Some(format!("task: {}", truncate_label(&del.task)));
         new_pane.inbox = Some(bus.register(new_id));
         new_pane.pending_prompt = Some(del.task);
+        new_pane.delegation = Some(crate::pane::DelegationInfo {
+            from_pane: del.from,
+            task_id: del.task_id.clone(),
+        });
         pane_mgr.add_pane(new_pane);
 
         // notify the delegating pane
@@ -443,6 +447,77 @@ mod tests {
         assert_eq!(pane_mgr.panes().len(), 1);
         assert_eq!(pane_mgr.focused().id, PaneId::new(1));
         assert_eq!(message_bus.pane_ids(), vec![PaneId::new(1)]);
+    }
+
+    #[test]
+    fn process_delegations_marks_pane_with_delegation_info() {
+        use crate::delegate;
+
+        let mut pane_mgr = PaneManager::new(Pane::new(PaneId::new(1), app()));
+        let bus = crate::messaging::MessageBus::new();
+        bus.register(PaneId::new(1));
+        let queue = delegate::new_queue();
+
+        queue.lock().unwrap().push(delegate::PendingDelegation {
+            task: "review code".into(),
+            from: PaneId::new(1),
+            task_id: "del-test".into(),
+            model: None,
+        });
+
+        let model = mush_ai::models::all_models_with_user()
+            .into_iter()
+            .next()
+            .unwrap();
+        let tui_config = super::TuiConfig {
+            model,
+            system_prompt: None,
+            options: mush_ai::types::StreamOptions::default(),
+            max_turns: 32,
+            initial_messages: vec![],
+            initial_panes: vec![],
+            theme: crate::theme::Theme::default(),
+            prompt_enricher: None,
+            hint_mode: crate::runner::HintMode::Message,
+            config_path: None,
+            provider_api_keys: std::collections::HashMap::new(),
+            thinking_prefs: std::collections::HashMap::new(),
+            save_thinking_prefs: None,
+            save_last_model: None,
+            save_session: None,
+            update_title: None,
+            confirm_tools: false,
+            auto_compact: false,
+            auto_fork_compact: false,
+            show_cost: false,
+            debug_cache: false,
+            cache_timer: false,
+            thinking_display: crate::app::ThinkingDisplay::Collapse,
+            tool_output_live: None,
+            log_buffer: None,
+            isolation_mode: crate::file_tracker::IsolationMode::None,
+            terminal_policy: crate::terminal_policy::TerminalPolicy::default(),
+            lifecycle_hooks: mush_agent::LifecycleHooks::default(),
+            cwd: std::path::PathBuf::from("/tmp"),
+            dynamic_system_context: None,
+            file_rules: None,
+            lsp_diagnostics: None,
+            agent_card: None,
+            model_tiers: std::collections::HashMap::new(),
+            compaction_model: None,
+            http_client: None,
+        };
+
+        process_delegations(&mut pane_mgr, &tui_config, &bus, &queue);
+
+        assert_eq!(pane_mgr.pane_count(), 2);
+        let new_pane = &pane_mgr.panes()[1];
+        let del = new_pane
+            .delegation
+            .as_ref()
+            .expect("delegation info should be set");
+        assert_eq!(del.from_pane, PaneId::new(1));
+        assert_eq!(del.task_id, "del-test");
     }
 
     #[test]
