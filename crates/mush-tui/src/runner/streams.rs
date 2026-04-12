@@ -494,6 +494,7 @@ async fn auto_fork_compact(
 pub(super) async fn abort_focused_stream(
     pane_mgr: &mut PaneManager,
     stream_state: &mut StreamState,
+    delegation_queue: &crate::delegate::DelegationQueue,
 ) {
     let focused_id = pane_mgr.focused().id;
     let app = &mut pane_mgr.focused_mut().app;
@@ -502,6 +503,12 @@ pub(super) async fn abort_focused_stream(
     app.status = Some("aborted".into());
 
     stream_state.abort(focused_id);
+
+    // drain pending delegations queued by the aborted stream
+    {
+        let mut q = delegation_queue.lock().unwrap_or_else(|e| e.into_inner());
+        q.retain(|d| d.from != focused_id);
+    }
 
     let pane = pane_mgr.focused_mut();
     pane.app.finish_streaming(None, None);
@@ -1521,6 +1528,60 @@ mod tests {
 
         // after abort without new registration, old stream_gen is stale
         assert!(!stream_state.is_current(pane_id, stream_gen));
+    }
+
+    #[tokio::test]
+    async fn abort_focused_stream_drains_delegation_queue() {
+        use crate::delegate;
+
+        let pane_id = PaneId::new(1);
+        let mut pane_mgr = PaneManager::new(Pane::new(pane_id, app()));
+        let mut stream_state = StreamState::new();
+
+        let (_tx, rx) = tokio::sync::mpsc::channel(1);
+        stream_state.register_active(
+            pane_id,
+            StreamMeta {
+                steering_queue: pane_mgr.pane(pane_id).unwrap().steering_queue.clone(),
+                confirm_req_rx: rx,
+                confirm_reply: Arc::new(Mutex::new(None)),
+                model: models::all_models_with_user().into_iter().next().unwrap(),
+                context_tokens: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            },
+        );
+
+        // simulate the agent queuing two delegations before user aborts
+        let queue = delegate::new_queue();
+        queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(delegate::PendingDelegation {
+                task: "from pane 1".into(),
+                from: pane_id,
+                task_id: "del-a".into(),
+                model: None,
+            });
+        queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(delegate::PendingDelegation {
+                task: "from pane 2".into(),
+                from: PaneId::new(2),
+                task_id: "del-b".into(),
+                model: None,
+            });
+
+        abort_focused_stream(&mut pane_mgr, &mut stream_state, &queue).await;
+
+        // delegations from the aborted pane should be drained,
+        // only the delegation from pane 2 should remain
+        let remaining = queue.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(
+            remaining.len(),
+            1,
+            "abort should drain delegations from the focused pane"
+        );
+        assert_eq!(remaining[0].from, PaneId::new(2));
     }
 
     #[test]
