@@ -38,6 +38,7 @@ pub(super) struct InputDeps<'a> {
     pub lifecycle_hooks: &'a mush_agent::LifecycleHooks,
     pub cwd: &'a Path,
     pub pending_prompt: &'a mut Option<String>,
+    pub delegation_queue: &'a crate::delegate::DelegationQueue,
 }
 
 fn confirmation_answer(code: KeyCode) -> Option<bool> {
@@ -159,7 +160,7 @@ pub(super) async fn handle_streaming_terminal_events(
 
                 match app_event {
                     AppEvent::Abort => {
-                        abort_focused_stream(pane_mgr, stream_state).await;
+                        abort_focused_stream(pane_mgr, stream_state, deps.delegation_queue).await;
                     }
                     AppEvent::UserSubmit { text } => {
                         submit_streaming_input(pane_mgr, stream_state, text).await;

@@ -66,6 +66,7 @@ fn input_parts<'a>(
             lifecycle_hooks,
             cwd,
             pending_prompt,
+            delegation_queue: &services.delegation_queue,
         },
     )
 }
