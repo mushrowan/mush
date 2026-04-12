@@ -797,22 +797,7 @@ struct ErrorData {
     message: String,
 }
 
-/// tracks state for a content block being streamed
-#[derive(Debug, Clone)]
-enum BlockState {
-    Text {
-        text: String,
-    },
-    Thinking {
-        thinking: String,
-        signature: Option<String>,
-    },
-    ToolCall {
-        id: String,
-        name: String,
-        json_buf: String,
-    },
-}
+use super::StreamBlock;
 
 fn parse_sse_stream(
     response: reqwest::Response,
@@ -834,7 +819,7 @@ fn parse_sse_stream(
             timestamp_ms: Timestamp::now(),
         };
 
-        let mut blocks: Vec<BlockState> = Vec::new();
+        let mut blocks: Vec<StreamBlock> = Vec::new();
         let mut parser = super::sse::SseParser::new();
         let mut raw_capture: Vec<u8> = Vec::new();
         const MAX_CAPTURE_BYTES: usize = 128 * 1024;
@@ -935,7 +920,7 @@ fn parse_sse_stream(
 fn process_sse_event(
     event: SseEvent,
     output: &mut AssistantMessage,
-    blocks: &mut Vec<BlockState>,
+    blocks: &mut Vec<StreamBlock>,
     is_oauth: bool,
     tools: &[ToolDefinition],
 ) -> Vec<StreamEvent> {
@@ -961,15 +946,15 @@ fn process_sse_event(
             let content_index = blocks.len();
             match content_block {
                 ContentBlockData::Text { text } => {
-                    blocks.push(BlockState::Text { text: text.clone() });
+                    blocks.push(StreamBlock::Text { text: text.clone() });
                     output
                         .content
                         .push(AssistantContentPart::Text(TextContent { text }));
                     events.push(StreamEvent::TextStart { content_index });
                 }
                 ContentBlockData::Thinking { thinking } => {
-                    blocks.push(BlockState::Thinking {
-                        thinking: thinking.clone(),
+                    blocks.push(StreamBlock::Thinking {
+                        text: thinking.clone(),
                         signature: None,
                     });
                     output.content.push(AssistantContentPart::Thinking(
@@ -981,8 +966,8 @@ fn process_sse_event(
                     events.push(StreamEvent::ThinkingStart { content_index });
                 }
                 ContentBlockData::RedactedThinking { data } => {
-                    blocks.push(BlockState::Thinking {
-                        thinking: "[reasoning redacted]".into(),
+                    blocks.push(StreamBlock::Thinking {
+                        text: "[reasoning redacted]".into(),
                         signature: Some(data.clone()),
                     });
                     output.content.push(AssistantContentPart::Thinking(
@@ -997,10 +982,10 @@ fn process_sse_event(
                     } else {
                         name.clone()
                     };
-                    blocks.push(BlockState::ToolCall {
+                    blocks.push(StreamBlock::ToolCall {
                         id: id.clone(),
                         name: resolved_name.clone(),
-                        json_buf: String::new(),
+                        args_buf: String::new(),
                     });
                     output
                         .content
@@ -1020,7 +1005,7 @@ fn process_sse_event(
 
             match delta {
                 DeltaData::TextDelta { text } => {
-                    if let Some(BlockState::Text { text: buf }) = blocks.last_mut() {
+                    if let Some(StreamBlock::Text { text: buf }) = blocks.last_mut() {
                         buf.push_str(&text);
                     }
                     if let Some(AssistantContentPart::Text(tc)) =
@@ -1034,7 +1019,7 @@ fn process_sse_event(
                     });
                 }
                 DeltaData::ThinkingDelta { thinking } => {
-                    if let Some(BlockState::Thinking { thinking: buf, .. }) = blocks.last_mut() {
+                    if let Some(StreamBlock::Thinking { text: buf, .. }) = blocks.last_mut() {
                         buf.push_str(&thinking);
                     }
                     if let Some(AssistantContentPart::Thinking(tc)) =
@@ -1049,8 +1034,8 @@ fn process_sse_event(
                     });
                 }
                 DeltaData::InputJsonDelta { partial_json } => {
-                    if let Some(BlockState::ToolCall { json_buf, .. }) = blocks.last_mut() {
-                        json_buf.push_str(&partial_json);
+                    if let Some(StreamBlock::ToolCall { args_buf, .. }) = blocks.last_mut() {
+                        args_buf.push_str(&partial_json);
                     }
                     events.push(StreamEvent::ToolCallDelta {
                         content_index,
@@ -1058,7 +1043,7 @@ fn process_sse_event(
                     });
                 }
                 DeltaData::SignatureDelta { signature } => {
-                    if let Some(BlockState::Thinking { signature: sig, .. }) = blocks.last_mut() {
+                    if let Some(StreamBlock::Thinking { signature: sig, .. }) = blocks.last_mut() {
                         sig.get_or_insert_with(String::new).push_str(&signature);
                     }
                     if let Some(AssistantContentPart::Thinking(tc)) =
@@ -1074,20 +1059,20 @@ fn process_sse_event(
             if let Some(block) = blocks.last() {
                 let content_index = blocks.len() - 1;
                 match block {
-                    BlockState::Text { text } => {
+                    StreamBlock::Text { text } => {
                         events.push(StreamEvent::TextEnd {
                             content_index,
                             text: text.clone(),
                         });
                     }
-                    BlockState::Thinking { thinking, .. } => {
+                    StreamBlock::Thinking { text: thinking, .. } => {
                         events.push(StreamEvent::ThinkingEnd {
                             content_index,
                             thinking: thinking.clone(),
                         });
                     }
-                    BlockState::ToolCall { id, name, json_buf } => {
-                        let arguments = serde_json::from_str(json_buf)
+                    StreamBlock::ToolCall { id, name, args_buf } => {
+                        let arguments = serde_json::from_str(args_buf)
                             .unwrap_or(serde_json::Value::Object(Default::default()));
                         // update the output with final parsed args
                         if let Some(AssistantContentPart::ToolCall(tc)) =

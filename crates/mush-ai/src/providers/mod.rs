@@ -57,6 +57,25 @@ pub(crate) fn maybe_trim_tool_output(
     }
 }
 
+/// tracks state for a content block being streamed.
+/// shared across all three providers. the `signature` field on `Thinking`
+/// is only used by anthropic but harmless as `None` for openai providers.
+#[derive(Debug, Clone)]
+pub(crate) enum StreamBlock {
+    Text {
+        text: String,
+    },
+    Thinking {
+        text: String,
+        signature: Option<String>,
+    },
+    ToolCall {
+        id: String,
+        name: String,
+        args_buf: String,
+    },
+}
+
 /// map a thinking level to an openai-style reasoning effort string.
 /// shared by the openai completions and openai responses providers.
 pub(crate) fn openai_reasoning_effort(model: &Model, level: ThinkingLevel) -> Option<String> {
