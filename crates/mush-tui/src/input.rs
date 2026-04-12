@@ -5,6 +5,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::app::{App, AppEvent, AppMode};
+use crate::session_picker::{SessionScope, filtered_sessions};
 
 // A trailing '\' escapes plain Enter into a literal newline, but only when the
 // cursor is at the end of the current line.
@@ -613,8 +614,8 @@ fn handle_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             // toggle scope between this dir and all dirs
             if let Some(ref mut picker) = app.session_picker {
                 picker.scope = match picker.scope {
-                    crate::app::SessionScope::ThisDir => crate::app::SessionScope::AllDirs,
-                    crate::app::SessionScope::AllDirs => crate::app::SessionScope::ThisDir,
+                    SessionScope::ThisDir => SessionScope::AllDirs,
+                    SessionScope::AllDirs => SessionScope::ThisDir,
                 };
                 picker.selected = 0;
             }
@@ -642,7 +643,7 @@ fn handle_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         }
         (_, KeyCode::Down) | (KeyModifiers::CONTROL, KeyCode::Char('j')) => {
             if let Some(ref mut picker) = app.session_picker {
-                let filtered_len = crate::app::filtered_sessions(picker).len();
+                let filtered_len = filtered_sessions(picker).len();
                 if picker.selected + 1 < filtered_len {
                     picker.selected += 1;
                 }
