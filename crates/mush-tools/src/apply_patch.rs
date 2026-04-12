@@ -178,7 +178,7 @@ pub fn parse_patch(patch_text: &str) -> Result<Vec<Hunk>, PatchError> {
             let move_path = if i < end && lines[i].starts_with("*** Move to:") {
                 let mp = lines[i]
                     .strip_prefix("*** Move to:")
-                    .unwrap()
+                    .unwrap_or_default()
                     .trim()
                     .to_string();
                 i += 1;

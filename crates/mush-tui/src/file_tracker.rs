@@ -101,7 +101,7 @@ impl FileTracker {
             let resolved = self.resolve(path);
             self.pending
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|e| e.into_inner())
                 .insert((pane_id, tool_call_id.clone()), resolved);
         }
     }
@@ -117,14 +117,14 @@ impl FileTracker {
         let path = self
             .pending
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .remove(&(pane_id, tool_call_id.clone()))?;
 
         if !success {
             return None;
         }
 
-        let mut mods = self.modifications.lock().unwrap();
+        let mut mods = self.modifications.lock().unwrap_or_else(|e| e.into_inner());
         let panes = mods.entry(path.clone()).or_default();
         panes.insert(pane_id);
 
@@ -142,7 +142,7 @@ impl FileTracker {
     /// check if a file is locked by another pane. returns the lock owner if so
     pub fn check_lock(&self, pane_id: PaneId, path: &str) -> Option<PaneId> {
         let resolved = self.resolve(path);
-        let locks = self.locks.lock().unwrap();
+        let locks = self.locks.lock().unwrap_or_else(|e| e.into_inner());
         locks
             .get(&resolved)
             .copied()
@@ -152,7 +152,7 @@ impl FileTracker {
     /// acquire an advisory lock. returns Err(owner) if already locked by another pane
     pub fn lock(&self, pane_id: PaneId, path: &str) -> Result<(), PaneId> {
         let resolved = self.resolve(path);
-        let mut locks = self.locks.lock().unwrap();
+        let mut locks = self.locks.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(&owner) = locks.get(&resolved)
             && owner != pane_id
         {
@@ -165,7 +165,7 @@ impl FileTracker {
     /// release an advisory lock. returns false if not owned by this pane
     pub fn unlock(&self, pane_id: PaneId, path: &str) -> bool {
         let resolved = self.resolve(path);
-        let mut locks = self.locks.lock().unwrap();
+        let mut locks = self.locks.lock().unwrap_or_else(|e| e.into_inner());
         if locks.get(&resolved) == Some(&pane_id) {
             locks.remove(&resolved);
             true
@@ -178,7 +178,7 @@ impl FileTracker {
     pub fn list_locks(&self) -> Vec<(PathBuf, PaneId)> {
         self.locks
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .iter()
             .map(|(p, &id)| (p.clone(), id))
             .collect()
@@ -188,7 +188,7 @@ impl FileTracker {
     pub fn pane_modifications(&self, pane_id: PaneId) -> Vec<PathBuf> {
         self.modifications
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .iter()
             .filter(|(_, panes)| panes.contains(&pane_id))
             .map(|(path, _)| path.clone())
@@ -199,11 +199,11 @@ impl FileTracker {
     pub fn release_pane(&self, pane_id: PaneId) {
         self.locks
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .retain(|_, &mut owner| owner != pane_id);
         self.pending
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .retain(|&(pid, _), _| pid != pane_id);
     }
 }

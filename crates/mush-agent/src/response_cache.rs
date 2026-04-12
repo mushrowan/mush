@@ -54,7 +54,7 @@ impl ResponseCache {
 
     /// look up a cached response
     pub fn get(&self, key: u64) -> Option<Message> {
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = entries.get(&key) {
             if entry.cached_at.elapsed() < self.ttl {
                 return Some(entry.response.clone());
@@ -67,7 +67,7 @@ impl ResponseCache {
 
     /// store a response in the cache
     pub fn put(&self, key: u64, response: Message) {
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
 
         // evict expired entries if at capacity
         if entries.len() >= self.max_entries {
@@ -96,7 +96,7 @@ impl ResponseCache {
 
     /// number of entries currently cached
     pub fn len(&self) -> usize {
-        self.entries.lock().unwrap().len()
+        self.entries.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     /// whether the cache is empty
@@ -106,7 +106,10 @@ impl ResponseCache {
 
     /// remove all entries
     pub fn clear(&self) {
-        self.entries.lock().unwrap().clear();
+        self.entries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     }
 }
 

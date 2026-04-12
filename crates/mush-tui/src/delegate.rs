@@ -112,7 +112,10 @@ impl AgentTool for DelegateTaskTool {
                 model: params.model,
             };
 
-            self.queue.lock().unwrap().push(delegation);
+            self.queue
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(delegation);
 
             ToolResult::text(format!(
                 "delegated task to a new pane (task_id: {task_id}{model_note}). \
@@ -139,7 +142,7 @@ mod tests {
     #[test]
     fn queue_starts_empty() {
         let q = new_queue();
-        assert!(q.lock().unwrap().is_empty());
+        assert!(q.lock().unwrap_or_else(|e| e.into_inner()).is_empty());
     }
 
     #[tokio::test]
@@ -157,7 +160,7 @@ mod tests {
         let result = tool.execute(args).await;
         assert!(result.outcome.is_success());
 
-        let pending = q.lock().unwrap();
+        let pending = q.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].task, "review src/main.rs for security issues");
         assert_eq!(pending[0].task_id, "review-1");
@@ -176,7 +179,7 @@ mod tests {
         let result = tool.execute(args).await;
         assert!(result.outcome.is_success());
 
-        let pending = q.lock().unwrap();
+        let pending = q.lock().unwrap_or_else(|e| e.into_inner());
         assert!(pending[0].task_id.starts_with("del-"));
     }
 
@@ -195,7 +198,7 @@ mod tests {
         let result = tool.execute(args).await;
         assert!(result.outcome.is_success());
 
-        let pending = q.lock().unwrap();
+        let pending = q.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(pending[0].model.as_deref(), Some("fast"));
     }
 
@@ -209,6 +212,6 @@ mod tests {
 
         let result = tool.execute(serde_json::json!({})).await;
         assert!(result.outcome.is_error());
-        assert!(q.lock().unwrap().is_empty());
+        assert!(q.lock().unwrap_or_else(|e| e.into_inner()).is_empty());
     }
 }

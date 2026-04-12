@@ -272,7 +272,7 @@ pub(super) fn process_delegations(
     queue: &crate::delegate::DelegationQueue,
 ) {
     let delegations: Vec<_> = {
-        let mut q = queue.lock().unwrap();
+        let mut q = queue.lock().unwrap_or_else(|e| e.into_inner());
         std::mem::take(&mut *q)
     };
 

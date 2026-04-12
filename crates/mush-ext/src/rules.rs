@@ -55,9 +55,11 @@ impl RuleIndex {
             }
         }
 
-        let globset = builder
-            .build()
-            .unwrap_or_else(|_| GlobSetBuilder::new().build().unwrap());
+        let globset = builder.build().unwrap_or_else(|_| {
+            GlobSetBuilder::new()
+                .build()
+                .unwrap_or_else(|_| unreachable!("empty globset always builds"))
+        });
         let injected = Mutex::new(vec![false; rules.len()]);
 
         Self {
@@ -73,7 +75,7 @@ impl RuleIndex {
     ///
     /// matches by glob pattern and by detected language (via tree-sitter)
     pub fn match_file(&self, path: &Path) -> Vec<&Rule> {
-        let mut injected = self.injected.lock().unwrap();
+        let mut injected = self.injected.lock().unwrap_or_else(|e| e.into_inner());
         let mut result = Vec::new();
         let mut seen = Vec::new();
 

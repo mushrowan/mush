@@ -68,7 +68,10 @@ impl AgentCard {
         }
     }
 
-    /// serialise to pretty JSON
+    #[expect(
+        clippy::expect_used,
+        reason = "AgentCard fields are all simple serialisable types"
+    )]
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).expect("AgentCard is always serialisable")
     }
