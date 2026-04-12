@@ -85,8 +85,8 @@ async fn handle_streaming_iteration(
     // wait for either an agent event or the frame tick
     tokio::select! {
         result = agent_streams.next() => {
-            if let Some((pane_id, event)) = result {
-                dispatch_agent_event(pane_id, event, stream_state, runtime, services, tui_config, registry, image_picker).await;
+            if let Some((pane_id, stream_gen, event)) = result {
+                dispatch_agent_event(pane_id, stream_gen, event, stream_state, runtime, services, tui_config, registry, image_picker).await;
             }
 
             // drain all immediately-available events within this frame
@@ -94,8 +94,8 @@ async fn handle_streaming_iteration(
             loop {
                 use futures::FutureExt;
                 match agent_streams.next().now_or_never() {
-                    Some(Some((pane_id, event))) => {
-                        dispatch_agent_event(pane_id, event, stream_state, runtime, services, tui_config, registry, image_picker).await;
+                    Some(Some((pane_id, stream_gen, event))) => {
+                        dispatch_agent_event(pane_id, stream_gen, event, stream_state, runtime, services, tui_config, registry, image_picker).await;
                     }
                     _ => break,
                 }
@@ -121,6 +121,7 @@ async fn handle_streaming_iteration(
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_agent_event(
     pane_id: crate::pane::PaneId,
+    stream_gen: super::streams::StreamGeneration,
     event: AgentEvent,
     stream_state: &mut super::streams::StreamState,
     runtime: &mut RunnerRuntime,
@@ -129,10 +130,8 @@ async fn dispatch_agent_event(
     registry: &ApiRegistry,
     image_picker: &Option<ratatui_image::picker::Picker>,
 ) {
-    if stream_state.is_aborted(pane_id) {
-        if matches!(event, AgentEvent::AgentEnd) {
-            stream_state.finish_aborted(pane_id);
-        }
+    // drop events from stale streams (aborted or superseded)
+    if !stream_state.is_current(pane_id, stream_gen) {
         return;
     }
 

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -19,8 +19,14 @@ use crate::pane::{PaneId, PaneManager};
 
 use super::{HintMode, PromptEnricher, TuiConfig};
 
+/// monotonically increasing generation counter for stream identity.
+/// each new stream (or abort) advances the generation, so events from
+/// stale streams are silently dropped even if the abort marker was cleared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) struct StreamGeneration(u64);
+
 pub(super) type TaggedStream<'a> =
-    Pin<Box<dyn futures::Stream<Item = (PaneId, AgentEvent)> + Send + 'a>>;
+    Pin<Box<dyn futures::Stream<Item = (PaneId, StreamGeneration, AgentEvent)> + Send + 'a>>;
 pub(super) type AgentStreams<'a> = SelectAll<TaggedStream<'a>>;
 pub(super) type ConfirmReply = tokio::sync::oneshot::Sender<bool>;
 
@@ -52,7 +58,8 @@ const SESSION_SAVE_DEBOUNCE: std::time::Duration = std::time::Duration::from_sec
 
 pub(super) struct StreamState {
     metas: HashMap<PaneId, StreamMeta>,
-    aborted_panes: HashSet<PaneId>,
+    generations: HashMap<PaneId, StreamGeneration>,
+    next_gen: u64,
     last_session_save: std::time::Instant,
 }
 
@@ -85,15 +92,28 @@ impl StreamState {
     pub(super) fn new() -> Self {
         Self {
             metas: HashMap::new(),
-            aborted_panes: HashSet::new(),
+            generations: HashMap::new(),
+            next_gen: 0,
             // start in the past so the first save happens immediately
             last_session_save: std::time::Instant::now() - SESSION_SAVE_DEBOUNCE,
         }
     }
 
-    pub(super) fn register_active(&mut self, pane_id: PaneId, meta: StreamMeta) {
-        self.aborted_panes.remove(&pane_id);
+    fn advance_generation(&mut self, pane_id: PaneId) -> StreamGeneration {
+        let stream_gen = StreamGeneration(self.next_gen);
+        self.next_gen += 1;
+        self.generations.insert(pane_id, stream_gen);
+        stream_gen
+    }
+
+    pub(super) fn register_active(
+        &mut self,
+        pane_id: PaneId,
+        meta: StreamMeta,
+    ) -> StreamGeneration {
+        let stream_gen = self.advance_generation(pane_id);
         self.metas.insert(pane_id, meta);
+        stream_gen
     }
 
     pub(super) fn meta(&self, pane_id: PaneId) -> Option<&StreamMeta> {
@@ -109,17 +129,13 @@ impl StreamState {
     }
 
     pub(super) fn abort(&mut self, pane_id: PaneId) {
-        self.aborted_panes.insert(pane_id);
+        self.advance_generation(pane_id);
         self.metas.remove(&pane_id);
     }
 
-    pub(super) fn is_aborted(&self, pane_id: PaneId) -> bool {
-        self.aborted_panes.contains(&pane_id)
-    }
-
-    pub(super) fn finish_aborted(&mut self, pane_id: PaneId) {
-        self.aborted_panes.remove(&pane_id);
-        self.metas.remove(&pane_id);
+    /// true when this generation matches the pane's current generation
+    pub(super) fn is_current(&self, pane_id: PaneId, stream_gen: StreamGeneration) -> bool {
+        self.generations.get(&pane_id) == Some(&stream_gen)
     }
 
     /// save session if enough time has passed since the last save
@@ -679,7 +695,7 @@ async fn start_stream_for_prompt<'a>(
     }
     tool_registry.extend_shared(extra_tools);
 
-    stream_state.register_active(
+    let stream_gen = stream_state.register_active(
         pane_id,
         StreamMeta {
             steering_queue,
@@ -712,7 +728,7 @@ async fn start_stream_for_prompt<'a>(
 
     let stream = agent_loop(config, conversation_snapshot);
     let tagged: TaggedStream<'a> = Box::pin(futures::StreamExt::map(stream, move |event| {
-        (pane_id, event)
+        (pane_id, stream_gen, event)
     }));
     agent_streams.push(tagged);
 }
@@ -1133,14 +1149,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn register_active_clears_abort_marker() {
+    async fn register_active_supersedes_previous_generation() {
         let mut stream_state = StreamState::new();
         let pane_id = PaneId::new(7);
-        stream_state.abort(pane_id);
-        assert!(stream_state.is_aborted(pane_id));
 
         let (_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
-        stream_state.register_active(
+        let gen1 = stream_state.register_active(
             pane_id,
             StreamMeta {
                 steering_queue: Arc::new(Mutex::new(Vec::new())),
@@ -1151,7 +1165,7 @@ mod tests {
             },
         );
 
-        assert!(!stream_state.is_aborted(pane_id));
+        assert!(stream_state.is_current(pane_id, gen1));
         assert!(stream_state.meta(pane_id).is_some());
         let _ = ToolCallId::from("unused");
     }
@@ -1409,6 +1423,77 @@ mod tests {
         let completed = complete_delegation(&mut pane_mgr, PaneId::new(1), &tui_config);
         assert!(!completed);
         assert_eq!(pane_mgr.pane_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn generation_rejects_stale_stream_events() {
+        let mut stream_state = StreamState::new();
+        let pane_id = PaneId::new(1);
+
+        let (_tx1, rx1) = tokio::sync::mpsc::channel(1);
+        let gen1 = stream_state.register_active(
+            pane_id,
+            StreamMeta {
+                steering_queue: Arc::new(Mutex::new(Vec::new())),
+                confirm_req_rx: rx1,
+                confirm_reply: Arc::new(Mutex::new(None)),
+                model: models::all_models_with_user().into_iter().next().unwrap(),
+                context_tokens: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            },
+        );
+
+        // abort (user presses Esc)
+        stream_state.abort(pane_id);
+
+        // register a new stream (user submits new message)
+        let (_tx2, rx2) = tokio::sync::mpsc::channel(1);
+        let gen2 = stream_state.register_active(
+            pane_id,
+            StreamMeta {
+                steering_queue: Arc::new(Mutex::new(Vec::new())),
+                confirm_req_rx: rx2,
+                confirm_reply: Arc::new(Mutex::new(None)),
+                model: models::all_models_with_user().into_iter().next().unwrap(),
+                context_tokens: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            },
+        );
+
+        assert_ne!(gen1, gen2, "generations must differ");
+
+        // old stream events should be rejected
+        assert!(
+            !stream_state.is_current(pane_id, gen1),
+            "stale generation must be rejected"
+        );
+
+        // new stream events should be accepted
+        assert!(
+            stream_state.is_current(pane_id, gen2),
+            "current generation must be accepted"
+        );
+    }
+
+    #[tokio::test]
+    async fn abort_without_reregister_rejects_all() {
+        let mut stream_state = StreamState::new();
+        let pane_id = PaneId::new(1);
+
+        let (_tx, rx) = tokio::sync::mpsc::channel(1);
+        let stream_gen = stream_state.register_active(
+            pane_id,
+            StreamMeta {
+                steering_queue: Arc::new(Mutex::new(Vec::new())),
+                confirm_req_rx: rx,
+                confirm_reply: Arc::new(Mutex::new(None)),
+                model: models::all_models_with_user().into_iter().next().unwrap(),
+                context_tokens: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            },
+        );
+
+        stream_state.abort(pane_id);
+
+        // after abort without new registration, old stream_gen is stale
+        assert!(!stream_state.is_current(pane_id, stream_gen));
     }
 
     #[test]
