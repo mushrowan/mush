@@ -7,8 +7,9 @@ use mush_ai::types::{Message, ThinkingLevel};
 use mush_session::ConversationState;
 use notify::RecommendedWatcher;
 
-use crate::app::{self, App, ModelCompletion, SlashCommand};
+use crate::app::{self, App};
 use crate::pane::{Pane, PaneId, PaneManager};
+use crate::slash_menu::{ModelCompletion, SlashCommand};
 
 use super::{ThinkingPrefsSaver, TuiConfig};
 

@@ -2,7 +2,7 @@
 //!
 //! renders a popup above the input box showing matching commands with descriptions
 
-use crate::app::SlashMenuState;
+use crate::slash_menu::SlashMenuState;
 use crate::theme::Theme;
 use ratatui::Frame;
 use ratatui::layout::Rect;
