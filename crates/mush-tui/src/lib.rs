@@ -1,5 +1,6 @@
 pub mod app;
 pub mod app_event;
+pub mod batch_output;
 pub mod cache;
 pub mod clipboard;
 pub mod config_watcher;
