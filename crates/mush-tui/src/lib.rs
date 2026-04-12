@@ -4,6 +4,7 @@ pub mod clipboard;
 pub mod config_watcher;
 mod conversation_display;
 pub mod delegate;
+pub mod display_types;
 pub mod event_handler;
 pub mod file_tracker;
 pub mod input;
