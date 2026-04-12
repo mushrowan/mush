@@ -4,15 +4,33 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Paragraph, Widget, Wrap};
+use ratatui::widgets::{Paragraph, Widget};
 
 use throbber_widgets_tui::{BRAILLE_SIX, Throbber, WhichUse};
 
 use mush_ai::types::TokenCount;
 
 use crate::app::{
-    App, DisplayMessage, DisplayToolCall, ImageRenderArea, MessageRole, ToolCallStatus,
+    App, CodeBlock, DisplayMessage, DisplayToolCall, ImageRenderArea, MessageRole, ToolCallStatus,
 };
+
+#[cfg(test)]
+use std::cell::Cell;
+
+#[cfg(test)]
+thread_local! {
+    static INDENT_LINE_CALLS: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_indent_line_call_count() {
+    INDENT_LINE_CALLS.with(|c| c.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn indent_line_call_count() -> usize {
+    INDENT_LINE_CALLS.with(Cell::get)
+}
 use crate::theme::Theme;
 
 /// renders the full message list including any active stream
@@ -35,28 +53,77 @@ impl Widget for MessageList<'_> {
 
         let in_scroll_mode = self.app.interaction.mode == crate::app::AppMode::Scroll;
         let selection_range = self.app.selection_range();
+        // compute once, not per-message (was O(N²) in block scroll mode)
+        let all_blocks = self.app.code_blocks();
+
+        // virtual scrolling: estimate per-message heights and determine
+        // which messages overlap the viewport so we can skip expensive
+        // markdown rendering and indent_line for off-screen messages
+        let heights: Vec<usize> = self
+            .app
+            .messages
+            .iter()
+            .enumerate()
+            .map(|(i, msg)| {
+                if msg.queued {
+                    return 0;
+                }
+                estimate_message_height(msg, i, area.width, &self.app.render_state)
+            })
+            .collect();
+        let estimated_total: usize = heights.iter().sum();
+
+        let vis_h = area.height as usize;
+        let max_scroll = estimated_total.saturating_sub(vis_h);
+        let scroll_from_top = max_scroll.saturating_sub(self.app.scroll_offset as usize);
+
+        // render messages within the viewport plus one viewport of margin
+        let margin = vis_h;
+        let render_start = scroll_from_top.saturating_sub(margin);
+        let render_end = (scroll_from_top + vis_h + margin).min(estimated_total);
+
+        let mut cumulative = 0;
+        let mut should_render = vec![false; self.app.messages.len()];
+        for (i, &h) in heights.iter().enumerate() {
+            let msg_end = cumulative + h;
+            if h > 0 && msg_end > render_start && cumulative < render_end {
+                should_render[i] = true;
+            }
+            cumulative = msg_end;
+        }
+
         for (i, msg) in self.app.messages.iter().enumerate() {
             if msg.queued {
                 continue; // rendered after streaming content
             }
             let start_line = lines.len();
-            let in_selection = selection_range.is_some_and(|(start, end)| i >= start && i <= end);
-            let sel = SelectionHint {
-                selected: in_scroll_mode
-                    && (self.app.navigation.selected_message == Some(i) || in_selection),
-                is_cursor: in_scroll_mode && self.app.navigation.selected_message == Some(i),
-                has_visual: self.app.has_selection(),
-            };
-            render_message(
-                self.app,
-                msg,
-                i,
-                &mut lines,
-                sel,
-                &mut image_placeholders,
-                area.width,
-            );
-            lines.push(Line::raw(""));
+
+            if should_render[i] {
+                let in_selection =
+                    selection_range.is_some_and(|(start, end)| i >= start && i <= end);
+                let sel = SelectionHint {
+                    selected: in_scroll_mode
+                        && (self.app.navigation.selected_message == Some(i) || in_selection),
+                    is_cursor: in_scroll_mode && self.app.navigation.selected_message == Some(i),
+                    has_visual: self.app.has_selection(),
+                };
+                render_message(
+                    self.app,
+                    msg,
+                    i,
+                    &mut lines,
+                    sel,
+                    &mut image_placeholders,
+                    area.width,
+                    &all_blocks,
+                );
+                lines.push(Line::raw(""));
+            } else {
+                // off-screen: use estimated height as placeholder lines
+                for _ in 0..heights[i] {
+                    lines.push(Line::raw(""));
+                }
+            }
             msg_line_starts.push((i, start_line));
         }
 
@@ -136,26 +203,19 @@ impl Widget for MessageList<'_> {
                 sel,
                 &mut image_placeholders,
                 area.width,
+                &all_blocks,
             );
             lines.push(Line::raw(""));
         }
 
         // pre-compute y positions for image placeholders before moving lines
-        // into Text (uses simple char-width approximation, close enough for
-        // image overlay positioning)
+        // into Text. since indent_line and wrap_text pre-wrap all lines to fit
+        // within area.width, each line occupies exactly one row
         let w = area.width as usize;
         let img_y_positions: Vec<u16> = if !image_placeholders.is_empty() && w > 0 {
             image_placeholders
                 .iter()
-                .map(|ph| {
-                    lines[..ph.line_idx]
-                        .iter()
-                        .map(|line| {
-                            let lw = line.width();
-                            if lw <= w { 1u16 } else { lw.div_ceil(w) as u16 }
-                        })
-                        .sum()
-                })
+                .map(|ph| ph.line_idx as u16)
                 .collect()
         } else {
             Vec::new()
@@ -175,18 +235,9 @@ impl Widget for MessageList<'_> {
         };
 
         // compute per-message wrapped-line ranges for mouse hit testing
-        // (done before padding/scroll so we work with original line indices)
+        // (done before padding/scroll so we work with original line indices).
+        // all lines are pre-wrapped so each raw line index maps 1:1 to a row
         if !msg_line_starts.is_empty() && w > 0 {
-            let wrapped_at = |raw_idx: usize| -> u16 {
-                let sum: usize = lines[..raw_idx]
-                    .iter()
-                    .map(|line| {
-                        let lw = line.width();
-                        if lw <= w { 1 } else { lw.div_ceil(w) }
-                    })
-                    .sum();
-                padding as u16 + sum as u16
-            };
             let total_raw = lines.len();
             let mut ranges = Vec::with_capacity(msg_line_starts.len());
             for (idx, &(msg_idx, start)) in msg_line_starts.iter().enumerate() {
@@ -197,8 +248,8 @@ impl Widget for MessageList<'_> {
                 };
                 ranges.push(crate::app::MessageRowRange {
                     msg_idx,
-                    start: wrapped_at(start),
-                    end: wrapped_at(end_raw),
+                    start: padding as u16 + start as u16,
+                    end: padding as u16 + end_raw as u16,
                 });
             }
             *self.app.render_state.message_row_ranges.borrow_mut() = ranges;
@@ -219,7 +270,7 @@ impl Widget for MessageList<'_> {
         };
 
         let total_lines = content_lines + padding as u16;
-        let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
+        let paragraph = Paragraph::new(text);
         let max_scroll = total_lines.saturating_sub(visible);
         let scroll = max_scroll.saturating_sub(self.app.scroll_offset);
 
@@ -290,6 +341,7 @@ fn render_message(
     sel: SelectionHint,
     image_placeholders: &mut Vec<ImagePlaceholder>,
     width: u16,
+    all_blocks: &[CodeBlock],
 ) {
     // user and assistant messages have no label line.
     // user messages are distinguished by a subtle background.
@@ -378,13 +430,15 @@ fn render_message(
             && app.navigation.scroll_unit == crate::app::ScrollUnit::Block
         {
             if let Some(sel) = app.navigation.selected_block {
-                let blocks = app.code_blocks();
-                blocks.get(sel).filter(|b| b.msg_idx == msg_idx).map(|_| {
-                    blocks[..sel]
-                        .iter()
-                        .filter(|b| b.msg_idx == msg_idx)
-                        .count()
-                })
+                all_blocks
+                    .get(sel)
+                    .filter(|b| b.msg_idx == msg_idx)
+                    .map(|_| {
+                        all_blocks[..sel]
+                            .iter()
+                            .filter(|b| b.msg_idx == msg_idx)
+                            .count()
+                    })
             } else {
                 None
             }
@@ -392,30 +446,57 @@ fn render_message(
             None
         };
 
-        let md_text = render_markdown_cached(app, &msg.content);
-        let block_ranges = if highlight_block.is_some() {
-            code_block_line_ranges(&msg.content)
-        } else {
-            Vec::new()
-        };
-        let highlight_range = highlight_block.and_then(|b| block_ranges.get(b).copied());
         let content_width = (width as usize).saturating_sub(1);
+        let highlight_range =
+            highlight_block.and_then(|b| code_block_line_ranges(&msg.content).get(b).copied());
 
-        for (i, line) in md_text.lines.into_iter().enumerate() {
-            let style_override = if let Some((start, end)) = highlight_range
-                && i >= start
-                && i < end
-            {
-                Some(Style::default().bg(app.theme.block_highlight_bg))
-            } else {
-                None
+        if highlight_range.is_none() {
+            // fast path: serve cached indented lines for stable messages
+            let hash = content_hash(&msg.content);
+            let width_u16 = content_width as u16;
+            let cached = {
+                let cache = app.render_state.indented_cache.borrow();
+                cache
+                    .get(msg_idx)
+                    .and_then(|e| e.as_ref())
+                    .filter(|(h, w, _)| *h == hash && *w == width_u16)
+                    .map(|(_, _, cached_lines)| cached_lines.clone())
             };
-
-            for mut indented in indent_line(line, content_width) {
-                if let Some(style) = style_override {
-                    indented = indented.style(style);
+            if let Some(cached_lines) = cached {
+                lines.extend(cached_lines);
+            } else {
+                let md_text = render_markdown_cached(app, &msg.content);
+                let mut indented = Vec::new();
+                for line in md_text.lines {
+                    indented.extend(indent_line(line, content_width));
                 }
-                lines.push(indented);
+                let to_cache = indented.clone();
+                lines.extend(indented);
+                let mut cache = app.render_state.indented_cache.borrow_mut();
+                if cache.len() <= msg_idx {
+                    cache.resize_with(msg_idx + 1, || None);
+                }
+                cache[msg_idx] = Some((hash, width_u16, to_cache));
+            }
+        } else {
+            // block highlight active: compute fresh with style overrides
+            let md_text = render_markdown_cached(app, &msg.content);
+            for (i, line) in md_text.lines.into_iter().enumerate() {
+                let style_override = if let Some((start, end)) = highlight_range
+                    && i >= start
+                    && i < end
+                {
+                    Some(Style::default().bg(app.theme.block_highlight_bg))
+                } else {
+                    None
+                };
+
+                for mut indented in indent_line(line, content_width) {
+                    if let Some(style) = style_override {
+                        indented = indented.style(style);
+                    }
+                    lines.push(indented);
+                }
             }
         }
     }
@@ -493,6 +574,98 @@ fn render_message(
             lines.push(Line::styled(parts.join(" | "), app.theme.usage));
         }
     }
+}
+
+/// hash string content for cache keying
+fn content_hash(s: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::hash::DefaultHasher::new();
+    s.hash(&mut h);
+    h.finish()
+}
+
+/// cheap height estimate for viewport culling.
+/// uses the indented cache for exact counts when available,
+/// falls back to character-count estimation otherwise.
+/// result includes the trailing separator line.
+fn estimate_message_height(
+    msg: &DisplayMessage,
+    msg_idx: usize,
+    width: u16,
+    render_state: &crate::app_state::RenderState,
+) -> usize {
+    let cw = (width as usize).saturating_sub(1).max(1);
+    let mut h = 1; // separator line
+
+    // system label
+    if matches!(msg.role, MessageRole::System) {
+        h += 1;
+    }
+
+    // thinking
+    if let Some(ref thinking) = msg.thinking {
+        if msg.thinking_expanded {
+            h += count_estimated_lines(thinking, cw);
+        } else {
+            h += 1;
+        }
+    }
+
+    // content
+    if matches!(msg.role, MessageRole::User) {
+        h += 2; // top + bottom padding
+        h += count_estimated_lines(&msg.content, cw);
+    } else if !msg.content.is_empty() && !matches!(msg.role, MessageRole::System) {
+        // try indented cache for exact content line count
+        let exact = {
+            let cache = render_state.indented_cache.borrow();
+            cache
+                .get(msg_idx)
+                .and_then(|e| e.as_ref())
+                .filter(|(hash, w, _)| *hash == content_hash(&msg.content) && *w == cw as u16)
+                .map(|(_, _, cached_lines)| cached_lines.len())
+        };
+        h += exact.unwrap_or_else(|| count_estimated_lines(&msg.content, cw));
+    }
+
+    // completed tool calls
+    for tc in &msg.tool_calls {
+        if tc.status != ToolCallStatus::Running {
+            h += 3; // top border + summary + bottom border
+            if let Some(ref output) = tc.output_preview {
+                let inner = (width as usize).saturating_sub(5).max(1);
+                h += count_estimated_lines(output, inner);
+            }
+            if tc.image_data.is_some() {
+                h += IMAGE_HEIGHT as usize;
+            }
+        }
+    }
+
+    // usage
+    if msg
+        .usage
+        .as_ref()
+        .is_some_and(|u| u.total_tokens() > TokenCount::ZERO)
+    {
+        h += 1;
+    }
+
+    h
+}
+
+/// estimate how many wrapped lines text occupies at a given width
+fn count_estimated_lines(text: &str, width: usize) -> usize {
+    if text.is_empty() || width == 0 {
+        return 1;
+    }
+    text.lines()
+        .map(|line| {
+            let chars = line.chars().count();
+            if chars == 0 { 1 } else { chars.div_ceil(width) }
+        })
+        .sum::<usize>()
+        .max(1)
 }
 
 /// truncate a string to at most `max` characters (not bytes), adding ellipsis
@@ -826,6 +999,9 @@ fn push_box_content_line<'a>(
 /// pre-wrap a styled line to `content_width`, prepending a 1-space indent
 /// to every resulting line (including continuations from wrapping)
 fn indent_line<'a>(line: Line<'a>, content_width: usize) -> Vec<Line<'a>> {
+    #[cfg(test)]
+    INDENT_LINE_CALLS.with(|c| c.set(c.get() + 1));
+
     let line_style = line.style;
     if content_width == 0 {
         let mut spans = vec![Span::raw(" ")];
@@ -1600,6 +1776,94 @@ mod tests {
         assert_eq!(
             first_count, second_count,
             "typewriter ticks should not cause markdown re-parsing"
+        );
+    }
+
+    #[test]
+    fn offscreen_messages_skip_markdown_render() {
+        // with viewport-aware rendering, messages above the visible area
+        // should not trigger markdown rendering or indent_line allocations
+        crate::markdown::reset_render_call_count();
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        for i in 0..100 {
+            let role = if i % 2 == 0 {
+                MessageRole::User
+            } else {
+                MessageRole::Assistant
+            };
+            app.messages.push(DisplayMessage::new(
+                role,
+                format!("message {i} with enough text to be a real message"),
+            ));
+        }
+
+        // render in a small viewport (10 lines visible)
+        render_app(&app, 60, 10);
+        let first_renders = crate::markdown::render_call_count();
+
+        // with 100 messages and only 10 visible lines, most messages
+        // are off-screen. we should render FAR fewer than 50 assistant
+        // messages worth of markdown (50 = half of 100 messages)
+        assert!(
+            first_renders < 20,
+            "expected fewer than 20 markdown renders for 10-line viewport, got {first_renders}"
+        );
+
+        // the last message should still be visible
+        let buf = render_app(&app, 60, 10);
+        let content = buffer_to_string(&buf);
+        assert!(
+            content.contains("message 99"),
+            "last message should be visible in viewport"
+        );
+    }
+
+    #[test]
+    fn stable_messages_reuse_cached_indented_lines() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        for i in 0..10 {
+            app.messages.push(DisplayMessage::new(
+                MessageRole::Assistant,
+                format!("message {i} with **markdown** and `code`"),
+            ));
+        }
+
+        // first render populates the cache
+        reset_indent_line_call_count();
+        render_app(&app, 60, 40);
+        let first_calls = indent_line_call_count();
+        assert!(first_calls > 0, "first render should call indent_line");
+
+        // second render at same width should serve from cache
+        reset_indent_line_call_count();
+        render_app(&app, 60, 40);
+        let second_calls = indent_line_call_count();
+        assert_eq!(
+            second_calls, 0,
+            "second render should use cached indented lines, got {second_calls} calls"
+        );
+    }
+
+    #[test]
+    fn indented_cache_invalidates_on_width_change() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        for i in 0..5 {
+            app.messages.push(DisplayMessage::new(
+                MessageRole::Assistant,
+                format!("message {i} with some text"),
+            ));
+        }
+
+        // first render at width 60
+        render_app(&app, 60, 20);
+
+        // render at different width should recompute
+        reset_indent_line_call_count();
+        render_app(&app, 80, 20);
+        let calls = indent_line_call_count();
+        assert!(
+            calls > 0,
+            "width change should invalidate cache, got {calls} calls"
         );
     }
 }

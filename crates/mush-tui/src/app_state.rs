@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use mush_ai::types::ToolCallId;
 use ratatui::layout::Rect;
-use ratatui::text::Text;
+use ratatui::text::{Line, Text};
 
 use crate::app::ScrollUnit;
 use crate::app_event::AppMode;
@@ -87,6 +87,10 @@ pub struct NavigationState {
     pub selected_block: Option<usize>,
 }
 
+/// cached indented lines for a single message.
+/// keyed by (content_hash, width) so entries invalidate on content or resize.
+type CachedIndentedLines = (u64, u16, Vec<Line<'static>>);
+
 /// render caches and geometry from the last frame
 #[derive(Debug)]
 pub struct RenderState {
@@ -106,6 +110,10 @@ pub struct RenderState {
     pub total_content_lines: Cell<u16>,
     /// visible area height (set during render by MessageList)
     pub visible_area_height: Cell<u16>,
+    /// per-message indented lines cache.
+    /// stores (content_hash, width, pre-indented lines) so stable
+    /// messages skip both the markdown clone and indent_line computation
+    pub indented_cache: RefCell<Vec<Option<CachedIndentedLines>>>,
 }
 
 impl RenderState {
@@ -120,6 +128,7 @@ impl RenderState {
             stream_markdown_cache: RefCell::new(None),
             total_content_lines: Cell::new(0),
             visible_area_height: Cell::new(0),
+            indented_cache: RefCell::new(Vec::new()),
         }
     }
 }
