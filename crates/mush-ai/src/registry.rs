@@ -124,6 +124,7 @@ impl ApiRegistry {
         self.providers.get(&api).map(|p| p.as_ref())
     }
 
+    #[tracing::instrument(name = "llm_stream", skip_all, fields(model = %model.id, api = ?model.api))]
     pub fn stream(
         &self,
         model: &Model,

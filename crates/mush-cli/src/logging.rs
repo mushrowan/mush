@@ -10,6 +10,13 @@ use tracing_subscriber::fmt;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
+/// holds all tracing guards alive for the process lifetime
+pub struct LoggingGuards {
+    _file_guard: WorkerGuard,
+    #[cfg(feature = "profiling")]
+    _chrome_guard: Option<tracing_chrome::FlushGuard>,
+}
+
 /// shared ring buffer for recent log entries
 #[derive(Clone)]
 pub struct LogBuffer {
@@ -70,15 +77,28 @@ pub fn log_file_path() -> PathBuf {
     dir.join("mush.log")
 }
 
+/// where profiling traces are written
+#[cfg(feature = "profiling")]
+pub fn trace_output_path() -> PathBuf {
+    let dir = std::env::var("MUSH_TRACE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            let dir = mush_session::data_dir();
+            std::fs::create_dir_all(&dir).ok();
+            dir
+        });
+    dir.join(format!("mush-trace-{}.json", std::process::id()))
+}
+
 /// initialise tracing with file output + ring buffer
-/// returns the guard (must be held alive) and the log buffer
-pub fn init_logging(config_filter: Option<&str>) -> (WorkerGuard, LogBuffer) {
+/// returns the guards (must be held alive) and the log buffer
+pub fn init_logging(config_filter: Option<&str>, profiling: bool) -> (LoggingGuards, LogBuffer) {
     let log_path = log_file_path();
     let log_dir = log_path.parent().unwrap();
     let log_name = log_path.file_name().unwrap();
 
     let file_appender = tracing_appender::rolling::never(log_dir, log_name);
-    let (file_writer, guard) = tracing_appender::non_blocking(file_appender);
+    let (file_writer, file_guard) = tracing_appender::non_blocking(file_appender);
 
     // ring buffer for TUI /logs command
     let log_buffer = LogBuffer::new(500);
@@ -91,41 +111,67 @@ pub fn init_logging(config_filter: Option<&str>) -> (WorkerGuard, LogBuffer) {
         EnvFilter::new(default)
     });
 
-    let registry = tracing_subscriber::registry()
-        .with(filter)
-        .with(
-            fmt::layer()
-                .with_writer(file_writer)
-                .with_ansi(false)
-                .with_target(true)
-                .with_thread_ids(false)
-                .compact(),
-        )
-        .with(
-            fmt::layer()
-                .with_writer(buf_writer)
-                .with_ansi(false)
-                .with_target(true)
-                .with_thread_ids(false)
-                .compact(),
-        );
+    let file_layer = fmt::layer()
+        .with_writer(file_writer)
+        .with_ansi(false)
+        .with_target(true)
+        .with_thread_ids(false)
+        .compact();
 
+    let buf_layer = fmt::layer()
+        .with_writer(buf_writer)
+        .with_ansi(false)
+        .with_target(true)
+        .with_thread_ids(false)
+        .compact();
+
+    // build the subscriber, conditionally adding optional layers
+    let subscriber = tracing_subscriber::registry()
+        .with(filter)
+        .with(file_layer)
+        .with(buf_layer);
+
+    // profiling: chrome trace timeline output
+    #[cfg(feature = "profiling")]
+    let (subscriber, chrome_guard) = if profiling {
+        let trace_path = trace_output_path();
+        let (chrome_layer, guard) = tracing_chrome::ChromeLayerBuilder::new()
+            .file(&trace_path)
+            .include_args(true)
+            .build();
+        eprintln!(
+            "\x1b[35mprofiling: trace will be written to {}\x1b[0m",
+            trace_path.display()
+        );
+        (subscriber.with(Some(chrome_layer)), Some(guard))
+    } else {
+        (subscriber.with(None), None)
+    };
+    #[cfg(not(feature = "profiling"))]
+    let _ = profiling;
+
+    // tokio-console: async task inspector
     #[cfg(feature = "tokio-console")]
     {
-        use tracing_subscriber::layer::SubscriberExt as _;
         let console_layer = console_subscriber::ConsoleLayer::builder()
             .with_default_env()
             .spawn();
-        registry.with(console_layer).init();
+        subscriber.with(console_layer).init();
         eprintln!("\x1b[2mtokio-console: listening on http://127.0.0.1:6669\x1b[0m");
     }
 
     #[cfg(not(feature = "tokio-console"))]
     {
-        registry.init();
+        subscriber.init();
     }
 
-    (guard, log_buffer)
+    let guards = LoggingGuards {
+        _file_guard: file_guard,
+        #[cfg(feature = "profiling")]
+        _chrome_guard: chrome_guard,
+    };
+
+    (guards, log_buffer)
 }
 
 #[cfg(test)]

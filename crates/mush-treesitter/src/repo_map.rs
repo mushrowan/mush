@@ -210,6 +210,7 @@ pub struct IncrementalRepoMap {
 
 impl IncrementalRepoMap {
     /// build initial map by walking and parsing all files
+    #[tracing::instrument(name = "repo_map_build", skip_all)]
     pub fn new(root: &Path) -> Self {
         let pool = ParserPool::new();
         let files = discover_files(root);
