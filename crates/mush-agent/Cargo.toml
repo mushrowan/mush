@@ -15,6 +15,7 @@ thiserror.workspace = true
 async-stream.workspace = true
 tracing.workspace = true
 tokio = { workspace = true, features = ["time", "net", "io-util"] }
+tokio-util.workspace = true
 
 [dev-dependencies]
 pretty_assertions.workspace = true

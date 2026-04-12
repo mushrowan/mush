@@ -183,6 +183,9 @@ pub struct AgentConfig<'a> {
     /// LSP diagnostic injection. after file-modifying tools (write, edit,
     /// apply_patch), queries the LSP server for diagnostics and appends them.
     pub lsp_diagnostics: Option<DiagnosticCallback>,
+    /// cooperative cancellation token. when cancelled, the agent loop
+    /// stops before the next turn or tool execution.
+    pub cancel: Option<tokio_util::sync::CancellationToken>,
 }
 
 /// run the agent loop, yielding events as they happen
@@ -240,6 +243,12 @@ pub fn agent_loop(
         'outer: loop {
             // inner loop: process tool calls and steering
             loop {
+                // check cooperative cancellation before each turn
+                if config.cancel.as_ref().is_some_and(|t| t.is_cancelled()) {
+                    tracing::info!("agent_loop cancelled before turn {turn_index}");
+                    break 'outer;
+                }
+
                 // inject pending messages
                 if !pending.is_empty() {
                     let count = pending.len();
@@ -522,6 +531,12 @@ pub fn agent_loop(
                             tool_name: tc.name.clone(),
                             args: tc.arguments.clone(),
                         };
+                    }
+
+                    // check cancellation before executing tools
+                    if config.cancel.as_ref().is_some_and(|t| t.is_cancelled()) {
+                        tracing::info!("agent_loop cancelled before tool execution");
+                        break 'outer;
                     }
 
                     // execute all allowed tools concurrently
@@ -870,6 +885,7 @@ mod tests {
             dynamic_system_context: None,
             file_rules: None,
             lsp_diagnostics: None,
+            cancel: None,
         };
 
         let messages = vec![Message::User(UserMessage {
@@ -922,6 +938,7 @@ mod tests {
             dynamic_system_context: None,
             file_rules: None,
             lsp_diagnostics: None,
+            cancel: None,
         };
 
         let messages = vec![Message::User(UserMessage {
@@ -1040,6 +1057,7 @@ mod tests {
             dynamic_system_context: None,
             file_rules: None,
             lsp_diagnostics: None,
+            cancel: None,
         };
 
         let messages = vec![Message::User(UserMessage {
@@ -1082,5 +1100,50 @@ mod tests {
         assert!(!is_file_modifying_tool("read"));
         assert!(!is_file_modifying_tool("bash"));
         assert!(!is_file_modifying_tool("grep"));
+    }
+
+    #[test]
+    fn cancelled_token_stops_before_turn() {
+        let token = tokio_util::sync::CancellationToken::new();
+        token.cancel();
+
+        let registry = ApiRegistry::new();
+        let model = test_model();
+        let tools = ToolRegistry::new();
+
+        let config = AgentConfig {
+            model: model.clone(),
+            system_prompt: None,
+            tools,
+            registry: &registry,
+            options: StreamOptions::default(),
+            max_turns: DEFAULT_MAX_TURNS,
+            hooks: AgentHooks::default(),
+            lifecycle_hooks: crate::hooks::LifecycleHooks::default(),
+            cwd: None,
+            dynamic_system_context: None,
+            file_rules: None,
+            lsp_diagnostics: None,
+            cancel: Some(token),
+        };
+
+        let messages = vec![Message::User(UserMessage {
+            content: UserContent::Text("hi".into()),
+            timestamp_ms: Timestamp::zero(),
+        })];
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let events: Vec<AgentEvent> =
+            rt.block_on(async { agent_loop(config, messages).collect().await });
+
+        // should get AgentStart then AgentEnd (no TurnStart, no Error)
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::AgentStart)));
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::AgentEnd)));
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::TurnStart { .. })),
+            "cancelled agent should not start any turns"
+        );
     }
 }
