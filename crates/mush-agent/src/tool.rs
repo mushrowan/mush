@@ -108,7 +108,7 @@ pub struct ToolKey(String);
 
 impl ToolKey {
     pub fn new(name: &str) -> Self {
-        Self(name.to_lowercase().replace('_', ""))
+        Self(mush_ai::providers::normalize_tool_name(name))
     }
 
     pub fn as_str(&self) -> &str {

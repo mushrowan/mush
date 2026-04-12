@@ -46,8 +46,7 @@ const CLAUDE_CODE_TOOLS: &[&str] = &[
 
 /// convert tool name to claude code canonical casing if it matches (case-insensitive)
 fn to_claude_code_name(name: &str) -> String {
-    // strip underscores for comparison (web_search → websearch → WebSearch)
-    let normalised = name.to_lowercase().replace('_', "");
+    let normalised = super::normalize_tool_name(name);
     CLAUDE_CODE_TOOLS
         .iter()
         .find(|t| t.to_lowercase() == normalised)
@@ -57,11 +56,10 @@ fn to_claude_code_name(name: &str) -> String {
 
 /// convert claude code tool name back to our tool name using the tool definitions
 fn from_claude_code_name(name: &str, tools: &[ToolDefinition]) -> String {
-    // strip underscores for comparison (WebSearch → websearch, web_search → websearch)
-    let normalised = name.to_lowercase().replace('_', "");
+    let normalised = super::normalize_tool_name(name);
     tools
         .iter()
-        .find(|t| t.name.to_lowercase().replace('_', "") == normalised)
+        .find(|t| super::normalize_tool_name(&t.name) == normalised)
         .map(|t| t.name.clone())
         .unwrap_or_else(|| name.to_string())
 }

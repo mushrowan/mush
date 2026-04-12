@@ -57,6 +57,14 @@ pub(crate) fn maybe_trim_tool_output(
     }
 }
 
+/// normalise a tool name for case-insensitive, underscore-insensitive matching.
+/// `"web_search"` → `"websearch"`, `"WebSearch"` → `"websearch"`.
+/// shared by the anthropic provider (claude code name mapping) and
+/// `ToolKey` in mush-agent.
+pub fn normalize_tool_name(name: &str) -> String {
+    name.to_lowercase().replace('_', "")
+}
+
 /// tracks state for a content block being streamed.
 /// shared across all three providers. the `signature` field on `Thinking`
 /// is only used by anthropic but harmless as `None` for openai providers.
@@ -181,6 +189,14 @@ mod tests {
             context_window: TokenCount::new(200_000),
             max_output_tokens: TokenCount::new(16384),
         }
+    }
+
+    #[test]
+    fn normalize_tool_name_strips_case_and_underscores() {
+        assert_eq!(super::normalize_tool_name("WebSearch"), "websearch");
+        assert_eq!(super::normalize_tool_name("web_search"), "websearch");
+        assert_eq!(super::normalize_tool_name("Read"), "read");
+        assert_eq!(super::normalize_tool_name("BASH"), "bash");
     }
 
     #[test]
