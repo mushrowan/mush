@@ -160,10 +160,10 @@ impl Widget for MessageList<'_> {
         };
 
         // bottom-anchor: when content is shorter than the viewport,
-        // pad with empty lines so messages sit near the input box
-        let text = Text::from(lines);
-        let paragraph_tmp = Paragraph::new(text.clone()).wrap(Wrap { trim: false });
-        let content_lines = paragraph_tmp.line_count(area.width).min(u16::MAX as usize) as u16;
+        // pad with empty lines so messages sit near the input box.
+        // since indent_line pre-wraps to content_width, each line fits
+        // within area.width so lines.len() equals the wrapped count
+        let content_lines = lines.len().min(u16::MAX as usize) as u16;
         let visible = area.height;
 
         let padding = if content_lines < visible {
@@ -176,7 +176,7 @@ impl Widget for MessageList<'_> {
         // (done before padding/scroll so we work with original line indices)
         if !msg_line_starts.is_empty() && w > 0 {
             let wrapped_at = |raw_idx: usize| -> u16 {
-                let sum: usize = text.lines[..raw_idx]
+                let sum: usize = lines[..raw_idx]
                     .iter()
                     .map(|line| {
                         let lw = line.width();
@@ -185,7 +185,7 @@ impl Widget for MessageList<'_> {
                     .sum();
                 padding as u16 + sum as u16
             };
-            let total_raw = text.lines.len();
+            let total_raw = lines.len();
             let mut ranges = Vec::with_capacity(msg_line_starts.len());
             for (idx, &(msg_idx, start)) in msg_line_starts.iter().enumerate() {
                 let end_raw = if idx + 1 < msg_line_starts.len() {
@@ -206,14 +206,14 @@ impl Widget for MessageList<'_> {
 
         let text = if padding > 0 {
             let mut padded = vec![Line::raw(""); padding];
-            padded.extend(text.lines);
+            padded.extend(lines);
             Text::from(padded)
         } else {
-            text
+            Text::from(lines)
         };
 
+        let total_lines = content_lines + padding as u16;
         let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
-        let total_lines = paragraph.line_count(area.width).min(u16::MAX as usize) as u16;
         let max_scroll = total_lines.saturating_sub(visible);
         let scroll = max_scroll.saturating_sub(self.app.scroll_offset);
 
@@ -1004,6 +1004,43 @@ mod tests {
         // should be mostly empty
         let content = buffer_to_string(&buf);
         assert!(content.trim().is_empty());
+    }
+
+    #[test]
+    fn long_conversation_renders_without_clone() {
+        // regression: the render path used to clone the entire Text just to
+        // count wrapped lines. verify that a multi-message conversation
+        // still renders correctly with the lines.len() optimisation
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        for i in 0..20 {
+            let role = if i % 2 == 0 {
+                MessageRole::User
+            } else {
+                MessageRole::Assistant
+            };
+            app.messages.push(DisplayMessage::new(
+                role,
+                format!("message number {i} with some text"),
+            ));
+        }
+        let buf = render_app(&app, 60, 30);
+        let content = buffer_to_string(&buf);
+        // last message should be visible near the bottom
+        assert!(
+            content.contains("message number 19"),
+            "last message should be visible"
+        );
+        // content should be bottom-anchored (no excess padding at top)
+        // find first non-empty line
+        let first_content_line = content
+            .lines()
+            .position(|l| !l.trim().is_empty())
+            .unwrap_or(0);
+        // with 20 messages and 30 lines visible, content should start near the top
+        assert!(
+            first_content_line < 5,
+            "content should start near top, but first content at line {first_content_line}"
+        );
     }
 
     #[test]
