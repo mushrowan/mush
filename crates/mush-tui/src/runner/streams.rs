@@ -303,7 +303,7 @@ pub(super) async fn handle_agent_event_side_effects(
     }
 
     if let Some(ref saver) = tui_config.save_session {
-        saver(build_session_snapshot(pane_mgr));
+        saver(build_session_snapshot(pane_mgr, tui_config));
     }
 
     // delegation panes: send result back to parent and auto-close
@@ -360,7 +360,7 @@ fn complete_delegation(
 
     // save before closing so the result is persisted
     if let Some(ref saver) = tui_config.save_session {
-        saver(build_session_snapshot(pane_mgr));
+        saver(build_session_snapshot(pane_mgr, tui_config));
     }
 
     pane_mgr.remove_pane(pane_id);
@@ -1034,7 +1034,10 @@ fn build_system_prompt(
 }
 
 /// build a snapshot of all pane conversations for session persistence
-pub(crate) fn build_session_snapshot(pane_mgr: &PaneManager) -> super::SessionSnapshot {
+pub(crate) fn build_session_snapshot(
+    pane_mgr: &PaneManager,
+    tui_config: &super::TuiConfig,
+) -> super::SessionSnapshot {
     let primary = pane_mgr.focused();
     let additional: Vec<super::PaneSnapshot> = pane_mgr
         .panes()
@@ -1049,6 +1052,7 @@ pub(crate) fn build_session_snapshot(pane_mgr: &PaneManager) -> super::SessionSn
         .collect();
 
     super::SessionSnapshot {
+        session_id: tui_config.session_id.clone(),
         primary: primary.conversation.clone(),
         model_id: primary.app.model_id.to_string(),
         panes: additional,
@@ -1294,6 +1298,7 @@ mod tests {
             model_tiers: std::collections::HashMap::new(),
             compaction_model: None,
             http_client: None,
+            session_id: mush_ai::types::SessionId::new(),
         }
     }
 

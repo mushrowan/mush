@@ -245,6 +245,20 @@ pub(super) async fn handle_slash_action(
                 pane.app.show_cost = show;
             }
         }
+        SlashAction::New => {
+            // save current session before clearing
+            if let Some(ref saver) = tui_config.save_session {
+                saver(super::streams::build_session_snapshot(pane_mgr, tui_config));
+            }
+            // start a new session with a fresh id
+            tui_config.session_id = mush_ai::types::SessionId::new();
+            let pane = pane_mgr.focused_mut();
+            let (app, conversation, _) = pane.fields_mut();
+            app.clear_messages();
+            *conversation = mush_session::ConversationState::new();
+            app.status = Some("new session started (previous session saved)".into());
+            state_changed = true;
+        }
         SlashAction::Close => {
             close_focused_pane(pane_mgr, message_bus, file_tracker, cwd).await;
         }
@@ -303,10 +317,7 @@ pub(super) async fn handle_slash_action(
                 app.start_streaming();
                 *pending_prompt = Some(prompt);
             }
-            if matches!(
-                other_action,
-                SlashAction::Undo | SlashAction::Clear | SlashAction::Branch { .. }
-            ) {
+            if matches!(other_action, SlashAction::Undo | SlashAction::Branch { .. }) {
                 state_changed = true;
             }
         }

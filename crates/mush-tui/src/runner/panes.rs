@@ -506,6 +506,7 @@ mod tests {
             model_tiers: std::collections::HashMap::new(),
             compaction_model: None,
             http_client: None,
+            session_id: mush_ai::types::SessionId::new(),
         };
 
         process_delegations(&mut pane_mgr, &tui_config, &bus, &queue);
