@@ -9,16 +9,17 @@ craneLib.devShell {
   inherit checks cargoArtifacts shellHook;
 
   packages = with pkgs; [
-    cargo-edit
-    cargo-machete
-    cargo-watch
-    cargo-nextest
     cargo-deny
-    jujutsu
+    cargo-edit
+    cargo-llvm-cov
+    cargo-machete
+    cargo-nextest
+    cargo-watch
     gh
-    pkg-config
-    openssl
+    jujutsu
     onnxruntime
+    openssl
+    pkg-config
     samply
   ];
 
