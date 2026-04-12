@@ -47,10 +47,13 @@ pub(super) struct StreamMeta {
     pub context_tokens: Arc<std::sync::atomic::AtomicU64>,
 }
 
-#[derive(Default)]
+/// minimum interval between incremental session saves
+const SESSION_SAVE_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(5);
+
 pub(super) struct StreamState {
     metas: HashMap<PaneId, StreamMeta>,
     aborted_panes: HashSet<PaneId>,
+    last_session_save: std::time::Instant,
 }
 
 pub(super) struct StreamDeps<'a> {
@@ -80,7 +83,12 @@ pub(super) struct StreamDeps<'a> {
 
 impl StreamState {
     pub(super) fn new() -> Self {
-        Self::default()
+        Self {
+            metas: HashMap::new(),
+            aborted_panes: HashSet::new(),
+            // start in the past so the first save happens immediately
+            last_session_save: std::time::Instant::now() - SESSION_SAVE_DEBOUNCE,
+        }
     }
 
     pub(super) fn register_active(&mut self, pane_id: PaneId, meta: StreamMeta) {
@@ -112,6 +120,33 @@ impl StreamState {
     pub(super) fn finish_aborted(&mut self, pane_id: PaneId) {
         self.aborted_panes.remove(&pane_id);
         self.metas.remove(&pane_id);
+    }
+
+    /// save session if enough time has passed since the last save
+    pub(super) fn save_session_debounced(
+        &mut self,
+        pane_mgr: &PaneManager,
+        tui_config: &super::TuiConfig,
+    ) {
+        if self.last_session_save.elapsed() < SESSION_SAVE_DEBOUNCE {
+            return;
+        }
+        if let Some(ref saver) = tui_config.save_session {
+            saver(build_session_snapshot(pane_mgr, tui_config));
+            self.last_session_save = std::time::Instant::now();
+        }
+    }
+
+    /// unconditional save (for AgentEnd and other important checkpoints)
+    pub(super) fn save_session_now(
+        &mut self,
+        pane_mgr: &PaneManager,
+        tui_config: &super::TuiConfig,
+    ) {
+        if let Some(ref saver) = tui_config.save_session {
+            saver(build_session_snapshot(pane_mgr, tui_config));
+            self.last_session_save = std::time::Instant::now();
+        }
     }
 }
 
@@ -249,6 +284,14 @@ pub(super) async fn handle_agent_event_side_effects(
         }
     }
 
+    // incremental save after meaningful state changes (debounced)
+    match event {
+        AgentEvent::MessageEnd { .. } | AgentEvent::ToolExecEnd { .. } => {
+            stream_state.save_session_debounced(pane_mgr, tui_config);
+        }
+        _ => {}
+    }
+
     if !matches!(event, AgentEvent::AgentEnd) {
         return;
     }
@@ -302,9 +345,7 @@ pub(super) async fn handle_agent_event_side_effects(
         auto_fork_compact(pane_mgr, pane_id, tui_config, registry).await;
     }
 
-    if let Some(ref saver) = tui_config.save_session {
-        saver(build_session_snapshot(pane_mgr, tui_config));
-    }
+    stream_state.save_session_now(pane_mgr, tui_config);
 
     // delegation panes: send result back to parent and auto-close
     complete_delegation(pane_mgr, pane_id, tui_config);
@@ -1368,5 +1409,32 @@ mod tests {
         let completed = complete_delegation(&mut pane_mgr, PaneId::new(1), &tui_config);
         assert!(!completed);
         assert_eq!(pane_mgr.pane_count(), 1);
+    }
+
+    #[test]
+    fn save_session_debounced_respects_interval() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let save_count = std::sync::Arc::new(AtomicU32::new(0));
+        let count_clone = save_count.clone();
+        let mut config = test_tui_config();
+        config.save_session = Some(std::sync::Arc::new(move |_| {
+            count_clone.fetch_add(1, Ordering::Relaxed);
+        }));
+
+        let pane_mgr = PaneManager::new(Pane::new(PaneId::new(1), app()));
+        let mut stream_state = StreamState::new();
+
+        // first call should save (debounce timer starts in the past)
+        stream_state.save_session_debounced(&pane_mgr, &config);
+        assert_eq!(save_count.load(Ordering::Relaxed), 1);
+
+        // immediate second call should be debounced
+        stream_state.save_session_debounced(&pane_mgr, &config);
+        assert_eq!(save_count.load(Ordering::Relaxed), 1);
+
+        // save_session_now bypasses debounce
+        stream_state.save_session_now(&pane_mgr, &config);
+        assert_eq!(save_count.load(Ordering::Relaxed), 2);
     }
 }
