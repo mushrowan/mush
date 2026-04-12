@@ -350,6 +350,7 @@ fn truncate_label(s: &str) -> String {
 
 pub(super) async fn close_focused_pane(
     pane_mgr: &mut PaneManager,
+    stream_state: Option<&mut super::streams::StreamState>,
     message_bus: &crate::messaging::MessageBus,
     file_tracker: &crate::file_tracker::FileTracker,
     cwd: &Path,
@@ -360,6 +361,13 @@ pub(super) async fn close_focused_pane(
     }
 
     let closed_id = pane_mgr.focused().id;
+
+    // abort any active stream before removing the pane so the agent_loop
+    // stops making API calls and executing tools
+    if let Some(ss) = stream_state {
+        ss.abort(closed_id);
+    }
+
     let isolation = pane_mgr.focused().isolation.clone();
     file_tracker.release_pane(closed_id);
     message_bus.unregister(closed_id);
@@ -413,6 +421,7 @@ mod tests {
 
         let closed = close_focused_pane(
             &mut pane_mgr,
+            None,
             &message_bus,
             &file_tracker,
             Path::new("/tmp"),
@@ -440,6 +449,7 @@ mod tests {
         let file_tracker = FileTracker::new(Path::new("/tmp").to_path_buf());
         let closed = close_focused_pane(
             &mut pane_mgr,
+            None,
             &message_bus,
             &file_tracker,
             Path::new("/tmp"),
@@ -541,6 +551,56 @@ mod tests {
     fn resolve_tier_falls_back_to_literal() {
         let tiers = std::collections::HashMap::new();
         assert_eq!(resolve_model_tier("gpt-4o", &tiers), "gpt-4o");
+    }
+
+    #[tokio::test]
+    async fn close_focused_pane_aborts_active_stream() {
+        use crate::runner::streams::{StreamMeta, StreamState};
+        use mush_ai::models;
+        use tokio::sync::Mutex;
+
+        let pane1 = PaneId::new(1);
+        let pane2 = PaneId::new(2);
+        let mut pane_mgr = PaneManager::new(Pane::new(pane1, app()));
+        pane_mgr.add_pane(Pane::new(pane2, app()));
+        pane_mgr.focus_index(1); // focus pane2
+
+        let message_bus = crate::messaging::MessageBus::new();
+        message_bus.register(pane1);
+        message_bus.register(pane2);
+        let file_tracker = FileTracker::new(Path::new("/tmp").to_path_buf());
+
+        let mut stream_state = StreamState::new();
+        let (_tx, rx) = tokio::sync::mpsc::channel(1);
+        let stream_gen = stream_state.register_active(
+            pane2,
+            StreamMeta {
+                steering_queue: std::sync::Arc::new(Mutex::new(Vec::new())),
+                confirm_req_rx: rx,
+                confirm_reply: std::sync::Arc::new(Mutex::new(None)),
+                model: models::all_models_with_user().into_iter().next().unwrap(),
+                context_tokens: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            },
+        );
+
+        close_focused_pane(
+            &mut pane_mgr,
+            Some(&mut stream_state),
+            &message_bus,
+            &file_tracker,
+            Path::new("/tmp"),
+        )
+        .await;
+
+        // after closing, the stream generation should be stale
+        assert!(
+            !stream_state.is_current(pane2, stream_gen),
+            "closing a pane should invalidate its stream generation"
+        );
+        assert!(
+            stream_state.meta(pane2).is_none(),
+            "closing a pane should remove its stream metadata"
+        );
     }
 
     #[tokio::test]

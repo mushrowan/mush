@@ -67,6 +67,7 @@ fn trace_dropped_event(event: Event, phase: &str) {
 async fn handle_common_app_event(
     app_event: &AppEvent,
     pane_mgr: &mut PaneManager,
+    stream_state: Option<&mut StreamState>,
     deps: &mut InputDeps<'_>,
 ) -> Option<LoopAction> {
     match app_event {
@@ -96,7 +97,14 @@ async fn handle_common_app_event(
             Some(LoopAction::Redraw)
         }
         AppEvent::ClosePane => {
-            close_focused_pane(pane_mgr, deps.message_bus, deps.file_tracker, deps.cwd).await;
+            close_focused_pane(
+                pane_mgr,
+                stream_state,
+                deps.message_bus,
+                deps.file_tracker,
+                deps.cwd,
+            )
+            .await;
             Some(LoopAction::Redraw)
         }
         AppEvent::FocusNextPane => {
@@ -140,7 +148,9 @@ pub(super) async fn handle_streaming_terminal_events(
                     continue;
                 };
 
-                if let Some(action) = handle_common_app_event(&app_event, pane_mgr, deps).await {
+                if let Some(action) =
+                    handle_common_app_event(&app_event, pane_mgr, Some(stream_state), deps).await
+                {
                     if matches!(action, LoopAction::Quit) {
                         return Ok(LoopAction::Quit);
                     }
@@ -191,7 +201,9 @@ pub(super) async fn handle_idle_terminal_events(
                     continue;
                 };
 
-                if let Some(action) = handle_common_app_event(&app_event, pane_mgr, deps).await {
+                if let Some(action) =
+                    handle_common_app_event(&app_event, pane_mgr, None, deps).await
+                {
                     if matches!(action, LoopAction::Quit) {
                         return Ok(LoopAction::Quit);
                     }
