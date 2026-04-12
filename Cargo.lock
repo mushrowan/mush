@@ -2856,11 +2856,13 @@ version = "0.1.0"
 dependencies = [
  "async-stream",
  "base64 0.22.1",
+ "bytes",
  "chrono",
  "criterion",
  "derive_more",
  "futures",
  "getrandom 0.4.2",
+ "http",
  "miette",
  "pretty_assertions",
  "reqwest 0.13.2",
@@ -2869,6 +2871,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
  "urlencoding",
 ]

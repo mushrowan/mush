@@ -5,7 +5,7 @@ pub mod openai_responses;
 pub mod sse;
 
 use crate::registry::ApiRegistry;
-use crate::types::{Message, ToolResultTrimming};
+use crate::types::{Message, Model, ThinkingLevel, ToolResultTrimming};
 
 /// max chars for tool results in older turns
 const TRIM_TOOL_OUTPUT_CHARS: usize = 1500;
@@ -57,6 +57,75 @@ pub(crate) fn maybe_trim_tool_output(
     }
 }
 
+/// map a thinking level to an openai-style reasoning effort string.
+/// shared by the openai completions and openai responses providers.
+pub(crate) fn openai_reasoning_effort(model: &Model, level: ThinkingLevel) -> Option<String> {
+    if level == ThinkingLevel::Off || !model.reasoning {
+        return None;
+    }
+
+    Some(match level {
+        ThinkingLevel::Off => unreachable!(),
+        ThinkingLevel::Minimal | ThinkingLevel::Low => "low".into(),
+        ThinkingLevel::Medium => "medium".into(),
+        ThinkingLevel::High => "high".into(),
+        ThinkingLevel::Xhigh => "xhigh".into(),
+    })
+}
+
+/// check an HTTP response for errors, logging metadata and returning a typed
+/// error on non-success status. returns the response unchanged on success.
+/// shared by all three providers to avoid ~30 lines of identical boilerplate.
+pub(crate) async fn check_response(
+    response: reqwest::Response,
+    api_label: &'static str,
+    model_id: &str,
+    url: &str,
+) -> Result<reqwest::Response, crate::registry::ProviderError> {
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("<missing>")
+        .to_string();
+    let header_names: Vec<_> = response
+        .headers()
+        .keys()
+        .map(reqwest::header::HeaderName::as_str)
+        .collect();
+
+    tracing::debug!(
+        model = %model_id,
+        %url,
+        %status,
+        content_type,
+        ?header_names,
+        "received {api_label} response"
+    );
+    if content_type == "<missing>" {
+        tracing::warn!(
+            model = %model_id,
+            %url,
+            ?header_names,
+            "{api_label} response missing content-type header"
+        );
+    }
+
+    if !status.is_success() {
+        let text = response.text().await.unwrap_or_default();
+        tracing::error!(%status, %content_type, body = %text, "{api_label} API error");
+        return Err(crate::registry::ProviderError::ApiError {
+            api: api_label,
+            status,
+            content_type,
+            body: crate::registry::truncate_error_body(&text),
+        });
+    }
+
+    Ok(response)
+}
+
 /// register all built-in api providers
 pub fn register_builtins(registry: &mut ApiRegistry, client: reqwest::Client) {
     registry.register(Box::new(anthropic::AnthropicProvider {
@@ -68,4 +137,92 @@ pub fn register_builtins(registry: &mut ApiRegistry, client: reqwest::Client) {
     registry.register(Box::new(openai_responses::OpenaiResponsesProvider {
         client,
     }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::*;
+
+    fn reasoning_model() -> Model {
+        Model {
+            id: "test-model".into(),
+            name: "Test".into(),
+            api: Api::OpenaiCompletions,
+            provider: Provider::Custom("test".into()),
+            base_url: "https://example.com".into(),
+            reasoning: true,
+            input: vec![InputModality::Text],
+            cost: ModelCost {
+                input: 0.0,
+                output: 0.0,
+                cache_read: 0.0,
+                cache_write: 0.0,
+            },
+            context_window: TokenCount::new(200_000),
+            max_output_tokens: TokenCount::new(16384),
+        }
+    }
+
+    #[test]
+    fn openai_reasoning_effort_maps_levels() {
+        let model = reasoning_model();
+        assert_eq!(openai_reasoning_effort(&model, ThinkingLevel::Off), None);
+        assert_eq!(
+            openai_reasoning_effort(&model, ThinkingLevel::Low),
+            Some("low".into())
+        );
+        assert_eq!(
+            openai_reasoning_effort(&model, ThinkingLevel::Medium),
+            Some("medium".into())
+        );
+        assert_eq!(
+            openai_reasoning_effort(&model, ThinkingLevel::High),
+            Some("high".into())
+        );
+        assert_eq!(
+            openai_reasoning_effort(&model, ThinkingLevel::Xhigh),
+            Some("xhigh".into())
+        );
+    }
+
+    #[test]
+    fn openai_reasoning_effort_none_for_non_reasoning_model() {
+        let model = Model {
+            reasoning: false,
+            ..reasoning_model()
+        };
+        assert_eq!(openai_reasoning_effort(&model, ThinkingLevel::High), None);
+    }
+
+    #[tokio::test]
+    async fn check_response_passes_success() {
+        let http_resp = http::Response::builder()
+            .status(200)
+            .header("content-type", "text/event-stream")
+            .body(bytes::Bytes::new())
+            .unwrap();
+        let resp = reqwest::Response::from(http_resp);
+        let result = check_response(resp, "test", "model-1", "http://example.com").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn check_response_returns_error_for_failure() {
+        let http_resp = http::Response::builder()
+            .status(400)
+            .header("content-type", "application/json")
+            .body(bytes::Bytes::from(r#"{"error": "bad request"}"#))
+            .unwrap();
+        let resp = reqwest::Response::from(http_resp);
+        let result = check_response(resp, "test-api", "model-1", "http://example.com").await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            crate::registry::ProviderError::ApiError { api, status, .. } => {
+                assert_eq!(api, "test-api");
+                assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+            }
+            other => panic!("expected ApiError, got {other:?}"),
+        }
+    }
 }
