@@ -580,7 +580,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         terminal_policy,
         lifecycle_hooks: setup.lifecycle_hooks,
         cwd: std::env::current_dir().unwrap_or_default(),
-        dynamic_system_context: setup.repo_map_context.clone(),
+        dynamic_system_context: None,
         file_rules: setup.file_rules.clone(),
         lsp_diagnostics: setup.lsp_diagnostics.clone(),
         agent_card: Some(agent_card),

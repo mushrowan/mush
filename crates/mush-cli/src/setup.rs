@@ -25,8 +25,6 @@ pub struct AppSetup {
     pub debug_cache: bool,
     pub max_turns: usize,
     pub lifecycle_hooks: mush_agent::LifecycleHooks,
-    /// live repo map context (updated by file watcher), kept alive by the watcher
-    pub repo_map_context: Option<mush_agent::DynamicContext>,
     /// file-triggered rule injection callback
     pub file_rules: Option<mush_agent::FileRuleCallback>,
     /// LSP diagnostic injection callback
@@ -198,11 +196,18 @@ impl AppSetup {
         let lifecycle_hooks = cfg.lifecycle_hooks();
 
         // start repo map file watcher for live updates
-        let (repo_map_context, _repo_map_watcher) = if cfg.retrieval.repo_map {
+        let (repo_map_text, _repo_map_watcher) = if cfg.retrieval.repo_map {
             start_repo_map_watcher(&cwd, cfg.retrieval.context_budget)
         } else {
             (None, None)
         };
+        if let Some(ref shared) = repo_map_text
+            && !args.no_tools
+        {
+            tools.register_shared(std::sync::Arc::new(mush_tools::repo_map::RepoMapTool::new(
+                shared.clone(),
+            )));
+        }
         if let Some(t) = &mut timer {
             t.phase("repo map");
         }
@@ -245,7 +250,6 @@ impl AppSetup {
                 debug_cache,
                 max_turns,
                 lifecycle_hooks,
-                repo_map_context,
                 file_rules,
                 lsp_diagnostics,
                 tool_descriptions,
@@ -516,9 +520,6 @@ fn build_system_prompt_from_context(
         }
     }
 
-    // repo map is now injected dynamically via the file watcher
-    // (see start_repo_map_watcher and dynamic_system_context)
-
     prompt
 }
 
@@ -648,16 +649,16 @@ fn parse_language_name(name: &str) -> Option<mush_treesitter::Language> {
     }
 }
 
-/// start the repo map file watcher and return a dynamic context callback
+/// start the repo map file watcher and return the shared map text
 ///
 /// the watcher keeps the repo map up to date as files change during
-/// the session. the callback is called before each LLM call to get
-/// the latest map text for the system prompt.
+/// the session. the shared text is passed to the RepoMapTool so the
+/// agent can query it on demand.
 fn start_repo_map_watcher(
     cwd: &std::path::Path,
     token_budget: usize,
 ) -> (
-    Option<mush_agent::DynamicContext>,
+    Option<mush_tools::repo_map::SharedMapText>,
     Option<mush_treesitter::RepoMapWatcher>,
 ) {
     let watcher = match mush_treesitter::RepoMapWatcher::start(cwd, token_budget) {
@@ -672,32 +673,14 @@ fn start_repo_map_watcher(
             if map_text.is_empty() {
                 return (None, None);
             }
-            let context = format_repo_map_context(&map_text);
-            let ctx: mush_agent::DynamicContext =
-                std::sync::Arc::new(move || Some(context.clone()));
-            return (Some(ctx), None);
+            let shared: mush_tools::repo_map::SharedMapText =
+                std::sync::Arc::new(std::sync::RwLock::new(map_text));
+            return (Some(shared), None);
         }
     };
 
-    let map_text = watcher.map_text().clone();
-    let ctx: mush_agent::DynamicContext = std::sync::Arc::new(move || {
-        let text = map_text.read().ok()?;
-        if text.is_empty() {
-            return None;
-        }
-        Some(format_repo_map_context(&text))
-    });
-
-    (Some(ctx), Some(watcher))
-}
-
-fn format_repo_map_context(map_text: &str) -> String {
-    format!(
-        "# Repository Map\n\n\
-         The following is a ranked summary of the most important files \
-         and symbols in this repository:\n\n\
-         {map_text}"
-    )
+    let shared = watcher.map_text().clone();
+    (Some(shared), Some(watcher))
 }
 
 /// build a prompt enricher that returns a relevance hint for the user message
