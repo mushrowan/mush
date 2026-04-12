@@ -205,6 +205,13 @@ pub(super) async fn handle_idle_terminal_events(
                             app.active_tools.clear();
                             app.start_streaming();
                             *deps.pending_prompt = Some(expanded);
+                            // save the user message immediately so it survives crashes
+                            if let Some(ref saver) = deps.tui_config.save_session {
+                                saver(super::streams::build_session_snapshot(
+                                    pane_mgr,
+                                    deps.tui_config,
+                                ));
+                            }
                         }
                         AppEvent::SlashCommand { action } => {
                             let state_changed = handle_slash_action(
