@@ -21,7 +21,10 @@ pub use crate::display_types::{
 };
 pub use crate::input_buffer::{IMAGE_PLACEHOLDER, InputBuffer, PendingImage};
 pub use crate::session_picker::{SessionPickerState, SessionScope, filtered_sessions};
+pub use crate::slash_menu::{ModelCompletion, SlashCommand, SlashMenuState};
 pub use crate::streaming::StreamingState;
+
+use crate::slash_menu::{TabState, filter_command_matches, filter_model_matches};
 
 /// tick() runs at ~60fps, divide by this to get spinner update rate (~8fps)
 const TICK_DIVISOR: u8 = 8;
@@ -149,33 +152,6 @@ pub struct App {
     pub theme: crate::theme::Theme,
 }
 
-/// slash command menu item
-#[derive(Debug, Clone)]
-pub struct SlashCommand {
-    pub name: String,
-    pub description: String,
-}
-
-/// model completion menu item
-#[derive(Debug, Clone)]
-pub struct ModelCompletion {
-    pub id: String,
-    pub name: String,
-}
-
-/// state for the slash command completion menu
-#[derive(Debug, Clone)]
-pub struct SlashMenuState {
-    /// filtered commands matching current input
-    pub matches: Vec<SlashCommand>,
-    /// filtered models matching current /model query
-    pub model_matches: Vec<ModelCompletion>,
-    /// whether this menu is showing models
-    pub model_mode: bool,
-    /// which match is selected
-    pub selected: usize,
-}
-
 /// state for the conversation search popup
 #[derive(Debug, Clone, Default)]
 pub struct SearchState {
@@ -185,15 +161,6 @@ pub struct SearchState {
     pub matches: Vec<usize>,
     /// which match is currently selected
     pub selected: usize,
-}
-
-/// tracks an in-progress tab completion cycle
-#[derive(Debug, Clone)]
-struct TabState {
-    /// matching candidates
-    matches: Vec<String>,
-    /// which match we're showing (cycles on repeated tab)
-    index: usize,
 }
 
 impl App {
@@ -613,48 +580,22 @@ impl App {
         let prefix = self.input.text.as_str();
 
         if let Some(rest) = prefix.strip_prefix("/model ") {
-            let query = rest.to_lowercase();
-            let model_matches: Vec<ModelCompletion> = self
-                .model_completions
-                .iter()
-                .filter(|m| m.id.starts_with(rest) || m.name.to_lowercase().contains(&query))
-                .cloned()
-                .collect();
-
+            let model_matches = filter_model_matches(&self.model_completions, rest);
             if model_matches.is_empty() {
                 return;
             }
 
-            self.slash_menu = Some(SlashMenuState {
-                matches: Vec::new(),
-                model_matches,
-                model_mode: true,
-                selected: 0,
-            });
+            self.slash_menu = Some(SlashMenuState::for_models(model_matches));
             self.mode = AppMode::SlashComplete;
             return;
         }
 
-        let matches: Vec<SlashCommand> = self
-            .slash_commands
-            .iter()
-            .filter(|cmd| {
-                let full = format!("/{}", cmd.name);
-                full.starts_with(prefix)
-            })
-            .cloned()
-            .collect();
-
+        let matches = filter_command_matches(&self.slash_commands, prefix);
         if matches.is_empty() {
             return;
         }
 
-        self.slash_menu = Some(SlashMenuState {
-            matches,
-            model_matches: Vec::new(),
-            model_mode: false,
-            selected: 0,
-        });
+        self.slash_menu = Some(SlashMenuState::for_commands(matches));
         self.mode = AppMode::SlashComplete;
     }
 
@@ -664,14 +605,8 @@ impl App {
             let prefix = self.input.text.as_str();
 
             if let Some(rest) = prefix.strip_prefix("/model ") {
-                let query = rest.to_lowercase();
                 menu.model_mode = true;
-                menu.model_matches = self
-                    .model_completions
-                    .iter()
-                    .filter(|m| m.id.starts_with(rest) || m.name.to_lowercase().contains(&query))
-                    .cloned()
-                    .collect();
+                menu.model_matches = filter_model_matches(&self.model_completions, rest);
                 menu.matches.clear();
                 menu.selected = menu
                     .selected
@@ -684,15 +619,7 @@ impl App {
             }
 
             menu.model_mode = false;
-            menu.matches = self
-                .slash_commands
-                .iter()
-                .filter(|cmd| {
-                    let full = format!("/{}", cmd.name);
-                    full.starts_with(prefix)
-                })
-                .cloned()
-                .collect();
+            menu.matches = filter_command_matches(&self.slash_commands, prefix);
             menu.model_matches.clear();
             menu.selected = menu.selected.min(menu.matches.len().saturating_sub(1));
 
