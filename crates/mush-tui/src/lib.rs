@@ -6,6 +6,7 @@ pub mod delegate;
 pub mod event_handler;
 pub mod file_tracker;
 pub mod input;
+pub mod input_buffer;
 pub mod isolation;
 pub mod markdown;
 pub mod messaging;
