@@ -524,15 +524,62 @@ fn render_streaming_markdown_cached(app: &App, source: &str) -> Text<'static> {
         return Text::default();
     }
 
+    // cache against the FULL stream buffer, not the visible (typewriter-truncated)
+    // portion. this way typewriter ticks don't invalidate the cache: we only
+    // re-parse when new deltas arrive
+    let full = &app.stream.text;
+
     if let Some((cached_source, cached)) = app.stream_markdown_cache.borrow().as_ref()
-        && cached_source == source
+        && cached_source == full
     {
-        return cached.clone();
+        // cache hit: truncate the pre-rendered output to the visible char count
+        return truncate_text(cached.clone(), source.chars().count());
     }
 
-    let rendered = crate::markdown::render(source, &app.theme);
-    *app.stream_markdown_cache.borrow_mut() = Some((source.to_string(), rendered.clone()));
-    rendered
+    let rendered = crate::markdown::render(full, &app.theme);
+    *app.stream_markdown_cache.borrow_mut() = Some((full.to_string(), rendered.clone()));
+    truncate_text(rendered, source.chars().count())
+}
+
+/// truncate a rendered Text to at most `max_chars` visible characters
+fn truncate_text(text: Text<'static>, max_chars: usize) -> Text<'static> {
+    let total: usize = text.lines.iter().map(|l| l.width()).sum();
+    if total <= max_chars {
+        return text;
+    }
+
+    let mut remaining = max_chars;
+    let mut result = Vec::new();
+    for line in text.lines {
+        if remaining == 0 {
+            break;
+        }
+        let line_w = line.width();
+        if line_w <= remaining {
+            remaining -= line_w;
+            result.push(line);
+        } else {
+            // truncate this line's spans to fit
+            let mut spans = Vec::new();
+            let mut left = remaining;
+            for span in line.spans {
+                let sw = span.width();
+                if sw <= left {
+                    left -= sw;
+                    spans.push(span);
+                } else if left > 0 {
+                    let truncated: String = span.content.chars().take(left).collect();
+                    spans.push(Span::styled(truncated, span.style));
+                    break;
+                } else {
+                    break;
+                }
+            }
+            result.push(Line::from(spans));
+            break;
+        }
+    }
+    Text::from(result)
 }
 
 // -- bordered tool boxes for completed tool calls --
@@ -1438,5 +1485,35 @@ mod tests {
                 "wrapped line missing indent: {trimmed:?}"
             );
         }
+    }
+
+    #[test]
+    fn streaming_typewriter_ticks_dont_reparse_markdown() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.start_streaming();
+        app.push_text_delta("hello **world** and some more text here");
+
+        // advance typewriter so some text is visible
+        app.tick();
+
+        crate::markdown::reset_render_call_count();
+
+        // first render: cache miss, parses markdown once
+        render_app(&app, 60, 20);
+        let first_count = crate::markdown::render_call_count();
+        assert!(first_count > 0, "should parse at least once");
+
+        // advance typewriter (changes visible text) and render again
+        for _ in 0..5 {
+            app.tick();
+        }
+        render_app(&app, 60, 20);
+        let second_count = crate::markdown::render_call_count();
+
+        // should not have re-parsed: the full buffer hasn't changed
+        assert_eq!(
+            first_count, second_count,
+            "typewriter ticks should not cause markdown re-parsing"
+        );
     }
 }
