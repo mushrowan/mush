@@ -128,7 +128,7 @@ pub(super) async fn handle_streaming_terminal_events(
         let event = event::read()?;
         match event {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
-                if pane_mgr.focused().app.mode == app::AppMode::ToolConfirm {
+                if pane_mgr.focused().app.interaction.mode == app::AppMode::ToolConfirm {
                     if let Some(allowed) = confirmation_answer(key.code) {
                         answer_confirmation(pane_mgr, stream_state, allowed).await;
                     }

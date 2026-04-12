@@ -193,9 +193,9 @@ pub(super) async fn poll_confirmation_prompt(
         && let Ok(confirm) = meta.confirm_req_rx.try_recv()
     {
         let app = &mut pane_mgr.focused_mut().app;
-        app.mode = crate::app::AppMode::ToolConfirm;
-        app.confirm_tool_call_id = Some(confirm.tool_call_id.clone());
-        app.confirm_prompt = Some(confirm.prompt);
+        app.interaction.mode = crate::app::AppMode::ToolConfirm;
+        app.interaction.confirm_tool_call_id = Some(confirm.tool_call_id.clone());
+        app.interaction.confirm_prompt = Some(confirm.prompt);
         *meta.confirm_reply.lock().await = Some(PendingConfirmation {
             tool_call_id: confirm.tool_call_id,
             reply: confirm.reply,
@@ -220,9 +220,9 @@ pub(super) async fn answer_confirmation(
     };
 
     let app = &mut pane_mgr.focused_mut().app;
-    app.mode = crate::app::AppMode::Normal;
-    app.confirm_prompt = None;
-    app.confirm_tool_call_id = None;
+    app.interaction.mode = crate::app::AppMode::Normal;
+    app.interaction.confirm_prompt = None;
+    app.interaction.confirm_tool_call_id = None;
     if !allowed {
         app.status = Some(match pending_tool_call_id {
             Some(tool_call_id) => format!("tool denied: {tool_call_id}"),
@@ -775,7 +775,7 @@ fn append_prompt_and_snapshot(
         && let Some(ref enricher) = *prompt_enricher
         && let Some(hint) = enricher(&prompt)
     {
-        if app.show_prompt_injection {
+        if app.interaction.show_prompt_injection {
             injection_preview = Some(format!("message hint\n{hint}"));
         }
         format!("{hint}\n\n{prompt}")
@@ -783,7 +783,7 @@ fn append_prompt_and_snapshot(
         prompt
     };
 
-    if app.show_prompt_injection
+    if app.interaction.show_prompt_injection
         && hint_mode == HintMode::Transform
         && let Some(ref enricher) = *prompt_enricher
         && let Some(hint) = enricher(&prompt_preview)
@@ -793,7 +793,7 @@ fn append_prompt_and_snapshot(
         ));
     }
 
-    if app.show_prompt_injection {
+    if app.interaction.show_prompt_injection {
         if let Some(preview) = injection_preview {
             app.push_system_message(preview);
         } else {
@@ -1202,9 +1202,15 @@ mod tests {
         poll_confirmation_prompt(&mut pane_mgr, &mut stream_state).await;
 
         let app = &pane_mgr.focused().app;
-        assert_eq!(app.mode, crate::app::AppMode::ToolConfirm);
-        assert_eq!(app.confirm_prompt.as_deref(), Some("read todo.md"));
-        assert_eq!(app.confirm_tool_call_id.as_ref(), Some(&tool_call_id));
+        assert_eq!(app.interaction.mode, crate::app::AppMode::ToolConfirm);
+        assert_eq!(
+            app.interaction.confirm_prompt.as_deref(),
+            Some("read todo.md")
+        );
+        assert_eq!(
+            app.interaction.confirm_tool_call_id.as_ref(),
+            Some(&tool_call_id)
+        );
 
         let pending = stream_state
             .meta(pane_id)
@@ -1252,9 +1258,9 @@ mod tests {
 
         assert!(reply_rx.await.unwrap());
         let app = &pane_mgr.focused().app;
-        assert_eq!(app.mode, crate::app::AppMode::Normal);
-        assert!(app.confirm_prompt.is_none());
-        assert!(app.confirm_tool_call_id.is_none());
+        assert_eq!(app.interaction.mode, crate::app::AppMode::Normal);
+        assert!(app.interaction.confirm_prompt.is_none());
+        assert!(app.interaction.confirm_tool_call_id.is_none());
         assert!(
             stream_state
                 .meta(pane_id)

@@ -228,7 +228,7 @@ fn build_initial_app(tui_config: &TuiConfig, cwd: &Path) -> App {
         .unwrap_or(ThinkingLevel::Off)
         .normalize_visible();
     app.thinking_display = tui_config.thinking_display;
-    app.show_cost = tui_config.show_cost;
+    app.interaction.show_cost = tui_config.show_cost;
     app.theme = tui_config.theme.clone();
     app.cache.ttl_secs = if tui_config.cache_timer {
         app::cache_ttl_secs(
@@ -239,11 +239,11 @@ fn build_initial_app(tui_config: &TuiConfig, cwd: &Path) -> App {
         0
     };
 
-    app.completions = BUILTIN_SLASH_COMMANDS
+    app.completion.completions = BUILTIN_SLASH_COMMANDS
         .iter()
         .map(|(name, _)| format!("/{name}"))
         .collect();
-    app.slash_commands = BUILTIN_SLASH_COMMANDS
+    app.completion.slash_commands = BUILTIN_SLASH_COMMANDS
         .iter()
         .map(|(name, description)| SlashCommand {
             name: (*name).to_string(),
@@ -252,16 +252,18 @@ fn build_initial_app(tui_config: &TuiConfig, cwd: &Path) -> App {
         .collect();
 
     for template in mush_ext::discover_templates(cwd) {
-        app.completions.push(format!("/{}", template.name));
-        app.slash_commands.push(SlashCommand {
+        app.completion
+            .completions
+            .push(format!("/{}", template.name));
+        app.completion.slash_commands.push(SlashCommand {
             name: template.name.clone(),
             description: template.description.clone(),
         });
     }
 
     for model in models::all_models_with_user() {
-        app.completions.push(model.id.to_string());
-        app.model_completions.push(ModelCompletion {
+        app.completion.completions.push(model.id.to_string());
+        app.completion.model_completions.push(ModelCompletion {
             id: model.id.to_string(),
             name: model.name.clone(),
         });
@@ -379,12 +381,23 @@ mod tests {
 
         assert_eq!(app.thinking_level, ThinkingLevel::Medium);
         assert_eq!(app.thinking_display, crate::app::ThinkingDisplay::Collapse);
-        assert!(app.show_cost);
+        assert!(app.interaction.show_cost);
         assert!(app.cache.ttl_secs > 0);
-        assert!(app.completions.iter().any(|item| item == "/help"));
-        assert!(app.slash_commands.iter().any(|cmd| cmd.name == "help"));
         assert!(
-            app.model_completions
+            app.completion
+                .completions
+                .iter()
+                .any(|item| item == "/help")
+        );
+        assert!(
+            app.completion
+                .slash_commands
+                .iter()
+                .any(|cmd| cmd.name == "help")
+        );
+        assert!(
+            app.completion
+                .model_completions
                 .iter()
                 .any(|model| model.id == config.model.id.to_string())
         );

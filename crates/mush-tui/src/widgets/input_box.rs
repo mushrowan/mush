@@ -409,7 +409,7 @@ impl Widget for InputBox<'_> {
         let content_width = area.width.saturating_sub(2) as usize;
 
         // border colour signals whose turn it is and whether there are unread messages
-        let border_style = if self.app.has_unread && !streaming_idle {
+        let border_style = if self.app.navigation.has_unread && !streaming_idle {
             if self.app.input.text.is_empty() {
                 // empty input + unread: blink between active and highlight
                 if self.app.unread_flash_on() {
@@ -796,7 +796,7 @@ mod tests {
     #[test]
     fn input_box_shows_ghost_completion() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.completions = vec!["/help".into(), "/history".into()];
+        app.completion.completions = vec!["/help".into(), "/history".into()];
         app.input.text = "/h".into();
         app.input.cursor = 2;
         let buf = render_input(&app, 40, 3);

@@ -320,13 +320,13 @@ pub fn handle(
             None
         }
         SlashAction::Search { query } => {
-            app.mode = crate::app::AppMode::Search;
-            app.search.query = query.clone();
+            app.interaction.mode = crate::app::AppMode::Search;
+            app.interaction.search.query = query.clone();
             app.update_search();
             None
         }
         SlashAction::Cost => {
-            app.show_cost = !app.show_cost;
+            app.interaction.show_cost = !app.interaction.show_cost;
             show_cost(app);
             None
         }
@@ -344,7 +344,7 @@ pub fn handle(
             None
         }
         SlashAction::Injection => {
-            app.show_prompt_injection = !app.show_prompt_injection;
+            app.interaction.show_prompt_injection = !app.interaction.show_prompt_injection;
             let mode = match tui_config.hint_mode {
                 HintMode::Message => "message",
                 HintMode::Transform => "transform",
@@ -357,7 +357,7 @@ pub fn handle(
             };
             app.push_system_message(format!(
                 "prompt injection preview: {} (mode: {mode}, enricher: {enricher})",
-                if app.show_prompt_injection {
+                if app.interaction.show_prompt_injection {
                     "on"
                 } else {
                     "off"

@@ -50,7 +50,7 @@ impl Widget for TabBar<'_> {
                     .tab_active
                     .bg(Color::White)
                     .add_modifier(Modifier::BOLD)
-            } else if pane.app.has_unread {
+            } else if pane.app.navigation.has_unread {
                 theme.unread
             } else if pane.app.is_busy() {
                 theme.tab_busy

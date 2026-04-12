@@ -343,7 +343,7 @@ impl PaneManager {
         self.panes
             .iter()
             .enumerate()
-            .filter(|(i, p)| *i != self.focused && p.app.has_unread)
+            .filter(|(i, p)| *i != self.focused && p.app.navigation.has_unread)
             .map(|(i, p)| (i, p.id))
             .collect()
     }

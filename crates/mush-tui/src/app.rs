@@ -3,14 +3,14 @@
 //! the app holds all TUI state: messages being displayed, current input,
 //! streaming status, and scroll position.
 
-use std::cell::{Cell, RefCell};
-
 use mush_ai::types::*;
 use mush_session::SessionMeta;
-use ratatui::layout::Rect;
 use throbber_widgets_tui::ThrobberState;
 
 pub use crate::app_event::{AppEvent, AppMode};
+pub use crate::app_state::{
+    CompletionState, InteractionState, NavigationState, RenderState, SearchState,
+};
 pub use crate::batch_output::{BatchSection, parse_batch_output, truncate_output};
 pub use crate::cache::{
     CACHE_COLD_DISPLAY_SECS, CACHE_WARN_SECS, CacheAnomaly, CacheTimer, TokenStats, cache_ttl_secs,
@@ -87,58 +87,16 @@ pub struct App {
     pub thinking_level: ThinkingLevel,
     /// how to display thinking text
     pub thinking_display: ThinkingDisplay,
-    /// which UI mode we're in
-    pub mode: AppMode,
-    /// session picker state (when mode == SessionPicker)
-    pub session_picker: Option<SessionPickerState>,
-    /// slash command menu state (when mode == SlashComplete)
-    pub slash_menu: Option<SlashMenuState>,
-    /// registered slash commands with descriptions
-    pub slash_commands: Vec<SlashCommand>,
-    /// available models for /model menu
-    pub model_completions: Vec<ModelCompletion>,
-    /// available completions (slash commands, model ids, etc)
-    pub completions: Vec<String>,
-    /// current tab-completion state
-    tab_state: Option<TabState>,
-    /// new messages arrived while scrolled up
-    pub has_unread: bool,
-    /// tool confirmation prompt (shown when mode == ToolConfirm)
-    pub confirm_prompt: Option<String>,
-    /// tool call being confirmed
-    pub confirm_tool_call_id: Option<ToolCallId>,
-    /// whether to show prompt injection previews in the chat
-    pub show_prompt_injection: bool,
-    /// whether to show dollar cost in status bar
-    pub show_cost: bool,
-    /// selected message index in scroll mode (for copy)
-    pub selected_message: Option<usize>,
-    /// anchor for visual selection range (v in scroll mode)
-    pub selection_anchor: Option<usize>,
-    /// what j/k navigates in scroll mode
-    pub scroll_unit: ScrollUnit,
-    /// selected code block index in block scroll mode
-    pub selected_block: Option<usize>,
-    /// search state
-    pub search: SearchState,
-    /// image render positions (populated by MessageList during render)
-    pub image_render_areas: RefCell<Vec<ImageRenderArea>>,
-    /// per-message wrapped-line ranges (populated by MessageList during render)
-    pub message_row_ranges: RefCell<Vec<MessageRowRange>>,
-    /// message area rect from last render
-    pub message_area: Cell<Rect>,
-    /// scroll value from last render (wrapped lines scrolled past)
-    pub render_scroll: Cell<u16>,
-    /// cached markdown rendering for stable message content
-    pub markdown_cache: RefCell<std::collections::HashMap<String, ratatui::text::Text<'static>>>,
-    /// cached markdown rendering for the current visible streaming text
-    pub stream_markdown_cache: RefCell<Option<(String, ratatui::text::Text<'static>)>>,
+    /// modal and prompt-related state
+    pub interaction: InteractionState,
+    /// slash completion and tab cycling state
+    pub completion: CompletionState,
+    /// selection and scroll navigation state
+    pub navigation: NavigationState,
+    /// render caches and geometry from the last frame
+    pub render_state: RenderState,
     /// working directory (with ~ for home)
     pub cwd: String,
-    /// total content lines (set during render by MessageList)
-    pub total_content_lines: Cell<u16>,
-    /// visible area height (set during render by MessageList)
-    pub visible_area_height: Cell<u16>,
     /// pane info: (this pane index 1-based, total panes), None when single pane
     pub pane_info: Option<(u16, u16)>,
     /// background pane alert text (e.g. "pane 2: busy")
@@ -151,17 +109,6 @@ pub struct App {
     pub oauth_usage: Option<mush_ai::oauth::usage::OAuthUsage>,
     /// colour theme for all widgets
     pub theme: crate::theme::Theme,
-}
-
-/// state for the conversation search popup
-#[derive(Debug, Clone, Default)]
-pub struct SearchState {
-    /// current search query
-    pub query: String,
-    /// indices of matching messages
-    pub matches: Vec<usize>,
-    /// which match is currently selected
-    pub selected: usize,
 }
 
 impl App {
@@ -180,29 +127,10 @@ impl App {
             tick_count: 0,
             thinking_level: ThinkingLevel::Off,
             thinking_display: ThinkingDisplay::default(),
-            mode: AppMode::Normal,
-            session_picker: None,
-            slash_menu: None,
-            slash_commands: Vec::new(),
-            model_completions: Vec::new(),
-            completions: Vec::new(),
-            tab_state: None,
-            has_unread: false,
-            confirm_prompt: None,
-            confirm_tool_call_id: None,
-            show_prompt_injection: false,
-            show_cost: false,
-            selected_message: None,
-            selection_anchor: None,
-            scroll_unit: ScrollUnit::default(),
-            selected_block: None,
-            search: SearchState::default(),
-            image_render_areas: RefCell::new(Vec::new()),
-            message_row_ranges: RefCell::new(Vec::new()),
-            message_area: Cell::new(Rect::default()),
-            render_scroll: Cell::new(0),
-            markdown_cache: RefCell::new(std::collections::HashMap::new()),
-            stream_markdown_cache: RefCell::new(None),
+            interaction: InteractionState::default(),
+            completion: CompletionState::default(),
+            navigation: NavigationState::default(),
+            render_state: RenderState::new(),
             cwd: {
                 let path = std::env::current_dir().unwrap_or_default();
                 match std::env::var("HOME") {
@@ -213,8 +141,6 @@ impl App {
                     Err(_) => path.display().to_string(),
                 }
             },
-            total_content_lines: Cell::new(0),
-            visible_area_height: Cell::new(0),
             pane_info: None,
             background_alert: None,
             cache: CacheTimer::new(300),
@@ -526,19 +452,19 @@ impl App {
             self.stats.total_cost += c;
         }
         if self.scroll_offset > 0 {
-            self.has_unread = true;
+            self.navigation.has_unread = true;
         }
     }
 
     /// insert a character at the cursor (clears tab completion)
     pub fn input_char(&mut self, c: char) {
-        self.tab_state = None;
+        self.completion.tab_state = None;
         self.input.insert_char(c);
     }
 
     /// cycle through tab completions for the current input
     pub fn tab_complete(&mut self) {
-        if let Some(ref mut state) = self.tab_state {
+        if let Some(ref mut state) = self.completion.tab_state {
             state.index = (state.index + 1) % state.matches.len();
             let replacement = &state.matches[state.index];
             self.input.text = replacement.clone();
@@ -549,14 +475,16 @@ impl App {
 
         let text = self.input.text.as_str();
         let matches: Vec<String> = if let Some(rest) = text.strip_prefix("/model ") {
-            self.completions
+            self.completion
+                .completions
                 .iter()
                 .filter(|c| !c.starts_with('/'))
                 .filter(|c| c.starts_with(rest))
                 .map(|c| format!("/model {c}"))
                 .collect()
         } else if text.starts_with('/') {
-            self.completions
+            self.completion
+                .completions
                 .iter()
                 .filter(|c| c.starts_with(text))
                 .cloned()
@@ -570,7 +498,7 @@ impl App {
         }
 
         let first = matches[0].clone();
-        self.tab_state = Some(TabState { matches, index: 0 });
+        self.completion.tab_state = Some(TabState { matches, index: 0 });
         self.input.text = first;
         self.input.cursor = self.input.text.len();
         self.input.ensure_cursor_visible();
@@ -581,33 +509,33 @@ impl App {
         let prefix = self.input.text.as_str();
 
         if let Some(rest) = prefix.strip_prefix("/model ") {
-            let model_matches = filter_model_matches(&self.model_completions, rest);
+            let model_matches = filter_model_matches(&self.completion.model_completions, rest);
             if model_matches.is_empty() {
                 return;
             }
 
-            self.slash_menu = Some(SlashMenuState::for_models(model_matches));
-            self.mode = AppMode::SlashComplete;
+            self.completion.slash_menu = Some(SlashMenuState::for_models(model_matches));
+            self.interaction.mode = AppMode::SlashComplete;
             return;
         }
 
-        let matches = filter_command_matches(&self.slash_commands, prefix);
+        let matches = filter_command_matches(&self.completion.slash_commands, prefix);
         if matches.is_empty() {
             return;
         }
 
-        self.slash_menu = Some(SlashMenuState::for_commands(matches));
-        self.mode = AppMode::SlashComplete;
+        self.completion.slash_menu = Some(SlashMenuState::for_commands(matches));
+        self.interaction.mode = AppMode::SlashComplete;
     }
 
     /// update the slash menu filter based on current input
     pub fn update_slash_menu(&mut self) {
-        if let Some(ref mut menu) = self.slash_menu {
+        if let Some(ref mut menu) = self.completion.slash_menu {
             let prefix = self.input.text.as_str();
 
             if let Some(rest) = prefix.strip_prefix("/model ") {
                 menu.model_mode = true;
-                menu.model_matches = filter_model_matches(&self.model_completions, rest);
+                menu.model_matches = filter_model_matches(&self.completion.model_completions, rest);
                 menu.matches.clear();
                 menu.selected = menu
                     .selected
@@ -620,7 +548,7 @@ impl App {
             }
 
             menu.model_mode = false;
-            menu.matches = filter_command_matches(&self.slash_commands, prefix);
+            menu.matches = filter_command_matches(&self.completion.slash_commands, prefix);
             menu.model_matches.clear();
             menu.selected = menu.selected.min(menu.matches.len().saturating_sub(1));
 
@@ -632,25 +560,25 @@ impl App {
 
     /// close the slash menu and return to normal mode
     pub fn close_slash_menu(&mut self) {
-        self.slash_menu = None;
-        self.mode = AppMode::Normal;
+        self.completion.slash_menu = None;
+        self.interaction.mode = AppMode::Normal;
     }
 
     /// jump to bottom of conversation and clear unread indicator
     pub fn scroll_to_bottom(&mut self) {
         self.scroll_offset = 0;
-        self.has_unread = false;
+        self.navigation.has_unread = false;
     }
 
     /// whether visual selection mode is active (v in scroll mode)
     pub fn has_selection(&self) -> bool {
-        self.selection_anchor.is_some() && self.selected_message.is_some()
+        self.navigation.selection_anchor.is_some() && self.navigation.selected_message.is_some()
     }
 
     /// get the inclusive selection range (min..=max), if active
     pub fn selection_range(&self) -> Option<(usize, usize)> {
-        let anchor = self.selection_anchor?;
-        let cursor = self.selected_message?;
+        let anchor = self.navigation.selection_anchor?;
+        let cursor = self.navigation.selected_message?;
         Some((anchor.min(cursor), anchor.max(cursor)))
     }
 
@@ -659,12 +587,12 @@ impl App {
     /// uses render metadata (message_row_ranges, render_scroll, message_area)
     /// populated by MessageList during the last render pass
     pub fn message_at_screen_row(&self, row: u16) -> Option<usize> {
-        let area = self.message_area.get();
+        let area = self.render_state.message_area.get();
         if row < area.y || row >= area.y + area.height {
             return None;
         }
-        let screen_line = self.render_scroll.get() + (row - area.y);
-        let ranges = self.message_row_ranges.borrow();
+        let screen_line = self.render_state.render_scroll.get() + (row - area.y);
+        let ranges = self.render_state.message_row_ranges.borrow();
         ranges
             .iter()
             .find(|r| screen_line >= r.start && screen_line < r.end)
@@ -719,8 +647,8 @@ impl App {
 
     /// update search matches based on current query
     pub fn update_search(&mut self) {
-        let q = self.search.query.to_lowercase();
-        self.search.matches = if q.is_empty() {
+        let q = self.interaction.search.query.to_lowercase();
+        self.interaction.search.matches = if q.is_empty() {
             Vec::new()
         } else {
             self.messages
@@ -731,17 +659,17 @@ impl App {
                 .collect()
         };
         // clamp selection
-        if self.search.matches.is_empty() {
-            self.search.selected = 0;
-        } else if self.search.selected >= self.search.matches.len() {
-            self.search.selected = self.search.matches.len() - 1;
+        if self.interaction.search.matches.is_empty() {
+            self.interaction.search.selected = 0;
+        } else if self.interaction.search.selected >= self.interaction.search.matches.len() {
+            self.interaction.search.selected = self.interaction.search.matches.len() - 1;
         }
     }
 
     /// return ghost completion suffix for inline hint (dimmed text after cursor).
     /// only shown when cursor is at end and no active tab cycle.
     pub fn ghost_text(&self) -> Option<&str> {
-        if self.tab_state.is_some() {
+        if self.completion.tab_state.is_some() {
             return None;
         }
         if self.input.cursor != self.input.text.len() || self.input.text.is_empty() {
@@ -749,13 +677,15 @@ impl App {
         }
         let text = self.input.text.as_str();
         let candidate = if let Some(rest) = text.strip_prefix("/model ") {
-            self.completions
+            self.completion
+                .completions
                 .iter()
                 .filter(|c| !c.starts_with('/'))
                 .find(|c| c.starts_with(rest))
                 .map(|c| &c[rest.len()..])
         } else if text.starts_with('/') {
-            self.completions
+            self.completion
+                .completions
                 .iter()
                 .find(|c| c.starts_with(text) && c.len() > text.len())
                 .map(|c| &c[text.len()..])
@@ -806,19 +736,19 @@ impl App {
 
     /// open the session picker with the given sessions
     pub fn open_session_picker(&mut self, sessions: Vec<SessionMeta>, cwd: String) {
-        self.session_picker = Some(SessionPickerState::new(sessions, cwd));
-        self.mode = AppMode::SessionPicker;
+        self.interaction.session_picker = Some(SessionPickerState::new(sessions, cwd));
+        self.interaction.mode = AppMode::SessionPicker;
     }
 
     /// close the session picker
     pub fn close_session_picker(&mut self) {
-        self.session_picker = None;
-        self.mode = AppMode::Normal;
+        self.interaction.session_picker = None;
+        self.interaction.mode = AppMode::Normal;
     }
 
     /// get the currently selected session id (if picker is open)
     pub fn selected_session(&self) -> Option<&SessionMeta> {
-        let picker = self.session_picker.as_ref()?;
+        let picker = self.interaction.session_picker.as_ref()?;
         let filtered = filtered_sessions(picker);
         filtered.get(picker.selected).copied()
     }
@@ -830,6 +760,7 @@ mod tests {
     use crate::input_buffer::word_boundary_left;
     use crate::streaming::char_prefix;
     use mush_ai::types::ToolOutcome;
+    use ratatui::layout::Rect;
 
     #[test]
     fn new_app_is_empty() {
@@ -1276,7 +1207,7 @@ batch: 1/2 succeeded, 1 failed";
     #[test]
     fn session_picker_open_close() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        assert_eq!(app.mode, AppMode::Normal);
+        assert_eq!(app.interaction.mode, AppMode::Normal);
 
         let sessions = vec![SessionMeta {
             id: mush_session::SessionId::from("abc"),
@@ -1289,12 +1220,12 @@ batch: 1/2 succeeded, 1 failed";
         }];
 
         app.open_session_picker(sessions, "/tmp".into());
-        assert_eq!(app.mode, AppMode::SessionPicker);
-        assert!(app.session_picker.is_some());
+        assert_eq!(app.interaction.mode, AppMode::SessionPicker);
+        assert!(app.interaction.session_picker.is_some());
 
         app.close_session_picker();
-        assert_eq!(app.mode, AppMode::Normal);
-        assert!(app.session_picker.is_none());
+        assert_eq!(app.interaction.mode, AppMode::Normal);
+        assert!(app.interaction.session_picker.is_none());
     }
 
     #[test]
@@ -1323,7 +1254,7 @@ batch: 1/2 succeeded, 1 failed";
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.open_session_picker(sessions, "/tmp".into());
 
-        let picker = app.session_picker.as_mut().unwrap();
+        let picker = app.interaction.session_picker.as_mut().unwrap();
         picker.filter = "rust".into();
         let filtered = filtered_sessions(picker);
         assert_eq!(filtered.len(), 1);
@@ -1357,14 +1288,14 @@ batch: 1/2 succeeded, 1 failed";
         app.open_session_picker(sessions, "/home/user/project".into());
 
         // this dir: only the matching session
-        let picker = app.session_picker.as_ref().unwrap();
+        let picker = app.interaction.session_picker.as_ref().unwrap();
         assert_eq!(picker.scope, SessionScope::ThisDir);
         let filtered = filtered_sessions(picker);
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].title.as_deref(), Some("local session"));
 
         // all dirs: both sessions
-        let picker = app.session_picker.as_mut().unwrap();
+        let picker = app.interaction.session_picker.as_mut().unwrap();
         picker.scope = SessionScope::AllDirs;
         let filtered = filtered_sessions(picker);
         assert_eq!(filtered.len(), 2);
@@ -1503,19 +1434,19 @@ batch: 1/2 succeeded, 1 failed";
     fn selection_range_normalises_order() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         // anchor at 3, cursor at 1 => range (1, 3)
-        app.selection_anchor = Some(3);
-        app.selected_message = Some(1);
+        app.navigation.selection_anchor = Some(3);
+        app.navigation.selected_message = Some(1);
         assert!(app.has_selection());
         assert_eq!(app.selection_range(), Some((1, 3)));
 
         // anchor at 1, cursor at 3 => range (1, 3)
-        app.selection_anchor = Some(1);
-        app.selected_message = Some(3);
+        app.navigation.selection_anchor = Some(1);
+        app.navigation.selected_message = Some(3);
         assert_eq!(app.selection_range(), Some((1, 3)));
 
         // same index => single message range
-        app.selection_anchor = Some(2);
-        app.selected_message = Some(2);
+        app.navigation.selection_anchor = Some(2);
+        app.navigation.selected_message = Some(2);
         assert_eq!(app.selection_range(), Some((2, 2)));
     }
 
@@ -1660,7 +1591,7 @@ batch: 1/2 succeeded, 1 failed";
     #[test]
     fn unread_flash_cycle_works() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.has_unread = true;
+        app.navigation.has_unread = true;
         // at tick 0, flash should be on
         assert!(app.unread_flash_on());
         // advance past the on-phase

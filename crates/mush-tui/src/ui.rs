@@ -138,7 +138,7 @@ impl Widget for Ui<'_> {
         }
 
         // floating popups
-        if self.app.mode == AppMode::Search {
+        if self.app.interaction.mode == AppMode::Search {
             SearchPopup::new(self.app).render(area, buf);
         }
     }

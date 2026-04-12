@@ -24,10 +24,10 @@ fn format_tokens(tokens: mush_ai::types::TokenCount) -> String {
 
 /// get the confirm prompt text (only shown during tool confirmation)
 fn confirm_text(app: &App) -> Option<String> {
-    if app.mode != crate::app::AppMode::ToolConfirm {
+    if app.interaction.mode != crate::app::AppMode::ToolConfirm {
         return None;
     }
-    Some(if let Some(ref prompt) = app.confirm_prompt {
+    Some(if let Some(ref prompt) = app.interaction.confirm_prompt {
         format!("run {prompt}? (y/n)")
     } else {
         "confirm tool? (y/n)".into()
@@ -148,7 +148,7 @@ fn left_spans(app: &App) -> Vec<Span<'static>> {
         ));
     }
 
-    if app.show_cost && app.stats.total_cost > Dollars::ZERO {
+    if app.interaction.show_cost && app.stats.total_cost > Dollars::ZERO {
         spans.push(Span::styled(format!(" {}", app.stats.total_cost), dim));
     }
 
@@ -178,8 +178,8 @@ fn left_spans(app: &App) -> Vec<Span<'static>> {
     }
 
     // scroll mode indicator
-    if app.mode == crate::app::AppMode::Scroll {
-        let unit_label = match app.scroll_unit {
+    if app.interaction.mode == crate::app::AppMode::Scroll {
+        let unit_label = match app.navigation.scroll_unit {
             crate::app::ScrollUnit::Block => "blocks",
             crate::app::ScrollUnit::Message => "messages",
         };
@@ -192,8 +192,8 @@ fn left_spans(app: &App) -> Vec<Span<'static>> {
 
     // scroll position indicator (only when scrolled away from bottom)
     if app.scroll_offset > 0 {
-        let total = app.total_content_lines.get();
-        let visible = app.visible_area_height.get();
+        let total = app.render_state.total_content_lines.get();
+        let visible = app.render_state.visible_area_height.get();
         let max_scroll = total.saturating_sub(visible);
         if max_scroll > 0 {
             // scroll_offset is lines from bottom, convert to percentage from top
@@ -294,7 +294,7 @@ mod tests {
     fn status_bar_shows_cost_and_context() {
         let mut app = App::new("test-model".into(), TokenCount::new(200_000));
         app.stats.total_cost = Dollars::new(0.0123);
-        app.show_cost = true;
+        app.interaction.show_cost = true;
         app.stats.input_tokens = TokenCount::new(45_000);
         app.stats.output_tokens = TokenCount::new(12_000);
         app.stats.cache_read_tokens = TokenCount::new(8_000);
@@ -435,8 +435,8 @@ mod tests {
     #[test]
     fn status_bar_shows_scroll_block_mode() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.mode = crate::app::AppMode::Scroll;
-        app.scroll_unit = crate::app::ScrollUnit::Block;
+        app.interaction.mode = crate::app::AppMode::Scroll;
+        app.navigation.scroll_unit = crate::app::ScrollUnit::Block;
         let buf = render_status(&app, 120, 1);
         let content = buffer_to_string(&buf);
         assert!(
@@ -448,8 +448,8 @@ mod tests {
     #[test]
     fn status_bar_shows_scroll_message_mode() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.mode = crate::app::AppMode::Scroll;
-        app.scroll_unit = crate::app::ScrollUnit::Message;
+        app.interaction.mode = crate::app::AppMode::Scroll;
+        app.navigation.scroll_unit = crate::app::ScrollUnit::Message;
         let buf = render_status(&app, 120, 1);
         let content = buffer_to_string(&buf);
         assert!(

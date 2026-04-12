@@ -57,14 +57,14 @@ impl Widget for SearchPopup<'_> {
         // input line
         let query_spans = vec![
             Span::styled("/ ", self.app.theme.search_border),
-            Span::raw(&self.app.search.query),
+            Span::raw(&self.app.interaction.search.query),
             Span::styled("▏", self.app.theme.search_border),
         ];
         Paragraph::new(Line::from(query_spans)).render(input_area, buf);
 
         // divider
-        let match_count = self.app.search.matches.len();
-        let divider_text = if self.app.search.query.is_empty() {
+        let match_count = self.app.interaction.search.matches.len();
+        let divider_text = if self.app.interaction.search.query.is_empty() {
             "type to search".to_string()
         } else {
             format!(
@@ -77,6 +77,7 @@ impl Widget for SearchPopup<'_> {
         // results list
         let items: Vec<ListItem> = self
             .app
+            .interaction
             .search
             .matches
             .iter()
@@ -102,7 +103,7 @@ impl Widget for SearchPopup<'_> {
                     preview.to_string()
                 };
 
-                let selected = i == self.app.search.selected;
+                let selected = i == self.app.interaction.search.selected;
                 let style = if selected {
                     self.app.theme.picker_selected.add_modifier(Modifier::BOLD)
                 } else {
