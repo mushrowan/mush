@@ -11,7 +11,10 @@ use crate::slash;
 
 use super::TuiConfig;
 
-pub(super) async fn drain_inboxes(pane_mgr: &mut PaneManager) {
+pub(super) async fn drain_inboxes(
+    pane_mgr: &mut PaneManager,
+    stream_state: &super::streams::StreamState,
+) {
     for pane in pane_mgr.panes_mut() {
         let Some(ref mut inbox) = pane.inbox else {
             continue;
@@ -36,7 +39,7 @@ pub(super) async fn drain_inboxes(pane_mgr: &mut PaneManager) {
                 task_suffix,
                 msg.content,
             );
-            if pane.app.stream.active {
+            if stream_state.meta(pane.id).is_some() {
                 let steering_msg = Message::User(UserMessage {
                     content: UserContent::Text(text.clone()),
                     timestamp_ms: msg.timestamp,
@@ -538,5 +541,63 @@ mod tests {
     fn resolve_tier_falls_back_to_literal() {
         let tiers = std::collections::HashMap::new();
         assert_eq!(resolve_model_tier("gpt-4o", &tiers), "gpt-4o");
+    }
+
+    #[tokio::test]
+    async fn drain_inboxes_steers_when_meta_exists_but_stream_inactive() {
+        use crate::messaging::{InterPaneMessage, MessageBus, MessageIntent};
+        use crate::runner::streams::{StreamMeta, StreamState};
+        use mush_ai::models;
+        use tokio::sync::Mutex;
+
+        let bus = MessageBus::new();
+        let pane_id = PaneId::new(1);
+        let sender_id = PaneId::new(2);
+        let inbox = bus.register(pane_id);
+        bus.register(sender_id);
+
+        let mut pane = Pane::new(pane_id, app());
+        pane.inbox = Some(inbox);
+        // simulate post-MessageEnd: stream.active is false but agent is still running
+        pane.app.stream.active = false;
+        let mut pane_mgr = PaneManager::new(pane);
+
+        let mut stream_state = StreamState::new();
+        let (_tx, rx) = tokio::sync::mpsc::channel(1);
+        stream_state.register_active(
+            pane_id,
+            StreamMeta {
+                steering_queue: pane_mgr.pane(pane_id).unwrap().steering_queue.clone(),
+                confirm_req_rx: rx,
+                confirm_reply: std::sync::Arc::new(Mutex::new(None)),
+                model: models::all_models_with_user().into_iter().next().unwrap(),
+                context_tokens: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            },
+        );
+
+        // send an inter-pane message
+        bus.send(
+            pane_id,
+            InterPaneMessage {
+                from: sender_id,
+                to: Some(pane_id),
+                intent: MessageIntent::Info,
+                content: "found a bug".into(),
+                task_id: None,
+                timestamp: mush_ai::types::Timestamp::now(),
+            },
+        )
+        .unwrap();
+
+        drain_inboxes(&mut pane_mgr, &stream_state).await;
+
+        // message should go to steering queue, not trigger a new stream
+        let pane = pane_mgr.pane(pane_id).unwrap();
+        assert!(
+            pane.pending_prompt.is_none(),
+            "should not set pending_prompt when meta exists"
+        );
+        let queue = pane.steering_queue.lock().await;
+        assert_eq!(queue.len(), 1, "should push to steering queue");
     }
 }
