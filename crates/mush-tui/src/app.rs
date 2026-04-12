@@ -1272,7 +1272,32 @@ impl App {
         self.messages.insert(insert_pos, assistant_msg);
 
         if let Some(ref u) = usage {
-            let _ = self.stats.update(u, cost);
+            let anomalies = self.stats.update(u, cost);
+            for anomaly in &anomalies {
+                let msg = match anomaly {
+                    CacheAnomaly::ContextDecrease { prev, curr } => {
+                        format!(
+                            "⚠ context decreased: {}k → {}k (delta -{}k) without compact",
+                            prev.get() / 1000,
+                            curr.get() / 1000,
+                            (prev.get() - curr.get()) / 1000,
+                        )
+                    }
+                    CacheAnomaly::CacheBust {
+                        prev_cache_read,
+                        curr_cache_read,
+                        curr_cache_write,
+                    } => {
+                        format!(
+                            "⚠ probable cache bust: cache_read {}k → {}k, cache_write {}k (prefix evicted)",
+                            prev_cache_read.get() / 1000,
+                            curr_cache_read.get() / 1000,
+                            curr_cache_write.get() / 1000,
+                        )
+                    }
+                };
+                self.push_system_message(msg);
+            }
         } else if let Some(c) = cost {
             self.stats.total_cost += c;
         }
@@ -2889,6 +2914,135 @@ batch: 1/2 succeeded, 1 failed";
             a2.iter()
                 .any(|a| matches!(a, CacheAnomaly::CacheBust { .. })),
             "should detect cache bust via stats.update"
+        );
+    }
+
+    #[test]
+    fn finish_streaming_shows_system_message_on_cache_bust() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+
+        // first call: warm cache
+        app.start_streaming();
+        app.push_text_delta("hello");
+        app.finish_streaming(
+            Some(Usage {
+                input_tokens: TokenCount::new(5_000),
+                output_tokens: TokenCount::new(3_000),
+                cache_read_tokens: TokenCount::new(90_000),
+                cache_write_tokens: TokenCount::new(5_000),
+            }),
+            None,
+        );
+
+        let before = app.messages.len();
+
+        // second call: cache bust
+        app.start_streaming();
+        app.push_text_delta("world");
+        app.finish_streaming(
+            Some(Usage {
+                input_tokens: TokenCount::new(5_000),
+                output_tokens: TokenCount::new(3_000),
+                cache_read_tokens: TokenCount::ZERO,
+                cache_write_tokens: TokenCount::new(100_000),
+            }),
+            None,
+        );
+
+        // should have an extra system message about the cache bust
+        let system_msgs: Vec<_> = app.messages[before..]
+            .iter()
+            .filter(|m| m.role == MessageRole::System)
+            .collect();
+        assert!(
+            system_msgs.iter().any(|m| m.content.contains("cache bust")),
+            "expected system message about cache bust, got: {system_msgs:?}"
+        );
+    }
+
+    #[test]
+    fn finish_streaming_shows_system_message_on_context_decrease() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+
+        // first call
+        app.start_streaming();
+        app.push_text_delta("hello");
+        app.finish_streaming(
+            Some(Usage {
+                input_tokens: TokenCount::new(10_000),
+                output_tokens: TokenCount::new(5_000),
+                cache_read_tokens: TokenCount::new(90_000),
+                cache_write_tokens: TokenCount::ZERO,
+            }),
+            None,
+        );
+
+        let before = app.messages.len();
+
+        // second call: context decreased
+        app.start_streaming();
+        app.push_text_delta("world");
+        app.finish_streaming(
+            Some(Usage {
+                input_tokens: TokenCount::new(8_000),
+                output_tokens: TokenCount::new(6_000),
+                cache_read_tokens: TokenCount::new(70_000),
+                cache_write_tokens: TokenCount::ZERO,
+            }),
+            None,
+        );
+
+        let system_msgs: Vec<_> = app.messages[before..]
+            .iter()
+            .filter(|m| m.role == MessageRole::System)
+            .collect();
+        assert!(
+            system_msgs
+                .iter()
+                .any(|m| m.content.contains("context decreased")),
+            "expected system message about context decrease, got: {system_msgs:?}"
+        );
+    }
+
+    #[test]
+    fn finish_streaming_no_system_message_on_normal_growth() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+
+        // first call
+        app.start_streaming();
+        app.push_text_delta("hello");
+        app.finish_streaming(
+            Some(Usage {
+                input_tokens: TokenCount::new(5_000),
+                output_tokens: TokenCount::new(3_000),
+                cache_read_tokens: TokenCount::new(90_000),
+                cache_write_tokens: TokenCount::new(5_000),
+            }),
+            None,
+        );
+
+        let before = app.messages.len();
+
+        // second call: normal growth
+        app.start_streaming();
+        app.push_text_delta("world");
+        app.finish_streaming(
+            Some(Usage {
+                input_tokens: TokenCount::new(5_000),
+                output_tokens: TokenCount::new(4_000),
+                cache_read_tokens: TokenCount::new(95_000),
+                cache_write_tokens: TokenCount::new(5_000),
+            }),
+            None,
+        );
+
+        let system_msgs: Vec<_> = app.messages[before..]
+            .iter()
+            .filter(|m| m.role == MessageRole::System)
+            .collect();
+        assert!(
+            system_msgs.is_empty(),
+            "normal growth should not produce system messages, got: {system_msgs:?}"
         );
     }
 }
