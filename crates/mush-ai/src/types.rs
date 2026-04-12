@@ -887,6 +887,18 @@ pub enum CacheRetention {
     Long,
 }
 
+/// strategy for trimming old tool results in the message array
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ToolResultTrimming {
+    /// trim old tool results at request time using a sliding window.
+    /// suitable for models/providers without prompt caching
+    #[default]
+    SlidingWindow,
+    /// never trim tool results at request time, preserving prefix stability
+    /// for providers with prompt caching (anthropic, etc.)
+    Preserve,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
