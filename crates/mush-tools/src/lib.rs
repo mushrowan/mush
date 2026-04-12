@@ -8,6 +8,7 @@ pub mod grep;
 pub mod ls;
 pub mod notify_user;
 pub mod read;
+pub mod repo_map;
 pub mod skills;
 pub mod util;
 pub mod web_fetch;
