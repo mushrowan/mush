@@ -44,6 +44,13 @@ impl<'a> Ui<'a> {
         };
         let chunks = layout(area, input_h, tools_h, status_h);
         self.app.input.area.set(chunks.input);
+        // sync visible_lines so scroll gets clamped correctly when the
+        // input box changes height (e.g. after inserting a newline)
+        self.app
+            .input
+            .visible_lines
+            .set(chunks.input.height.saturating_sub(2));
+        self.app.input.ensure_cursor_visible();
         InputBox::new(self.app).cursor_position(chunks.input)
     }
 }
@@ -276,6 +283,38 @@ mod tests {
         input.cursor = input.text.len();
         input.images = images;
         input_height(&input, width)
+    }
+
+    #[test]
+    fn cursor_position_correct_after_newline_grows_input() {
+        // simulate the shift+enter scenario:
+        // 1. render with "hello" (1-line input, area height 3)
+        // 2. insert_char('\n') which calls ensure_cursor_visible with old area
+        // 3. compute cursor_position with new layout (2-line input, area height 4)
+        // the cursor should be on line 1, not line 0
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.input.text = "hello".into();
+        app.input.cursor = 5;
+
+        // step 1: initial render sets area and visible_lines
+        let area = Rect::new(0, 0, 40, 24);
+        let _ = Ui::new(&app).cursor_position(area);
+        let _ = render_full(&app, 40, 24);
+
+        // step 2: insert newline (triggers ensure_cursor_visible with old area)
+        app.input.insert_char('\n');
+
+        // step 3: compute cursor position for the next frame
+        let (_, cy) = Ui::new(&app).cursor_position(area);
+
+        // cursor should be on line 1 of the input box (below "hello")
+        // input area starts near the bottom, cursor should be at area.y + 1 + 1
+        let input_area = app.input.area.get();
+        let expected_y = input_area.y + 1 + 1; // border + line 1
+        assert_eq!(
+            cy, expected_y,
+            "cursor should be on the new line, not the previous one"
+        );
     }
 
     fn render_full(app: &App, width: u16, height: u16) -> Buffer {
