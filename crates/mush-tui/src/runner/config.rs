@@ -31,6 +31,8 @@ pub type TitleUpdater = std::sync::Arc<dyn Fn(String) + Send + Sync>;
 
 /// snapshot of all pane conversations for session persistence
 pub struct SessionSnapshot {
+    /// session id for this snapshot
+    pub session_id: mush_ai::types::SessionId,
     /// primary pane conversation
     pub primary: ConversationState,
     /// primary pane model id
@@ -119,4 +121,6 @@ pub struct TuiConfig {
     pub compaction_model: Option<(Model, StreamOptions)>,
     /// shared http client for usage polling and other http calls
     pub http_client: Option<reqwest::Client>,
+    /// current session id (updated by /new)
+    pub session_id: mush_ai::types::SessionId,
 }

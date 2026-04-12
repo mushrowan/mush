@@ -15,7 +15,7 @@ use super::{ThinkingPrefsSaver, TuiConfig};
 const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("help", "show available commands"),
     ("keys", "show keyboard shortcuts"),
-    ("clear", "clear conversation"),
+    ("new", "save session, start fresh"),
     ("model", "show or switch model"),
     ("sessions", "browse and resume sessions"),
     ("branch", "branch from nth user message"),
@@ -339,6 +339,7 @@ mod tests {
             model_tiers: HashMap::new(),
             compaction_model: None,
             http_client: None,
+            session_id: mush_ai::types::SessionId::new(),
         }
     }
 

@@ -224,7 +224,10 @@ pub(super) async fn handle_idle_terminal_events(
                             .await;
 
                             if state_changed && let Some(ref saver) = deps.tui_config.save_session {
-                                saver(super::streams::build_session_snapshot(pane_mgr));
+                                saver(super::streams::build_session_snapshot(
+                                    pane_mgr,
+                                    deps.tui_config,
+                                ));
                             }
                         }
                         _ => {}

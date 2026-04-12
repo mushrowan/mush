@@ -40,6 +40,7 @@ pub enum SlashAction {
     Help,
     Keys,
     Clear,
+    New,
     Model { model_id: Option<String> },
     Sessions,
     Resume { session_id: SessionId },
@@ -78,7 +79,7 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
     match name {
         "help" => Ok(SlashAction::Help),
         "keys" => Ok(SlashAction::Keys),
-        "clear" => Ok(SlashAction::Clear),
+        "new" => Ok(SlashAction::New),
         "model" => Ok(SlashAction::Model {
             model_id: (!args.is_empty()).then(|| args.to_string()),
         }),
@@ -181,7 +182,7 @@ pub fn handle(
             let mut help = String::from("available commands:\n");
             help.push_str("  /help          - show this message\n");
             help.push_str("  /keys          - show keyboard shortcuts\n");
-            help.push_str("  /clear         - clear conversation\n");
+            help.push_str("  /new           - save session, start fresh\n");
             help.push_str("  /model [id]    - show or switch model\n");
             help.push_str("  /sessions      - browse and resume sessions\n");
             help.push_str("  /branch [n]    - branch from nth user message\n");
@@ -250,9 +251,14 @@ pub fn handle(
             None
         }
         SlashAction::Clear => {
+            // legacy: kept for backwards compat, prefer /new
             app.clear_messages();
             conversation.replace_messages(vec![]);
             app.status = Some("conversation cleared".into());
+            None
+        }
+        SlashAction::New => {
+            // handled in commands.rs where save_session is available
             None
         }
         SlashAction::Tree => {
@@ -973,5 +979,22 @@ mod tests {
         let msg = app.messages.last().unwrap();
         assert!(msg.content.contains("reuse 60%"));
         assert!(msg.content.contains("write 16%"));
+    }
+
+    #[test]
+    fn parse_new_command() {
+        assert_eq!(parse("/new").unwrap(), SlashAction::New);
+    }
+
+    #[test]
+    fn parse_clear_is_removed() {
+        // /clear should no longer be a recognised command
+        assert_eq!(
+            parse("/clear").unwrap(),
+            SlashAction::Other {
+                name: "clear".into(),
+                args: String::new(),
+            }
+        );
     }
 }

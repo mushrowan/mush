@@ -526,13 +526,12 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         save_session: if cli.no_session {
             None
         } else {
-            let sid = session_id.clone();
             let cwd_s = cwd_str.clone();
             Some(std::sync::Arc::new(
                 move |snapshot: mush_tui::SessionSnapshot| {
                     let store = SessionStore::new(SessionStore::default_dir());
                     let mut session = Session::new(&snapshot.model_id, &cwd_s);
-                    session.meta.id = sid.clone();
+                    session.meta.id = snapshot.session_id;
                     session.conversation = snapshot.primary;
                     session.meta.message_count = session.conversation.context_len();
                     session.panes = snapshot
@@ -585,6 +584,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         model_tiers: setup.cfg.model_tiers.clone(),
         compaction_model: setup.compaction_model.clone(),
         http_client: Some(setup.http_client.clone()),
+        session_id: session_id.clone(),
     };
 
     mush_tui::run_tui(tui_config, &setup.tools, &setup.registry)
