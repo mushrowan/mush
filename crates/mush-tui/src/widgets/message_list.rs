@@ -66,6 +66,7 @@ impl Widget for MessageList<'_> {
                 .throbber_set(BRAILLE_SIX)
                 .use_type(WhichUse::Spin);
             let spinner_span = throbber.to_symbol_span(&self.app.throbber_state);
+            let stream_content_width = (area.width as usize).saturating_sub(1);
 
             if !self.app.stream.thinking.is_empty()
                 && self.app.thinking_display != crate::app::ThinkingDisplay::Hidden
@@ -76,8 +77,9 @@ impl Widget for MessageList<'_> {
                     Span::styled(" thinking", dim),
                 ]));
                 let visible_thinking = self.app.visible_streaming_thinking();
-                for line in visible_thinking.lines() {
-                    lines.push(Line::styled(format!(" {line}"), dim));
+                for text_line in visible_thinking.lines() {
+                    let styled = Line::styled(text_line.to_string(), dim);
+                    lines.extend(indent_line(styled, stream_content_width));
                 }
                 lines.push(Line::raw(""));
             }
@@ -85,9 +87,7 @@ impl Widget for MessageList<'_> {
                 let visible_text = self.app.visible_streaming_text();
                 let md_text = render_streaming_markdown_cached(self.app, visible_text);
                 for line in md_text.lines {
-                    let mut spans: Vec<Span<'_>> = vec![Span::raw(" ")];
-                    spans.extend(line.spans);
-                    lines.push(Line::from(spans));
+                    lines.extend(indent_line(line, stream_content_width));
                 }
             }
             if self.app.stream.text.is_empty() && self.app.stream.thinking.is_empty() {
@@ -315,8 +315,10 @@ fn render_message(
     // thinking block
     if let Some(ref thinking) = msg.thinking {
         if msg.thinking_expanded {
-            for line in thinking.lines() {
-                lines.push(Line::styled(format!(" {line}"), app.theme.dim));
+            let cw = (width as usize).saturating_sub(1);
+            for text_line in thinking.lines() {
+                let styled = Line::styled(text_line.to_string(), app.theme.dim);
+                lines.extend(indent_line(styled, cw));
             }
         } else {
             let preview = thinking.lines().next().unwrap_or("...");
@@ -337,8 +339,10 @@ fn render_message(
     // main content (markdown rendered)
     if msg.queued {
         let dim = app.theme.dim;
-        for line in msg.content.lines() {
-            lines.push(Line::styled(format!(" {line}"), dim));
+        let cw = (width as usize).saturating_sub(1);
+        for text_line in msg.content.lines() {
+            let styled = Line::styled(text_line.to_string(), dim);
+            lines.extend(indent_line(styled, cw));
         }
     } else if is_user {
         let w = width as usize;
@@ -389,18 +393,24 @@ fn render_message(
             Vec::new()
         };
         let highlight_range = highlight_block.and_then(|b| block_ranges.get(b).copied());
+        let content_width = (width as usize).saturating_sub(1);
 
         for (i, line) in md_text.lines.into_iter().enumerate() {
-            let mut spans: Vec<Span<'_>> = vec![Span::raw(" ")];
-            spans.extend(line.spans);
-            let mut rendered = Line::from(spans);
-            if let Some((start, end)) = highlight_range
+            let style_override = if let Some((start, end)) = highlight_range
                 && i >= start
                 && i < end
             {
-                rendered = rendered.style(Style::default().bg(app.theme.block_highlight_bg));
+                Some(Style::default().bg(app.theme.block_highlight_bg))
+            } else {
+                None
+            };
+
+            for mut indented in indent_line(line, content_width) {
+                if let Some(style) = style_override {
+                    indented = indented.style(style);
+                }
+                lines.push(indented);
             }
-            lines.push(rendered);
         }
     }
 
@@ -750,6 +760,62 @@ fn push_box_content_line<'a>(
             Span::styled(" │", border),
         ]));
     }
+}
+
+/// pre-wrap a styled line to `content_width`, prepending a 1-space indent
+/// to every resulting line (including continuations from wrapping)
+fn indent_line<'a>(line: Line<'a>, content_width: usize) -> Vec<Line<'a>> {
+    if content_width == 0 {
+        let mut spans = vec![Span::raw(" ")];
+        spans.extend(line.spans);
+        return vec![Line::from(spans)];
+    }
+    if line.width() <= content_width {
+        let mut spans = vec![Span::raw(" ")];
+        spans.extend(line.spans);
+        return vec![Line::from(spans)];
+    }
+
+    // walk spans character by character, splitting at content_width
+    let mut result: Vec<Line<'a>> = Vec::new();
+    let mut current: Vec<Span<'a>> = Vec::new();
+    let mut current_width: usize = 0;
+
+    for span in line.spans {
+        let style = span.style;
+        let text: &str = &span.content;
+        let mut seg_start = 0;
+
+        for (byte_pos, ch) in text.char_indices() {
+            let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
+            if current_width + ch_w > content_width && current_width > 0 {
+                // flush the segment up to this point
+                if byte_pos > seg_start {
+                    current.push(Span::styled(text[seg_start..byte_pos].to_string(), style));
+                }
+                result.push(Line::from(std::mem::take(&mut current)));
+                current_width = 0;
+                seg_start = byte_pos;
+            }
+            current_width += ch_w;
+        }
+
+        // remainder of span
+        if seg_start < text.len() {
+            current.push(Span::styled(text[seg_start..].to_string(), style));
+        }
+    }
+
+    if !current.is_empty() {
+        result.push(Line::from(current));
+    }
+
+    // prepend the indent to every line
+    for line in &mut result {
+        line.spans.insert(0, Span::raw(" "));
+    }
+
+    result
 }
 
 /// wrap text to fit within `width` chars, breaking at spaces first,
@@ -1349,5 +1415,28 @@ mod tests {
             s.push('\n');
         }
         s
+    }
+
+    #[test]
+    fn wrapped_assistant_lines_keep_indent() {
+        // 20 chars wide, message longer than 19 (content width = width - 1 indent)
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.messages.push(DisplayMessage::new(
+            MessageRole::Assistant,
+            "this line is way too long to fit in twenty characters",
+        ));
+        let buf = render_app(&app, 20, 10);
+        let text = buffer_to_string(&buf);
+        // every non-empty content line should start with a space (the indent)
+        for line in text.lines() {
+            let trimmed = line.trim_end();
+            if trimmed.is_empty() {
+                continue;
+            }
+            assert!(
+                trimmed.starts_with(' '),
+                "wrapped line missing indent: {trimmed:?}"
+            );
+        }
     }
 }
