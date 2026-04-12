@@ -4,6 +4,7 @@ mod commands;
 mod config;
 mod logging;
 mod setup;
+mod timing;
 
 use clap::Parser;
 use color_eyre::eyre::{Result, eyre};
@@ -71,6 +72,10 @@ struct Cli {
     /// don't save the session
     #[arg(long)]
     no_session: bool,
+
+    /// print startup timing breakdown
+    #[arg(long, env = "MUSH_PROFILE_STARTUP")]
+    profile_startup: bool,
 
     #[arg(long, hide = true, env = mush_tui::KEYBOARD_ENHANCEMENT_ENV)]
     tui_keyboard_enhancement: Option<mush_tui::KeyboardEnhancementMode>,
@@ -175,7 +180,12 @@ async fn main() -> Result<()> {
 }
 
 async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
-    let mut setup = AppSetup::init(SetupArgs {
+    let timer = if cli.profile_startup {
+        Some(timing::PhaseTimer::new())
+    } else {
+        None
+    };
+    let (mut setup, startup_report) = AppSetup::init(SetupArgs {
         model: cli.model.clone(),
         thinking: cli.thinking,
         max_tokens: cli.max_tokens,
@@ -184,8 +194,13 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
         no_tools: cli.no_tools,
         debug_cache: cli.debug_cache,
         output_sink: None,
+        timer,
     })
     .await?;
+
+    if let Some(report) = startup_report {
+        eprintln!("{report}");
+    }
 
     // in print mode, hint is always prepended (one-shot, no transform loop)
     let enricher =
@@ -402,7 +417,12 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         }
     });
 
-    let mut setup = AppSetup::init(SetupArgs {
+    let timer = if cli.profile_startup {
+        Some(timing::PhaseTimer::new())
+    } else {
+        None
+    };
+    let (mut setup, startup_report) = AppSetup::init(SetupArgs {
         model: cli.model.clone(),
         thinking: cli.thinking,
         max_tokens: cli.max_tokens,
@@ -411,8 +431,13 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         no_tools: cli.no_tools,
         debug_cache: cli.debug_cache,
         output_sink: Some(output_sink),
+        timer,
     })
     .await?;
+
+    if let Some(report) = startup_report {
+        eprintln!("{report}");
+    }
 
     // create or resume a session
     let cwd_str = setup.cwd.display().to_string();

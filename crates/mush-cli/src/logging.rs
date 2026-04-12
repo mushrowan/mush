@@ -91,7 +91,7 @@ pub fn init_logging(config_filter: Option<&str>) -> (WorkerGuard, LogBuffer) {
         EnvFilter::new(default)
     });
 
-    tracing_subscriber::registry()
+    let registry = tracing_subscriber::registry()
         .with(filter)
         .with(
             fmt::layer()
@@ -108,8 +108,22 @@ pub fn init_logging(config_filter: Option<&str>) -> (WorkerGuard, LogBuffer) {
                 .with_target(true)
                 .with_thread_ids(false)
                 .compact(),
-        )
-        .init();
+        );
+
+    #[cfg(feature = "tokio-console")]
+    {
+        use tracing_subscriber::layer::SubscriberExt as _;
+        let console_layer = console_subscriber::ConsoleLayer::builder()
+            .with_default_env()
+            .spawn();
+        registry.with(console_layer).init();
+        eprintln!("\x1b[2mtokio-console: listening on http://127.0.0.1:6669\x1b[0m");
+    }
+
+    #[cfg(not(feature = "tokio-console"))]
+    {
+        registry.init();
+    }
 
     (guard, log_buffer)
 }

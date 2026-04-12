@@ -49,13 +49,19 @@ pub struct SetupArgs {
     pub no_tools: bool,
     pub debug_cache: bool,
     pub output_sink: Option<mush_tools::bash::OutputSink>,
+    pub timer: Option<crate::timing::PhaseTimer>,
 }
 
 impl AppSetup {
     /// build shared state from CLI args
-    pub async fn init(args: SetupArgs) -> Result<Self> {
+    pub async fn init(args: SetupArgs) -> Result<(Self, Option<crate::timing::StartupReport>)> {
+        let mut timer = args.timer;
+
         let cfg = config::load_config();
         let debug_cache = args.debug_cache || cfg.debug_cache;
+        if let Some(t) = &mut timer {
+            t.phase("config");
+        }
 
         let model_id = args.model.unwrap_or_else(|| default_model_id(&cfg));
 
@@ -73,6 +79,9 @@ impl AppSetup {
 
         let mut registry = ApiRegistry::new();
         providers::register_builtins(&mut registry, http_client.clone());
+        if let Some(t) = &mut timer {
+            t.phase("model + http");
+        }
 
         let cwd = std::env::current_dir()?;
 
@@ -88,13 +97,15 @@ impl AppSetup {
                 http_client.clone(),
             )
         };
+        if let Some(t) = &mut timer {
+            t.phase("builtin tools");
+        }
 
         let mut tool_descriptions: Vec<(String, String)> = Vec::new();
 
         if !args.no_tools && !cfg.mcp.is_empty() {
             let (mcp_manager, mcp_tools) = mush_mcp::McpManager::connect_all(&cfg.mcp).await;
             if cfg.dynamic_mcp {
-                // register meta-tools for on-demand MCP tool discovery
                 let conns = mcp_manager.connections();
                 if !conns.is_empty() {
                     let index = mush_mcp::dynamic::McpToolIndex::new(&conns);
@@ -103,9 +114,11 @@ impl AppSetup {
                     tools.extend_shared(dynamic.iter().cloned());
                 }
             } else {
-                // register all MCP tools directly (eager)
                 tools.extend_shared(mcp_tools.iter().cloned());
             }
+        }
+        if let Some(t) = &mut timer {
+            t.phase("mcp");
         }
 
         // discover project context once for both system prompt and skill tools
@@ -128,6 +141,9 @@ impl AppSetup {
             let skill_tools = mush_tools::skills::skill_tools(skill_infos);
             tools.extend_shared(skill_tools.iter().cloned());
         }
+        if let Some(t) = &mut timer {
+            t.phase("project context");
+        }
 
         let system_prompt = args
             .system
@@ -139,6 +155,9 @@ impl AppSetup {
                     cfg.retrieval.context_strategy,
                 )
             });
+        if let Some(t) = &mut timer {
+            t.phase("system prompt");
+        }
 
         let thinking_prefs = config::load_thinking_prefs();
         let thinking_level = resolve_thinking(args.thinking, &model, &thinking_prefs, &cfg);
@@ -160,13 +179,15 @@ impl AppSetup {
                 );
                 model.clone()
             });
-            // resolve api key for the compaction model too
             let mut compact_opts = options.clone();
             resolve_api_key(&mut compact_opts, &m, &cfg).await;
             Some((m, compact_opts))
         } else {
             None
         };
+        if let Some(t) = &mut timer {
+            t.phase("api keys");
+        }
 
         let max_turns = args
             .max_turns
@@ -181,6 +202,9 @@ impl AppSetup {
         } else {
             (None, None)
         };
+        if let Some(t) = &mut timer {
+            t.phase("repo map");
+        }
 
         // build file rule index from .mush/rules/
         let file_rules = build_file_rules(&cwd);
@@ -195,32 +219,40 @@ impl AppSetup {
                 tools.register_shared(std::sync::Arc::from(tool));
             }
         }
+        if let Some(t) = &mut timer {
+            t.phase("lsp + rules");
+        }
 
         // add batch tool last so it can dispatch to skill, MCP, LSP tools
         if !args.no_tools && !skip_batch {
             mush_tools::add_batch_tool(&mut tools);
         }
 
-        Ok(Self {
-            cfg,
-            model,
-            compaction_model,
-            registry,
-            cwd,
-            system_prompt,
-            options,
-            thinking_prefs,
-            tools,
-            debug_cache,
-            max_turns,
-            lifecycle_hooks,
-            repo_map_context,
-            file_rules,
-            lsp_diagnostics,
-            tool_descriptions,
-            http_client,
-            _repo_map_watcher,
-        })
+        let report = timer.map(|t| t.finish());
+
+        Ok((
+            Self {
+                cfg,
+                model,
+                compaction_model,
+                registry,
+                cwd,
+                system_prompt,
+                options,
+                thinking_prefs,
+                tools,
+                debug_cache,
+                max_turns,
+                lifecycle_hooks,
+                repo_map_context,
+                file_rules,
+                lsp_diagnostics,
+                tool_descriptions,
+                http_client,
+                _repo_map_watcher,
+            },
+            report,
+        ))
     }
 }
 
