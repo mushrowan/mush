@@ -10,6 +10,7 @@ use mush_session::SessionMeta;
 use ratatui::layout::Rect;
 use throbber_widgets_tui::ThrobberState;
 
+pub use crate::app_event::{AppEvent, AppMode};
 pub use crate::cache::{
     CACHE_COLD_DISPLAY_SECS, CACHE_WARN_SECS, CacheAnomaly, CacheTimer, TokenStats, cache_ttl_secs,
     detect_cache_anomalies,
@@ -30,46 +31,6 @@ const UNREAD_FLASH_CYCLE: u8 = 60;
 /// ticks the flash indicator stays "on" within each cycle
 const UNREAD_FLASH_ON: u8 = 30;
 
-/// events that flow between the TUI and the agent
-#[derive(Debug, Clone)]
-pub enum AppEvent {
-    /// user submitted a prompt
-    UserSubmit {
-        text: String,
-    },
-    /// user executed a slash command
-    SlashCommand {
-        action: crate::slash::SlashAction,
-    },
-    /// user requested quit
-    Quit,
-    /// user requested abort of current operation
-    Abort,
-    /// user scrolled up/down
-    ScrollUp(u16),
-    ScrollDown(u16),
-    /// resize
-    Resize(u16, u16),
-    /// user cycled thinking level
-    CycleThinkingLevel,
-    /// user triggered clipboard image paste
-    PasteImage,
-    /// split current pane (fork conversation into new agent)
-    SplitPane,
-    /// close the focused pane
-    ClosePane,
-    /// focus the next pane
-    FocusNextPane,
-    /// focus the previous pane
-    FocusPrevPane,
-    /// focus pane by index (0-based)
-    FocusPaneByIndex(usize),
-    /// resize focused pane (positive = grow, negative = shrink)
-    ResizePane(i16),
-    /// alt+k: edit a queued steering message
-    EditSteering,
-}
-
 /// controls how thinking text is displayed
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -81,21 +42,6 @@ pub enum ThinkingDisplay {
     /// always show thinking text expanded
     #[default]
     Expanded,
-}
-
-/// which UI mode the app is in
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AppMode {
-    Normal,
-    SessionPicker,
-    /// slash command completion menu visible above input
-    SlashComplete,
-    /// waiting for user to confirm a tool call (y/n)
-    ToolConfirm,
-    /// scroll mode: j/k scroll, y copies message, esc exits
-    Scroll,
-    /// search mode: type to filter messages, enter to jump
-    Search,
 }
 
 /// what j/k navigates in scroll mode
