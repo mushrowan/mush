@@ -33,7 +33,7 @@ impl Widget for MessageList<'_> {
         // track where each message starts in the lines vec
         let mut msg_line_starts: Vec<(usize, usize)> = Vec::new();
 
-        let in_scroll_mode = self.app.mode == crate::app::AppMode::Scroll;
+        let in_scroll_mode = self.app.interaction.mode == crate::app::AppMode::Scroll;
         let selection_range = self.app.selection_range();
         for (i, msg) in self.app.messages.iter().enumerate() {
             if msg.queued {
@@ -42,8 +42,9 @@ impl Widget for MessageList<'_> {
             let start_line = lines.len();
             let in_selection = selection_range.is_some_and(|(start, end)| i >= start && i <= end);
             let sel = SelectionHint {
-                selected: in_scroll_mode && (self.app.selected_message == Some(i) || in_selection),
-                is_cursor: in_scroll_mode && self.app.selected_message == Some(i),
+                selected: in_scroll_mode
+                    && (self.app.navigation.selected_message == Some(i) || in_selection),
+                is_cursor: in_scroll_mode && self.app.navigation.selected_message == Some(i),
                 has_visual: self.app.has_selection(),
             };
             render_message(
@@ -122,8 +123,9 @@ impl Widget for MessageList<'_> {
             }
             let in_selection = selection_range.is_some_and(|(start, end)| i >= start && i <= end);
             let sel = SelectionHint {
-                selected: in_scroll_mode && (self.app.selected_message == Some(i) || in_selection),
-                is_cursor: in_scroll_mode && self.app.selected_message == Some(i),
+                selected: in_scroll_mode
+                    && (self.app.navigation.selected_message == Some(i) || in_selection),
+                is_cursor: in_scroll_mode && self.app.navigation.selected_message == Some(i),
                 has_visual: self.app.has_selection(),
             };
             render_message(
@@ -199,9 +201,13 @@ impl Widget for MessageList<'_> {
                     end: wrapped_at(end_raw),
                 });
             }
-            *self.app.message_row_ranges.borrow_mut() = ranges;
+            *self.app.render_state.message_row_ranges.borrow_mut() = ranges;
         } else {
-            self.app.message_row_ranges.borrow_mut().clear();
+            self.app
+                .render_state
+                .message_row_ranges
+                .borrow_mut()
+                .clear();
         }
 
         let text = if padding > 0 {
@@ -218,10 +224,10 @@ impl Widget for MessageList<'_> {
         let scroll = max_scroll.saturating_sub(self.app.scroll_offset);
 
         // expose scroll geometry for the status bar
-        self.app.total_content_lines.set(total_lines);
-        self.app.visible_area_height.set(visible);
-        self.app.message_area.set(area);
-        self.app.render_scroll.set(scroll);
+        self.app.render_state.total_content_lines.set(total_lines);
+        self.app.render_state.visible_area_height.set(visible);
+        self.app.render_state.message_area.set(area);
+        self.app.render_state.render_scroll.set(scroll);
 
         // compute image render areas based on scroll position
         let mut render_areas = Vec::new();
@@ -248,7 +254,7 @@ impl Widget for MessageList<'_> {
                 }
             }
         }
-        *self.app.image_render_areas.borrow_mut() = render_areas;
+        *self.app.render_state.image_render_areas.borrow_mut() = render_areas;
 
         paragraph.scroll((scroll, 0)).render(area, buf);
     }
@@ -300,7 +306,7 @@ fn render_message(
     } else if sel.selected {
         let mut hint_spans = vec![Span::styled("▌", app.theme.selection_marker)];
         if sel.is_cursor {
-            let hint = if app.scroll_unit == crate::app::ScrollUnit::Block {
+            let hint = if app.navigation.scroll_unit == crate::app::ScrollUnit::Block {
                 " (y to copy block, b for messages)"
             } else if sel.has_visual {
                 " (y to copy range)"
@@ -368,10 +374,10 @@ fn render_message(
         )));
     } else {
         // determine if a code block in this message is selected
-        let highlight_block = if app.mode == crate::app::AppMode::Scroll
-            && app.scroll_unit == crate::app::ScrollUnit::Block
+        let highlight_block = if app.interaction.mode == crate::app::AppMode::Scroll
+            && app.navigation.scroll_unit == crate::app::ScrollUnit::Block
         {
-            if let Some(sel) = app.selected_block {
+            if let Some(sel) = app.navigation.selected_block {
                 let blocks = app.code_blocks();
                 blocks.get(sel).filter(|b| b.msg_idx == msg_idx).map(|_| {
                     blocks[..sel]
@@ -508,12 +514,19 @@ fn render_markdown_cached(app: &App, source: &str) -> Text<'static> {
         return Text::default();
     }
 
-    if let Some(cached) = app.markdown_cache.borrow().get(source).cloned() {
+    if let Some(cached) = app
+        .render_state
+        .markdown_cache
+        .borrow()
+        .get(source)
+        .cloned()
+    {
         return cached;
     }
 
     let rendered = crate::markdown::render(source, &app.theme);
-    app.markdown_cache
+    app.render_state
+        .markdown_cache
         .borrow_mut()
         .insert(source.to_string(), rendered.clone());
     rendered
@@ -529,7 +542,7 @@ fn render_streaming_markdown_cached(app: &App, source: &str) -> Text<'static> {
     // re-parse when new deltas arrive
     let full = &app.stream.text;
 
-    if let Some((cached_source, cached)) = app.stream_markdown_cache.borrow().as_ref()
+    if let Some((cached_source, cached)) = app.render_state.stream_markdown_cache.borrow().as_ref()
         && cached_source == full
     {
         // cache hit: truncate the pre-rendered output to the visible char count
@@ -537,7 +550,8 @@ fn render_streaming_markdown_cached(app: &App, source: &str) -> Text<'static> {
     }
 
     let rendered = crate::markdown::render(full, &app.theme);
-    *app.stream_markdown_cache.borrow_mut() = Some((full.to_string(), rendered.clone()));
+    *app.render_state.stream_markdown_cache.borrow_mut() =
+        Some((full.to_string(), rendered.clone()));
     truncate_text(rendered, source.chars().count())
 }
 
@@ -1215,7 +1229,7 @@ mod tests {
         assert!(content.contains("📷"));
         assert!(content.contains("image"));
         // should have produced a render area
-        let areas = app.image_render_areas.borrow();
+        let areas = app.render_state.image_render_areas.borrow();
         assert_eq!(areas.len(), 1);
         assert_eq!(areas[0].msg_idx, 0);
         assert_eq!(areas[0].tc_idx, 0);
@@ -1380,9 +1394,9 @@ mod tests {
             "here:\n```bash\nrm -rf mything\n```\nand:\n```python\nprint(42)\n```",
         ));
         // enter scroll mode with block selected
-        app.mode = crate::app::AppMode::Scroll;
-        app.scroll_unit = crate::app::ScrollUnit::Block;
-        app.selected_block = Some(0); // first block (bash)
+        app.interaction.mode = crate::app::AppMode::Scroll;
+        app.navigation.scroll_unit = crate::app::ScrollUnit::Block;
+        app.navigation.selected_block = Some(0); // first block (bash)
 
         let buf = render_app(&app, 60, 20);
 

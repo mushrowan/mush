@@ -212,8 +212,8 @@ pub(super) async fn handle_slash_action(
         }
         SlashAction::Cost if pane_mgr.is_multi_pane() => {
             let focused = &mut pane_mgr.focused_mut().app;
-            focused.show_cost = !focused.show_cost;
-            let show = focused.show_cost;
+            focused.interaction.show_cost = !focused.interaction.show_cost;
+            let show = focused.interaction.show_cost;
             let mut total_cost = Dollars::ZERO;
             let mut total_tokens = TokenCount::ZERO;
             let mut lines = Vec::new();
@@ -242,7 +242,7 @@ pub(super) async fn handle_slash_action(
                     .push_system_message(msg.trim_end().to_string());
             }
             for pane in pane_mgr.panes_mut() {
-                pane.app.show_cost = show;
+                pane.app.interaction.show_cost = show;
             }
         }
         SlashAction::New => {

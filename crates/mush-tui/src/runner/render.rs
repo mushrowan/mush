@@ -110,7 +110,7 @@ pub(super) fn draw_panes(
             let pane_area = pane.area;
             frame.render_widget(Ui::new(&pane.app).hide_status(is_multi), pane_area);
 
-            let render_areas = pane.app.image_render_areas.borrow().clone();
+            let render_areas = pane.app.render_state.image_render_areas.borrow().clone();
             for img_area in &render_areas {
                 if let Some(proto) = pane
                     .image_protos
@@ -139,17 +139,18 @@ pub(super) fn draw_panes(
         let focused_app = &pane_mgr.panes()[focused_idx].app;
         let streaming_idle = focused_app.is_busy() && focused_app.input.text.is_empty();
         if !streaming_idle
-            && (focused_app.mode == app::AppMode::Normal
-                || focused_app.mode == app::AppMode::SlashComplete
-                || (focused_app.stream.active && focused_app.mode != app::AppMode::ToolConfirm))
+            && (focused_app.interaction.mode == app::AppMode::Normal
+                || focused_app.interaction.mode == app::AppMode::SlashComplete
+                || (focused_app.stream.active
+                    && focused_app.interaction.mode != app::AppMode::ToolConfirm))
         {
             frame.set_cursor_position((cx, cy));
         }
 
-        if let Some(ref picker) = focused_app.session_picker {
+        if let Some(ref picker) = focused_app.interaction.session_picker {
             widgets::session_picker::render(frame, picker, &focused_app.theme);
         }
-        if let Some(ref menu) = focused_app.slash_menu {
+        if let Some(ref menu) = focused_app.completion.slash_menu {
             let input_h = crate::ui::input_height(&focused_app.input, focused_area.width);
             let tools_h = crate::widgets::tool_panels::tool_panels_height(
                 &focused_app.active_tools,
@@ -184,7 +185,7 @@ pub(super) fn handle_mouse(app: &mut App, mouse: MouseEvent) {
             } else {
                 app.scroll_offset = app.scroll_offset.saturating_sub(SCROLL_LINES);
                 if app.scroll_offset == 0 {
-                    app.has_unread = false;
+                    app.navigation.has_unread = false;
                 }
             }
         }
@@ -192,17 +193,17 @@ pub(super) fn handle_mouse(app: &mut App, mouse: MouseEvent) {
             if !app.input.is_mouse_over(mouse.column, mouse.row)
                 && let Some(msg_idx) = app.message_at_screen_row(mouse.row)
             {
-                app.mode = app::AppMode::Scroll;
-                app.scroll_unit = app::ScrollUnit::Message;
-                app.selected_message = Some(msg_idx);
-                app.selection_anchor = Some(msg_idx);
+                app.interaction.mode = app::AppMode::Scroll;
+                app.navigation.scroll_unit = app::ScrollUnit::Message;
+                app.navigation.selected_message = Some(msg_idx);
+                app.navigation.selection_anchor = Some(msg_idx);
             }
         }
         MouseEventKind::Drag(crossterm::event::MouseButton::Left)
-            if app.mode == app::AppMode::Scroll =>
+            if app.interaction.mode == app::AppMode::Scroll =>
         {
             if let Some(msg_idx) = app.message_at_screen_row(mouse.row) {
-                app.selected_message = Some(msg_idx);
+                app.navigation.selected_message = Some(msg_idx);
             }
         }
         _ => {}
@@ -275,7 +276,7 @@ mod tests {
             "world",
         ));
 
-        *app.message_row_ranges.borrow_mut() = vec![
+        *app.render_state.message_row_ranges.borrow_mut() = vec![
             MessageRowRange {
                 msg_idx: 0,
                 start: 0,
@@ -287,8 +288,8 @@ mod tests {
                 end: 6,
             },
         ];
-        app.render_scroll.set(0);
-        app.message_area.set(Rect::new(0, 0, 80, 20));
+        app.render_state.render_scroll.set(0);
+        app.render_state.message_area.set(Rect::new(0, 0, 80, 20));
 
         assert_eq!(app.message_at_screen_row(0), Some(0));
         assert_eq!(app.message_at_screen_row(2), Some(0));
@@ -310,7 +311,7 @@ mod tests {
             "world",
         ));
 
-        *app.message_row_ranges.borrow_mut() = vec![
+        *app.render_state.message_row_ranges.borrow_mut() = vec![
             MessageRowRange {
                 msg_idx: 0,
                 start: 0,
@@ -323,8 +324,8 @@ mod tests {
             },
         ];
         // scrolled down by 3 lines
-        app.render_scroll.set(3);
-        app.message_area.set(Rect::new(0, 0, 80, 7));
+        app.render_state.render_scroll.set(3);
+        app.render_state.message_area.set(Rect::new(0, 0, 80, 7));
 
         // screen row 0 -> render line 3 -> msg 0
         assert_eq!(app.message_at_screen_row(0), Some(0));
@@ -347,7 +348,7 @@ mod tests {
             "world",
         ));
 
-        *app.message_row_ranges.borrow_mut() = vec![
+        *app.render_state.message_row_ranges.borrow_mut() = vec![
             MessageRowRange {
                 msg_idx: 0,
                 start: 0,
@@ -359,8 +360,8 @@ mod tests {
                 end: 6,
             },
         ];
-        app.render_scroll.set(0);
-        app.message_area.set(Rect::new(0, 0, 80, 18));
+        app.render_state.render_scroll.set(0);
+        app.render_state.message_area.set(Rect::new(0, 0, 80, 18));
 
         handle_mouse(
             &mut app,
@@ -372,8 +373,8 @@ mod tests {
             },
         );
 
-        assert_eq!(app.mode, AppMode::Scroll);
-        assert_eq!(app.selected_message, Some(1));
+        assert_eq!(app.interaction.mode, AppMode::Scroll);
+        assert_eq!(app.navigation.selected_message, Some(1));
     }
 
     #[test]
@@ -395,7 +396,7 @@ mod tests {
             "third",
         ));
 
-        *app.message_row_ranges.borrow_mut() = vec![
+        *app.render_state.message_row_ranges.borrow_mut() = vec![
             MessageRowRange {
                 msg_idx: 0,
                 start: 0,
@@ -412,8 +413,8 @@ mod tests {
                 end: 9,
             },
         ];
-        app.render_scroll.set(0);
-        app.message_area.set(Rect::new(0, 0, 80, 18));
+        app.render_state.render_scroll.set(0);
+        app.render_state.message_area.set(Rect::new(0, 0, 80, 18));
 
         // mouse down on message 0
         handle_mouse(
@@ -425,8 +426,8 @@ mod tests {
                 modifiers: crossterm::event::KeyModifiers::NONE,
             },
         );
-        assert_eq!(app.mode, AppMode::Scroll);
-        assert_eq!(app.selection_anchor, Some(0));
+        assert_eq!(app.interaction.mode, AppMode::Scroll);
+        assert_eq!(app.navigation.selection_anchor, Some(0));
 
         // drag to message 2
         handle_mouse(
@@ -438,7 +439,7 @@ mod tests {
                 modifiers: crossterm::event::KeyModifiers::NONE,
             },
         );
-        assert_eq!(app.selected_message, Some(2));
+        assert_eq!(app.navigation.selected_message, Some(2));
         assert_eq!(app.selection_range(), Some((0, 2)));
     }
 }

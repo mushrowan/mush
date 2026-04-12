@@ -126,9 +126,9 @@ pub(super) async fn fork_pane(
             parent.app.stats.context_window,
             parent.app.thinking_level,
             parent.app.thinking_display,
-            parent.app.completions.clone(),
-            parent.app.slash_commands.clone(),
-            parent.app.model_completions.clone(),
+            parent.app.completion.completions.clone(),
+            parent.app.completion.slash_commands.clone(),
+            parent.app.completion.model_completions.clone(),
             parent.app.cwd.clone(),
         )
     };
@@ -138,11 +138,11 @@ pub(super) async fn fork_pane(
     new_app.messages = display_msgs;
     new_app.thinking_level = thinking_level;
     new_app.thinking_display = thinking_display;
-    new_app.completions = completions;
-    new_app.slash_commands = slash_commands;
-    new_app.model_completions = model_completions;
+    new_app.completion.completions = completions;
+    new_app.completion.slash_commands = slash_commands;
+    new_app.completion.model_completions = model_completions;
     new_app.cwd = cwd.clone();
-    new_app.show_cost = tui_config.show_cost;
+    new_app.interaction.show_cost = tui_config.show_cost;
     new_app.cache.ttl_secs = if tui_config.cache_timer {
         crate::app::cache_ttl_secs(
             &tui_config.model.provider,
@@ -326,11 +326,11 @@ fn app_from_parent(parent: &crate::pane::Pane, tui_config: &TuiConfig) -> App {
     let mut app = App::new(parent.app.model_id.clone(), parent.app.stats.context_window);
     app.thinking_level = parent.app.thinking_level;
     app.thinking_display = parent.app.thinking_display;
-    app.completions = parent.app.completions.clone();
-    app.slash_commands = parent.app.slash_commands.clone();
-    app.model_completions = parent.app.model_completions.clone();
+    app.completion.completions = parent.app.completion.completions.clone();
+    app.completion.slash_commands = parent.app.completion.slash_commands.clone();
+    app.completion.model_completions = parent.app.completion.model_completions.clone();
     app.cwd = parent.app.cwd.clone();
-    app.show_cost = tui_config.show_cost;
+    app.interaction.show_cost = tui_config.show_cost;
     app
 }
 

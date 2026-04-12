@@ -38,7 +38,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         code = ?key.code,
         modifiers = ?key.modifiers,
         kind = ?key.kind,
-        mode = ?app.mode,
+        mode = ?app.interaction.mode,
         is_streaming = app.stream.active,
         input_len = app.input.text.len(),
         cursor = app.input.cursor,
@@ -46,16 +46,16 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     );
 
     // 1. mode-specific dispatches
-    if app.mode == AppMode::SessionPicker {
+    if app.interaction.mode == AppMode::SessionPicker {
         return handle_picker_key(app, key);
     }
-    if app.mode == AppMode::SlashComplete {
+    if app.interaction.mode == AppMode::SlashComplete {
         return handle_slash_menu_key(app, key);
     }
-    if app.mode == AppMode::Scroll {
+    if app.interaction.mode == AppMode::Scroll {
         return handle_scroll_mode(app, key);
     }
-    if app.mode == AppMode::Search {
+    if app.interaction.mode == AppMode::Search {
         return handle_search_mode(app, key);
     }
 
@@ -77,7 +77,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         KeyCode::PageDown => {
             app.scroll_offset = app.scroll_offset.saturating_sub(10);
             if app.scroll_offset == 0 {
-                app.has_unread = false;
+                app.navigation.has_unread = false;
             }
             return Some(AppEvent::ScrollDown(10));
         }
@@ -172,21 +172,21 @@ fn handle_idle_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     match (key.modifiers, key.code) {
         // mode switches
         (KeyModifiers::CONTROL, KeyCode::Char('f')) => {
-            app.mode = AppMode::Search;
-            app.search.query.clear();
-            app.search.matches.clear();
-            app.search.selected = 0;
+            app.interaction.mode = AppMode::Search;
+            app.interaction.search.query.clear();
+            app.interaction.search.matches.clear();
+            app.interaction.search.selected = 0;
             None
         }
         (KeyModifiers::CONTROL, KeyCode::Char('s')) => {
-            app.mode = AppMode::Scroll;
+            app.interaction.mode = AppMode::Scroll;
             if !app.messages.is_empty() {
-                app.selected_message = Some(app.messages.len() - 1);
+                app.navigation.selected_message = Some(app.messages.len() - 1);
             }
             // initialise block selection when entering in block mode
-            if app.scroll_unit == crate::app::ScrollUnit::Block {
+            if app.navigation.scroll_unit == crate::app::ScrollUnit::Block {
                 let blocks = app.code_blocks();
-                app.selected_block = if blocks.is_empty() {
+                app.navigation.selected_block = if blocks.is_empty() {
                     None
                 } else {
                     Some(blocks.len() - 1)
@@ -198,8 +198,8 @@ fn handle_idle_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         // tab completion / slash menu
         (_, KeyCode::Tab) | (KeyModifiers::SHIFT, KeyCode::BackTab) => {
             if app.input.text.starts_with('/')
-                && app.slash_menu.is_none()
-                && !app.slash_commands.is_empty()
+                && app.completion.slash_menu.is_none()
+                && !app.completion.slash_commands.is_empty()
             {
                 app.open_slash_menu();
             } else {
@@ -255,8 +255,8 @@ fn handle_idle_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             None
         }
         (KeyModifiers::CONTROL, KeyCode::Char('i')) => {
-            app.show_prompt_injection = !app.show_prompt_injection;
-            app.status = Some(if app.show_prompt_injection {
+            app.interaction.show_prompt_injection = !app.interaction.show_prompt_injection;
+            app.status = Some(if app.interaction.show_prompt_injection {
                 "prompt injection visible".into()
             } else {
                 "prompt injection hidden".into()
@@ -311,42 +311,47 @@ fn handle_search_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     match (key.modifiers, key.code) {
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => return Some(AppEvent::Quit),
         (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('f')) => {
-            app.mode = AppMode::Normal;
-            app.search.query.clear();
-            app.search.matches.clear();
+            app.interaction.mode = AppMode::Normal;
+            app.interaction.search.query.clear();
+            app.interaction.search.matches.clear();
         }
         (_, KeyCode::Enter) => {
             // jump to selected match and enter scroll mode
-            if let Some(&idx) = app.search.matches.get(app.search.selected) {
-                app.mode = AppMode::Scroll;
-                app.selected_message = Some(idx);
-                app.search.query.clear();
-                app.search.matches.clear();
+            if let Some(&idx) = app
+                .interaction
+                .search
+                .matches
+                .get(app.interaction.search.selected)
+            {
+                app.interaction.mode = AppMode::Scroll;
+                app.navigation.selected_message = Some(idx);
+                app.interaction.search.query.clear();
+                app.interaction.search.matches.clear();
             } else {
-                app.mode = AppMode::Normal;
+                app.interaction.mode = AppMode::Normal;
             }
         }
         (_, KeyCode::Up)
         | (KeyModifiers::CONTROL, KeyCode::Char('p'))
         | (KeyModifiers::CONTROL, KeyCode::Char('k'))
-            if !app.search.matches.is_empty() =>
+            if !app.interaction.search.matches.is_empty() =>
         {
-            app.search.selected = app.search.selected.saturating_sub(1);
+            app.interaction.search.selected = app.interaction.search.selected.saturating_sub(1);
         }
         (_, KeyCode::Down)
         | (KeyModifiers::CONTROL, KeyCode::Char('n'))
         | (KeyModifiers::CONTROL, KeyCode::Char('j'))
-            if !app.search.matches.is_empty()
-                && app.search.selected + 1 < app.search.matches.len() =>
+            if !app.interaction.search.matches.is_empty()
+                && app.interaction.search.selected + 1 < app.interaction.search.matches.len() =>
         {
-            app.search.selected += 1;
+            app.interaction.search.selected += 1;
         }
         (_, KeyCode::Backspace) => {
-            app.search.query.pop();
+            app.interaction.search.query.pop();
             app.update_search();
         }
         (_, KeyCode::Char(c)) => {
-            app.search.query.push(c);
+            app.interaction.search.query.push(c);
             app.update_search();
         }
         _ => {}
@@ -360,21 +365,21 @@ fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     match (key.modifiers, key.code) {
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => return Some(AppEvent::Quit),
         (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('s')) => {
-            if app.selection_anchor.is_some() {
+            if app.navigation.selection_anchor.is_some() {
                 // first esc clears selection, stays in scroll mode
-                app.selection_anchor = None;
+                app.navigation.selection_anchor = None;
             } else {
-                app.mode = AppMode::Normal;
-                app.selected_message = None;
-                app.selected_block = None;
+                app.interaction.mode = AppMode::Normal;
+                app.navigation.selected_message = None;
+                app.navigation.selected_block = None;
             }
         }
         (_, KeyCode::Char('b')) => {
-            app.scroll_unit = match app.scroll_unit {
+            app.navigation.scroll_unit = match app.navigation.scroll_unit {
                 ScrollUnit::Message => {
                     // switching to block mode, initialise selection
                     let blocks = app.code_blocks();
-                    app.selected_block = if blocks.is_empty() {
+                    app.navigation.selected_block = if blocks.is_empty() {
                         None
                     } else {
                         Some(blocks.len() - 1)
@@ -382,91 +387,91 @@ fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
                     ScrollUnit::Block
                 }
                 ScrollUnit::Block => {
-                    app.selected_block = None;
+                    app.navigation.selected_block = None;
                     ScrollUnit::Message
                 }
             };
         }
-        (_, KeyCode::Char('v')) if app.scroll_unit == ScrollUnit::Message => {
+        (_, KeyCode::Char('v')) if app.navigation.scroll_unit == ScrollUnit::Message => {
             // toggle visual selection (message mode only)
-            if app.selection_anchor.is_some() {
-                app.selection_anchor = None;
+            if app.navigation.selection_anchor.is_some() {
+                app.navigation.selection_anchor = None;
             } else {
-                app.selection_anchor = app.selected_message;
+                app.navigation.selection_anchor = app.navigation.selected_message;
             }
         }
         (_, KeyCode::Char('j')) | (_, KeyCode::Down) => {
-            if app.scroll_unit == ScrollUnit::Block {
+            if app.navigation.scroll_unit == ScrollUnit::Block {
                 // move to next code block
                 let blocks = app.code_blocks();
-                if let Some(sel) = app.selected_block
+                if let Some(sel) = app.navigation.selected_block
                     && sel + 1 < blocks.len()
                 {
-                    app.selected_block = Some(sel + 1);
-                    app.selected_message = Some(blocks[sel + 1].msg_idx);
+                    app.navigation.selected_block = Some(sel + 1);
+                    app.navigation.selected_message = Some(blocks[sel + 1].msg_idx);
                     app.scroll_offset = app.scroll_offset.saturating_sub(3);
                     if app.scroll_offset == 0 {
-                        app.has_unread = false;
+                        app.navigation.has_unread = false;
                     }
                 }
             } else {
                 // message mode
                 app.scroll_offset = app.scroll_offset.saturating_sub(3);
                 if app.scroll_offset == 0 {
-                    app.has_unread = false;
+                    app.navigation.has_unread = false;
                 }
-                if let Some(sel) = app.selected_message
+                if let Some(sel) = app.navigation.selected_message
                     && sel + 1 < app.messages.len()
                 {
-                    app.selected_message = Some(sel + 1);
+                    app.navigation.selected_message = Some(sel + 1);
                 }
             }
         }
         (_, KeyCode::Char('k')) | (_, KeyCode::Up) => {
-            if app.scroll_unit == ScrollUnit::Block {
+            if app.navigation.scroll_unit == ScrollUnit::Block {
                 // move to previous code block
                 let blocks = app.code_blocks();
-                if let Some(sel) = app.selected_block {
+                if let Some(sel) = app.navigation.selected_block {
                     let new_sel = sel.saturating_sub(1);
-                    app.selected_block = Some(new_sel);
-                    app.selected_message = Some(blocks[new_sel].msg_idx);
+                    app.navigation.selected_block = Some(new_sel);
+                    app.navigation.selected_message = Some(blocks[new_sel].msg_idx);
                     app.scroll_offset = app.scroll_offset.saturating_add(3);
                 }
             } else {
                 // message mode
                 app.scroll_offset = app.scroll_offset.saturating_add(3);
-                if let Some(sel) = app.selected_message {
-                    app.selected_message = Some(sel.saturating_sub(1));
+                if let Some(sel) = app.navigation.selected_message {
+                    app.navigation.selected_message = Some(sel.saturating_sub(1));
                 }
             }
         }
         (_, KeyCode::Char('G')) => {
             app.scroll_to_bottom();
-            if app.scroll_unit == ScrollUnit::Block {
+            if app.navigation.scroll_unit == ScrollUnit::Block {
                 let blocks = app.code_blocks();
-                app.selected_block = if blocks.is_empty() {
+                app.navigation.selected_block = if blocks.is_empty() {
                     None
                 } else {
                     Some(blocks.len() - 1)
                 };
             }
             if !app.messages.is_empty() {
-                app.selected_message = Some(app.messages.len() - 1);
+                app.navigation.selected_message = Some(app.messages.len() - 1);
             }
         }
         (_, KeyCode::Char('g')) => {
             app.scroll_offset = u16::MAX;
-            if app.scroll_unit == ScrollUnit::Block {
+            if app.navigation.scroll_unit == ScrollUnit::Block {
                 let blocks = app.code_blocks();
-                app.selected_block = if blocks.is_empty() { None } else { Some(0) };
+                app.navigation.selected_block = if blocks.is_empty() { None } else { Some(0) };
             }
-            app.selected_message = Some(0);
+            app.navigation.selected_message = Some(0);
         }
         (_, KeyCode::Char('y')) => {
-            if app.scroll_unit == ScrollUnit::Block {
+            if app.navigation.scroll_unit == ScrollUnit::Block {
                 // copy selected code block
                 let blocks = app.code_blocks();
-                if let Some(sel) = app.selected_block
+                if let Some(sel) = app.navigation.selected_block
                     && let Some(block) = blocks.get(sel)
                 {
                     if copy_to_clipboard(&block.content) {
@@ -493,8 +498,8 @@ fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
                 } else {
                     app.status = Some("clipboard copy failed".into());
                 }
-                app.selection_anchor = None;
-            } else if let Some(sel) = app.selected_message
+                app.navigation.selection_anchor = None;
+            } else if let Some(sel) = app.navigation.selected_message
                 && let Some(msg) = app.messages.get(sel)
             {
                 // copy single selected message
@@ -548,7 +553,7 @@ fn handle_slash_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         }
         // select the highlighted command
         (_, KeyCode::Enter) | (_, KeyCode::Tab) => {
-            if let Some(ref menu) = app.slash_menu {
+            if let Some(ref menu) = app.completion.slash_menu {
                 if menu.model_mode {
                     if let Some(model) = menu.model_matches.get(menu.selected) {
                         app.input.text = format!("/model {}", model.id);
@@ -566,13 +571,13 @@ fn handle_slash_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         }
         // navigate
         (_, KeyCode::Up) | (KeyModifiers::CONTROL, KeyCode::Char('k')) => {
-            if let Some(ref mut menu) = app.slash_menu {
+            if let Some(ref mut menu) = app.completion.slash_menu {
                 menu.selected = menu.selected.saturating_sub(1);
             }
             None
         }
         (_, KeyCode::Down) | (KeyModifiers::CONTROL, KeyCode::Char('j')) => {
-            if let Some(ref mut menu) = app.slash_menu {
+            if let Some(ref mut menu) = app.completion.slash_menu {
                 let len = if menu.model_mode {
                     menu.model_matches.len()
                 } else {
@@ -612,7 +617,7 @@ fn handle_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         }
         (_, KeyCode::Tab) | (_, KeyCode::BackTab) => {
             // toggle scope between this dir and all dirs
-            if let Some(ref mut picker) = app.session_picker {
+            if let Some(ref mut picker) = app.interaction.session_picker {
                 picker.scope = match picker.scope {
                     SessionScope::ThisDir => SessionScope::AllDirs,
                     SessionScope::AllDirs => SessionScope::ThisDir,
@@ -636,13 +641,13 @@ fn handle_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             }
         }
         (_, KeyCode::Up) | (KeyModifiers::CONTROL, KeyCode::Char('k')) => {
-            if let Some(ref mut picker) = app.session_picker {
+            if let Some(ref mut picker) = app.interaction.session_picker {
                 picker.selected = picker.selected.saturating_sub(1);
             }
             None
         }
         (_, KeyCode::Down) | (KeyModifiers::CONTROL, KeyCode::Char('j')) => {
-            if let Some(ref mut picker) = app.session_picker {
+            if let Some(ref mut picker) = app.interaction.session_picker {
                 let filtered_len = filtered_sessions(picker).len();
                 if picker.selected + 1 < filtered_len {
                     picker.selected += 1;
@@ -651,14 +656,14 @@ fn handle_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             None
         }
         (_, KeyCode::Backspace) => {
-            if let Some(ref mut picker) = app.session_picker {
+            if let Some(ref mut picker) = app.interaction.session_picker {
                 picker.filter.pop();
                 picker.selected = 0;
             }
             None
         }
         (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
-            if let Some(ref mut picker) = app.session_picker {
+            if let Some(ref mut picker) = app.interaction.session_picker {
                 picker.filter.push(c);
                 picker.selected = 0;
             }
@@ -817,13 +822,13 @@ mod tests {
     #[test]
     fn ctrl_i_toggles_prompt_injection_preview() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        assert!(!app.show_prompt_injection);
+        assert!(!app.interaction.show_prompt_injection);
         handle_key(&mut app, ctrl(KeyCode::Char('i')));
-        assert!(app.show_prompt_injection);
+        assert!(app.interaction.show_prompt_injection);
         assert_eq!(app.status.as_deref(), Some("prompt injection visible"));
 
         handle_key(&mut app, ctrl(KeyCode::Char('i')));
-        assert!(!app.show_prompt_injection);
+        assert!(!app.interaction.show_prompt_injection);
         assert_eq!(app.status.as_deref(), Some("prompt injection hidden"));
     }
 
@@ -993,7 +998,7 @@ mod tests {
     #[test]
     fn tab_completes_slash_commands() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.completions = vec!["/help".into(), "/history".into(), "/clear".into()];
+        app.completion.completions = vec!["/help".into(), "/history".into(), "/clear".into()];
         app.input.text = "/h".into();
         app.input.cursor = 2;
         handle_key(&mut app, key(KeyCode::Tab));
@@ -1011,7 +1016,7 @@ mod tests {
     #[test]
     fn tab_completes_model_ids() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.completions = vec![
+        app.completion.completions = vec![
             "/model".into(),
             "claude-opus-4-6".into(),
             "claude-sonnet-4-20250514".into(),
@@ -1025,7 +1030,7 @@ mod tests {
     #[test]
     fn tab_no_match_does_nothing() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.completions = vec!["/help".into()];
+        app.completion.completions = vec!["/help".into()];
         app.input.text = "/zzz".into();
         app.input.cursor = 4;
         handle_key(&mut app, key(KeyCode::Tab));
@@ -1035,7 +1040,7 @@ mod tests {
     #[test]
     fn tab_resets_on_typing() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.completions = vec!["/help".into(), "/history".into()];
+        app.completion.completions = vec!["/help".into(), "/history".into()];
         app.input.text = "/h".into();
         app.input.cursor = 2;
         handle_key(&mut app, key(KeyCode::Tab));
@@ -1049,7 +1054,7 @@ mod tests {
     #[test]
     fn tab_ignored_for_non_slash_input() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.completions = vec!["/help".into()];
+        app.completion.completions = vec!["/help".into()];
         app.input.text = "hello".into();
         app.input.cursor = 5;
         handle_key(&mut app, key(KeyCode::Tab));
@@ -1059,7 +1064,7 @@ mod tests {
     #[test]
     fn slash_menu_opens_on_tab_with_commands() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.slash_commands = vec![
+        app.completion.slash_commands = vec![
             crate::app::SlashCommand {
                 name: "help".into(),
                 description: "show help".into(),
@@ -1072,9 +1077,9 @@ mod tests {
         app.input.text = "/".into();
         app.input.cursor = 1;
         handle_key(&mut app, key(KeyCode::Tab));
-        assert_eq!(app.mode, AppMode::SlashComplete);
-        assert!(app.slash_menu.is_some());
-        let menu = app.slash_menu.as_ref().unwrap();
+        assert_eq!(app.interaction.mode, AppMode::SlashComplete);
+        assert!(app.completion.slash_menu.is_some());
+        let menu = app.completion.slash_menu.as_ref().unwrap();
         assert!(!menu.model_mode);
         assert_eq!(menu.matches.len(), 2);
         assert_eq!(menu.selected, 0);
@@ -1083,7 +1088,7 @@ mod tests {
     #[test]
     fn slash_menu_navigate_and_select() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.slash_commands = vec![
+        app.completion.slash_commands = vec![
             crate::app::SlashCommand {
                 name: "help".into(),
                 description: "show help".into(),
@@ -1099,22 +1104,22 @@ mod tests {
 
         // ctrl+j moves down
         handle_key(&mut app, ctrl(KeyCode::Char('j')));
-        assert_eq!(app.slash_menu.as_ref().unwrap().selected, 1);
+        assert_eq!(app.completion.slash_menu.as_ref().unwrap().selected, 1);
 
         // ctrl+k moves up
         handle_key(&mut app, ctrl(KeyCode::Char('k')));
-        assert_eq!(app.slash_menu.as_ref().unwrap().selected, 0);
+        assert_eq!(app.completion.slash_menu.as_ref().unwrap().selected, 0);
 
         // enter selects
         handle_key(&mut app, key(KeyCode::Enter));
-        assert_eq!(app.mode, AppMode::Normal);
+        assert_eq!(app.interaction.mode, AppMode::Normal);
         assert_eq!(app.input.text, "/help");
     }
 
     #[test]
     fn slash_menu_typing_filters() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.slash_commands = vec![
+        app.completion.slash_commands = vec![
             crate::app::SlashCommand {
                 name: "help".into(),
                 description: "show help".into(),
@@ -1133,12 +1138,12 @@ mod tests {
         handle_key(&mut app, key(KeyCode::Tab));
 
         // only /h* commands match
-        let menu = app.slash_menu.as_ref().unwrap();
+        let menu = app.completion.slash_menu.as_ref().unwrap();
         assert_eq!(menu.matches.len(), 2);
 
         // type 'e' to narrow to /he*
         handle_key(&mut app, key(KeyCode::Char('e')));
-        let menu = app.slash_menu.as_ref().unwrap();
+        let menu = app.completion.slash_menu.as_ref().unwrap();
         assert_eq!(menu.matches.len(), 1);
         assert_eq!(menu.matches[0].name, "help");
     }
@@ -1146,11 +1151,11 @@ mod tests {
     #[test]
     fn slash_menu_opens_for_model_subcommand() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.slash_commands = vec![crate::app::SlashCommand {
+        app.completion.slash_commands = vec![crate::app::SlashCommand {
             name: "model".into(),
             description: "show or switch model".into(),
         }];
-        app.model_completions = vec![
+        app.completion.model_completions = vec![
             crate::app::ModelCompletion {
                 id: "claude-opus-4-6".into(),
                 name: "Claude Opus 4.6".into(),
@@ -1165,7 +1170,7 @@ mod tests {
 
         handle_key(&mut app, key(KeyCode::Tab));
 
-        let menu = app.slash_menu.as_ref().unwrap();
+        let menu = app.completion.slash_menu.as_ref().unwrap();
         assert!(menu.model_mode);
         assert_eq!(menu.model_matches.len(), 2);
     }
@@ -1173,11 +1178,11 @@ mod tests {
     #[test]
     fn slash_menu_selects_model_completion() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.slash_commands = vec![crate::app::SlashCommand {
+        app.completion.slash_commands = vec![crate::app::SlashCommand {
             name: "model".into(),
             description: "show or switch model".into(),
         }];
-        app.model_completions = vec![
+        app.completion.model_completions = vec![
             crate::app::ModelCompletion {
                 id: "claude-opus-4-6".into(),
                 name: "Claude Opus 4.6".into(),
@@ -1200,11 +1205,11 @@ mod tests {
     #[test]
     fn slash_menu_typing_filters_model_matches() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.slash_commands = vec![crate::app::SlashCommand {
+        app.completion.slash_commands = vec![crate::app::SlashCommand {
             name: "model".into(),
             description: "show or switch model".into(),
         }];
-        app.model_completions = vec![
+        app.completion.model_completions = vec![
             crate::app::ModelCompletion {
                 id: "claude-opus-4-6".into(),
                 name: "Claude Opus 4.6".into(),
@@ -1220,7 +1225,7 @@ mod tests {
         handle_key(&mut app, key(KeyCode::Tab));
         handle_key(&mut app, key(KeyCode::Char('o')));
 
-        let menu = app.slash_menu.as_ref().unwrap();
+        let menu = app.completion.slash_menu.as_ref().unwrap();
         assert!(menu.model_mode);
         assert_eq!(menu.model_matches.len(), 1);
         assert_eq!(menu.model_matches[0].id, "claude-opus-4-6");
@@ -1245,18 +1250,18 @@ mod tests {
     #[test]
     fn slash_menu_esc_closes() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.slash_commands = vec![crate::app::SlashCommand {
+        app.completion.slash_commands = vec![crate::app::SlashCommand {
             name: "help".into(),
             description: "show help".into(),
         }];
         app.input.text = "/".into();
         app.input.cursor = 1;
         handle_key(&mut app, key(KeyCode::Tab));
-        assert_eq!(app.mode, AppMode::SlashComplete);
+        assert_eq!(app.interaction.mode, AppMode::SlashComplete);
 
         handle_key(&mut app, key(KeyCode::Esc));
-        assert_eq!(app.mode, AppMode::Normal);
-        assert!(app.slash_menu.is_none());
+        assert_eq!(app.interaction.mode, AppMode::Normal);
+        assert!(app.completion.slash_menu.is_none());
     }
 
     fn alt(code: KeyCode) -> KeyEvent {
@@ -1382,17 +1387,17 @@ mod tests {
         // enter scroll mode then switch to message mode
         handle_key(&mut app, ctrl(KeyCode::Char('s')));
         handle_key(&mut app, key(KeyCode::Char('b')));
-        assert_eq!(app.mode, AppMode::Scroll);
-        assert_eq!(app.selected_message, Some(2));
-        assert!(app.selection_anchor.is_none());
+        assert_eq!(app.interaction.mode, AppMode::Scroll);
+        assert_eq!(app.navigation.selected_message, Some(2));
+        assert!(app.navigation.selection_anchor.is_none());
 
         // press v to start visual selection
         handle_key(&mut app, key(KeyCode::Char('v')));
-        assert_eq!(app.selection_anchor, Some(2));
+        assert_eq!(app.navigation.selection_anchor, Some(2));
 
         // press v again to toggle off
         handle_key(&mut app, key(KeyCode::Char('v')));
-        assert!(app.selection_anchor.is_none());
+        assert!(app.navigation.selection_anchor.is_none());
     }
 
     #[test]
@@ -1404,16 +1409,16 @@ mod tests {
 
         handle_key(&mut app, ctrl(KeyCode::Char('s')));
         handle_key(&mut app, key(KeyCode::Char('b'))); // switch to message mode
-        assert_eq!(app.selected_message, Some(2));
+        assert_eq!(app.navigation.selected_message, Some(2));
 
         // start visual selection at message 2
         handle_key(&mut app, key(KeyCode::Char('v')));
-        assert_eq!(app.selection_anchor, Some(2));
+        assert_eq!(app.navigation.selection_anchor, Some(2));
 
         // move up twice
         handle_key(&mut app, key(KeyCode::Char('k')));
         handle_key(&mut app, key(KeyCode::Char('k')));
-        assert_eq!(app.selected_message, Some(0));
+        assert_eq!(app.navigation.selected_message, Some(0));
 
         // range should be 0..=2
         assert_eq!(app.selection_range(), Some((0, 2)));
@@ -1428,16 +1433,16 @@ mod tests {
         handle_key(&mut app, ctrl(KeyCode::Char('s')));
         handle_key(&mut app, key(KeyCode::Char('b'))); // switch to message mode
         handle_key(&mut app, key(KeyCode::Char('v')));
-        assert!(app.selection_anchor.is_some());
+        assert!(app.navigation.selection_anchor.is_some());
 
         // first esc clears selection, stays in scroll mode
         handle_key(&mut app, key(KeyCode::Esc));
-        assert!(app.selection_anchor.is_none());
-        assert_eq!(app.mode, AppMode::Scroll);
+        assert!(app.navigation.selection_anchor.is_none());
+        assert_eq!(app.interaction.mode, AppMode::Scroll);
 
         // second esc exits scroll mode
         handle_key(&mut app, key(KeyCode::Esc));
-        assert_eq!(app.mode, AppMode::Normal);
+        assert_eq!(app.interaction.mode, AppMode::Normal);
     }
 
     #[test]
@@ -1448,12 +1453,12 @@ mod tests {
         handle_key(&mut app, ctrl(KeyCode::Char('s')));
         handle_key(&mut app, key(KeyCode::Char('b'))); // switch to message mode
         handle_key(&mut app, key(KeyCode::Char('v')));
-        assert!(app.selection_anchor.is_some());
+        assert!(app.navigation.selection_anchor.is_some());
 
         // esc clears selection first
         handle_key(&mut app, key(KeyCode::Esc));
-        assert!(app.selection_anchor.is_none());
-        assert_eq!(app.mode, AppMode::Scroll);
+        assert!(app.navigation.selection_anchor.is_none());
+        assert_eq!(app.interaction.mode, AppMode::Scroll);
     }
 
     #[test]
@@ -1463,18 +1468,18 @@ mod tests {
         app.push_user_message("hello");
 
         handle_key(&mut app, ctrl(KeyCode::Char('s')));
-        assert_eq!(app.mode, AppMode::Scroll);
+        assert_eq!(app.interaction.mode, AppMode::Scroll);
 
         // default is Block
-        assert_eq!(app.scroll_unit, ScrollUnit::Block);
+        assert_eq!(app.navigation.scroll_unit, ScrollUnit::Block);
 
         // b toggles to Message
         handle_key(&mut app, key(KeyCode::Char('b')));
-        assert_eq!(app.scroll_unit, ScrollUnit::Message);
+        assert_eq!(app.navigation.scroll_unit, ScrollUnit::Message);
 
         // b again toggles back to Block
         handle_key(&mut app, key(KeyCode::Char('b')));
-        assert_eq!(app.scroll_unit, ScrollUnit::Block);
+        assert_eq!(app.navigation.scroll_unit, ScrollUnit::Block);
     }
 
     #[test]
@@ -1487,25 +1492,25 @@ mod tests {
 
         // enter scroll mode (default: Block)
         handle_key(&mut app, ctrl(KeyCode::Char('s')));
-        assert_eq!(app.scroll_unit, ScrollUnit::Block);
+        assert_eq!(app.navigation.scroll_unit, ScrollUnit::Block);
 
         // should start on the last block
-        assert_eq!(app.selected_block, Some(1));
+        assert_eq!(app.navigation.selected_block, Some(1));
 
         // k moves to previous block
         handle_key(&mut app, key(KeyCode::Char('k')));
-        assert_eq!(app.selected_block, Some(0));
+        assert_eq!(app.navigation.selected_block, Some(0));
 
         // k at start stays at 0
         handle_key(&mut app, key(KeyCode::Char('k')));
-        assert_eq!(app.selected_block, Some(0));
+        assert_eq!(app.navigation.selected_block, Some(0));
 
         // j moves forward
         handle_key(&mut app, key(KeyCode::Char('j')));
-        assert_eq!(app.selected_block, Some(1));
+        assert_eq!(app.navigation.selected_block, Some(1));
 
         // j at end stays at last
         handle_key(&mut app, key(KeyCode::Char('j')));
-        assert_eq!(app.selected_block, Some(1));
+        assert_eq!(app.navigation.selected_block, Some(1));
     }
 }
