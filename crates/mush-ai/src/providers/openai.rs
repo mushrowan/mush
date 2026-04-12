@@ -171,21 +171,10 @@ fn build_request_body(
         }));
     }
 
-    // conversation messages (trim old tool results to save context)
-    let boundary = {
-        let mut user_count = 0;
-        let mut b = 0;
-        for (i, msg) in messages.iter().enumerate().rev() {
-            if matches!(msg, Message::User(_)) {
-                user_count += 1;
-                if user_count >= 3 {
-                    b = i;
-                    break;
-                }
-            }
-        }
-        b
-    };
+    // openai has automatic caching so always use SlidingWindow
+    // (their caching handles prefix changes transparently)
+    let trimming = ToolResultTrimming::SlidingWindow;
+    let boundary = super::recent_boundary(messages);
 
     for (msg_idx, msg) in messages.iter().enumerate() {
         let is_old_turn = msg_idx < boundary;
@@ -272,21 +261,7 @@ fn build_request_body(
                     .collect::<Vec<_>>()
                     .join("\n");
 
-                // trim large tool results from older turns
-                let text = if is_old_turn && raw_text.len() > 1500 {
-                    let preview_end = raw_text.floor_char_boundary(750);
-                    let tail_start =
-                        raw_text.ceil_char_boundary(raw_text.len().saturating_sub(375));
-                    let trimmed = raw_text.len() - preview_end - (raw_text.len() - tail_start);
-                    format!(
-                        "{}\n\n[... {} chars trimmed from old tool result ...]\n\n{}",
-                        &raw_text[..preview_end],
-                        trimmed,
-                        &raw_text[tail_start..]
-                    )
-                } else {
-                    raw_text
-                };
+                let text = super::maybe_trim_tool_output(&raw_text, is_old_turn, trimming);
 
                 all_messages.push(serde_json::json!({
                     "role": "tool",

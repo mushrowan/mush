@@ -180,7 +180,13 @@ fn build_request_body(
 ) -> RequestBody {
     // codex: system prompt goes in top-level `instructions`, not in input
     let input_system_prompt = if is_codex { &None } else { system_prompt };
-    let input = convert_input_messages(model, input_system_prompt, messages);
+    // openai responses API: always use sliding window (no explicit cache control)
+    let input = convert_input_messages(
+        model,
+        input_system_prompt,
+        messages,
+        ToolResultTrimming::SlidingWindow,
+    );
     // codex endpoint requires `instructions` to be present, even if empty
     let instructions = if is_codex {
         Some(system_prompt.clone().unwrap_or_default())
@@ -274,50 +280,13 @@ fn build_request_body(
     }
 }
 
-/// max chars for tool results in older turns (beyond recent_turns_to_keep)
-const TRIM_TOOL_OUTPUT_CHARS: usize = 1500;
-/// number of recent user messages whose tool results are kept at full size
-const RECENT_TURNS_TO_KEEP: usize = 3;
-
-/// find the message index at which "recent" turns begin
-fn recent_boundary(messages: &[Message]) -> usize {
-    let mut user_count = 0;
-    for (i, msg) in messages.iter().enumerate().rev() {
-        if matches!(msg, Message::User(_)) {
-            user_count += 1;
-            if user_count >= RECENT_TURNS_TO_KEEP {
-                return i;
-            }
-        }
-    }
-    0
-}
-
-/// trim a tool result string for older turns to save context
-fn trim_old_tool_output(text: &str) -> String {
-    if text.len() <= TRIM_TOOL_OUTPUT_CHARS {
-        return text.to_string();
-    }
-
-    // keep head preview
-    let preview_end = text.floor_char_boundary(TRIM_TOOL_OUTPUT_CHARS / 2);
-    // keep tail preview
-    let tail_start = text.len().saturating_sub(TRIM_TOOL_OUTPUT_CHARS / 4);
-    let tail_start = text.ceil_char_boundary(tail_start);
-
-    let trimmed = text.len() - preview_end - (text.len() - tail_start);
-    format!(
-        "{}\n\n[... {} chars trimmed from old tool result ...]\n\n{}",
-        &text[..preview_end],
-        trimmed,
-        &text[tail_start..]
-    )
-}
+use super::{maybe_trim_tool_output, recent_boundary};
 
 fn convert_input_messages(
     model: &Model,
     system_prompt: &Option<String>,
     messages: &[Message],
+    trimming: ToolResultTrimming,
 ) -> Vec<serde_json::Value> {
     let boundary = recent_boundary(messages);
     let mut converted = Vec::new();
@@ -411,12 +380,7 @@ fn convert_input_messages(
                     .collect::<Vec<_>>()
                     .join("\n");
 
-                // trim large tool results from older turns to save context
-                let text = if is_old_turn {
-                    trim_old_tool_output(&raw_text)
-                } else {
-                    raw_text
-                };
+                let text = maybe_trim_tool_output(&raw_text, is_old_turn, trimming);
 
                 let has_images = tr
                     .content

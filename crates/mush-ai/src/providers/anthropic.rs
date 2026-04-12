@@ -308,7 +308,15 @@ fn build_request_body(
         })
     };
 
-    let converted_messages = convert_messages(messages, is_oauth, cache_control.clone());
+    // when caching is active, preserve tool results to avoid busting the prefix cache.
+    // trimming old tool results shifts content in the message array, invalidating
+    // the cached prefix on every new user message
+    let trimming = if cache_control.is_some() {
+        ToolResultTrimming::Preserve
+    } else {
+        ToolResultTrimming::SlidingWindow
+    };
+    let converted_messages = convert_messages(messages, is_oauth, cache_control.clone(), trimming);
 
     let converted_tools = if tools.is_empty() {
         None
@@ -442,49 +450,22 @@ fn convert_messages(
     messages: &[Message],
     is_oauth: bool,
     cache_control: Option<CacheControl>,
+    trimming: ToolResultTrimming,
 ) -> Vec<RequestMessage> {
-    let converted = convert_messages_raw(messages, is_oauth);
+    let converted = convert_messages_raw(messages, is_oauth, trimming);
     let mut fixed = fix_orphaned_tool_calls(converted);
     apply_cache_control_to_last_user_message(&mut fixed, cache_control);
     fixed
 }
 
-/// max chars for tool results in older turns
-const TRIM_TOOL_OUTPUT_CHARS: usize = 1500;
-/// number of recent user messages whose tool results are kept at full size
-const RECENT_TURNS_TO_KEEP: usize = 3;
-
-fn recent_boundary(messages: &[Message]) -> usize {
-    let mut user_count = 0;
-    for (i, msg) in messages.iter().enumerate().rev() {
-        if matches!(msg, Message::User(_)) {
-            user_count += 1;
-            if user_count >= RECENT_TURNS_TO_KEEP {
-                return i;
-            }
-        }
-    }
-    0
-}
-
-fn trim_old_tool_output(text: &str) -> String {
-    if text.len() <= TRIM_TOOL_OUTPUT_CHARS {
-        return text.to_string();
-    }
-    let preview_end = text.floor_char_boundary(TRIM_TOOL_OUTPUT_CHARS / 2);
-    let tail_start = text.len().saturating_sub(TRIM_TOOL_OUTPUT_CHARS / 4);
-    let tail_start = text.ceil_char_boundary(tail_start);
-    let trimmed = text.len() - preview_end - (text.len() - tail_start);
-    format!(
-        "{}\n\n[... {} chars trimmed from old tool result ...]\n\n{}",
-        &text[..preview_end],
-        trimmed,
-        &text[tail_start..]
-    )
-}
+use super::{maybe_trim_tool_output, recent_boundary};
 
 /// raw conversion without orphan fixing
-fn convert_messages_raw(messages: &[Message], is_oauth: bool) -> Vec<RequestMessage> {
+fn convert_messages_raw(
+    messages: &[Message],
+    is_oauth: bool,
+    trimming: ToolResultTrimming,
+) -> Vec<RequestMessage> {
     let mut result = Vec::new();
     let boundary = recent_boundary(messages);
 
@@ -590,11 +571,7 @@ fn convert_messages_raw(messages: &[Message], is_oauth: bool) -> Vec<RequestMess
                     .iter()
                     .map(|part| match part {
                         ToolResultContentPart::Text(t) => {
-                            let text = if is_old_turn {
-                                trim_old_tool_output(&t.text)
-                            } else {
-                                t.text.clone()
-                            };
+                            let text = maybe_trim_tool_output(&t.text, is_old_turn, trimming);
                             serde_json::json!({
                                 "type": "text",
                                 "text": text,
@@ -1284,7 +1261,7 @@ mod tests {
             timestamp_ms: Timestamp::zero(),
         })];
 
-        let converted = convert_messages(&messages, false, None);
+        let converted = convert_messages(&messages, false, None, ToolResultTrimming::SlidingWindow);
         assert_eq!(converted.len(), 1);
         assert_eq!(converted[0].role, "user");
         assert_eq!(converted[0].content, serde_json::json!("hello"));
@@ -1302,7 +1279,7 @@ mod tests {
             timestamp_ms: Timestamp::zero(),
         })];
 
-        let converted = convert_messages(&messages, false, None);
+        let converted = convert_messages(&messages, false, None, ToolResultTrimming::SlidingWindow);
         assert_eq!(converted.len(), 1);
         assert_eq!(converted[0].role, "user");
 
@@ -1333,7 +1310,7 @@ mod tests {
             timestamp_ms: Timestamp::zero(),
         })];
 
-        let converted = convert_messages(&messages, false, None);
+        let converted = convert_messages(&messages, false, None, ToolResultTrimming::SlidingWindow);
         // assistant + synthetic tool_result for the orphaned tool_use
         assert_eq!(converted.len(), 2);
         assert_eq!(converted[0].role, "assistant");
@@ -1379,7 +1356,7 @@ mod tests {
             }),
         ];
 
-        let converted = convert_messages(&messages, false, None);
+        let converted = convert_messages(&messages, false, None, ToolResultTrimming::SlidingWindow);
         // assistant + real tool_result, no synthetic
         assert_eq!(converted.len(), 2);
         assert_eq!(converted[0].role, "assistant");
@@ -1413,7 +1390,7 @@ mod tests {
             }),
         ];
 
-        let converted = convert_messages(&messages, false, None);
+        let converted = convert_messages(&messages, false, None, ToolResultTrimming::SlidingWindow);
         // assistant + synthetic tool_result + user
         assert_eq!(converted.len(), 3);
         assert_eq!(converted[0].role, "assistant");
@@ -1788,7 +1765,8 @@ mod tests {
             timestamp_ms: Timestamp::zero(),
         })];
 
-        let converted = convert_messages(&messages, false, cache);
+        let converted =
+            convert_messages(&messages, false, cache, ToolResultTrimming::SlidingWindow);
         let blocks = converted[0].content.as_array().unwrap();
         assert_eq!(blocks[0]["type"], "text");
         assert_eq!(blocks[0]["text"], "hello");
@@ -1849,6 +1827,105 @@ mod tests {
             context_window: TokenCount::new(200_000),
             max_output_tokens: TokenCount::new(16384),
         }
+    }
+
+    /// build a conversation with enough turns for the sliding window boundary
+    /// to kick in, with a large tool result in the oldest turn
+    fn messages_with_old_large_tool_result() -> Vec<Message> {
+        let large_output = "x".repeat(3000);
+        vec![
+            // turn 1: user + assistant + tool_call + tool_result (old)
+            Message::User(UserMessage {
+                content: UserContent::Text("read foo.rs".into()),
+                timestamp_ms: Timestamp::zero(),
+            }),
+            Message::Assistant(AssistantMessage {
+                content: vec![AssistantContentPart::ToolCall(ToolCall {
+                    id: "tc_old".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({"path": "foo.rs"}),
+                })],
+                model: "test".into(),
+                provider: Provider::Anthropic,
+                api: Api::AnthropicMessages,
+                usage: Usage::default(),
+                stop_reason: StopReason::ToolUse,
+                error_message: None,
+                timestamp_ms: Timestamp::zero(),
+            }),
+            Message::ToolResult(ToolResultMessage {
+                tool_call_id: "tc_old".into(),
+                tool_name: "read".into(),
+                content: vec![ToolResultContentPart::Text(TextContent {
+                    text: large_output.clone(),
+                })],
+                outcome: ToolOutcome::Success,
+                timestamp_ms: Timestamp::zero(),
+            }),
+            // turns 2-4: three user messages to push turn 1 past the boundary
+            Message::User(UserMessage {
+                content: UserContent::Text("thanks".into()),
+                timestamp_ms: Timestamp::zero(),
+            }),
+            Message::User(UserMessage {
+                content: UserContent::Text("now do something else".into()),
+                timestamp_ms: Timestamp::zero(),
+            }),
+            Message::User(UserMessage {
+                content: UserContent::Text("one more thing".into()),
+                timestamp_ms: Timestamp::zero(),
+            }),
+        ]
+    }
+
+    #[test]
+    fn sliding_window_trims_old_tool_results() {
+        let messages = messages_with_old_large_tool_result();
+        let converted = convert_messages(&messages, false, None, ToolResultTrimming::SlidingWindow);
+
+        // find the tool result for tc_old
+        let tool_result = converted
+            .iter()
+            .find(|m| {
+                m.role == "user"
+                    && m.content.is_array()
+                    && m.content[0].get("tool_use_id").map(|v| v.as_str()) == Some(Some("tc_old"))
+            })
+            .expect("should have tool result");
+
+        let text = tool_result.content[0]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(
+            text.contains("trimmed"),
+            "old tool result should be trimmed"
+        );
+        assert!(text.len() < 3000, "trimmed result should be shorter");
+    }
+
+    #[test]
+    fn preserve_keeps_old_tool_results_intact() {
+        let messages = messages_with_old_large_tool_result();
+        let converted = convert_messages(&messages, false, None, ToolResultTrimming::Preserve);
+
+        // find the tool result for tc_old
+        let tool_result = converted
+            .iter()
+            .find(|m| {
+                m.role == "user"
+                    && m.content.is_array()
+                    && m.content[0].get("tool_use_id").map(|v| v.as_str()) == Some(Some("tc_old"))
+            })
+            .expect("should have tool result");
+
+        let text = tool_result.content[0]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(
+            !text.contains("trimmed"),
+            "preserved tool result should not be trimmed"
+        );
+        assert_eq!(text.len(), 3000, "preserved result should be full size");
     }
 
     fn test_output() -> AssistantMessage {
