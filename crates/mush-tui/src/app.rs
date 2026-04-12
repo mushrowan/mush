@@ -219,6 +219,16 @@ impl InputBuffer {
         self.ensure_cursor_visible();
     }
 
+    /// insert a string at the cursor (used for bracketed paste)
+    pub fn insert_str(&mut self, s: &str) {
+        if s.is_empty() {
+            return;
+        }
+        self.text.insert_str(self.cursor, s);
+        self.cursor += s.len();
+        self.ensure_cursor_visible();
+    }
+
     pub fn backspace(&mut self) {
         if self.cursor > 0 {
             let prev = self.text[..self.cursor]
@@ -746,6 +756,12 @@ pub struct App {
     pub search: SearchState,
     /// image render positions (populated by MessageList during render)
     pub image_render_areas: RefCell<Vec<ImageRenderArea>>,
+    /// per-message wrapped-line ranges (populated by MessageList during render)
+    pub message_row_ranges: RefCell<Vec<MessageRowRange>>,
+    /// message area rect from last render
+    pub message_area: Cell<Rect>,
+    /// scroll value from last render (wrapped lines scrolled past)
+    pub render_scroll: Cell<u16>,
     /// cached markdown rendering for stable message content
     pub markdown_cache: RefCell<std::collections::HashMap<String, ratatui::text::Text<'static>>>,
     /// cached markdown rendering for the current visible streaming text
@@ -776,6 +792,16 @@ pub struct ImageRenderArea {
     pub msg_idx: usize,
     pub tc_idx: usize,
     pub area: Rect,
+}
+
+/// wrapped-line range for a message (populated during render)
+#[derive(Debug, Clone)]
+pub struct MessageRowRange {
+    pub msg_idx: usize,
+    /// first wrapped line (absolute, includes bottom-anchor padding)
+    pub start: u16,
+    /// first wrapped line after this message
+    pub end: u16,
 }
 
 /// slash command menu item
@@ -859,6 +885,9 @@ impl App {
             selected_block: None,
             search: SearchState::default(),
             image_render_areas: RefCell::new(Vec::new()),
+            message_row_ranges: RefCell::new(Vec::new()),
+            message_area: Cell::new(Rect::default()),
+            render_scroll: Cell::new(0),
             markdown_cache: RefCell::new(std::collections::HashMap::new()),
             stream_markdown_cache: RefCell::new(None),
             cwd: {
@@ -1325,6 +1354,23 @@ impl App {
         let anchor = self.selection_anchor?;
         let cursor = self.selected_message?;
         Some((anchor.min(cursor), anchor.max(cursor)))
+    }
+
+    /// find which message is displayed at a given screen row
+    ///
+    /// uses render metadata (message_row_ranges, render_scroll, message_area)
+    /// populated by MessageList during the last render pass
+    pub fn message_at_screen_row(&self, row: u16) -> Option<usize> {
+        let area = self.message_area.get();
+        if row < area.y || row >= area.y + area.height {
+            return None;
+        }
+        let screen_line = self.render_scroll.get() + (row - area.y);
+        let ranges = self.message_row_ranges.borrow();
+        ranges
+            .iter()
+            .find(|r| screen_line >= r.start && screen_line < r.end)
+            .map(|r| r.msg_idx)
     }
 
     /// extract all fenced code blocks from conversation messages
@@ -2571,5 +2617,41 @@ batch: 1/2 succeeded, 1 failed";
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].content, "fn main() {}");
         assert_eq!(blocks[0].lang.as_deref(), Some("rust"));
+    }
+
+    #[test]
+    fn insert_str_at_end() {
+        let mut buf = InputBuffer::new();
+        buf.insert_str("hello world");
+        assert_eq!(buf.text, "hello world");
+        assert_eq!(buf.cursor, 11);
+    }
+
+    #[test]
+    fn insert_str_at_middle() {
+        let mut buf = InputBuffer::new();
+        buf.text = "hello world".into();
+        buf.cursor = 5;
+        buf.insert_str(" beautiful");
+        assert_eq!(buf.text, "hello beautiful world");
+        assert_eq!(buf.cursor, 15);
+    }
+
+    #[test]
+    fn insert_str_multiline_paste() {
+        let mut buf = InputBuffer::new();
+        buf.insert_str("line 1\nline 2\nline 3");
+        assert_eq!(buf.text, "line 1\nline 2\nline 3");
+        assert_eq!(buf.cursor, 20);
+    }
+
+    #[test]
+    fn insert_str_empty_is_noop() {
+        let mut buf = InputBuffer::new();
+        buf.text = "existing".into();
+        buf.cursor = 3;
+        buf.insert_str("");
+        assert_eq!(buf.text, "existing");
+        assert_eq!(buf.cursor, 3);
     }
 }

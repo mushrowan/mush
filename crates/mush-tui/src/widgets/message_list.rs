@@ -30,6 +30,8 @@ impl Widget for MessageList<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let mut lines: Vec<Line<'_>> = Vec::new();
         let mut image_placeholders: Vec<ImagePlaceholder> = Vec::new();
+        // track where each message starts in the lines vec
+        let mut msg_line_starts: Vec<(usize, usize)> = Vec::new();
 
         let in_scroll_mode = self.app.mode == crate::app::AppMode::Scroll;
         let selection_range = self.app.selection_range();
@@ -37,6 +39,7 @@ impl Widget for MessageList<'_> {
             if msg.queued {
                 continue; // rendered after streaming content
             }
+            let start_line = lines.len();
             let in_selection = selection_range.is_some_and(|(start, end)| i >= start && i <= end);
             let sel = SelectionHint {
                 selected: in_scroll_mode && (self.app.selected_message == Some(i) || in_selection),
@@ -53,6 +56,7 @@ impl Widget for MessageList<'_> {
                 area.width,
             );
             lines.push(Line::raw(""));
+            msg_line_starts.push((i, start_line));
         }
 
         // streaming content
@@ -162,9 +166,46 @@ impl Widget for MessageList<'_> {
         let content_lines = paragraph_tmp.line_count(area.width).min(u16::MAX as usize) as u16;
         let visible = area.height;
 
-        let text = if content_lines < visible {
-            let pad = (visible - content_lines) as usize;
-            let mut padded = vec![Line::raw(""); pad];
+        let padding = if content_lines < visible {
+            (visible - content_lines) as usize
+        } else {
+            0
+        };
+
+        // compute per-message wrapped-line ranges for mouse hit testing
+        // (done before padding/scroll so we work with original line indices)
+        if !msg_line_starts.is_empty() && w > 0 {
+            let wrapped_at = |raw_idx: usize| -> u16 {
+                let sum: usize = text.lines[..raw_idx]
+                    .iter()
+                    .map(|line| {
+                        let lw = line.width();
+                        if lw <= w { 1 } else { lw.div_ceil(w) }
+                    })
+                    .sum();
+                padding as u16 + sum as u16
+            };
+            let total_raw = text.lines.len();
+            let mut ranges = Vec::with_capacity(msg_line_starts.len());
+            for (idx, &(msg_idx, start)) in msg_line_starts.iter().enumerate() {
+                let end_raw = if idx + 1 < msg_line_starts.len() {
+                    msg_line_starts[idx + 1].1
+                } else {
+                    total_raw
+                };
+                ranges.push(crate::app::MessageRowRange {
+                    msg_idx,
+                    start: wrapped_at(start),
+                    end: wrapped_at(end_raw),
+                });
+            }
+            *self.app.message_row_ranges.borrow_mut() = ranges;
+        } else {
+            self.app.message_row_ranges.borrow_mut().clear();
+        }
+
+        let text = if padding > 0 {
+            let mut padded = vec![Line::raw(""); padding];
             padded.extend(text.lines);
             Text::from(padded)
         } else {
@@ -179,6 +220,8 @@ impl Widget for MessageList<'_> {
         // expose scroll geometry for the status bar
         self.app.total_content_lines.set(total_lines);
         self.app.visible_area_height.set(visible);
+        self.app.message_area.set(area);
+        self.app.render_scroll.set(scroll);
 
         // compute image render areas based on scroll position
         let mut render_areas = Vec::new();
