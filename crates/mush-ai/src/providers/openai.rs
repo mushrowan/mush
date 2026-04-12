@@ -59,40 +59,9 @@ impl ApiProvider for OpenaiCompletionsProvider {
                 .send()
                 .await?;
 
-            let status = response.status();
-            let content_type = response
-                .headers()
-                .get(reqwest::header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok())
-                .unwrap_or("<missing>")
-                .to_string();
-            let header_names: Vec<_> = response
-                .headers()
-                .keys()
-                .map(reqwest::header::HeaderName::as_str)
-                .collect();
-            tracing::debug!(
-                model = %model.id,
-                %url,
-                %status,
-                content_type,
-                ?header_names,
-                "received openai completions response"
-            );
-            if content_type == "<missing>" {
-                tracing::warn!(model = %model.id, %url, ?header_names, "openai completions response missing content-type header");
-            }
-
-            if !status.is_success() {
-                let text = response.text().await.unwrap_or_default();
-                tracing::error!(%status, %content_type, body = %text, "openai completions API error");
-                return Err(ProviderError::ApiError {
-                    api: "openai completions",
-                    status,
-                    content_type,
-                    body: crate::registry::truncate_error_body(&text),
-                });
-            }
+            let response =
+                super::check_response(response, "openai completions", model.id.as_str(), &url)
+                    .await?;
 
             let model_id = model.id.clone();
             let provider = model.provider.clone();
@@ -138,20 +107,6 @@ struct RequestToolFunction {
     name: String,
     description: String,
     parameters: serde_json::Value,
-}
-
-fn openai_reasoning_effort(model: &Model, level: ThinkingLevel) -> Option<String> {
-    if level == ThinkingLevel::Off || !model.reasoning {
-        return None;
-    }
-
-    Some(match level {
-        ThinkingLevel::Off => unreachable!(),
-        ThinkingLevel::Minimal | ThinkingLevel::Low => "low".into(),
-        ThinkingLevel::Medium => "medium".into(),
-        ThinkingLevel::High => "high".into(),
-        ThinkingLevel::Xhigh => "xhigh".into(),
-    })
 }
 
 fn build_request_body(
@@ -292,7 +247,7 @@ fn build_request_body(
 
     let reasoning_effort = options
         .thinking
-        .and_then(|level| openai_reasoning_effort(model, level));
+        .and_then(|level| super::openai_reasoning_effort(model, level));
 
     RequestBody {
         model: model.id.to_string(),

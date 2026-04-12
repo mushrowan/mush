@@ -155,40 +155,8 @@ impl ApiProvider for AnthropicProvider {
                 .send()
                 .await?;
 
-            let status = response.status();
-            let content_type = response
-                .headers()
-                .get(reqwest::header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok())
-                .unwrap_or("<missing>")
-                .to_string();
-            let header_names: Vec<_> = response
-                .headers()
-                .keys()
-                .map(reqwest::header::HeaderName::as_str)
-                .collect();
-            tracing::debug!(
-                model = %model.id,
-                %url,
-                %status,
-                content_type,
-                ?header_names,
-                "received anthropic response"
-            );
-            if content_type == "<missing>" {
-                tracing::warn!(model = %model.id, %url, ?header_names, "anthropic response missing content-type header");
-            }
-
-            if !status.is_success() {
-                let text = response.text().await.unwrap_or_default();
-                tracing::error!(%status, %content_type, body = %text, "anthropic API error");
-                return Err(ProviderError::ApiError {
-                    api: "anthropic",
-                    status,
-                    content_type,
-                    body: crate::registry::truncate_error_body(&text),
-                });
-            }
+            let response =
+                super::check_response(response, "anthropic", model.id.as_str(), &url).await?;
 
             let model_id = model.id.clone();
             let provider_name = model.provider.clone();
