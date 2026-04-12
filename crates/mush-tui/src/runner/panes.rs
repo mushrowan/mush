@@ -580,6 +580,7 @@ mod tests {
                 confirm_reply: std::sync::Arc::new(Mutex::new(None)),
                 model: models::all_models_with_user().into_iter().next().unwrap(),
                 context_tokens: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                cancel: tokio_util::sync::CancellationToken::new(),
             },
         );
 
@@ -632,6 +633,7 @@ mod tests {
                 confirm_reply: std::sync::Arc::new(Mutex::new(None)),
                 model: models::all_models_with_user().into_iter().next().unwrap(),
                 context_tokens: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                cancel: tokio_util::sync::CancellationToken::new(),
             },
         );
 

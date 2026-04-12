@@ -298,6 +298,7 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
         dynamic_system_context: None,
         file_rules: None,
         lsp_diagnostics: None,
+        cancel: None,
     };
 
     let mut stream = std::pin::pin!(agent_loop(config, session.context()));

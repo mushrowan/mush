@@ -51,6 +51,7 @@ pub(super) struct StreamMeta {
     pub confirm_reply: Arc<Mutex<Option<PendingConfirmation>>>,
     pub model: Model,
     pub context_tokens: Arc<std::sync::atomic::AtomicU64>,
+    pub cancel: tokio_util::sync::CancellationToken,
 }
 
 /// minimum interval between incremental session saves
@@ -129,6 +130,9 @@ impl StreamState {
     }
 
     pub(super) fn abort(&mut self, pane_id: PaneId) {
+        if let Some(meta) = self.metas.get(&pane_id) {
+            meta.cancel.cancel();
+        }
         self.advance_generation(pane_id);
         self.metas.remove(&pane_id);
     }
@@ -715,6 +719,8 @@ async fn start_stream_for_prompt<'a>(
     }
     tool_registry.extend_shared(extra_tools);
 
+    let cancel = tokio_util::sync::CancellationToken::new();
+
     let stream_gen = stream_state.register_active(
         pane_id,
         StreamMeta {
@@ -723,6 +729,7 @@ async fn start_stream_for_prompt<'a>(
             confirm_reply: Arc::new(Mutex::new(None)),
             model: model.clone(),
             context_tokens: context_tokens_shared,
+            cancel: cancel.clone(),
         },
     );
 
@@ -744,6 +751,7 @@ async fn start_stream_for_prompt<'a>(
         dynamic_system_context: deps.dynamic_system_context.clone(),
         file_rules: deps.file_rules.clone(),
         lsp_diagnostics: deps.lsp_diagnostics.clone(),
+        cancel: Some(cancel),
     };
 
     let stream = agent_loop(config, conversation_snapshot);
@@ -1190,6 +1198,7 @@ mod tests {
                 confirm_reply: Arc::new(Mutex::new(None)),
                 model: models::all_models_with_user().into_iter().next().unwrap(),
                 context_tokens: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                cancel: tokio_util::sync::CancellationToken::new(),
             },
         );
 
@@ -1213,6 +1222,7 @@ mod tests {
                 confirm_reply: Arc::new(Mutex::new(None)),
                 model: models::all_models_with_user().into_iter().next().unwrap(),
                 context_tokens: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                cancel: tokio_util::sync::CancellationToken::new(),
             },
         );
 
@@ -1267,6 +1277,7 @@ mod tests {
                 confirm_reply: Arc::new(Mutex::new(None)),
                 model: models::all_models_with_user().into_iter().next().unwrap(),
                 context_tokens: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                cancel: tokio_util::sync::CancellationToken::new(),
             },
         );
 
@@ -1473,6 +1484,7 @@ mod tests {
                 confirm_reply: Arc::new(Mutex::new(None)),
                 model: models::all_models_with_user().into_iter().next().unwrap(),
                 context_tokens: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                cancel: tokio_util::sync::CancellationToken::new(),
             },
         );
 
@@ -1489,6 +1501,7 @@ mod tests {
                 confirm_reply: Arc::new(Mutex::new(None)),
                 model: models::all_models_with_user().into_iter().next().unwrap(),
                 context_tokens: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                cancel: tokio_util::sync::CancellationToken::new(),
             },
         );
 
@@ -1521,6 +1534,7 @@ mod tests {
                 confirm_reply: Arc::new(Mutex::new(None)),
                 model: models::all_models_with_user().into_iter().next().unwrap(),
                 context_tokens: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                cancel: tokio_util::sync::CancellationToken::new(),
             },
         );
 
@@ -1547,6 +1561,7 @@ mod tests {
                 confirm_reply: Arc::new(Mutex::new(None)),
                 model: models::all_models_with_user().into_iter().next().unwrap(),
                 context_tokens: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                cancel: tokio_util::sync::CancellationToken::new(),
             },
         );
 

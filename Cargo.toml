@@ -33,6 +33,7 @@ mush-lsp = { path = "crates/mush-lsp" }
 
 # async
 tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
 futures = "0.3"
 async-stream = "0.3"
 
