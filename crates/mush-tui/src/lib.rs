@@ -16,6 +16,7 @@ pub mod path_utils;
 pub mod runner;
 pub mod shared_state;
 pub mod slash;
+pub mod streaming;
 pub mod terminal_policy;
 pub mod theme;
 pub mod ui;
