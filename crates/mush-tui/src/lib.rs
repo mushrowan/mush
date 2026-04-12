@@ -1,4 +1,5 @@
 pub mod app;
+pub mod cache;
 pub mod clipboard;
 pub mod config_watcher;
 mod conversation_display;
