@@ -231,7 +231,10 @@ pub fn handle(
             keys.push_str("\nscroll mode:\n");
             keys.push_str("  j/k            - scroll down/up\n");
             keys.push_str("  g/G            - jump to top/bottom\n");
+            keys.push_str("  b              - toggle block/message mode\n");
+            keys.push_str("  v              - visual selection\n");
             keys.push_str("  y              - copy selected message\n");
+            keys.push_str("  click/drag     - select messages with mouse\n");
             keys.push_str("  esc            - exit scroll mode\n");
             keys.push_str("\nediting:\n");
             keys.push_str("  ctrl+a / home  - start of line\n");

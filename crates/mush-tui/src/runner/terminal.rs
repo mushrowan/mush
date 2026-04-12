@@ -57,6 +57,7 @@ pub(super) fn probe_image_picker(policy: TerminalPolicy) -> Option<ratatui_image
 pub(super) fn enter_tui_terminal(policy: TerminalPolicy) -> io::Result<()> {
     enable_raw_mode()?;
     io::stdout().execute(EnterAlternateScreen)?;
+    io::stdout().execute(event::EnableBracketedPaste)?;
     enable_mouse_tracking(policy.mouse_tracking)?;
     enable_keyboard_enhancement(policy.keyboard_enhancement);
     let _ = io::stdout().execute(SetCursorStyle::BlinkingBar);
@@ -110,16 +111,16 @@ pub(super) fn install_panic_cleanup_hook() {
     }));
 }
 
-/// enable minimal mouse tracking: clicks + scroll with sgr coordinates
+/// enable mouse tracking: clicks, scroll, and drag with sgr coordinates
 ///
-/// crossterm's `EnableMouseCapture` also enables `?1003h` (any-event tracking)
-/// which floods the event stream with movement events. when events accumulate
-/// faster than the tui polls them, sgr escape sequence fragments can leak
-/// through crossterm's parser as spurious key events, causing garbled text
+/// `?1002h` reports button press/release and motion while a button is held.
+/// `?1006h` enables SGR coordinate encoding for large terminals.
+/// we avoid `?1003h` (any-event tracking) which floods the event stream
+/// with movement events even when no button is held
 fn enable_minimal_mouse_tracking() -> io::Result<()> {
     use std::io::Write;
 
-    io::stdout().write_all(b"\x1b[?1000h\x1b[?1006h")?;
+    io::stdout().write_all(b"\x1b[?1002h\x1b[?1006h")?;
     io::stdout().flush()
 }
 
@@ -136,7 +137,7 @@ fn enable_mouse_tracking(mode: MouseTrackingMode) -> io::Result<()> {
 fn disable_mouse_tracking() {
     use std::io::Write;
 
-    let _ = io::stdout().write_all(b"\x1b[?1000l\x1b[?1006l");
+    let _ = io::stdout().write_all(b"\x1b[?1002l\x1b[?1006l");
     let _ = io::stdout().flush();
 }
 
@@ -144,6 +145,7 @@ pub(super) fn restore_terminal_state() {
     use std::io::Write;
 
     let _ = io::stdout().execute(PopKeyboardEnhancementFlags);
+    let _ = io::stdout().execute(event::DisableBracketedPaste);
     let _ = io::stdout().execute(SetCursorStyle::DefaultUserShape);
     let _ = disable_raw_mode();
     disable_mouse_tracking();
