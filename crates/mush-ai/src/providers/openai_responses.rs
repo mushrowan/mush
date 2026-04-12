@@ -618,25 +618,12 @@ struct ErrorDetail {
     message: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-enum CurrentBlock {
-    Text {
-        text: String,
-    },
-    Thinking {
-        text: String,
-    },
-    ToolCall {
-        id: String,
-        name: String,
-        args_buf: String,
-    },
-}
+use super::StreamBlock;
 
 #[derive(Debug)]
 struct ActiveBlock {
     content_index: usize,
-    block: CurrentBlock,
+    block: StreamBlock,
 }
 
 #[derive(Debug, Default)]
@@ -857,7 +844,7 @@ fn process_sse_event(
                 return events;
             };
             if let Some(active_block) = active.get_mut(ev.output_index)
-                && let CurrentBlock::Text { text } = &mut active_block.block
+                && let StreamBlock::Text { text } = &mut active_block.block
             {
                 text.push_str(&ev.delta);
                 if let Some(AssistantContentPart::Text(content)) =
@@ -876,7 +863,7 @@ fn process_sse_event(
                 return events;
             };
             if let Some(active_block) = active.get_mut(ev.output_index)
-                && let CurrentBlock::Thinking { text } = &mut active_block.block
+                && let StreamBlock::Thinking { text, .. } = &mut active_block.block
             {
                 text.push_str(&ev.delta);
                 if let Some(AssistantContentPart::Thinking(content)) =
@@ -896,7 +883,7 @@ fn process_sse_event(
                 return events;
             };
             if let Some(active_block) = active.get_mut(ev.output_index)
-                && let CurrentBlock::ToolCall { args_buf, .. } = &mut active_block.block
+                && let StreamBlock::ToolCall { args_buf, .. } = &mut active_block.block
             {
                 args_buf.push_str(&ev.delta);
                 events.push(StreamEvent::ToolCallDelta {
@@ -923,7 +910,7 @@ fn process_sse_event(
                         ev.output_index,
                         ActiveBlock {
                             content_index,
-                            block: CurrentBlock::Text {
+                            block: StreamBlock::Text {
                                 text: String::new(),
                             },
                         },
@@ -942,8 +929,9 @@ fn process_sse_event(
                         ev.output_index,
                         ActiveBlock {
                             content_index,
-                            block: CurrentBlock::Thinking {
+                            block: StreamBlock::Thinking {
                                 text: String::new(),
+                                signature: None,
                             },
                         },
                     );
@@ -973,7 +961,7 @@ fn process_sse_event(
                         ev.output_index,
                         ActiveBlock {
                             content_index,
-                            block: CurrentBlock::ToolCall { id, name, args_buf },
+                            block: StreamBlock::ToolCall { id, name, args_buf },
                         },
                     );
                     events.push(StreamEvent::ToolCallStart { content_index });
@@ -1042,7 +1030,7 @@ fn finish_block(
     events: &mut Vec<StreamEvent>,
 ) {
     match active_block.block {
-        CurrentBlock::Text { text } => {
+        StreamBlock::Text { text } => {
             let final_text = item
                 .and_then(|i| i.get("content"))
                 .and_then(|c| c.as_array())
@@ -1063,7 +1051,7 @@ fn finish_block(
                 text: final_text,
             });
         }
-        CurrentBlock::Thinking { text } => {
+        StreamBlock::Thinking { text, .. } => {
             if let Some(AssistantContentPart::Thinking(content)) =
                 output.content.get_mut(active_block.content_index)
                 && let Some(buf) = content.text_mut()
@@ -1076,7 +1064,7 @@ fn finish_block(
                 thinking: text,
             });
         }
-        CurrentBlock::ToolCall {
+        StreamBlock::ToolCall {
             mut id,
             mut name,
             mut args_buf,
@@ -1436,7 +1424,7 @@ mod tests {
             7,
             ActiveBlock {
                 content_index: 0,
-                block: CurrentBlock::Text {
+                block: StreamBlock::Text {
                     text: "first".into(),
                 },
             },
@@ -1445,7 +1433,7 @@ mod tests {
             7,
             ActiveBlock {
                 content_index: 1,
-                block: CurrentBlock::Text {
+                block: StreamBlock::Text {
                     text: "second".into(),
                 },
             },
@@ -1482,7 +1470,7 @@ mod tests {
             42,
             ActiveBlock {
                 content_index: 1,
-                block: CurrentBlock::Text {
+                block: StreamBlock::Text {
                     text: "hello".into(),
                 },
             },
@@ -1491,8 +1479,9 @@ mod tests {
             3,
             ActiveBlock {
                 content_index: 0,
-                block: CurrentBlock::Thinking {
+                block: StreamBlock::Thinking {
                     text: "thinking".into(),
+                    signature: None,
                 },
             },
         );

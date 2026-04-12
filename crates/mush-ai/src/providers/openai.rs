@@ -327,21 +327,7 @@ struct PromptTokenDetails {
     cached_tokens: u64,
 }
 
-/// what kind of content block we're currently accumulating
-#[derive(Debug)]
-enum CurrentBlock {
-    Text {
-        text: String,
-    },
-    Thinking {
-        text: String,
-    },
-    ToolCall {
-        id: String,
-        name: String,
-        args_buf: String,
-    },
-}
+use super::StreamBlock;
 
 fn parse_sse_stream(
     response: reqwest::Response,
@@ -361,7 +347,7 @@ fn parse_sse_stream(
             timestamp_ms: Timestamp::now(),
         };
 
-        let mut current: Option<CurrentBlock> = None;
+        let mut current: Option<StreamBlock> = None;
         let mut parser = super::sse::SseParser::new();
         let mut raw_capture: Vec<u8> = Vec::new();
         const MAX_CAPTURE_BYTES: usize = 128 * 1024;
@@ -461,7 +447,7 @@ fn parse_sse_stream(
 fn process_chunk(
     chunk: ChunkResponse,
     output: &mut AssistantMessage,
-    current: &mut Option<CurrentBlock>,
+    current: &mut Option<StreamBlock>,
 ) -> Vec<StreamEvent> {
     let mut events = Vec::new();
 
@@ -492,7 +478,7 @@ fn process_chunk(
         && !reasoning.is_empty()
     {
         match current {
-            Some(CurrentBlock::Thinking { text }) => {
+            Some(StreamBlock::Thinking { text, .. }) => {
                 text.push_str(&reasoning);
                 let idx = output.content.len().saturating_sub(1);
                 if let Some(AssistantContentPart::Thinking(tc)) = output.content.get_mut(idx)
@@ -508,8 +494,9 @@ fn process_chunk(
             _ => {
                 let idx = finish_block_events(current, output, &mut events);
                 let content_index = idx.unwrap_or(output.content.len());
-                *current = Some(CurrentBlock::Thinking {
+                *current = Some(StreamBlock::Thinking {
                     text: reasoning.clone(),
+                    signature: None,
                 });
                 output
                     .content
@@ -531,7 +518,7 @@ fn process_chunk(
         && !text.is_empty()
     {
         match current {
-            Some(CurrentBlock::Text { text: buf }) => {
+            Some(StreamBlock::Text { text: buf }) => {
                 buf.push_str(&text);
                 let idx = output.content.len().saturating_sub(1);
                 if let Some(AssistantContentPart::Text(tc)) = output.content.get_mut(idx) {
@@ -545,7 +532,7 @@ fn process_chunk(
             _ => {
                 let idx = finish_block_events(current, output, &mut events);
                 let content_index = idx.unwrap_or(output.content.len());
-                *current = Some(CurrentBlock::Text { text: text.clone() });
+                *current = Some(StreamBlock::Text { text: text.clone() });
                 output.content.push(AssistantContentPart::Text(TextContent {
                     text: text.clone(),
                 }));
@@ -571,7 +558,7 @@ fn process_chunk(
                     .and_then(|f| f.name.clone())
                     .unwrap_or_default();
                 let content_index = output.content.len();
-                *current = Some(CurrentBlock::ToolCall {
+                *current = Some(StreamBlock::ToolCall {
                     id: id.clone(),
                     name: name.clone(),
                     args_buf: String::new(),
@@ -588,7 +575,7 @@ fn process_chunk(
 
             if let Some(func) = tc.function
                 && let Some(args) = func.arguments
-                && let Some(CurrentBlock::ToolCall { args_buf, .. }) = current.as_mut()
+                && let Some(StreamBlock::ToolCall { args_buf, .. }) = current.as_mut()
             {
                 args_buf.push_str(&args);
                 let idx = output.content.len().saturating_sub(1);
@@ -605,26 +592,26 @@ fn process_chunk(
 
 /// finish the current block, emitting end events and returning the content index
 fn finish_block_events(
-    current: &mut Option<CurrentBlock>,
+    current: &mut Option<StreamBlock>,
     output: &mut AssistantMessage,
     events: &mut Vec<StreamEvent>,
 ) -> Option<usize> {
     let block = current.take()?;
     let content_index = output.content.len().saturating_sub(1);
     match block {
-        CurrentBlock::Text { text } => {
+        StreamBlock::Text { text } => {
             events.push(StreamEvent::TextEnd {
                 content_index,
                 text,
             });
         }
-        CurrentBlock::Thinking { text } => {
+        StreamBlock::Thinking { text, .. } => {
             events.push(StreamEvent::ThinkingEnd {
                 content_index,
                 thinking: text,
             });
         }
-        CurrentBlock::ToolCall { id, name, args_buf } => {
+        StreamBlock::ToolCall { id, name, args_buf } => {
             let arguments = serde_json::from_str(&args_buf)
                 .unwrap_or(serde_json::Value::Object(Default::default()));
             if let Some(AssistantContentPart::ToolCall(tc)) = output.content.get_mut(content_index)
@@ -643,9 +630,9 @@ fn finish_block_events(
 }
 
 /// finish the current block without producing events (for stream end)
-fn finish_block(current: &mut Option<CurrentBlock>, output: &mut AssistantMessage) {
+fn finish_block(current: &mut Option<StreamBlock>, output: &mut AssistantMessage) {
     if let Some(block) = current.take()
-        && let CurrentBlock::ToolCall { args_buf, .. } = &block
+        && let StreamBlock::ToolCall { args_buf, .. } = &block
     {
         let idx = output.content.len().saturating_sub(1);
         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(args_buf)
@@ -865,7 +852,7 @@ mod tests {
             usage: None,
         };
         process_chunk(chunk, &mut output, &mut current);
-        assert!(matches!(current, Some(CurrentBlock::Thinking { .. })));
+        assert!(matches!(current, Some(StreamBlock::Thinking { .. })));
 
         // then text
         let chunk = ChunkResponse {
