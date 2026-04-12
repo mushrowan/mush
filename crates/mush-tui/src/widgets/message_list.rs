@@ -78,7 +78,7 @@ impl Widget for MessageList<'_> {
                 ]));
                 let visible_thinking = self.app.visible_streaming_thinking();
                 for text_line in visible_thinking.lines() {
-                    let styled = Line::styled(text_line.to_string(), dim);
+                    let styled = Line::styled(text_line.to_string(), self.app.theme.thinking);
                     lines.extend(indent_line(styled, stream_content_width));
                 }
                 lines.push(Line::raw(""));
@@ -317,7 +317,7 @@ fn render_message(
         if msg.thinking_expanded {
             let cw = (width as usize).saturating_sub(1);
             for text_line in thinking.lines() {
-                let styled = Line::styled(text_line.to_string(), app.theme.dim);
+                let styled = Line::styled(text_line.to_string(), app.theme.thinking);
                 lines.extend(indent_line(styled, cw));
             }
         } else {
@@ -812,15 +812,16 @@ fn push_box_content_line<'a>(
 /// pre-wrap a styled line to `content_width`, prepending a 1-space indent
 /// to every resulting line (including continuations from wrapping)
 fn indent_line<'a>(line: Line<'a>, content_width: usize) -> Vec<Line<'a>> {
+    let line_style = line.style;
     if content_width == 0 {
         let mut spans = vec![Span::raw(" ")];
         spans.extend(line.spans);
-        return vec![Line::from(spans)];
+        return vec![Line::from(spans).style(line_style)];
     }
     if line.width() <= content_width {
         let mut spans = vec![Span::raw(" ")];
         spans.extend(line.spans);
-        return vec![Line::from(spans)];
+        return vec![Line::from(spans).style(line_style)];
     }
 
     // walk spans character by character, splitting at content_width
@@ -840,7 +841,7 @@ fn indent_line<'a>(line: Line<'a>, content_width: usize) -> Vec<Line<'a>> {
                 if byte_pos > seg_start {
                     current.push(Span::styled(text[seg_start..byte_pos].to_string(), style));
                 }
-                result.push(Line::from(std::mem::take(&mut current)));
+                result.push(Line::from(std::mem::take(&mut current)).style(line_style));
                 current_width = 0;
                 seg_start = byte_pos;
             }
@@ -854,7 +855,7 @@ fn indent_line<'a>(line: Line<'a>, content_width: usize) -> Vec<Line<'a>> {
     }
 
     if !current.is_empty() {
-        result.push(Line::from(current));
+        result.push(Line::from(current).style(line_style));
     }
 
     // prepend the indent to every line
@@ -1121,6 +1122,40 @@ mod tests {
         let content = buffer_to_string(&buf);
         // should show the thinking emoji indicator
         assert!(content.contains("💭"));
+    }
+
+    #[test]
+    fn expanded_thinking_uses_thinking_style() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.messages.push(DisplayMessage {
+            thinking: Some("deep thoughts here".into()),
+            thinking_expanded: true,
+            ..DisplayMessage::new(MessageRole::Assistant, "the answer")
+        });
+        let buf = render_app(&app, 60, 10);
+
+        // find a cell containing thinking text and check its colour
+        let thinking_fg = app.theme.thinking.fg;
+        let dim_fg = app.theme.dim.fg;
+        assert_ne!(thinking_fg, dim_fg, "thinking and dim should differ");
+
+        let thinking_cell = (0..buf.area.height)
+            .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
+            .find(|&(x, y)| {
+                let cell = &buf[(x, y)];
+                cell.symbol() == "d" && {
+                    // "deep" starts with d
+                    let next = &buf[(x + 1, y)];
+                    next.symbol() == "e"
+                }
+            });
+        let (x, y) = thinking_cell.expect("should find thinking text 'de' in buffer");
+        let cell = &buf[(x, y)];
+        assert_eq!(
+            cell.fg,
+            thinking_fg.unwrap(),
+            "thinking text should use thinking style, not dim"
+        );
     }
 
     #[test]

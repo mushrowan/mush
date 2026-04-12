@@ -128,8 +128,10 @@ impl Theme {
                 .add_modifier(Modifier::BOLD),
             system_label: Style::default().fg(Color::Yellow),
 
-            thinking: Style::default().fg(Color::DarkGray),
-            thinking_label: Style::default().fg(Color::DarkGray),
+            thinking: Style::default()
+                .fg(Color::Indexed(103))
+                .add_modifier(Modifier::ITALIC),
+            thinking_label: Style::default().fg(Color::Indexed(103)),
 
             code_block: Style::default().fg(Color::White),
             inline_code: Style::default().fg(Color::Yellow),
@@ -221,8 +223,10 @@ impl Theme {
                 .add_modifier(Modifier::BOLD),
             system_label: Style::default().fg(Color::Yellow),
 
-            thinking: Style::default().fg(Color::Gray),
-            thinking_label: Style::default().fg(Color::Gray),
+            thinking: Style::default()
+                .fg(Color::Indexed(103))
+                .add_modifier(Modifier::ITALIC),
+            thinking_label: Style::default().fg(Color::Indexed(103)),
 
             code_block: Style::default().fg(Color::Black),
             inline_code: Style::default().fg(Color::Magenta),
