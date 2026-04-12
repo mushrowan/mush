@@ -110,3 +110,7 @@ criterion = { version = "0.8", features = ["html_reports"] }
 inherits = "release"
 debug = "line-tables-only"
 strip = "none"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"

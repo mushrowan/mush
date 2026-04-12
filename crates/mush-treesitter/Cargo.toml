@@ -72,3 +72,6 @@ lang-nix = ["dep:tree-sitter-nix"]
 pretty_assertions.workspace = true
 tempfile.workspace = true
 filetime.workspace = true
+
+[lints]
+workspace = true

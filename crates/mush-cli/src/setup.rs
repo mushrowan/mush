@@ -71,6 +71,10 @@ impl AppSetup {
             )
         })?;
 
+        #[expect(
+            clippy::expect_used,
+            reason = "reqwest client with default TLS should never fail to build"
+        )]
         let http_client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::limited(10))
             .build()

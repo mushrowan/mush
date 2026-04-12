@@ -45,3 +45,6 @@ pretty_assertions.workspace = true
 [[bench]]
 name = "render_hot_paths"
 harness = false
+
+[lints]
+workspace = true

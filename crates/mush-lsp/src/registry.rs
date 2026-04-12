@@ -155,6 +155,7 @@ impl LspRegistry {
             entry.insert(client);
         }
 
+        #[expect(clippy::expect_used, reason = "entry was just inserted above")]
         Ok(clients.get(&language).expect("just ensured"))
     }
 }

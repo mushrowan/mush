@@ -69,7 +69,10 @@ impl ParserPool {
         let mut parsers = self.parsers.lock().unwrap_or_else(|e| e.into_inner());
         let parser = parsers.entry(language).or_insert_with(|| {
             let mut p = tree_sitter::Parser::new();
-            // safe: we just got the language from a valid grammar
+            #[expect(
+                clippy::expect_used,
+                reason = "grammar was just validated by tree_sitter_language()"
+            )]
             p.set_language(&ts_lang).expect("grammar version mismatch");
             p
         });

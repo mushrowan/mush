@@ -1,3 +1,8 @@
+#![expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "eval binary, not library code"
+)]
 //! eval harness for comparing skill injection strategies
 //!
 //! run: cargo run -p mush-eval

@@ -453,6 +453,10 @@ async fn auto_fork_compact(
         return;
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "pane existence verified by early return above"
+    )]
     let pane = pane_mgr.pane_mut(pane_id).expect("pane exists after check");
     let before = pane.conversation.context_len();
 
@@ -473,6 +477,10 @@ async fn auto_fork_compact(
     .await;
 
     if let Some((after, tokens_before, tokens_after)) = result {
+        #[expect(
+            clippy::expect_used,
+            reason = "pane existence verified by compact call above"
+        )]
         let pane = pane_mgr
             .pane_mut(pane_id)
             .expect("pane exists after compact");
@@ -618,11 +626,16 @@ async fn start_stream_for_prompt<'a>(
     let message_bus = deps.message_bus;
     let shared_state = deps.shared_state;
     let file_tracker = deps.file_tracker;
-    let steering_queue = pane_mgr.pane(pane_id).unwrap().steering_queue.clone();
+    let Some(pane_ref) = pane_mgr.pane(pane_id) else {
+        return;
+    };
+    let steering_queue = pane_ref.steering_queue.clone();
     let model = pane_model(pane_mgr, pane_id, &deps.default_model);
     let thinking_level = pane_thinking_level(pane_mgr, pane_id);
     let conversation_snapshot = {
-        let pane = pane_mgr.pane_mut(pane_id).unwrap();
+        let Some(pane) = pane_mgr.pane_mut(pane_id) else {
+            return;
+        };
         let (app, conversation, _) = pane.fields_mut();
         append_prompt_and_snapshot(
             app,
@@ -870,6 +883,10 @@ fn build_context_transform<'a>(
             let mut maybe_msgs: Option<Vec<Message>> = None;
 
             if do_auto_compact {
+                #[expect(
+                    clippy::expect_used,
+                    reason = "owned_messages always Some inside context_transform"
+                )]
                 let messages = owned_messages
                     .as_ref()
                     .expect("owned messages required for context transform");
@@ -915,6 +932,10 @@ fn build_context_transform<'a>(
                 return mush_agent::ContextTransformResult::Unchanged;
             }
 
+            #[expect(
+                clippy::expect_used,
+                reason = "owned_messages always Some inside context_transform"
+            )]
             let mut msgs = maybe_msgs.unwrap_or_else(|| {
                 owned_messages.expect("owned messages required for context transform")
             });

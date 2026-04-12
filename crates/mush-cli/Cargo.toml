@@ -44,3 +44,6 @@ tracing-chrome = { workspace = true, optional = true }
 [dev-dependencies]
 pretty_assertions.workspace = true
 tempfile.workspace = true
+
+[lints]
+workspace = true

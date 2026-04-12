@@ -1,7 +1,7 @@
 //! logging setup - file-based tracing with ring buffer for TUI viewing
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use tracing_appender::non_blocking::WorkerGuard;
@@ -40,7 +40,7 @@ impl LogBuffer {
 
     /// get last N entries
     pub fn tail(&self, n: usize) -> Vec<String> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let start = inner.entries.len().saturating_sub(n);
         inner.entries.iter().skip(start).cloned().collect()
     }
@@ -52,7 +52,7 @@ impl std::io::Write for LogBuffer {
             // each write is a complete log line (tracing-subscriber writes one at a time)
             let trimmed = s.trim_end();
             if !trimmed.is_empty() {
-                let mut inner = self.inner.lock().unwrap();
+                let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
                 if inner.capacity == 0 {
                     return Ok(buf.len());
                 }
@@ -94,8 +94,8 @@ pub fn trace_output_path() -> PathBuf {
 /// returns the guards (must be held alive) and the log buffer
 pub fn init_logging(config_filter: Option<&str>, profiling: bool) -> (LoggingGuards, LogBuffer) {
     let log_path = log_file_path();
-    let log_dir = log_path.parent().unwrap();
-    let log_name = log_path.file_name().unwrap();
+    let log_dir = log_path.parent().unwrap_or(Path::new("."));
+    let log_name = log_path.file_name().unwrap_or_default();
 
     let file_appender = tracing_appender::rolling::never(log_dir, log_name);
     let (file_writer, file_guard) = tracing_appender::non_blocking(file_appender);

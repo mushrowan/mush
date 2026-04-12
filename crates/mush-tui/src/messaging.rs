@@ -106,18 +106,24 @@ impl MessageBus {
     /// register a pane, returns its inbox receiver
     pub fn register(&self, pane_id: PaneId) -> mpsc::UnboundedReceiver<InterPaneMessage> {
         let (tx, rx) = mpsc::unbounded_channel();
-        self.senders.lock().unwrap().insert(pane_id, tx);
+        self.senders
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(pane_id, tx);
         rx
     }
 
     /// remove a pane's channel (on close)
     pub fn unregister(&self, pane_id: PaneId) {
-        self.senders.lock().unwrap().remove(&pane_id);
+        self.senders
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&pane_id);
     }
 
     /// send a message to a specific pane
     pub fn send(&self, to: PaneId, msg: InterPaneMessage) -> Result<(), MessageBusError> {
-        let senders = self.senders.lock().unwrap();
+        let senders = self.senders.lock().unwrap_or_else(|e| e.into_inner());
         match senders.get(&to) {
             Some(tx) => tx.send(msg).map_err(|_| MessageBusError::PaneClosed),
             None => Err(MessageBusError::PaneNotFound(to)),
@@ -126,7 +132,7 @@ impl MessageBus {
 
     /// send a message to all panes except the sender
     pub fn broadcast(&self, from: PaneId, content: String) -> BroadcastStats {
-        let senders = self.senders.lock().unwrap();
+        let senders = self.senders.lock().unwrap_or_else(|e| e.into_inner());
         let timestamp = Timestamp::now();
         let mut attempted = 0;
         let mut sent = 0;
@@ -155,7 +161,12 @@ impl MessageBus {
 
     /// list registered pane ids
     pub fn pane_ids(&self) -> Vec<PaneId> {
-        self.senders.lock().unwrap().keys().copied().collect()
+        self.senders
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .copied()
+            .collect()
     }
 }
 

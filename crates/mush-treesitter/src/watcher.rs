@@ -69,7 +69,7 @@ impl RepoMapWatcher {
                 *text = initial_text;
             }
             {
-                let mut guard = state_clone.lock().unwrap();
+                let mut guard = state_clone.lock().unwrap_or_else(|e| e.into_inner());
                 guard.incr_map = Some(incr_map);
 
                 // process any events that arrived during the build
@@ -100,7 +100,7 @@ impl RepoMapWatcher {
                 std::thread::sleep(Duration::from_millis(DEBOUNCE_MS));
                 while debounce_rx.try_recv().is_ok() {}
 
-                let mut guard = state_clone.lock().unwrap();
+                let mut guard = state_clone.lock().unwrap_or_else(|e| e.into_inner());
                 let changed: Vec<PathBuf> = guard.pending_changed.drain(..).collect();
                 let removed: Vec<PathBuf> = guard.pending_removed.drain(..).collect();
 

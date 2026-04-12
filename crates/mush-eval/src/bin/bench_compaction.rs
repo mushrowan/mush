@@ -1,3 +1,8 @@
+#![expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "eval binary, not library code"
+)]
 //! compaction prompt bench
 //!
 //! generates synthetic conversations of varying sizes, runs compaction

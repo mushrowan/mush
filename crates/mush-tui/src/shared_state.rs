@@ -58,13 +58,17 @@ impl SharedState {
     pub fn set_reducer(&self, key: &str, reducer: Reducer) {
         self.reducers
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .insert(key.to_string(), reducer);
     }
 
     /// read a value by key
     pub fn get(&self, key: &str) -> Option<Value> {
-        self.fields.lock().unwrap().get(key).cloned()
+        self.fields
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(key)
+            .cloned()
     }
 
     pub fn get_typed<T>(&self, key: &str) -> Result<Option<T>, SharedStateError>
@@ -81,12 +85,12 @@ impl SharedState {
         let reducer = self
             .reducers
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .get(key)
             .copied()
             .unwrap_or_default();
 
-        let mut fields = self.fields.lock().unwrap();
+        let mut fields = self.fields.lock().unwrap_or_else(|e| e.into_inner());
         match reducer {
             Reducer::Overwrite => {
                 fields.insert(key.to_string(), value);
@@ -120,17 +124,28 @@ impl SharedState {
 
     /// delete a key
     pub fn remove(&self, key: &str) -> Option<Value> {
-        self.fields.lock().unwrap().remove(key)
+        self.fields
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(key)
     }
 
     /// list all keys
     pub fn keys(&self) -> Vec<String> {
-        self.fields.lock().unwrap().keys().cloned().collect()
+        self.fields
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .cloned()
+            .collect()
     }
 
     /// snapshot of all state (for debugging / display)
     pub fn snapshot(&self) -> HashMap<String, Value> {
-        self.fields.lock().unwrap().clone()
+        self.fields
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 }
 
@@ -192,7 +207,9 @@ impl AgentTool for ReadStateTool {
 
             match args.key.as_deref() {
                 Some(key) => match self.state.get(key) {
-                    Some(val) => ToolResult::text(serde_json::to_string_pretty(&val).unwrap()),
+                    Some(val) => ToolResult::text(
+                        serde_json::to_string_pretty(&val).unwrap_or_else(|_| format!("{val:?}")),
+                    ),
                     None => ToolResult::text(format!("key \"{key}\" not found")),
                 },
                 None => {
