@@ -260,7 +260,7 @@ pub(super) async fn handle_slash_action(
             state_changed = true;
         }
         SlashAction::Close => {
-            close_focused_pane(pane_mgr, message_bus, file_tracker, cwd).await;
+            close_focused_pane(pane_mgr, None, message_bus, file_tracker, cwd).await;
         }
         SlashAction::Merge => {
             let pane = pane_mgr.focused();
