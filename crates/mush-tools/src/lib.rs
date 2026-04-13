@@ -1,5 +1,7 @@
 pub mod apply_patch;
+pub mod background;
 pub mod bash;
+pub mod bash_status;
 pub mod batch;
 pub mod edit;
 pub mod find;

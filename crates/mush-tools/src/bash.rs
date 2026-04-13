@@ -30,6 +30,16 @@ struct BashArgs {
     timeout: u64,
     #[serde(default)]
     output: BashOutput,
+    /// run the command in the background and return a job id immediately.
+    /// use bash_status to poll for completion. keeps API cache warm during
+    /// long-running commands like nix builds or large test suites
+    #[serde(default)]
+    background: bool,
+    /// allow starting a background job when one is already running.
+    /// defaults to false to prevent accidental CPU overload.
+    /// hard-capped at 3 concurrent background jobs regardless
+    #[serde(default)]
+    concurrent: bool,
 }
 
 const fn default_timeout_secs() -> u64 {
@@ -43,6 +53,8 @@ pub struct BashTool {
     cwd: PathBuf,
     /// optional callback for streaming output lines as they arrive
     output_sink: Option<OutputSink>,
+    /// shared registry for background jobs (None = background mode disabled)
+    bg_registry: Option<crate::background::BackgroundJobRegistry>,
 }
 
 impl BashTool {
@@ -50,11 +62,20 @@ impl BashTool {
         Self {
             cwd,
             output_sink: None,
+            bg_registry: None,
         }
     }
 
     pub fn with_output_sink(mut self, sink: OutputSink) -> Self {
         self.output_sink = Some(sink);
+        self
+    }
+
+    pub fn with_background_registry(
+        mut self,
+        registry: crate::background::BackgroundJobRegistry,
+    ) -> Self {
+        self.bg_registry = Some(registry);
         self
     }
 }
@@ -69,7 +90,9 @@ impl AgentTool for BashTool {
     fn description(&self) -> &str {
         "Execute a bash command in the current working directory. Returns stdout and stderr. \
          Output is truncated to the last 2000 lines or 50KB (whichever is hit first). \
-         If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds."
+         If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds. \
+         For long-running commands (builds, test suites), set background: true to run \
+         asynchronously and poll with bash_status to avoid cache busting."
     }
 
     fn output_limit(&self) -> mush_agent::tool::OutputLimit {
@@ -92,6 +115,14 @@ impl AgentTool for BashTool {
                     "type": "string",
                     "description": "output format: 'text' (default) or 'json' with structured fields (stdout, stderr, exit_code, timed_out)",
                     "enum": ["text", "json"]
+                },
+                "background": {
+                    "type": "boolean",
+                    "description": "run in background, return job id immediately. poll with bash_status tool. use for commands >2min to keep cache warm"
+                },
+                "concurrent": {
+                    "type": "boolean",
+                    "description": "allow running alongside existing background jobs (default: only 1 at a time, hard cap: 3)"
                 }
             },
             "required": ["command"]
@@ -108,6 +139,10 @@ impl AgentTool for BashTool {
                 Err(error) => return error,
             };
 
+            if args.background {
+                return self.execute_background(args).await;
+            }
+
             run_command(
                 &self.cwd,
                 &args.command,
@@ -118,6 +153,121 @@ impl AgentTool for BashTool {
             .await
         })
     }
+}
+
+impl BashTool {
+    async fn execute_background(&self, args: BashArgs) -> ToolResult {
+        let registry = match &self.bg_registry {
+            Some(r) => r,
+            None => {
+                return ToolResult::error(
+                    "background execution not available (no job registry configured)",
+                );
+            }
+        };
+
+        if let Err(msg) = registry.check_can_start(args.concurrent).await {
+            return ToolResult::error(msg);
+        }
+
+        let id = registry.next_id();
+        let state = crate::background::JobState {
+            id: id.clone(),
+            command: args.command.clone(),
+            status: crate::background::JobStatus::Running,
+            stdout: String::new(),
+            stderr: String::new(),
+            started: std::time::Instant::now(),
+            cwd: self.cwd.clone(),
+        };
+
+        let handle = registry.insert(state).await;
+        let timeout_secs = args.timeout;
+        let command = args.command.clone();
+        let cwd = self.cwd.clone();
+
+        // spawn the command in a background task
+        tokio::spawn(async move {
+            run_background_command(handle, &cwd, &command, timeout_secs).await;
+        });
+
+        let json = serde_json::json!({
+            "job_id": id,
+            "status": "running",
+            "command": args.command,
+            "message": format!(
+                "command started in background. poll with bash_status tool using job_id: {id}"
+            ),
+        });
+        ToolResult::text(json.to_string())
+    }
+}
+
+/// run a command and stream output into a shared job state
+async fn run_background_command(
+    handle: std::sync::Arc<tokio::sync::RwLock<crate::background::JobState>>,
+    cwd: &std::path::Path,
+    command: &str,
+    timeout_secs: u64,
+) {
+    let mut cmd = tokio::process::Command::new("bash");
+    cmd.arg("-c")
+        .arg(command)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    #[cfg(unix)]
+    cmd.process_group(0);
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            let mut state = handle.write().await;
+            state.status = crate::background::JobStatus::Failed(format!("failed to spawn: {e}"));
+            return;
+        }
+    };
+
+    let timeout = tokio::time::Duration::from_secs(timeout_secs);
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+
+    let stdout_handle = tokio::spawn(stream_pipe(stdout_pipe, None));
+    let stderr_handle = tokio::spawn(stream_pipe(stderr_pipe, None));
+
+    let status = match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(e)) => {
+            let stdout = stdout_handle.await.unwrap_or_default();
+            let stderr = stderr_handle.await.unwrap_or_default();
+            let mut state = handle.write().await;
+            state.stdout = stdout;
+            state.stderr = stderr;
+            state.status = crate::background::JobStatus::Failed(format!("command failed: {e}"));
+            return;
+        }
+        Err(_) => {
+            let _ = child.kill().await;
+            let stdout = stdout_handle.await.unwrap_or_default();
+            let stderr = stderr_handle.await.unwrap_or_default();
+            let mut state = handle.write().await;
+            state.stdout = stdout;
+            state.stderr = stderr;
+            state.status = crate::background::JobStatus::TimedOut;
+            return;
+        }
+    };
+
+    let stdout = stdout_handle.await.unwrap_or_default();
+    let stderr = stderr_handle.await.unwrap_or_default();
+    let exit_code = status.code().unwrap_or(-1);
+
+    let mut state = handle.write().await;
+    state.stdout = stdout;
+    state.stderr = stderr;
+    state.status = crate::background::JobStatus::Done { exit_code };
 }
 
 async fn run_command(
@@ -354,5 +504,102 @@ mod tests {
         use mush_agent::tool::OutputLimit;
         let tool = BashTool::new(PathBuf::from("."));
         assert_eq!(tool.output_limit(), OutputLimit::Tail);
+    }
+
+    #[tokio::test]
+    async fn background_returns_job_id() {
+        let registry = crate::background::BackgroundJobRegistry::new();
+        let tool = BashTool::new(std::env::current_dir().unwrap())
+            .with_background_registry(registry.clone());
+
+        let result = tool
+            .execute(serde_json::json!({
+                "command": "echo hello",
+                "background": true
+            }))
+            .await;
+        assert!(result.outcome.is_success());
+        let text = extract_text(&result);
+        assert!(text.contains("bg_0"), "should contain job id: {text}");
+        assert!(text.contains("running"), "should show running: {text}");
+    }
+
+    #[tokio::test]
+    async fn background_without_registry_errors() {
+        let tool = BashTool::new(std::env::current_dir().unwrap());
+        let result = tool
+            .execute(serde_json::json!({
+                "command": "echo hello",
+                "background": true
+            }))
+            .await;
+        assert!(result.outcome.is_error());
+    }
+
+    #[tokio::test]
+    async fn background_job_completes() {
+        let registry = crate::background::BackgroundJobRegistry::new();
+        let tool = BashTool::new(std::env::current_dir().unwrap())
+            .with_background_registry(registry.clone());
+
+        let result = tool
+            .execute(serde_json::json!({
+                "command": "echo background_done",
+                "background": true
+            }))
+            .await;
+        assert!(
+            result.outcome.is_success(),
+            "background spawn should succeed"
+        );
+
+        // wait a bit for the background task to finish
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+        let handle = registry.get("bg_0").await.unwrap();
+        let state = handle.read().await;
+        assert!(
+            !state.status.is_running(),
+            "job should have completed: {:?}",
+            state.status
+        );
+        assert!(
+            state.stdout.contains("background_done"),
+            "should capture output: {}",
+            state.stdout
+        );
+    }
+
+    #[tokio::test]
+    async fn background_concurrency_guard() {
+        let registry = crate::background::BackgroundJobRegistry::new();
+        let tool = BashTool::new(std::env::current_dir().unwrap())
+            .with_background_registry(registry.clone());
+
+        // start a long-running background job
+        let result = tool
+            .execute(serde_json::json!({
+                "command": "sleep 10",
+                "background": true
+            }))
+            .await;
+        assert!(
+            result.outcome.is_success(),
+            "first background job should start"
+        );
+
+        // second job without concurrent flag should fail
+        let result = tool
+            .execute(serde_json::json!({
+                "command": "echo second",
+                "background": true
+            }))
+            .await;
+        assert!(result.outcome.is_error());
+        let text = extract_text(&result);
+        assert!(
+            text.contains("concurrent: true"),
+            "should suggest flag: {text}"
+        );
     }
 }
