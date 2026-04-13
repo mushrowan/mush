@@ -8,8 +8,10 @@ use thiserror::Error;
 
 use crate::util::resolve_path;
 
-const MAX_LINES: usize = 2000;
-const MAX_BYTES: usize = 50 * 1024;
+use mush_agent::truncation::{MAX_BYTES, MAX_LINES};
+
+/// headroom so read's hint footer fits within the central truncation limit
+const CONTENT_LINE_HEADROOM: usize = 5;
 /// per-line length cap (chars). longer lines silently truncated
 const MAX_LINE_CHARS: usize = 500;
 
@@ -328,7 +330,8 @@ fn read_file(
 
     // apply offset (1-indexed)
     let start = offset.unwrap_or(1).saturating_sub(1).min(total_lines);
-    let max_lines = limit.unwrap_or(MAX_LINES).min(MAX_LINES);
+    let content_max = MAX_LINES - CONTENT_LINE_HEADROOM;
+    let max_lines = limit.unwrap_or(content_max).min(content_max);
 
     let mut result = String::new();
     let mut bytes_written = 0;
@@ -695,5 +698,43 @@ mod tests {
             }
             Ok(_) => panic!("expected read args error"),
         }
+    }
+
+    #[test]
+    fn large_file_output_within_central_truncation_limits() {
+        // read's output for large files must fit within the central
+        // truncation limits so the central pass is a no-op and read's
+        // semantic hint ("[N more lines. Use offset=X]") survives
+        let dir = temp_dir();
+        let file = dir.path().join("big.txt");
+        let content: String = (1..=5000)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&file, &content).unwrap();
+
+        let result = read_file(&file, None, None, false);
+        let text = extract_text(&result);
+
+        let line_count = text.lines().count();
+        let byte_count = text.len();
+
+        let max_lines = mush_agent::truncation::MAX_LINES;
+        let max_bytes = mush_agent::truncation::MAX_BYTES;
+
+        assert!(
+            line_count <= max_lines,
+            "read output {line_count} lines exceeds central limit {max_lines}, \
+             central truncation would strip read's hint"
+        );
+        assert!(
+            byte_count <= max_bytes,
+            "read output {byte_count} bytes exceeds central limit {max_bytes}, \
+             central truncation would strip read's hint"
+        );
+
+        // verify the hint is present
+        assert!(text.contains("more lines in file"));
+        assert!(text.contains("offset="));
     }
 }
