@@ -51,6 +51,25 @@ fn save_full_output(content: &str) -> Option<PathBuf> {
     Some(path)
 }
 
+/// save full batch output to a file (cap at 10MB to avoid runaway writes)
+pub fn save_batch_output(content: &str) -> Option<PathBuf> {
+    const MAX_SAVE_BYTES: usize = 10 * 1024 * 1024;
+    if content.len() > MAX_SAVE_BYTES {
+        // truncate at a line boundary
+        let truncated = match content[..MAX_SAVE_BYTES].rfind('\n') {
+            Some(pos) => &content[..pos],
+            None => &content[..MAX_SAVE_BYTES],
+        };
+        let with_notice = format!(
+            "{truncated}\n\n[...truncated at {MAX_SAVE_BYTES} byte cap, {} bytes omitted]",
+            content.len() - truncated.len()
+        );
+        save_full_output(&with_notice)
+    } else {
+        save_full_output(content)
+    }
+}
+
 /// clean up tool output files older than 7 days
 pub fn cleanup() {
     let dir = output_dir();
