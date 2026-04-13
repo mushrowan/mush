@@ -422,7 +422,7 @@ fn parse_sse_stream(
                     );
                     finish_block(&mut current, &mut output);
                     output.stop_reason = StopReason::Error;
-                    output.error_message = Some(e.to_string());
+                    output.error_message = Some(super::format_error_chain(&e));
                     yield StreamEvent::Error {
                         reason: StopReason::Error,
                         message: output,

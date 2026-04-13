@@ -773,7 +773,7 @@ fn parse_sse_stream(
                     );
                     finish_all_blocks(&mut active, &mut output);
                     output.stop_reason = StopReason::Error;
-                    output.error_message = Some(e.to_string());
+                    output.error_message = Some(super::format_error_chain(&e));
                     yield StreamEvent::Error {
                         reason: output.stop_reason,
                         message: output.clone(),
