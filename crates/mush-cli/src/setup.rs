@@ -665,6 +665,16 @@ fn start_repo_map_watcher(
     Option<mush_tools::repo_map::SharedMapText>,
     Option<mush_treesitter::RepoMapWatcher>,
 ) {
+    // skip repo map when not inside a VCS repo to avoid walking
+    // unbounded directory trees (e.g. running from ~)
+    if !mush_treesitter::is_inside_repo(cwd) {
+        tracing::debug!(
+            cwd = %cwd.display(),
+            "skipping repo map: not inside a git/jj repository"
+        );
+        return (None, None);
+    }
+
     let watcher = match mush_treesitter::RepoMapWatcher::start(cwd, token_budget) {
         Some(w) => w,
         None => {

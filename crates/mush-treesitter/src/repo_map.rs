@@ -158,14 +158,87 @@ fn pagerank(edges: &[(usize, usize)], n: usize, damping: f64, iterations: usize)
     ranks
 }
 
+/// check whether a path is inside a VCS-managed repository
+///
+/// walks up from `path` looking for `.git` or `.jj` directories.
+/// returns false for bare directories (e.g. home dir) where a
+/// recursive walk would be unbounded and dangerous
+pub fn is_inside_repo(path: &Path) -> bool {
+    let mut current = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    loop {
+        if current.join(".git").exists() || current.join(".jj").exists() {
+            return true;
+        }
+        if !current.pop() {
+            return false;
+        }
+    }
+}
+
+/// options for controlling file discovery
+#[derive(Debug, Clone)]
+pub struct DiscoverOptions {
+    /// hard cap on files to discover (0 = no limit)
+    pub max_files: usize,
+}
+
+impl Default for DiscoverOptions {
+    fn default() -> Self {
+        Self {
+            max_files: default_max_files(),
+        }
+    }
+}
+
+/// read the inotify watch limit and derive a reasonable file cap
+///
+/// uses half the inotify limit (since we're not the only watcher)
+/// capped to a hard maximum to prevent memory blowup even if
+/// the kernel limit is absurdly high
+fn default_max_files() -> usize {
+    const HARD_MAX: usize = 50_000;
+
+    #[cfg(target_os = "linux")]
+    {
+        let limit = std::fs::read_to_string("/proc/sys/fs/inotify/max_user_watches")
+            .ok()
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .unwrap_or(HARD_MAX);
+        // use half the inotify limit, clamped to hard max
+        (limit / 2).min(HARD_MAX)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        HARD_MAX
+    }
+}
+
 /// walk a directory tree, respecting .gitignore, returning parseable files
 fn discover_files(root: &Path) -> Vec<PathBuf> {
+    discover_files_with_options(root, &DiscoverOptions::default())
+}
+
+/// walk a directory tree with configurable limits
+fn discover_files_with_options(root: &Path, opts: &DiscoverOptions) -> Vec<PathBuf> {
     let walker = ignore::WalkBuilder::new(root)
         .hidden(true) // skip hidden files
         .git_ignore(true)
         .git_global(true)
         .git_exclude(true)
         .build();
+
+    let max = if opts.max_files == 0 {
+        usize::MAX
+    } else {
+        opts.max_files
+    };
 
     let mut files = Vec::new();
     for entry in walker {
@@ -174,9 +247,16 @@ fn discover_files(root: &Path) -> Vec<PathBuf> {
             continue;
         }
         let path = entry.into_path();
-        // only include files we can parse
         if Language::detect(&path).is_some() {
             files.push(path);
+            if files.len() >= max {
+                tracing::warn!(
+                    max_files = max,
+                    root = %root.display(),
+                    "file discovery hit cap, results truncated"
+                );
+                break;
+            }
         }
     }
     files.sort();
@@ -708,5 +788,66 @@ pub fn helper() -> String {
 
         assert!(!incr.update(&[], &[]));
         assert!(!incr.add_new_files());
+    }
+
+    #[test]
+    fn is_repo_root_detects_git() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join(".git")).unwrap();
+        assert!(is_inside_repo(dir.path()), ".git should be detected");
+    }
+
+    #[test]
+    fn is_repo_root_detects_jj() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join(".jj")).unwrap();
+        assert!(is_inside_repo(dir.path()), ".jj should be detected");
+    }
+
+    #[test]
+    fn is_repo_root_negative_for_bare_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            !is_inside_repo(dir.path()),
+            "bare tempdir should not be a repo"
+        );
+    }
+
+    #[test]
+    fn is_repo_root_finds_ancestor() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join(".git")).unwrap();
+        let nested = dir.path().join("a/b/c");
+        fs::create_dir_all(&nested).unwrap();
+        assert!(
+            is_inside_repo(&nested),
+            "nested dir under .git root should count"
+        );
+    }
+
+    #[test]
+    fn discover_files_respects_max_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        fs::create_dir_all(&src).unwrap();
+        // create 20 files
+        for i in 0..20 {
+            fs::write(src.join(format!("f{i}.rs")), format!("fn f{i}() {{}}")).unwrap();
+        }
+        let opts = DiscoverOptions { max_files: 5 };
+        let files = discover_files_with_options(dir.path(), &opts);
+        assert_eq!(files.len(), 5, "should cap at max_files");
+    }
+
+    #[test]
+    fn discover_files_default_returns_all_small_repos() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        fs::create_dir_all(&src).unwrap();
+        for i in 0..3 {
+            fs::write(src.join(format!("f{i}.rs")), format!("fn f{i}() {{}}")).unwrap();
+        }
+        let files = discover_files(dir.path());
+        assert_eq!(files.len(), 3, "small repos should not be capped");
     }
 }
