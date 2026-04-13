@@ -59,37 +59,37 @@ pub struct HookResult {
 /// collection of lifecycle hooks by point
 #[derive(Debug, Clone, Default)]
 pub struct LifecycleHooks {
-    pub pre_session: Vec<LifecycleHook>,
-    pub pre_tool_use: Vec<LifecycleHook>,
-    pub post_tool_use: Vec<LifecycleHook>,
-    pub stop: Vec<LifecycleHook>,
-    pub post_compaction: Vec<LifecycleHook>,
+    hooks: std::collections::HashMap<HookPoint, Vec<LifecycleHook>>,
 }
 
 impl LifecycleHooks {
     pub fn is_empty(&self) -> bool {
-        self.pre_session.is_empty()
-            && self.pre_tool_use.is_empty()
-            && self.post_tool_use.is_empty()
-            && self.stop.is_empty()
-            && self.post_compaction.is_empty()
+        self.hooks.values().all(|v| v.is_empty())
     }
 
     /// get hooks for a specific point
     pub fn for_point(&self, point: HookPoint) -> &[LifecycleHook] {
-        match point {
-            HookPoint::PreSession => &self.pre_session,
-            HookPoint::PreToolUse => &self.pre_tool_use,
-            HookPoint::PostToolUse => &self.post_tool_use,
-            HookPoint::Stop => &self.stop,
-            HookPoint::PostCompaction => &self.post_compaction,
-        }
+        self.hooks.get(&point).map_or(&[], |v| v.as_slice())
     }
 
-    /// run pre-session hooks (not tool-specific)
-    pub async fn run_pre_session(&self, cwd: Option<&std::path::Path>) -> Vec<HookResult> {
+    /// replace all hooks for a point
+    pub fn set(&mut self, point: HookPoint, hooks: Vec<LifecycleHook>) {
+        self.hooks.insert(point, hooks);
+    }
+
+    /// add a single hook for a point
+    pub fn push(&mut self, point: HookPoint, hook: LifecycleHook) {
+        self.hooks.entry(point).or_default().push(hook);
+    }
+
+    /// run all hooks at a point (not filtered by tool name)
+    pub async fn run_all(
+        &self,
+        point: HookPoint,
+        cwd: Option<&std::path::Path>,
+    ) -> Vec<HookResult> {
         let mut results = Vec::new();
-        for hook in &self.pre_session {
+        for hook in self.for_point(point) {
             results.push(run_hook(hook, cwd).await);
         }
         results
@@ -105,32 +105,11 @@ impl LifecycleHooks {
         tool_name: &str,
         cwd: Option<&std::path::Path>,
     ) -> Vec<HookResult> {
-        let hooks = self.for_point(point);
         let mut results = Vec::new();
-
-        for hook in hooks {
+        for hook in self.for_point(point) {
             if !hook.matches_tool(tool_name) {
                 continue;
             }
-            results.push(run_hook(hook, cwd).await);
-        }
-
-        results
-    }
-
-    /// run stop hooks (not tool-specific)
-    pub async fn run_stop(&self, cwd: Option<&std::path::Path>) -> Vec<HookResult> {
-        let mut results = Vec::new();
-        for hook in &self.stop {
-            results.push(run_hook(hook, cwd).await);
-        }
-        results
-    }
-
-    /// run post-compaction hooks (after context was compacted)
-    pub async fn run_post_compaction(&self, cwd: Option<&std::path::Path>) -> Vec<HookResult> {
-        let mut results = Vec::new();
-        for hook in &self.post_compaction {
             results.push(run_hook(hook, cwd).await);
         }
         results
@@ -239,10 +218,18 @@ mod tests {
     }
 
     fn post_hooks(hooks: Vec<LifecycleHook>) -> LifecycleHooks {
-        LifecycleHooks {
-            post_tool_use: hooks,
-            ..Default::default()
-        }
+        let mut lh = LifecycleHooks::default();
+        lh.set(HookPoint::PostToolUse, hooks);
+        lh
+    }
+
+    #[test]
+    fn push_accumulates_hooks() {
+        let mut hooks = LifecycleHooks::default();
+        hooks.push(HookPoint::PreToolUse, hook("*", "echo a"));
+        hooks.push(HookPoint::PreToolUse, hook("edit", "echo b"));
+        assert_eq!(hooks.for_point(HookPoint::PreToolUse).len(), 2);
+        assert!(hooks.for_point(HookPoint::PostToolUse).is_empty());
     }
 
     #[test]
@@ -283,13 +270,9 @@ mod tests {
     #[test]
     fn for_point_returns_correct_hooks() {
         let h = hook("*", "echo ok");
-        let hooks = LifecycleHooks {
-            pre_session: vec![],
-            pre_tool_use: vec![h.clone()],
-            post_tool_use: vec![h.clone(), h.clone()],
-            stop: vec![],
-            post_compaction: vec![],
-        };
+        let mut hooks = LifecycleHooks::default();
+        hooks.set(HookPoint::PreToolUse, vec![h.clone()]);
+        hooks.set(HookPoint::PostToolUse, vec![h.clone(), h.clone()]);
         assert_eq!(hooks.for_point(HookPoint::PreSession).len(), 0);
         assert_eq!(hooks.for_point(HookPoint::PreToolUse).len(), 1);
         assert_eq!(hooks.for_point(HookPoint::PostToolUse).len(), 2);
@@ -359,11 +342,12 @@ mod tests {
 
     #[tokio::test]
     async fn run_stop_hooks() {
-        let hooks = LifecycleHooks {
-            stop: vec![blocking_hook("*", "echo stop check passed")],
-            ..Default::default()
-        };
-        let results = hooks.run_stop(None).await;
+        let mut hooks = LifecycleHooks::default();
+        hooks.set(
+            HookPoint::Stop,
+            vec![blocking_hook("*", "echo stop check passed")],
+        );
+        let results = hooks.run_all(HookPoint::Stop, None).await;
         assert_eq!(results.len(), 1);
         assert!(results[0].success);
     }
@@ -413,21 +397,20 @@ mod tests {
     #[test]
     fn post_compaction_hooks_in_lifecycle() {
         let h = hook("*", "echo compacted");
-        let hooks = LifecycleHooks {
-            post_compaction: vec![h],
-            ..Default::default()
-        };
+        let mut hooks = LifecycleHooks::default();
+        hooks.set(HookPoint::PostCompaction, vec![h]);
         assert!(!hooks.is_empty());
         assert_eq!(hooks.for_point(HookPoint::PostCompaction).len(), 1);
     }
 
     #[tokio::test]
     async fn run_post_compaction_hooks() {
-        let hooks = LifecycleHooks {
-            post_compaction: vec![hook("*", "echo rules preserved")],
-            ..Default::default()
-        };
-        let results = hooks.run_post_compaction(None).await;
+        let mut hooks = LifecycleHooks::default();
+        hooks.set(
+            HookPoint::PostCompaction,
+            vec![hook("*", "echo rules preserved")],
+        );
+        let results = hooks.run_all(HookPoint::PostCompaction, None).await;
         assert_eq!(results.len(), 1);
         assert!(results[0].success);
         assert!(results[0].output.contains("rules preserved"));

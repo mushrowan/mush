@@ -240,13 +240,25 @@ impl Config {
                 .collect()
         }
 
-        mush_agent::LifecycleHooks {
-            pre_session: convert(&self.hooks.pre_session),
-            pre_tool_use: convert(&self.hooks.pre_tool_use),
-            post_tool_use: convert(&self.hooks.post_tool_use),
-            stop: convert(&self.hooks.stop),
-            post_compaction: convert(&self.hooks.post_compaction),
-        }
+        let mut hooks = mush_agent::LifecycleHooks::default();
+        hooks.set(
+            mush_agent::HookPoint::PreSession,
+            convert(&self.hooks.pre_session),
+        );
+        hooks.set(
+            mush_agent::HookPoint::PreToolUse,
+            convert(&self.hooks.pre_tool_use),
+        );
+        hooks.set(
+            mush_agent::HookPoint::PostToolUse,
+            convert(&self.hooks.post_tool_use),
+        );
+        hooks.set(mush_agent::HookPoint::Stop, convert(&self.hooks.stop));
+        hooks.set(
+            mush_agent::HookPoint::PostCompaction,
+            convert(&self.hooks.post_compaction),
+        );
+        hooks
     }
 }
 
@@ -610,10 +622,19 @@ blocking = true
 
         // conversion to agent types
         let lifecycle = config.lifecycle_hooks();
-        assert_eq!(lifecycle.post_tool_use.len(), 2);
-        assert_eq!(lifecycle.stop.len(), 1);
-        assert!(lifecycle.pre_tool_use.is_empty());
-        assert!(lifecycle.stop[0].blocking);
+        assert_eq!(
+            lifecycle
+                .for_point(mush_agent::HookPoint::PostToolUse)
+                .len(),
+            2
+        );
+        assert_eq!(lifecycle.for_point(mush_agent::HookPoint::Stop).len(), 1);
+        assert!(
+            lifecycle
+                .for_point(mush_agent::HookPoint::PreToolUse)
+                .is_empty()
+        );
+        assert!(lifecycle.for_point(mush_agent::HookPoint::Stop)[0].blocking);
     }
 
     #[test]
@@ -732,7 +753,12 @@ command = "echo critical rules here"
         );
 
         let lifecycle = config.lifecycle_hooks();
-        assert_eq!(lifecycle.post_compaction.len(), 2);
+        assert_eq!(
+            lifecycle
+                .for_point(mush_agent::HookPoint::PostCompaction)
+                .len(),
+            2
+        );
         assert!(!lifecycle.is_empty());
     }
 

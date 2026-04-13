@@ -858,9 +858,13 @@ pub async fn run_compaction(
     let mut compacted = result.messages;
 
     if let Some(hooks) = lifecycle_hooks
-        && !hooks.post_compaction.is_empty()
+        && !hooks
+            .for_point(mush_agent::HookPoint::PostCompaction)
+            .is_empty()
     {
-        let hook_results = hooks.run_post_compaction(cwd).await;
+        let hook_results = hooks
+            .run_all(mush_agent::HookPoint::PostCompaction, cwd)
+            .await;
         let output: String = hook_results
             .iter()
             .filter(|r| !r.output.is_empty())
