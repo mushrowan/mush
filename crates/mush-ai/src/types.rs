@@ -864,6 +864,26 @@ pub struct Model {
     pub max_output_tokens: TokenCount,
 }
 
+impl Model {
+    /// whether this model prefers the patch-based edit tool.
+    /// GPT models (except gpt-4 and OSS variants) are trained on the patch format
+    pub fn uses_patch_tool(&self) -> bool {
+        let id = self.id.as_str();
+        id.contains("gpt-") && !id.contains("oss") && !id.contains("gpt-4")
+    }
+
+    /// whether this model handles parallel tool calls natively (no batch tool needed).
+    /// OpenAI responses API and reasoning models support this
+    pub fn supports_native_parallel_calls(&self) -> bool {
+        let id = self.id.as_str();
+        id.contains("gpt-")
+            || id.contains("codex")
+            || id.starts_with("o1")
+            || id.starts_with("o3")
+            || id.starts_with("o4")
+    }
+}
+
 // -- thinking level --
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

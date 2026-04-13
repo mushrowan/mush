@@ -23,6 +23,7 @@ use mush_agent::tool::{SharedTool, ToolRegistry};
 /// whether a model id should use the codex patch format instead of edit + write.
 /// GPT models (except gpt-4 and oss variants) are trained on the patch format
 /// and produce better edits with it.
+#[deprecated(note = "use Model::uses_patch_tool() instead")]
 pub fn uses_patch_tool(model_id: &str) -> bool {
     model_id.contains("gpt-") && !model_id.contains("oss") && !model_id.contains("gpt-4")
 }
@@ -30,6 +31,7 @@ pub fn uses_patch_tool(model_id: &str) -> bool {
 /// whether a model supports native parallel tool calls and doesn't need the
 /// batch tool. GPT/codex models use the responses API which handles parallel
 /// calls natively, and anthropic does too.
+#[deprecated(note = "use Model::supports_native_parallel_calls() instead")]
 pub fn supports_native_parallel_calls(model_id: &str) -> bool {
     model_id.contains("gpt-")
         || model_id.contains("codex")
