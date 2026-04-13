@@ -221,12 +221,12 @@ impl App {
 
     /// append text delta to the current stream
     pub fn push_text_delta(&mut self, delta: &str) {
-        self.stream.text.push_str(delta);
+        self.stream.push_text(delta);
     }
 
     /// append thinking delta to the current stream
     pub fn push_thinking_delta(&mut self, delta: &str) {
-        self.stream.thinking.push_str(delta);
+        self.stream.push_thinking(delta);
     }
 
     /// visible portion of streaming text (typewriter effect)
@@ -1527,7 +1527,7 @@ batch: 1/2 succeeded, 1 failed";
     #[test]
     fn streaming_state_start_clears_and_activates() {
         let mut stream = StreamingState::new();
-        stream.text.push_str("leftover");
+        stream.push_text("leftover");
         stream.start();
         assert!(stream.active);
         assert!(stream.text.is_empty());
@@ -1538,7 +1538,7 @@ batch: 1/2 succeeded, 1 failed";
     fn streaming_state_visible_text_typewriter() {
         let mut stream = StreamingState::new();
         stream.start();
-        stream.text.push_str("hello world");
+        stream.push_text("hello world");
         // before advance, nothing visible
         assert_eq!(stream.visible_text(), "");
         // advance once
@@ -1557,8 +1557,8 @@ batch: 1/2 succeeded, 1 failed";
     fn streaming_state_take_returns_content() {
         let mut stream = StreamingState::new();
         stream.start();
-        stream.text.push_str("answer");
-        stream.thinking.push_str("reasoning");
+        stream.push_text("answer");
+        stream.push_thinking("reasoning");
         let (text, thinking) = stream.take();
         assert_eq!(text, "answer");
         assert_eq!(thinking.as_deref(), Some("reasoning"));
@@ -1570,7 +1570,7 @@ batch: 1/2 succeeded, 1 failed";
     fn streaming_state_take_no_thinking_returns_none() {
         let mut stream = StreamingState::new();
         stream.start();
-        stream.text.push_str("just text");
+        stream.push_text("just text");
         let (_, thinking) = stream.take();
         assert!(thinking.is_none());
     }
