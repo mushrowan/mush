@@ -12,6 +12,18 @@ const TRIM_TOOL_OUTPUT_CHARS: usize = 1500;
 /// number of recent user messages whose tool results are kept at full size
 const RECENT_TURNS_TO_KEEP: usize = 3;
 
+/// format an error with its full source chain (e.g. "outer: middle: root cause")
+pub(crate) fn format_error_chain(err: &dyn std::error::Error) -> String {
+    let mut msg = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        msg.push_str(": ");
+        msg.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    msg
+}
+
 /// find the message index at which "recent" turns begin (sliding window boundary)
 pub(crate) fn recent_boundary(messages: &[Message]) -> usize {
     let mut user_count = 0;
@@ -259,5 +271,38 @@ mod tests {
             }
             other => panic!("expected ApiError, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn format_error_chain_includes_sources() {
+        let inner = std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "unexpected eof");
+        let outer: Box<dyn std::error::Error> = "decoding response body".to_string().into();
+        // simulate a chain by using a custom error
+        #[derive(Debug)]
+        struct Chained {
+            msg: String,
+            source: std::io::Error,
+        }
+        impl std::fmt::Display for Chained {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(&self.msg)
+            }
+        }
+        impl std::error::Error for Chained {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.source)
+            }
+        }
+
+        let chained = Chained {
+            msg: "error decoding response body".into(),
+            source: inner,
+        };
+        let result = super::format_error_chain(&chained);
+        assert_eq!(result, "error decoding response body: unexpected eof");
+
+        // single error with no source
+        let result = super::format_error_chain(&*outer);
+        assert_eq!(result, "decoding response body");
     }
 }
