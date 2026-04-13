@@ -1,6 +1,7 @@
 //! ls tool - directory listing with metadata
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::sync::Arc;
 
 use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
 use serde::Deserialize;
@@ -16,11 +17,11 @@ struct LsArgs {
 }
 
 pub struct LsTool {
-    cwd: PathBuf,
+    cwd: Arc<Path>,
 }
 
 impl LsTool {
-    pub fn new(cwd: PathBuf) -> Self {
+    pub fn new(cwd: Arc<Path>) -> Self {
         Self { cwd }
     }
 }
@@ -68,7 +69,7 @@ impl AgentTool for LsTool {
                 .path
                 .as_deref()
                 .map(|path| resolve_path(&self.cwd, path))
-                .unwrap_or_else(|| self.cwd.clone());
+                .unwrap_or_else(|| self.cwd.to_path_buf());
 
             tokio::task::spawn_blocking(move || list_dir(&path))
                 .await
@@ -234,7 +235,7 @@ mod tests {
     #[test]
     fn output_limit_is_head() {
         use mush_agent::tool::OutputLimit;
-        let tool = LsTool::new(PathBuf::from("."));
+        let tool = LsTool::new(Path::new(".").into());
         assert_eq!(tool.output_limit(), OutputLimit::Head);
     }
 

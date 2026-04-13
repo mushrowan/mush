@@ -198,7 +198,7 @@ mod tests {
                 stdout: "hello\n".into(),
                 stderr: String::new(),
                 started: std::time::Instant::now(),
-                cwd: std::path::PathBuf::from("."),
+                cwd: std::sync::Arc::from(std::path::Path::new(".")),
             })
             .await;
         drop(handle);
@@ -227,7 +227,7 @@ mod tests {
                 stdout: "partial output\n".into(),
                 stderr: String::new(),
                 started: std::time::Instant::now(),
-                cwd: std::path::PathBuf::from("."),
+                cwd: std::sync::Arc::from(std::path::Path::new(".")),
             })
             .await;
 
@@ -255,7 +255,7 @@ mod tests {
                 stdout: String::new(),
                 stderr: String::new(),
                 started: std::time::Instant::now(),
-                cwd: std::path::PathBuf::from("."),
+                cwd: std::sync::Arc::from(std::path::Path::new(".")),
             })
             .await;
 

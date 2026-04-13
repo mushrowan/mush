@@ -1,7 +1,8 @@
 //! bash tool - executes shell commands with timeout
 
-use std::path::PathBuf;
+use std::path::Path;
 use std::process::Stdio;
+use std::sync::Arc;
 
 use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
 use serde::Deserialize;
@@ -50,7 +51,7 @@ const fn default_timeout_secs() -> u64 {
 pub type OutputSink = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
 
 pub struct BashTool {
-    cwd: PathBuf,
+    cwd: Arc<Path>,
     /// optional callback for streaming output lines as they arrive
     output_sink: Option<OutputSink>,
     /// shared registry for background jobs (None = background mode disabled)
@@ -58,7 +59,7 @@ pub struct BashTool {
 }
 
 impl BashTool {
-    pub fn new(cwd: PathBuf) -> Self {
+    pub fn new(cwd: Arc<Path>) -> Self {
         Self {
             cwd,
             output_sink: None,
@@ -504,14 +505,14 @@ mod tests {
     #[test]
     fn output_limit_is_tail() {
         use mush_agent::tool::OutputLimit;
-        let tool = BashTool::new(PathBuf::from("."));
+        let tool = BashTool::new(Path::new(".").into());
         assert_eq!(tool.output_limit(), OutputLimit::Tail);
     }
 
     #[tokio::test]
     async fn background_returns_job_id() {
         let registry = crate::background::BackgroundJobRegistry::new();
-        let tool = BashTool::new(std::env::current_dir().unwrap())
+        let tool = BashTool::new(std::env::current_dir().unwrap().into())
             .with_background_registry(registry.clone());
 
         let result = tool
@@ -528,7 +529,7 @@ mod tests {
 
     #[tokio::test]
     async fn background_without_registry_errors() {
-        let tool = BashTool::new(std::env::current_dir().unwrap());
+        let tool = BashTool::new(std::env::current_dir().unwrap().into());
         let result = tool
             .execute(serde_json::json!({
                 "command": "echo hello",
@@ -541,7 +542,7 @@ mod tests {
     #[tokio::test]
     async fn background_job_completes() {
         let registry = crate::background::BackgroundJobRegistry::new();
-        let tool = BashTool::new(std::env::current_dir().unwrap())
+        let tool = BashTool::new(std::env::current_dir().unwrap().into())
             .with_background_registry(registry.clone());
 
         let result = tool
@@ -575,7 +576,7 @@ mod tests {
     #[tokio::test]
     async fn background_concurrency_guard() {
         let registry = crate::background::BackgroundJobRegistry::new();
-        let tool = BashTool::new(std::env::current_dir().unwrap())
+        let tool = BashTool::new(std::env::current_dir().unwrap().into())
             .with_background_registry(registry.clone());
 
         // start a long-running background job

@@ -6,6 +6,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use grep_regex::RegexMatcherBuilder;
 use grep_searcher::{BinaryDetection, SearcherBuilder, Sink, SinkContext, SinkMatch};
@@ -64,11 +65,11 @@ const fn default_true() -> bool {
 const MAX_MATCHES_PER_FILE: u64 = 50;
 
 pub struct GrepTool {
-    cwd: PathBuf,
+    cwd: Arc<Path>,
 }
 
 impl GrepTool {
-    pub fn new(cwd: PathBuf) -> Self {
+    pub fn new(cwd: Arc<Path>) -> Self {
         Self { cwd }
     }
 }
@@ -161,7 +162,7 @@ impl AgentTool for GrepTool {
                 .path
                 .as_deref()
                 .map(|path| resolve_path(&self.cwd, path))
-                .unwrap_or_else(|| self.cwd.clone());
+                .unwrap_or_else(|| self.cwd.to_path_buf());
 
             let cwd = self.cwd.clone();
             let pattern = args.pattern.clone();
@@ -543,7 +544,7 @@ mod tests {
         )
         .unwrap();
 
-        let tool = GrepTool::new(dir.path().to_path_buf());
+        let tool = GrepTool::new(dir.path().into());
         let result = tool
             .execute(serde_json::json!({
                 "pattern": "hello",
@@ -560,7 +561,7 @@ mod tests {
         let dir = temp_dir();
         fs::write(dir.path().join("test.txt"), "hello world").unwrap();
 
-        let tool = GrepTool::new(dir.path().to_path_buf());
+        let tool = GrepTool::new(dir.path().into());
         let result = tool
             .execute(serde_json::json!({
                 "pattern": "nonexistent",
@@ -577,7 +578,7 @@ mod tests {
         fs::write(dir.path().join("test.rs"), "fn main() {}").unwrap();
         fs::write(dir.path().join("test.txt"), "fn other()").unwrap();
 
-        let tool = GrepTool::new(dir.path().to_path_buf());
+        let tool = GrepTool::new(dir.path().into());
         let result = tool
             .execute(serde_json::json!({
                 "pattern": "fn",
@@ -595,7 +596,7 @@ mod tests {
         let dir = temp_dir();
         fs::write(dir.path().join("test.txt"), "hello.world\nhelloXworld").unwrap();
 
-        let tool = GrepTool::new(dir.path().to_path_buf());
+        let tool = GrepTool::new(dir.path().into());
         let result = tool
             .execute(serde_json::json!({
                 "pattern": "hello.world",
@@ -618,7 +619,7 @@ mod tests {
         )
         .unwrap();
 
-        let tool = GrepTool::new(dir.path().to_path_buf());
+        let tool = GrepTool::new(dir.path().into());
         let result = tool
             .execute(serde_json::json!({
                 "pattern": "hello",
@@ -637,7 +638,7 @@ mod tests {
         let dir = temp_dir();
         fs::write(dir.path().join("test.txt"), "cat\ncatch\nthe cat sat").unwrap();
 
-        let tool = GrepTool::new(dir.path().to_path_buf());
+        let tool = GrepTool::new(dir.path().into());
         let result = tool
             .execute(serde_json::json!({
                 "pattern": "cat",
@@ -660,7 +661,7 @@ mod tests {
         )
         .unwrap();
 
-        let tool = GrepTool::new(dir.path().to_path_buf());
+        let tool = GrepTool::new(dir.path().into());
         let result = tool
             .execute(serde_json::json!({
                 "pattern": "MATCH",
@@ -680,7 +681,7 @@ mod tests {
         let dir = temp_dir();
         fs::write(dir.path().join("test.txt"), "helloworld").unwrap();
 
-        let tool = GrepTool::new(dir.path().to_path_buf());
+        let tool = GrepTool::new(dir.path().into());
         let result = tool
             .execute(serde_json::json!({
                 "pattern": "hello\nworld",
@@ -698,7 +699,7 @@ mod tests {
         fs::write(dir.path().join("a.txt"), "hello\nhello\nhello").unwrap();
         fs::write(dir.path().join("b.txt"), "hello\nworld").unwrap();
 
-        let tool = GrepTool::new(dir.path().to_path_buf());
+        let tool = GrepTool::new(dir.path().into());
         let result = tool
             .execute(serde_json::json!({
                 "pattern": "hello",
@@ -719,7 +720,7 @@ mod tests {
         fs::write(dir.path().join("match.txt"), "hello world").unwrap();
         fs::write(dir.path().join("no.txt"), "goodbye").unwrap();
 
-        let tool = GrepTool::new(dir.path().to_path_buf());
+        let tool = GrepTool::new(dir.path().into());
         let result = tool
             .execute(serde_json::json!({
                 "pattern": "hello",
@@ -739,7 +740,7 @@ mod tests {
         fs::write(dir.path().join("b.txt"), "x\nx").unwrap();
         fs::write(dir.path().join("c.txt"), "x").unwrap();
 
-        let tool = GrepTool::new(dir.path().to_path_buf());
+        let tool = GrepTool::new(dir.path().into());
         let result = tool
             .execute(serde_json::json!({
                 "pattern": "x",
@@ -762,7 +763,7 @@ mod tests {
         fs::write(dir.path().join("c.txt"), "x\nx").unwrap();
         fs::write(dir.path().join("d.txt"), "x").unwrap();
 
-        let tool = GrepTool::new(dir.path().to_path_buf());
+        let tool = GrepTool::new(dir.path().into());
         let result = tool
             .execute(serde_json::json!({
                 "pattern": "x",
@@ -785,7 +786,7 @@ mod tests {
         fs::write(dir.path().join("b.txt"), "y\ny").unwrap();
         fs::write(dir.path().join("c.txt"), "y").unwrap();
 
-        let tool = GrepTool::new(dir.path().to_path_buf());
+        let tool = GrepTool::new(dir.path().into());
         let result = tool
             .execute(serde_json::json!({
                 "pattern": "y",
@@ -809,7 +810,7 @@ mod tests {
         fs::write(dir.path().join("a.txt"), "hello\nhello").unwrap();
         fs::write(dir.path().join("b.txt"), "hello").unwrap();
 
-        let tool = GrepTool::new(dir.path().to_path_buf());
+        let tool = GrepTool::new(dir.path().into());
         let result = tool
             .execute(serde_json::json!({
                 "pattern": "hello",
@@ -832,7 +833,7 @@ mod tests {
         let dir = temp_dir();
         fs::write(dir.path().join("test.txt"), "hello").unwrap();
 
-        let tool = GrepTool::new(dir.path().to_path_buf());
+        let tool = GrepTool::new(dir.path().into());
         let result = tool
             .execute(serde_json::json!({
                 "pattern": "\n\n",

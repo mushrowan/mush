@@ -1,7 +1,8 @@
 //! glob tool - find files by glob pattern using fd
 
-use std::path::PathBuf;
+use std::path::Path;
 use std::process::Stdio;
+use std::sync::Arc;
 
 use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
 use serde::Deserialize;
@@ -16,11 +17,11 @@ struct GlobArgs {
 }
 
 pub struct GlobTool {
-    cwd: PathBuf,
+    cwd: Arc<Path>,
 }
 
 impl GlobTool {
-    pub fn new(cwd: PathBuf) -> Self {
+    pub fn new(cwd: Arc<Path>) -> Self {
         Self { cwd }
     }
 }
@@ -69,7 +70,7 @@ impl AgentTool for GlobTool {
                 .path
                 .as_deref()
                 .map(|path| resolve_path(&self.cwd, path))
-                .unwrap_or_else(|| self.cwd.clone());
+                .unwrap_or_else(|| self.cwd.to_path_buf());
 
             let mut cmd = tokio::process::Command::new("fd");
             cmd.args(["--glob", &args.pattern, "--type", "f"])
@@ -103,7 +104,7 @@ mod tests {
 
     #[test]
     fn schema_has_required_pattern() {
-        let tool = GlobTool::new(PathBuf::from("/tmp"));
+        let tool = GlobTool::new(Path::new("/tmp").into());
         let schema = tool.parameters_schema();
         let required = schema["required"].as_array().unwrap();
         assert!(required.iter().any(|v| v == "pattern"));
@@ -117,7 +118,7 @@ mod tests {
         std::fs::write(dir.path().join("nested/config.toml"), "x = 1").unwrap();
         std::fs::write(dir.path().join("readme.md"), "hi").unwrap();
 
-        let tool = GlobTool::new(dir.path().to_path_buf());
+        let tool = GlobTool::new(dir.path().into());
         let result = tool
             .execute(serde_json::json!({ "pattern": "**/*.toml" }))
             .await;
@@ -132,7 +133,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::write(dir.path().join("a.txt"), "x").unwrap();
 
-        let tool = GlobTool::new(dir.path().to_path_buf());
+        let tool = GlobTool::new(dir.path().into());
         let result = tool
             .execute(serde_json::json!({ "pattern": "**/*.rs" }))
             .await;

@@ -3,7 +3,8 @@
 //! finds exact text in a file and replaces it. the old text must match
 //! exactly including whitespace.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::sync::Arc;
 
 use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
 use serde::Deserialize;
@@ -60,11 +61,11 @@ impl EditArgs {
 }
 
 pub struct EditTool {
-    cwd: PathBuf,
+    cwd: Arc<Path>,
 }
 
 impl EditTool {
-    pub fn new(cwd: PathBuf) -> Self {
+    pub fn new(cwd: Arc<Path>) -> Self {
         Self { cwd }
     }
 }
@@ -1093,7 +1094,7 @@ mod tests {
         let path = dir.path().join("test.txt");
         fs::write(&path, "hello\nworld\n").unwrap();
 
-        let tool = super::EditTool::new(dir.path().to_path_buf());
+        let tool = super::EditTool::new(dir.path().into());
         // end_line without start_line - tested via tool execute
         let result = futures::executor::block_on(tool.execute(serde_json::json!({
             "path": path.to_str().unwrap(),
