@@ -88,8 +88,8 @@ impl AppSetup {
 
         let cwd = std::env::current_dir()?;
 
-        let use_patch = mush_tools::uses_patch_tool(&model.id);
-        let skip_batch = mush_tools::supports_native_parallel_calls(&model.id);
+        let use_patch = model.uses_patch_tool();
+        let skip_batch = model.supports_native_parallel_calls();
         let mut tools = if args.no_tools {
             mush_agent::tool::ToolRegistry::new()
         } else {
