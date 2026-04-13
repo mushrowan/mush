@@ -236,6 +236,19 @@ impl std::ops::AddAssign for TokenCount {
     }
 }
 
+impl std::ops::Sub for TokenCount {
+    type Output = Self;
+    fn sub(self, rhs: Self) -> Self {
+        Self(self.0.saturating_sub(rhs.0))
+    }
+}
+
+impl std::ops::SubAssign for TokenCount {
+    fn sub_assign(&mut self, rhs: Self) {
+        self.0 = self.0.saturating_sub(rhs.0);
+    }
+}
+
 // -- dollars --
 
 /// monetary cost in US dollars.
@@ -277,6 +290,19 @@ impl std::ops::Add for Dollars {
 impl std::ops::AddAssign for Dollars {
     fn add_assign(&mut self, rhs: Self) {
         self.0 += rhs.0;
+    }
+}
+
+impl std::ops::Sub for Dollars {
+    type Output = Self;
+    fn sub(self, rhs: Self) -> Self {
+        Self(self.0 - rhs.0)
+    }
+}
+
+impl std::ops::SubAssign for Dollars {
+    fn sub_assign(&mut self, rhs: Self) {
+        self.0 -= rhs.0;
     }
 }
 
@@ -1151,5 +1177,33 @@ mod tests {
     fn age_display_future_is_now() {
         let ts = Timestamp::from_ms(Timestamp::now().as_ms() + 10_000);
         assert_eq!(ts.age_display(), "now");
+    }
+
+    #[test]
+    fn token_count_sub() {
+        let a = TokenCount::new(100);
+        let b = TokenCount::new(30);
+        assert_eq!(a - b, TokenCount::new(70));
+    }
+
+    #[test]
+    fn token_count_sub_assign() {
+        let mut a = TokenCount::new(100);
+        a -= TokenCount::new(25);
+        assert_eq!(a, TokenCount::new(75));
+    }
+
+    #[test]
+    fn dollars_sub() {
+        let a = Dollars::new(1.5);
+        let b = Dollars::new(0.5);
+        assert!(((a - b).get() - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn dollars_sub_assign() {
+        let mut a = Dollars::new(2.0);
+        a -= Dollars::new(0.75);
+        assert!((a.get() - 1.25).abs() < f64::EPSILON);
     }
 }
