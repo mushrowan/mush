@@ -655,8 +655,12 @@ fn fix_orphaned_tool_calls(messages: Vec<RequestMessage>) -> Vec<RequestMessage>
     result
 }
 
-/// apply cache control to the last cacheable block in a user message.
-/// this mirrors anthropic automatic caching semantics for multi-turn chat.
+/// apply cache control to the last user text message (not tool_results).
+/// tool_result messages are also role="user" in anthropic format, but placing
+/// cache_control on them causes prefix invalidation: each new tool_result moves
+/// the marker, changing the serialised content of the previous holder. by targeting
+/// only actual user text messages, the cache_control position stays stable within
+/// an agent turn's tool-call loop
 fn apply_cache_control_to_last_user_message(
     messages: &mut [RequestMessage],
     cache_control: Option<CacheControl>,
@@ -665,7 +669,18 @@ fn apply_cache_control_to_last_user_message(
         return;
     };
 
-    let Some(last_user) = messages.iter_mut().rfind(|m| m.role == "user") else {
+    let is_tool_result_msg = |msg: &RequestMessage| {
+        msg.content.as_array().is_some_and(|blocks| {
+            blocks
+                .iter()
+                .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
+        })
+    };
+
+    let Some(last_user) = messages
+        .iter_mut()
+        .rfind(|m| m.role == "user" && !is_tool_result_msg(m))
+    else {
         return;
     };
 
@@ -1858,6 +1873,71 @@ mod tests {
         assert_eq!(blocks[0]["type"], "text");
         assert_eq!(blocks[0]["text"], "hello");
         assert_eq!(blocks[0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn cache_control_on_user_text_not_tool_result() {
+        // when tool_results follow a user message, cache_control must stay on the
+        // user text message, not jump to the tool_result. otherwise the user message
+        // content changes between requests (loses cache_control), invalidating the
+        // entire cached prefix
+        let cache = Some(CacheControl {
+            control_type: "ephemeral".into(),
+            ttl: None,
+        });
+        let messages = vec![
+            Message::User(UserMessage {
+                content: UserContent::Text("do the thing".into()),
+                timestamp_ms: Timestamp::zero(),
+            }),
+            Message::Assistant(AssistantMessage {
+                content: vec![AssistantContentPart::ToolCall(ToolCall {
+                    id: "tc_1".into(),
+                    name: "bash".into(),
+                    arguments: serde_json::json!({"command": "echo hi"}),
+                })],
+                model: "test".into(),
+                provider: Provider::Custom("test".into()),
+                api: Api::AnthropicMessages,
+                usage: Usage::default(),
+                stop_reason: StopReason::ToolUse,
+                error_message: None,
+                timestamp_ms: Timestamp::zero(),
+            }),
+            Message::ToolResult(ToolResultMessage {
+                tool_call_id: "tc_1".into(),
+                tool_name: "bash".into(),
+                content: vec![ToolResultContentPart::Text(TextContent {
+                    text: "hi".into(),
+                })],
+                outcome: ToolOutcome::Success,
+                timestamp_ms: Timestamp::zero(),
+            }),
+        ];
+
+        let converted = convert_messages(&messages, false, cache, ToolResultTrimming::Preserve);
+
+        // user text message (index 0) should have cache_control
+        // when cache_control is applied, a plain string gets wrapped in an array
+        let has_cc_on_user = match &converted[0].content {
+            serde_json::Value::Array(blocks) => blocks
+                .first()
+                .is_some_and(|b| b.get("cache_control").is_some()),
+            _ => false,
+        };
+        assert!(
+            has_cc_on_user,
+            "cache_control should be on the user text message, not the tool_result"
+        );
+
+        // tool_result (index 2) should NOT have cache_control
+        let has_cc_on_tr = match &converted[2].content {
+            serde_json::Value::Array(blocks) => {
+                blocks.iter().any(|b| b.get("cache_control").is_some())
+            }
+            _ => false,
+        };
+        assert!(!has_cc_on_tr, "tool_result should not have cache_control");
     }
 
     #[test]
