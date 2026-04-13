@@ -302,6 +302,7 @@ pub fn handle(
                 Ok(session) => {
                     *conversation = session.conversation;
                     rebuild_display(app, &conversation.context());
+                    tui_config.session_id = session_id.clone();
                     let title = session.meta.title.as_deref().unwrap_or("untitled");
                     app.status = Some(format!("resumed: {title}"));
                 }
