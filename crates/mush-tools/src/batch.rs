@@ -1,8 +1,8 @@
 //! batch tool - execute multiple tool calls in parallel
 //!
 //! each sub-call gets the same truncation treatment as a standalone call.
-//! the batch result is marked self-truncating so the agent loop doesn't
-//! double-truncate the combined output.
+//! the combined output targets the central truncation budget (MAX_BYTES)
+//! so the agent loop's final truncation pass is a no-op.
 //!
 //! calls that target the same file path (edit, write) are executed
 //! sequentially in the order they appear to avoid silent conflicts.
@@ -16,7 +16,7 @@ use mush_ai::types::ToolResultContentPart;
 use serde::Deserialize;
 
 const MAX_CALLS: usize = 25;
-const MAX_TOTAL_OUTPUT: usize = 100 * 1024; // 100KB combined output cap
+const MAX_TOTAL_OUTPUT: usize = mush_agent::truncation::MAX_BYTES;
 
 /// truncate text to a byte budget on a line boundary
 fn truncate_to_budget(text: &str, budget: usize) -> &str {
@@ -460,7 +460,7 @@ mod tests {
             }
         }
 
-        // 10 calls x ~20KB = 200KB, should exceed the 100KB budget
+        // 10 calls x ~20KB = 200KB, should exceed the MAX_TOTAL_OUTPUT budget
         let calls: Vec<_> = (0..10)
             .map(|i| serde_json::json!({"tool": "big", "parameters": {"idx": i}}))
             .collect();
@@ -680,5 +680,16 @@ mod tests {
             _ => panic!("expected text"),
         };
         assert!(text.contains("ok"));
+    }
+
+    #[test]
+    fn batch_budget_matches_central_truncation_limit() {
+        // batch's total output budget must equal the central truncation
+        // MAX_BYTES so the central pass is a no-op for batch output
+        assert_eq!(
+            MAX_TOTAL_OUTPUT,
+            mush_agent::truncation::MAX_BYTES,
+            "batch budget diverged from central truncation limit"
+        );
     }
 }
