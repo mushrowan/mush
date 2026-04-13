@@ -259,7 +259,7 @@ impl AgentTool for ReadTool {
     }
 
     fn output_limit(&self) -> mush_agent::tool::OutputLimit {
-        mush_agent::tool::OutputLimit::SelfManaged
+        mush_agent::tool::OutputLimit::Head
     }
 
     fn execute(

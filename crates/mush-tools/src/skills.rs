@@ -143,7 +143,7 @@ impl AgentTool for SkillTool {
     }
 
     fn output_limit(&self) -> OutputLimit {
-        OutputLimit::SelfManaged
+        OutputLimit::Head
     }
 
     fn execute(

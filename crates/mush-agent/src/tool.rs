@@ -52,8 +52,6 @@ impl ToolResult {
 /// how a tool's output should be truncated when it exceeds limits
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OutputLimit {
-    /// tool handles its own truncation, skip agent-loop truncation
-    SelfManaged,
     /// keep the start (file reads, directory listings)
     Head,
     /// keep the end (command output, logs)
@@ -86,8 +84,7 @@ pub trait AgentTool: Send + Sync {
         args: serde_json::Value,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>>;
 
-    /// how this tool's output should be truncated by the agent loop.
-    /// tools that manage their own limits return `SelfManaged`.
+    /// how this tool's output should be truncated by the agent loop
     fn output_limit(&self) -> OutputLimit {
         OutputLimit::Middle
     }

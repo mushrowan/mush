@@ -77,7 +77,7 @@ impl AgentTool for WebFetchTool {
     }
 
     fn output_limit(&self) -> mush_agent::tool::OutputLimit {
-        mush_agent::tool::OutputLimit::SelfManaged
+        mush_agent::tool::OutputLimit::Head
     }
 
     fn execute(
