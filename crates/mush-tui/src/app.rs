@@ -1589,6 +1589,47 @@ batch: 1/2 succeeded, 1 failed";
     }
 
     #[test]
+    fn is_busy_during_tool_execution() {
+        // stream.active is false during tool execution (text streaming
+        // ended) but is_busy() should still return true when tools are
+        // running, so the throbber keeps animating
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        assert!(!app.stream.active);
+        assert!(!app.is_busy());
+
+        // simulate tool running with stream inactive
+        app.active_tools
+            .push(crate::display_types::ActiveToolState {
+                tool_call_id: "test_1".into(),
+                name: "bash".into(),
+                summary: "running command".into(),
+                live_output: None,
+                status: ToolCallStatus::Running,
+                output: None,
+            });
+
+        assert!(
+            !app.stream.active,
+            "stream should be inactive during tool execution"
+        );
+        assert!(
+            app.is_busy(),
+            "is_busy should be true when tools are running"
+        );
+
+        // throbber should advance when ticked during tool execution
+        let initial = app.throbber_state.clone();
+        for _ in 0..TICK_DIVISOR {
+            app.tick();
+        }
+        assert_ne!(
+            format!("{:?}", app.throbber_state),
+            format!("{initial:?}"),
+            "throbber should advance during tool execution"
+        );
+    }
+
+    #[test]
     fn unread_flash_cycle_works() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.navigation.has_unread = true;

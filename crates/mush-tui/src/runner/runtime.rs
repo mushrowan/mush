@@ -152,7 +152,7 @@ impl RunnerRuntime {
 
     pub(super) fn tick_streaming_panes(&mut self) {
         for pane in self.pane_mgr.panes_mut() {
-            if pane.app.stream.active {
+            if pane.app.is_busy() {
                 pane.app.tick();
             }
         }
