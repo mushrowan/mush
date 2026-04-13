@@ -234,10 +234,10 @@ fn collect_tail<'a>(lines: &[&'a str], max_lines: usize, max_bytes: usize) -> (V
 fn actionable_hint(saved_path: &Option<PathBuf>) -> String {
     match saved_path {
         Some(path) => format!(
-            "Use the grep tool to search or the read tool with offset/limit to view sections (do not use bash cat). Full output: {}",
+            "Use the Grep tool to search or the Read tool with offset/limit to view sections. Do not use bash cat on this file. Full output: {}",
             path.display()
         ),
-        None => "Use the grep tool to search or the read tool with offset/limit to view sections (do not use bash cat).".into(),
+        None => "Use the Grep tool to search or the Read tool with offset/limit to view sections. Do not use bash cat on this file.".into(),
     }
 }
 
@@ -335,9 +335,9 @@ mod tests {
     // bash cat the saved file (which re-truncates, saving to another file, etc)
 
     const EXPECTED_HINT_FRAGMENTS: &[&str] = &[
-        "Use the grep tool to search",
-        "the read tool with offset/limit",
-        "do not use bash cat",
+        "Use the Grep tool to search",
+        "the Read tool with offset/limit",
+        "Do not use bash cat",
     ];
 
     #[test]
