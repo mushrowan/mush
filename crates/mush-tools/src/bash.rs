@@ -92,7 +92,9 @@ impl AgentTool for BashTool {
          Output is truncated to the last 2000 lines or 50KB (whichever is hit first). \
          If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds. \
          For long-running commands (builds, test suites), set background: true to run \
-         asynchronously and poll with bash_status to avoid cache busting."
+         asynchronously and poll with bash_status to avoid cache busting. \
+         Prefer the grep tool over bash grep/rg for searching file contents, \
+         and find/glob tools over bash find for locating files."
     }
 
     fn output_limit(&self) -> mush_agent::tool::OutputLimit {
