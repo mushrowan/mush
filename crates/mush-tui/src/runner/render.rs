@@ -10,6 +10,7 @@ use crate::pane::{LayoutMode, PaneManager};
 use crate::ui::Ui;
 use crate::widgets;
 
+#[tracing::instrument(name = "draw_panes", skip_all)]
 pub(super) fn draw_panes(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     pane_mgr: &mut PaneManager,
