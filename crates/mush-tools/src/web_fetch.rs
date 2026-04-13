@@ -6,7 +6,6 @@ use serde::Deserialize;
 const MAX_RESPONSE_SIZE: usize = 5 * 1024 * 1024; // 5MB
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const MAX_TIMEOUT_SECS: u64 = 120;
-const MAX_OUTPUT_CHARS: usize = 50_000;
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -154,17 +153,6 @@ impl AgentTool for WebFetchTool {
                 }
                 (FetchFormat::Text, true) => strip_html_tags(&body),
                 _ => body.to_string(),
-            };
-
-            let output = if output.len() > MAX_OUTPUT_CHARS {
-                let end = output.floor_char_boundary(MAX_OUTPUT_CHARS);
-                let truncated = &output[..end];
-                format!(
-                    "{truncated}\n\n... (truncated, {} total chars)",
-                    output.len()
-                )
-            } else {
-                output
             };
 
             ToolResult::text(output)
