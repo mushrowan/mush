@@ -43,11 +43,13 @@ impl ResponseCache {
         let mut hasher = DefaultHasher::new();
         model_id.hash(&mut hasher);
         system_prompt.hash(&mut hasher);
-        // hash via Debug repr since Message contains f64/non-Hash types.
-        // Debug output is deterministic for the same data
         messages.len().hash(&mut hasher);
         for msg in messages {
-            format!("{msg:?}").hash(&mut hasher);
+            // hash via serde serialisation bytes (deterministic, avoids
+            // fragile dependency on Debug repr)
+            if let Ok(bytes) = serde_json::to_vec(msg) {
+                bytes.hash(&mut hasher);
+            }
         }
         hasher.finish()
     }
@@ -212,5 +214,17 @@ mod tests {
         assert_eq!(cache.len(), 2);
         cache.clear();
         assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn key_via_serde_is_deterministic() {
+        let msgs = [user_msg("hello"), user_msg("world")];
+        let k1 = ResponseCache::key("model", Some("sys"), &msgs);
+        let k2 = ResponseCache::key("model", Some("sys"), &msgs);
+        assert_eq!(k1, k2);
+
+        // different content produces different keys
+        let k3 = ResponseCache::key("model", Some("sys"), &[user_msg("hello")]);
+        assert_ne!(k1, k3);
     }
 }
