@@ -60,7 +60,7 @@ fn left_spans(app: &App) -> Vec<Span<'static>> {
     let sep = Span::styled(" │ ", dim);
 
     spans.extend([
-        Span::styled(app.model_id.to_string(), app.theme.status_model),
+        Span::styled(app.model_id.abbreviated(), app.theme.status_model),
         sep.clone(),
         Span::styled(
             format!("thinking: {thinking_label}"),
@@ -287,7 +287,10 @@ mod tests {
         let app = App::new("claude-sonnet-4".into(), TokenCount::new(200_000));
         let buf = render_status(&app, 120, 1);
         let content = buffer_to_string(&buf);
-        assert!(content.contains("claude-sonnet-4"));
+        assert!(
+            content.contains("c-s-4"),
+            "expected abbreviated model: {content}"
+        );
     }
 
     #[test]
