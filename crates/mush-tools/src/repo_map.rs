@@ -88,7 +88,7 @@ impl AgentTool for RepoMapTool {
     }
 
     fn output_limit(&self) -> OutputLimit {
-        OutputLimit::SelfManaged
+        OutputLimit::Head
     }
 }
 

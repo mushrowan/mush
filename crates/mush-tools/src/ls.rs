@@ -39,7 +39,7 @@ impl AgentTool for LsTool {
     }
 
     fn output_limit(&self) -> mush_agent::tool::OutputLimit {
-        mush_agent::tool::OutputLimit::SelfManaged
+        mush_agent::tool::OutputLimit::Head
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -232,10 +232,10 @@ mod tests {
     }
 
     #[test]
-    fn output_limit_is_self_managed() {
+    fn output_limit_is_head() {
         use mush_agent::tool::OutputLimit;
         let tool = LsTool::new(PathBuf::from("."));
-        assert_eq!(tool.output_limit(), OutputLimit::SelfManaged);
+        assert_eq!(tool.output_limit(), OutputLimit::Head);
     }
 
     #[test]

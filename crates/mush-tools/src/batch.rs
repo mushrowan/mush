@@ -178,7 +178,7 @@ impl AgentTool for BatchTool {
     }
 
     fn output_limit(&self) -> OutputLimit {
-        OutputLimit::SelfManaged
+        OutputLimit::Middle
     }
 
     fn execute(

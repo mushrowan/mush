@@ -87,11 +87,9 @@ pub fn cleanup() {
     }
 }
 
-/// apply truncation based on the tool's declared output limit.
-/// returns the result unchanged for `SelfManaged` tools.
+/// apply truncation based on the tool's declared output limit
 pub fn apply(result: ToolResult, limit: OutputLimit) -> ToolResult {
     match limit {
-        OutputLimit::SelfManaged => result,
         OutputLimit::Head => truncate(result, MAX_LINES, MAX_BYTES, OutputLimit::Head),
         OutputLimit::Tail => truncate(result, MAX_LINES, MAX_BYTES, OutputLimit::Tail),
         OutputLimit::Middle => truncate(result, MAX_LINES, MAX_BYTES, OutputLimit::Middle),
@@ -142,7 +140,7 @@ pub fn truncate(
     let total = lines.len();
 
     let truncated_text = match direction {
-        OutputLimit::Head | OutputLimit::SelfManaged => {
+        OutputLimit::Head => {
             let (kept, hit_bytes) = collect_head(&lines, max_lines, max_bytes);
             let omitted = total - kept.len();
             let preview = kept.join("\n");
@@ -255,10 +253,17 @@ mod tests {
     }
 
     #[test]
-    fn self_managed_passes_through() {
+    fn all_directions_enforce_truncation() {
         let big = make_lines(3000);
-        let out = apply(ToolResult::text(big.clone()), OutputLimit::SelfManaged);
-        assert_text(&out, |t| assert_eq!(t, big));
+        for direction in [OutputLimit::Head, OutputLimit::Tail, OutputLimit::Middle] {
+            let out = apply(ToolResult::text(big.clone()), direction);
+            assert_text(&out, |t| {
+                assert!(
+                    t.contains("lines truncated"),
+                    "{direction:?} must enforce truncation"
+                );
+            });
+        }
     }
 
     #[test]
