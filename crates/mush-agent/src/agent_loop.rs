@@ -75,13 +75,11 @@ pub enum AgentEvent {
 /// default max turns before the agent stops (effectively unlimited)
 pub const DEFAULT_MAX_TURNS: usize = usize::MAX;
 
+/// boxed future for async callback return types
+pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+
 /// callback type for steering and follow-up messages
-pub type MessageCallback<'a> = Box<
-    dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<Message>> + Send>>
-        + Send
-        + Sync
-        + 'a,
->;
+pub type MessageCallback<'a> = Box<dyn Fn() -> BoxFuture<'static, Vec<Message>> + Send + Sync + 'a>;
 
 #[derive(Debug, Clone)]
 pub enum ContextTransformResult {
@@ -91,15 +89,8 @@ pub enum ContextTransformResult {
 }
 
 /// callback type for context transforms (e.g. compaction)
-pub type ContextTransform<'a> = Box<
-    dyn Fn(
-            &[Message],
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = ContextTransformResult> + Send + 'a>,
-        > + Send
-        + Sync
-        + 'a,
->;
+pub type ContextTransform<'a> =
+    Box<dyn Fn(&[Message]) -> BoxFuture<'a, ContextTransformResult> + Send + Sync + 'a>;
 
 /// result of a tool confirmation check
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,11 +105,7 @@ pub enum ConfirmAction {
 
 /// callback for tool confirmation. receives tool call id, name, and args.
 pub type ConfirmCallback<'a> = Box<
-    dyn Fn(
-            &ToolCallId,
-            &str,
-            &serde_json::Value,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ConfirmAction> + Send>>
+    dyn Fn(&ToolCallId, &str, &serde_json::Value) -> BoxFuture<'static, ConfirmAction>
         + Send
         + Sync
         + 'a,
@@ -152,24 +139,14 @@ pub type FileRuleCallback =
 /// async callback for getting diagnostics after a file-modifying tool runs.
 /// receives the file path from tool arguments, returns formatted diagnostics
 /// to append to the tool result.
-pub type DiagnosticCallback = std::sync::Arc<
-    dyn Fn(
-            &std::path::Path,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send>>
-        + Send
-        + Sync,
->;
+pub type DiagnosticCallback =
+    std::sync::Arc<dyn Fn(&std::path::Path) -> BoxFuture<'_, Option<String>> + Send + Sync>;
 
-/// configuration for running the agent loop
-pub struct AgentConfig<'a> {
-    pub model: Model,
-    pub system_prompt: Option<String>,
-    pub tools: ToolRegistry,
-    pub registry: &'a ApiRegistry,
-    pub options: StreamOptions,
-    /// max tool-calling turns before forced stop (default: unlimited)
-    pub max_turns: usize,
-    pub hooks: AgentHooks<'a>,
+/// injection callbacks for file rules, diagnostics, and dynamic context.
+/// grouped separately from core config since these are all optional
+/// extension points wired up by the host application.
+#[derive(Default)]
+pub struct AgentInjections {
     /// user-configured lifecycle hooks (shell commands)
     pub lifecycle_hooks: crate::hooks::LifecycleHooks,
     /// working directory for lifecycle hook commands
@@ -183,6 +160,20 @@ pub struct AgentConfig<'a> {
     /// LSP diagnostic injection. after file-modifying tools (write, edit,
     /// apply_patch), queries the LSP server for diagnostics and appends them.
     pub lsp_diagnostics: Option<DiagnosticCallback>,
+}
+
+/// configuration for running the agent loop
+pub struct AgentConfig<'a> {
+    pub model: Model,
+    pub system_prompt: Option<String>,
+    pub tools: ToolRegistry,
+    pub registry: &'a ApiRegistry,
+    pub options: StreamOptions,
+    /// max tool-calling turns before forced stop (default: unlimited)
+    pub max_turns: usize,
+    pub hooks: AgentHooks<'a>,
+    /// injection callbacks and context
+    pub injections: AgentInjections,
     /// cooperative cancellation token. when cancelled, the agent loop
     /// stops before the next turn or tool execution.
     pub cancel: Option<tokio_util::sync::CancellationToken>,
@@ -203,9 +194,9 @@ pub fn agent_loop(
         let mut turn_index = 0;
 
         // run pre-session hooks (once, before the first LLM call)
-        if !config.lifecycle_hooks.pre_session.is_empty() {
-            let results = config.lifecycle_hooks
-                .run_pre_session(config.cwd.as_deref())
+        if !config.injections.lifecycle_hooks.pre_session.is_empty() {
+            let results = config.injections.lifecycle_hooks
+                .run_pre_session(config.injections.cwd.as_deref())
                 .await;
 
             for r in &results {
@@ -291,7 +282,7 @@ pub fn agent_loop(
                     }).collect();
 
                 // compose system prompt from static base + dynamic suffix
-                let system_prompt = match (&config.system_prompt, &config.dynamic_system_context) {
+                let system_prompt = match (&config.system_prompt, &config.injections.dynamic_system_context) {
                     (Some(base), Some(suffix_fn)) => {
                         if let Some(suffix) = suffix_fn() {
                             Some(format!("{base}\n\n{suffix}"))
@@ -412,9 +403,9 @@ pub fn agent_loop(
 
                 if tool_calls.is_empty() {
                     // run stop hooks before declaring done
-                    if !config.lifecycle_hooks.stop.is_empty() {
-                        let results = config.lifecycle_hooks
-                            .run_stop(config.cwd.as_deref())
+                    if !config.injections.lifecycle_hooks.stop.is_empty() {
+                        let results = config.injections.lifecycle_hooks
+                            .run_stop(config.injections.cwd.as_deref())
                             .await;
 
                         for r in &results {
@@ -483,12 +474,12 @@ pub fn agent_loop(
                     // run pre-tool hooks and filter out blocked tools
                     let mut allowed: Vec<&ToolCall> = Vec::new();
                     for tc in &confirmed {
-                        if !config.lifecycle_hooks.pre_tool_use.is_empty() {
-                            let hook_results = config.lifecycle_hooks
+                        if !config.injections.lifecycle_hooks.pre_tool_use.is_empty() {
+                            let hook_results = config.injections.lifecycle_hooks
                                 .run_for_tool(
                                     crate::hooks::HookPoint::PreToolUse,
                                     tc.name.as_str(),
-                                    config.cwd.as_deref(),
+                                    config.injections.cwd.as_deref(),
                                 )
                                 .await;
 
@@ -549,12 +540,12 @@ pub fn agent_loop(
                     // emit results, run post-tool hooks, push to messages
                     for (tc, mut result) in allowed.iter().zip(results) {
                         // run post-tool hooks
-                        if !config.lifecycle_hooks.post_tool_use.is_empty() {
-                            let hook_results = config.lifecycle_hooks
+                        if !config.injections.lifecycle_hooks.post_tool_use.is_empty() {
+                            let hook_results = config.injections.lifecycle_hooks
                                 .run_for_tool(
                                     crate::hooks::HookPoint::PostToolUse,
                                     tc.name.as_str(),
-                                    config.cwd.as_deref(),
+                                    config.injections.cwd.as_deref(),
                                 )
                                 .await;
 
@@ -577,7 +568,7 @@ pub fn agent_loop(
                         }
 
                         // check file rules for path-based tool calls
-                        if let Some(ref file_rules) = config.file_rules
+                        if let Some(ref file_rules) = config.injections.file_rules
                             && let Some(path) = extract_file_path(&tc.arguments)
                             && let Some(rule_text) = file_rules(&path)
                         {
@@ -587,7 +578,7 @@ pub fn agent_loop(
                         }
 
                         // inject LSP diagnostics for file-modifying tools
-                        if let Some(ref lsp_diag) = config.lsp_diagnostics
+                        if let Some(ref lsp_diag) = config.injections.lsp_diagnostics
                             && is_file_modifying_tool(tc.name.as_str())
                             && let Some(path) = extract_file_path(&tc.arguments)
                             && let Some(diag_text) = lsp_diag(&path).await
@@ -880,11 +871,7 @@ mod tests {
             options: StreamOptions::default(),
             max_turns: DEFAULT_MAX_TURNS,
             hooks: AgentHooks::default(),
-            lifecycle_hooks: crate::hooks::LifecycleHooks::default(),
-            cwd: None,
-            dynamic_system_context: None,
-            file_rules: None,
-            lsp_diagnostics: None,
+            injections: AgentInjections::default(),
             cancel: None,
         };
 
@@ -933,11 +920,7 @@ mod tests {
                 transform_context: Some(transform),
                 ..AgentHooks::default()
             },
-            lifecycle_hooks: crate::hooks::LifecycleHooks::default(),
-            cwd: None,
-            dynamic_system_context: None,
-            file_rules: None,
-            lsp_diagnostics: None,
+            injections: AgentInjections::default(),
             cancel: None,
         };
 
@@ -1052,11 +1035,7 @@ mod tests {
                 get_follow_up: Some(get_follow_up),
                 ..AgentHooks::default()
             },
-            lifecycle_hooks: crate::hooks::LifecycleHooks::default(),
-            cwd: None,
-            dynamic_system_context: None,
-            file_rules: None,
-            lsp_diagnostics: None,
+            injections: AgentInjections::default(),
             cancel: None,
         };
 
@@ -1119,11 +1098,7 @@ mod tests {
             options: StreamOptions::default(),
             max_turns: DEFAULT_MAX_TURNS,
             hooks: AgentHooks::default(),
-            lifecycle_hooks: crate::hooks::LifecycleHooks::default(),
-            cwd: None,
-            dynamic_system_context: None,
-            file_rules: None,
-            lsp_diagnostics: None,
+            injections: AgentInjections::default(),
             cancel: Some(token),
         };
 

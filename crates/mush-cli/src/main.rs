@@ -293,11 +293,11 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
             transform_context: transform,
             ..mush_agent::AgentHooks::default()
         },
-        lifecycle_hooks: setup.lifecycle_hooks,
-        cwd: Some(std::env::current_dir().unwrap_or_default()),
-        dynamic_system_context: None,
-        file_rules: None,
-        lsp_diagnostics: None,
+        injections: mush_agent::AgentInjections {
+            lifecycle_hooks: setup.lifecycle_hooks,
+            cwd: Some(std::env::current_dir().unwrap_or_default()),
+            ..mush_agent::AgentInjections::default()
+        },
         cancel: None,
     };
 
