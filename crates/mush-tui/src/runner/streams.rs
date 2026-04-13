@@ -84,7 +84,6 @@ pub(super) struct StreamDeps<'a> {
     pub dynamic_system_context: Option<mush_agent::DynamicContext>,
     pub file_rules: Option<mush_agent::FileRuleCallback>,
     pub lsp_diagnostics: Option<mush_agent::DiagnosticCallback>,
-    pub delegation_queue: &'a crate::delegate::DelegationQueue,
     /// separate model + options for compaction (None = use active model)
     pub compaction_model: Option<(Model, StreamOptions)>,
 }
@@ -701,13 +700,8 @@ async fn start_stream_for_prompt<'a>(
     call_options.account_id = account_id;
     call_options.thinking = Some(thinking_level);
 
-    let extra_tools = build_extra_tools(
-        pane_mgr.is_multi_pane(),
-        pane_id,
-        message_bus,
-        shared_state,
-        deps.delegation_queue,
-    );
+    let extra_tools =
+        build_extra_tools(pane_mgr.is_multi_pane(), pane_id, message_bus, shared_state);
     let system_prompt = build_system_prompt(pane_mgr, pane_id, &deps.system_prompt);
     let pane_tools = pane_mgr
         .pane_mut(pane_id)
@@ -1057,7 +1051,6 @@ fn build_extra_tools(
     pane_id: PaneId,
     message_bus: &crate::messaging::MessageBus,
     shared_state: &crate::shared_state::SharedState,
-    delegation_queue: &crate::delegate::DelegationQueue,
 ) -> Vec<SharedTool> {
     let mut extra_tools = Vec::new();
     if is_multi_pane {
@@ -1072,11 +1065,9 @@ fn build_extra_tools(
             state: shared_state.clone(),
         }) as SharedTool);
     }
-    // delegate_task always available (spawns a new pane even from single-pane)
-    extra_tools.push(Arc::new(crate::delegate::DelegateTaskTool {
-        sender_id: pane_id,
-        queue: delegation_queue.clone(),
-    }) as SharedTool);
+    // delegate_task disabled: sub-agents frequently fail or step on each other.
+    // keeping the module and queue around for when we fix delegation properly.
+    // see todo.md "investigate delegate_task reliability"
     extra_tools
 }
 

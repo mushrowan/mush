@@ -95,7 +95,6 @@ pub async fn run_tui(
                 dynamic_system_context: tui_config.dynamic_system_context.clone(),
                 file_rules: tui_config.file_rules.clone(),
                 lsp_diagnostics: tui_config.lsp_diagnostics.clone(),
-                delegation_queue: &services.delegation_queue,
                 compaction_model: tui_config.compaction_model.clone(),
             },
         )
