@@ -18,6 +18,28 @@ use serde::Deserialize;
 const MAX_CALLS: usize = 25;
 const MAX_TOTAL_OUTPUT: usize = 100 * 1024; // 100KB combined output cap
 
+/// truncate text to a byte budget on a line boundary
+fn truncate_to_budget(text: &str, budget: usize) -> &str {
+    if text.len() <= budget {
+        return text;
+    }
+    // find last newline before budget
+    match text[..budget].rfind('\n') {
+        Some(pos) => &text[..pos],
+        None => &text[..budget],
+    }
+}
+
+/// extract a "Full output: /path" reference from truncated tool output
+fn extract_file_path(text: &str) -> Option<&str> {
+    for line in text.lines() {
+        if let Some(pos) = line.find("Full output: ") {
+            return Some(&line[pos + "Full output: ".len()..]);
+        }
+    }
+    None
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BatchArgs {
@@ -200,9 +222,9 @@ impl AgentTool for BatchTool {
 
             let mut success_count = 0;
             let mut error_count = 0;
-            let mut output = String::new();
-            let mut budget_exhausted = false;
 
+            // first pass: individually truncate each result and extract text
+            let mut items: Vec<(usize, String, String, String)> = Vec::with_capacity(results.len());
             for (i, tool_name, limit, result) in &results {
                 let truncated = match result {
                     Ok(result) => {
@@ -219,8 +241,11 @@ impl AgentTool for BatchTool {
                     }
                 };
 
-                let is_error = truncated.outcome.is_error();
-                let status = if is_error { "error" } else { "ok" };
+                let status = if truncated.outcome.is_error() {
+                    "error"
+                } else {
+                    "ok"
+                };
                 let header = format!("--- [{i}] {tool_name} [{status}] ---\n");
                 let mut item_text = String::new();
                 for part in &truncated.content {
@@ -229,33 +254,66 @@ impl AgentTool for BatchTool {
                         ToolResultContentPart::Image(_) => item_text.push_str("[image]"),
                     }
                 }
+                items.push((*i, tool_name.clone(), header, item_text));
+            }
 
-                // check if adding this item would exceed the total output budget
-                let item_size = header.len() + item_text.len() + 2; // +2 for trailing newlines
-                if !budget_exhausted && output.len() + item_size > MAX_TOTAL_OUTPUT {
-                    budget_exhausted = true;
-                    let remaining = results.len() - *i;
-                    output.push_str(&format!(
-                        "[...{remaining} more items omitted, output budget exceeded ({MAX_TOTAL_OUTPUT} bytes). \
-                         use the individual tools directly to see full output.]\n\n"
-                    ));
-                }
+            // check if total exceeds budget
+            let total_size: usize = items.iter().map(|(_, _, h, t)| h.len() + t.len() + 2).sum();
 
-                if budget_exhausted {
-                    output.push_str(&format!("--- [{i}] {tool_name} [{status}] --- [omitted]\n"));
-                } else {
-                    output.push_str(&header);
-                    output.push_str(&item_text);
+            let mut output = String::new();
+            if total_size <= MAX_TOTAL_OUTPUT {
+                // everything fits, no truncation needed
+                for (_, _, header, item_text) in &items {
+                    output.push_str(header);
+                    output.push_str(item_text);
                     output.push_str("\n\n");
                 }
+            } else {
+                // build full output and save to file
+                let mut full_output = String::with_capacity(total_size + 256);
+                for (_, _, header, item_text) in &items {
+                    full_output.push_str(header);
+                    full_output.push_str(item_text);
+                    full_output.push_str("\n\n");
+                }
+                let saved_path = truncation::save_batch_output(&full_output);
+
+                // fair truncation: give each item a share of the budget
+                let overhead_per_item = 80; // header + truncation notice
+                let usable = MAX_TOTAL_OUTPUT.saturating_sub(items.len() * overhead_per_item + 256);
+                let per_item_budget = usable / items.len();
+
+                for (_, _, header, item_text) in &items {
+                    output.push_str(header);
+                    if item_text.len() <= per_item_budget {
+                        output.push_str(item_text);
+                    } else {
+                        // preserve any file path from individual truncation
+                        let file_ref = extract_file_path(item_text);
+                        let truncated = truncate_to_budget(item_text, per_item_budget);
+                        output.push_str(truncated);
+                        let omitted = item_text.len() - truncated.len();
+                        output.push_str(&format!("\n[...truncated, {omitted} bytes omitted"));
+                        if let Some(path) = file_ref {
+                            output.push_str(&format!(". full output: {path}"));
+                        }
+                        output.push(']');
+                    }
+                    output.push_str("\n\n");
+                }
+
+                let path_note = match saved_path {
+                    Some(p) => format!("full output: {}", p.display()),
+                    None => "full output could not be saved".into(),
+                };
+                output.push_str(&format!(
+                    "[batch output exceeded {MAX_TOTAL_OUTPUT} byte budget. {path_note}]\n"
+                ));
             }
 
             output.push_str(&format!(
                 "batch: {success_count}/{total} succeeded, {error_count} failed"
             ));
-            if budget_exhausted {
-                output.push_str(" (output truncated, budget exceeded)");
-            }
             ToolResult::text(output)
         })
     }
@@ -370,7 +428,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn total_output_budget_enforced() {
+    async fn total_output_budget_truncates_fairly_with_spillover() {
         struct BigTool;
 
         impl AgentTool for BigTool {
@@ -392,18 +450,19 @@ mod tests {
 
             fn execute(
                 &self,
-                _params: serde_json::Value,
+                params: serde_json::Value,
             ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>>
             {
-                // each call returns ~20KB
-                let text = "x".repeat(20_000);
+                // each call returns ~20KB with a unique marker
+                let idx = params.get("idx").and_then(|v| v.as_u64()).unwrap_or(0);
+                let text = format!("MARKER_{idx}\n{}", "x".repeat(20_000));
                 Box::pin(async move { ToolResult::text(text) })
             }
         }
 
-        // 10 calls × 20KB = 200KB, should exceed the 100KB budget
+        // 10 calls x ~20KB = 200KB, should exceed the 100KB budget
         let calls: Vec<_> = (0..10)
-            .map(|_| serde_json::json!({"tool": "big", "parameters": {}}))
+            .map(|i| serde_json::json!({"tool": "big", "parameters": {"idx": i}}))
             .collect();
         let tool = BatchTool::new(ToolRegistry::from_boxed(vec![Box::new(BigTool)]));
         let result = tool
@@ -413,11 +472,93 @@ mod tests {
             ToolResultContentPart::Text(t) => &t.text,
             _ => panic!("expected text"),
         };
-        assert!(text.contains("budget exceeded"));
-        assert!(text.contains("[omitted]"));
+
+        // every tool should have a header (no tool completely omitted)
+        for i in 0..10 {
+            assert!(
+                text.contains(&format!("[{i}] big")),
+                "missing header for tool {i}: {text}"
+            );
+        }
+
+        // should mention the spillover file path
+        assert!(
+            text.contains("full output:"),
+            "missing spillover file path: {text}"
+        );
+
+        // each tool's output should be truncated, not just later ones
+        // count how many tools have their marker visible
+        let markers_visible: Vec<bool> = (0..10)
+            .map(|i| text.contains(&format!("MARKER_{i}")))
+            .collect();
+        // all markers should be present (fair truncation keeps a preview of each)
+        assert!(
+            markers_visible.iter().all(|v| *v),
+            "not all markers visible (fair truncation failed): {markers_visible:?}"
+        );
+
         assert!(text.contains("batch: 10/10 succeeded, 0 failed"));
-        // combined output should be under 150KB (budget + overhead)
-        assert!(text.len() < 150_000);
+        // inline output should be bounded
+        assert!(
+            text.len() < 150_000,
+            "inline output too large: {} bytes",
+            text.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_preserves_individual_file_paths() {
+        struct PathTool;
+
+        impl AgentTool for PathTool {
+            fn name(&self) -> &str {
+                "pathtool"
+            }
+            fn label(&self) -> &str {
+                self.name()
+            }
+            fn description(&self) -> &str {
+                "returns output with a file path reference"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            fn execute(
+                &self,
+                params: serde_json::Value,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>>
+            {
+                let idx = params.get("idx").and_then(|v| v.as_u64()).unwrap_or(0);
+                // simulate individually-truncated output with a file path hint in the middle
+                let text = format!(
+                    "{}\n\n[…500 lines truncated (1000 total). Full output: /tmp/tool_{idx}.txt]\n\n{}",
+                    "x".repeat(15_000),
+                    "y".repeat(15_000),
+                );
+                Box::pin(async move { ToolResult::text(text) })
+            }
+        }
+
+        let calls: Vec<_> = (0..8)
+            .map(|i| serde_json::json!({"tool": "pathtool", "parameters": {"idx": i}}))
+            .collect();
+        let tool = BatchTool::new(ToolRegistry::from_boxed(vec![Box::new(PathTool)]));
+        let result = tool
+            .execute(serde_json::json!({ "tool_calls": calls }))
+            .await;
+        let text = match &result.content[0] {
+            ToolResultContentPart::Text(t) => &t.text,
+            _ => panic!("expected text"),
+        };
+
+        // each tool's individual file path should survive batch truncation
+        for i in 0..8 {
+            assert!(
+                text.contains(&format!("/tmp/tool_{i}.txt")),
+                "missing file path for tool {i}"
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
