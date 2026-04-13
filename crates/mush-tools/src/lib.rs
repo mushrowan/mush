@@ -71,18 +71,21 @@ pub fn builtin_tools_with_options(
     use_patch: bool,
     http_client: reqwest::Client,
 ) -> ToolRegistry {
+    let bg_registry = background::BackgroundJobRegistry::new();
+
     let bash_tool: SharedTool = {
-        let tool = bash::BashTool::new(cwd.clone());
+        let mut tool =
+            bash::BashTool::new(cwd.clone()).with_background_registry(bg_registry.clone());
         if let Some(ref sink) = output_sink {
-            Arc::new(tool.with_output_sink(sink.clone()))
-        } else {
-            Arc::new(tool)
+            tool = tool.with_output_sink(sink.clone());
         }
+        Arc::new(tool)
     };
 
     let mut tools: Vec<SharedTool> = vec![
         Arc::new(read::ReadTool::new(cwd.clone())),
         bash_tool,
+        Arc::new(bash_status::BashStatusTool::new(bg_registry)),
         Arc::new(grep::GrepTool::new(cwd.clone())),
         Arc::new(find::FindTool::new(cwd.clone())),
         Arc::new(glob::GlobTool::new(cwd.clone())),
