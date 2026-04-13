@@ -746,11 +746,13 @@ async fn start_stream_for_prompt<'a>(
             transform_context: transform,
             confirm_tool: confirm,
         },
-        lifecycle_hooks: deps.lifecycle_hooks.clone(),
-        cwd: Some(deps.cwd.clone()),
-        dynamic_system_context: deps.dynamic_system_context.clone(),
-        file_rules: deps.file_rules.clone(),
-        lsp_diagnostics: deps.lsp_diagnostics.clone(),
+        injections: mush_agent::AgentInjections {
+            lifecycle_hooks: deps.lifecycle_hooks.clone(),
+            cwd: Some(deps.cwd.clone()),
+            dynamic_system_context: deps.dynamic_system_context.clone(),
+            file_rules: deps.file_rules.clone(),
+            lsp_diagnostics: deps.lsp_diagnostics.clone(),
+        },
         cancel: Some(cancel),
     };
 
