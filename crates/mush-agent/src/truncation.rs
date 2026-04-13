@@ -330,22 +330,108 @@ mod tests {
         });
     }
 
+    // the hint text must always be complete and actionable in the truncated
+    // output. if the hint gets mangled or cut, agents loop forever trying to
+    // bash cat the saved file (which re-truncates, saving to another file, etc)
+
+    const EXPECTED_HINT_FRAGMENTS: &[&str] = &[
+        "Use the grep tool to search",
+        "the read tool with offset/limit",
+        "do not use bash cat",
+    ];
+
     #[test]
-    fn saves_full_output_to_file() {
-        let big = make_lines(3000);
-        let out = apply(ToolResult::text(big), OutputLimit::Middle);
+    fn hint_survives_head_truncation() {
+        let big = make_lines(5000);
+        let out = truncate(ToolResult::text(big), 100, usize::MAX, OutputLimit::Head);
         assert_text(&out, |t| {
-            assert!(t.contains("Full output:"));
+            for frag in EXPECTED_HINT_FRAGMENTS {
+                assert!(
+                    t.contains(frag),
+                    "head truncation missing hint fragment: {frag}"
+                );
+            }
         });
     }
 
     #[test]
-    fn includes_actionable_hint() {
-        let big = make_lines(3000);
-        let out = apply(ToolResult::text(big), OutputLimit::Middle);
+    fn hint_survives_tail_truncation() {
+        let big = make_lines(5000);
+        let out = truncate(ToolResult::text(big), 100, usize::MAX, OutputLimit::Tail);
         assert_text(&out, |t| {
-            assert!(t.contains("Use the grep tool to search or the read tool with offset/limit"));
+            for frag in EXPECTED_HINT_FRAGMENTS {
+                assert!(
+                    t.contains(frag),
+                    "tail truncation missing hint fragment: {frag}"
+                );
+            }
         });
+    }
+
+    #[test]
+    fn hint_survives_middle_truncation() {
+        let big = make_lines(5000);
+        let out = truncate(ToolResult::text(big), 100, usize::MAX, OutputLimit::Middle);
+        assert_text(&out, |t| {
+            for frag in EXPECTED_HINT_FRAGMENTS {
+                assert!(
+                    t.contains(frag),
+                    "middle truncation missing hint fragment: {frag}"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn hint_survives_extreme_truncation() {
+        // even with a budget of 1 line, the hint must be complete
+        let big = make_lines(5000);
+        for direction in [OutputLimit::Head, OutputLimit::Tail, OutputLimit::Middle] {
+            let out = truncate(ToolResult::text(big.clone()), 1, usize::MAX, direction);
+            assert_text(&out, |t| {
+                for frag in EXPECTED_HINT_FRAGMENTS {
+                    assert!(
+                        t.contains(frag),
+                        "extreme {direction:?} truncation missing hint fragment: {frag}"
+                    );
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn hint_includes_file_path_when_saved() {
+        let big = make_lines(5000);
+        let out = apply(ToolResult::text(big), OutputLimit::Tail);
+        assert_text(&out, |t| {
+            assert!(
+                t.contains("Full output:"),
+                "missing 'Full output:' with file path"
+            );
+            // path should end in .txt and contain tool-output
+            assert!(
+                t.contains("tool-output/") && t.contains(".txt"),
+                "file path doesn't look right: {t}"
+            );
+        });
+    }
+
+    #[test]
+    fn truncated_output_has_line_count_and_total() {
+        let big = make_lines(5000);
+        for direction in [OutputLimit::Head, OutputLimit::Tail, OutputLimit::Middle] {
+            let out = truncate(ToolResult::text(big.clone()), 100, usize::MAX, direction);
+            assert_text(&out, |t| {
+                assert!(
+                    t.contains("lines truncated"),
+                    "{direction:?} missing 'lines truncated'"
+                );
+                assert!(
+                    t.contains("5000 total"),
+                    "{direction:?} missing total line count"
+                );
+            });
+        }
     }
 
     // helpers
