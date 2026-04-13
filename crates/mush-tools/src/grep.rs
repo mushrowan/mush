@@ -1,8 +1,16 @@
-//! grep tool - pattern search using ripgrep (rg)
+//! grep tool - pattern search using grep-searcher + ignore library crates
+//!
+//! replaces the previous rg subprocess with in-process search.
+//! uses `grep-regex` for pattern matching, `grep-searcher` for line-oriented
+//! search with context, and `ignore` for .gitignore-respecting directory walks.
 
-use std::path::PathBuf;
-use std::process::Stdio;
+use std::io;
+use std::path::{Path, PathBuf};
 
+use grep_regex::RegexMatcherBuilder;
+use grep_searcher::{BinaryDetection, SearcherBuilder, Sink, SinkContext, SinkMatch};
+use ignore::WalkBuilder;
+use ignore::overrides::OverrideBuilder;
 use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
 use serde::Deserialize;
 
@@ -52,6 +60,9 @@ const fn default_true() -> bool {
     true
 }
 
+/// per-file match cap in lines mode (same as old --max-count=50)
+const MAX_MATCHES_PER_FILE: u64 = 50;
+
 pub struct GrepTool {
     cwd: PathBuf,
 }
@@ -70,7 +81,7 @@ impl AgentTool for GrepTool {
         "Grep"
     }
     fn description(&self) -> &str {
-        "Search file contents using ripgrep (rg). Respects .gitignore. \
+        "Search file contents using ripgrep. Respects .gitignore. \
          Returns matching lines with file paths and line numbers. \
          Use 'count' output to get per-file match counts instead of full lines. \
          Use 'files' output to get just filenames with matches. \
@@ -152,30 +163,37 @@ impl AgentTool for GrepTool {
                 .map(|path| resolve_path(&self.cwd, path))
                 .unwrap_or_else(|| self.cwd.clone());
 
-            run_rg(
-                &self.cwd,
-                &args.pattern,
-                &search_path,
-                args.include.as_deref(),
-                args.mode,
-                args.case_sensitive,
-                args.whole_word,
-                args.context_before,
-                args.context_after,
-                args.output,
-                args.max_results,
-                args.top_n,
-            )
+            let cwd = self.cwd.clone();
+            let pattern = args.pattern.clone();
+            let include = args.include.clone();
+
+            tokio::task::spawn_blocking(move || {
+                run_search(
+                    &cwd,
+                    &pattern,
+                    &search_path,
+                    include.as_deref(),
+                    args.mode,
+                    args.case_sensitive,
+                    args.whole_word,
+                    args.context_before,
+                    args.context_after,
+                    args.output,
+                    args.max_results,
+                    args.top_n,
+                )
+            })
             .await
+            .unwrap_or_else(|e| ToolResult::error(format!("task join error: {e}")))
         })
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_rg(
-    cwd: &std::path::Path,
+fn run_search(
+    cwd: &Path,
     pattern: &str,
-    search_path: &std::path::Path,
+    search_path: &Path,
     include: Option<&str>,
     mode: GrepMode,
     case_sensitive: bool,
@@ -187,7 +205,6 @@ async fn run_rg(
     top_n: Option<usize>,
 ) -> ToolResult {
     // strip newlines from pattern - LLMs sometimes include literal newlines
-    // which rg rejects with "literal \n is not allowed"
     let pattern: String = pattern
         .chars()
         .filter(|&c| c != '\n' && c != '\r')
@@ -197,137 +214,314 @@ async fn run_rg(
         return ToolResult::error("pattern is empty (after stripping newlines)");
     }
 
-    let mut cmd = tokio::process::Command::new("rg");
-
-    match output_mode {
-        GrepOutput::Count | GrepOutput::Json => {
-            cmd.arg("--count")
-                .arg("--color=never")
-                .arg("--with-filename");
-        }
-        GrepOutput::Files => {
-            cmd.arg("--files-with-matches").arg("--color=never");
-        }
-        GrepOutput::Lines => {
-            cmd.arg("--no-heading")
-                .arg("--line-number")
-                .arg("--color=never")
-                .arg("--with-filename")
-                .arg("--max-count=50");
-        }
-    }
-
+    // build the regex matcher
+    let mut builder = RegexMatcherBuilder::new();
     if matches!(mode, GrepMode::Literal) {
-        cmd.arg("--fixed-strings");
+        builder.fixed_strings(true);
     }
-
     if !case_sensitive {
-        cmd.arg("--ignore-case");
+        builder.case_insensitive(true);
     }
-
     if whole_word {
-        cmd.arg("--word-regexp");
+        builder.word(true);
     }
-
-    if !matches!(output_mode, GrepOutput::Count | GrepOutput::Files) {
-        if context_before > 0 {
-            cmd.arg(format!("-B{context_before}"));
-        }
-
-        if context_after > 0 {
-            cmd.arg(format!("-A{context_after}"));
-        }
-    }
-
-    if let Some(glob) = include {
-        cmd.arg("--glob").arg(glob);
-    }
-
-    cmd.arg("--").arg(&pattern).arg(search_path);
-    cmd.current_dir(cwd);
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-
-    let output = match cmd.output().await {
-        Ok(o) => o,
-        Err(e) => return ToolResult::error(format!("failed to run rg: {e}")),
+    let matcher = match builder.build(&pattern) {
+        Ok(m) => m,
+        Err(e) => return ToolResult::error(format!("invalid pattern: {e}")),
     };
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    // collect files to search
+    let files = match collect_files(cwd, search_path, include) {
+        Ok(f) => f,
+        Err(e) => return ToolResult::error(format!("failed to walk directory: {e}")),
+    };
 
-    // rg exit 1 = no matches, exit 2 = error
-    if output.status.code() == Some(2) {
-        return ToolResult::error(format!("rg error: {stderr}"));
-    }
-
-    if stdout.is_empty() {
+    if files.is_empty() {
         return ToolResult::text("No matches found.");
     }
 
-    let lines: Vec<&str> = stdout.lines().collect();
-
     match output_mode {
-        GrepOutput::Count | GrepOutput::Json => {
-            let mut entries: Vec<(&str, u64)> = lines
-                .iter()
-                .filter_map(|line| {
-                    let (path, count) = line.rsplit_once(':')?;
-                    Some((path, count.trim().parse().ok()?))
-                })
-                .collect();
-            entries.sort_by_key(|e| std::cmp::Reverse(e.1));
-
-            let total_matches: u64 = entries.iter().map(|(_, c)| c).sum();
-            let total_files = entries.len();
-            let effective_limit = top_n.or(max_results);
-            if let Some(n) = effective_limit {
-                entries.truncate(n);
-            }
-
-            if matches!(output_mode, GrepOutput::Json) {
-                let items: Vec<serde_json::Value> = entries
-                    .iter()
-                    .map(|(path, count)| serde_json::json!({"file": path, "count": count}))
-                    .collect();
-                let json = serde_json::json!({
-                    "total_matches": total_matches,
-                    "total_files": total_files,
-                    "files": items,
-                });
-                ToolResult::text(json.to_string())
-            } else {
-                let showing = if effective_limit.is_some() && entries.len() < total_files {
-                    format!(" (showing top {})", entries.len())
-                } else {
-                    String::new()
-                };
-                let mut out =
-                    format!("{total_matches} matches across {total_files} files{showing}\n");
-                for (path, count) in &entries {
-                    out.push_str(&format!("{path}: {count}\n"));
-                }
-                ToolResult::text(out)
-            }
-        }
-        GrepOutput::Files => {
-            let mut file_lines = lines;
-            let total = file_lines.len();
-            if let Some(n) = max_results {
-                file_lines.truncate(n);
-            }
-            let showing = if file_lines.len() < total {
-                format!(" (showing {}/{})", file_lines.len(), total)
-            } else {
-                String::new()
-            };
-            ToolResult::text(format!(
-                "{total} files{showing}\n\n{}",
-                file_lines.join("\n")
-            ))
-        }
-        GrepOutput::Lines => ToolResult::text(truncate_lines(&lines, "matches")),
+        GrepOutput::Lines => search_lines(
+            &matcher,
+            &files,
+            search_path,
+            context_before as usize,
+            context_after as usize,
+        ),
+        GrepOutput::Count | GrepOutput::Json => search_count(
+            &matcher,
+            &files,
+            search_path,
+            output_mode,
+            max_results,
+            top_n,
+        ),
+        GrepOutput::Files => search_files(&matcher, &files, search_path, max_results),
     }
+}
+
+/// collect files to search, respecting .gitignore
+fn collect_files(
+    cwd: &Path,
+    search_path: &Path,
+    include: Option<&str>,
+) -> io::Result<Vec<PathBuf>> {
+    // single file
+    if search_path.is_file() {
+        return Ok(vec![search_path.to_path_buf()]);
+    }
+
+    let mut walk = WalkBuilder::new(search_path);
+    walk.hidden(true).git_ignore(true).parents(true);
+
+    if let Some(glob) = include {
+        let mut overrides = OverrideBuilder::new(cwd);
+        // ignore crate uses `!` prefix for excludes, bare patterns for includes.
+        // when an include glob is given, we need to exclude everything else
+        // first, then include the pattern
+        let _ = overrides.add("!*");
+        let _ = overrides.add(glob);
+        if let Ok(built) = overrides.build() {
+            walk.overrides(built);
+        }
+    }
+
+    let mut files = Vec::new();
+    for entry in walk.build() {
+        let entry = entry.map_err(io::Error::other)?;
+        if entry.file_type().is_some_and(|ft| ft.is_file()) {
+            files.push(entry.into_path());
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+/// make a path relative to the search root for display
+fn display_path(path: &Path, search_root: &Path) -> String {
+    path.strip_prefix(search_root)
+        .unwrap_or(path)
+        .display()
+        .to_string()
+}
+
+// lines mode: collect matching lines with file:line:content format
+
+fn search_lines(
+    matcher: &grep_regex::RegexMatcher,
+    files: &[PathBuf],
+    search_root: &Path,
+    ctx_before: usize,
+    ctx_after: usize,
+) -> ToolResult {
+    let mut searcher = SearcherBuilder::new()
+        .binary_detection(BinaryDetection::quit(0))
+        .line_number(true)
+        .before_context(ctx_before)
+        .after_context(ctx_after)
+        .build();
+
+    let mut output_lines: Vec<String> = Vec::new();
+
+    for file in files {
+        let rel = display_path(file, search_root);
+        let mut sink = LineSink {
+            path: &rel,
+            lines: &mut output_lines,
+            match_count: 0,
+            max_matches: MAX_MATCHES_PER_FILE,
+            needs_separator: false,
+        };
+        // errors (e.g. binary files, permission denied) are silently skipped
+        let _ = searcher.search_path(matcher, file, &mut sink);
+    }
+
+    if output_lines.is_empty() {
+        return ToolResult::text("No matches found.");
+    }
+
+    let lines_ref: Vec<&str> = output_lines.iter().map(String::as_str).collect();
+    ToolResult::text(truncate_lines(&lines_ref, "matches"))
+}
+
+/// custom sink that formats output like `file:line:content`
+struct LineSink<'a> {
+    path: &'a str,
+    lines: &'a mut Vec<String>,
+    match_count: u64,
+    max_matches: u64,
+    needs_separator: bool,
+}
+
+impl Sink for LineSink<'_> {
+    type Error = io::Error;
+
+    fn matched(
+        &mut self,
+        _searcher: &grep_searcher::Searcher,
+        mat: &SinkMatch<'_>,
+    ) -> Result<bool, io::Error> {
+        if self.match_count >= self.max_matches {
+            return Ok(false);
+        }
+        self.match_count += 1;
+
+        let line_num = mat.line_number().unwrap_or(0);
+        let text = std::str::from_utf8(mat.bytes())
+            .unwrap_or("<binary>")
+            .trim_end_matches('\n')
+            .trim_end_matches('\r');
+
+        self.lines
+            .push(format!("{}:{}:{}", self.path, line_num, text));
+        self.needs_separator = true;
+        Ok(true)
+    }
+
+    fn context(
+        &mut self,
+        _searcher: &grep_searcher::Searcher,
+        ctx: &SinkContext<'_>,
+    ) -> Result<bool, io::Error> {
+        let line_num = ctx.line_number().unwrap_or(0);
+        let text = std::str::from_utf8(ctx.bytes())
+            .unwrap_or("<binary>")
+            .trim_end_matches('\n')
+            .trim_end_matches('\r');
+
+        self.lines
+            .push(format!("{}-{}-{}", self.path, line_num, text));
+        Ok(true)
+    }
+
+    fn context_break(&mut self, _searcher: &grep_searcher::Searcher) -> Result<bool, io::Error> {
+        if self.needs_separator {
+            self.lines.push("--".to_string());
+            self.needs_separator = false;
+        }
+        Ok(true)
+    }
+}
+
+// count mode: count matches per file
+
+fn search_count(
+    matcher: &grep_regex::RegexMatcher,
+    files: &[PathBuf],
+    search_root: &Path,
+    output_mode: GrepOutput,
+    max_results: Option<usize>,
+    top_n: Option<usize>,
+) -> ToolResult {
+    let mut searcher = SearcherBuilder::new()
+        .binary_detection(BinaryDetection::quit(0))
+        .line_number(true)
+        .build();
+
+    let mut counts: Vec<(String, u64)> = Vec::new();
+
+    for file in files {
+        let mut count: u64 = 0;
+        let _ = searcher.search_path(
+            matcher,
+            file,
+            grep_searcher::sinks::UTF8(|_, _| {
+                count += 1;
+                Ok(true)
+            }),
+        );
+        if count > 0 {
+            let rel = display_path(file, search_root);
+            counts.push((rel, count));
+        }
+    }
+
+    if counts.is_empty() {
+        return ToolResult::text("No matches found.");
+    }
+
+    counts.sort_by_key(|e| std::cmp::Reverse(e.1));
+
+    let total_matches: u64 = counts.iter().map(|(_, c)| c).sum();
+    let total_files = counts.len();
+    let effective_limit = top_n.or(max_results);
+    if let Some(n) = effective_limit {
+        counts.truncate(n);
+    }
+
+    if matches!(output_mode, GrepOutput::Json) {
+        let items: Vec<serde_json::Value> = counts
+            .iter()
+            .map(|(path, count)| serde_json::json!({"file": path, "count": count}))
+            .collect();
+        let json = serde_json::json!({
+            "total_matches": total_matches,
+            "total_files": total_files,
+            "files": items,
+        });
+        ToolResult::text(json.to_string())
+    } else {
+        let showing = if effective_limit.is_some() && counts.len() < total_files {
+            format!(" (showing top {})", counts.len())
+        } else {
+            String::new()
+        };
+        let mut out = format!("{total_matches} matches across {total_files} files{showing}\n");
+        for (path, count) in &counts {
+            out.push_str(&format!("{path}: {count}\n"));
+        }
+        ToolResult::text(out)
+    }
+}
+
+// files mode: list files with any match
+
+fn search_files(
+    matcher: &grep_regex::RegexMatcher,
+    files: &[PathBuf],
+    search_root: &Path,
+    max_results: Option<usize>,
+) -> ToolResult {
+    let mut searcher = SearcherBuilder::new()
+        .binary_detection(BinaryDetection::quit(0))
+        .line_number(true)
+        .build();
+
+    let mut matching_files: Vec<String> = Vec::new();
+
+    for file in files {
+        let mut found = false;
+        let _ = searcher.search_path(
+            matcher,
+            file,
+            grep_searcher::sinks::UTF8(|_, _| {
+                found = true;
+                Ok(false) // stop after first match
+            }),
+        );
+        if found {
+            matching_files.push(display_path(file, search_root));
+        }
+    }
+
+    if matching_files.is_empty() {
+        return ToolResult::text("No matches found.");
+    }
+
+    matching_files.sort();
+    let total = matching_files.len();
+    if let Some(n) = max_results {
+        matching_files.truncate(n);
+    }
+    let showing = if matching_files.len() < total {
+        format!(" (showing {}/{})", matching_files.len(), total)
+    } else {
+        String::new()
+    };
+    ToolResult::text(format!(
+        "{total} files{showing}\n\n{}",
+        matching_files.join("\n")
+    ))
 }
 
 #[cfg(test)]

@@ -64,12 +64,12 @@
 
         craneOutputs = import ./nix/package.nix {
           inherit craneLib src;
-          inherit (pkgs) ripgrep fd onnxruntime pkg-config openssl cacert;
+          inherit (pkgs) fd onnxruntime pkg-config openssl cacert;
         };
 
         craneOutputsProfiling = import ./nix/package.nix {
           inherit craneLib src;
-          inherit (pkgs) ripgrep fd onnxruntime pkg-config openssl cacert;
+          inherit (pkgs) fd onnxruntime pkg-config openssl cacert;
           enableProfiling = true;
         };
       in {

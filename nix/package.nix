@@ -1,7 +1,6 @@
 {
   craneLib,
   src,
-  ripgrep,
   fd,
   onnxruntime,
   openssl,
@@ -72,7 +71,7 @@ in {
     // {
       inherit cargoArtifacts;
       doCheck = false;
-      nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ripgrep fd];
+      nativeBuildInputs = commonArgs.nativeBuildInputs ++ [fd];
       SSL_CERT_FILE = "${cacert}/etc/ssl/certs/ca-bundle.crt";
     });
 
@@ -85,7 +84,7 @@ in {
   test = craneLib.cargoNextest (commonArgs
     // {
       inherit cargoArtifacts;
-      nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ripgrep fd];
+      nativeBuildInputs = commonArgs.nativeBuildInputs ++ [fd];
       SSL_CERT_FILE = "${cacert}/etc/ssl/certs/ca-bundle.crt";
     });
 
