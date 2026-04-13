@@ -1167,10 +1167,6 @@ pub fn run() {
                 "lsp_diagnostics",
                 "get compiler errors and warnings from the language server",
             ),
-            (
-                "delegate_task",
-                "spawn a sub-agent pane to work on a task independently",
-            ),
             ("send_message", "send a message to another agent pane"),
             (
                 "read_state",
@@ -1293,7 +1289,7 @@ pub fn run() {
             },
             BenchCase {
                 query: "ask another agent to review the code",
-                expected: &["delegate_task", "send_message"],
+                expected: &["send_message"],
             },
         ]
     }
