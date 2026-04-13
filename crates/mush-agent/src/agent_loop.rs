@@ -194,9 +194,9 @@ pub fn agent_loop(
         let mut turn_index = 0;
 
         // run pre-session hooks (once, before the first LLM call)
-        if !config.injections.lifecycle_hooks.pre_session.is_empty() {
+        if !config.injections.lifecycle_hooks.for_point(crate::hooks::HookPoint::PreSession).is_empty() {
             let results = config.injections.lifecycle_hooks
-                .run_pre_session(config.injections.cwd.as_deref())
+                .run_all(crate::hooks::HookPoint::PreSession, config.injections.cwd.as_deref())
                 .await;
 
             for r in &results {
@@ -403,9 +403,9 @@ pub fn agent_loop(
 
                 if tool_calls.is_empty() {
                     // run stop hooks before declaring done
-                    if !config.injections.lifecycle_hooks.stop.is_empty() {
+                    if !config.injections.lifecycle_hooks.for_point(crate::hooks::HookPoint::Stop).is_empty() {
                         let results = config.injections.lifecycle_hooks
-                            .run_stop(config.injections.cwd.as_deref())
+                            .run_all(crate::hooks::HookPoint::Stop, config.injections.cwd.as_deref())
                             .await;
 
                         for r in &results {
@@ -474,7 +474,7 @@ pub fn agent_loop(
                     // run pre-tool hooks and filter out blocked tools
                     let mut allowed: Vec<&ToolCall> = Vec::new();
                     for tc in &confirmed {
-                        if !config.injections.lifecycle_hooks.pre_tool_use.is_empty() {
+                        if !config.injections.lifecycle_hooks.for_point(crate::hooks::HookPoint::PreToolUse).is_empty() {
                             let hook_results = config.injections.lifecycle_hooks
                                 .run_for_tool(
                                     crate::hooks::HookPoint::PreToolUse,
@@ -540,7 +540,7 @@ pub fn agent_loop(
                     // emit results, run post-tool hooks, push to messages
                     for (tc, mut result) in allowed.iter().zip(results) {
                         // run post-tool hooks
-                        if !config.injections.lifecycle_hooks.post_tool_use.is_empty() {
+                        if !config.injections.lifecycle_hooks.for_point(crate::hooks::HookPoint::PostToolUse).is_empty() {
                             let hook_results = config.injections.lifecycle_hooks
                                 .run_for_tool(
                                     crate::hooks::HookPoint::PostToolUse,

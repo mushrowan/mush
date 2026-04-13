@@ -968,9 +968,13 @@ pub async fn auto_compact(
 
     // post-compaction hooks (needs mush-agent types, so handled here)
     if let Some(hooks) = lifecycle_hooks
-        && !hooks.post_compaction.is_empty()
+        && !hooks
+            .for_point(mush_agent::HookPoint::PostCompaction)
+            .is_empty()
     {
-        let results = hooks.run_post_compaction(cwd).await;
+        let results = hooks
+            .run_all(mush_agent::HookPoint::PostCompaction, cwd)
+            .await;
         let output: String = results
             .iter()
             .filter(|r| !r.output.is_empty())
