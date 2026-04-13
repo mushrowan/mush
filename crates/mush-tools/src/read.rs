@@ -1,6 +1,7 @@
 //! read tool - reads file contents with optional offset/limit
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::sync::Arc;
 
 use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
 use serde::Deserialize;
@@ -192,11 +193,11 @@ impl ReadArgs {
 }
 
 pub struct ReadTool {
-    cwd: PathBuf,
+    cwd: Arc<Path>,
 }
 
 impl ReadTool {
-    pub fn new(cwd: PathBuf) -> Self {
+    pub fn new(cwd: Arc<Path>) -> Self {
         Self { cwd }
     }
 }
@@ -540,7 +541,7 @@ mod tests {
             .join("\n");
         fs::write(&file, &content).unwrap();
 
-        let tool = super::ReadTool::new(dir.path().to_path_buf());
+        let tool = super::ReadTool::new(dir.path().into());
         let result = tool
             .execute(serde_json::json!({
                 "path": file.to_str().unwrap(),
@@ -565,7 +566,7 @@ mod tests {
             .join("\n");
         fs::write(&file, &content).unwrap();
 
-        let tool = super::ReadTool::new(dir.path().to_path_buf());
+        let tool = super::ReadTool::new(dir.path().into());
         let result = tool
             .execute(serde_json::json!({
                 "path": file.to_str().unwrap(),
@@ -592,7 +593,7 @@ mod tests {
             .join("\n");
         fs::write(&file, &content).unwrap();
 
-        let tool = super::ReadTool::new(dir.path().to_path_buf());
+        let tool = super::ReadTool::new(dir.path().into());
         let result = tool
             .execute(serde_json::json!({
                 "path": file.to_str().unwrap(),
@@ -613,7 +614,7 @@ mod tests {
         let file = dir.path().join("test.txt");
         fs::write(&file, "line 1\nline 2").unwrap();
 
-        let tool = super::ReadTool::new(dir.path().to_path_buf());
+        let tool = super::ReadTool::new(dir.path().into());
         let result = tool
             .execute(serde_json::json!({
                 "path": file.to_str().unwrap(),
@@ -631,7 +632,7 @@ mod tests {
         let file = dir.path().join("test.txt");
         fs::write(&file, "line 1\nline 2\nline 3").unwrap();
 
-        let tool = super::ReadTool::new(dir.path().to_path_buf());
+        let tool = super::ReadTool::new(dir.path().into());
         let result = tool
             .execute(serde_json::json!({
                 "path": file.to_str().unwrap(),

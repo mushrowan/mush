@@ -1,6 +1,7 @@
 //! write tool - creates or overwrites files, auto-creating parent dirs
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::sync::Arc;
 
 use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
 use serde::Deserialize;
@@ -15,11 +16,11 @@ struct WriteArgs {
 }
 
 pub struct WriteTool {
-    cwd: PathBuf,
+    cwd: Arc<Path>,
 }
 
 impl WriteTool {
-    pub fn new(cwd: PathBuf) -> Self {
+    pub fn new(cwd: Arc<Path>) -> Self {
         Self { cwd }
     }
 }

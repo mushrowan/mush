@@ -1,7 +1,8 @@
 //! find tool - file search using fd
 
-use std::path::PathBuf;
+use std::path::Path;
 use std::process::Stdio;
+use std::sync::Arc;
 
 use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
 use serde::Deserialize;
@@ -34,11 +35,11 @@ struct FindArgs {
 }
 
 pub struct FindTool {
-    cwd: PathBuf,
+    cwd: Arc<Path>,
 }
 
 impl FindTool {
-    pub fn new(cwd: PathBuf) -> Self {
+    pub fn new(cwd: Arc<Path>) -> Self {
         Self { cwd }
     }
 }
@@ -92,7 +93,7 @@ impl AgentTool for FindTool {
                 .path
                 .as_deref()
                 .map(|path| resolve_path(&self.cwd, path))
-                .unwrap_or_else(|| self.cwd.clone());
+                .unwrap_or_else(|| self.cwd.to_path_buf());
 
             run_fd(&self.cwd, &args.pattern, &search_path, args.type_filter).await
         })

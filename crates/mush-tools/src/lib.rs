@@ -17,7 +17,7 @@ pub mod web_fetch;
 pub mod web_search;
 pub mod write;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use mush_agent::tool::{SharedTool, ToolRegistry};
@@ -71,6 +71,7 @@ pub fn builtin_tools_with_options(
     use_patch: bool,
     http_client: reqwest::Client,
 ) -> ToolRegistry {
+    let cwd: Arc<Path> = Arc::from(cwd);
     let bg_registry = background::BackgroundJobRegistry::new();
 
     let bash_tool: SharedTool = {

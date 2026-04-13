@@ -19,7 +19,8 @@
 //! ```
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::sync::Arc;
 
 use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
 use serde::Deserialize;
@@ -491,11 +492,11 @@ Rules:\n\
 - do NOT re-run to verify changes; trust the output summary";
 
 pub struct ApplyPatchTool {
-    cwd: PathBuf,
+    cwd: Arc<Path>,
 }
 
 impl ApplyPatchTool {
-    pub fn new(cwd: PathBuf) -> Self {
+    pub fn new(cwd: Arc<Path>) -> Self {
         Self { cwd }
     }
 }

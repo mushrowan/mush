@@ -4,7 +4,7 @@
 //! for results, keeping API cache warm between polls
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -39,7 +39,7 @@ pub struct JobState {
     pub stdout: String,
     pub stderr: String,
     pub started: Instant,
-    pub cwd: PathBuf,
+    pub cwd: Arc<Path>,
 }
 
 /// registry of active background jobs
@@ -167,7 +167,7 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             started: Instant::now(),
-            cwd: PathBuf::from("."),
+            cwd: Arc::from(Path::new(".")),
         }
     }
 
