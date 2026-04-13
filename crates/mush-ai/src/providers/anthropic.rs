@@ -571,9 +571,15 @@ fn convert_messages_raw(
     result
 }
 
-/// ensure every tool_use block in an assistant message has a matching tool_result.
-/// inserts synthetic error results for orphaned tool calls (from aborts, steering,
-/// compaction, etc) so the API doesn't reject the conversation.
+/// ensure tool_use/tool_result pairing is consistent.
+///
+/// handles both directions:
+/// - tool_use without tool_result: injects synthetic error results
+/// - tool_result without tool_use: strips the orphaned result
+///
+/// orphaned tool_results can appear after compaction removes an assistant
+/// message while its tool_results survive at the boundary, or from other
+/// message reordering during context transforms.
 fn fix_orphaned_tool_calls(messages: Vec<RequestMessage>) -> Vec<RequestMessage> {
     let mut result: Vec<RequestMessage> = Vec::new();
     let mut pending_tool_ids: Vec<String> = Vec::new();
@@ -598,18 +604,6 @@ fn fix_orphaned_tool_calls(messages: Vec<RequestMessage>) -> Vec<RequestMessage>
             }
             result.push(msg);
         } else if msg.role == "user" {
-            // check if this is a tool_result
-            if let serde_json::Value::Array(ref blocks) = msg.content {
-                for block in blocks {
-                    if block.get("type").and_then(|t| t.as_str()) == Some("tool_result")
-                        && let Some(id) = block.get("tool_use_id").and_then(|i| i.as_str())
-                    {
-                        seen_result_ids.insert(id.to_string());
-                    }
-                }
-            }
-
-            // if this is a plain user message (not tool_result), flush orphans first
             let is_tool_result = msg
                 .content
                 .as_array()
@@ -620,13 +614,36 @@ fn fix_orphaned_tool_calls(messages: Vec<RequestMessage>) -> Vec<RequestMessage>
                 })
                 .unwrap_or(false);
 
-            if !is_tool_result && !pending_tool_ids.is_empty() {
-                inject_synthetic_results(&mut result, &pending_tool_ids, &seen_result_ids);
-                pending_tool_ids.clear();
-                seen_result_ids.clear();
+            if is_tool_result {
+                // check each tool_result references a known tool_use
+                if let Some(id) = msg
+                    .content
+                    .as_array()
+                    .and_then(|blocks| blocks.first())
+                    .and_then(|b| b.get("tool_use_id"))
+                    .and_then(|i| i.as_str())
+                {
+                    if pending_tool_ids.contains(&id.to_string()) {
+                        seen_result_ids.insert(id.to_string());
+                        result.push(msg);
+                    } else {
+                        tracing::warn!(
+                            tool_use_id = id,
+                            "stripping orphaned tool_result (no matching tool_use)"
+                        );
+                    }
+                } else {
+                    result.push(msg);
+                }
+            } else {
+                // plain user message: flush any pending orphans first
+                if !pending_tool_ids.is_empty() {
+                    inject_synthetic_results(&mut result, &pending_tool_ids, &seen_result_ids);
+                    pending_tool_ids.clear();
+                    seen_result_ids.clear();
+                }
+                result.push(msg);
             }
-
-            result.push(msg);
         } else {
             result.push(msg);
         }
@@ -1220,21 +1237,38 @@ mod tests {
 
     #[test]
     fn convert_tool_result_message() {
-        let messages = vec![Message::ToolResult(ToolResultMessage {
-            tool_call_id: "tc_123".into(),
-            tool_name: "read".into(),
-            content: vec![ToolResultContentPart::Text(TextContent {
-                text: "file contents".into(),
-            })],
-            outcome: ToolOutcome::Success,
-            timestamp_ms: Timestamp::zero(),
-        })];
+        let messages = vec![
+            Message::Assistant(AssistantMessage {
+                content: vec![AssistantContentPart::ToolCall(ToolCall {
+                    id: "tc_123".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({"path": "foo.rs"}),
+                })],
+                model: "test".into(),
+                provider: Provider::Custom("test".into()),
+                api: Api::AnthropicMessages,
+                usage: Usage::default(),
+                stop_reason: StopReason::ToolUse,
+                error_message: None,
+                timestamp_ms: Timestamp::zero(),
+            }),
+            Message::ToolResult(ToolResultMessage {
+                tool_call_id: "tc_123".into(),
+                tool_name: "read".into(),
+                content: vec![ToolResultContentPart::Text(TextContent {
+                    text: "file contents".into(),
+                })],
+                outcome: ToolOutcome::Success,
+                timestamp_ms: Timestamp::zero(),
+            }),
+        ];
 
         let converted = convert_messages(&messages, false, None, ToolResultTrimming::SlidingWindow);
-        assert_eq!(converted.len(), 1);
-        assert_eq!(converted[0].role, "user");
+        assert_eq!(converted.len(), 2);
+        assert_eq!(converted[0].role, "assistant");
+        assert_eq!(converted[1].role, "user");
 
-        let content = &converted[0].content;
+        let content = &converted[1].content;
         assert_eq!(content[0]["type"], "tool_result");
         assert_eq!(content[0]["tool_use_id"], "tc_123");
     }
@@ -1351,6 +1385,108 @@ mod tests {
         assert_eq!(converted[1].content[0]["is_error"], true);
         assert_eq!(converted[2].role, "user");
         assert_eq!(converted[2].content, serde_json::json!("stop! undo that"));
+    }
+
+    #[test]
+    fn orphaned_tool_result_stripped() {
+        // tool_result referencing a tool_use that was compacted away.
+        // the tool_result should be stripped to prevent the API from
+        // rejecting the request with "unexpected tool_use_id"
+        let messages = vec![
+            // after compaction: summary user message
+            Message::User(UserMessage {
+                content: UserContent::Text("compacted summary".into()),
+                timestamp_ms: Timestamp::zero(),
+            }),
+            // kept assistant with tool_use A
+            Message::Assistant(AssistantMessage {
+                content: vec![AssistantContentPart::ToolCall(ToolCall {
+                    id: "tc_A".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({"path": "foo.rs"}),
+                })],
+                model: "test".into(),
+                provider: Provider::Custom("test".into()),
+                api: Api::AnthropicMessages,
+                usage: Usage::default(),
+                stop_reason: StopReason::ToolUse,
+                error_message: None,
+                timestamp_ms: Timestamp::zero(),
+            }),
+            // orphaned tool_result: references tc_GONE which was compacted away
+            Message::ToolResult(ToolResultMessage {
+                tool_call_id: "tc_GONE".into(),
+                tool_name: "bash".into(),
+                content: vec![ToolResultContentPart::Text(TextContent {
+                    text: "stale output".into(),
+                })],
+                outcome: ToolOutcome::Success,
+                timestamp_ms: Timestamp::zero(),
+            }),
+            // valid tool_result for tc_A
+            Message::ToolResult(ToolResultMessage {
+                tool_call_id: "tc_A".into(),
+                tool_name: "read".into(),
+                content: vec![ToolResultContentPart::Text(TextContent {
+                    text: "file contents".into(),
+                })],
+                outcome: ToolOutcome::Success,
+                timestamp_ms: Timestamp::zero(),
+            }),
+        ];
+
+        let converted = convert_messages(&messages, false, None, ToolResultTrimming::SlidingWindow);
+
+        // the orphaned tool_result (tc_GONE) should be stripped entirely.
+        // result: user(summary), assistant(tool_use A), user(tool_result A)
+        assert_eq!(converted.len(), 3, "orphaned tool_result should be dropped");
+        assert_eq!(converted[0].role, "user");
+        assert_eq!(converted[1].role, "assistant");
+        assert_eq!(converted[2].role, "user");
+        assert_eq!(converted[2].content[0]["tool_use_id"], "tc_A");
+    }
+
+    #[test]
+    fn orphaned_tool_result_all_blocks_stripped() {
+        // when ALL tool_results after an assistant are orphaned, the entire
+        // message group should be stripped (not just individual blocks)
+        let messages = vec![
+            Message::Assistant(AssistantMessage {
+                content: vec![AssistantContentPart::Text(TextContent {
+                    text: "done".into(),
+                })],
+                model: "test".into(),
+                provider: Provider::Custom("test".into()),
+                api: Api::AnthropicMessages,
+                usage: Usage::default(),
+                stop_reason: StopReason::Stop,
+                error_message: None,
+                timestamp_ms: Timestamp::zero(),
+            }),
+            // orphaned: the preceding assistant has no tool_uses
+            Message::ToolResult(ToolResultMessage {
+                tool_call_id: "tc_stale".into(),
+                tool_name: "bash".into(),
+                content: vec![ToolResultContentPart::Text(TextContent {
+                    text: "stale".into(),
+                })],
+                outcome: ToolOutcome::Success,
+                timestamp_ms: Timestamp::zero(),
+            }),
+            Message::User(UserMessage {
+                content: UserContent::Text("continue".into()),
+                timestamp_ms: Timestamp::zero(),
+            }),
+        ];
+
+        let converted = convert_messages(&messages, false, None, ToolResultTrimming::SlidingWindow);
+
+        // the orphaned tool_result should be dropped.
+        // result: assistant(text), user("continue")
+        assert_eq!(converted.len(), 2, "orphaned tool_result should be dropped");
+        assert_eq!(converted[0].role, "assistant");
+        assert_eq!(converted[1].role, "user");
+        assert_eq!(converted[1].content, serde_json::json!("continue"));
     }
 
     #[test]
