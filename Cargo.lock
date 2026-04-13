@@ -2999,6 +2999,7 @@ dependencies = [
  "reqwest 0.13.2",
  "serde",
  "serde_json",
+ "similar",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -4820,6 +4821,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "95890f873bec569a0362c235787f3aca6e1e887302ba4840839bcc6459c42da6"
 dependencies = [
  "quote",
+]
+
+[[package]]
+name = "similar"
+version = "3.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04d93e861ede2e497b47833469b8ec9d5c07fa4c78ce7a00f6eb7dd8168b4b3f"
+dependencies = [
+ "bstr",
 ]
 
 [[package]]

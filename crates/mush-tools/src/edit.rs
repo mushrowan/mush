@@ -522,6 +522,10 @@ fn dedent_pair(old_text: &str, new_text: &str) -> (String, String) {
 }
 
 /// format a diff between old and new text for display
+///
+/// uses a proper line diff algorithm so only changed lines show as +/-.
+/// unchanged lines adjacent to changes are shown as context (no prefix).
+/// unchanged lines far from any change are omitted entirely
 fn format_edit_diff(old_text: &str, new_text: &str) -> String {
     let (old_text, new_text) = dedent_pair(old_text, new_text);
 
@@ -547,14 +551,51 @@ fn format_edit_diff(old_text: &str, new_text: &str) -> String {
             .join("\n");
     }
 
-    // show old lines as removed, new lines as added
+    use similar::{ChangeTag, TextDiff};
+
+    let diff = TextDiff::from_lines(&old_text, &new_text);
     let mut result = String::new();
-    for line in old_text.lines() {
-        result.push_str(&format!("- {line}\n"));
+
+    // collect all changes with their tags
+    let changes: Vec<_> = diff.iter_all_changes().collect();
+
+    // find which lines are near an actual change (context window of 2)
+    const CONTEXT: usize = 2;
+    let mut dominated = vec![false; changes.len()];
+    for (i, change) in changes.iter().enumerate() {
+        if change.tag() != ChangeTag::Equal {
+            let start = i.saturating_sub(CONTEXT);
+            let end = (i + CONTEXT + 1).min(changes.len());
+            for slot in &mut dominated[start..end] {
+                *slot = true;
+            }
+        }
     }
-    for line in new_text.lines() {
-        result.push_str(&format!("+ {line}\n"));
+
+    let mut last_was_gap = false;
+    for (i, change) in changes.iter().enumerate() {
+        match change.tag() {
+            ChangeTag::Equal => {
+                if dominated[i] {
+                    result.push_str(&format!("  {}", change));
+                    last_was_gap = false;
+                } else if !last_was_gap && i > 0 && i < changes.len() - 1 {
+                    // omitted lines between change groups
+                    result.push_str("  ...\n");
+                    last_was_gap = true;
+                }
+            }
+            ChangeTag::Delete => {
+                result.push_str(&format!("- {}", change));
+                last_was_gap = false;
+            }
+            ChangeTag::Insert => {
+                result.push_str(&format!("+ {}", change));
+                last_was_gap = false;
+            }
+        }
     }
+
     result.trim_end().to_string()
 }
 
@@ -730,10 +771,14 @@ mod tests {
             "    base\n            more nested",
         );
         // 4-space common indent stripped, relative indent preserved
-        assert!(diff.contains("- base"));
-        assert!(diff.contains("-     nested"));
-        assert!(diff.contains("+ base"));
-        assert!(diff.contains("+         more nested"));
+        // "base" is unchanged so it appears as context, not +/-
+        assert!(diff.contains("  base"), "context line: {diff}");
+        assert!(
+            !diff.contains("- base"),
+            "unchanged line should not be removed: {diff}"
+        );
+        assert!(diff.contains("-     nested"), "removed: {diff}");
+        assert!(diff.contains("+         more nested"), "added: {diff}");
     }
 
     #[test]
@@ -751,6 +796,36 @@ mod tests {
         assert!(diff.contains("+ line A"));
         assert!(diff.contains("+ line B"));
         assert!(diff.contains("+ line C"));
+    }
+
+    #[test]
+    fn diff_omits_unchanged_context_lines() {
+        // simulate what the edit tool does: oldText/newText include context
+        let old = "## project tracking\n\n- todo.md is the canonical planning file\n\n## reference repos\n\n- pi-mono\n- opencode\n- codex";
+        let new = "## project tracking\n\n- todo.md is the canonical planning file\n\n## gitignored local files\n\n- AGENTS.md\n- untracked-docs/\n- reference repos";
+        let diff = format_edit_diff(old, new);
+        // unchanged lines should NOT appear with - or + prefix
+        assert!(
+            !diff.contains("- ## project tracking"),
+            "unchanged line should not appear as removed: {diff}"
+        );
+        assert!(
+            !diff.contains("+ ## project tracking"),
+            "unchanged line should not appear as added: {diff}"
+        );
+        assert!(
+            !diff.contains("- - todo.md"),
+            "unchanged line should not appear as removed: {diff}"
+        );
+        // changed lines should still appear
+        assert!(
+            diff.contains("- ## reference repos"),
+            "removed line should appear: {diff}"
+        );
+        assert!(
+            diff.contains("+ ## gitignored local files"),
+            "added line should appear: {diff}"
+        );
     }
 
     #[test]
