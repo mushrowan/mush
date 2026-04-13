@@ -422,7 +422,7 @@ mod tests {
         };
         assert!(text.contains("batch: 1/1 succeeded, 0 failed"));
         assert!(text.contains("lines truncated"));
-        assert!(text.contains("Use grep to search"));
+        assert!(text.contains("Use the grep tool to search"));
         assert!(text.contains("line 0"));
         assert!(text.contains("line 4999"));
     }

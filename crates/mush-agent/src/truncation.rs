@@ -234,10 +234,10 @@ fn collect_tail<'a>(lines: &[&'a str], max_lines: usize, max_bytes: usize) -> (V
 fn actionable_hint(saved_path: &Option<PathBuf>) -> String {
     match saved_path {
         Some(path) => format!(
-            "Use grep to search or read with offset/limit to view sections. Full output: {}",
+            "Use the grep tool to search or the read tool with offset/limit to view sections (do not use bash cat). Full output: {}",
             path.display()
         ),
-        None => "Use grep to search or read with offset/limit to view sections.".into(),
+        None => "Use the grep tool to search or the read tool with offset/limit to view sections (do not use bash cat).".into(),
     }
 }
 
@@ -344,7 +344,7 @@ mod tests {
         let big = make_lines(3000);
         let out = apply(ToolResult::text(big), OutputLimit::Middle);
         assert_text(&out, |t| {
-            assert!(t.contains("Use grep to search or read with offset/limit"));
+            assert!(t.contains("Use the grep tool to search or the read tool with offset/limit"));
         });
     }
 
