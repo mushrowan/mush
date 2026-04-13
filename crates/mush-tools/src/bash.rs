@@ -93,8 +93,8 @@ impl AgentTool for BashTool {
          If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds. \
          For long-running commands (builds, test suites), set background: true to run \
          asynchronously and poll with bash_status to avoid cache busting. \
-         Prefer the grep tool over bash grep/rg for searching file contents, \
-         and find/glob tools over bash find for locating files."
+         For searching file contents, use the Grep tool instead of running grep or rg via bash. \
+         For locating files, use the Find or Glob tools instead of running find via bash."
     }
 
     fn output_limit(&self) -> mush_agent::tool::OutputLimit {

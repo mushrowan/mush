@@ -74,7 +74,7 @@ impl AgentTool for GrepTool {
          Returns matching lines with file paths and line numbers. \
          Use 'count' output to get per-file match counts instead of full lines. \
          Use 'files' output to get just filenames with matches. \
-         Prefer this over bash grep/rg for all file content searches."
+         Always use this tool instead of running grep or rg via the bash tool."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
