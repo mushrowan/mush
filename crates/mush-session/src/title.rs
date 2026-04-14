@@ -30,8 +30,7 @@ pub async fn generate_title(
         tools: vec![],
     };
 
-    let stream_future = registry.stream(model, &context, options).ok()?;
-    let mut stream = stream_future.await.ok()?;
+    let mut stream = registry.stream(model, &context, options).await.ok()?;
 
     let mut title = String::new();
     while let Some(event) = stream.next().await {

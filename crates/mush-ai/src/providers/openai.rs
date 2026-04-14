@@ -7,9 +7,7 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 
 use crate::env::env_api_key;
-use crate::registry::{
-    ApiProvider, EventStream, LlmContext, ProviderError, StreamResult, ToolDefinition,
-};
+use crate::registry::{ApiProvider, EventStream, LlmContext, ProviderError, ToolDefinition};
 use crate::stream::StreamEvent;
 use crate::types::*;
 
@@ -17,58 +15,61 @@ pub struct OpenaiCompletionsProvider {
     pub client: reqwest::Client,
 }
 
+#[async_trait::async_trait]
 impl ApiProvider for OpenaiCompletionsProvider {
     fn api(&self) -> Api {
         Api::OpenaiCompletions
     }
 
-    fn stream(&self, model: &Model, context: &LlmContext, options: &StreamOptions) -> StreamResult {
-        let model = model.clone();
-        let context_messages = context.messages.clone();
-        let system_prompt = context.system_prompt.clone();
-        let tools = context.tools.clone();
-        let options = options.clone();
-        let client = self.client.clone();
+    async fn stream(
+        &self,
+        model: &Model,
+        context: &LlmContext,
+        options: &StreamOptions,
+    ) -> Result<EventStream, ProviderError> {
+        let api_key = options
+            .api_key
+            .clone()
+            .or_else(|| env_api_key(&model.provider))
+            .ok_or_else(|| ProviderError::MissingApiKey(model.provider.clone()))?;
+        let api_key_str = api_key.expose();
+        let body = build_request_body(
+            model,
+            &context.system_prompt,
+            &context.messages,
+            &context.tools,
+            options,
+        );
 
-        Box::pin(async move {
-            let api_key = options
-                .api_key
-                .clone()
-                .or_else(|| env_api_key(&model.provider))
-                .ok_or_else(|| ProviderError::MissingApiKey(model.provider.clone()))?;
-            let api_key_str = api_key.expose();
-            let body =
-                build_request_body(&model, &system_prompt, &context_messages, &tools, &options);
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {api_key_str}"))?,
+        );
 
-            let mut headers = HeaderMap::new();
-            headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-            headers.insert(
-                AUTHORIZATION,
-                HeaderValue::from_str(&format!("Bearer {api_key_str}"))?,
-            );
+        let base_url = &model.base_url;
+        let url = format!("{base_url}/chat/completions");
 
-            let base_url = &model.base_url;
-            let url = format!("{base_url}/chat/completions");
+        tracing::debug!(model = %model.id, %url, "sending openai completions request");
 
-            tracing::debug!(model = %model.id, %url, "sending openai completions request");
+        let response = self
+            .client
+            .post(&url)
+            .headers(headers)
+            .json(&body)
+            .send()
+            .await?;
 
-            let response = client
-                .post(&url)
-                .headers(headers)
-                .json(&body)
-                .send()
-                .await?;
+        let response =
+            super::check_response(response, "openai completions", model.id.as_str(), &url).await?;
 
-            let response =
-                super::check_response(response, "openai completions", model.id.as_str(), &url)
-                    .await?;
-
-            let model_id = model.id.clone();
-            let provider = model.provider.clone();
-            let api = model.api;
-
-            Ok(parse_sse_stream(response, model_id, provider, api))
-        })
+        Ok(parse_sse_stream(
+            response,
+            model.id.clone(),
+            model.provider.clone(),
+            model.api,
+        ))
     }
 }
 
