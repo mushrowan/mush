@@ -25,11 +25,22 @@ pub fn summarise_tool_args(tool_name: &str, args: &serde_json::Value) -> String 
     match tool_name.to_lowercase().replace('_', "").as_str() {
         "read" | "write" | "edit" => args["path"].as_str().unwrap_or("").to_string(),
         "bash" => {
-            let cmd = args["command"].as_str().unwrap_or("");
-            if cmd.chars().count() > 60 {
-                truncate_with_ellipsis(cmd, 60)
+            let raw = args["command"].as_str().unwrap_or("");
+            // collapse newlines into " && " so the summary stays single-line
+            // (ratatui swallows \n inside a Span, concatenating text with no separator)
+            let cmd = if raw.contains('\n') {
+                raw.split('\n')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" && ")
             } else {
-                cmd.to_string()
+                raw.to_string()
+            };
+            if cmd.chars().count() > 60 {
+                truncate_with_ellipsis(&cmd, 60)
+            } else {
+                cmd
             }
         }
         "grep" => {
@@ -87,6 +98,20 @@ mod tests {
     fn bash_tool_keeps_short_command() {
         let short = serde_json::json!({"command": "ls -la"});
         assert_eq!(summarise_tool_args("bash", &short), "ls -la");
+    }
+
+    #[test]
+    fn bash_tool_collapses_newlines() {
+        // models sometimes send multi-line commands like cd + echo
+        // newlines in the summary cause display glitches in the TUI
+        // because ratatui swallows \n inside a Span
+        let multiline = serde_json::json!({"command": "cd /home/user/dev/project\necho hello"});
+        let summary = summarise_tool_args("bash", &multiline);
+        assert!(
+            !summary.contains('\n'),
+            "summary should not contain newlines: {summary}"
+        );
+        assert_eq!(summary, "cd /home/user/dev/project && echo hello");
     }
 
     #[test]
