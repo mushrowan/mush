@@ -829,6 +829,45 @@ struct ErrorData {
 
 use super::StreamBlock;
 
+struct AnthropicProcessor {
+    blocks: Vec<StreamBlock>,
+    is_oauth: bool,
+    tools: Vec<ToolDefinition>,
+}
+
+impl super::sse::SseProcessor for AnthropicProcessor {
+    fn process(
+        &mut self,
+        raw: &super::sse::SseRawEvent,
+        output: &mut AssistantMessage,
+    ) -> super::sse::ProcessResult {
+        match serde_json::from_str::<SseEvent>(&raw.data) {
+            Ok(event) => {
+                let events =
+                    process_sse_event(event, output, &mut self.blocks, self.is_oauth, &self.tools);
+                super::sse::ProcessResult::Events(events)
+            }
+            Err(_) => {
+                // [DONE] and empty payloads are expected
+                super::sse::ProcessResult::Skip
+            }
+        }
+    }
+
+    fn finish(&mut self, _output: &mut AssistantMessage) {
+        // anthropic sends explicit message_stop events, no cleanup needed
+    }
+
+    fn emit_start(&self) -> bool {
+        // anthropic emits Start from within process() on message_start
+        false
+    }
+
+    fn label(&self) -> &'static str {
+        "anthropic"
+    }
+}
+
 fn parse_sse_stream(
     response: reqwest::Response,
     model_id: ModelId,
@@ -837,114 +876,12 @@ fn parse_sse_stream(
     is_oauth: bool,
     tools: Vec<ToolDefinition>,
 ) -> EventStream {
-    let event_stream = async_stream::stream! {
-        let mut output = AssistantMessage {
-            content: vec![],
-            model: model_id.clone(),
-            provider: provider_name.clone(),
-            api,
-            usage: Usage::default(),
-            stop_reason: StopReason::Stop,
-            error_message: None,
-            timestamp_ms: Timestamp::now(),
-        };
-
-        let mut blocks: Vec<StreamBlock> = Vec::new();
-        let mut parser = super::sse::SseParser::new();
-        let mut raw_capture: Vec<u8> = Vec::new();
-        const MAX_CAPTURE_BYTES: usize = 128 * 1024;
-
-        use futures::TryStreamExt;
-        let mut byte_stream = response.bytes_stream();
-
-        loop {
-            match byte_stream.try_next().await {
-                Ok(Some(chunk)) => {
-                    if raw_capture.len() < MAX_CAPTURE_BYTES {
-                        let remain = MAX_CAPTURE_BYTES - raw_capture.len();
-                        let take = remain.min(chunk.len());
-                        raw_capture.extend_from_slice(&chunk[..take]);
-                    }
-                    let chunk_len = chunk.len();
-                    let chunk_preview = super::sse::preview_bytes(&chunk, 240);
-                    tracing::trace!(
-                        model = %model_id,
-                        provider = %provider_name,
-                        api = ?api,
-                        chunk_len,
-                        chunk_preview = %chunk_preview,
-                        "anthropic raw stream chunk"
-                    );
-                    for raw in parser.push(&chunk) {
-                        tracing::trace!(
-                            model = %model_id,
-                            provider = %provider_name,
-                            api = ?api,
-                            event_name = raw.event.as_deref().unwrap_or("message"),
-                            data_preview = %super::sse::preview_text(raw.data.trim(), 240),
-                            "anthropic sse event"
-                        );
-                        match serde_json::from_str::<SseEvent>(&raw.data) {
-                            Ok(event) => {
-                                for stream_event in process_sse_event(event, &mut output, &mut blocks, is_oauth, &tools) {
-                                    yield stream_event;
-                                }
-                            }
-                            Err(e) => {
-                                // [DONE] and empty payloads are expected
-                                let data = raw.data.trim();
-                                if data != "[DONE]" && !data.is_empty() {
-                                    tracing::warn!(
-                                        model = %model_id,
-                                        provider = %provider_name,
-                                        api = ?api,
-                                        error = %e,
-                                        data_preview = %super::sse::preview_text(data, 240),
-                                        "anthropic non-parseable sse payload"
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-                Ok(None) => break,
-                Err(e) => {
-                    let capture_path = super::openai_responses::write_decode_snapshot(
-                        &model_id.to_string(),
-                        &provider_name.to_string(),
-                        &raw_capture,
-                    );
-                    tracing::error!(
-                        model = %model_id,
-                        provider = %provider_name,
-                        api = ?api,
-                        error = %e,
-                        captured_bytes = raw_capture.len(),
-                        capture_path = capture_path.as_deref().unwrap_or("<none>"),
-                        capture_preview = %super::sse::preview_bytes(&raw_capture, 400),
-                        "anthropic body stream decode error"
-                    );
-                    output.stop_reason = StopReason::Error;
-                    output.error_message = Some(super::format_error_chain(&e));
-                    yield StreamEvent::Error {
-                        reason: StopReason::Error,
-                        message: output,
-                    };
-                    return;
-                }
-            }
-        }
-
-        // emit done if we haven't errored
-        if output.stop_reason != StopReason::Error && output.stop_reason != StopReason::Aborted {
-            yield StreamEvent::Done {
-                reason: output.stop_reason,
-                message: output,
-            };
-        }
+    let processor = AnthropicProcessor {
+        blocks: Vec::new(),
+        is_oauth,
+        tools,
     };
-
-    Box::pin(event_stream)
+    super::sse::run_sse_stream(response, model_id, provider_name, api, processor)
 }
 
 fn process_sse_event(

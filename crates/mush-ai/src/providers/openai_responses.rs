@@ -671,119 +671,37 @@ impl ActiveBlocks {
     }
 }
 
-fn parse_sse_stream(
-    response: reqwest::Response,
-    model_id: ModelId,
-    provider_name: Provider,
-    api: Api,
-) -> EventStream {
-    let event_stream = async_stream::stream! {
-        let mut output = AssistantMessage {
-            content: vec![],
-            model: model_id.clone(),
-            provider: provider_name.clone(),
-            api,
-            usage: Usage::default(),
-            stop_reason: StopReason::Stop,
-            error_message: None,
-            timestamp_ms: Timestamp::now(),
-        };
+struct OpenAiResponsesProcessor {
+    active: ActiveBlocks,
+}
 
-        let mut active = ActiveBlocks::new();
-        let mut parser = super::sse::SseParser::new();
-        let mut raw_capture: Vec<u8> = Vec::new();
-        const MAX_CAPTURE_BYTES: usize = 128 * 1024;
-
-        use futures::TryStreamExt;
-        let mut byte_stream = response.bytes_stream();
-
-        yield StreamEvent::Start { partial: output.clone() };
-
-        loop {
-            match byte_stream.try_next().await {
-                Ok(Some(chunk)) => {
-                    if raw_capture.len() < MAX_CAPTURE_BYTES {
-                        let remain = MAX_CAPTURE_BYTES - raw_capture.len();
-                        let take = remain.min(chunk.len());
-                        raw_capture.extend_from_slice(&chunk[..take]);
-                    }
-                    let chunk_len = chunk.len();
-                    let chunk_preview = super::sse::preview_bytes(&chunk, 240);
-                    tracing::trace!(
-                        model = %model_id,
-                        provider = %provider_name,
-                        api = ?api,
-                        chunk_len,
-                        chunk_preview = %chunk_preview,
-                        "openai responses raw stream chunk"
-                    );
-                    for raw in parser.push(&chunk) {
-                        let data = raw.data.trim();
-                        tracing::trace!(
-                            model = %model_id,
-                            provider = %provider_name,
-                            api = ?api,
-                            event_name = raw.event.as_deref().unwrap_or("message"),
-                            data_preview = %super::sse::preview_text(data, 240),
-                            "openai responses sse event"
-                        );
-                        if data == "[DONE]" {
-                            continue;
-                        }
-                        if data.starts_with('{') {
-                            for event in process_sse_event(
-                                raw.event.as_deref(),
-                                data,
-                                &mut output,
-                                &mut active,
-                            ) {
-                                let is_error = matches!(event, StreamEvent::Error { .. });
-                                yield event;
-                                if is_error {
-                                    return;
-                                }
-                            }
-                        } else {
-                            tracing::warn!(
-                                model = %model_id,
-                                provider = %provider_name,
-                                api = ?api,
-                                data_preview = %super::sse::preview_text(data, 240),
-                                "openai responses non-json sse payload"
-                            );
-                        }
-                    }
-                }
-                Ok(None) => break,
-                Err(e) => {
-                    let capture_path = write_decode_snapshot(
-                        &model_id.to_string(),
-                        &provider_name.to_string(),
-                        &raw_capture,
-                    );
-                    tracing::error!(
-                        model = %model_id,
-                        provider = %provider_name,
-                        api = ?api,
-                        error = %e,
-                        captured_bytes = raw_capture.len(),
-                        capture_path = capture_path.as_deref().unwrap_or("<none>"),
-                        capture_preview = %super::sse::preview_bytes(&raw_capture, 400),
-                        "openai responses body stream decode error"
-                    );
-                    finish_all_blocks(&mut active, &mut output);
-                    output.stop_reason = StopReason::Error;
-                    output.error_message = Some(super::format_error_chain(&e));
-                    yield StreamEvent::Error {
-                        reason: output.stop_reason,
-                        message: output.clone(),
-                    };
-                    return;
-                }
+impl super::sse::SseProcessor for OpenAiResponsesProcessor {
+    fn process(
+        &mut self,
+        raw: &super::sse::SseRawEvent,
+        output: &mut AssistantMessage,
+    ) -> super::sse::ProcessResult {
+        let data = raw.data.trim();
+        if data == "[DONE]" {
+            return super::sse::ProcessResult::Skip;
+        }
+        if !data.starts_with('{') {
+            return super::sse::ProcessResult::Skip;
+        }
+        let events = process_sse_event(raw.event.as_deref(), data, output, &mut self.active);
+        // if any event is a fatal error, split it out
+        for event in &events {
+            if matches!(event, StreamEvent::Error { .. }) {
+                return super::sse::ProcessResult::Fatal(
+                    events.into_iter().next().unwrap_or_else(|| unreachable!()),
+                );
             }
         }
+        super::sse::ProcessResult::Events(events)
+    }
 
-        finish_all_blocks(&mut active, &mut output);
+    fn finish(&mut self, output: &mut AssistantMessage) {
+        finish_all_blocks(&mut self.active, output);
         if output.stop_reason == StopReason::Stop
             && output
                 .content
@@ -792,14 +710,23 @@ fn parse_sse_stream(
         {
             output.stop_reason = StopReason::ToolUse;
         }
+    }
 
-        yield StreamEvent::Done {
-            reason: output.stop_reason,
-            message: output,
-        };
+    fn label(&self) -> &'static str {
+        "openai responses"
+    }
+}
+
+fn parse_sse_stream(
+    response: reqwest::Response,
+    model_id: ModelId,
+    provider_name: Provider,
+    api: Api,
+) -> EventStream {
+    let processor = OpenAiResponsesProcessor {
+        active: ActiveBlocks::new(),
     };
-
-    Box::pin(event_stream)
+    super::sse::run_sse_stream(response, model_id, provider_name, api, processor)
 }
 
 fn process_sse_event(
