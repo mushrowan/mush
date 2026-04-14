@@ -5,7 +5,6 @@
 //! the right provider at call time.
 
 use std::collections::HashMap;
-use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -14,9 +13,6 @@ use crate::types::{Api, Model, StreamOptions};
 
 /// a boxed stream of events from an LLM provider
 pub type EventStream = Pin<Box<dyn futures::Stream<Item = StreamEvent> + Send>>;
-
-/// a boxed future that returns an event stream (allows async setup)
-pub type StreamResult = Pin<Box<dyn Future<Output = Result<EventStream, ProviderError>> + Send>>;
 
 /// errors from provider operations
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
@@ -98,10 +94,16 @@ pub struct ToolDefinition {
 }
 
 /// trait that LLM api providers implement
+#[async_trait::async_trait]
 pub trait ApiProvider: Send + Sync {
     fn api(&self) -> Api;
 
-    fn stream(&self, model: &Model, context: &LlmContext, options: &StreamOptions) -> StreamResult;
+    async fn stream(
+        &self,
+        model: &Model,
+        context: &LlmContext,
+        options: &StreamOptions,
+    ) -> Result<EventStream, ProviderError>;
 }
 
 /// registry holding all available api providers
@@ -126,16 +128,16 @@ impl ApiRegistry {
     }
 
     #[tracing::instrument(name = "llm_stream", skip_all, fields(model = %model.id, api = ?model.api))]
-    pub fn stream(
+    pub async fn stream(
         &self,
         model: &Model,
         context: &LlmContext,
         options: &StreamOptions,
-    ) -> Result<StreamResult, ProviderError> {
+    ) -> Result<EventStream, ProviderError> {
         let provider = self
             .get(model.api)
             .ok_or(ProviderError::NoProvider(model.api))?;
-        Ok(provider.stream(model, context, options))
+        provider.stream(model, context, options).await
     }
 }
 
@@ -150,8 +152,8 @@ mod tests {
         assert!(registry.get(Api::AnthropicMessages).is_none());
     }
 
-    #[test]
-    fn stream_without_provider_returns_error() {
+    #[tokio::test]
+    async fn stream_without_provider_returns_error() {
         let registry = ApiRegistry::new();
         let model = crate::types::Model {
             id: "test".into(),
@@ -175,7 +177,9 @@ mod tests {
             messages: vec![],
             tools: vec![],
         };
-        let err = registry.stream(&model, &ctx, &StreamOptions::default());
+        let err = registry
+            .stream(&model, &ctx, &StreamOptions::default())
+            .await;
         assert!(err.is_err());
     }
 

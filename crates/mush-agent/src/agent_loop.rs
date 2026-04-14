@@ -377,27 +377,19 @@ pub fn agent_loop(
                         tokio::time::sleep(delay).await;
                     }
 
-                    let stream_result = config.registry.stream(
+                    match config.registry.stream(
                         &config.model, &context, &config.options,
-                    );
-                    match stream_result {
-                        Ok(fut) => match fut.await {
-                            Ok(stream) => {
-                                event_stream = Some(stream);
-                                break;
-                            }
-                            Err(e) if e.is_retryable() && attempt < MAX_RETRIES => {
-                                tracing::warn!(error = %e, "retryable request error");
-                                last_error = Some(format!("request failed: {e}"));
-                            }
-                            Err(e) => {
-                                last_error = Some(format!("request failed: {e}"));
-                                break;
-                            }
-                        },
+                    ).await {
+                        Ok(stream) => {
+                            event_stream = Some(stream);
+                            break;
+                        }
+                        Err(e) if e.is_retryable() && attempt < MAX_RETRIES => {
+                            tracing::warn!(error = %e, "retryable request error");
+                            last_error = Some(format!("request failed: {e}"));
+                        }
                         Err(e) => {
-                            // setup errors (no provider, missing key) aren't retryable
-                            last_error = Some(format!("stream setup failed: {e}"));
+                            last_error = Some(format!("request failed: {e}"));
                             break;
                         }
                     }
@@ -1004,17 +996,19 @@ mod tests {
             calls: Arc<AtomicUsize>,
         }
 
+        #[async_trait::async_trait]
         impl mush_ai::registry::ApiProvider for ScriptedProvider {
             fn api(&self) -> Api {
                 Api::AnthropicMessages
             }
 
-            fn stream(
+            async fn stream(
                 &self,
                 model: &Model,
                 _context: &mush_ai::registry::LlmContext,
                 _options: &StreamOptions,
-            ) -> mush_ai::registry::StreamResult {
+            ) -> Result<mush_ai::registry::EventStream, mush_ai::registry::ProviderError>
+            {
                 let call = self.calls.fetch_add(1, Ordering::SeqCst);
                 let msg = AssistantMessage {
                     content: if call == 0 {
@@ -1041,18 +1035,16 @@ mod tests {
                     timestamp_ms: Timestamp::zero(),
                 };
 
-                Box::pin(async move {
-                    let s = async_stream::stream! {
-                        yield StreamEvent::Start {
-                            partial: msg.clone(),
-                        };
-                        yield StreamEvent::Done {
-                            reason: msg.stop_reason,
-                            message: msg,
-                        };
+                let s = async_stream::stream! {
+                    yield StreamEvent::Start {
+                        partial: msg.clone(),
                     };
-                    Ok(Box::pin(s) as mush_ai::registry::EventStream)
-                })
+                    yield StreamEvent::Done {
+                        reason: msg.stop_reason,
+                        message: msg,
+                    };
+                };
+                Ok(Box::pin(s) as mush_ai::registry::EventStream)
             }
         }
 

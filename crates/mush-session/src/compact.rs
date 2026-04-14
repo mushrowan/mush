@@ -503,8 +503,7 @@ async fn call_for_text(
     context: &LlmContext,
     options: &StreamOptions,
 ) -> Option<String> {
-    let stream_future = registry.stream(model, context, options).ok()?;
-    let mut stream = stream_future.await.ok()?;
+    let mut stream = registry.stream(model, context, options).await.ok()?;
 
     let mut text = String::new();
     while let Some(event) = stream.next().await {

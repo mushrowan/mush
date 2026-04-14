@@ -10,9 +10,7 @@ use reqwest::header::{
 use serde::Serialize;
 
 use crate::env::env_api_key;
-use crate::registry::{
-    ApiProvider, EventStream, LlmContext, ProviderError, StreamResult, ToolDefinition,
-};
+use crate::registry::{ApiProvider, EventStream, LlmContext, ProviderError, ToolDefinition};
 use crate::stream::StreamEvent;
 use crate::types::*;
 
@@ -23,55 +21,53 @@ pub struct OpenaiResponsesProvider {
     pub client: reqwest::Client,
 }
 
+#[async_trait::async_trait]
 impl ApiProvider for OpenaiResponsesProvider {
     fn api(&self) -> Api {
         Api::OpenaiResponses
     }
 
-    fn stream(&self, model: &Model, context: &LlmContext, options: &StreamOptions) -> StreamResult {
-        let model = model.clone();
-        let context_messages = context.messages.clone();
-        let system_prompt = context.system_prompt.clone();
-        let tools = context.tools.clone();
-        let options = options.clone();
-        let client = self.client.clone();
+    async fn stream(
+        &self,
+        model: &Model,
+        context: &LlmContext,
+        options: &StreamOptions,
+    ) -> Result<EventStream, ProviderError> {
+        let api_key = options
+            .api_key
+            .clone()
+            .or_else(|| env_api_key(&model.provider))
+            .ok_or_else(|| ProviderError::MissingApiKey(model.provider.clone()))?;
 
-        Box::pin(async move {
-            let api_key = options
-                .api_key
-                .clone()
-                .or_else(|| env_api_key(&model.provider))
-                .ok_or_else(|| ProviderError::MissingApiKey(model.provider.clone()))?;
+        let is_codex = is_codex_provider(model);
+        let body = build_request_body(
+            model,
+            &context.system_prompt,
+            &context.messages,
+            &context.tools,
+            options,
+            is_codex,
+        );
 
-            let is_codex = is_codex_provider(&model);
-            let body = build_request_body(
-                &model,
-                &system_prompt,
-                &context_messages,
-                &tools,
-                &options,
-                is_codex,
-            );
+        let url = resolve_url(model, is_codex);
+        let headers = build_headers(&api_key, options, is_codex)?;
+        let response = self
+            .client
+            .post(&url)
+            .headers(headers)
+            .json(&body)
+            .send()
+            .await?;
 
-            let url = resolve_url(&model, is_codex);
-            let headers = build_headers(&api_key, &options, is_codex)?;
-            let response = client
-                .post(&url)
-                .headers(headers)
-                .json(&body)
-                .send()
-                .await?;
+        let response =
+            super::check_response(response, "openai responses", model.id.as_str(), &url).await?;
 
-            let response =
-                super::check_response(response, "openai responses", model.id.as_str(), &url)
-                    .await?;
-
-            let model_id = model.id.clone();
-            let provider = model.provider.clone();
-            let api = model.api;
-
-            Ok(parse_sse_stream(response, model_id, provider, api))
-        })
+        Ok(parse_sse_stream(
+            response,
+            model.id.clone(),
+            model.provider.clone(),
+            model.api,
+        ))
     }
 }
 

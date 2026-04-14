@@ -7,9 +7,7 @@ use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 
 use crate::env::anthropic_api_key;
-use crate::registry::{
-    ApiProvider, EventStream, LlmContext, ProviderError, StreamResult, ToolDefinition,
-};
+use crate::registry::{ApiProvider, EventStream, LlmContext, ProviderError, ToolDefinition};
 use crate::stream::StreamEvent;
 use crate::types::*;
 
@@ -68,102 +66,103 @@ pub struct AnthropicProvider {
     pub client: reqwest::Client,
 }
 
+#[async_trait::async_trait]
 impl ApiProvider for AnthropicProvider {
     fn api(&self) -> Api {
         Api::AnthropicMessages
     }
 
-    fn stream(&self, model: &Model, context: &LlmContext, options: &StreamOptions) -> StreamResult {
-        let model = model.clone();
-        let context_messages = context.messages.clone();
-        let system_prompt = context.system_prompt.clone();
-        let tools = context.tools.clone();
-        let options = options.clone();
-        let client = self.client.clone();
+    async fn stream(
+        &self,
+        model: &Model,
+        context: &LlmContext,
+        options: &StreamOptions,
+    ) -> Result<EventStream, ProviderError> {
+        let api_key = options
+            .api_key
+            .clone()
+            .or_else(anthropic_api_key)
+            .ok_or_else(|| ProviderError::MissingApiKey(Provider::Anthropic))?;
 
-        Box::pin(async move {
-            let api_key = options
-                .api_key
-                .clone()
-                .or_else(anthropic_api_key)
-                .ok_or_else(|| ProviderError::MissingApiKey(Provider::Anthropic))?;
+        let is_oauth = api_key.is_oauth_token();
 
-            let is_oauth = api_key.is_oauth_token();
+        let body = build_request_body(
+            model,
+            &context.system_prompt,
+            &context.messages,
+            &context.tools,
+            options,
+            is_oauth,
+        );
 
-            let body = build_request_body(
-                &model,
-                &system_prompt,
-                &context_messages,
-                &tools,
-                &options,
-                is_oauth,
+        tracing::trace!(
+            body = %serde_json::to_string_pretty(&body).unwrap_or_default(),
+            "anthropic request body"
+        );
+
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
+        headers.insert("anthropic-version", HeaderValue::from_static(API_VERSION));
+
+        if is_oauth {
+            headers.insert(
+                "anthropic-beta",
+                HeaderValue::from_static(
+                    "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14",
+                ),
             );
-
-            tracing::trace!(
-                body = %serde_json::to_string_pretty(&body).unwrap_or_default(),
-                "anthropic request body"
+            headers.insert(
+                "user-agent",
+                HeaderValue::from_static(concat!("claude-cli/", "2.1.62")),
             );
+            headers.insert("x-app", HeaderValue::from_static("cli"));
+            let key = api_key.expose();
+            headers.insert(
+                "authorization",
+                HeaderValue::from_str(&format!("Bearer {key}"))?,
+            );
+        } else {
+            let key = api_key.expose();
+            headers.insert(
+                "anthropic-beta",
+                HeaderValue::from_static(
+                    "fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14",
+                ),
+            );
+            headers.insert("x-api-key", HeaderValue::from_str(key)?);
+        }
 
-            let mut headers = HeaderMap::new();
-            headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-            headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
-            headers.insert("anthropic-version", HeaderValue::from_static(API_VERSION));
+        let base_url = if model.base_url.is_empty() {
+            DEFAULT_BASE_URL
+        } else {
+            &model.base_url
+        };
+        let url = format!("{base_url}/v1/messages");
 
-            if is_oauth {
-                headers.insert(
-                    "anthropic-beta",
-                    HeaderValue::from_static(
-                        "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14",
-                    ),
-                );
-                headers.insert(
-                    "user-agent",
-                    HeaderValue::from_static(concat!("claude-cli/", "2.1.62")),
-                );
-                headers.insert("x-app", HeaderValue::from_static("cli"));
-                let key = api_key.expose();
-                headers.insert(
-                    "authorization",
-                    HeaderValue::from_str(&format!("Bearer {key}"))?,
-                );
-            } else {
-                let key = api_key.expose();
-                headers.insert(
-                    "anthropic-beta",
-                    HeaderValue::from_static(
-                        "fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14",
-                    ),
-                );
-                headers.insert("x-api-key", HeaderValue::from_str(key)?);
-            }
+        tracing::debug!(model = %model.id, %url, oauth = is_oauth, "sending anthropic request");
 
-            let base_url = if model.base_url.is_empty() {
-                DEFAULT_BASE_URL
-            } else {
-                &model.base_url
-            };
-            let url = format!("{base_url}/v1/messages");
+        let response = self
+            .client
+            .post(&url)
+            .headers(headers)
+            .json(&body)
+            .send()
+            .await?;
 
-            tracing::debug!(model = %model.id, %url, oauth = is_oauth, "sending anthropic request");
+        let response =
+            super::check_response(response, "anthropic", model.id.as_str(), &url).await?;
 
-            let response = client
-                .post(&url)
-                .headers(headers)
-                .json(&body)
-                .send()
-                .await?;
+        let sse_stream = parse_sse_stream(
+            response,
+            model.id.clone(),
+            model.provider.clone(),
+            model.api,
+            is_oauth,
+            context.tools.clone(),
+        );
 
-            let response =
-                super::check_response(response, "anthropic", model.id.as_str(), &url).await?;
-
-            let model_id = model.id.clone();
-            let provider_name = model.provider.clone();
-            let api = model.api;
-            let sse_stream =
-                parse_sse_stream(response, model_id, provider_name, api, is_oauth, tools);
-
-            Ok(sse_stream)
-        })
+        Ok(sse_stream)
     }
 }
 
