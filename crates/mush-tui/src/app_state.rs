@@ -91,6 +91,21 @@ pub struct NavigationState {
 /// keyed by (content_hash, width) so entries invalidate on content or resize.
 type CachedIndentedLines = (u64, u16, Vec<Line<'static>>);
 
+/// cached estimated height for a single message.
+/// keyed by cheap O(1) byte-length fingerprint so we avoid
+/// re-scanning content with chars().count() every frame
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CachedHeight {
+    pub content_len: usize,
+    pub thinking_len: usize,
+    pub tool_output_len: usize,
+    pub completed_tool_count: usize,
+    pub thinking_expanded: bool,
+    pub has_usage: bool,
+    pub width: u16,
+    pub height: usize,
+}
+
 /// render caches and geometry from the last frame
 #[derive(Debug)]
 pub struct RenderState {
@@ -114,6 +129,10 @@ pub struct RenderState {
     /// stores (content_hash, width, pre-indented lines) so stable
     /// messages skip both the markdown clone and indent_line computation
     pub indented_cache: RefCell<Vec<Option<CachedIndentedLines>>>,
+    /// per-message estimated height cache.
+    /// avoids re-running count_estimated_lines (which does chars().count()
+    /// per line) on every frame for stable messages
+    pub height_cache: RefCell<Vec<Option<CachedHeight>>>,
 }
 
 impl RenderState {
@@ -129,6 +148,7 @@ impl RenderState {
             total_content_lines: Cell::new(0),
             visible_area_height: Cell::new(0),
             indented_cache: RefCell::new(Vec::new()),
+            height_cache: RefCell::new(Vec::new()),
         }
     }
 }
