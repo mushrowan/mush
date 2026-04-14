@@ -774,10 +774,10 @@ async fn execute_tool(tools: &ToolRegistry, tool_call: &ToolCall) -> ToolResult 
 mod tests {
     use super::*;
     use crate::tool::{AgentTool, ToolRegistry};
-    use std::pin::Pin;
 
     struct CounterTool;
 
+    #[async_trait::async_trait]
     impl AgentTool for CounterTool {
         fn name(&self) -> &str {
             "counter"
@@ -791,11 +791,8 @@ mod tests {
         fn parameters_schema(&self) -> serde_json::Value {
             serde_json::json!({"type": "object", "properties": {}})
         }
-        fn execute(
-            &self,
-            _args: serde_json::Value,
-        ) -> Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
-            Box::pin(async { ToolResult::text("42") })
+        async fn execute(&self, _args: serde_json::Value) -> ToolResult {
+            ToolResult::text("42")
         }
     }
 
@@ -869,6 +866,7 @@ mod tests {
 
     struct WebSearchTool;
 
+    #[async_trait::async_trait]
     impl AgentTool for WebSearchTool {
         fn name(&self) -> &str {
             "web_search"
@@ -882,11 +880,8 @@ mod tests {
         fn parameters_schema(&self) -> serde_json::Value {
             serde_json::json!({"type": "object", "properties": {}})
         }
-        fn execute(
-            &self,
-            _args: serde_json::Value,
-        ) -> Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
-            Box::pin(async { ToolResult::text("results") })
+        async fn execute(&self, _args: serde_json::Value) -> ToolResult {
+            ToolResult::text("results")
         }
     }
 

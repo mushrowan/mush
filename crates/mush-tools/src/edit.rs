@@ -70,6 +70,7 @@ impl EditTool {
     }
 }
 
+#[async_trait::async_trait]
 impl AgentTool for EditTool {
     fn name(&self) -> &str {
         "edit"
@@ -117,26 +118,21 @@ impl AgentTool for EditTool {
         })
     }
 
-    fn execute(
-        &self,
-        args: serde_json::Value,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
-        Box::pin(async move {
-            let args = match parse_tool_args::<EditArgs>(args) {
-                Ok(args) => args,
-                Err(error) => return error,
-            };
-            let (path, old_text, new_text, opts) = match args.into_opts() {
-                Ok(args) => args,
-                Err(error) => return ToolResult::error(error.to_string()),
-            };
+    async fn execute(&self, args: serde_json::Value) -> ToolResult {
+        let args = match parse_tool_args::<EditArgs>(args) {
+            Ok(args) => args,
+            Err(error) => return error,
+        };
+        let (path, old_text, new_text, opts) = match args.into_opts() {
+            Ok(args) => args,
+            Err(error) => return ToolResult::error(error.to_string()),
+        };
 
-            let path = resolve_path(&self.cwd, &path);
+        let path = resolve_path(&self.cwd, &path);
 
-            tokio::task::spawn_blocking(move || edit_file(&path, &old_text, &new_text, &opts))
-                .await
-                .unwrap_or_else(|e| ToolResult::error(format!("task join error: {e}")))
-        })
+        tokio::task::spawn_blocking(move || edit_file(&path, &old_text, &new_text, &opts))
+            .await
+            .unwrap_or_else(|e| ToolResult::error(format!("task join error: {e}")))
     }
 }
 

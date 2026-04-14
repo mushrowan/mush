@@ -501,6 +501,7 @@ impl ApplyPatchTool {
     }
 }
 
+#[async_trait::async_trait]
 impl AgentTool for ApplyPatchTool {
     fn name(&self) -> &str {
         "apply_patch"
@@ -525,32 +526,27 @@ impl AgentTool for ApplyPatchTool {
         })
     }
 
-    fn execute(
-        &self,
-        args: serde_json::Value,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
-        Box::pin(async move {
-            let args = match parse_tool_args::<ApplyPatchArgs>(args) {
-                Ok(args) => args,
-                Err(error) => return error,
-            };
-            if args.patch_text.is_empty() {
-                return ToolResult::error("patch_text is required");
-            }
+    async fn execute(&self, args: serde_json::Value) -> ToolResult {
+        let args = match parse_tool_args::<ApplyPatchArgs>(args) {
+            Ok(args) => args,
+            Err(error) => return error,
+        };
+        if args.patch_text.is_empty() {
+            return ToolResult::error("patch_text is required");
+        }
 
-            let hunks = match parse_patch(&args.patch_text) {
-                Ok(h) => h,
-                Err(e) => return ToolResult::error(format!("patch parse error: {e}")),
-            };
+        let hunks = match parse_patch(&args.patch_text) {
+            Ok(h) => h,
+            Err(e) => return ToolResult::error(format!("patch parse error: {e}")),
+        };
 
-            match apply_hunks(&self.cwd, &hunks) {
-                Ok(summary) => {
-                    let output = format!("applied patch successfully:\n{}", summary.join("\n"));
-                    ToolResult::text(output)
-                }
-                Err(e) => ToolResult::error(format!("patch apply error: {e}")),
+        match apply_hunks(&self.cwd, &hunks) {
+            Ok(summary) => {
+                let output = format!("applied patch successfully:\n{}", summary.join("\n"));
+                ToolResult::text(output)
             }
-        })
+            Err(e) => ToolResult::error(format!("patch apply error: {e}")),
+        }
     }
 }
 

@@ -5,7 +5,6 @@
 //! state management pattern
 
 use std::collections::HashMap;
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
@@ -168,6 +167,7 @@ pub struct ReadStateTool {
     pub state: SharedState,
 }
 
+#[async_trait::async_trait]
 impl AgentTool for ReadStateTool {
     fn name(&self) -> &str {
         "read_state"
@@ -195,33 +195,28 @@ impl AgentTool for ReadStateTool {
         })
     }
 
-    fn execute(
-        &self,
-        args: serde_json::Value,
-    ) -> Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
-        Box::pin(async move {
-            let args = match parse_tool_args::<ReadStateArgs>(args) {
-                Ok(args) => args,
-                Err(error) => return error,
-            };
+    async fn execute(&self, args: serde_json::Value) -> ToolResult {
+        let args = match parse_tool_args::<ReadStateArgs>(args) {
+            Ok(args) => args,
+            Err(error) => return error,
+        };
 
-            match args.key.as_deref() {
-                Some(key) => match self.state.get(key) {
-                    Some(val) => ToolResult::text(
-                        serde_json::to_string_pretty(&val).unwrap_or_else(|_| format!("{val:?}")),
-                    ),
-                    None => ToolResult::text(format!("key \"{key}\" not found")),
-                },
-                None => {
-                    let keys = self.state.keys();
-                    if keys.is_empty() {
-                        ToolResult::text("shared state is empty")
-                    } else {
-                        ToolResult::text(format!("keys: {}", keys.join(", ")))
-                    }
+        match args.key.as_deref() {
+            Some(key) => match self.state.get(key) {
+                Some(val) => ToolResult::text(
+                    serde_json::to_string_pretty(&val).unwrap_or_else(|_| format!("{val:?}")),
+                ),
+                None => ToolResult::text(format!("key \"{key}\" not found")),
+            },
+            None => {
+                let keys = self.state.keys();
+                if keys.is_empty() {
+                    ToolResult::text("shared state is empty")
+                } else {
+                    ToolResult::text(format!("keys: {}", keys.join(", ")))
                 }
             }
-        })
+        }
     }
 }
 
@@ -230,6 +225,7 @@ pub struct WriteStateTool {
     pub state: SharedState,
 }
 
+#[async_trait::async_trait]
 impl AgentTool for WriteStateTool {
     fn name(&self) -> &str {
         "write_state"
@@ -267,23 +263,18 @@ impl AgentTool for WriteStateTool {
         })
     }
 
-    fn execute(
-        &self,
-        args: serde_json::Value,
-    ) -> Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
-        Box::pin(async move {
-            let args = match parse_tool_args::<WriteStateArgs>(args) {
-                Ok(args) => args,
-                Err(error) => return error,
-            };
+    async fn execute(&self, args: serde_json::Value) -> ToolResult {
+        let args = match parse_tool_args::<WriteStateArgs>(args) {
+            Ok(args) => args,
+            Err(error) => return error,
+        };
 
-            if let Some(reducer) = args.reducer {
-                self.state.set_reducer(&args.key, reducer);
-            }
+        if let Some(reducer) = args.reducer {
+            self.state.set_reducer(&args.key, reducer);
+        }
 
-            self.state.set(&args.key, args.value);
-            ToolResult::text(format!("wrote to \"{}\"", args.key))
-        })
+        self.state.set(&args.key, args.value);
+        ToolResult::text(format!("wrote to \"{}\"", args.key))
     }
 }
 

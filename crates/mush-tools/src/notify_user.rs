@@ -24,6 +24,7 @@ impl NotifyUserTool {
     }
 }
 
+#[async_trait::async_trait]
 impl AgentTool for NotifyUserTool {
     fn name(&self) -> &str {
         "notify_user"
@@ -54,50 +55,45 @@ impl AgentTool for NotifyUserTool {
         })
     }
 
-    fn execute(
-        &self,
-        args: serde_json::Value,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
-        Box::pin(async move {
-            let args = match parse_tool_args::<NotifyUserArgs>(args) {
-                Ok(args) => args,
-                Err(error) => return error,
-            };
+    async fn execute(&self, args: serde_json::Value) -> ToolResult {
+        let args = match parse_tool_args::<NotifyUserArgs>(args) {
+            Ok(args) => args,
+            Err(error) => return error,
+        };
 
-            let title = args.title;
-            let body = args.body;
+        let title = args.title;
+        let body = args.body;
 
-            let notif_result = std::process::Command::new("notify-send")
-                .arg("--app-name=mush")
-                .arg(&title)
-                .arg(&body)
+        let notif_result = std::process::Command::new("notify-send")
+            .arg("--app-name=mush")
+            .arg(&title)
+            .arg(&body)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+
+        let sound_path =
+            "/run/current-system/sw/share/sounds/freedesktop/stereo/message-new-instant.oga";
+        if std::path::Path::new(sound_path).exists() {
+            let _ = std::process::Command::new("pw-play")
+                .arg(sound_path)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
-                .status();
+                .spawn();
+        }
 
-            let sound_path =
-                "/run/current-system/sw/share/sounds/freedesktop/stereo/message-new-instant.oga";
-            if std::path::Path::new(sound_path).exists() {
-                let _ = std::process::Command::new("pw-play")
-                    .arg(sound_path)
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .spawn();
+        match notif_result {
+            Ok(status) if status.success() => {
+                ToolResult::text(format!("notification sent: {title}"))
             }
-
-            match notif_result {
-                Ok(status) if status.success() => {
-                    ToolResult::text(format!("notification sent: {title}"))
-                }
-                Ok(status) => ToolResult::text(format!(
-                    "notify-send exited with {}, notification may not have appeared",
-                    status
-                )),
-                Err(_) => ToolResult::text("notification attempted (notify-send not available)"),
-            }
-        })
+            Ok(status) => ToolResult::text(format!(
+                "notify-send exited with {}, notification may not have appeared",
+                status
+            )),
+            Err(_) => ToolResult::text("notification attempted (notify-send not available)"),
+        }
     }
 }
 

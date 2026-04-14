@@ -6,7 +6,6 @@
 //! - `lsp_references`: find all references to a symbol
 
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use mush_agent::tool::{AgentTool, ToolResult};
@@ -27,6 +26,7 @@ impl DiagnosticsTool {
     }
 }
 
+#[async_trait::async_trait]
 impl AgentTool for DiagnosticsTool {
     fn name(&self) -> &str {
         "lsp_diagnostics"
@@ -54,29 +54,24 @@ impl AgentTool for DiagnosticsTool {
         })
     }
 
-    fn execute(
-        &self,
-        args: Value,
-    ) -> Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
-        Box::pin(async move {
-            let path_str = match args.get("path").and_then(|v| v.as_str()) {
-                Some(p) => p,
-                None => return ToolResult::error("missing required parameter: path"),
-            };
+    async fn execute(&self, args: Value) -> ToolResult {
+        let path_str = match args.get("path").and_then(|v| v.as_str()) {
+            Some(p) => p,
+            None => return ToolResult::error("missing required parameter: path"),
+        };
 
-            let path = resolve_path(&self.cwd, path_str);
-            if !path.exists() {
-                return ToolResult::error(format!("file not found: {}", path.display()));
-            }
+        let path = resolve_path(&self.cwd, path_str);
+        if !path.exists() {
+            return ToolResult::error(format!("file not found: {}", path.display()));
+        }
 
-            match self.registry.diagnostics_for_file(&path).await {
-                Ok(diags) if diags.is_empty() => {
-                    ToolResult::text(format!("no diagnostics for {}", path.display()))
-                }
-                Ok(diags) => ToolResult::text(format_diagnostics(&path, &diags)),
-                Err(e) => ToolResult::error(format!("LSP error: {e}")),
+        match self.registry.diagnostics_for_file(&path).await {
+            Ok(diags) if diags.is_empty() => {
+                ToolResult::text(format!("no diagnostics for {}", path.display()))
             }
-        })
+            Ok(diags) => ToolResult::text(format_diagnostics(&path, &diags)),
+            Err(e) => ToolResult::error(format!("LSP error: {e}")),
+        }
     }
 }
 

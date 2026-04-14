@@ -35,6 +35,7 @@ impl McpTool {
     }
 }
 
+#[async_trait::async_trait]
 impl AgentTool for McpTool {
     fn name(&self) -> &str {
         &self.full_name
@@ -58,23 +59,18 @@ impl AgentTool for McpTool {
         })
     }
 
-    fn execute(
-        &self,
-        args: serde_json::Value,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
-        Box::pin(async move {
-            match self
-                .connection
-                .call_tool(self.tool_name.clone(), args)
-                .await
-            {
-                Ok(result) => crate::result::convert_call_result(result),
-                Err(e) => ToolResult::error(format!(
-                    "MCP tool {} on {}: {e}",
-                    self.tool_name, self.server_name
-                )),
-            }
-        })
+    async fn execute(&self, args: serde_json::Value) -> ToolResult {
+        match self
+            .connection
+            .call_tool(self.tool_name.clone(), args)
+            .await
+        {
+            Ok(result) => crate::result::convert_call_result(result),
+            Err(e) => ToolResult::error(format!(
+                "MCP tool {} on {}: {e}",
+                self.tool_name, self.server_name
+            )),
+        }
     }
 }
 

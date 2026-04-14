@@ -40,6 +40,7 @@ impl WebFetchTool {
     }
 }
 
+#[async_trait::async_trait]
 impl AgentTool for WebFetchTool {
     fn name(&self) -> &str {
         "web_fetch"
@@ -79,84 +80,79 @@ impl AgentTool for WebFetchTool {
         mush_agent::tool::OutputLimit::Head
     }
 
-    fn execute(
-        &self,
-        args: serde_json::Value,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
-        Box::pin(async move {
-            let args = match parse_tool_args::<WebFetchArgs>(args) {
-                Ok(args) => args,
-                Err(error) => return error,
-            };
+    async fn execute(&self, args: serde_json::Value) -> ToolResult {
+        let args = match parse_tool_args::<WebFetchArgs>(args) {
+            Ok(args) => args,
+            Err(error) => return error,
+        };
 
-            if !args.url.starts_with("http://") && !args.url.starts_with("https://") {
-                return ToolResult::error("URL must start with http:// or https://");
+        if !args.url.starts_with("http://") && !args.url.starts_with("https://") {
+            return ToolResult::error("URL must start with http:// or https://");
+        }
+
+        let timeout_secs = args.timeout.min(MAX_TIMEOUT_SECS);
+
+        let response = match self
+            .client
+            .get(&args.url)
+            .timeout(std::time::Duration::from_secs(timeout_secs))
+            .header("user-agent", "Mozilla/5.0 (compatible; mush/0.1)")
+            .header(
+                "accept",
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            )
+            .header("accept-language", "en-US,en;q=0.9")
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) if e.is_timeout() => return ToolResult::error("request timed out"),
+            Err(e) => return ToolResult::error(format!("fetch failed: {e}")),
+        };
+
+        if !response.status().is_success() {
+            return ToolResult::error(format!(
+                "HTTP {}: {}",
+                response.status(),
+                response.status().canonical_reason().unwrap_or("error")
+            ));
+        }
+
+        if let Some(len) = response.content_length()
+            && len as usize > MAX_RESPONSE_SIZE
+        {
+            return ToolResult::error(format!(
+                "response too large ({len} bytes, max {MAX_RESPONSE_SIZE})"
+            ));
+        }
+
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+
+        let bytes = match response.bytes().await {
+            Ok(b) if b.len() > MAX_RESPONSE_SIZE => {
+                return ToolResult::error("response too large");
             }
+            Ok(b) => b,
+            Err(e) => return ToolResult::error(format!("failed to read body: {e}")),
+        };
 
-            let timeout_secs = args.timeout.min(MAX_TIMEOUT_SECS);
+        let body = String::from_utf8_lossy(&bytes);
+        let is_html = content_type.contains("text/html") || content_type.contains("xhtml");
 
-            let response = match self
-                .client
-                .get(&args.url)
-                .timeout(std::time::Duration::from_secs(timeout_secs))
-                .header("user-agent", "Mozilla/5.0 (compatible; mush/0.1)")
-                .header(
-                    "accept",
-                    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                )
-                .header("accept-language", "en-US,en;q=0.9")
-                .send()
-                .await
-            {
-                Ok(r) => r,
-                Err(e) if e.is_timeout() => return ToolResult::error("request timed out"),
-                Err(e) => return ToolResult::error(format!("fetch failed: {e}")),
-            };
-
-            if !response.status().is_success() {
-                return ToolResult::error(format!(
-                    "HTTP {}: {}",
-                    response.status(),
-                    response.status().canonical_reason().unwrap_or("error")
-                ));
+        let output = match (args.format, is_html) {
+            (FetchFormat::Markdown, true) => {
+                htmd::convert(&body).unwrap_or_else(|_| body.to_string())
             }
+            (FetchFormat::Text, true) => strip_html_tags(&body),
+            _ => body.to_string(),
+        };
 
-            if let Some(len) = response.content_length()
-                && len as usize > MAX_RESPONSE_SIZE
-            {
-                return ToolResult::error(format!(
-                    "response too large ({len} bytes, max {MAX_RESPONSE_SIZE})"
-                ));
-            }
-
-            let content_type = response
-                .headers()
-                .get("content-type")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("")
-                .to_string();
-
-            let bytes = match response.bytes().await {
-                Ok(b) if b.len() > MAX_RESPONSE_SIZE => {
-                    return ToolResult::error("response too large");
-                }
-                Ok(b) => b,
-                Err(e) => return ToolResult::error(format!("failed to read body: {e}")),
-            };
-
-            let body = String::from_utf8_lossy(&bytes);
-            let is_html = content_type.contains("text/html") || content_type.contains("xhtml");
-
-            let output = match (args.format, is_html) {
-                (FetchFormat::Markdown, true) => {
-                    htmd::convert(&body).unwrap_or_else(|_| body.to_string())
-                }
-                (FetchFormat::Text, true) => strip_html_tags(&body),
-                _ => body.to_string(),
-            };
-
-            ToolResult::text(output)
-        })
+        ToolResult::text(output)
     }
 }
 

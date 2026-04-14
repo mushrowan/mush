@@ -7,7 +7,6 @@
 //! can categorise and route communication effectively
 
 use std::collections::HashMap;
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
@@ -186,6 +185,7 @@ pub struct SendMessageTool {
     pub bus: MessageBus,
 }
 
+#[async_trait::async_trait]
 impl AgentTool for SendMessageTool {
     fn name(&self) -> &str {
         "send_message"
@@ -227,41 +227,36 @@ impl AgentTool for SendMessageTool {
         })
     }
 
-    fn execute(
-        &self,
-        args: serde_json::Value,
-    ) -> Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
-        Box::pin(async move {
-            let args = match parse_tool_args::<SendMessageArgs>(args) {
-                Ok(args) => args,
-                Err(error) => return error,
-            };
+    async fn execute(&self, args: serde_json::Value) -> ToolResult {
+        let args = match parse_tool_args::<SendMessageArgs>(args) {
+            Ok(args) => args,
+            Err(error) => return error,
+        };
 
-            let target = PaneId::new(args.recipient_pane);
-            if target == self.sender_id {
-                return ToolResult::error("cannot send a message to yourself");
-            }
+        let target = PaneId::new(args.recipient_pane);
+        if target == self.sender_id {
+            return ToolResult::error("cannot send a message to yourself");
+        }
 
-            let msg = InterPaneMessage {
-                from: self.sender_id,
-                to: Some(target),
-                intent: args.intent,
-                content: args.message,
-                task_id: args.task_id.clone(),
-                timestamp: Timestamp::now(),
-            };
+        let msg = InterPaneMessage {
+            from: self.sender_id,
+            to: Some(target),
+            intent: args.intent,
+            content: args.message,
+            task_id: args.task_id.clone(),
+            timestamp: Timestamp::now(),
+        };
 
-            match self.bus.send(target, msg) {
-                Ok(()) => {
-                    let mut reply = format!("sent {} to pane {}", args.intent, args.recipient_pane);
-                    if let Some(task_id) = &args.task_id {
-                        reply.push_str(&format!(" (task: {task_id})"));
-                    }
-                    ToolResult::text(reply)
+        match self.bus.send(target, msg) {
+            Ok(()) => {
+                let mut reply = format!("sent {} to pane {}", args.intent, args.recipient_pane);
+                if let Some(task_id) = &args.task_id {
+                    reply.push_str(&format!(" (task: {task_id})"));
                 }
-                Err(e) => ToolResult::error(e.to_string()),
+                ToolResult::text(reply)
             }
-        })
+            Err(e) => ToolResult::error(e.to_string()),
+        }
     }
 }
 

@@ -102,6 +102,7 @@ impl BashTool {
     }
 }
 
+#[async_trait::async_trait]
 impl AgentTool for BashTool {
     fn name(&self) -> &str {
         "bash"
@@ -155,29 +156,24 @@ impl AgentTool for BashTool {
         })
     }
 
-    fn execute(
-        &self,
-        args: serde_json::Value,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
-        Box::pin(async move {
-            let args = match parse_tool_args::<BashArgs>(args) {
-                Ok(args) => args,
-                Err(error) => return error,
-            };
+    async fn execute(&self, args: serde_json::Value) -> ToolResult {
+        let args = match parse_tool_args::<BashArgs>(args) {
+            Ok(args) => args,
+            Err(error) => return error,
+        };
 
-            if args.background {
-                return self.execute_background(args).await;
-            }
+        if args.background {
+            return self.execute_background(args).await;
+        }
 
-            run_command(
-                &self.cwd,
-                &args.command,
-                args.effective_timeout(),
-                self.output_sink.as_ref(),
-                args.output.is_json(),
-            )
-            .await
-        })
+        run_command(
+            &self.cwd,
+            &args.command,
+            args.effective_timeout(),
+            self.output_sink.as_ref(),
+            args.output.is_json(),
+        )
+        .await
     }
 }
 
