@@ -63,7 +63,6 @@ impl AppSetup {
         }
 
         let model_id = args.model.unwrap_or_else(|| default_model_id(&cfg));
-
         let model = models::find_model_by_id(&model_id).ok_or_else(|| {
             eyre!(
                 "unknown model: {model_id}\n\navailable models:\n{}",
@@ -88,62 +87,19 @@ impl AppSetup {
 
         let cwd = std::env::current_dir()?;
 
-        let use_patch = model.uses_patch_tool();
-        let skip_batch = model.supports_native_parallel_calls();
-        let mut tools = if args.no_tools {
-            mush_agent::tool::ToolRegistry::new()
-        } else {
-            mush_tools::builtin_tools_with_options(
-                cwd.clone(),
-                args.output_sink,
-                use_patch,
-                http_client.clone(),
-            )
-        };
+        let mut tools =
+            init_builtin_tools(&model, &cwd, args.output_sink, args.no_tools, &http_client);
         if let Some(t) = &mut timer {
             t.phase("builtin tools");
         }
 
-        let mut tool_descriptions: Vec<(String, String)> = Vec::new();
-
-        if !args.no_tools && !cfg.mcp.is_empty() {
-            let (mcp_manager, mcp_tools) = mush_mcp::McpManager::connect_all(&cfg.mcp).await;
-            if cfg.dynamic_mcp {
-                let conns = mcp_manager.connections();
-                if !conns.is_empty() {
-                    let index = mush_mcp::dynamic::McpToolIndex::new(&conns);
-                    tool_descriptions = index.tool_descriptions();
-                    let dynamic = mush_mcp::dynamic::dynamic_mcp_tools(&conns);
-                    tools.extend_shared(dynamic.iter().cloned());
-                }
-            } else {
-                tools.extend_shared(mcp_tools.iter().cloned());
-            }
-        }
+        let tool_descriptions = init_mcp(&cfg, args.no_tools, &mut tools).await;
         if let Some(t) = &mut timer {
             t.phase("mcp");
         }
 
-        // discover project context once for both system prompt and skill tools
         let project_context = loader::discover_project_context(&cwd);
-
-        // register skill tools for strategies that use on-demand loading
-        if !args.no_tools
-            && cfg.retrieval.context_strategy.needs_skill_tools()
-            && !project_context.skills.is_empty()
-        {
-            let skill_infos: Vec<mush_tools::skills::SkillInfo> = project_context
-                .skills
-                .iter()
-                .map(|s| mush_tools::skills::SkillInfo {
-                    name: s.name.clone(),
-                    description: s.description.clone(),
-                    path: s.path.clone(),
-                })
-                .collect();
-            let skill_tools = mush_tools::skills::skill_tools(skill_infos);
-            tools.extend_shared(skill_tools.iter().cloned());
-        }
+        init_skill_tools(&project_context, &cfg, args.no_tools, &mut tools);
         if let Some(t) = &mut timer {
             t.phase("project context");
         }
@@ -164,30 +120,15 @@ impl AppSetup {
 
         let thinking_prefs = config::load_thinking_prefs();
         let thinking_level = resolve_thinking(args.thinking, &model, &thinking_prefs, &cfg);
-
         let mut options = StreamOptions {
             thinking: thinking_level,
             max_tokens: args.max_tokens.or(cfg.max_tokens).map(TokenCount::new),
             cache_retention: cfg.cache_retention,
             ..Default::default()
         };
-
         resolve_api_key(&mut options, &model, &cfg).await;
 
-        // resolve optional compaction model
-        let compaction_model = if let Some(ref id) = cfg.compaction_model {
-            let m = models::find_model_by_id(id).unwrap_or_else(|| {
-                eprintln!(
-                    "\x1b[33mwarning: unknown compaction_model '{id}', falling back to active model\x1b[0m"
-                );
-                model.clone()
-            });
-            let mut compact_opts = options.clone();
-            resolve_api_key(&mut compact_opts, &m, &cfg).await;
-            Some((m, compact_opts))
-        } else {
-            None
-        };
+        let compaction_model = init_compaction_model(&cfg, &model, &options).await;
         if let Some(t) = &mut timer {
             t.phase("api keys");
         }
@@ -196,45 +137,22 @@ impl AppSetup {
             .max_turns
             .or(cfg.max_turns)
             .unwrap_or(mush_agent::DEFAULT_MAX_TURNS);
-
         let lifecycle_hooks = cfg.lifecycle_hooks();
 
-        // start repo map file watcher for live updates
-        let (repo_map_text, _repo_map_watcher) = if cfg.retrieval.repo_map {
-            start_repo_map_watcher(&cwd, cfg.retrieval.context_budget)
-        } else {
-            (None, None)
-        };
-        if let Some(ref shared) = repo_map_text
-            && !args.no_tools
-        {
-            tools.register_shared(std::sync::Arc::new(mush_tools::repo_map::RepoMapTool::new(
-                shared.clone(),
-            )));
-        }
+        let _repo_map_watcher = init_repo_map(&cfg, &cwd, args.no_tools, &mut tools);
         if let Some(t) = &mut timer {
             t.phase("repo map");
         }
 
-        // build file rule index from .mush/rules/
         let file_rules = build_file_rules(&cwd);
-
-        // build LSP registry, diagnostic callback, and tools
-        let (lsp_diagnostics, lsp_reg) = build_lsp_diagnostics(&cwd, &cfg);
-        if let Some(reg) = &lsp_reg
-            && !args.no_tools
-        {
-            let lsp_tool_list = mush_lsp::lsp_tools(reg.clone(), cwd.clone());
-            for tool in lsp_tool_list {
-                tools.register_shared(std::sync::Arc::from(tool));
-            }
-        }
+        let lsp_diagnostics = init_lsp(&cfg, &cwd, args.no_tools, &mut tools);
         if let Some(t) = &mut timer {
             t.phase("lsp + rules");
         }
 
-        // add batch tool last so it can dispatch to skill, MCP, LSP tools
-        if !args.no_tools && !skip_batch {
+        if !args.no_tools && model.supports_native_parallel_calls() {
+            // skip batch tool
+        } else if !args.no_tools {
             mush_tools::add_batch_tool(&mut tools);
         }
 
@@ -263,6 +181,129 @@ impl AppSetup {
             report,
         ))
     }
+}
+
+fn init_builtin_tools(
+    model: &Model,
+    cwd: &std::path::Path,
+    output_sink: Option<mush_tools::bash::OutputSink>,
+    no_tools: bool,
+    http_client: &reqwest::Client,
+) -> mush_agent::tool::ToolRegistry {
+    if no_tools {
+        return mush_agent::tool::ToolRegistry::new();
+    }
+    mush_tools::builtin_tools_with_options(
+        cwd.to_path_buf(),
+        output_sink,
+        model.uses_patch_tool(),
+        http_client.clone(),
+    )
+}
+
+async fn init_mcp(
+    cfg: &config::Config,
+    no_tools: bool,
+    tools: &mut mush_agent::tool::ToolRegistry,
+) -> Vec<(String, String)> {
+    let mut tool_descriptions = Vec::new();
+    if no_tools || cfg.mcp.is_empty() {
+        return tool_descriptions;
+    }
+
+    let (mcp_manager, mcp_tools) = mush_mcp::McpManager::connect_all(&cfg.mcp).await;
+    if cfg.dynamic_mcp {
+        let conns = mcp_manager.connections();
+        if !conns.is_empty() {
+            let index = mush_mcp::dynamic::McpToolIndex::new(&conns);
+            tool_descriptions = index.tool_descriptions();
+            let dynamic = mush_mcp::dynamic::dynamic_mcp_tools(&conns);
+            tools.extend_shared(dynamic.iter().cloned());
+        }
+    } else {
+        tools.extend_shared(mcp_tools.iter().cloned());
+    }
+    tool_descriptions
+}
+
+fn init_skill_tools(
+    project_context: &loader::ProjectContext,
+    cfg: &config::Config,
+    no_tools: bool,
+    tools: &mut mush_agent::tool::ToolRegistry,
+) {
+    if no_tools
+        || !cfg.retrieval.context_strategy.needs_skill_tools()
+        || project_context.skills.is_empty()
+    {
+        return;
+    }
+    let skill_infos: Vec<mush_tools::skills::SkillInfo> = project_context
+        .skills
+        .iter()
+        .map(|s| mush_tools::skills::SkillInfo {
+            name: s.name.clone(),
+            description: s.description.clone(),
+            path: s.path.clone(),
+        })
+        .collect();
+    let skill_tools = mush_tools::skills::skill_tools(skill_infos);
+    tools.extend_shared(skill_tools.iter().cloned());
+}
+
+async fn init_compaction_model(
+    cfg: &config::Config,
+    model: &Model,
+    options: &StreamOptions,
+) -> Option<(Model, StreamOptions)> {
+    let id = cfg.compaction_model.as_ref()?;
+    let m = models::find_model_by_id(id).unwrap_or_else(|| {
+        eprintln!(
+            "\x1b[33mwarning: unknown compaction_model '{id}', falling back to active model\x1b[0m"
+        );
+        model.clone()
+    });
+    let mut compact_opts = options.clone();
+    resolve_api_key(&mut compact_opts, &m, cfg).await;
+    Some((m, compact_opts))
+}
+
+fn init_repo_map(
+    cfg: &config::Config,
+    cwd: &std::path::Path,
+    no_tools: bool,
+    tools: &mut mush_agent::tool::ToolRegistry,
+) -> Option<mush_treesitter::RepoMapWatcher> {
+    if !cfg.retrieval.repo_map {
+        return None;
+    }
+    let (repo_map_text, watcher) = start_repo_map_watcher(cwd, cfg.retrieval.context_budget);
+    if let Some(ref shared) = repo_map_text
+        && !no_tools
+    {
+        tools.register_shared(std::sync::Arc::new(mush_tools::repo_map::RepoMapTool::new(
+            shared.clone(),
+        )));
+    }
+    watcher
+}
+
+fn init_lsp(
+    cfg: &config::Config,
+    cwd: &std::path::Path,
+    no_tools: bool,
+    tools: &mut mush_agent::tool::ToolRegistry,
+) -> Option<mush_agent::DiagnosticCallback> {
+    let (lsp_diagnostics, lsp_reg) = build_lsp_diagnostics(cwd, cfg);
+    if let Some(reg) = &lsp_reg
+        && !no_tools
+    {
+        let lsp_tool_list = mush_lsp::lsp_tools(reg.clone(), cwd.to_path_buf());
+        for tool in lsp_tool_list {
+            tools.register_shared(std::sync::Arc::from(tool));
+        }
+    }
+    lsp_diagnostics
 }
 
 /// expand /template_name args... into template content
