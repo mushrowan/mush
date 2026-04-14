@@ -437,14 +437,12 @@ pub(crate) fn show_cost(app: &mut App) {
         String::new()
     };
 
-    let reuse_base = s.cache_read_tokens + s.input_tokens;
-    let reuse_pct = if reuse_base > TokenCount::ZERO {
-        s.cache_read_tokens.percent_of(reuse_base) as u64
+    let total_input = s.cache_read_tokens + s.cache_write_tokens + s.input_tokens;
+    let reuse_pct = if total_input > TokenCount::ZERO {
+        s.cache_read_tokens.percent_of(total_input) as u64
     } else {
         0
     };
-
-    let total_input = s.cache_read_tokens + s.cache_write_tokens + s.input_tokens;
     let write_pct = if total_input > TokenCount::ZERO {
         s.cache_write_tokens.percent_of(total_input) as u64
     } else {
@@ -602,7 +600,7 @@ mod tests {
         show_cost(&mut app);
 
         let msg = app.messages.last().unwrap();
-        assert!(msg.content.contains("reuse 60%"));
+        assert!(msg.content.contains("reuse 50%"));
         assert!(msg.content.contains("write 16%"));
     }
 }
