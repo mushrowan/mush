@@ -9,6 +9,15 @@ use serde::Deserialize;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
 
+/// foreground commands are capped at 10 minutes. for longer tasks
+/// (builds, test suites), use background: true which has no cap
+const MAX_FOREGROUND_TIMEOUT_SECS: u64 = 600;
+
+/// if a foreground command produces zero bytes of output for this long,
+/// kill it. catches servers, daemons, and commands that hang waiting
+/// for a TTY (e.g. jj split, jj describe without -m)
+const NO_OUTPUT_TIMEOUT_SECS: u64 = 240;
+
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum BashOutput {
@@ -45,6 +54,18 @@ struct BashArgs {
 
 const fn default_timeout_secs() -> u64 {
     DEFAULT_TIMEOUT_SECS
+}
+
+impl BashArgs {
+    /// effective timeout, capping foreground commands to prevent runaways.
+    /// background jobs are not capped since they're polled explicitly
+    fn effective_timeout(&self) -> u64 {
+        if self.background {
+            self.timeout
+        } else {
+            self.timeout.min(MAX_FOREGROUND_TIMEOUT_SECS)
+        }
+    }
 }
 
 /// sender for streaming partial output lines from bash
@@ -95,7 +116,9 @@ impl AgentTool for BashTool {
          For long-running commands (builds, test suites), set background: true to run \
          asynchronously and poll with bash_status to avoid cache busting. \
          For searching file contents, use the Grep tool instead of running grep or rg via bash. \
-         For locating files, use the Find or Glob tools instead of running find via bash."
+         For locating files, use the Find or Glob tools instead of running find via bash. \
+         Do not run interactive commands (e.g. vim, python REPL, less) as stdin is not available. \
+         Commands that produce no output for 240s are killed automatically."
     }
 
     fn output_limit(&self) -> mush_agent::tool::OutputLimit {
@@ -149,7 +172,7 @@ impl AgentTool for BashTool {
             run_command(
                 &self.cwd,
                 &args.command,
-                args.timeout,
+                args.effective_timeout(),
                 self.output_sink.as_ref(),
                 args.output.is_json(),
             )
@@ -185,7 +208,7 @@ impl BashTool {
         };
 
         let handle = registry.insert(state).await;
-        let timeout_secs = args.timeout;
+        let timeout_secs = args.effective_timeout();
         let command = args.command.clone();
         let cwd = self.cwd.clone();
 
@@ -237,8 +260,8 @@ async fn run_background_command(
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
 
-    let stdout_handle = tokio::spawn(stream_pipe(stdout_pipe, None));
-    let stderr_handle = tokio::spawn(stream_pipe(stderr_pipe, None));
+    let stdout_handle = tokio::spawn(stream_pipe(stdout_pipe, None, None));
+    let stderr_handle = tokio::spawn(stream_pipe(stderr_pipe, None, None));
 
     let status = match tokio::time::timeout(timeout, child.wait()).await {
         Ok(Ok(status)) => status,
@@ -280,6 +303,25 @@ async fn run_command(
     output_sink: Option<&OutputSink>,
     json_output: bool,
 ) -> ToolResult {
+    run_command_with_no_output_timeout(
+        cwd,
+        command,
+        timeout_secs,
+        output_sink,
+        json_output,
+        NO_OUTPUT_TIMEOUT_SECS,
+    )
+    .await
+}
+
+async fn run_command_with_no_output_timeout(
+    cwd: &std::path::Path,
+    command: &str,
+    timeout_secs: u64,
+    output_sink: Option<&OutputSink>,
+    json_output: bool,
+    no_output_timeout_secs: u64,
+) -> ToolResult {
     let mut cmd = tokio::process::Command::new("bash");
     cmd.arg("-c")
         .arg(command)
@@ -300,19 +342,56 @@ async fn run_command(
 
     let started = std::time::Instant::now();
     let timeout = tokio::time::Duration::from_secs(timeout_secs);
+    let no_output_timeout = tokio::time::Duration::from_secs(no_output_timeout_secs);
 
-    // stream stdout and stderr concurrently, forwarding lines to sink
+    // track whether any output has been produced
+    let has_output = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
 
-    let stdout_handle = tokio::spawn(stream_pipe(stdout_pipe, output_sink.cloned()));
-    let stderr_handle = tokio::spawn(stream_pipe(stderr_pipe, output_sink.cloned()));
+    let stdout_handle = tokio::spawn(stream_pipe(
+        stdout_pipe,
+        output_sink.cloned(),
+        Some(has_output.clone()),
+    ));
+    let stderr_handle = tokio::spawn(stream_pipe(
+        stderr_pipe,
+        output_sink.cloned(),
+        Some(has_output.clone()),
+    ));
 
-    // wait for the process, or kill on timeout
-    let status = match tokio::time::timeout(timeout, child.wait()).await {
-        Ok(Ok(status)) => status,
-        Ok(Err(e)) => return ToolResult::error(format!("command failed: {e}")),
-        Err(_) => {
+    // race: process exit vs overall timeout vs no-output timeout
+    enum WaitResult {
+        Exited(std::io::Result<std::process::ExitStatus>),
+        TimedOut,
+        NoOutput,
+    }
+
+    let has_output_ref = has_output.clone();
+    let result = tokio::select! {
+        status = child.wait() => WaitResult::Exited(status),
+        () = tokio::time::sleep(timeout) => WaitResult::TimedOut,
+        () = async {
+            tokio::time::sleep(no_output_timeout).await;
+            if has_output_ref.load(std::sync::atomic::Ordering::Relaxed) {
+                // output was produced, don't trigger no-output kill.
+                // let the overall timeout handle long-running commands
+                std::future::pending::<()>().await;
+            }
+        } => WaitResult::NoOutput,
+    };
+
+    match result {
+        WaitResult::Exited(Ok(status)) => {
+            let stdout = stdout_handle.await.unwrap_or_default();
+            let stderr = stderr_handle.await.unwrap_or_default();
+            let exit_code = status.code().unwrap_or(-1);
+            let duration = started.elapsed();
+            format_result(stdout, stderr, exit_code, false, duration, json_output)
+        }
+        WaitResult::Exited(Err(e)) => ToolResult::error(format!("command failed: {e}")),
+        WaitResult::TimedOut => {
             let _ = child.kill().await;
             let stdout = stdout_handle.await.unwrap_or_default();
             let stderr = stderr_handle.await.unwrap_or_default();
@@ -320,16 +399,24 @@ async fn run_command(
             if json_output {
                 return format_result(stdout, stderr, -1, true, duration, true);
             }
-            return ToolResult::error(format!("command timed out after {timeout_secs}s"));
+            ToolResult::error(format!("command timed out after {timeout_secs}s"))
         }
-    };
-
-    let stdout = stdout_handle.await.unwrap_or_default();
-    let stderr = stderr_handle.await.unwrap_or_default();
-    let exit_code = status.code().unwrap_or(-1);
-    let duration = started.elapsed();
-
-    format_result(stdout, stderr, exit_code, false, duration, json_output)
+        WaitResult::NoOutput => {
+            let _ = child.kill().await;
+            let stdout = stdout_handle.await.unwrap_or_default();
+            let stderr = stderr_handle.await.unwrap_or_default();
+            let duration = started.elapsed();
+            if json_output {
+                return format_result(stdout, stderr, -1, true, duration, true);
+            }
+            ToolResult::error(format!(
+                "command produced no output for {no_output_timeout_secs}s and was killed. \
+                 this usually means the command is interactive, waiting for a TTY, \
+                 or running as a daemon. use background: true for long-running commands, \
+                 or check that the command works in non-interactive mode"
+            ))
+        }
+    }
 }
 
 fn format_result(
@@ -406,6 +493,7 @@ fn format_result(
 async fn stream_pipe<R: tokio::io::AsyncRead + Unpin>(
     pipe: Option<R>,
     sink: Option<OutputSink>,
+    has_output: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> String {
     use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -423,6 +511,9 @@ async fn stream_pipe<R: tokio::io::AsyncRead + Unpin>(
             Ok(0) => break,
             Ok(_) => {
                 output.push_str(&line);
+                if let Some(ref flag) = has_output {
+                    flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
                 // throttle sink to avoid flooding the TUI (~10 updates/sec)
                 if let Some(ref sink) = sink
                     && last_emit.elapsed() >= std::time::Duration::from_millis(100)
@@ -603,6 +694,69 @@ mod tests {
         assert!(
             text.contains("concurrent: true"),
             "should suggest flag: {text}"
+        );
+    }
+
+    #[test]
+    fn foreground_timeout_capped_at_max() {
+        // agent passes an absurdly large timeout, should be capped
+        let args: BashArgs = serde_json::from_value(serde_json::json!({
+            "command": "echo hi",
+            "timeout": 99999
+        }))
+        .unwrap();
+        assert_eq!(args.effective_timeout(), MAX_FOREGROUND_TIMEOUT_SECS);
+    }
+
+    #[test]
+    fn foreground_timeout_normal_passthrough() {
+        let args: BashArgs = serde_json::from_value(serde_json::json!({
+            "command": "echo hi",
+            "timeout": 30
+        }))
+        .unwrap();
+        assert_eq!(args.effective_timeout(), 30);
+    }
+
+    #[test]
+    fn foreground_timeout_default() {
+        let args: BashArgs = serde_json::from_value(serde_json::json!({
+            "command": "echo hi"
+        }))
+        .unwrap();
+        assert_eq!(args.effective_timeout(), DEFAULT_TIMEOUT_SECS);
+    }
+
+    #[test]
+    fn background_timeout_not_capped() {
+        // background jobs use their own timeout without the foreground cap
+        let args: BashArgs = serde_json::from_value(serde_json::json!({
+            "command": "nix build",
+            "timeout": 3600,
+            "background": true
+        }))
+        .unwrap();
+        assert_eq!(args.effective_timeout(), 3600);
+    }
+
+    #[tokio::test]
+    async fn no_output_foreground_killed_early() {
+        let cwd = std::env::current_dir().unwrap();
+        // sleep produces no output, should be killed after no_output_timeout
+        let start = std::time::Instant::now();
+        // use a short no-output timeout (2s) to keep the test fast
+        let result =
+            run_command_with_no_output_timeout(&cwd, "sleep 300", 300, None, false, 2).await;
+        let elapsed = start.elapsed();
+        assert!(result.outcome.is_error());
+        let text = extract_text(&result);
+        assert!(
+            text.contains("no output"),
+            "should mention no output: {text}"
+        );
+        assert!(
+            elapsed.as_secs() < 10,
+            "should be killed after ~2s, took {elapsed:?}"
         );
     }
 }
