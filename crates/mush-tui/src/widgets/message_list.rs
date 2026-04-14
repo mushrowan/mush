@@ -557,9 +557,9 @@ fn render_message(
         let total = usage.total_tokens();
         if total > TokenCount::ZERO {
             let mut parts = vec![format!(" {total}tok")];
-            let reuse_base = usage.cache_read_tokens + usage.input_tokens;
-            if reuse_base > TokenCount::ZERO {
-                let reuse_pct = usage.cache_read_tokens.percent_of(reuse_base) as u32;
+            let total_input = usage.total_input_tokens();
+            if total_input > TokenCount::ZERO {
+                let reuse_pct = usage.cache_read_tokens.percent_of(total_input) as u32;
                 parts.push(format!("reuse {reuse_pct}%"));
             }
             if usage.cache_write_tokens > TokenCount::ZERO {
@@ -1301,9 +1301,35 @@ mod tests {
         let buf = render_app(&app, 70, 10);
         let content = buffer_to_string(&buf);
         assert!(content.contains("320tok"));
-        assert!(content.contains("reuse 60%"));
+        // reuse = cache_read / total_input = 150/300 = 50%
+        assert!(content.contains("reuse 50%"));
         assert!(content.contains("write 16%"));
         assert!(content.contains("$0.0012"));
+    }
+
+    #[test]
+    fn usage_line_reuse_reflects_cache_bust() {
+        // during a bust: cache_read drops, cache_write spikes.
+        // old formula (cache_read / (cache_read + input)) would show 99%,
+        // new formula (cache_read / total_input) correctly shows ~4%
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.messages.push(DisplayMessage {
+            usage: Some(Usage {
+                input_tokens: TokenCount::new(50),
+                output_tokens: TokenCount::new(500),
+                cache_read_tokens: TokenCount::new(5_000),
+                cache_write_tokens: TokenCount::new(105_000),
+            }),
+            ..DisplayMessage::new(MessageRole::Assistant, "done")
+        });
+
+        let buf = render_app(&app, 70, 10);
+        let content = buffer_to_string(&buf);
+        // 5000 / (5000 + 105000 + 50) = 4%, NOT 99%
+        assert!(
+            content.contains("reuse 4%"),
+            "during a cache bust reuse should reflect total input, got: {content}"
+        );
     }
 
     #[test]
