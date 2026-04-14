@@ -3,9 +3,6 @@
 //! supports both direct openai `/responses` and codex subscription
 //! (`chatgpt.com/backend-api/codex/responses`) style endpoints.
 
-use std::fs;
-use std::path::PathBuf;
-
 use base64::Engine;
 use reqwest::header::{
     AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT,
@@ -489,39 +486,6 @@ fn extract_account_id(token: &str) -> Option<String> {
                 .and_then(|v| v.as_str())
                 .map(str::to_string)
         })
-}
-
-pub fn write_decode_snapshot(model_id: &str, provider: &str, bytes: &[u8]) -> Option<String> {
-    if bytes.is_empty() {
-        return None;
-    }
-
-    let mut dir = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let home = std::env::var_os("HOME").unwrap_or_else(|| ".".into());
-            let mut p = PathBuf::from(home);
-            p.push(".local/share");
-            p
-        });
-    dir.push("mush");
-    dir.push("stream-errors");
-
-    if fs::create_dir_all(&dir).is_err() {
-        return None;
-    }
-
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    let file = format!("decode-{provider}-{model_id}-{ts}.bin");
-    let path = dir.join(file);
-    if fs::write(&path, bytes).is_ok() {
-        Some(path.display().to_string())
-    } else {
-        None
-    }
 }
 
 fn decode_jwt_payload(token: &str) -> Option<serde_json::Value> {

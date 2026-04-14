@@ -251,72 +251,59 @@ pub(super) fn poll_live_tool_output(
     }
 }
 
-pub(super) async fn handle_agent_event_side_effects(
+/// track file conflicts in multi-pane mode when tools start/end
+fn track_file_conflicts(
     pane_mgr: &mut PaneManager,
-    stream_state: &mut StreamState,
     pane_id: PaneId,
     event: &AgentEvent,
     file_tracker: &FileTracker,
-    tui_config: &TuiConfig,
-    registry: &ApiRegistry,
 ) {
-    if let AgentEvent::MessageEnd { message } = event
-        && let Some(meta) = stream_state.meta(pane_id)
-    {
-        meta.context_tokens.store(
-            message.usage.total_input_tokens().get(),
-            std::sync::atomic::Ordering::Relaxed,
-        );
+    if !pane_mgr.is_multi_pane() {
+        return;
     }
-
-    if pane_mgr.is_multi_pane() {
-        match event {
-            AgentEvent::ToolExecStart {
-                tool_call_id,
-                tool_name,
-                args,
-            } => {
-                file_tracker.record_tool_start(pane_id, tool_call_id, tool_name.as_str(), args);
-            }
-            AgentEvent::ToolExecEnd {
-                tool_call_id,
-                tool_name: _,
-                result,
-            } => {
-                if let Some(conflict) =
-                    file_tracker.record_tool_end(pane_id, tool_call_id, result.outcome.is_success())
-                {
-                    let others: Vec<String> = conflict
-                        .other_panes
-                        .iter()
-                        .map(|pane_id| pane_id.to_string())
-                        .collect();
-                    let warning = format!(
-                        "⚠ file conflict: {} also modified by pane {}",
-                        conflict.path.display(),
-                        others.join(", ")
-                    );
-                    if let Some(pane) = pane_mgr.pane_mut(pane_id) {
-                        pane.app.status = Some(warning);
-                    }
+    match event {
+        AgentEvent::ToolExecStart {
+            tool_call_id,
+            tool_name,
+            args,
+        } => {
+            file_tracker.record_tool_start(pane_id, tool_call_id, tool_name.as_str(), args);
+        }
+        AgentEvent::ToolExecEnd {
+            tool_call_id,
+            tool_name: _,
+            result,
+        } => {
+            if let Some(conflict) =
+                file_tracker.record_tool_end(pane_id, tool_call_id, result.outcome.is_success())
+            {
+                let others: Vec<String> = conflict
+                    .other_panes
+                    .iter()
+                    .map(|pane_id| pane_id.to_string())
+                    .collect();
+                let warning = format!(
+                    "⚠ file conflict: {} also modified by pane {}",
+                    conflict.path.display(),
+                    others.join(", ")
+                );
+                if let Some(pane) = pane_mgr.pane_mut(pane_id) {
+                    pane.app.status = Some(warning);
                 }
             }
-            _ => {}
-        }
-    }
-
-    // incremental save after meaningful state changes (debounced)
-    match event {
-        AgentEvent::MessageEnd { .. } | AgentEvent::ToolExecEnd { .. } => {
-            stream_state.save_session_debounced(pane_mgr, tui_config);
         }
         _ => {}
     }
+}
 
-    if !matches!(event, AgentEvent::AgentEnd) {
-        return;
-    }
-
+/// cleanup and follow-up work when the agent finishes
+async fn handle_agent_end(
+    pane_mgr: &mut PaneManager,
+    stream_state: &mut StreamState,
+    pane_id: PaneId,
+    tui_config: &TuiConfig,
+    registry: &ApiRegistry,
+) {
     stream_state.remove(pane_id);
     crate::notify::play(crate::notify::Sound::Complete);
 
@@ -361,15 +348,46 @@ pub(super) async fn handle_agent_event_side_effects(
         );
     }
 
-    // auto fork-and-compact: fork the session tree and persist compacted state
     if tui_config.auto_fork_compact {
         auto_fork_compact(pane_mgr, pane_id, tui_config, registry).await;
     }
 
     stream_state.save_session_now(pane_mgr, tui_config);
 
-    // delegation panes: send result back to parent and auto-close
     complete_delegation(pane_mgr, pane_id, tui_config);
+}
+
+pub(super) async fn handle_agent_event_side_effects(
+    pane_mgr: &mut PaneManager,
+    stream_state: &mut StreamState,
+    pane_id: PaneId,
+    event: &AgentEvent,
+    file_tracker: &FileTracker,
+    tui_config: &TuiConfig,
+    registry: &ApiRegistry,
+) {
+    if let AgentEvent::MessageEnd { message } = event
+        && let Some(meta) = stream_state.meta(pane_id)
+    {
+        meta.context_tokens.store(
+            message.usage.total_input_tokens().get(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    track_file_conflicts(pane_mgr, pane_id, event, file_tracker);
+
+    // incremental save after meaningful state changes (debounced)
+    if matches!(
+        event,
+        AgentEvent::MessageEnd { .. } | AgentEvent::ToolExecEnd { .. }
+    ) {
+        stream_state.save_session_debounced(pane_mgr, tui_config);
+    }
+
+    if matches!(event, AgentEvent::AgentEnd) {
+        handle_agent_end(pane_mgr, stream_state, pane_id, tui_config, registry).await;
+    }
 }
 
 /// if pane is a delegation pane, send the last assistant message back to the
