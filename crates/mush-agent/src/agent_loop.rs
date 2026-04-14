@@ -214,7 +214,7 @@ pub type DiagnosticCallback =
 /// injection callbacks for file rules, diagnostics, and dynamic context.
 /// grouped separately from core config since these are all optional
 /// extension points wired up by the host application.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct AgentInjections {
     /// user-configured lifecycle hooks (shell commands)
     pub lifecycle_hooks: crate::hooks::LifecycleHooks,

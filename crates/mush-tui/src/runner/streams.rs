@@ -64,7 +64,9 @@ pub(super) struct StreamState {
     last_session_save: std::time::Instant,
 }
 
-pub(super) struct StreamDeps<'a> {
+/// owned configuration fields for stream creation, grouped from the
+/// formerly-21-field StreamDeps to reduce parameter count
+pub(super) struct StreamConfig {
     pub default_model: Model,
     pub system_prompt: Option<String>,
     pub options: StreamOptions,
@@ -74,18 +76,18 @@ pub(super) struct StreamDeps<'a> {
     pub provider_api_keys: HashMap<String, String>,
     pub confirm_tools: bool,
     pub auto_compact: bool,
+    /// separate model + options for compaction (None = use active model)
+    pub compaction_model: Option<(Model, StreamOptions)>,
+}
+
+pub(super) struct StreamDeps<'a> {
+    pub config: StreamConfig,
+    pub injections: mush_agent::AgentInjections,
     pub tools: &'a ToolRegistry,
     pub registry: &'a ApiRegistry,
     pub message_bus: &'a crate::messaging::MessageBus,
     pub shared_state: &'a crate::shared_state::SharedState,
     pub file_tracker: &'a FileTracker,
-    pub lifecycle_hooks: mush_agent::LifecycleHooks,
-    pub cwd: std::path::PathBuf,
-    pub dynamic_system_context: Option<mush_agent::DynamicContext>,
-    pub file_rules: Option<mush_agent::FileRuleCallback>,
-    pub lsp_diagnostics: Option<mush_agent::DiagnosticCallback>,
-    /// separate model + options for compaction (None = use active model)
-    pub compaction_model: Option<(Model, StreamOptions)>,
 }
 
 impl StreamState {
@@ -640,7 +642,7 @@ async fn start_stream_for_prompt<'a>(
         return;
     };
     let steering_queue = pane_ref.steering_queue.clone();
-    let model = pane_model(pane_mgr, pane_id, &deps.default_model);
+    let model = pane_model(pane_mgr, pane_id, &deps.config.default_model);
     let thinking_level = pane_thinking_level(pane_mgr, pane_id);
     let conversation_snapshot = {
         let Some(pane) = pane_mgr.pane_mut(pane_id) else {
@@ -651,22 +653,23 @@ async fn start_stream_for_prompt<'a>(
             app,
             conversation,
             prompt,
-            deps.hint_mode,
-            &deps.prompt_enricher,
+            deps.config.hint_mode,
+            &deps.config.prompt_enricher,
         )
     };
 
     let context_window = model.context_window;
-    let enricher_arc = if deps.hint_mode == HintMode::Transform {
-        deps.prompt_enricher.clone()
+    let enricher_arc = if deps.config.hint_mode == HintMode::Transform {
+        deps.config.prompt_enricher.clone()
     } else {
         None
     };
     let (compact_model, compact_options) = deps
+        .config
         .compaction_model
         .clone()
-        .unwrap_or_else(|| (model.clone(), deps.options.clone()));
-    let do_auto_compact = deps.auto_compact;
+        .unwrap_or_else(|| (model.clone(), deps.config.options.clone()));
+    let do_auto_compact = deps.config.auto_compact;
     let initial_ctx = pane_mgr
         .pane(pane_id)
         .map(|pane| pane.app.stats.context_tokens.get())
@@ -680,29 +683,29 @@ async fn start_stream_for_prompt<'a>(
         context_window,
         registry.clone(),
         context_tokens_shared.clone(),
-        deps.lifecycle_hooks.clone(),
-        deps.cwd.clone(),
+        deps.injections.lifecycle_hooks.clone(),
+        deps.injections.cwd.clone().unwrap_or_default(),
     );
 
     let steering = build_steering_callback(steering_queue.clone());
     let follow_up = build_steering_callback(steering_queue.clone());
     let (confirm_req_rx, confirm) = build_confirm_callback(
         pane_id,
-        deps.confirm_tools,
+        deps.config.confirm_tools,
         pane_mgr.is_multi_pane(),
         file_tracker,
     );
 
-    let mut call_options = deps.options.clone();
+    let mut call_options = deps.config.options.clone();
     let (api_key, account_id) =
-        event_handler::resolve_auth_for_model(&model, &deps.provider_api_keys).await;
+        event_handler::resolve_auth_for_model(&model, &deps.config.provider_api_keys).await;
     call_options.api_key = api_key;
     call_options.account_id = account_id;
     call_options.thinking = Some(thinking_level);
 
     let extra_tools =
         build_extra_tools(pane_mgr.is_multi_pane(), pane_id, message_bus, shared_state);
-    let system_prompt = build_system_prompt(pane_mgr, pane_id, &deps.system_prompt);
+    let system_prompt = build_system_prompt(pane_mgr, pane_id, &deps.config.system_prompt);
     let pane_tools = pane_mgr
         .pane_mut(pane_id)
         .and_then(|pane| pane.tools.take());
@@ -733,20 +736,14 @@ async fn start_stream_for_prompt<'a>(
         tools: tool_registry,
         registry,
         options: call_options,
-        max_turns: effective_max_turns(pane_mgr, pane_id, deps.max_turns),
+        max_turns: effective_max_turns(pane_mgr, pane_id, deps.config.max_turns),
         hooks: Box::new(mush_agent::ClosureHooks {
             steering,
             follow_up,
             transform,
             confirm,
         }),
-        injections: mush_agent::AgentInjections {
-            lifecycle_hooks: deps.lifecycle_hooks.clone(),
-            cwd: Some(deps.cwd.clone()),
-            dynamic_system_context: deps.dynamic_system_context.clone(),
-            file_rules: deps.file_rules.clone(),
-            lsp_diagnostics: deps.lsp_diagnostics.clone(),
-        },
+        injections: deps.injections.clone(),
         cancel: Some(cancel),
     };
 
@@ -1162,6 +1159,36 @@ mod tests {
     use super::*;
 
     use mush_ai::types::{ModelId, ToolCallId};
+
+    #[test]
+    fn stream_config_groups_owned_fields() {
+        let config = StreamConfig {
+            default_model: models::all_models_with_user().into_iter().next().unwrap(),
+            system_prompt: None,
+            options: StreamOptions::default(),
+            max_turns: 32,
+            prompt_enricher: None,
+            hint_mode: super::super::HintMode::None,
+            provider_api_keys: HashMap::new(),
+            confirm_tools: false,
+            auto_compact: false,
+            compaction_model: None,
+        };
+        assert_eq!(config.max_turns, 32);
+        assert!(!config.confirm_tools);
+    }
+
+    #[test]
+    fn stream_deps_uses_agent_injections() {
+        let injections = mush_agent::AgentInjections {
+            cwd: Some(std::path::PathBuf::from("/tmp")),
+            ..Default::default()
+        };
+        assert_eq!(
+            injections.cwd.as_deref(),
+            Some(std::path::Path::new("/tmp"))
+        );
+    }
 
     use crate::app::App;
     use crate::pane::Pane;
