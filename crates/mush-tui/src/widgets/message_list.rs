@@ -21,6 +21,7 @@ use std::cell::Cell;
 thread_local! {
     static INDENT_LINE_CALLS: Cell<usize> = const { Cell::new(0) };
     static COUNT_ESTIMATED_LINES_CALLS: Cell<usize> = const { Cell::new(0) };
+    static CONTENT_HASH_CALLS: Cell<usize> = const { Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -41,6 +42,16 @@ pub(crate) fn reset_count_estimated_lines_calls() {
 #[cfg(test)]
 pub(crate) fn count_estimated_lines_call_count() -> usize {
     COUNT_ESTIMATED_LINES_CALLS.with(Cell::get)
+}
+
+#[cfg(test)]
+fn reset_content_hash_calls() {
+    CONTENT_HASH_CALLS.with(|c| c.set(0));
+}
+
+#[cfg(test)]
+fn content_hash_call_count() -> usize {
+    CONTENT_HASH_CALLS.with(Cell::get)
 }
 use crate::theme::Theme;
 
@@ -463,7 +474,7 @@ fn render_message(
 
         if highlight_range.is_none() {
             // fast path: serve cached indented lines for stable messages
-            let hash = content_hash(&msg.content);
+            let hash = cached_content_hash(&msg.content, msg_idx, &app.render_state);
             let width_u16 = content_width as u16;
             let cached = {
                 let cache = app.render_state.indented_cache.borrow();
@@ -589,10 +600,42 @@ fn render_message(
 
 /// hash string content for cache keying
 fn content_hash(s: &str) -> u64 {
+    #[cfg(test)]
+    CONTENT_HASH_CALLS.with(|c| c.set(c.get() + 1));
+
     use std::hash::{Hash, Hasher};
     let mut h = std::hash::DefaultHasher::new();
     s.hash(&mut h);
     h.finish()
+}
+
+/// cached content hash: returns the hash from cache if byte length matches,
+/// otherwise recomputes and stores. message content is write-once so byte
+/// length is a sufficient invalidation key
+fn cached_content_hash(
+    content: &str,
+    msg_idx: usize,
+    render_state: &crate::app_state::RenderState,
+) -> u64 {
+    let len = content.len();
+    {
+        let cache = render_state.content_hash_cache.borrow();
+        if let Some(Some((cached_len, cached_hash))) = cache.get(msg_idx)
+            && *cached_len == len
+        {
+            return *cached_hash;
+        }
+    }
+
+    let hash = content_hash(content);
+    {
+        let mut cache = render_state.content_hash_cache.borrow_mut();
+        if cache.len() <= msg_idx {
+            cache.resize_with(msg_idx + 1, || None);
+        }
+        cache[msg_idx] = Some((len, hash));
+    }
+    hash
 }
 
 /// cheap height estimate for viewport culling.
@@ -697,7 +740,10 @@ fn compute_message_height(
             cache
                 .get(msg_idx)
                 .and_then(|e| e.as_ref())
-                .filter(|(hash, w, _)| *hash == content_hash(&msg.content) && *w == cw as u16)
+                .filter(|(hash, w, _)| {
+                    *hash == cached_content_hash(&msg.content, msg_idx, render_state)
+                        && *w == cw as u16
+                })
                 .map(|(_, _, cached_lines)| cached_lines.len())
         };
         h += exact.unwrap_or_else(|| count_estimated_lines(&msg.content, cw));
@@ -2021,5 +2067,26 @@ mod tests {
         let calls = count_estimated_lines_call_count();
 
         assert!(calls > 0, "width change should recompute");
+    }
+
+    #[test]
+    fn content_hash_cached_across_renders() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.messages.push(DisplayMessage::new(
+            MessageRole::Assistant,
+            "hello world with some **markdown**",
+        ));
+
+        // first render computes the hash
+        render_app(&app, 60, 20);
+        reset_content_hash_calls();
+
+        // second render should reuse cached hash
+        render_app(&app, 60, 20);
+        let calls = content_hash_call_count();
+        assert_eq!(
+            calls, 0,
+            "second render should use cached hash, got {calls} calls"
+        );
     }
 }
