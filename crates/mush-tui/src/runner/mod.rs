@@ -26,7 +26,9 @@ use self::input::LoopAction;
 use self::looping::run_loop_iteration;
 use self::render::draw_panes;
 use self::runtime::RunnerRuntime;
-use self::streams::{StreamDeps, StreamState, new_agent_streams, start_pending_streams};
+use self::streams::{
+    StreamConfig, StreamDeps, StreamState, new_agent_streams, start_pending_streams,
+};
 use self::terminal::{
     TerminalStateGuard, cleanup, enter_tui_terminal, install_panic_cleanup_hook,
     probe_image_picker, restore_terminal_state,
@@ -76,26 +78,30 @@ pub async fn run_tui(
             &mut runtime.pane_mgr,
             &mut runtime.pending_prompt,
             StreamDeps {
-                default_model: tui_config.model.clone(),
-                system_prompt: tui_config.system_prompt.clone(),
-                options: tui_config.options.clone(),
-                max_turns: tui_config.max_turns,
-                prompt_enricher: tui_config.prompt_enricher.clone(),
-                hint_mode: tui_config.hint_mode,
-                provider_api_keys: tui_config.provider_api_keys.clone(),
-                confirm_tools: tui_config.confirm_tools,
-                auto_compact: tui_config.auto_compact,
+                config: StreamConfig {
+                    default_model: tui_config.model.clone(),
+                    system_prompt: tui_config.system_prompt.clone(),
+                    options: tui_config.options.clone(),
+                    max_turns: tui_config.max_turns,
+                    prompt_enricher: tui_config.prompt_enricher.clone(),
+                    hint_mode: tui_config.hint_mode,
+                    provider_api_keys: tui_config.provider_api_keys.clone(),
+                    confirm_tools: tui_config.confirm_tools,
+                    auto_compact: tui_config.auto_compact,
+                    compaction_model: tui_config.compaction_model.clone(),
+                },
+                injections: mush_agent::AgentInjections {
+                    lifecycle_hooks: tui_config.lifecycle_hooks.clone(),
+                    cwd: Some(tui_config.cwd.clone()),
+                    dynamic_system_context: tui_config.dynamic_system_context.clone(),
+                    file_rules: tui_config.file_rules.clone(),
+                    lsp_diagnostics: tui_config.lsp_diagnostics.clone(),
+                },
                 tools,
                 registry,
                 message_bus: &services.message_bus,
                 shared_state: &services.shared_state,
                 file_tracker: &services.file_tracker,
-                lifecycle_hooks: tui_config.lifecycle_hooks.clone(),
-                cwd: tui_config.cwd.clone(),
-                dynamic_system_context: tui_config.dynamic_system_context.clone(),
-                file_rules: tui_config.file_rules.clone(),
-                lsp_diagnostics: tui_config.lsp_diagnostics.clone(),
-                compaction_model: tui_config.compaction_model.clone(),
             },
         )
         .await;
