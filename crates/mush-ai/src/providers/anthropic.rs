@@ -444,19 +444,20 @@ fn convert_messages_raw(
                     UserContent::Parts(parts) => {
                         let blocks: Vec<serde_json::Value> = parts
                             .iter()
-                            .map(|part| match part {
-                                UserContentPart::Text(t) => serde_json::json!({
+                            .filter_map(|part| match part {
+                                UserContentPart::Text(t) if t.text.is_empty() => None,
+                                UserContentPart::Text(t) => Some(serde_json::json!({
                                     "type": "text",
                                     "text": t.text,
-                                }),
-                                UserContentPart::Image(img) => serde_json::json!({
+                                })),
+                                UserContentPart::Image(img) => Some(serde_json::json!({
                                     "type": "image",
                                     "source": {
                                         "type": "base64",
                                         "media_type": img.mime_type,
                                         "data": img.data,
                                     }
-                                }),
+                                })),
                             })
                             .collect();
                         serde_json::Value::Array(blocks)
@@ -1185,6 +1186,30 @@ mod tests {
         assert_eq!(converted.len(), 1);
         assert_eq!(converted[0].role, "user");
         assert_eq!(converted[0].content, serde_json::json!("hello"));
+    }
+
+    #[test]
+    fn convert_image_only_message_omits_empty_text() {
+        // when user pastes an image with no text, the Parts vec contains
+        // an empty Text("") + Image. the empty text block must be filtered
+        // out or anthropic rejects with "text content blocks must be non-empty"
+        let messages = vec![Message::User(UserMessage {
+            content: UserContent::Parts(vec![
+                UserContentPart::Text(TextContent { text: "".into() }),
+                UserContentPart::Image(ImageContent {
+                    data: "iVBOR...".into(),
+                    mime_type: ImageMimeType::Png,
+                }),
+            ]),
+            timestamp_ms: Timestamp::zero(),
+        })];
+
+        let converted = convert_messages(&messages, false, None, ToolResultTrimming::SlidingWindow);
+        assert_eq!(converted.len(), 1);
+        let blocks = converted[0].content.as_array().expect("should be array");
+        // only the image block, no empty text
+        assert_eq!(blocks.len(), 1, "empty text block should be filtered out");
+        assert_eq!(blocks[0]["type"], "image");
     }
 
     #[test]
