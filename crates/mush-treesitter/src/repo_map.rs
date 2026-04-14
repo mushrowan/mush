@@ -247,7 +247,7 @@ fn discover_files_with_options(root: &Path, opts: &DiscoverOptions) -> Vec<PathB
             continue;
         }
         let path = entry.into_path();
-        if Language::detect(&path).is_some() {
+        if Language::detect(&path).is_some_and(|l| l.is_code()) {
             files.push(path);
             if files.len() >= max {
                 tracing::warn!(
@@ -849,5 +849,33 @@ pub fn helper() -> String {
         }
         let files = discover_files(dir.path());
         assert_eq!(files.len(), 3, "small repos should not be capped");
+    }
+
+    #[test]
+    fn discover_files_skips_data_languages() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
+        fs::write(dir.path().join("config.json"), "{}").unwrap();
+        fs::write(dir.path().join("data.toml"), "[x]\ny = 1").unwrap();
+        fs::write(dir.path().join("readme.md"), "# hi").unwrap();
+        fs::write(dir.path().join("style.css"), "body {}").unwrap();
+
+        let files = discover_files(dir.path());
+        let names: Vec<_> = files
+            .iter()
+            .map(|p| p.file_name().unwrap().to_str().unwrap())
+            .collect();
+
+        assert!(names.contains(&"main.rs"), "should include code files");
+        assert!(
+            !names.contains(&"config.json"),
+            "should skip json: {names:?}"
+        );
+        assert!(!names.contains(&"data.toml"), "should skip toml: {names:?}");
+        assert!(
+            !names.contains(&"readme.md"),
+            "should skip markdown: {names:?}"
+        );
+        assert!(!names.contains(&"style.css"), "should skip css: {names:?}");
     }
 }

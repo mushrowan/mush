@@ -162,6 +162,11 @@ impl Language {
         }
     }
 
+    /// whether this is a code language (has meaningful symbol extraction)
+    pub fn is_code(self) -> bool {
+        CODE.contains(&self)
+    }
+
     /// human-readable name
     pub fn name(self) -> &'static str {
         match self {
