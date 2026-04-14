@@ -226,7 +226,7 @@ pub fn run_sse_stream(
                 }
                 Ok(None) => break,
                 Err(e) => {
-                    let capture_path = super::openai_responses::write_decode_snapshot(
+                    let capture_path = write_decode_snapshot(
                         &model_id.to_string(),
                         &provider_name.to_string(),
                         &raw_capture,
@@ -261,6 +261,43 @@ pub fn run_sse_stream(
     };
 
     Box::pin(event_stream)
+}
+
+pub(crate) fn write_decode_snapshot(
+    model_id: &str,
+    provider: &str,
+    bytes: &[u8],
+) -> Option<String> {
+    if bytes.is_empty() {
+        return None;
+    }
+
+    let mut dir = std::env::var_os("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            let home = std::env::var_os("HOME").unwrap_or_else(|| ".".into());
+            let mut p = std::path::PathBuf::from(home);
+            p.push(".local/share");
+            p
+        });
+    dir.push("mush");
+    dir.push("stream-errors");
+
+    if std::fs::create_dir_all(&dir).is_err() {
+        return None;
+    }
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let file = format!("decode-{provider}-{model_id}-{ts}.bin");
+    let path = dir.join(file);
+    if std::fs::write(&path, bytes).is_ok() {
+        Some(path.display().to_string())
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]

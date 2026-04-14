@@ -583,12 +583,12 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         lifecycle_hooks: setup.lifecycle_hooks,
         cwd: std::env::current_dir().unwrap_or_default(),
         dynamic_system_context: None,
-        file_rules: setup.file_rules.clone(),
-        lsp_diagnostics: setup.lsp_diagnostics.clone(),
+        file_rules: setup.file_rules,
+        lsp_diagnostics: setup.lsp_diagnostics,
         agent_card: Some(agent_card),
-        model_tiers: setup.cfg.model_tiers.clone(),
-        compaction_model: setup.compaction_model.clone(),
-        http_client: Some(setup.http_client.clone()),
+        model_tiers: setup.cfg.model_tiers,
+        compaction_model: setup.compaction_model,
+        http_client: Some(setup.http_client),
         session_id: session_id.clone(),
     };
 
