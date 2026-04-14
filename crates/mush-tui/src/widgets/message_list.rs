@@ -20,6 +20,7 @@ use std::cell::Cell;
 #[cfg(test)]
 thread_local! {
     static INDENT_LINE_CALLS: Cell<usize> = const { Cell::new(0) };
+    static COUNT_ESTIMATED_LINES_CALLS: Cell<usize> = const { Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -30,6 +31,16 @@ pub(crate) fn reset_indent_line_call_count() {
 #[cfg(test)]
 pub(crate) fn indent_line_call_count() -> usize {
     INDENT_LINE_CALLS.with(Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_count_estimated_lines_calls() {
+    COUNT_ESTIMATED_LINES_CALLS.with(|c| c.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn count_estimated_lines_call_count() -> usize {
+    COUNT_ESTIMATED_LINES_CALLS.with(Cell::get)
 }
 use crate::theme::Theme;
 
@@ -585,10 +596,74 @@ fn content_hash(s: &str) -> u64 {
 }
 
 /// cheap height estimate for viewport culling.
-/// uses the indented cache for exact counts when available,
-/// falls back to character-count estimation otherwise.
+/// uses a per-message cache keyed by O(1) byte-length fingerprint
+/// to avoid re-scanning content with chars().count() every frame.
+/// falls back to the indented cache or character-count estimation on miss.
 /// result includes the trailing separator line.
 fn estimate_message_height(
+    msg: &DisplayMessage,
+    msg_idx: usize,
+    width: u16,
+    render_state: &crate::app_state::RenderState,
+) -> usize {
+    use crate::app_state::CachedHeight;
+
+    // build a cheap O(1) fingerprint for cache lookup
+    let tool_output_len: usize = msg
+        .tool_calls
+        .iter()
+        .filter(|tc| tc.status != ToolCallStatus::Running)
+        .map(|tc| tc.output_preview.as_ref().map_or(0, String::len))
+        .sum();
+    let completed_tool_count = msg
+        .tool_calls
+        .iter()
+        .filter(|tc| tc.status != ToolCallStatus::Running)
+        .count();
+    let has_usage = msg
+        .usage
+        .as_ref()
+        .is_some_and(|u| u.total_tokens() > TokenCount::ZERO);
+
+    let fingerprint = |height| CachedHeight {
+        content_len: msg.content.len(),
+        thinking_len: msg.thinking.as_ref().map_or(0, String::len),
+        tool_output_len,
+        completed_tool_count,
+        thinking_expanded: msg.thinking_expanded,
+        has_usage,
+        width,
+        height,
+    };
+
+    // check cache
+    {
+        let cache = render_state.height_cache.borrow();
+        if let Some(Some(entry)) = cache.get(msg_idx) {
+            // compare all fields except height
+            let probe = fingerprint(entry.height);
+            if *entry == probe {
+                return entry.height;
+            }
+        }
+    }
+
+    let h = compute_message_height(msg, msg_idx, width, render_state);
+
+    // store in cache
+    {
+        let mut cache = render_state.height_cache.borrow_mut();
+        if cache.len() <= msg_idx {
+            cache.resize_with(msg_idx + 1, || None);
+        }
+        cache[msg_idx] = Some(fingerprint(h));
+    }
+
+    h
+}
+
+/// inner height computation (called on cache miss)
+fn compute_message_height(
     msg: &DisplayMessage,
     msg_idx: usize,
     width: u16,
@@ -656,6 +731,9 @@ fn estimate_message_height(
 
 /// estimate how many wrapped lines text occupies at a given width
 fn count_estimated_lines(text: &str, width: usize) -> usize {
+    #[cfg(test)]
+    COUNT_ESTIMATED_LINES_CALLS.with(|c| c.set(c.get() + 1));
+
     if text.is_empty() || width == 0 {
         return 1;
     }
@@ -1891,5 +1969,57 @@ mod tests {
             calls > 0,
             "width change should invalidate cache, got {calls} calls"
         );
+    }
+
+    #[test]
+    fn height_cache_avoids_recomputation() {
+        let render_state = crate::app_state::RenderState::new();
+        let msg = DisplayMessage::new(
+            MessageRole::User,
+            "hello world this is some content for height estimation",
+        );
+
+        reset_count_estimated_lines_calls();
+        let h1 = estimate_message_height(&msg, 0, 60, &render_state);
+        let first_calls = count_estimated_lines_call_count();
+        assert!(first_calls > 0, "should compute on first call");
+
+        reset_count_estimated_lines_calls();
+        let h2 = estimate_message_height(&msg, 0, 60, &render_state);
+        let second_calls = count_estimated_lines_call_count();
+
+        assert_eq!(h1, h2, "cached height should match");
+        assert_eq!(second_calls, 0, "should use cache on second call");
+    }
+
+    #[test]
+    fn height_cache_invalidates_on_content_change() {
+        let render_state = crate::app_state::RenderState::new();
+        let msg = DisplayMessage::new(MessageRole::User, "short");
+        estimate_message_height(&msg, 0, 60, &render_state);
+
+        // different content length invalidates and recomputes
+        let msg2 = DisplayMessage::new(MessageRole::User, "different length content");
+        reset_count_estimated_lines_calls();
+        estimate_message_height(&msg2, 0, 60, &render_state);
+        let calls = count_estimated_lines_call_count();
+
+        assert!(calls > 0, "content change should recompute");
+    }
+
+    #[test]
+    fn height_cache_invalidates_on_width_change() {
+        let render_state = crate::app_state::RenderState::new();
+        let msg = DisplayMessage::new(
+            MessageRole::User,
+            "some content that might wrap differently at different widths",
+        );
+        estimate_message_height(&msg, 0, 60, &render_state);
+
+        reset_count_estimated_lines_calls();
+        estimate_message_height(&msg, 0, 80, &render_state);
+        let calls = count_estimated_lines_call_count();
+
+        assert!(calls > 0, "width change should recompute");
     }
 }
