@@ -140,17 +140,18 @@ fn build_request_body(
                     UserContent::Parts(parts) => {
                         let blocks: Vec<serde_json::Value> = parts
                             .iter()
-                            .map(|part| match part {
-                                UserContentPart::Text(t) => serde_json::json!({
+                            .filter_map(|part| match part {
+                                UserContentPart::Text(t) if t.text.is_empty() => None,
+                                UserContentPart::Text(t) => Some(serde_json::json!({
                                     "type": "text",
                                     "text": t.text,
-                                }),
-                                UserContentPart::Image(img) => serde_json::json!({
+                                })),
+                                UserContentPart::Image(img) => Some(serde_json::json!({
                                     "type": "image_url",
                                     "image_url": {
                                         "url": format!("data:{};base64,{}", img.mime_type, img.data),
                                     }
-                                }),
+                                })),
                             })
                             .collect();
                         serde_json::Value::Array(blocks)

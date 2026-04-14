@@ -272,6 +272,7 @@ fn convert_input_messages(
                     let mut content = Vec::new();
                     for part in parts {
                         match part {
+                            UserContentPart::Text(text) if text.text.is_empty() => {}
                             UserContentPart::Text(text) => {
                                 content.push(serde_json::json!({
                                     "type": "input_text",
