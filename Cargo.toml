@@ -36,6 +36,7 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
 futures = "0.3"
 async-stream = "0.3"
+async-trait = "0.1"
 
 # http + streaming
 reqwest = { version = "0.13", default-features = false, features = [

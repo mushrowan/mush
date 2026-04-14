@@ -125,6 +125,7 @@ impl SkillTool {
     }
 }
 
+#[async_trait::async_trait]
 impl AgentTool for SkillTool {
     fn name(&self) -> &str {
         "skill"
@@ -146,52 +147,47 @@ impl AgentTool for SkillTool {
         OutputLimit::Head
     }
 
-    fn execute(
-        &self,
-        args: serde_json::Value,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
-        Box::pin(async move {
-            let args = match parse_tool_args::<NameArgs>(args) {
-                Ok(args) => args,
-                Err(error) => return error,
-            };
+    async fn execute(&self, args: serde_json::Value) -> ToolResult {
+        let args = match parse_tool_args::<NameArgs>(args) {
+            Ok(args) => args,
+            Err(error) => return error,
+        };
 
-            let skill = match find_skill(&self.skills, &args.name) {
-                Ok(skill) => skill,
-                Err(error) => return error,
-            };
+        let skill = match find_skill(&self.skills, &args.name) {
+            Ok(skill) => skill,
+            Err(error) => return error,
+        };
 
-            let content = match std::fs::read_to_string(&skill.path) {
-                Ok(content) => content,
-                Err(error) => {
-                    return ToolResult::error(format!(
-                        "failed to read {}: {error}",
-                        skill.path.display()
-                    ));
-                }
-            };
-
-            let base_dir = skill_base_dir(&skill.path);
-            let files = sample_skill_files(&base_dir, 10);
-
-            let mut output = format!(
-                "<skill_content name=\"{}\">\n# Skill: {}\n\n{}\n\nBase directory for this skill: {}\nRelative paths in this skill are resolved from this directory",
-                skill.name,
-                skill.name,
-                content.trim(),
-                base_dir.display()
-            );
-
-            if !files.is_empty() {
-                output.push_str("\n\n<skill_files>\n");
-                output.push_str(&files.join("\n"));
-                output.push_str("\n</skill_files>");
+        let content = match std::fs::read_to_string(&skill.path) {
+            Ok(content) => content,
+            Err(error) => {
+                return ToolResult::error(format!(
+                    "failed to read {}: {error}",
+                    skill.path.display()
+                ));
             }
+        };
 
-            output.push_str("\n</skill_content>");
+        let base_dir = skill_base_dir(&skill.path);
+        let files = sample_skill_files(&base_dir, 10);
 
-            ToolResult::text(output)
-        })
+        let mut output = format!(
+            "<skill_content name=\"{}\">\n# Skill: {}\n\n{}\n\nBase directory for this skill: {}\nRelative paths in this skill are resolved from this directory",
+            skill.name,
+            skill.name,
+            content.trim(),
+            base_dir.display()
+        );
+
+        if !files.is_empty() {
+            output.push_str("\n\n<skill_files>\n");
+            output.push_str(&files.join("\n"));
+            output.push_str("\n</skill_files>");
+        }
+
+        output.push_str("\n</skill_content>");
+
+        ToolResult::text(output)
     }
 }
 

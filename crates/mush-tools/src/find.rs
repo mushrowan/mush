@@ -44,6 +44,7 @@ impl FindTool {
     }
 }
 
+#[async_trait::async_trait]
 impl AgentTool for FindTool {
     fn name(&self) -> &str {
         "find"
@@ -79,24 +80,19 @@ impl AgentTool for FindTool {
         })
     }
 
-    fn execute(
-        &self,
-        args: serde_json::Value,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
-        Box::pin(async move {
-            let args = match parse_tool_args::<FindArgs>(args) {
-                Ok(args) => args,
-                Err(error) => return error,
-            };
+    async fn execute(&self, args: serde_json::Value) -> ToolResult {
+        let args = match parse_tool_args::<FindArgs>(args) {
+            Ok(args) => args,
+            Err(error) => return error,
+        };
 
-            let search_path = args
-                .path
-                .as_deref()
-                .map(|path| resolve_path(&self.cwd, path))
-                .unwrap_or_else(|| self.cwd.to_path_buf());
+        let search_path = args
+            .path
+            .as_deref()
+            .map(|path| resolve_path(&self.cwd, path))
+            .unwrap_or_else(|| self.cwd.to_path_buf());
 
-            run_fd(&self.cwd, &args.pattern, &search_path, args.type_filter).await
-        })
+        run_fd(&self.cwd, &args.pattern, &search_path, args.type_filter).await
     }
 }
 

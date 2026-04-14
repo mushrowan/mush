@@ -2949,6 +2949,7 @@ name = "mush-agent"
 version = "0.1.0"
 dependencies = [
  "async-stream",
+ "async-trait",
  "futures",
  "mush-ai",
  "pretty_assertions",
@@ -3053,6 +3054,7 @@ dependencies = [
 name = "mush-lsp"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "lsp-types",
  "mush-agent",
  "mush-treesitter",
@@ -3067,6 +3069,7 @@ dependencies = [
 name = "mush-mcp"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "mush-agent",
  "mush-ai",
  "pretty_assertions",
@@ -3100,6 +3103,7 @@ dependencies = [
 name = "mush-tools"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "base64 0.22.1",
  "futures",
  "grep-matcher",
@@ -3154,6 +3158,7 @@ dependencies = [
 name = "mush-tui"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "base64 0.22.1",
  "chrono",
  "criterion",

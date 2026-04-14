@@ -69,6 +69,7 @@ struct McpError {
     message: String,
 }
 
+#[async_trait::async_trait]
 impl AgentTool for WebSearchTool {
     fn name(&self) -> &str {
         "web_search"
@@ -104,73 +105,68 @@ impl AgentTool for WebSearchTool {
         })
     }
 
-    fn execute(
-        &self,
-        args: serde_json::Value,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
-        Box::pin(async move {
-            let args = match parse_tool_args::<WebSearchArgs>(args) {
-                Ok(args) => args,
-                Err(error) => return error,
-            };
+    async fn execute(&self, args: serde_json::Value) -> ToolResult {
+        let args = match parse_tool_args::<WebSearchArgs>(args) {
+            Ok(args) => args,
+            Err(error) => return error,
+        };
 
-            let body = serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "tools/call",
-                "params": {
-                    "name": "web_search_exa",
-                    "arguments": {
-                        "query": args.query,
-                        "type": args.search_type.as_str(),
-                        "numResults": args.num_results,
-                        "livecrawl": "fallback",
-                    }
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "web_search_exa",
+                "arguments": {
+                    "query": args.query,
+                    "type": args.search_type.as_str(),
+                    "numResults": args.num_results,
+                    "livecrawl": "fallback",
                 }
-            });
-
-            let response = match self
-                .client
-                .post(EXA_MCP_URL)
-                .header("accept", "application/json, text/event-stream")
-                .header("content-type", "application/json")
-                .timeout(std::time::Duration::from_secs(TIMEOUT_SECS))
-                .body(body.to_string())
-                .send()
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => return ToolResult::error(format!("search request failed: {e}")),
-            };
-
-            if !response.status().is_success() {
-                let status = response.status();
-                let body = response.text().await.unwrap_or_default();
-                return ToolResult::error(format!("search error ({status}): {body}"));
             }
+        });
 
-            let text = match response.text().await {
-                Ok(t) => t,
-                Err(e) => return ToolResult::error(format!("failed to read response: {e}")),
-            };
+        let response = match self
+            .client
+            .post(EXA_MCP_URL)
+            .header("accept", "application/json, text/event-stream")
+            .header("content-type", "application/json")
+            .timeout(std::time::Duration::from_secs(TIMEOUT_SECS))
+            .body(body.to_string())
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => return ToolResult::error(format!("search request failed: {e}")),
+        };
 
-            if let Some(result) = parse_sse_response(&text) {
-                return result;
-            }
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return ToolResult::error(format!("search error ({status}): {body}"));
+        }
 
-            let Ok(resp) = serde_json::from_str::<McpResponse>(&text) else {
-                return ToolResult::text("no results found. try a different query.");
-            };
-            if let Some(err) = resp.error {
-                ToolResult::error(format!("exa error: {}", err.message))
-            } else if let Some(result) = resp.result
-                && let Some(content) = result.content.first()
-            {
-                ToolResult::text(&content.text)
-            } else {
-                ToolResult::text("no results found. try a different query.")
-            }
-        })
+        let text = match response.text().await {
+            Ok(t) => t,
+            Err(e) => return ToolResult::error(format!("failed to read response: {e}")),
+        };
+
+        if let Some(result) = parse_sse_response(&text) {
+            return result;
+        }
+
+        let Ok(resp) = serde_json::from_str::<McpResponse>(&text) else {
+            return ToolResult::text("no results found. try a different query.");
+        };
+        if let Some(err) = resp.error {
+            ToolResult::error(format!("exa error: {}", err.message))
+        } else if let Some(result) = resp.result
+            && let Some(content) = result.content.first()
+        {
+            ToolResult::text(&content.text)
+        } else {
+            ToolResult::text("no results found. try a different query.")
+        }
     }
 }
 

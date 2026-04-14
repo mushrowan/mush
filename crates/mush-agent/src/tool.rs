@@ -65,6 +65,7 @@ pub enum OutputLimit {
 ///
 /// tools are given a json arguments object and return a result.
 /// they can be cancelled via the abort signal.
+#[async_trait::async_trait]
 pub trait AgentTool: Send + Sync {
     /// unique name for this tool
     fn name(&self) -> &str;
@@ -79,10 +80,7 @@ pub trait AgentTool: Send + Sync {
     fn parameters_schema(&self) -> serde_json::Value;
 
     /// execute the tool with the given arguments
-    fn execute(
-        &self,
-        args: serde_json::Value,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>>;
+    async fn execute(&self, args: serde_json::Value) -> ToolResult;
 
     /// how this tool's output should be truncated by the agent loop
     fn output_limit(&self) -> OutputLimit {
@@ -213,6 +211,7 @@ mod tests {
 
     struct EchoTool;
 
+    #[async_trait::async_trait]
     impl AgentTool for EchoTool {
         fn name(&self) -> &str {
             "echo"
@@ -230,14 +229,9 @@ mod tests {
                 "required": ["text"]
             })
         }
-        fn execute(
-            &self,
-            args: serde_json::Value,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
-            Box::pin(async move {
-                let text = args["text"].as_str().unwrap_or("no text");
-                ToolResult::text(text)
-            })
+        async fn execute(&self, args: serde_json::Value) -> ToolResult {
+            let text = args["text"].as_str().unwrap_or("no text");
+            ToolResult::text(text)
         }
     }
 
@@ -266,6 +260,7 @@ mod tests {
 
     struct UpperEchoTool;
 
+    #[async_trait::async_trait]
     impl AgentTool for UpperEchoTool {
         fn name(&self) -> &str {
             "echo"
@@ -283,14 +278,9 @@ mod tests {
                 "required": ["text"]
             })
         }
-        fn execute(
-            &self,
-            args: serde_json::Value,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
-            Box::pin(async move {
-                let text = args["text"].as_str().unwrap_or("no text");
-                ToolResult::text(text.to_uppercase())
-            })
+        async fn execute(&self, args: serde_json::Value) -> ToolResult {
+            let text = args["text"].as_str().unwrap_or("no text");
+            ToolResult::text(text.to_uppercase())
         }
     }
 

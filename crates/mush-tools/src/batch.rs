@@ -137,6 +137,7 @@ fn group_by_path(calls: Vec<BatchCall>) -> Vec<Vec<(usize, BatchCall)>> {
     groups
 }
 
+#[async_trait::async_trait]
 impl AgentTool for BatchTool {
     fn name(&self) -> &str {
         "batch"
@@ -181,141 +182,136 @@ impl AgentTool for BatchTool {
         OutputLimit::Middle
     }
 
-    fn execute(
-        &self,
-        params: serde_json::Value,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
-        Box::pin(async move {
-            let params = match parse_tool_args::<BatchArgs>(params) {
-                Ok(params) => params,
-                Err(error) => return error,
+    async fn execute(&self, params: serde_json::Value) -> ToolResult {
+        let params = match parse_tool_args::<BatchArgs>(params) {
+            Ok(params) => params,
+            Err(error) => return error,
+        };
+
+        if params.tool_calls.is_empty() {
+            return ToolResult::error("tool_calls cannot be empty");
+        }
+
+        if params.tool_calls.len() > MAX_CALLS {
+            return ToolResult::error(format!(
+                "too many tool calls: {} (max {})",
+                params.tool_calls.len(),
+                MAX_CALLS
+            ));
+        }
+
+        let total = params.tool_calls.len();
+
+        // group same-path file-mutating calls so they run sequentially,
+        // everything else runs in parallel across groups
+        let groups = group_by_path(params.tool_calls);
+        let group_futures = groups.into_iter().map(|group| async {
+            let mut results = Vec::with_capacity(group.len());
+            for (i, call) in group {
+                results.push(run_call(i, call, &self.tools).await);
+            }
+            results
+        });
+
+        let all_groups = futures::future::join_all(group_futures).await;
+        let mut results: Vec<CallResult> = all_groups.into_iter().flatten().collect();
+        results.sort_by_key(|(i, _, _, _)| *i);
+
+        let mut success_count = 0;
+        let mut error_count = 0;
+
+        // first pass: individually truncate each result and extract text
+        let mut items: Vec<(usize, String, String, String)> = Vec::with_capacity(results.len());
+        for (i, tool_name, limit, result) in &results {
+            let truncated = match result {
+                Ok(result) => {
+                    if result.outcome.is_error() {
+                        error_count += 1;
+                    } else {
+                        success_count += 1;
+                    }
+                    truncation::apply(result.clone(), limit.unwrap_or_default())
+                }
+                Err(error) => {
+                    error_count += 1;
+                    ToolResult::error(error.clone())
+                }
             };
 
-            if params.tool_calls.is_empty() {
-                return ToolResult::error("tool_calls cannot be empty");
-            }
-
-            if params.tool_calls.len() > MAX_CALLS {
-                return ToolResult::error(format!(
-                    "too many tool calls: {} (max {})",
-                    params.tool_calls.len(),
-                    MAX_CALLS
-                ));
-            }
-
-            let total = params.tool_calls.len();
-
-            // group same-path file-mutating calls so they run sequentially,
-            // everything else runs in parallel across groups
-            let groups = group_by_path(params.tool_calls);
-            let group_futures = groups.into_iter().map(|group| async {
-                let mut results = Vec::with_capacity(group.len());
-                for (i, call) in group {
-                    results.push(run_call(i, call, &self.tools).await);
-                }
-                results
-            });
-
-            let all_groups = futures::future::join_all(group_futures).await;
-            let mut results: Vec<CallResult> = all_groups.into_iter().flatten().collect();
-            results.sort_by_key(|(i, _, _, _)| *i);
-
-            let mut success_count = 0;
-            let mut error_count = 0;
-
-            // first pass: individually truncate each result and extract text
-            let mut items: Vec<(usize, String, String, String)> = Vec::with_capacity(results.len());
-            for (i, tool_name, limit, result) in &results {
-                let truncated = match result {
-                    Ok(result) => {
-                        if result.outcome.is_error() {
-                            error_count += 1;
-                        } else {
-                            success_count += 1;
-                        }
-                        truncation::apply(result.clone(), limit.unwrap_or_default())
-                    }
-                    Err(error) => {
-                        error_count += 1;
-                        ToolResult::error(error.clone())
-                    }
-                };
-
-                let status = if truncated.outcome.is_error() {
-                    "error"
-                } else {
-                    "ok"
-                };
-                let header = format!("--- [{i}] {tool_name} [{status}] ---\n");
-                let mut item_text = String::new();
-                for part in &truncated.content {
-                    match part {
-                        ToolResultContentPart::Text(text) => item_text.push_str(&text.text),
-                        ToolResultContentPart::Image(_) => item_text.push_str("[image]"),
-                    }
-                }
-                items.push((*i, tool_name.clone(), header, item_text));
-            }
-
-            // check if total exceeds budget
-            let total_size: usize = items.iter().map(|(_, _, h, t)| h.len() + t.len() + 2).sum();
-
-            let mut output = String::new();
-            if total_size <= MAX_TOTAL_OUTPUT {
-                // everything fits, no truncation needed
-                for (_, _, header, item_text) in &items {
-                    output.push_str(header);
-                    output.push_str(item_text);
-                    output.push_str("\n\n");
-                }
+            let status = if truncated.outcome.is_error() {
+                "error"
             } else {
-                // build full output and save to file
-                let mut full_output = String::with_capacity(total_size + 256);
-                for (_, _, header, item_text) in &items {
-                    full_output.push_str(header);
-                    full_output.push_str(item_text);
-                    full_output.push_str("\n\n");
+                "ok"
+            };
+            let header = format!("--- [{i}] {tool_name} [{status}] ---\n");
+            let mut item_text = String::new();
+            for part in &truncated.content {
+                match part {
+                    ToolResultContentPart::Text(text) => item_text.push_str(&text.text),
+                    ToolResultContentPart::Image(_) => item_text.push_str("[image]"),
                 }
-                let saved_path = truncation::save_batch_output(&full_output);
+            }
+            items.push((*i, tool_name.clone(), header, item_text));
+        }
 
-                // fair truncation: give each item a share of the budget
-                let overhead_per_item = 80; // header + truncation notice
-                let usable = MAX_TOTAL_OUTPUT.saturating_sub(items.len() * overhead_per_item + 256);
-                let per_item_budget = usable / items.len();
+        // check if total exceeds budget
+        let total_size: usize = items.iter().map(|(_, _, h, t)| h.len() + t.len() + 2).sum();
 
-                for (_, _, header, item_text) in &items {
-                    output.push_str(header);
-                    if item_text.len() <= per_item_budget {
-                        output.push_str(item_text);
-                    } else {
-                        // preserve any file path from individual truncation
-                        let file_ref = extract_file_path(item_text);
-                        let truncated = truncate_to_budget(item_text, per_item_budget);
-                        output.push_str(truncated);
-                        let omitted = item_text.len() - truncated.len();
-                        output.push_str(&format!("\n[...truncated, {omitted} bytes omitted"));
-                        if let Some(path) = file_ref {
-                            output.push_str(&format!(". full output: {path}"));
-                        }
-                        output.push(']');
+        let mut output = String::new();
+        if total_size <= MAX_TOTAL_OUTPUT {
+            // everything fits, no truncation needed
+            for (_, _, header, item_text) in &items {
+                output.push_str(header);
+                output.push_str(item_text);
+                output.push_str("\n\n");
+            }
+        } else {
+            // build full output and save to file
+            let mut full_output = String::with_capacity(total_size + 256);
+            for (_, _, header, item_text) in &items {
+                full_output.push_str(header);
+                full_output.push_str(item_text);
+                full_output.push_str("\n\n");
+            }
+            let saved_path = truncation::save_batch_output(&full_output);
+
+            // fair truncation: give each item a share of the budget
+            let overhead_per_item = 80; // header + truncation notice
+            let usable = MAX_TOTAL_OUTPUT.saturating_sub(items.len() * overhead_per_item + 256);
+            let per_item_budget = usable / items.len();
+
+            for (_, _, header, item_text) in &items {
+                output.push_str(header);
+                if item_text.len() <= per_item_budget {
+                    output.push_str(item_text);
+                } else {
+                    // preserve any file path from individual truncation
+                    let file_ref = extract_file_path(item_text);
+                    let truncated = truncate_to_budget(item_text, per_item_budget);
+                    output.push_str(truncated);
+                    let omitted = item_text.len() - truncated.len();
+                    output.push_str(&format!("\n[...truncated, {omitted} bytes omitted"));
+                    if let Some(path) = file_ref {
+                        output.push_str(&format!(". full output: {path}"));
                     }
-                    output.push_str("\n\n");
+                    output.push(']');
                 }
-
-                let path_note = match saved_path {
-                    Some(p) => format!("full output: {}", p.display()),
-                    None => "full output could not be saved".into(),
-                };
-                output.push_str(&format!(
-                    "[batch output exceeded {MAX_TOTAL_OUTPUT} byte budget. {path_note}]\n"
-                ));
+                output.push_str("\n\n");
             }
 
+            let path_note = match saved_path {
+                Some(p) => format!("full output: {}", p.display()),
+                None => "full output could not be saved".into(),
+            };
             output.push_str(&format!(
-                "batch: {success_count}/{total} succeeded, {error_count} failed"
+                "[batch output exceeded {MAX_TOTAL_OUTPUT} byte budget. {path_note}]\n"
             ));
-            ToolResult::text(output)
-        })
+        }
+
+        output.push_str(&format!(
+            "batch: {success_count}/{total} succeeded, {error_count} failed"
+        ));
+        ToolResult::text(output)
     }
 }
 
@@ -383,6 +379,7 @@ mod tests {
     async fn large_output_truncated_like_standalone() {
         struct LargeTool;
 
+        #[async_trait::async_trait]
         impl AgentTool for LargeTool {
             fn name(&self) -> &str {
                 "large"
@@ -400,13 +397,9 @@ mod tests {
                 serde_json::json!({"type": "object"})
             }
 
-            fn execute(
-                &self,
-                _params: serde_json::Value,
-            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>>
-            {
+            async fn execute(&self, _params: serde_json::Value) -> ToolResult {
                 let lines: Vec<String> = (0..5000).map(|i| format!("line {i}")).collect();
-                Box::pin(async move { ToolResult::text(lines.join("\n")) })
+                ToolResult::text(lines.join("\n"))
             }
         }
 
@@ -431,6 +424,7 @@ mod tests {
     async fn total_output_budget_truncates_fairly_with_spillover() {
         struct BigTool;
 
+        #[async_trait::async_trait]
         impl AgentTool for BigTool {
             fn name(&self) -> &str {
                 "big"
@@ -448,15 +442,11 @@ mod tests {
                 serde_json::json!({"type": "object"})
             }
 
-            fn execute(
-                &self,
-                params: serde_json::Value,
-            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>>
-            {
+            async fn execute(&self, params: serde_json::Value) -> ToolResult {
                 // each call returns ~20KB with a unique marker
                 let idx = params.get("idx").and_then(|v| v.as_u64()).unwrap_or(0);
                 let text = format!("MARKER_{idx}\n{}", "x".repeat(20_000));
-                Box::pin(async move { ToolResult::text(text) })
+                ToolResult::text(text)
             }
         }
 
@@ -511,6 +501,7 @@ mod tests {
     async fn batch_preserves_individual_file_paths() {
         struct PathTool;
 
+        #[async_trait::async_trait]
         impl AgentTool for PathTool {
             fn name(&self) -> &str {
                 "pathtool"
@@ -524,11 +515,7 @@ mod tests {
             fn parameters_schema(&self) -> serde_json::Value {
                 serde_json::json!({"type": "object"})
             }
-            fn execute(
-                &self,
-                params: serde_json::Value,
-            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>>
-            {
+            async fn execute(&self, params: serde_json::Value) -> ToolResult {
                 let idx = params.get("idx").and_then(|v| v.as_u64()).unwrap_or(0);
                 // simulate individually-truncated output with a file path hint in the middle
                 let text = format!(
@@ -536,7 +523,7 @@ mod tests {
                     "x".repeat(15_000),
                     "y".repeat(15_000),
                 );
-                Box::pin(async move { ToolResult::text(text) })
+                ToolResult::text(text)
             }
         }
 
@@ -571,6 +558,7 @@ mod tests {
             dir: std::path::PathBuf,
         }
 
+        #[async_trait::async_trait]
         impl AgentTool for SlowEdit {
             fn name(&self) -> &str {
                 "edit"
@@ -584,24 +572,18 @@ mod tests {
             fn parameters_schema(&self) -> serde_json::Value {
                 serde_json::json!({"type": "object"})
             }
-            fn execute(
-                &self,
-                params: serde_json::Value,
-            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>>
-            {
+            async fn execute(&self, params: serde_json::Value) -> ToolResult {
                 let dir = self.dir.clone();
-                Box::pin(async move {
-                    let path = dir.join(params["path"].as_str().unwrap());
-                    let old = params["oldText"].as_str().unwrap();
-                    let new = params["newText"].as_str().unwrap();
+                let path = dir.join(params["path"].as_str().unwrap());
+                let old = params["oldText"].as_str().unwrap();
+                let new = params["newText"].as_str().unwrap();
 
-                    let content = std::fs::read_to_string(&path).unwrap();
-                    // widen the race window so concurrent calls definitely overlap
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                    let replaced = content.replacen(old, new, 1);
-                    std::fs::write(&path, &replaced).unwrap();
-                    ToolResult::text(format!("edited {}", path.display()))
-                })
+                let content = std::fs::read_to_string(&path).unwrap();
+                // widen the race window so concurrent calls definitely overlap
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                let replaced = content.replacen(old, new, 1);
+                std::fs::write(&path, &replaced).unwrap();
+                ToolResult::text(format!("edited {}", path.display()))
             }
         }
 
@@ -643,6 +625,7 @@ mod tests {
     async fn tool_lookup_is_case_insensitive() {
         struct DummyTool;
 
+        #[async_trait::async_trait]
         impl AgentTool for DummyTool {
             fn name(&self) -> &str {
                 "DuMmY"
@@ -660,12 +643,8 @@ mod tests {
                 serde_json::json!({"type": "object"})
             }
 
-            fn execute(
-                &self,
-                _params: serde_json::Value,
-            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>>
-            {
-                Box::pin(async { ToolResult::text("ok") })
+            async fn execute(&self, _params: serde_json::Value) -> ToolResult {
+                ToolResult::text("ok")
             }
         }
 

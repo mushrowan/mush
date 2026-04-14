@@ -26,6 +26,7 @@ impl GlobTool {
     }
 }
 
+#[async_trait::async_trait]
 impl AgentTool for GlobTool {
     fn name(&self) -> &str {
         "glob"
@@ -56,45 +57,40 @@ impl AgentTool for GlobTool {
         })
     }
 
-    fn execute(
-        &self,
-        args: serde_json::Value,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
-        Box::pin(async move {
-            let args = match parse_tool_args::<GlobArgs>(args) {
-                Ok(args) => args,
-                Err(error) => return error,
-            };
+    async fn execute(&self, args: serde_json::Value) -> ToolResult {
+        let args = match parse_tool_args::<GlobArgs>(args) {
+            Ok(args) => args,
+            Err(error) => return error,
+        };
 
-            let search_dir = args
-                .path
-                .as_deref()
-                .map(|path| resolve_path(&self.cwd, path))
-                .unwrap_or_else(|| self.cwd.to_path_buf());
+        let search_dir = args
+            .path
+            .as_deref()
+            .map(|path| resolve_path(&self.cwd, path))
+            .unwrap_or_else(|| self.cwd.to_path_buf());
 
-            let mut cmd = tokio::process::Command::new("fd");
-            cmd.args(["--glob", &args.pattern, "--type", "f"])
-                .arg("--color=never")
-                .current_dir(&search_dir)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
+        let mut cmd = tokio::process::Command::new("fd");
+        cmd.args(["--glob", &args.pattern, "--type", "f"])
+            .arg("--color=never")
+            .current_dir(&search_dir)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
 
-            let output = match cmd.output().await {
-                Ok(o) => o,
-                Err(e) => {
-                    return ToolResult::error(format!("failed to run fd: {e}"));
-                }
-            };
-
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let lines: Vec<&str> = stdout.lines().collect();
-
-            if lines.is_empty() {
-                return ToolResult::text("no files found");
+        let output = match cmd.output().await {
+            Ok(o) => o,
+            Err(e) => {
+                return ToolResult::error(format!("failed to run fd: {e}"));
             }
+        };
 
-            ToolResult::text(truncate_lines(&lines, "files"))
-        })
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<&str> = stdout.lines().collect();
+
+        if lines.is_empty() {
+            return ToolResult::text("no files found");
+        }
+
+        ToolResult::text(truncate_lines(&lines, "files"))
     }
 }
 

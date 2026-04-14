@@ -13,6 +13,7 @@ thiserror.workspace = true
 tracing.workspace = true
 mush-treesitter.workspace = true
 mush-agent.workspace = true
+async-trait.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

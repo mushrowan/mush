@@ -26,6 +26,7 @@ impl LsTool {
     }
 }
 
+#[async_trait::async_trait]
 impl AgentTool for LsTool {
     fn name(&self) -> &str {
         "ls"
@@ -55,26 +56,21 @@ impl AgentTool for LsTool {
         })
     }
 
-    fn execute(
-        &self,
-        args: serde_json::Value,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
-        Box::pin(async move {
-            let args = match parse_tool_args::<LsArgs>(args) {
-                Ok(args) => args,
-                Err(error) => return error,
-            };
+    async fn execute(&self, args: serde_json::Value) -> ToolResult {
+        let args = match parse_tool_args::<LsArgs>(args) {
+            Ok(args) => args,
+            Err(error) => return error,
+        };
 
-            let path = args
-                .path
-                .as_deref()
-                .map(|path| resolve_path(&self.cwd, path))
-                .unwrap_or_else(|| self.cwd.to_path_buf());
+        let path = args
+            .path
+            .as_deref()
+            .map(|path| resolve_path(&self.cwd, path))
+            .unwrap_or_else(|| self.cwd.to_path_buf());
 
-            tokio::task::spawn_blocking(move || list_dir(&path))
-                .await
-                .unwrap_or_else(|e| ToolResult::error(format!("task join error: {e}")))
-        })
+        tokio::task::spawn_blocking(move || list_dir(&path))
+            .await
+            .unwrap_or_else(|e| ToolResult::error(format!("task join error: {e}")))
     }
 }
 

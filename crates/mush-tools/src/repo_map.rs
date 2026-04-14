@@ -27,6 +27,7 @@ impl RepoMapTool {
     }
 }
 
+#[async_trait::async_trait]
 impl AgentTool for RepoMapTool {
     fn name(&self) -> &str {
         "repo_map"
@@ -52,39 +53,34 @@ impl AgentTool for RepoMapTool {
         })
     }
 
-    fn execute(
-        &self,
-        args: serde_json::Value,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
-        Box::pin(async move {
-            let args: RepoMapArgs = match parse_tool_args(args) {
-                Ok(a) => a,
-                Err(e) => return e,
-            };
+    async fn execute(&self, args: serde_json::Value) -> ToolResult {
+        let args: RepoMapArgs = match parse_tool_args(args) {
+            Ok(a) => a,
+            Err(e) => return e,
+        };
 
-            let map_text = match self.map_text.read() {
-                Ok(guard) => guard.clone(),
-                Err(_) => return ToolResult::error("failed to read repo map"),
-            };
+        let map_text = match self.map_text.read() {
+            Ok(guard) => guard.clone(),
+            Err(_) => return ToolResult::error("failed to read repo map"),
+        };
 
-            if map_text.is_empty() {
-                return ToolResult::text(
-                    "repo map is not available yet (still building or no parseable files found)",
-                );
-            }
+        if map_text.is_empty() {
+            return ToolResult::text(
+                "repo map is not available yet (still building or no parseable files found)",
+            );
+        }
 
-            match args.path {
-                None => ToolResult::text(&map_text),
-                Some(prefix) => {
-                    let filtered = filter_by_path(&map_text, &prefix);
-                    if filtered.is_empty() {
-                        ToolResult::text(format!("no files found under '{prefix}' in the repo map"))
-                    } else {
-                        ToolResult::text(filtered)
-                    }
+        match args.path {
+            None => ToolResult::text(&map_text),
+            Some(prefix) => {
+                let filtered = filter_by_path(&map_text, &prefix);
+                if filtered.is_empty() {
+                    ToolResult::text(format!("no files found under '{prefix}' in the repo map"))
+                } else {
+                    ToolResult::text(filtered)
                 }
             }
-        })
+        }
     }
 
     fn output_limit(&self) -> OutputLimit {

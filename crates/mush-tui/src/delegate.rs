@@ -4,7 +4,6 @@
 //! the sub-agent runs independently and sends results back
 //! via the messaging system.
 
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
@@ -45,6 +44,7 @@ pub struct DelegateTaskTool {
     pub queue: DelegationQueue,
 }
 
+#[async_trait::async_trait]
 impl AgentTool for DelegateTaskTool {
     fn name(&self) -> &str {
         "delegate_task"
@@ -85,44 +85,39 @@ impl AgentTool for DelegateTaskTool {
         })
     }
 
-    fn execute(
-        &self,
-        args: serde_json::Value,
-    ) -> Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
-        Box::pin(async move {
-            let params: DelegateArgs = match parse_tool_args(args) {
-                Ok(p) => p,
-                Err(e) => return e,
-            };
+    async fn execute(&self, args: serde_json::Value) -> ToolResult {
+        let params: DelegateArgs = match parse_tool_args(args) {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
 
-            let task_id = params
-                .task_id
-                .unwrap_or_else(|| format!("del-{}", rand_id()));
+        let task_id = params
+            .task_id
+            .unwrap_or_else(|| format!("del-{}", rand_id()));
 
-            let model_note = params
-                .model
-                .as_deref()
-                .map(|m| format!(", model: {m}"))
-                .unwrap_or_default();
+        let model_note = params
+            .model
+            .as_deref()
+            .map(|m| format!(", model: {m}"))
+            .unwrap_or_default();
 
-            let delegation = PendingDelegation {
-                task: params.task.clone(),
-                from: self.sender_id,
-                task_id: task_id.clone(),
-                model: params.model,
-            };
+        let delegation = PendingDelegation {
+            task: params.task.clone(),
+            from: self.sender_id,
+            task_id: task_id.clone(),
+            model: params.model,
+        };
 
-            self.queue
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push(delegation);
+        self.queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(delegation);
 
-            ToolResult::text(format!(
-                "delegated task to a new pane (task_id: {task_id}{model_note}). \
-                 the sub-agent will work on it independently and send results back \
-                 as a message when done. continue with your own work."
-            ))
-        })
+        ToolResult::text(format!(
+            "delegated task to a new pane (task_id: {task_id}{model_note}). \
+             the sub-agent will work on it independently and send results back \
+             as a message when done. continue with your own work."
+        ))
     }
 }
 

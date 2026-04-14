@@ -25,6 +25,7 @@ impl WriteTool {
     }
 }
 
+#[async_trait::async_trait]
 impl AgentTool for WriteTool {
     fn name(&self) -> &str {
         "write"
@@ -54,23 +55,18 @@ impl AgentTool for WriteTool {
         })
     }
 
-    fn execute(
-        &self,
-        args: serde_json::Value,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
-        Box::pin(async move {
-            let args = match parse_tool_args::<WriteArgs>(args) {
-                Ok(args) => args,
-                Err(error) => return error,
-            };
+    async fn execute(&self, args: serde_json::Value) -> ToolResult {
+        let args = match parse_tool_args::<WriteArgs>(args) {
+            Ok(args) => args,
+            Err(error) => return error,
+        };
 
-            let path = resolve_path(&self.cwd, &args.path);
-            let content = args.content;
+        let path = resolve_path(&self.cwd, &args.path);
+        let content = args.content;
 
-            tokio::task::spawn_blocking(move || write_file(&path, &content))
-                .await
-                .unwrap_or_else(|e| ToolResult::error(format!("task join error: {e}")))
-        })
+        tokio::task::spawn_blocking(move || write_file(&path, &content))
+            .await
+            .unwrap_or_else(|e| ToolResult::error(format!("task join error: {e}")))
     }
 }
 

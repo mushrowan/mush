@@ -74,6 +74,7 @@ impl GrepTool {
     }
 }
 
+#[async_trait::async_trait]
 impl AgentTool for GrepTool {
     fn name(&self) -> &str {
         "grep"
@@ -144,49 +145,44 @@ impl AgentTool for GrepTool {
         })
     }
 
-    fn execute(
-        &self,
-        args: serde_json::Value,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
-        Box::pin(async move {
-            let args = match parse_tool_args::<GrepArgs>(args) {
-                Ok(args) => args,
-                Err(error) => return error,
-            };
+    async fn execute(&self, args: serde_json::Value) -> ToolResult {
+        let args = match parse_tool_args::<GrepArgs>(args) {
+            Ok(args) => args,
+            Err(error) => return error,
+        };
 
-            if args.pattern.is_empty() {
-                return ToolResult::error("pattern is required");
-            }
+        if args.pattern.is_empty() {
+            return ToolResult::error("pattern is required");
+        }
 
-            let search_path = args
-                .path
-                .as_deref()
-                .map(|path| resolve_path(&self.cwd, path))
-                .unwrap_or_else(|| self.cwd.to_path_buf());
+        let search_path = args
+            .path
+            .as_deref()
+            .map(|path| resolve_path(&self.cwd, path))
+            .unwrap_or_else(|| self.cwd.to_path_buf());
 
-            let cwd = self.cwd.clone();
-            let pattern = args.pattern.clone();
-            let include = args.include.clone();
+        let cwd = self.cwd.clone();
+        let pattern = args.pattern.clone();
+        let include = args.include.clone();
 
-            tokio::task::spawn_blocking(move || {
-                run_search(
-                    &cwd,
-                    &pattern,
-                    &search_path,
-                    include.as_deref(),
-                    args.mode,
-                    args.case_sensitive,
-                    args.whole_word,
-                    args.context_before,
-                    args.context_after,
-                    args.output,
-                    args.max_results,
-                    args.top_n,
-                )
-            })
-            .await
-            .unwrap_or_else(|e| ToolResult::error(format!("task join error: {e}")))
+        tokio::task::spawn_blocking(move || {
+            run_search(
+                &cwd,
+                &pattern,
+                &search_path,
+                include.as_deref(),
+                args.mode,
+                args.case_sensitive,
+                args.whole_word,
+                args.context_before,
+                args.context_after,
+                args.output,
+                args.max_results,
+                args.top_n,
+            )
         })
+        .await
+        .unwrap_or_else(|e| ToolResult::error(format!("task join error: {e}")))
     }
 }
 

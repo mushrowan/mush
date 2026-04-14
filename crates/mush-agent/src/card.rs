@@ -97,9 +97,9 @@ mod tests {
     #[test]
     fn build_card_with_tools() {
         use crate::tool::{AgentTool, ToolResult};
-        use std::pin::Pin;
 
         struct DummyTool;
+        #[async_trait::async_trait]
         impl AgentTool for DummyTool {
             fn name(&self) -> &str {
                 "read"
@@ -113,11 +113,8 @@ mod tests {
             fn parameters_schema(&self) -> serde_json::Value {
                 serde_json::json!({"type": "object"})
             }
-            fn execute(
-                &self,
-                _: serde_json::Value,
-            ) -> Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
-                Box::pin(async { ToolResult::text("ok") })
+            async fn execute(&self, _: serde_json::Value) -> ToolResult {
+                ToolResult::text("ok")
             }
         }
 

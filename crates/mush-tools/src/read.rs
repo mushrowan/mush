@@ -202,6 +202,7 @@ impl ReadTool {
     }
 }
 
+#[async_trait::async_trait]
 impl AgentTool for ReadTool {
     fn name(&self) -> &str {
         "read"
@@ -265,29 +266,22 @@ impl AgentTool for ReadTool {
         mush_agent::tool::OutputLimit::Head
     }
 
-    fn execute(
-        &self,
-        args: serde_json::Value,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
-        Box::pin(async move {
-            let args = match parse_tool_args::<ReadArgs>(args) {
-                Ok(args) => args,
-                Err(error) => return error,
-            };
-            let args = match args.resolve() {
-                Ok(args) => args,
-                Err(error) => return ToolResult::error(error.to_string()),
-            };
+    async fn execute(&self, args: serde_json::Value) -> ToolResult {
+        let args = match parse_tool_args::<ReadArgs>(args) {
+            Ok(args) => args,
+            Err(error) => return error,
+        };
+        let args = match args.resolve() {
+            Ok(args) => args,
+            Err(error) => return ToolResult::error(error.to_string()),
+        };
 
-            let path = resolve_path(&self.cwd, &args.path);
-            let json_output = args.output.is_json();
+        let path = resolve_path(&self.cwd, &args.path);
+        let json_output = args.output.is_json();
 
-            tokio::task::spawn_blocking(move || {
-                read_file(&path, args.offset, args.limit, json_output)
-            })
+        tokio::task::spawn_blocking(move || read_file(&path, args.offset, args.limit, json_output))
             .await
             .unwrap_or_else(|e| ToolResult::error(format!("task join error: {e}")))
-        })
     }
 }
 

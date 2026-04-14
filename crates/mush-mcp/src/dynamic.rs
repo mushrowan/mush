@@ -109,6 +109,7 @@ impl McpListToolsTool {
     }
 }
 
+#[async_trait::async_trait]
 impl AgentTool for McpListToolsTool {
     fn name(&self) -> &str {
         "mcp_list_tools"
@@ -132,39 +133,34 @@ impl AgentTool for McpListToolsTool {
             }
         })
     }
-    fn execute(
-        &self,
-        args: serde_json::Value,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
-        Box::pin(async move {
-            let filter = args
-                .get("server")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_lowercase());
+    async fn execute(&self, args: serde_json::Value) -> ToolResult {
+        let filter = args
+            .get("server")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_lowercase());
 
-            let tools: Vec<_> = self
-                .index
-                .tools
-                .iter()
-                .filter(|t| {
-                    filter
-                        .as_ref()
-                        .is_none_or(|f| t.server.to_lowercase() == *f)
-                })
-                .collect();
+        let tools: Vec<_> = self
+            .index
+            .tools
+            .iter()
+            .filter(|t| {
+                filter
+                    .as_ref()
+                    .is_none_or(|f| t.server.to_lowercase() == *f)
+            })
+            .collect();
 
-            if tools.is_empty() {
-                return ToolResult::text("no MCP tools available");
-            }
+        if tools.is_empty() {
+            return ToolResult::text("no MCP tools available");
+        }
 
-            let listing: String = tools
-                .iter()
-                .map(|t| format!("- {} ({}): {}", t.full_name, t.server, t.description))
-                .collect::<Vec<_>>()
-                .join("\n");
+        let listing: String = tools
+            .iter()
+            .map(|t| format!("- {} ({}): {}", t.full_name, t.server, t.description))
+            .collect::<Vec<_>>()
+            .join("\n");
 
-            ToolResult::text(format!("{} MCP tools:\n{listing}", tools.len()))
-        })
+        ToolResult::text(format!("{} MCP tools:\n{listing}", tools.len()))
     }
 }
 
@@ -186,6 +182,7 @@ impl McpGetSchemasTool {
     }
 }
 
+#[async_trait::async_trait]
 impl AgentTool for McpGetSchemasTool {
     fn name(&self) -> &str {
         "mcp_get_schemas"
@@ -210,41 +207,36 @@ impl AgentTool for McpGetSchemasTool {
             "required": ["names"]
         })
     }
-    fn execute(
-        &self,
-        args: serde_json::Value,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
-        Box::pin(async move {
-            let args = match parse_tool_args::<GetSchemasArgs>(args) {
-                Ok(a) => a,
-                Err(e) => return e,
-            };
+    async fn execute(&self, args: serde_json::Value) -> ToolResult {
+        let args = match parse_tool_args::<GetSchemasArgs>(args) {
+            Ok(a) => a,
+            Err(e) => return e,
+        };
 
-            let mut output = Vec::new();
-            let mut not_found = Vec::new();
+        let mut output = Vec::new();
+        let mut not_found = Vec::new();
 
-            for name in &args.names {
-                match self.index.find_definition(name) {
-                    Some(def) => {
-                        let schema = serde_json::to_value(&def.input_schema)
-                            .unwrap_or_else(|_| serde_json::json!({}));
-                        let desc = def.description.as_deref().unwrap_or("");
-                        output.push(format!(
-                            "## {}\n{desc}\n```json\n{}\n```",
-                            name,
-                            serde_json::to_string_pretty(&schema).unwrap_or_default()
-                        ));
-                    }
-                    None => not_found.push(name.as_str()),
+        for name in &args.names {
+            match self.index.find_definition(name) {
+                Some(def) => {
+                    let schema = serde_json::to_value(&def.input_schema)
+                        .unwrap_or_else(|_| serde_json::json!({}));
+                    let desc = def.description.as_deref().unwrap_or("");
+                    output.push(format!(
+                        "## {}\n{desc}\n```json\n{}\n```",
+                        name,
+                        serde_json::to_string_pretty(&schema).unwrap_or_default()
+                    ));
                 }
+                None => not_found.push(name.as_str()),
             }
+        }
 
-            if !not_found.is_empty() {
-                output.push(format!("not found: {}", not_found.join(", ")));
-            }
+        if !not_found.is_empty() {
+            output.push(format!("not found: {}", not_found.join(", ")));
+        }
 
-            ToolResult::text(output.join("\n\n"))
-        })
+        ToolResult::text(output.join("\n\n"))
     }
 }
 
@@ -268,6 +260,7 @@ impl McpCallToolTool {
     }
 }
 
+#[async_trait::async_trait]
 impl AgentTool for McpCallToolTool {
     fn name(&self) -> &str {
         "mcp_call_tool"
@@ -295,39 +288,34 @@ impl AgentTool for McpCallToolTool {
             "required": ["name"]
         })
     }
-    fn execute(
-        &self,
-        args: serde_json::Value,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
-        Box::pin(async move {
-            let args = match parse_tool_args::<CallToolArgs>(args) {
-                Ok(a) => a,
-                Err(e) => return e,
-            };
+    async fn execute(&self, args: serde_json::Value) -> ToolResult {
+        let args = match parse_tool_args::<CallToolArgs>(args) {
+            Ok(a) => a,
+            Err(e) => return e,
+        };
 
-            let Some((server, tool_name, conn)) = self.index.find_connection(&args.name) else {
-                let available: Vec<_> = self
-                    .index
-                    .tools
-                    .iter()
-                    .map(|t| t.full_name.as_str())
-                    .collect();
-                return ToolResult::error(format!(
-                    "tool '{}' not found. available: {}",
-                    args.name,
-                    if available.is_empty() {
-                        "(none)".to_string()
-                    } else {
-                        available.join(", ")
-                    }
-                ));
-            };
+        let Some((server, tool_name, conn)) = self.index.find_connection(&args.name) else {
+            let available: Vec<_> = self
+                .index
+                .tools
+                .iter()
+                .map(|t| t.full_name.as_str())
+                .collect();
+            return ToolResult::error(format!(
+                "tool '{}' not found. available: {}",
+                args.name,
+                if available.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    available.join(", ")
+                }
+            ));
+        };
 
-            match conn.call_tool(tool_name.to_string(), args.arguments).await {
-                Ok(result) => crate::result::convert_call_result(result),
-                Err(e) => ToolResult::error(format!("MCP call {tool_name} on {server}: {e}")),
-            }
-        })
+        match conn.call_tool(tool_name.to_string(), args.arguments).await {
+            Ok(result) => crate::result::convert_call_result(result),
+            Err(e) => ToolResult::error(format!("MCP call {tool_name} on {server}: {e}")),
+        }
     }
 }
 

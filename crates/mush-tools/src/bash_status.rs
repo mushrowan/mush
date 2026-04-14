@@ -33,6 +33,7 @@ impl BashStatusTool {
     }
 }
 
+#[async_trait::async_trait]
 impl AgentTool for BashStatusTool {
     fn name(&self) -> &str {
         "bash_status"
@@ -63,49 +64,40 @@ impl AgentTool for BashStatusTool {
         })
     }
 
-    fn execute(
-        &self,
-        args: serde_json::Value,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + '_>> {
-        Box::pin(async move {
-            let args = match parse_tool_args::<StatusArgs>(args) {
-                Ok(args) => args,
-                Err(error) => return error,
-            };
+    async fn execute(&self, args: serde_json::Value) -> ToolResult {
+        let args = match parse_tool_args::<StatusArgs>(args) {
+            Ok(args) => args,
+            Err(error) => return error,
+        };
 
-            // reap expired jobs while we're here
-            self.registry.reap_expired().await;
+        // reap expired jobs while we're here
+        self.registry.reap_expired().await;
 
-            let handle = match self.registry.get(&args.job_id).await {
-                Some(h) => h,
-                None => {
-                    return ToolResult::error(format!(
-                        "no background job with id: {}",
-                        args.job_id
-                    ));
-                }
-            };
-
-            // poll with timeout: check periodically until done or timeout
-            let deadline =
-                tokio::time::Instant::now() + tokio::time::Duration::from_secs(args.timeout);
-            let poll_interval = tokio::time::Duration::from_millis(500);
-
-            loop {
-                let state = handle.read().await;
-                if !state.status.is_running() {
-                    return format_job_result(&state);
-                }
-                drop(state);
-
-                if tokio::time::Instant::now() >= deadline {
-                    let state = handle.read().await;
-                    return format_running_status(&state);
-                }
-
-                tokio::time::sleep(poll_interval).await;
+        let handle = match self.registry.get(&args.job_id).await {
+            Some(h) => h,
+            None => {
+                return ToolResult::error(format!("no background job with id: {}", args.job_id));
             }
-        })
+        };
+
+        // poll with timeout: check periodically until done or timeout
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(args.timeout);
+        let poll_interval = tokio::time::Duration::from_millis(500);
+
+        loop {
+            let state = handle.read().await;
+            if !state.status.is_running() {
+                return format_job_result(&state);
+            }
+            drop(state);
+
+            if tokio::time::Instant::now() >= deadline {
+                let state = handle.read().await;
+                return format_running_status(&state);
+            }
+
+            tokio::time::sleep(poll_interval).await;
+        }
     }
 }
 
