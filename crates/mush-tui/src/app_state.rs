@@ -133,6 +133,10 @@ pub struct RenderState {
     /// avoids re-running count_estimated_lines (which does chars().count()
     /// per line) on every frame for stable messages
     pub height_cache: RefCell<Vec<Option<CachedHeight>>>,
+    /// per-message content hash cache.
+    /// avoids rehashing full content string every frame when checking
+    /// indented cache validity. keyed by byte length (O(1) check)
+    pub content_hash_cache: RefCell<Vec<Option<(usize, u64)>>>,
 }
 
 impl RenderState {
@@ -149,6 +153,7 @@ impl RenderState {
             visible_area_height: Cell::new(0),
             indented_cache: RefCell::new(Vec::new()),
             height_cache: RefCell::new(Vec::new()),
+            content_hash_cache: RefCell::new(Vec::new()),
         }
     }
 }
