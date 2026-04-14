@@ -113,6 +113,156 @@ impl SseParser {
     }
 }
 
+// shared SSE stream runner
+
+use crate::registry::EventStream;
+use crate::stream::StreamEvent;
+use crate::types::*;
+
+/// what the processor wants the stream runner to do after processing an event
+pub enum ProcessResult {
+    /// yield these events to the consumer
+    Events(Vec<StreamEvent>),
+    /// nothing to yield (e.g. [DONE] or empty payload)
+    Skip,
+    /// yield this event and stop the stream immediately
+    Fatal(StreamEvent),
+}
+
+/// trait for provider-specific SSE event processing.
+/// the stream runner handles byte reading, SSE parsing, capture, logging,
+/// and error recovery. providers just implement event interpretation
+pub trait SseProcessor: Send + 'static {
+    /// process a single raw SSE event
+    fn process(&mut self, raw: &SseRawEvent, output: &mut AssistantMessage) -> ProcessResult;
+
+    /// called when the byte stream ends normally. clean up open blocks,
+    /// adjust stop_reason, etc
+    fn finish(&mut self, output: &mut AssistantMessage);
+
+    /// whether to emit a Start event before the main loop.
+    /// openai providers do this; anthropic emits Start from within process()
+    fn emit_start(&self) -> bool {
+        true
+    }
+
+    /// label for tracing spans (e.g. "anthropic", "openai completions")
+    fn label(&self) -> &'static str;
+}
+
+const MAX_CAPTURE_BYTES: usize = 128 * 1024;
+
+/// run an SSE stream, handling byte reading, parsing, capture, logging,
+/// and error snapshot. the processor handles event interpretation
+pub fn run_sse_stream(
+    response: reqwest::Response,
+    model_id: ModelId,
+    provider_name: Provider,
+    api: Api,
+    mut processor: impl SseProcessor,
+) -> EventStream {
+    let label = processor.label();
+    let event_stream = async_stream::stream! {
+        let mut output = AssistantMessage {
+            content: vec![],
+            model: model_id.clone(),
+            provider: provider_name.clone(),
+            api,
+            usage: Usage::default(),
+            stop_reason: StopReason::Stop,
+            error_message: None,
+            timestamp_ms: Timestamp::now(),
+        };
+
+        let mut parser = SseParser::new();
+        let mut raw_capture: Vec<u8> = Vec::new();
+
+        use futures::TryStreamExt;
+        let mut byte_stream = response.bytes_stream();
+
+        if processor.emit_start() {
+            yield StreamEvent::Start { partial: output.clone() };
+        }
+
+        loop {
+            match byte_stream.try_next().await {
+                Ok(Some(chunk)) => {
+                    if raw_capture.len() < MAX_CAPTURE_BYTES {
+                        let remain = MAX_CAPTURE_BYTES - raw_capture.len();
+                        let take = remain.min(chunk.len());
+                        raw_capture.extend_from_slice(&chunk[..take]);
+                    }
+                    let chunk_len = chunk.len();
+                    tracing::trace!(
+                        model = %model_id,
+                        provider = %provider_name,
+                        api = ?api,
+                        chunk_len,
+                        chunk_preview = %preview_bytes(&chunk, 240),
+                        "{label} raw stream chunk"
+                    );
+                    for raw in parser.push(&chunk) {
+                        tracing::trace!(
+                            model = %model_id,
+                            provider = %provider_name,
+                            api = ?api,
+                            event_name = raw.event.as_deref().unwrap_or("message"),
+                            data_preview = %preview_text(raw.data.trim(), 240),
+                            "{label} sse event"
+                        );
+                        match processor.process(&raw, &mut output) {
+                            ProcessResult::Events(events) => {
+                                for event in events {
+                                    yield event;
+                                }
+                            }
+                            ProcessResult::Skip => {}
+                            ProcessResult::Fatal(event) => {
+                                yield event;
+                                return;
+                            }
+                        }
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    let capture_path = super::openai_responses::write_decode_snapshot(
+                        &model_id.to_string(),
+                        &provider_name.to_string(),
+                        &raw_capture,
+                    );
+                    tracing::error!(
+                        model = %model_id,
+                        provider = %provider_name,
+                        api = ?api,
+                        error = %e,
+                        captured_bytes = raw_capture.len(),
+                        capture_path = capture_path.as_deref().unwrap_or("<none>"),
+                        capture_preview = %preview_bytes(&raw_capture, 400),
+                        "{label} body stream decode error"
+                    );
+                    processor.finish(&mut output);
+                    output.stop_reason = StopReason::Error;
+                    output.error_message = Some(super::format_error_chain(&e));
+                    yield StreamEvent::Error {
+                        reason: StopReason::Error,
+                        message: output,
+                    };
+                    return;
+                }
+            }
+        }
+
+        processor.finish(&mut output);
+        yield StreamEvent::Done {
+            reason: output.stop_reason,
+            message: output,
+        };
+    };
+
+    Box::pin(event_stream)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

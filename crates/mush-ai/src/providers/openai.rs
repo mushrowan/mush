@@ -329,119 +329,45 @@ struct PromptTokenDetails {
 
 use super::StreamBlock;
 
+struct OpenAiCompletionsProcessor {
+    current: Option<StreamBlock>,
+}
+
+impl super::sse::SseProcessor for OpenAiCompletionsProcessor {
+    fn process(
+        &mut self,
+        raw: &super::sse::SseRawEvent,
+        output: &mut AssistantMessage,
+    ) -> super::sse::ProcessResult {
+        if raw.data.trim() == "[DONE]" {
+            return super::sse::ProcessResult::Skip;
+        }
+        match serde_json::from_str::<ChunkResponse>(&raw.data) {
+            Ok(chunk) => {
+                let events = process_chunk(chunk, output, &mut self.current);
+                super::sse::ProcessResult::Events(events)
+            }
+            Err(_) => super::sse::ProcessResult::Skip,
+        }
+    }
+
+    fn finish(&mut self, output: &mut AssistantMessage) {
+        finish_block(&mut self.current, output);
+    }
+
+    fn label(&self) -> &'static str {
+        "openai completions"
+    }
+}
+
 fn parse_sse_stream(
     response: reqwest::Response,
     model_id: ModelId,
     provider_name: Provider,
     api: Api,
 ) -> EventStream {
-    let event_stream = async_stream::stream! {
-        let mut output = AssistantMessage {
-            content: vec![],
-            model: model_id.clone(),
-            provider: provider_name.clone(),
-            api,
-            usage: Usage::default(),
-            stop_reason: StopReason::Stop,
-            error_message: None,
-            timestamp_ms: Timestamp::now(),
-        };
-
-        let mut current: Option<StreamBlock> = None;
-        let mut parser = super::sse::SseParser::new();
-        let mut raw_capture: Vec<u8> = Vec::new();
-        const MAX_CAPTURE_BYTES: usize = 128 * 1024;
-
-        use futures::TryStreamExt;
-        let mut byte_stream = response.bytes_stream();
-
-        yield StreamEvent::Start { partial: output.clone() };
-
-        loop {
-            match byte_stream.try_next().await {
-                Ok(Some(chunk)) => {
-                    if raw_capture.len() < MAX_CAPTURE_BYTES {
-                        let remain = MAX_CAPTURE_BYTES - raw_capture.len();
-                        let take = remain.min(chunk.len());
-                        raw_capture.extend_from_slice(&chunk[..take]);
-                    }
-                    let chunk_len = chunk.len();
-                    let chunk_preview = super::sse::preview_bytes(&chunk, 240);
-                    tracing::trace!(
-                        model = %model_id,
-                        provider = %provider_name,
-                        api = ?api,
-                        chunk_len,
-                        chunk_preview = %chunk_preview,
-                        "openai completions raw stream chunk"
-                    );
-                    for raw in parser.push(&chunk) {
-                        tracing::trace!(
-                            model = %model_id,
-                            provider = %provider_name,
-                            api = ?api,
-                            event_name = raw.event.as_deref().unwrap_or("message"),
-                            data_preview = %super::sse::preview_text(raw.data.trim(), 240),
-                            "openai completions sse event"
-                        );
-                        if raw.data.trim() == "[DONE]" {
-                            continue;
-                        }
-                        if let Ok(chunk) = serde_json::from_str::<ChunkResponse>(&raw.data) {
-                            for event in process_chunk(chunk, &mut output, &mut current) {
-                                yield event;
-                            }
-                        } else {
-                            let data = raw.data.trim();
-                            tracing::warn!(
-                                model = %model_id,
-                                provider = %provider_name,
-                                api = ?api,
-                                data_preview = %super::sse::preview_text(data, 240),
-                                "openai completions non-json sse payload"
-                            );
-                        }
-                    }
-                }
-                Ok(None) => break,
-                Err(e) => {
-                    let capture_path = super::openai_responses::write_decode_snapshot(
-                        &model_id.to_string(),
-                        &provider_name.to_string(),
-                        &raw_capture,
-                    );
-                    tracing::error!(
-                        model = %model_id,
-                        provider = %provider_name,
-                        api = ?api,
-                        error = %e,
-                        captured_bytes = raw_capture.len(),
-                        capture_path = capture_path.as_deref().unwrap_or("<none>"),
-                        capture_preview = %super::sse::preview_bytes(&raw_capture, 400),
-                        "openai completions body stream decode error"
-                    );
-                    finish_block(&mut current, &mut output);
-                    output.stop_reason = StopReason::Error;
-                    output.error_message = Some(super::format_error_chain(&e));
-                    yield StreamEvent::Error {
-                        reason: StopReason::Error,
-                        message: output,
-                    };
-                    return;
-                }
-            }
-        }
-
-        // finish any remaining open block
-        finish_block(&mut current, &mut output);
-
-        yield StreamEvent::Done {
-            reason: output.stop_reason,
-            message: output,
-        };
-    };
-
-    Box::pin(event_stream)
+    let processor = OpenAiCompletionsProcessor { current: None };
+    super::sse::run_sse_stream(response, model_id, provider_name, api, processor)
 }
 
 fn process_chunk(
