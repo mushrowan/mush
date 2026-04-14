@@ -126,7 +126,10 @@ pub enum ContextError {
 ///
 /// holds a local embedding model and pre-computed document embeddings.
 /// created once at startup, queried per user message. the model is
-/// behind a mutex because embed() requires &mut self.
+/// behind `std::sync::Mutex` (not `tokio::sync::Mutex`) because
+/// embedding is CPU-bound work that blocks the thread regardless.
+/// `tokio::sync::Mutex` is for protecting IO-bound critical sections
+/// where you need to hold the lock across `.await` points.
 pub struct ContextIndex {
     model: Mutex<TextEmbedding>,
     model_choice: EmbeddingModelChoice,

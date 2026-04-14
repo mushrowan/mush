@@ -17,6 +17,12 @@ const DEFAULT_KEEP_RECENT: usize = 10;
 /// how many recent assistant turns to keep full tool output for
 const DEFAULT_KEEP_OBSERVATIONS: usize = 5;
 
+/// rough chars-per-token ratio for estimation (LLM tokenisers average ~4)
+const CHARS_PER_TOKEN: usize = 4;
+
+/// rough char-equivalent for images in token estimation
+const IMAGE_CHAR_ESTIMATE: usize = 1000;
+
 /// result of compaction
 #[derive(Debug)]
 pub struct CompactionResult {
@@ -28,20 +34,23 @@ pub struct CompactionResult {
     pub summary: String,
 }
 
-/// estimate token count for a message list (rough: 4 chars per token)
+/// estimate token count for a message list (rough: chars / CHARS_PER_TOKEN)
 pub fn estimate_tokens(messages: &[Message]) -> usize {
     messages.iter().map(estimate_message_tokens).sum()
 }
 
-fn estimate_message_tokens(msg: &Message) -> usize {
-    let chars = match msg {
+/// count the approximate character length of a message's content.
+/// images use a fixed estimate since their tokens come from the
+/// vision encoder, not character count.
+fn message_char_count(msg: &Message) -> usize {
+    match msg {
         Message::User(u) => match &u.content {
             UserContent::Text(t) => t.len(),
             UserContent::Parts(parts) => parts
                 .iter()
                 .map(|p| match p {
                     UserContentPart::Text(t) => t.text.len(),
-                    UserContentPart::Image(_) => 1000, // rough estimate for images
+                    UserContentPart::Image(_) => IMAGE_CHAR_ESTIMATE,
                 })
                 .sum(),
         },
@@ -61,11 +70,14 @@ fn estimate_message_tokens(msg: &Message) -> usize {
             .iter()
             .map(|p| match p {
                 ToolResultContentPart::Text(t) => t.text.len(),
-                ToolResultContentPart::Image(_) => 1000,
+                ToolResultContentPart::Image(_) => IMAGE_CHAR_ESTIMATE,
             })
             .sum(),
-    };
-    chars / 4
+    }
+}
+
+fn estimate_message_tokens(msg: &Message) -> usize {
+    message_char_count(msg) / CHARS_PER_TOKEN
 }
 
 /// mask old tool result outputs while preserving the action history
@@ -537,6 +549,31 @@ mod tests {
     fn estimate_tokens_basic() {
         let msgs = vec![user_msg("hello world")]; // 11 chars / 4 = 2
         assert_eq!(estimate_tokens(&msgs), 2);
+    }
+
+    #[test]
+    fn message_char_count_text_message() {
+        let msg = user_msg("hello world"); // 11 chars
+        assert_eq!(message_char_count(&msg), 11);
+    }
+
+    #[test]
+    fn message_char_count_image_uses_constant() {
+        let msg = Message::User(UserMessage {
+            content: UserContent::Parts(vec![UserContentPart::Image(ImageContent {
+                mime_type: ImageMimeType::Png,
+                data: "base64data".into(),
+            })]),
+            timestamp_ms: Timestamp::zero(),
+        });
+        assert_eq!(message_char_count(&msg), IMAGE_CHAR_ESTIMATE);
+    }
+
+    #[test]
+    fn estimate_uses_chars_per_token_ratio() {
+        // 40 chars / CHARS_PER_TOKEN(4) = 10 tokens
+        let msg = user_msg(&"a".repeat(40));
+        assert_eq!(estimate_message_tokens(&msg), 40 / CHARS_PER_TOKEN);
     }
 
     #[test]
