@@ -678,7 +678,7 @@ async fn start_stream_for_prompt<'a>(
         compact_options,
         do_auto_compact,
         context_window,
-        registry,
+        registry.clone(),
         context_tokens_shared.clone(),
         deps.lifecycle_hooks.clone(),
         deps.cwd.clone(),
@@ -734,12 +734,12 @@ async fn start_stream_for_prompt<'a>(
         registry,
         options: call_options,
         max_turns: effective_max_turns(pane_mgr, pane_id, deps.max_turns),
-        hooks: mush_agent::AgentHooks {
-            get_steering: steering,
-            get_follow_up: follow_up,
-            transform_context: transform,
-            confirm_tool: confirm,
-        },
+        hooks: Box::new(mush_agent::ClosureHooks {
+            steering,
+            follow_up,
+            transform,
+            confirm,
+        }),
         injections: mush_agent::AgentInjections {
             lifecycle_hooks: deps.lifecycle_hooks.clone(),
             cwd: Some(deps.cwd.clone()),
@@ -854,23 +854,24 @@ fn append_prompt_and_snapshot(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_context_transform<'a>(
+fn build_context_transform(
     enricher_arc: Option<PromptEnricher>,
     compact_model: Model,
     compact_options: StreamOptions,
     do_auto_compact: bool,
     context_window: TokenCount,
-    registry: &'a ApiRegistry,
+    registry: ApiRegistry,
     context_tokens_shared: Arc<std::sync::atomic::AtomicU64>,
     lifecycle_hooks: mush_agent::LifecycleHooks,
     cwd: std::path::PathBuf,
-) -> Option<mush_agent::ContextTransform<'a>> {
+) -> Option<mush_agent::TransformFn> {
     let ctx_tokens_for_transform = context_tokens_shared;
     #[expect(clippy::type_complexity)]
     let compaction_cache: std::sync::Arc<tokio::sync::Mutex<Option<(usize, Vec<Message>)>>> =
         std::sync::Arc::new(tokio::sync::Mutex::new(None));
     let hooks = Arc::new(lifecycle_hooks);
     let cwd = Arc::new(cwd);
+    let registry = Arc::new(registry);
 
     Some(Box::new(move |messages| {
         let hint_match = enricher_arc
@@ -888,6 +889,7 @@ fn build_context_transform<'a>(
         let ctx_tokens = ctx_tokens_for_transform.clone();
         let hooks = hooks.clone();
         let cwd = cwd.clone();
+        let registry = registry.clone();
         Box::pin(async move {
             let mut replayed_cached_compaction = false;
             let mut fresh_compaction = false;
@@ -924,7 +926,7 @@ fn build_context_transform<'a>(
                     msgs,
                     current_tokens,
                     context_window,
-                    registry,
+                    &registry,
                     &model,
                     &options,
                     Some(&hooks),
@@ -967,9 +969,9 @@ fn build_context_transform<'a>(
     }))
 }
 
-fn build_steering_callback<'a>(
+fn build_steering_callback(
     steering_queue: Arc<Mutex<Vec<Message>>>,
-) -> Option<mush_agent::MessageCallback<'a>> {
+) -> Option<mush_agent::SteeringFn> {
     Some(Box::new(move || {
         let steering_queue = steering_queue.clone();
         Box::pin(async move {
@@ -979,17 +981,17 @@ fn build_steering_callback<'a>(
     }))
 }
 
-fn build_confirm_callback<'a>(
+fn build_confirm_callback(
     pane_id: PaneId,
     confirm_tools: bool,
     is_multi_pane: bool,
     file_tracker: &FileTracker,
 ) -> (
     tokio::sync::mpsc::Receiver<ConfirmRequest>,
-    Option<mush_agent::ConfirmCallback<'a>>,
+    Option<mush_agent::ConfirmFn>,
 ) {
     let (confirm_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel::<ConfirmRequest>(1);
-    let confirm: Option<mush_agent::ConfirmCallback<'a>> = if confirm_tools || is_multi_pane {
+    let confirm: Option<mush_agent::ConfirmFn> = if confirm_tools || is_multi_pane {
         let file_tracker = file_tracker.clone();
         Some(Box::new(
             move |tool_call_id: &ToolCallId,
@@ -1038,7 +1040,17 @@ fn build_confirm_callback<'a>(
                     }
                 })
             },
-        ) as mush_agent::ConfirmCallback<'a>)
+        )
+            as Box<
+                dyn Fn(
+                        &mush_ai::types::ToolCallId,
+                        &str,
+                        &serde_json::Value,
+                    )
+                        -> mush_agent::BoxFuture<'static, mush_agent::ConfirmAction>
+                    + Send
+                    + Sync,
+            >)
     } else {
         None
     };

@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use crate::stream::StreamEvent;
 use crate::types::{Api, Model, StreamOptions};
@@ -104,9 +105,9 @@ pub trait ApiProvider: Send + Sync {
 }
 
 /// registry holding all available api providers
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ApiRegistry {
-    providers: HashMap<Api, Box<dyn ApiProvider>>,
+    providers: HashMap<Api, Arc<dyn ApiProvider>>,
 }
 
 impl ApiRegistry {
@@ -117,7 +118,7 @@ impl ApiRegistry {
 
     pub fn register(&mut self, provider: Box<dyn ApiProvider>) {
         let api = provider.api();
-        self.providers.insert(api, provider);
+        self.providers.insert(api, Arc::from(provider));
     }
 
     pub fn get(&self, api: Api) -> Option<&dyn ApiProvider> {
