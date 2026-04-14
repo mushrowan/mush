@@ -244,12 +244,12 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
         .clone()
         .unwrap_or_else(|| (setup.model.clone(), setup.options.clone()));
     let context_window = compact_model.context_window.max(setup.model.context_window);
-    let reg_ref = &setup.registry;
+    let reg_ref = setup.registry.clone();
     let context_tokens_shared = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let ctx_tokens_for_transform = context_tokens_shared.clone();
     let lifecycle_hooks = std::sync::Arc::new(setup.lifecycle_hooks.clone());
     let cwd = std::sync::Arc::new(setup.cwd.clone());
-    let transform: Option<mush_agent::ContextTransform<'_>> = if setup.cfg.auto_compact {
+    let transform: Option<mush_agent::TransformFn> = if setup.cfg.auto_compact {
         Some(Box::new(move |msgs| {
             let m = compact_model.clone();
             let o = compact_options.clone();
@@ -258,13 +258,14 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
             let owned = msgs.to_vec();
             let hooks = lifecycle_hooks.clone();
             let cwd = cwd.clone();
+            let reg = reg_ref.clone();
             Box::pin(async move {
                 let tokens = TokenCount::new(ctx.load(std::sync::atomic::Ordering::Relaxed));
                 let compacted = auto_compact(
                     owned,
                     tokens,
                     context_window,
-                    reg_ref,
+                    &reg,
                     &m,
                     &o,
                     Some(&hooks),
@@ -289,10 +290,10 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
         registry: &setup.registry,
         options: setup.options,
         max_turns: setup.max_turns,
-        hooks: mush_agent::AgentHooks {
-            transform_context: transform,
-            ..mush_agent::AgentHooks::default()
-        },
+        hooks: Box::new(mush_agent::ClosureHooks {
+            transform,
+            ..mush_agent::ClosureHooks::default()
+        }),
         injections: mush_agent::AgentInjections {
             lifecycle_hooks: setup.lifecycle_hooks,
             cwd: Some(std::env::current_dir().unwrap_or_default()),

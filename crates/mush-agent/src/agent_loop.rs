@@ -78,19 +78,12 @@ pub const DEFAULT_MAX_TURNS: usize = usize::MAX;
 /// boxed future for async callback return types
 pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
-/// callback type for steering and follow-up messages
-pub type MessageCallback<'a> = Box<dyn Fn() -> BoxFuture<'static, Vec<Message>> + Send + Sync + 'a>;
-
 #[derive(Debug, Clone)]
 pub enum ContextTransformResult {
     Unchanged,
     Updated(Vec<Message>),
     Silent(Vec<Message>),
 }
-
-/// callback type for context transforms (e.g. compaction)
-pub type ContextTransform<'a> =
-    Box<dyn Fn(&[Message]) -> BoxFuture<'a, ContextTransformResult> + Send + Sync + 'a>;
 
 /// result of a tool confirmation check
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,28 +96,104 @@ pub enum ConfirmAction {
     DenyWithReason(String),
 }
 
-/// callback for tool confirmation. receives tool call id, name, and args.
-pub type ConfirmCallback<'a> = Box<
-    dyn Fn(&ToolCallId, &str, &serde_json::Value) -> BoxFuture<'static, ConfirmAction>
-        + Send
-        + Sync
-        + 'a,
->;
-
-#[derive(Default)]
-pub struct AgentHooks<'a> {
+/// extension point for agent loop lifecycle callbacks.
+/// all methods have default no-op implementations so callers only
+/// override what they need. use `NoopHooks` for the default
+pub trait AgentHooks: Send + Sync {
     /// check for steering messages between tool calls.
     /// if messages are returned, remaining tool calls are skipped and
-    /// these messages are added before the next LLM call.
-    pub get_steering: Option<MessageCallback<'a>>,
+    /// these messages are added before the next LLM call
+    fn get_steering(&self) -> BoxFuture<'static, Vec<Message>> {
+        Box::pin(async { vec![] })
+    }
+
     /// check for follow-up messages when agent would otherwise stop.
-    /// if messages are returned, the agent continues with another turn.
-    pub get_follow_up: Option<MessageCallback<'a>>,
+    /// if messages are returned, the agent continues with another turn
+    fn get_follow_up(&self) -> BoxFuture<'static, Vec<Message>> {
+        Box::pin(async { vec![] })
+    }
+
     /// transform the message context before each LLM call.
-    /// use for compaction, filtering, or other context management.
-    pub transform_context: Option<ContextTransform<'a>>,
-    /// confirm before executing a tool. if None, all tools run without confirmation.
-    pub confirm_tool: Option<ConfirmCallback<'a>>,
+    /// use for compaction, filtering, or other context management
+    fn transform_context<'a>(
+        &'a self,
+        _messages: &'a [Message],
+    ) -> BoxFuture<'a, ContextTransformResult> {
+        Box::pin(async { ContextTransformResult::Unchanged })
+    }
+
+    /// confirm before executing a tool. return Allow to proceed,
+    /// Deny or DenyWithReason to skip
+    fn confirm_tool(
+        &self,
+        _id: &ToolCallId,
+        _name: &str,
+        _args: &serde_json::Value,
+    ) -> BoxFuture<'static, ConfirmAction> {
+        Box::pin(async { ConfirmAction::Allow })
+    }
+}
+
+/// default no-op hooks implementation
+pub struct NoopHooks;
+impl AgentHooks for NoopHooks {}
+
+/// closure type aliases for `ClosureHooks` fields
+pub type SteeringFn = Box<dyn Fn() -> BoxFuture<'static, Vec<Message>> + Send + Sync>;
+pub type TransformFn =
+    Box<dyn Fn(&[Message]) -> BoxFuture<'_, ContextTransformResult> + Send + Sync>;
+pub type ConfirmFn = Box<
+    dyn Fn(&ToolCallId, &str, &serde_json::Value) -> BoxFuture<'static, ConfirmAction>
+        + Send
+        + Sync,
+>;
+
+/// callback-based hooks adapter. wraps optional closures into the
+/// `AgentHooks` trait. callers set only the fields they need
+#[derive(Default)]
+pub struct ClosureHooks {
+    pub steering: Option<SteeringFn>,
+    pub follow_up: Option<SteeringFn>,
+    pub transform: Option<TransformFn>,
+    pub confirm: Option<ConfirmFn>,
+}
+
+impl AgentHooks for ClosureHooks {
+    fn get_steering(&self) -> BoxFuture<'static, Vec<Message>> {
+        match &self.steering {
+            Some(f) => f(),
+            None => Box::pin(async { vec![] }),
+        }
+    }
+
+    fn get_follow_up(&self) -> BoxFuture<'static, Vec<Message>> {
+        match &self.follow_up {
+            Some(f) => f(),
+            None => Box::pin(async { vec![] }),
+        }
+    }
+
+    fn transform_context<'a>(
+        &'a self,
+        messages: &'a [Message],
+    ) -> BoxFuture<'a, ContextTransformResult> {
+        match &self.transform {
+            Some(f) => f(messages),
+            None => Box::pin(async { ContextTransformResult::Unchanged }),
+        }
+    }
+
+    fn confirm_tool(
+        &self,
+        id: &ToolCallId,
+        name: &str,
+        args: &serde_json::Value,
+    ) -> BoxFuture<'static, ConfirmAction> {
+        match &self.confirm {
+            Some(f) => f(id, name, args),
+            None => Box::pin(async { ConfirmAction::Allow }),
+        }
+    }
 }
 
 /// callback type for dynamic system prompt additions, called each turn
@@ -171,7 +240,7 @@ pub struct AgentConfig<'a> {
     pub options: StreamOptions,
     /// max tool-calling turns before forced stop (default: unlimited)
     pub max_turns: usize,
-    pub hooks: AgentHooks<'a>,
+    pub hooks: Box<dyn AgentHooks>,
     /// injection callbacks and context
     pub injections: AgentInjections,
     /// cooperative cancellation token. when cancelled, the agent loop
@@ -224,11 +293,7 @@ pub fn agent_loop(
         }
 
         // check for steering at start (user may have typed while waiting)
-        let mut pending: Vec<Message> = if let Some(ref get) = config.hooks.get_steering {
-            get().await
-        } else {
-            vec![]
-        };
+        let mut pending: Vec<Message> = config.hooks.get_steering().await;
 
         // outer loop: continues when follow-up messages arrive
         'outer: loop {
@@ -253,9 +318,9 @@ pub fn agent_loop(
                 tracing::info_span!("agent_turn", turn = turn_index).in_scope(|| {
                     tracing::info!("turn started");
                 });
-                let llm_messages = if let Some(ref transform) = config.hooks.transform_context {
+                let llm_messages = {
                     let before = messages.len();
-                    match transform(&messages).await {
+                    match config.hooks.transform_context(&messages).await {
                         ContextTransformResult::Unchanged => messages.clone(),
                         ContextTransformResult::Updated(transformed) => {
                             let after = transformed.len();
@@ -269,8 +334,6 @@ pub fn agent_loop(
                         }
                         ContextTransformResult::Silent(transformed) => transformed,
                     }
-                } else {
-                    messages.clone()
                 };
 
                 // build LLM context
@@ -443,8 +506,8 @@ pub fn agent_loop(
                 // confirmations are checked sequentially (needs user interaction)
                 let mut confirmed: Vec<&ToolCall> = Vec::new();
                 for tc in &tool_calls {
-                    if let Some(ref confirm) = config.hooks.confirm_tool {
-                        let action = confirm(&tc.id, tc.name.as_str(), &tc.arguments).await;
+                    {
+                        let action = config.hooks.confirm_tool(&tc.id, tc.name.as_str(), &tc.arguments).await;
                         let deny_reason = match action {
                             ConfirmAction::Allow => None,
                             ConfirmAction::Deny => Some("tool call denied by user".to_string()),
@@ -603,8 +666,8 @@ pub fn agent_loop(
                     }
 
                     // check steering after all tools complete
-                    if let Some(ref get) = config.hooks.get_steering {
-                        let steering = get().await;
+                    {
+                        let steering = config.hooks.get_steering().await;
                         if !steering.is_empty() {
                             pending = steering;
                         }
@@ -620,8 +683,8 @@ pub fn agent_loop(
                 }
 
                 // if no pending steering, check for more
-                if pending.is_empty() && let Some(ref get) = config.hooks.get_steering {
-                    pending = get().await;
+                if pending.is_empty() {
+                    pending = config.hooks.get_steering().await;
                 }
 
                 // if there are pending messages, the inner loop continues
@@ -634,8 +697,8 @@ pub fn agent_loop(
             }
 
             // agent would stop. check for follow-ups
-            if let Some(ref get) = config.hooks.get_follow_up {
-                let follow_up = get().await;
+            {
+                let follow_up = config.hooks.get_follow_up().await;
                 if !follow_up.is_empty() {
                     let count = follow_up.len();
                     pending = follow_up;
@@ -870,7 +933,7 @@ mod tests {
             registry: &registry,
             options: StreamOptions::default(),
             max_turns: DEFAULT_MAX_TURNS,
-            hooks: AgentHooks::default(),
+            hooks: Box::new(NoopHooks),
             injections: AgentInjections::default(),
             cancel: None,
         };
@@ -903,7 +966,7 @@ mod tests {
         let model = test_model();
         let tools = ToolRegistry::new();
 
-        let transform: ContextTransform<'_> = Box::new(move |msgs| {
+        let transform: TransformFn = Box::new(move |msgs| {
             called_clone.store(true, Ordering::SeqCst);
             let msgs = msgs.to_vec();
             Box::pin(async move { ContextTransformResult::Silent(msgs) })
@@ -916,10 +979,10 @@ mod tests {
             registry: &registry,
             options: StreamOptions::default(),
             max_turns: DEFAULT_MAX_TURNS,
-            hooks: AgentHooks {
-                transform_context: Some(transform),
-                ..AgentHooks::default()
-            },
+            hooks: Box::new(ClosureHooks {
+                transform: Some(transform),
+                ..ClosureHooks::default()
+            }),
             injections: AgentInjections::default(),
             cancel: None,
         };
@@ -1009,7 +1072,7 @@ mod tests {
         let follow_up_calls = Arc::new(AtomicUsize::new(0));
         let follow_up_calls_clone = follow_up_calls.clone();
 
-        let get_follow_up: MessageCallback<'_> = Box::new(move || {
+        let get_follow_up: SteeringFn = Box::new(move || {
             let calls = follow_up_calls_clone.clone();
             Box::pin(async move {
                 let n = calls.fetch_add(1, Ordering::SeqCst);
@@ -1031,10 +1094,10 @@ mod tests {
             registry: &registry,
             options: StreamOptions::default(),
             max_turns: 1,
-            hooks: AgentHooks {
-                get_follow_up: Some(get_follow_up),
-                ..AgentHooks::default()
-            },
+            hooks: Box::new(ClosureHooks {
+                follow_up: Some(get_follow_up),
+                ..ClosureHooks::default()
+            }),
             injections: AgentInjections::default(),
             cancel: None,
         };
@@ -1097,7 +1160,7 @@ mod tests {
             registry: &registry,
             options: StreamOptions::default(),
             max_turns: DEFAULT_MAX_TURNS,
-            hooks: AgentHooks::default(),
+            hooks: Box::new(NoopHooks),
             injections: AgentInjections::default(),
             cancel: Some(token),
         };
