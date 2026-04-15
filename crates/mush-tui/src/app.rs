@@ -216,7 +216,10 @@ impl App {
     /// start streaming a new assistant message
     pub fn start_streaming(&mut self) {
         self.stream.start();
-        self.scroll_offset = 0;
+        // don't reset scroll_offset here: push_user_message() already does it
+        // when the user sends a message. resetting here would yank the user
+        // to the bottom if streaming starts in other contexts (delegation,
+        // resume, etc) while they're scrolled up
     }
 
     /// append text delta to the current stream

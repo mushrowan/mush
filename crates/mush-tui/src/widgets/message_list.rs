@@ -95,9 +95,27 @@ impl Widget for MessageList<'_> {
             .collect();
         let estimated_total: usize = heights.iter().sum();
 
+        // compensate scroll for content growth while the user is scrolled up.
+        // scroll_offset is "lines from bottom" so when content grows at the
+        // bottom, we need to increase the effective offset to keep the
+        // viewport pinned to the same absolute position
+        let prev_total = self.app.render_state.prev_content_lines.get();
+        let prev_compensation = self.app.render_state.scroll_compensation.get();
+        let compensation = if self.app.scroll_offset > 0 && prev_total > 0 {
+            prev_compensation + estimated_total.saturating_sub(prev_total)
+        } else {
+            0
+        };
+        self.app
+            .render_state
+            .prev_content_lines
+            .set(estimated_total);
+        self.app.render_state.scroll_compensation.set(compensation);
+        let effective_offset = (self.app.scroll_offset as usize) + compensation;
+
         let vis_h = area.height as usize;
         let max_scroll = estimated_total.saturating_sub(vis_h);
-        let scroll_from_top = max_scroll.saturating_sub(self.app.scroll_offset as usize);
+        let scroll_from_top = max_scroll.saturating_sub(effective_offset);
 
         // render messages within the viewport plus one viewport of margin
         let margin = vis_h;
@@ -294,7 +312,8 @@ impl Widget for MessageList<'_> {
         let total_lines = content_lines + padding as u16;
         let paragraph = Paragraph::new(text);
         let max_scroll = total_lines.saturating_sub(visible);
-        let scroll = max_scroll.saturating_sub(self.app.scroll_offset);
+        let effective_offset_u16 = effective_offset.min(u16::MAX as usize) as u16;
+        let scroll = max_scroll.saturating_sub(effective_offset_u16);
 
         // expose scroll geometry for the status bar
         self.app.render_state.total_content_lines.set(total_lines);
@@ -2087,6 +2106,93 @@ mod tests {
         assert_eq!(
             calls, 0,
             "second render should use cached hash, got {calls} calls"
+        );
+    }
+
+    #[test]
+    fn scroll_position_stable_when_content_grows() {
+        // bug: when scrolled up and new content arrives at the bottom,
+        // the viewport shifts because scroll_offset is "from bottom" but
+        // max_scroll increases. the view should stay pinned
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+
+        // fill with enough messages to exceed viewport
+        for i in 0..20 {
+            app.messages.push(DisplayMessage::new(
+                MessageRole::Assistant,
+                format!("message number {i} with some content"),
+            ));
+        }
+
+        // scroll up
+        app.scroll_offset = 15;
+
+        // first render to establish baseline
+        render_app(&app, 60, 20);
+        let scroll_before = app.render_state.render_scroll.get();
+        assert!(scroll_before > 0, "should be scrolled");
+
+        // simulate new content arriving (streaming adds a message)
+        app.messages.push(DisplayMessage::new(
+            MessageRole::Assistant,
+            "new streaming content that just arrived",
+        ));
+
+        // second render: scroll position should stay the same
+        render_app(&app, 60, 20);
+        let scroll_after = app.render_state.render_scroll.get();
+
+        assert_eq!(
+            scroll_before, scroll_after,
+            "viewport should stay pinned when content grows while scrolled up \
+             (before={scroll_before}, after={scroll_after})"
+        );
+    }
+
+    #[test]
+    fn scroll_compensation_resets_at_bottom() {
+        // when user scrolls back to bottom (scroll_offset=0), compensation
+        // should reset so future scrolling starts fresh
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+
+        for i in 0..20 {
+            app.messages.push(DisplayMessage::new(
+                MessageRole::Assistant,
+                format!("message {i}"),
+            ));
+        }
+
+        // scroll up, render, add content, render (accumulates compensation)
+        app.scroll_offset = 10;
+        render_app(&app, 60, 20);
+        app.messages
+            .push(DisplayMessage::new(MessageRole::Assistant, "extra content"));
+        render_app(&app, 60, 20);
+        assert!(
+            app.render_state.scroll_compensation.get() > 0,
+            "should have accumulated compensation"
+        );
+
+        // scroll to bottom
+        app.scroll_offset = 0;
+        render_app(&app, 60, 20);
+        assert_eq!(
+            app.render_state.scroll_compensation.get(),
+            0,
+            "compensation should reset when at bottom"
+        );
+    }
+
+    #[test]
+    fn start_streaming_preserves_scroll_offset() {
+        // start_streaming should not yank the user to bottom
+        // (push_user_message already does that when the user sends)
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.scroll_offset = 20;
+        app.start_streaming();
+        assert_eq!(
+            app.scroll_offset, 20,
+            "start_streaming should not reset scroll_offset"
         );
     }
 }
