@@ -13,6 +13,7 @@ use mush_ai::types::TokenCount;
 use crate::app::{
     App, CodeBlock, DisplayMessage, DisplayToolCall, ImageRenderArea, MessageRole, ToolCallStatus,
 };
+use crate::app_state::CachedHeight;
 
 #[cfg(test)]
 use std::cell::Cell;
@@ -158,6 +159,16 @@ impl Widget for MessageList<'_> {
                     &all_blocks,
                 );
                 lines.push(Line::raw(""));
+
+                // correct the height_cache with the actual rendered height.
+                // the cache may hold a stale estimate from count_estimated_lines
+                // (which counts raw markdown chars). updating here ensures the
+                // cache converges after one render, preventing persistent gaps
+                // in virtual scrolling placeholders
+                let actual_height = lines.len() - start_line;
+                if actual_height != heights[i] {
+                    update_cached_height(msg, i, area.width, actual_height, &self.app.render_state);
+                }
             } else {
                 // off-screen: use estimated height as placeholder lines
                 for _ in 0..heights[i] {
@@ -657,20 +668,9 @@ fn cached_content_hash(
     hash
 }
 
-/// cheap height estimate for viewport culling.
-/// uses a per-message cache keyed by O(1) byte-length fingerprint
-/// to avoid re-scanning content with chars().count() every frame.
-/// falls back to the indented cache or character-count estimation on miss.
-/// result includes the trailing separator line.
-fn estimate_message_height(
-    msg: &DisplayMessage,
-    msg_idx: usize,
-    width: u16,
-    render_state: &crate::app_state::RenderState,
-) -> usize {
-    use crate::app_state::CachedHeight;
-
-    // build a cheap O(1) fingerprint for cache lookup
+/// build a cheap O(1) fingerprint for height cache lookup.
+/// all fields except `height` form the cache key
+fn height_fingerprint(msg: &DisplayMessage, width: u16, height: usize) -> CachedHeight {
     let tool_output_len: usize = msg
         .tool_calls
         .iter()
@@ -687,7 +687,7 @@ fn estimate_message_height(
         .as_ref()
         .is_some_and(|u| u.total_tokens() > TokenCount::ZERO);
 
-    let fingerprint = |height| CachedHeight {
+    CachedHeight {
         content_len: msg.content.len(),
         thinking_len: msg.thinking.as_ref().map_or(0, String::len),
         tool_output_len,
@@ -696,14 +696,25 @@ fn estimate_message_height(
         has_usage,
         width,
         height,
-    };
+    }
+}
 
+/// cheap height estimate for viewport culling.
+/// uses a per-message cache keyed by O(1) byte-length fingerprint
+/// to avoid re-scanning content with chars().count() every frame.
+/// falls back to the indented cache or character-count estimation on miss.
+/// result includes the trailing separator line.
+fn estimate_message_height(
+    msg: &DisplayMessage,
+    msg_idx: usize,
+    width: u16,
+    render_state: &crate::app_state::RenderState,
+) -> usize {
     // check cache
     {
         let cache = render_state.height_cache.borrow();
         if let Some(Some(entry)) = cache.get(msg_idx) {
-            // compare all fields except height
-            let probe = fingerprint(entry.height);
+            let probe = height_fingerprint(msg, width, entry.height);
             if *entry == probe {
                 return entry.height;
             }
@@ -718,10 +729,27 @@ fn estimate_message_height(
         if cache.len() <= msg_idx {
             cache.resize_with(msg_idx + 1, || None);
         }
-        cache[msg_idx] = Some(fingerprint(h));
+        cache[msg_idx] = Some(height_fingerprint(msg, width, h));
     }
 
     h
+}
+
+/// update the height_cache entry with the actual rendered line count.
+/// called after render_message so the cache converges to exact values
+/// even when the initial estimate from count_estimated_lines was wrong
+fn update_cached_height(
+    msg: &DisplayMessage,
+    msg_idx: usize,
+    width: u16,
+    actual_height: usize,
+    render_state: &crate::app_state::RenderState,
+) {
+    let mut cache = render_state.height_cache.borrow_mut();
+    if cache.len() <= msg_idx {
+        cache.resize_with(msg_idx + 1, || None);
+    }
+    cache[msg_idx] = Some(height_fingerprint(msg, width, actual_height));
 }
 
 /// inner height computation (called on cache miss)
@@ -2193,6 +2221,43 @@ mod tests {
         assert_eq!(
             app.scroll_offset, 20,
             "start_streaming should not reset scroll_offset"
+        );
+    }
+
+    #[test]
+    fn height_cache_converges_after_render() {
+        // bug: height_cache stores an estimate from count_estimated_lines
+        // (which counts raw markdown chars). once cached, it never rechecks
+        // the indented_cache even after the message has been rendered with
+        // exact line counts. the stale estimate persists across frames
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+
+        // markdown-heavy content where raw char count overestimates lines.
+        // **bold** markers add 4 invisible chars per emphasis
+        let content = "**this is some very bold text that will definitely wrap at narrow widths** and **here is even more bold text for wrapping**";
+        app.messages
+            .push(DisplayMessage::new(MessageRole::Assistant, content));
+
+        // first render at a narrow width to populate caches
+        render_app(&app, 30, 20);
+
+        // the height_cache should now have the actual rendered height,
+        // not the overestimate from raw char counting
+        let cache = app.render_state.height_cache.borrow();
+        let entry = cache[0].as_ref().expect("height should be cached");
+        let cached_height = entry.height;
+
+        // compute actual height by checking how many indented lines were produced
+        let indented = app.render_state.indented_cache.borrow();
+        let (_, _, actual_lines) = indented[0].as_ref().expect("indented should be cached");
+        let actual_content_lines = actual_lines.len();
+        // total = separator (1) + content lines
+        let actual_total = 1 + actual_content_lines;
+
+        assert_eq!(
+            cached_height, actual_total,
+            "height_cache should converge to actual rendered height \
+             (cached={cached_height}, actual={actual_total})"
         );
     }
 }
