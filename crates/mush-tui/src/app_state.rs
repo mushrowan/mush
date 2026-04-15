@@ -137,6 +137,12 @@ pub struct RenderState {
     /// avoids rehashing full content string every frame when checking
     /// indented cache validity. keyed by byte length (O(1) check)
     pub content_hash_cache: RefCell<Vec<Option<(usize, u64)>>>,
+    /// estimated total content lines from the previous render frame.
+    /// used to detect content growth while scrolled up
+    pub prev_content_lines: Cell<usize>,
+    /// accumulated scroll compensation (in lines) for content that grew
+    /// while the user was scrolled up. resets when scroll_offset returns to 0
+    pub scroll_compensation: Cell<usize>,
 }
 
 impl RenderState {
@@ -154,6 +160,8 @@ impl RenderState {
             indented_cache: RefCell::new(Vec::new()),
             height_cache: RefCell::new(Vec::new()),
             content_hash_cache: RefCell::new(Vec::new()),
+            prev_content_lines: Cell::new(0),
+            scroll_compensation: Cell::new(0),
         }
     }
 }
