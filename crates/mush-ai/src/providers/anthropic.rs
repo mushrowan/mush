@@ -109,7 +109,7 @@ impl ApiProvider for AnthropicProvider {
             headers.insert(
                 "anthropic-beta",
                 HeaderValue::from_static(
-                    "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14",
+                    "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05",
                 ),
             );
             headers.insert(
@@ -203,6 +203,8 @@ struct CacheControl {
     control_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     ttl: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -246,20 +248,30 @@ fn build_request_body(
     is_oauth: bool,
 ) -> RequestBody {
     let max_tokens = options.max_tokens.unwrap_or(model.max_output_tokens);
-    let cache_control = anthropic_cache_control(model.base_url.as_str(), options.cache_retention);
+    let cache_control =
+        anthropic_cache_control(model.base_url.as_str(), options.cache_retention, is_oauth);
+
+    // system blocks get scope:"global" on oauth so the system prompt cache
+    // is shared across sessions (mirroring claude code behaviour)
+    let system_cache_control = cache_control.clone().map(|mut cc| {
+        if is_oauth {
+            cc.scope = Some("global".into());
+        }
+        cc
+    });
 
     // oauth requires claude code identity as first system block
     let system = if is_oauth {
         let mut blocks = vec![SystemBlock {
             block_type: "text".into(),
             text: CLAUDE_CODE_IDENTITY.into(),
-            cache_control: cache_control.clone(),
+            cache_control: system_cache_control.clone(),
         }];
         if let Some(prompt) = system_prompt {
             blocks.push(SystemBlock {
                 block_type: "text".into(),
                 text: prompt.clone(),
-                cache_control: cache_control.clone(),
+                cache_control: system_cache_control.clone(),
             });
         }
         Some(blocks)
@@ -268,7 +280,7 @@ fn build_request_body(
             vec![SystemBlock {
                 block_type: "text".into(),
                 text: prompt.clone(),
-                cache_control: cache_control.clone(),
+                cache_control: system_cache_control.clone(),
             }]
         })
     };
@@ -357,14 +369,17 @@ fn build_request_body(
 fn anthropic_cache_control(
     base_url: &str,
     retention: Option<CacheRetention>,
+    is_oauth: bool,
 ) -> Option<CacheControl> {
     let retention = retention.unwrap_or(CacheRetention::Short);
     if retention == CacheRetention::None {
         return None;
     }
 
-    let allow_ttl = base_url.contains(ANTHROPIC_DIRECT_API);
-    let ttl = if retention == CacheRetention::Long && allow_ttl {
+    let is_direct = base_url.contains(ANTHROPIC_DIRECT_API);
+    // on claude.ai (oauth), 1h cache writes are included in the subscription
+    // so always use 1h. on API keys, only use 1h when explicitly requested
+    let ttl = if is_direct && (is_oauth || retention == CacheRetention::Long) {
         Some("1h".to_string())
     } else {
         None
@@ -373,6 +388,7 @@ fn anthropic_cache_control(
     Some(CacheControl {
         control_type: "ephemeral".into(),
         ttl,
+        scope: None,
     })
 }
 
@@ -1799,22 +1815,77 @@ mod tests {
 
     #[test]
     fn anthropic_cache_control_defaults_to_short() {
-        let cc = anthropic_cache_control("https://api.anthropic.com", None).unwrap();
+        let cc = anthropic_cache_control("https://api.anthropic.com", None, false).unwrap();
         assert_eq!(cc.control_type, "ephemeral");
         assert!(cc.ttl.is_none());
     }
 
     #[test]
     fn anthropic_cache_control_long_only_on_direct_api() {
-        let direct =
-            anthropic_cache_control("https://api.anthropic.com", Some(CacheRetention::Long))
-                .unwrap();
+        let direct = anthropic_cache_control(
+            "https://api.anthropic.com",
+            Some(CacheRetention::Long),
+            false,
+        )
+        .unwrap();
         assert_eq!(direct.ttl.as_deref(), Some("1h"));
 
-        let proxied =
-            anthropic_cache_control("https://openrouter.ai/api/v1", Some(CacheRetention::Long))
-                .unwrap();
+        let proxied = anthropic_cache_control(
+            "https://openrouter.ai/api/v1",
+            Some(CacheRetention::Long),
+            false,
+        )
+        .unwrap();
         assert!(proxied.ttl.is_none());
+    }
+
+    #[test]
+    fn anthropic_cache_control_oauth_always_1h() {
+        // on claude.ai (oauth), 1h cache writes are included in the
+        // subscription so we should always use ttl=1h
+        let default = anthropic_cache_control("https://api.anthropic.com", None, true).unwrap();
+        assert_eq!(default.ttl.as_deref(), Some("1h"));
+
+        let short = anthropic_cache_control(
+            "https://api.anthropic.com",
+            Some(CacheRetention::Short),
+            true,
+        )
+        .unwrap();
+        assert_eq!(short.ttl.as_deref(), Some("1h"));
+    }
+
+    #[test]
+    fn oauth_system_blocks_get_global_scope() {
+        // mirroring claude code: system prompt cache_control gets
+        // scope:"global" so it's shared across sessions
+        let options = StreamOptions {
+            cache_retention: None,
+            ..Default::default()
+        };
+        let system = Some("you are helpful".to_string());
+        let body = build_request_body(&test_model(), &system, &[], &[], &options, true);
+        let system_blocks = body.system.unwrap();
+        // oauth adds identity block + system prompt = 2 blocks
+        assert_eq!(system_blocks.len(), 2);
+        let cc = system_blocks[1].cache_control.as_ref().unwrap();
+        assert_eq!(cc.scope.as_deref(), Some("global"));
+        assert_eq!(cc.ttl.as_deref(), Some("1h"));
+    }
+
+    #[test]
+    fn non_oauth_system_blocks_no_scope() {
+        let options = StreamOptions {
+            cache_retention: None,
+            ..Default::default()
+        };
+        let system = Some("you are helpful".to_string());
+        let body = build_request_body(&test_model(), &system, &[], &[], &options, false);
+        let system_blocks = body.system.unwrap();
+        assert_eq!(system_blocks.len(), 1);
+        let cc = system_blocks[0].cache_control.as_ref().unwrap();
+        assert!(cc.scope.is_none());
+        assert!(cc.ttl.is_none());
     }
 
     #[test]
@@ -1822,6 +1893,7 @@ mod tests {
         let cache = Some(CacheControl {
             control_type: "ephemeral".into(),
             ttl: None,
+            scope: None,
         });
         let messages = vec![Message::User(UserMessage {
             content: UserContent::Text("hello".into()),
@@ -1845,6 +1917,7 @@ mod tests {
         let cache = Some(CacheControl {
             control_type: "ephemeral".into(),
             ttl: None,
+            scope: None,
         });
         let messages = vec![
             Message::User(UserMessage {
