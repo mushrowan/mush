@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 tree-sitter = "0.26"
 thiserror.workspace = true
+rayon.workspace = true
 tracing.workspace = true
 ignore = "0.4"
 notify.workspace = true

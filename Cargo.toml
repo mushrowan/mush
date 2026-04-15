@@ -87,6 +87,9 @@ clap = { version = "4", features = ["derive", "env"] }
 # terminal
 atty = "0.2"
 
+# parallelism
+rayon = "1.11"
+
 # crypto + encoding
 sha2 = "0.11"
 getrandom = "0.4"

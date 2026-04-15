@@ -276,6 +276,60 @@ fn parse_file_data(pool: &ParserPool, path: &Path) -> Result<FileData, crate::Pa
     })
 }
 
+/// parse a single file without a shared pool (for parallel use).
+/// creates or reuses a thread-local parser for the detected language.
+fn parse_file_standalone(path: &Path) -> Result<FileData, crate::ParseError> {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static PARSERS: RefCell<HashMap<Language, tree_sitter::Parser>> =
+            RefCell::new(HashMap::new());
+    }
+
+    let language = Language::detect(path)
+        .ok_or_else(|| crate::ParseError::UnsupportedLanguage(path.display().to_string()))?;
+    let ts_lang = language
+        .tree_sitter_language()
+        .ok_or(crate::ParseError::GrammarNotAvailable(language))?;
+    let source = std::fs::read(path)?;
+
+    let tree = PARSERS.with_borrow_mut(|parsers| {
+        let parser = parsers.entry(language).or_insert_with(|| {
+            let mut p = tree_sitter::Parser::new();
+            // set_language only fails on ABI mismatch which would be a build
+            // error, not a runtime condition
+            #[expect(clippy::expect_used, reason = "ABI mismatch is a build-time bug")]
+            p.set_language(&ts_lang).expect("grammar version mismatch");
+            p
+        });
+        parser
+            .parse(&source, None)
+            .ok_or(crate::ParseError::ParseFailed)
+    })?;
+
+    Ok(FileData {
+        definitions: symbols::extract_symbols(language, &source, &tree, Some(path)),
+        references: extract_references(&source, &tree),
+    })
+}
+
+/// parse files in parallel using rayon with per-thread parsers.
+/// returns a map of path -> parsed data, skipping files that fail to parse.
+fn parse_files_parallel(files: &[PathBuf]) -> HashMap<PathBuf, FileData> {
+    use rayon::prelude::*;
+
+    files
+        .par_iter()
+        .filter_map(|path| match parse_file_standalone(path) {
+            Ok(data) => Some((path.clone(), data)),
+            Err(e) => {
+                tracing::debug!("skipping {}: {e}", path.display());
+                None
+            }
+        })
+        .collect()
+}
+
 /// persistent repo map that can be updated incrementally
 ///
 /// holds parsed file data and a parser pool so only changed files
@@ -294,18 +348,7 @@ impl IncrementalRepoMap {
     pub fn new(root: &Path) -> Self {
         let pool = ParserPool::new();
         let files = discover_files(root);
-
-        let mut file_data: HashMap<PathBuf, FileData> = HashMap::new();
-        for path in &files {
-            match parse_file_data(&pool, path) {
-                Ok(data) => {
-                    file_data.insert(path.clone(), data);
-                }
-                Err(e) => {
-                    tracing::debug!("skipping {}: {e}", path.display());
-                }
-            }
-        }
+        let file_data = parse_files_parallel(&files);
 
         let current = build_from_data(root, &file_data);
         Self {
@@ -849,6 +892,62 @@ pub fn helper() -> String {
         }
         let files = discover_files(dir.path());
         assert_eq!(files.len(), 3, "small repos should not be capped");
+    }
+
+    #[test]
+    fn parallel_parse_matches_serial() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("alpha.rs"), "fn alpha() {}\nstruct Beta;").unwrap();
+        fs::write(
+            src.join("gamma.py"),
+            "def gamma():\n    pass\ndef delta(): pass",
+        )
+        .unwrap();
+        fs::write(
+            src.join("epsilon.go"),
+            "package main\nfunc Epsilon() {}\nfunc Zeta() {}",
+        )
+        .unwrap();
+
+        let files = discover_files(dir.path());
+        assert_eq!(files.len(), 3, "should find all code files");
+
+        // serial parse via existing path
+        let pool = ParserPool::new();
+        let mut serial: HashMap<PathBuf, FileData> = HashMap::new();
+        for path in &files {
+            if let Ok(data) = parse_file_data(&pool, path) {
+                serial.insert(path.clone(), data);
+            }
+        }
+
+        // parallel parse
+        let parallel = parse_files_parallel(&files);
+
+        assert_eq!(
+            serial.len(),
+            parallel.len(),
+            "parallel should produce same number of results"
+        );
+        for (path, s_data) in &serial {
+            let p_data = parallel
+                .get(path)
+                .unwrap_or_else(|| panic!("missing {}", path.display()));
+            assert_eq!(
+                s_data.definitions.len(),
+                p_data.definitions.len(),
+                "definition count mismatch for {}",
+                path.display()
+            );
+            assert_eq!(
+                s_data.references,
+                p_data.references,
+                "reference mismatch for {}",
+                path.display()
+            );
+        }
     }
 
     #[test]
