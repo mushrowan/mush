@@ -67,12 +67,22 @@ impl<'a> MessageList<'a> {
     }
 }
 
+/// tracks where cached content was replaced with placeholders
+/// so we can overlay it directly after Paragraph renders
+struct DeferredCacheRender {
+    msg_idx: usize,
+    /// position in the flat lines vec (before padding)
+    start_line: usize,
+    line_count: usize,
+}
+
 impl Widget for MessageList<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let mut lines: Vec<Line<'_>> = Vec::new();
         let mut image_placeholders: Vec<ImagePlaceholder> = Vec::new();
         // track where each message starts in the lines vec
         let mut msg_line_starts: Vec<(usize, usize)> = Vec::new();
+        let mut deferred_renders: Vec<DeferredCacheRender> = Vec::new();
 
         let in_scroll_mode = self.app.interaction.mode == crate::app::AppMode::Scroll;
         let selection_range = self.app.selection_range();
@@ -155,6 +165,7 @@ impl Widget for MessageList<'_> {
                     &mut lines,
                     sel,
                     &mut image_placeholders,
+                    &mut deferred_renders,
                     area.width,
                     &all_blocks,
                 );
@@ -253,6 +264,7 @@ impl Widget for MessageList<'_> {
                 &mut lines,
                 sel,
                 &mut image_placeholders,
+                &mut deferred_renders,
                 area.width,
                 &all_blocks,
             );
@@ -360,6 +372,27 @@ impl Widget for MessageList<'_> {
         *self.app.render_state.image_render_areas.borrow_mut() = render_areas;
 
         paragraph.scroll((scroll, 0)).render(area, buf);
+
+        // overlay deferred cached content directly to the buffer.
+        // during the lines build, cached content was replaced with empty
+        // placeholders to avoid deep-cloning Line vecs. now we borrow
+        // from the indented_cache and write directly, zero clones
+        if !deferred_renders.is_empty() {
+            let scroll_usize = scroll as usize;
+            let visible_usize = area.height as usize;
+            let cache = self.app.render_state.indented_cache.borrow();
+            for dc in &deferred_renders {
+                if let Some(Some((_, _, cached_lines))) = cache.get(dc.msg_idx) {
+                    let doc_y = padding + dc.start_line;
+                    let doc_end = doc_y + dc.line_count;
+                    if doc_end > scroll_usize && doc_y < scroll_usize + visible_usize {
+                        let skip = scroll_usize.saturating_sub(doc_y);
+                        let screen_y = (doc_y.saturating_sub(scroll_usize)) as u16;
+                        write_lines_to_buf(&cached_lines[skip..], buf, area, area.y + screen_y);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -392,6 +425,7 @@ fn render_message(
     lines: &mut Vec<Line<'_>>,
     sel: SelectionHint,
     image_placeholders: &mut Vec<ImagePlaceholder>,
+    deferred: &mut Vec<DeferredCacheRender>,
     width: u16,
     all_blocks: &[CodeBlock],
 ) {
@@ -506,29 +540,37 @@ fn render_message(
             // fast path: serve cached indented lines for stable messages
             let hash = cached_content_hash(&msg.content, msg_idx, &app.render_state);
             let width_u16 = content_width as u16;
-            let cached = {
+            let cache_hit_count = {
                 let cache = app.render_state.indented_cache.borrow();
                 cache
                     .get(msg_idx)
                     .and_then(|e| e.as_ref())
                     .filter(|(h, w, _)| *h == hash && *w == width_u16)
-                    .map(|(_, _, cached_lines)| cached_lines.clone())
+                    .map(|(_, _, cached_lines)| cached_lines.len())
             };
-            if let Some(cached_lines) = cached {
-                lines.extend(cached_lines);
+            if let Some(line_count) = cache_hit_count {
+                // push empty placeholders instead of deep-cloning.
+                // the overlay pass after Paragraph will write cached
+                // content directly to the buffer
+                let start_line = lines.len();
+                lines.resize_with(lines.len() + line_count, || Line::raw(""));
+                deferred.push(DeferredCacheRender {
+                    msg_idx,
+                    start_line,
+                    line_count,
+                });
             } else {
                 let md_text = render_markdown_cached(app, &msg.content);
                 let mut indented = Vec::new();
                 for line in md_text.lines {
                     indented.extend(indent_line(line, content_width));
                 }
-                let to_cache = indented.clone();
-                lines.extend(indented);
+                lines.extend(indented.iter().cloned());
                 let mut cache = app.render_state.indented_cache.borrow_mut();
                 if cache.len() <= msg_idx {
                     cache.resize_with(msg_idx + 1, || None);
                 }
-                cache[msg_idx] = Some((hash, width_u16, to_cache));
+                cache[msg_idx] = Some((hash, width_u16, indented));
             }
         } else {
             // block highlight active: compute fresh with style overrides
@@ -1339,6 +1381,21 @@ fn code_block_line_ranges(source: &str) -> Vec<(usize, usize)> {
     ranges
 }
 
+/// write borrowed lines directly to a buffer at a y offset.
+/// clips to the area height. returns the number of rows written.
+fn write_lines_to_buf(lines: &[Line<'_>], buf: &mut Buffer, area: Rect, start_y: u16) -> u16 {
+    let mut written = 0u16;
+    for line in lines {
+        let y = start_y + written;
+        if y >= area.bottom() {
+            break;
+        }
+        buf.set_line(area.x, y, line, area.width);
+        written += 1;
+    }
+    written
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1356,6 +1413,58 @@ mod tests {
             })
             .unwrap();
         terminal.backend().buffer().clone()
+    }
+
+    #[test]
+    fn write_lines_to_buf_renders_at_position() {
+        let lines = vec![Line::raw("alpha"), Line::raw("beta"), Line::raw("gamma")];
+        let area = Rect::new(0, 0, 20, 3);
+        let mut buf = Buffer::empty(area);
+
+        let written = write_lines_to_buf(&lines, &mut buf, area, 0);
+
+        assert_eq!(written, 3);
+        let content = buffer_to_string(&buf);
+        assert!(content.contains("alpha"));
+        assert!(content.contains("beta"));
+        assert!(content.contains("gamma"));
+    }
+
+    #[test]
+    fn write_lines_to_buf_clips_to_area_height() {
+        let lines = vec![Line::raw("alpha"), Line::raw("beta"), Line::raw("gamma")];
+        let area = Rect::new(0, 0, 20, 2);
+        let mut buf = Buffer::empty(area);
+
+        let written = write_lines_to_buf(&lines, &mut buf, area, 0);
+
+        assert_eq!(written, 2);
+        let content = buffer_to_string(&buf);
+        assert!(content.contains("alpha"));
+        assert!(content.contains("beta"));
+        assert!(!content.contains("gamma"));
+    }
+
+    #[test]
+    fn write_lines_to_buf_starts_at_y_offset() {
+        let lines = vec![Line::raw("alpha"), Line::raw("beta")];
+        let area = Rect::new(0, 0, 20, 3);
+        let mut buf = Buffer::empty(area);
+
+        let written = write_lines_to_buf(&lines, &mut buf, area, 1);
+
+        assert_eq!(written, 2);
+        let row0: String = (0..20)
+            .map(|x| buf[(x, 0u16)].symbol().to_string())
+            .collect();
+        let row1: String = (0..20)
+            .map(|x| buf[(x, 1u16)].symbol().to_string())
+            .collect();
+        assert!(row0.trim().is_empty(), "row 0 should be empty");
+        assert!(
+            row1.starts_with("alpha"),
+            "row 1 should have alpha, got '{row1}'"
+        );
     }
 
     #[test]
