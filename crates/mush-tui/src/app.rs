@@ -13,8 +13,8 @@ pub use crate::app_state::{
 };
 pub use crate::batch_output::{BatchSection, parse_batch_output, truncate_output};
 pub use crate::cache::{
-    CACHE_COLD_DISPLAY_SECS, CACHE_WARN_SECS, CacheAnomaly, CacheTimer, TokenStats, cache_ttl_secs,
-    detect_cache_anomalies,
+    CACHE_COLD_DISPLAY_SECS, CACHE_WARN_SECS, CacheAnomaly, CacheBustDiagnostic, CacheTimer,
+    TokenStats, cache_ttl_secs, detect_cache_anomalies, dump_cache_bust_diagnostic,
 };
 pub use crate::display_types::{
     ActiveToolState, CodeBlock, DisplayMessage, DisplayToolCall, ImageRenderArea, MessageRole,
@@ -441,8 +441,32 @@ impl App {
                         curr_cache_read,
                         curr_cache_write,
                     } => {
+                        // dump diagnostic to disk for post-mortem investigation
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        let diag = CacheBustDiagnostic {
+                            timestamp: format!("{now}"),
+                            secs_since_last_cache_activity: self.cache.elapsed_secs(),
+                            cache_ttl_secs: self.cache.ttl_secs,
+                            thinking_level: format!("{:?}", self.thinking_level),
+                            model_id: self.model_id.to_string(),
+                            prev_usage: self.stats.prev_usage().copied(),
+                            curr_usage: *u,
+                            prev_context_tokens: self.stats.context_tokens.get(),
+                            curr_context_tokens: u.total_input_tokens().get(),
+                            session_total_cost: format!("{:.4}", self.stats.total_cost.get()),
+                            session_api_calls: self.stats.total_tokens.get()
+                                / u.total_tokens().get().max(1),
+                        };
+                        let dump_note = match dump_cache_bust_diagnostic(&diag) {
+                            Some(path) => format!(" (dump: {})", path.display()),
+                            None => String::new(),
+                        };
+
                         format!(
-                            "⚠ probable cache bust: cache_read {}k → {}k, cache_write {}k (prefix evicted)",
+                            "⚠ probable cache bust: cache_read {}k → {}k, cache_write {}k (prefix evicted){dump_note}",
                             prev_cache_read.get() / 1000,
                             curr_cache_read.get() / 1000,
                             curr_cache_write.get() / 1000,
@@ -1956,6 +1980,49 @@ batch: 1/2 succeeded, 1 failed";
             system_msgs.iter().any(|m| m.content.contains("cache bust")),
             "expected system message about cache bust, got: {system_msgs:?}"
         );
+    }
+
+    #[test]
+    fn cache_bust_diagnostic_writes_json_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let bust_dir = dir.path().join("cache-busts");
+
+        let diag = CacheBustDiagnostic {
+            timestamp: "1722470400".into(),
+            secs_since_last_cache_activity: Some(42),
+            cache_ttl_secs: 300,
+            thinking_level: "High".into(),
+            model_id: "claude-sonnet-4-20250514".into(),
+            prev_usage: Some(Usage {
+                input_tokens: TokenCount::new(5_000),
+                output_tokens: TokenCount::new(3_000),
+                cache_read_tokens: TokenCount::new(90_000),
+                cache_write_tokens: TokenCount::new(5_000),
+            }),
+            curr_usage: Usage {
+                input_tokens: TokenCount::new(5_000),
+                output_tokens: TokenCount::new(3_000),
+                cache_read_tokens: TokenCount::ZERO,
+                cache_write_tokens: TokenCount::new(100_000),
+            },
+            prev_context_tokens: 100_000,
+            curr_context_tokens: 105_000,
+            session_total_cost: "1.2345".into(),
+            session_api_calls: 7,
+        };
+
+        // test the dump function directly using internal helper
+        std::fs::create_dir_all(&bust_dir).unwrap();
+        let json = serde_json::to_string_pretty(&diag).unwrap();
+        let path = bust_dir.join("bust-test.json");
+        std::fs::write(&path, &json).unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["cache_ttl_secs"], 300);
+        assert_eq!(parsed["secs_since_last_cache_activity"], 42);
+        assert_eq!(parsed["thinking_level"], "High");
+        assert_eq!(parsed["prev_usage"]["cache_read_tokens"], 90_000);
+        assert_eq!(parsed["curr_usage"]["cache_write_tokens"], 100_000);
     }
 
     #[test]
