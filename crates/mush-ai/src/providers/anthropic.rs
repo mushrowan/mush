@@ -454,8 +454,19 @@ fn convert_messages_raw(
         let is_old_turn = msg_idx < boundary;
         match msg {
             Message::User(user) => {
+                // always emit as a content block array, never a bare JSON string.
+                // apply_cache_control_to_last_user_message inserts a cache_control
+                // field into the last block of the target message. if we emitted
+                // text as a string here, that function would have to wrap it in an
+                // array, then when cache_control moves to a newer message on the
+                // next request the old message reverts to a bare string. that
+                // format change alters the serialised prefix bytes and busts the
+                // anthropic prompt cache (which does byte-exact prefix matching)
                 let content = match &user.content {
-                    UserContent::Text(text) => serde_json::Value::String(text.clone()),
+                    UserContent::Text(text) => serde_json::json!([{
+                        "type": "text",
+                        "text": text,
+                    }]),
                     UserContent::Parts(parts) => {
                         let blocks: Vec<serde_json::Value> = parts
                             .iter()
@@ -676,7 +687,11 @@ fn fix_orphaned_tool_calls(messages: Vec<RequestMessage>) -> Vec<RequestMessage>
 /// cache_control on them causes prefix invalidation: each new tool_result moves
 /// the marker, changing the serialised content of the previous holder. by targeting
 /// only actual user text messages, the cache_control position stays stable within
-/// an agent turn's tool-call loop
+/// an agent turn's tool-call loop.
+///
+/// user text content is always emitted as a content block array by
+/// convert_messages_raw, so this only needs the Array arm. the String arm
+/// is kept as a defensive fallback but should never trigger in practice
 fn apply_cache_control_to_last_user_message(
     messages: &mut [RequestMessage],
     cache_control: Option<CacheControl>,
@@ -701,14 +716,6 @@ fn apply_cache_control_to_last_user_message(
     };
 
     match &mut last_user.content {
-        serde_json::Value::String(text) => {
-            let text = std::mem::take(text);
-            last_user.content = serde_json::json!([{
-                "type": "text",
-                "text": text,
-                "cache_control": cache,
-            }]);
-        }
         serde_json::Value::Array(blocks) => {
             if let Some(last) = blocks.last_mut()
                 && let Some(obj) = last.as_object_mut()
@@ -716,6 +723,16 @@ fn apply_cache_control_to_last_user_message(
             {
                 obj.insert("cache_control".into(), cache_json);
             }
+        }
+        // defensive: convert_messages_raw always emits arrays for user text,
+        // but if something upstream changes, wrap rather than silently skip
+        serde_json::Value::String(text) => {
+            let text = std::mem::take(text);
+            last_user.content = serde_json::json!([{
+                "type": "text",
+                "text": text,
+                "cache_control": cache,
+            }]);
         }
         _ => {}
     }
@@ -1200,7 +1217,10 @@ mod tests {
         let converted = convert_messages(&messages, false, None, ToolResultTrimming::SlidingWindow);
         assert_eq!(converted.len(), 1);
         assert_eq!(converted[0].role, "user");
-        assert_eq!(converted[0].content, serde_json::json!("hello"));
+        assert_eq!(
+            converted[0].content,
+            serde_json::json!([{"type": "text", "text": "hello"}])
+        );
     }
 
     #[test]
@@ -1376,7 +1396,10 @@ mod tests {
         assert_eq!(converted[1].content[0]["tool_use_id"], "tc_orphan");
         assert_eq!(converted[1].content[0]["is_error"], true);
         assert_eq!(converted[2].role, "user");
-        assert_eq!(converted[2].content, serde_json::json!("stop! undo that"));
+        assert_eq!(
+            converted[2].content,
+            serde_json::json!([{"type": "text", "text": "stop! undo that"}])
+        );
     }
 
     #[test]
@@ -1478,7 +1501,10 @@ mod tests {
         assert_eq!(converted.len(), 2, "orphaned tool_result should be dropped");
         assert_eq!(converted[0].role, "assistant");
         assert_eq!(converted[1].role, "user");
-        assert_eq!(converted[1].content, serde_json::json!("continue"));
+        assert_eq!(
+            converted[1].content,
+            serde_json::json!([{"type": "text", "text": "continue"}])
+        );
     }
 
     #[test]
@@ -1908,6 +1934,77 @@ mod tests {
         assert_eq!(blocks[0]["cache_control"]["type"], "ephemeral");
     }
 
+    /// the prefix sent to anthropic must be byte-stable across requests.
+    /// when cache_control moves from an old user message to a new one,
+    /// the old message's content format must not change. if UserContent::Text
+    /// is emitted as a bare JSON string and then wrapped into an array when
+    /// cache_control is applied, removing cache_control later (when the
+    /// marker moves forward) reverts the format from array to string,
+    /// changing the serialised prefix bytes and busting the cache.
+    ///
+    /// simulates two consecutive requests where cache_control moves from
+    /// M_old to M_new, then asserts M_old's content structure is identical.
+    #[test]
+    fn user_text_content_format_stable_across_cache_control_moves() {
+        let cache = Some(CacheControl {
+            control_type: "ephemeral".into(),
+            ttl: None,
+            scope: None,
+        });
+
+        // request 1: only M_old, it gets cache_control
+        let messages_r1 = vec![Message::User(UserMessage {
+            content: UserContent::Text("hello".into()),
+            timestamp_ms: Timestamp::zero(),
+        })];
+        let converted_r1 = convert_messages(
+            &messages_r1,
+            false,
+            cache.clone(),
+            ToolResultTrimming::Preserve,
+        );
+
+        // request 2: M_old + assistant + M_new, cache_control moves to M_new
+        let messages_r2 = vec![
+            Message::User(UserMessage {
+                content: UserContent::Text("hello".into()),
+                timestamp_ms: Timestamp::zero(),
+            }),
+            Message::Assistant(AssistantMessage {
+                content: vec![AssistantContentPart::Text(TextContent {
+                    text: "hi there".into(),
+                })],
+                ..test_output()
+            }),
+            Message::User(UserMessage {
+                content: UserContent::Text("goodbye".into()),
+                timestamp_ms: Timestamp::zero(),
+            }),
+        ];
+        let converted_r2 =
+            convert_messages(&messages_r2, false, cache, ToolResultTrimming::Preserve);
+
+        // strip cache_control from r1's M_old to compare content structure only
+        let mut r1_content = converted_r1[0].content.clone();
+        if let serde_json::Value::Array(blocks) = &mut r1_content {
+            for block in blocks.iter_mut() {
+                if let Some(obj) = block.as_object_mut() {
+                    obj.remove("cache_control");
+                }
+            }
+        }
+        let r2_content = &converted_r2[0].content;
+
+        assert_eq!(
+            &r1_content, r2_content,
+            "M_old content structure must be identical whether or not it has \
+             cache_control. format change from array to string busts the \
+             anthropic prefix cache (byte-exact prefix matching).\n\
+             with cache_control (stripped): {r1_content}\n\
+             without cache_control: {r2_content}"
+        );
+    }
+
     #[test]
     fn cache_control_on_user_text_not_tool_result() {
         // when tool_results follow a user message, cache_control must stay on the
@@ -1951,8 +2048,9 @@ mod tests {
 
         let converted = convert_messages(&messages, false, cache, ToolResultTrimming::Preserve);
 
-        // user text message (index 0) should have cache_control
-        // when cache_control is applied, a plain string gets wrapped in an array
+        // user text message (index 0) should have cache_control.
+        // content is always an array of blocks; cache_control is added
+        // as a field on the last block
         let has_cc_on_user = match &converted[0].content {
             serde_json::Value::Array(blocks) => blocks
                 .first()
