@@ -1018,13 +1018,13 @@ mod tests {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.completion.completions = vec![
             "/model".into(),
-            "claude-opus-4-6".into(),
+            "claude-opus-4-7".into(),
             "claude-sonnet-4-20250514".into(),
         ];
         app.input.text = "/model claude-o".into();
         app.input.cursor = 15;
         handle_key(&mut app, key(KeyCode::Tab));
-        assert_eq!(app.input.text, "/model claude-opus-4-6");
+        assert_eq!(app.input.text, "/model claude-opus-4-7");
     }
 
     #[test]
@@ -1157,8 +1157,8 @@ mod tests {
         }];
         app.completion.model_completions = vec![
             crate::app::ModelCompletion {
-                id: "claude-opus-4-6".into(),
-                name: "Claude Opus 4.6".into(),
+                id: "claude-opus-4-7".into(),
+                name: "Claude Opus 4.7".into(),
             },
             crate::app::ModelCompletion {
                 id: "claude-sonnet-4-20250514".into(),
@@ -1184,8 +1184,8 @@ mod tests {
         }];
         app.completion.model_completions = vec![
             crate::app::ModelCompletion {
-                id: "claude-opus-4-6".into(),
-                name: "Claude Opus 4.6".into(),
+                id: "claude-opus-4-7".into(),
+                name: "Claude Opus 4.7".into(),
             },
             crate::app::ModelCompletion {
                 id: "claude-sonnet-4-20250514".into(),
@@ -1211,8 +1211,8 @@ mod tests {
         }];
         app.completion.model_completions = vec![
             crate::app::ModelCompletion {
-                id: "claude-opus-4-6".into(),
-                name: "Claude Opus 4.6".into(),
+                id: "claude-opus-4-7".into(),
+                name: "Claude Opus 4.7".into(),
             },
             crate::app::ModelCompletion {
                 id: "claude-sonnet-4-20250514".into(),
@@ -1228,7 +1228,7 @@ mod tests {
         let menu = app.completion.slash_menu.as_ref().unwrap();
         assert!(menu.model_mode);
         assert_eq!(menu.model_matches.len(), 1);
-        assert_eq!(menu.model_matches[0].id, "claude-opus-4-6");
+        assert_eq!(menu.model_matches[0].id, "claude-opus-4-7");
     }
 
     #[test]

@@ -389,7 +389,7 @@ mod tests {
     #[test]
     fn parse_full_config() {
         let toml = r#"
-model = "claude-opus-4-6"
+model = "claude-opus-4-7"
 thinking = true
 max_tokens = 8192
 system_prompt = "you are helpful"
@@ -403,7 +403,7 @@ openai = "sk-openai-test"
 "#;
 
         let config: Config = toml::from_str(toml).unwrap();
-        assert_eq!(config.model.as_deref(), Some("claude-opus-4-6"));
+        assert_eq!(config.model.as_deref(), Some("claude-opus-4-7"));
         assert_eq!(config.thinking, Some(ThinkingLevel::High));
         assert_eq!(config.max_tokens, Some(8192));
         assert_eq!(
@@ -579,9 +579,9 @@ enabled = false
 
     #[test]
     fn thinking_prefs_round_trip() {
-        let json = r#"{"claude-opus-4-6":"high","claude-sonnet-4-20250514":"medium"}"#;
+        let json = r#"{"claude-opus-4-7":"high","claude-sonnet-4-20250514":"medium"}"#;
         let prefs: HashMap<String, ThinkingLevel> = serde_json::from_str(json).unwrap();
-        assert_eq!(prefs.get("claude-opus-4-6"), Some(&ThinkingLevel::High));
+        assert_eq!(prefs.get("claude-opus-4-7"), Some(&ThinkingLevel::High));
         assert_eq!(
             prefs.get("claude-sonnet-4-20250514"),
             Some(&ThinkingLevel::Medium)
@@ -795,12 +795,12 @@ args = ["--stdio"]
 [model_tiers]
 fast = "claude-haiku-3-5-20241022"
 default = "claude-sonnet-4-20250514"
-strong = "claude-opus-4-6"
+strong = "claude-opus-4-7"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.model_tiers.len(), 3);
         assert_eq!(config.model_tiers["fast"], "claude-haiku-3-5-20241022");
-        assert_eq!(config.model_tiers["strong"], "claude-opus-4-6");
+        assert_eq!(config.model_tiers["strong"], "claude-opus-4-7");
     }
 
     #[test]

@@ -216,6 +216,7 @@ pub fn exclude_known_files(matches: Vec<ContextMatch>, known: &[PathBuf]) -> Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context::DocumentKind;
 
     // cosine similarity
 

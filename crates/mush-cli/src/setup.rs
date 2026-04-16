@@ -959,14 +959,14 @@ pub fn default_model_id(cfg: &config::Config) -> String {
     let has_openai_codex_auth = oauth_store.providers.contains_key("openai-codex");
 
     if has_anthropic_auth {
-        return "claude-opus-4-6".into();
+        return "claude-opus-4-7".into();
     }
 
     if has_openai_codex_auth {
         return "gpt-5.4".into();
     }
 
-    "claude-opus-4-6".into()
+    "claude-opus-4-7".into()
 }
 
 /// short model list for error messages
@@ -1054,8 +1054,46 @@ pub async fn auto_compact(
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
+    use std::sync::{LazyLock, Mutex};
+
     use super::*;
     use mush_ext::loader::{ProjectContext, Skill};
+
+    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<OsString>)>,
+    }
+
+    impl EnvGuard {
+        fn set(vars: &[(&'static str, Option<&str>)]) -> Self {
+            let mut saved = Vec::new();
+            unsafe {
+                for (key, value) in vars {
+                    saved.push((*key, std::env::var_os(key)));
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+            Self { saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                for (key, value) in self.saved.drain(..) {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn summaries_prompt_lists_available_skills() {
@@ -1162,5 +1200,39 @@ mod tests {
 
         assert!(text.contains("nested agents"));
         assert!(text.contains("use the local workflow"));
+    }
+
+    #[test]
+    fn anthropic_auth_defaults_to_opus_4_7() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let _guard = EnvGuard::set(&[
+            ("MUSH_CONFIG_DIR", Some(path)),
+            ("MUSH_DATA_DIR", Some(path)),
+            ("ANTHROPIC_API_KEY", Some("sk-ant-test")),
+            ("ANTHROPIC_OAUTH_TOKEN", None),
+        ]);
+
+        let cfg: config::Config = toml::from_str("").unwrap();
+
+        assert_eq!(default_model_id(&cfg), "claude-opus-4-7");
+    }
+
+    #[test]
+    fn no_auth_defaults_to_opus_4_7() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let _guard = EnvGuard::set(&[
+            ("MUSH_CONFIG_DIR", Some(path)),
+            ("MUSH_DATA_DIR", Some(path)),
+            ("ANTHROPIC_API_KEY", None),
+            ("ANTHROPIC_OAUTH_TOKEN", None),
+        ]);
+
+        let cfg: config::Config = toml::from_str("").unwrap();
+
+        assert_eq!(default_model_id(&cfg), "claude-opus-4-7");
     }
 }
