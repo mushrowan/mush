@@ -35,6 +35,23 @@ static USER_MODELS_CACHE: LazyLock<Mutex<Option<UserModelsCache>>> =
 pub fn anthropic_models() -> Vec<Model> {
     vec![
         Model {
+            id: "claude-opus-4-7".into(),
+            name: "Claude Opus 4.7".into(),
+            api: Api::AnthropicMessages,
+            provider: Provider::Anthropic,
+            base_url: "https://api.anthropic.com".into(),
+            reasoning: true,
+            input: vec![InputModality::Text, InputModality::Image],
+            cost: ModelCost {
+                input: 5.0,
+                output: 25.0,
+                cache_read: 0.5,
+                cache_write: 6.25,
+            },
+            context_window: TokenCount::new(1_000_000),
+            max_output_tokens: TokenCount::new(128_000),
+        },
+        Model {
             id: "claude-opus-4-6".into(),
             name: "Claude Opus 4.6".into(),
             api: Api::AnthropicMessages,
@@ -505,6 +522,16 @@ mod tests {
     }
 
     #[test]
+    fn find_new_opus_4_7_model() {
+        let model = find_model_by_id("claude-opus-4-7").unwrap();
+        assert_eq!(model.name, "Claude Opus 4.7");
+        assert_eq!(model.context_window, TokenCount::new(1_000_000));
+        assert_eq!(model.max_output_tokens, TokenCount::new(128_000));
+        assert_eq!(model.cost.input, 5.0);
+        assert_eq!(model.cost.output, 25.0);
+    }
+
+    #[test]
     fn find_model_missing() {
         assert!(find_model_by_id("nonexistent-model").is_none());
     }
@@ -696,7 +723,7 @@ mod tests {
 
     #[test]
     fn calculate_cost_works() {
-        // opus 4.6: $5/MTok input, $25/MTok output
+        // opus 4.7: $5/MTok input, $25/MTok output
         let model = anthropic_models().into_iter().next().unwrap();
         let usage = Usage {
             input_tokens: TokenCount::new(1_000_000),

@@ -214,10 +214,12 @@ enum ThinkingConfig {
         #[serde(rename = "type")]
         config_type: String,
         budget_tokens: u64,
+        display: String,
     },
     Adaptive {
         #[serde(rename = "type")]
         config_type: String,
+        display: String,
     },
 }
 
@@ -319,12 +321,14 @@ fn build_request_body(
             if supports_adaptive_thinking(&model.id) {
                 Some(ThinkingConfig::Adaptive {
                     config_type: "adaptive".into(),
+                    display: "summarized".into(),
                 })
             } else {
                 let budget = thinking_budget(level, max_tokens.get());
                 Some(ThinkingConfig::Enabled {
                     config_type: "enabled".into(),
                     budget_tokens: budget,
+                    display: "summarized".into(),
                 })
             }
         }
@@ -392,11 +396,13 @@ fn anthropic_cache_control(
     })
 }
 
-/// Claude 4.6 models use adaptive thinking; older Claude 4 models still use
-/// enabled+budget thinking. Keep this narrow until reasoning capabilities move
-/// into model metadata instead of living in provider code.
+/// Claude 4.6+ Opus models and Sonnet 4.6 use adaptive thinking. Older Claude
+/// 4 models still use enabled+budget thinking. Keep this narrow until
+/// reasoning capabilities move into model metadata instead of living here.
 fn supports_adaptive_thinking(model_id: &str) -> bool {
-    model_id.contains("opus-4-6")
+    model_id.contains("opus-4-7")
+        || model_id.contains("opus-4.7")
+        || model_id.contains("opus-4-6")
         || model_id.contains("opus-4.6")
         || model_id.contains("sonnet-4-6")
         || model_id.contains("sonnet-4.6")
@@ -408,9 +414,14 @@ fn anthropic_effort(model_id: &str, level: ThinkingLevel) -> Option<&'static str
         (_, ThinkingLevel::Minimal | ThinkingLevel::Low) => Some("low"),
         (_, ThinkingLevel::Medium) => Some("medium"),
         (_, ThinkingLevel::High) => Some("high"),
+        (id, ThinkingLevel::Xhigh) if id.contains("opus-4-7") || id.contains("opus-4.7") => {
+            Some("xhigh")
+        }
         // Model-specific effort support should eventually live in model metadata.
-        // For now, only the shipped Claude Opus 4.6 id gets Anthropic's `max`.
-        ("claude-opus-4-6", ThinkingLevel::Xhigh) => Some("max"),
+        // Claude Opus 4.6 lacks `xhigh`, so map the top visible level to `max`.
+        (id, ThinkingLevel::Xhigh) if id.contains("opus-4-6") || id.contains("opus-4.6") => {
+            Some("max")
+        }
         (_, ThinkingLevel::Xhigh) => Some("high"),
     }
 }
@@ -1566,6 +1577,34 @@ mod tests {
         assert_eq!(
             body.output_config.as_ref().map(|cfg| cfg.effort.as_str()),
             Some("max")
+        );
+    }
+
+    #[test]
+    fn opus_4_7_uses_adaptive_thinking_with_xhigh_effort() {
+        let model = Model {
+            id: "claude-opus-4-7".into(),
+            name: "Claude Opus 4.7".into(),
+            reasoning: true,
+            ..test_model()
+        };
+        let options = StreamOptions {
+            thinking: Some(ThinkingLevel::Xhigh),
+            ..Default::default()
+        };
+
+        let body = build_request_body(&model, &None, &[], &[], &options, false);
+
+        assert!(matches!(
+            body.thinking,
+            Some(ThinkingConfig::Adaptive {
+                ref display,
+                ..
+            }) if display == "summarized"
+        ));
+        assert_eq!(
+            body.output_config.as_ref().map(|cfg| cfg.effort.as_str()),
+            Some("xhigh")
         );
     }
 

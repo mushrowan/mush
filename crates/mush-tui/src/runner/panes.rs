@@ -538,13 +538,13 @@ mod tests {
     fn resolve_tier_from_map() {
         let mut tiers = std::collections::HashMap::new();
         tiers.insert("fast".into(), "claude-haiku-3-5-20241022".into());
-        tiers.insert("strong".into(), "claude-opus-4-6".into());
+        tiers.insert("strong".into(), "claude-opus-4-7".into());
 
         assert_eq!(
             resolve_model_tier("fast", &tiers),
             "claude-haiku-3-5-20241022"
         );
-        assert_eq!(resolve_model_tier("strong", &tiers), "claude-opus-4-6");
+        assert_eq!(resolve_model_tier("strong", &tiers), "claude-opus-4-7");
     }
 
     #[test]
