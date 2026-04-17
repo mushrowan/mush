@@ -58,6 +58,7 @@ pub(super) fn enter_tui_terminal(policy: TerminalPolicy) -> io::Result<()> {
     enable_raw_mode()?;
     io::stdout().execute(EnterAlternateScreen)?;
     io::stdout().execute(event::EnableBracketedPaste)?;
+    io::stdout().execute(event::EnableFocusChange)?;
     enable_mouse_tracking(policy.mouse_tracking)?;
     enable_keyboard_enhancement(policy.keyboard_enhancement);
     let _ = io::stdout().execute(SetCursorStyle::BlinkingBar);
@@ -145,6 +146,7 @@ pub(super) fn restore_terminal_state() {
     use std::io::Write;
 
     let _ = io::stdout().execute(PopKeyboardEnhancementFlags);
+    let _ = io::stdout().execute(event::DisableFocusChange);
     let _ = io::stdout().execute(event::DisableBracketedPaste);
     let _ = io::stdout().execute(SetCursorStyle::DefaultUserShape);
     let _ = disable_raw_mode();
