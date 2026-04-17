@@ -510,6 +510,21 @@ fn render_message(
             " ".repeat(w),
             app.theme.user_msg_bg,
         )));
+        // user message images
+        for (img_idx, _) in msg.images.iter().enumerate() {
+            image_placeholders.push(ImagePlaceholder {
+                msg_idx,
+                tc_idx: img_idx,
+                line_idx: lines.len(),
+            });
+            lines.push(Line::from(vec![
+                Span::styled("    📷 ", Style::default()),
+                Span::styled("image", app.theme.image_label),
+            ]));
+            for _ in 1..IMAGE_HEIGHT {
+                lines.push(Line::raw(""));
+            }
+        }
     } else {
         // determine if a code block in this message is selected
         let highlight_block = if app.interaction.mode == crate::app::AppMode::Scroll
@@ -822,6 +837,7 @@ fn compute_message_height(
     if matches!(msg.role, MessageRole::User) {
         h += 2; // top + bottom padding
         h += count_estimated_lines(&msg.content, cw);
+        h += msg.images.len() * IMAGE_HEIGHT as usize;
     } else if !msg.content.is_empty() && !matches!(msg.role, MessageRole::System) {
         // try indented cache for exact content line count
         let exact = {
@@ -2368,5 +2384,20 @@ mod tests {
             "height_cache should converge to actual rendered height \
              (cached={cached_height}, actual={actual_total})"
         );
+    }
+
+    #[test]
+    fn user_message_with_images_reserves_render_area() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        let mut msg = DisplayMessage::new(MessageRole::User, "check this out");
+        msg.images = vec![vec![0u8; 100]];
+        app.messages.push(msg);
+        let buf = render_app(&app, 60, 30);
+        let content = buffer_to_string(&buf);
+        assert!(content.contains("📷"));
+        let areas = app.render_state.image_render_areas.borrow();
+        assert_eq!(areas.len(), 1);
+        assert_eq!(areas[0].msg_idx, 0);
+        assert!(areas[0].area.height > 0);
     }
 }
