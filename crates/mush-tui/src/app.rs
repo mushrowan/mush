@@ -425,6 +425,8 @@ impl App {
         self.messages.insert(insert_pos, assistant_msg);
 
         if let Some(ref u) = usage {
+            let prev_usage_snapshot = self.stats.prev_usage().copied();
+            let prev_context_snapshot = self.stats.context_tokens;
             let anomalies = self.stats.update(u, cost);
             for anomaly in &anomalies {
                 let msg = match anomaly {
@@ -452,9 +454,9 @@ impl App {
                             cache_ttl_secs: self.cache.ttl_secs,
                             thinking_level: format!("{:?}", self.thinking_level),
                             model_id: self.model_id.to_string(),
-                            prev_usage: self.stats.prev_usage().copied(),
+                            prev_usage: prev_usage_snapshot,
                             curr_usage: *u,
-                            prev_context_tokens: self.stats.context_tokens.get(),
+                            prev_context_tokens: prev_context_snapshot.get(),
                             curr_context_tokens: u.total_input_tokens().get(),
                             session_total_cost: format!("{:.4}", self.stats.total_cost.get()),
                             session_api_calls: self.stats.total_tokens.get()
