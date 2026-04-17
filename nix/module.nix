@@ -48,6 +48,16 @@ self: {
           - prefer Result over unwrap
         '';
       };
+
+      files = lib.mkOption {
+        type = lib.types.attrsOf (lib.types.either lib.types.path lib.types.str);
+        default = {};
+        description = "additional files in the skill directory. paths are linked, strings are written inline";
+        example = {
+          "references/api.md" = ./skills/my-skill/references/api.md;
+          "references/inline.md" = "# inline content";
+        };
+      };
     };
   };
 
@@ -67,6 +77,20 @@ self: {
 
       ${skill.content}
     '';
+
+  # build xdg.configFile entries for a skill (SKILL.md + extra files)
+  skillToFiles = name: skill: {
+    "mush/skills/${name}/SKILL.md".text = skillToText name skill;
+  } // (
+    if lib.isString skill then {}
+    else lib.mapAttrs' (path: value:
+      lib.nameValuePair "mush/skills/${name}/${path}" (
+        if builtins.isPath value
+        then {source = value;}
+        else {text = value;}
+      )
+    ) (skill.files or {})
+  );
 
   colourType = lib.types.nullOr lib.types.str;
   colourOption = description:
@@ -347,6 +371,16 @@ in {
               Use when writing or reviewing Rust code.
             ''';
           };
+
+          # with additional reference files
+          nix = {
+            description = "Nix flake conventions";
+            content = "## flakes\nuse flake-parts";
+            files = {
+              "references/flake-parts.md" = ./skills/nix/flake-parts.md;
+              "references/inline.md" = "# written inline";
+            };
+          };
         }
       '';
       description = ''
@@ -378,10 +412,6 @@ in {
       // lib.optionalAttrs (cfg.agentsMd != null) {
         "mush/AGENTS.md".text = cfg.agentsMd;
       }
-      // lib.mapAttrs' (name: skill:
-        lib.nameValuePair "mush/skills/${name}/SKILL.md" {
-          text = skillToText name skill;
-        })
-      cfg.skills;
+      // lib.concatMapAttrs skillToFiles cfg.skills;
   };
 }
