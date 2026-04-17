@@ -29,6 +29,8 @@ pub struct DisplayMessage {
     pub model_id: Option<ModelId>,
     /// whether this message is queued (steering) and hasn't been processed yet
     pub queued: bool,
+    /// raw image bytes attached to user messages (for inline rendering)
+    pub images: Vec<Vec<u8>>,
 }
 
 impl DisplayMessage {
@@ -44,6 +46,7 @@ impl DisplayMessage {
             cost: None,
             model_id: None,
             queued: false,
+            images: Vec::new(),
         }
     }
 }

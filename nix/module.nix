@@ -79,18 +79,23 @@ self: {
     '';
 
   # build xdg.configFile entries for a skill (SKILL.md + extra files)
-  skillToFiles = name: skill: {
-    "mush/skills/${name}/SKILL.md".text = skillToText name skill;
-  } // (
-    if lib.isString skill then {}
-    else lib.mapAttrs' (path: value:
-      lib.nameValuePair "mush/skills/${name}/${path}" (
-        if builtins.isPath value
-        then {source = value;}
-        else {text = value;}
-      )
-    ) (skill.files or {})
-  );
+  skillToFiles = name: skill:
+    {
+      "mush/skills/${name}/SKILL.md".text = skillToText name skill;
+    }
+    // (
+      if lib.isString skill
+      then {}
+      else
+        lib.mapAttrs' (
+          path: value:
+            lib.nameValuePair "mush/skills/${name}/${path}" (
+              if builtins.isPath value
+              then {source = value;}
+              else {text = value;}
+            )
+        ) (skill.files or {})
+    );
 
   colourType = lib.types.nullOr lib.types.str;
   colourOption = description:
