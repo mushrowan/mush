@@ -52,15 +52,29 @@ fn confirmation_answer(code: KeyCode) -> Option<bool> {
 fn trace_dropped_event(event: Event, phase: &str) {
     match event {
         Event::Key(key) => {
-            tracing::trace!(
+            // non-press key events are suspicious with our keyboard enhancement
+            // setup (we only request DISAMBIGUATE_ESCAPE_CODES, not
+            // REPORT_EVENT_TYPES) so log at debug to help diagnose misparsed
+            // escape sequences
+            tracing::debug!(
                 %phase,
                 code = ?key.code,
+                modifiers = ?key.modifiers,
                 kind = ?key.kind,
                 "dropped non-press key event"
             );
         }
+        Event::FocusGained => {
+            tracing::debug!(%phase, "focus gained");
+        }
+        Event::FocusLost => {
+            tracing::debug!(%phase, "focus lost");
+        }
+        Event::Resize(w, h) => {
+            tracing::debug!(%phase, width = w, height = h, "terminal resized");
+        }
         event => {
-            tracing::trace!(%phase, ?event, "dropped non-key event");
+            tracing::debug!(%phase, ?event, "unhandled terminal event");
         }
     }
 }
