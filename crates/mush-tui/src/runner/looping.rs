@@ -24,7 +24,15 @@ pub(super) async fn run_loop_iteration(
     image_picker: &Option<ratatui_image::picker::Picker>,
 ) -> io::Result<LoopAction> {
     if agent_streams.is_empty() {
-        handle_idle_iteration(stream_state, runtime, services, tui_config, registry).await
+        handle_idle_iteration(
+            stream_state,
+            runtime,
+            services,
+            tui_config,
+            registry,
+            image_picker,
+        )
+        .await
     } else {
         handle_streaming_iteration(
             agent_streams,
@@ -44,6 +52,7 @@ fn input_parts<'a>(
     services: &'a RunnerServices,
     tui_config: &'a mut TuiConfig,
     registry: &'a ApiRegistry,
+    image_picker: &'a Option<ratatui_image::picker::Picker>,
 ) -> (&'a mut crate::pane::PaneManager, InputDeps<'a>) {
     let RunnerRuntime {
         pane_mgr,
@@ -67,6 +76,7 @@ fn input_parts<'a>(
             cwd,
             pending_prompt,
             delegation_queue: &services.delegation_queue,
+            image_picker,
         },
     )
 }
@@ -107,7 +117,7 @@ async fn handle_streaming_iteration(
             poll_live_tool_output(&mut runtime.pane_mgr, &tui_config.tool_output_live);
             drain_inboxes(&mut runtime.pane_mgr, stream_state).await;
 
-            let (pane_mgr, mut deps) = input_parts(runtime, services, tui_config, registry);
+            let (pane_mgr, mut deps) = input_parts(runtime, services, tui_config, registry, image_picker);
             let action = handle_streaming_terminal_events(pane_mgr, stream_state, &mut deps).await?;
             if matches!(action, LoopAction::Quit) {
                 return Ok(LoopAction::Quit);
@@ -174,9 +184,10 @@ async fn handle_idle_iteration(
     services: &RunnerServices,
     tui_config: &mut TuiConfig,
     registry: &ApiRegistry,
+    image_picker: &Option<ratatui_image::picker::Picker>,
 ) -> io::Result<LoopAction> {
     drain_inboxes(&mut runtime.pane_mgr, stream_state).await;
 
-    let (pane_mgr, mut deps) = input_parts(runtime, services, tui_config, registry);
+    let (pane_mgr, mut deps) = input_parts(runtime, services, tui_config, registry, image_picker);
     handle_idle_terminal_events(pane_mgr, &mut deps).await
 }

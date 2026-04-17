@@ -183,6 +183,14 @@ impl App {
         self.scroll_offset = 0;
     }
 
+    /// add a user message with attached images to the display
+    pub fn push_user_message_with_images(&mut self, text: impl Into<String>, images: Vec<Vec<u8>>) {
+        let mut msg = DisplayMessage::new(MessageRole::User, text);
+        msg.images = images;
+        self.messages.push(msg);
+        self.scroll_offset = 0;
+    }
+
     /// remove all queued steering messages, returning their text content
     pub fn take_queued_messages(&mut self) -> Vec<String> {
         let mut texts = Vec::new();
@@ -807,6 +815,17 @@ mod tests {
         assert_eq!(app.messages.len(), 1);
         assert_eq!(app.messages[0].role, MessageRole::User);
         assert_eq!(app.messages[0].content, "hello");
+    }
+
+    #[test]
+    fn push_user_message_stores_images() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        let images = vec![vec![0u8; 100], vec![1u8; 200]];
+        app.push_user_message_with_images("hello", images.clone());
+        assert_eq!(app.messages.len(), 1);
+        assert_eq!(app.messages[0].content, "hello");
+        assert_eq!(app.messages[0].images.len(), 2);
+        assert_eq!(app.messages[0].images[0], images[0]);
     }
 
     #[test]

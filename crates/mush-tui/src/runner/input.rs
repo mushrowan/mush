@@ -39,6 +39,7 @@ pub(super) struct InputDeps<'a> {
     pub cwd: &'a Path,
     pub pending_prompt: &'a mut Option<String>,
     pub delegation_queue: &'a crate::delegate::DelegationQueue,
+    pub image_picker: &'a Option<ratatui_image::picker::Picker>,
 }
 
 fn confirmation_answer(code: KeyCode) -> Option<bool> {
@@ -230,8 +231,32 @@ pub(super) async fn handle_idle_terminal_events(
                             if pane.label.is_none() && pane.conversation.is_empty() {
                                 pane.label = Some(expanded.chars().take(30).collect());
                             }
+                            let pane = pane_mgr.focused_mut();
+                            let pending_images: Vec<Vec<u8>> = pane
+                                .app
+                                .input
+                                .images
+                                .iter()
+                                .map(|img| img.data.clone())
+                                .collect();
+                            if pending_images.is_empty() {
+                                pane.app.push_user_message(expanded.clone());
+                            } else {
+                                let msg_idx = pane.app.messages.len();
+                                pane.app.push_user_message_with_images(
+                                    expanded.clone(),
+                                    pending_images.clone(),
+                                );
+                                if let Some(picker) = deps.image_picker {
+                                    for (img_idx, data) in pending_images.iter().enumerate() {
+                                        if let Ok(dyn_img) = image::load_from_memory(data) {
+                                            let proto = picker.new_resize_protocol(dyn_img);
+                                            pane.image_protos.insert((msg_idx, img_idx), proto);
+                                        }
+                                    }
+                                }
+                            }
                             let app = &mut pane_mgr.focused_mut().app;
-                            app.push_user_message(expanded.clone());
                             app.active_tools.clear();
                             app.start_streaming();
                             *deps.pending_prompt = Some(expanded);
