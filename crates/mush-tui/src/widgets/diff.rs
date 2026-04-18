@@ -153,30 +153,157 @@ pub fn paired_change_spans(
     added: &str,
     theme: &Theme,
 ) -> (Vec<Span<'static>>, Vec<Span<'static>>) {
+    paired_change_spans_with_lang(removed, added, theme, None)
+}
+
+/// variant of [`paired_change_spans`] that runs syntax highlighting on
+/// the matching (unchanged) portions when `lang` is recognised by
+/// syntect. intra-highlighted tokens keep their `*_intra` style wholesale
+/// so the "look here" signal wins over syntax colouring
+#[must_use]
+pub fn paired_change_spans_with_lang(
+    removed: &str,
+    added: &str,
+    theme: &Theme,
+    lang: Option<&str>,
+) -> (Vec<Span<'static>>, Vec<Span<'static>>) {
     let diff = TextDiff::from_words(removed, added);
-    let base_removed = theme.diff_base_removed();
-    let base_added = theme.diff_base_added();
-    let mut removed_spans: Vec<Span<'static>> = Vec::new();
-    let mut added_spans: Vec<Span<'static>> = Vec::new();
+    let (removed_intra, added_intra) = compute_intra_byte_ranges(&diff);
+    let removed_spans = build_side_spans(
+        removed,
+        &removed_intra,
+        theme.diff_base_removed(),
+        theme.diff_removed_intra,
+        lang,
+        theme,
+    );
+    let added_spans = build_side_spans(
+        added,
+        &added_intra,
+        theme.diff_base_added(),
+        theme.diff_added_intra,
+        lang,
+        theme,
+    );
+    (removed_spans, added_spans)
+}
+
+/// walk a word-level diff and return byte ranges of differing tokens
+/// within the removed and added strings respectively. whitespace-only
+/// diff tokens are accumulated into the surrounding token ranges so the
+/// output doesn't fragment purely on word boundaries
+fn compute_intra_byte_ranges(
+    diff: &TextDiff<str>,
+) -> (Vec<std::ops::Range<usize>>, Vec<std::ops::Range<usize>>) {
+    let mut removed_intra: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut added_intra: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut removed_pos = 0usize;
+    let mut added_pos = 0usize;
     for change in diff.iter_all_changes() {
-        let text = change.value().to_string();
-        if text.is_empty() {
-            continue;
-        }
+        let len = change.value().len();
         match change.tag() {
             ChangeTag::Equal => {
-                removed_spans.push(Span::styled(text.clone(), base_removed));
-                added_spans.push(Span::styled(text, base_added));
+                removed_pos += len;
+                added_pos += len;
             }
             ChangeTag::Delete => {
-                removed_spans.push(Span::styled(text, theme.diff_removed_intra));
+                removed_intra.push(removed_pos..removed_pos + len);
+                removed_pos += len;
             }
             ChangeTag::Insert => {
-                added_spans.push(Span::styled(text, theme.diff_added_intra));
+                added_intra.push(added_pos..added_pos + len);
+                added_pos += len;
             }
         }
     }
-    (removed_spans, added_spans)
+    (removed_intra, added_intra)
+}
+
+/// build styled spans for one side of a paired diff line.
+///
+/// when `lang` is provided and syntect recognises it, the base spans
+/// come from syntect (fg colour per token) with the side's line bg
+/// folded in; otherwise a single span with the plain base style is used.
+/// byte ranges in `intra_ranges` are then overlaid with `intra_style`
+fn build_side_spans(
+    text: &str,
+    intra_ranges: &[std::ops::Range<usize>],
+    base: Style,
+    intra_style: Style,
+    lang: Option<&str>,
+    theme: &Theme,
+) -> Vec<Span<'static>> {
+    let base_spans = lang
+        .and_then(|l| crate::syntax::highlight_line(text, l, theme))
+        .map(|syn| {
+            syn.into_iter()
+                .map(|s| {
+                    let mut st = s.style;
+                    if let Some(bg) = base.bg {
+                        st = st.bg(bg);
+                    }
+                    Span::styled(s.content.into_owned(), st)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| vec![Span::styled(text.to_string(), base)]);
+    overlay_intra(base_spans, intra_ranges, intra_style)
+}
+
+/// overlay an `intra_style` onto byte ranges of a list of pre-styled
+/// spans. base spans are split at range boundaries so that characters
+/// inside an intra range carry `intra_style` while surrounding
+/// characters keep their original style (which may include syntect fg)
+fn overlay_intra(
+    base_spans: Vec<Span<'static>>,
+    intra_ranges: &[std::ops::Range<usize>],
+    intra_style: Style,
+) -> Vec<Span<'static>> {
+    if intra_ranges.is_empty() {
+        return base_spans;
+    }
+    let mut result: Vec<Span<'static>> = Vec::new();
+    let mut pos = 0usize;
+    for span in base_spans {
+        let span_start = pos;
+        let span_len = span.content.len();
+        let span_end = span_start + span_len;
+        let overlapping: Vec<&std::ops::Range<usize>> = intra_ranges
+            .iter()
+            .filter(|r| r.start < span_end && r.end > span_start)
+            .collect();
+        if overlapping.is_empty() {
+            pos = span_end;
+            result.push(span);
+            continue;
+        }
+        let base_style = span.style;
+        let text: String = span.content.into_owned();
+        let mut cursor = 0usize;
+        for r in overlapping {
+            let start_in_span = r.start.saturating_sub(span_start);
+            let end_in_span = (r.end - span_start).min(span_len);
+            if start_in_span > cursor {
+                result.push(Span::styled(
+                    text[cursor..start_in_span].to_string(),
+                    base_style,
+                ));
+            }
+            let from = start_in_span.max(cursor);
+            if end_in_span > from {
+                result.push(Span::styled(
+                    text[from..end_in_span].to_string(),
+                    intra_style,
+                ));
+            }
+            cursor = end_in_span;
+        }
+        if cursor < span_len {
+            result.push(Span::styled(text[cursor..].to_string(), base_style));
+        }
+        pos = span_end;
+    }
+    result
 }
 
 /// pick the rendering mode based on inner width, then render to rows.
@@ -184,11 +311,24 @@ pub fn paired_change_spans(
 /// wraps it in any outer box chrome (borders, indents)
 #[must_use]
 pub fn render_diff(text: &str, inner_width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    render_diff_with_lang(text, inner_width, theme, None)
+}
+
+/// variant of [`render_diff`] that syntax-highlights +/- line content
+/// when `lang` is recognised by syntect. context and gap lines are
+/// left dim (lang-agnostic) since they rarely benefit from colouring
+#[must_use]
+pub fn render_diff_with_lang(
+    text: &str,
+    inner_width: usize,
+    theme: &Theme,
+    lang: Option<&str>,
+) -> Vec<Line<'static>> {
     let events = parse_diff_lines(text);
     if inner_width >= SIDE_BY_SIDE_MIN_WIDTH {
-        render_side_by_side(&events, inner_width, theme)
+        render_side_by_side(&events, inner_width, theme, lang)
     } else {
-        render_inline(&events, inner_width, theme)
+        render_inline(&events, inner_width, theme, lang)
     }
 }
 
@@ -220,6 +360,7 @@ fn build_side(
     added: Option<&str>,
     theme: &Theme,
     side: Side,
+    lang: Option<&str>,
 ) -> Vec<Span<'static>> {
     let (own, base) = match side {
         Side::Removed => (removed, theme.diff_base_removed()),
@@ -231,15 +372,27 @@ fn build_side(
     let mut spans: Vec<Span<'static>> = vec![Span::styled(prefix.to_string(), base)];
     match (removed, added) {
         (Some(r), Some(a)) => {
-            let (removed_spans, added_spans) = paired_change_spans(r, a, theme);
+            let (removed_spans, added_spans) = paired_change_spans_with_lang(r, a, theme, lang);
             spans.extend(match side {
                 Side::Removed => removed_spans,
                 Side::Added => added_spans,
             });
         }
         _ => {
-            // unpaired end of run: no intra highlight, plain base style
-            spans.push(Span::styled(own.to_string(), base));
+            // unpaired end of run: no intra highlight, but still syntax
+            // highlight the content when a language is known
+            let (intra_style, empty_ranges): (Style, Vec<std::ops::Range<usize>>) = match side {
+                Side::Removed => (theme.diff_removed_intra, Vec::new()),
+                Side::Added => (theme.diff_added_intra, Vec::new()),
+            };
+            spans.extend(build_side_spans(
+                own,
+                &empty_ranges,
+                base,
+                intra_style,
+                lang,
+                theme,
+            ));
         }
     }
     spans
@@ -265,7 +418,12 @@ enum Side {
 
 /// inline (single-column) rendering: one event per row, prefix preserved.
 /// consecutive removed/added pairs receive intra-line word highlights
-fn render_inline(events: &[DiffEvent], inner_width: usize, theme: &Theme) -> Vec<Line<'static>> {
+fn render_inline(
+    events: &[DiffEvent],
+    inner_width: usize,
+    theme: &Theme,
+    lang: Option<&str>,
+) -> Vec<Line<'static>> {
     let mut rows: Vec<Line<'static>> = Vec::new();
     let mut i = 0;
     while i < events.len() {
@@ -295,6 +453,7 @@ fn render_inline(events: &[DiffEvent], inner_width: usize, theme: &Theme) -> Vec
                         added.get(idx).copied(),
                         theme,
                         Side::Removed,
+                        lang,
                     );
                     let pad = Side::Removed.pad_style(theme);
                     rows.push(Line::from(fit_spans(spans, inner_width, pad)));
@@ -306,6 +465,7 @@ fn render_inline(events: &[DiffEvent], inner_width: usize, theme: &Theme) -> Vec
                         Some(added_text),
                         theme,
                         Side::Added,
+                        lang,
                     );
                     let pad = Side::Added.pad_style(theme);
                     rows.push(Line::from(fit_spans(spans, inner_width, pad)));
@@ -325,6 +485,7 @@ fn render_side_by_side(
     events: &[DiffEvent],
     inner_width: usize,
     theme: &Theme,
+    lang: Option<&str>,
 ) -> Vec<Line<'static>> {
     // " │ " separator takes 3 cols, split remainder evenly
     let content_total = inner_width.saturating_sub(3);
@@ -367,6 +528,7 @@ fn render_side_by_side(
                         added.get(row).copied(),
                         theme,
                         Side::Removed,
+                        lang,
                     );
                     let right_spans = build_side(
                         "+ ",
@@ -374,6 +536,7 @@ fn render_side_by_side(
                         added.get(row).copied(),
                         theme,
                         Side::Added,
+                        lang,
                     );
                     let mut spans =
                         fit_spans(left_spans, left_width, Side::Removed.pad_style(theme));
@@ -697,5 +860,53 @@ mod tests {
                 "context row should not have bg, got {span:?}"
             );
         }
+    }
+
+    // -- syntax highlighting in diff --
+
+    #[test]
+    fn render_diff_with_lang_highlights_equal_tokens_in_paired_lines() {
+        let theme = Theme::dark();
+        let rows = render_diff_with_lang("- let x = 1;\n+ let x = 2;\n", 40, &theme, Some("rs"));
+        assert_eq!(rows.len(), 2);
+        // removed row: "let" keyword should have a distinct fg from the
+        // base diff_removed colour (syntect applies its own palette on top)
+        let removed_fg_variety: std::collections::HashSet<_> =
+            rows[0].spans.iter().map(|s| s.style.fg).collect();
+        assert!(
+            removed_fg_variety.len() >= 2,
+            "expected syntax-highlighted tokens on removed row to have varied fg, got {removed_fg_variety:?}"
+        );
+    }
+
+    #[test]
+    fn render_diff_with_lang_none_matches_render_diff() {
+        let theme = Theme::dark();
+        let a = render_diff("- old\n+ new\n", 40, &theme);
+        let b = render_diff_with_lang("- old\n+ new\n", 40, &theme, None);
+        assert_eq!(a.len(), b.len());
+        for (row_a, row_b) in a.iter().zip(b.iter()) {
+            let text_a: String = row_a.spans.iter().map(|s| s.content.as_ref()).collect();
+            let text_b: String = row_b.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert_eq!(text_a, text_b);
+        }
+    }
+
+    #[test]
+    fn render_diff_with_lang_preserves_intra_highlight_bg() {
+        // intra-highlighted tokens should keep their stronger bg even
+        // when syntect would have painted a different fg for them
+        let theme = Theme::dark();
+        let rows = render_diff_with_lang("- let x = 1;\n+ let x = 2;\n", 40, &theme, Some("rs"));
+        let added_row = &rows[1];
+        let has_intra_bg = added_row
+            .spans
+            .iter()
+            .any(|s| s.content.contains('2') && s.style.bg == theme.diff_added_intra.bg);
+        assert!(
+            has_intra_bg,
+            "intra '2' should keep diff_added_intra bg, got {:?}",
+            added_row.spans
+        );
     }
 }

@@ -1110,8 +1110,11 @@ fn render_single_tool_box(
     if let Some(ref output) = tc.output_preview {
         if tc.name == "edit" {
             // edit tool produces structured +/- diffs: render in side-by-side
-            // columns when the inner panel is wide enough, otherwise inline
-            for row in super::diff::render_diff(output, inner, theme) {
+            // columns when the inner panel is wide enough, otherwise inline.
+            // `tc.summary` holds the file path for edit, use it to detect a
+            // syntect language so we can highlight unchanged tokens
+            let lang = crate::syntax::lang_from_path(&tc.summary);
+            for row in super::diff::render_diff_with_lang(output, inner, theme, lang) {
                 let mut spans = vec![indent.clone(), Span::styled("│ ", border)];
                 spans.extend(row.spans);
                 spans.push(Span::styled(" │", border));
