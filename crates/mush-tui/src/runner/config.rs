@@ -26,6 +26,10 @@ pub type ThinkingPrefsSaver =
 /// callback to persist last selected model id
 pub type LastModelSaver = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
 
+/// callback to persist the imperative favourites list. only called when
+/// favourites aren't locked by config.toml
+pub type FavouriteModelsSaver = std::sync::Arc<dyn Fn(&[String]) + Send + Sync>;
+
 /// callback to update session title
 pub type TitleUpdater = std::sync::Arc<dyn Fn(String) + Send + Sync>;
 
@@ -135,4 +139,6 @@ pub struct TuiConfig {
     /// whether the favourites list is pinned by config.toml. when true the
     /// picker's ctrl+f toggle is rejected with a toast
     pub favourites_locked: bool,
+    /// callback to persist favourites after an imperative toggle
+    pub save_favourite_models: Option<FavouriteModelsSaver>,
 }

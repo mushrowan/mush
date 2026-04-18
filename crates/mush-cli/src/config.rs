@@ -492,7 +492,6 @@ pub(crate) fn load_favourite_models_from(path: &std::path::Path) -> Vec<String> 
 
 /// persist favourites after an imperative toggle. callers should gate on
 /// the locked flag from [`resolve_favourites`] before calling
-#[allow(dead_code, reason = "wired up in step 10 when /favourite lands")]
 pub fn save_favourite_models(models: &[String]) {
     save_favourite_models_to(&favourite_models_path(), models);
 }

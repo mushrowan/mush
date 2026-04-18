@@ -600,6 +600,13 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         scroll_lines: setup.cfg.scroll_lines,
         favourite_models: favourite_models.clone(),
         favourites_locked,
+        save_favourite_models: if favourites_locked {
+            None
+        } else {
+            Some(std::sync::Arc::new(|favs: &[String]| {
+                config::save_favourite_models(favs);
+            }))
+        },
     };
 
     mush_tui::run_tui(tui_config, &setup.tools, &setup.registry)

@@ -687,6 +687,9 @@ fn handle_slash_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             }
             None
         }
+        // ctrl+f toggles favourite on the selected model (model mode only).
+        // rejected with a toast when favourites are locked by config
+        (KeyModifiers::CONTROL, KeyCode::Char('f')) => toggle_selected_favourite(app),
         // navigate
         (_, KeyCode::Up) | (KeyModifiers::CONTROL, KeyCode::Char('k')) => {
             if let Some(ref mut menu) = app.completion.slash_menu {
@@ -729,6 +732,41 @@ fn menu_len(menu: &crate::slash_menu::SlashMenuState) -> usize {
     } else {
         menu.matches.len()
     }
+}
+
+/// toggle favourite status on the currently-selected model row. returns
+/// `AppEvent::PersistFavourites` when the list actually changed so the
+/// runner can save to disk. no-op + toast when locked
+fn toggle_selected_favourite(app: &mut App) -> Option<AppEvent> {
+    let Some(ref mut menu) = app.completion.slash_menu else {
+        return None;
+    };
+    if !menu.model_mode {
+        return None;
+    }
+    if menu.favourites_locked {
+        menu.toast = Some("favourites are locked by config.toml".to_string());
+        return None;
+    }
+    let Some(model) = menu.model_matches.get(menu.selected) else {
+        return None;
+    };
+    let id = model.id.clone();
+    if let Some(pos) = app
+        .completion
+        .favourite_models
+        .iter()
+        .position(|f| f == &id)
+    {
+        app.completion.favourite_models.remove(pos);
+    } else {
+        app.completion.favourite_models.push(id);
+    }
+    // keep the menu's copy in sync so the star marker updates immediately
+    if let Some(ref mut menu) = app.completion.slash_menu {
+        menu.favourite_models = app.completion.favourite_models.clone();
+    }
+    Some(AppEvent::PersistFavourites)
 }
 
 /// toggle the model picker between all-models and favourites-only views.
@@ -1480,6 +1518,59 @@ mod tests {
                 .as_deref()
                 .is_some_and(|t| t.contains("no favourites")),
             "expected a 'no favourites' toast, got {:?}",
+            menu.toast
+        );
+    }
+
+    #[test]
+    fn model_picker_ctrl_f_toggles_favourite_when_unlocked() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.completion.model_completions = vec![crate::app::ModelCompletion {
+            id: "claude-opus".into(),
+            name: "Claude Opus".into(),
+        }];
+        app.completion.favourite_models = Vec::new();
+        app.completion.favourites_locked = false;
+        app.open_model_picker();
+
+        // add to favourites
+        let event = handle_key(&mut app, ctrl(KeyCode::Char('f')));
+        assert!(
+            matches!(event, Some(AppEvent::PersistFavourites)),
+            "expected PersistFavourites event, got {event:?}"
+        );
+        assert_eq!(app.completion.favourite_models, vec!["claude-opus"]);
+        let menu = app.completion.slash_menu.as_ref().unwrap();
+        assert!(menu.is_favourite("claude-opus"));
+
+        // toggle off
+        let event = handle_key(&mut app, ctrl(KeyCode::Char('f')));
+        assert!(matches!(event, Some(AppEvent::PersistFavourites)));
+        assert!(app.completion.favourite_models.is_empty());
+    }
+
+    #[test]
+    fn model_picker_ctrl_f_toasts_when_locked() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.completion.model_completions = vec![crate::app::ModelCompletion {
+            id: "claude-opus".into(),
+            name: "Claude Opus".into(),
+        }];
+        app.completion.favourite_models = vec!["claude-opus".into()];
+        app.completion.favourites_locked = true;
+        app.open_model_picker();
+
+        let event = handle_key(&mut app, ctrl(KeyCode::Char('f')));
+        assert!(
+            event.is_none(),
+            "locked ctrl+f must not emit a persist event, got {event:?}"
+        );
+        // list unchanged
+        assert_eq!(app.completion.favourite_models, vec!["claude-opus"]);
+        let menu = app.completion.slash_menu.as_ref().unwrap();
+        assert!(
+            menu.toast.as_deref().is_some_and(|t| t.contains("locked")),
+            "expected locked toast, got {:?}",
             menu.toast
         );
     }
