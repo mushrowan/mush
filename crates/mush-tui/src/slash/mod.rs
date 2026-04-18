@@ -30,6 +30,8 @@ pub enum SlashParseError {
     UnlockUsage,
     #[error("usage: /task claim <id> <description> | /task release <id> | /task list")]
     TaskUsage,
+    #[error("usage: /login-complete <code>")]
+    LoginCodeUsage,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +68,14 @@ pub enum SlashAction {
     /// view or modify runtime settings (anthropic betas, scope)
     Settings {
         args: String,
+    },
+    /// start an oauth login flow for a provider (default anthropic)
+    Login {
+        provider: Option<String>,
+    },
+    /// complete the in-progress oauth login with the authorization code
+    LoginComplete {
+        code: String,
     },
     Close,
     Broadcast {
@@ -142,6 +152,13 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
         "injection" => Ok(SlashAction::Injection),
         "settings" => Ok(SlashAction::Settings {
             args: args.to_string(),
+        }),
+        "login" => Ok(SlashAction::Login {
+            provider: (!args.is_empty()).then(|| args.to_string()),
+        }),
+        "login-complete" | "login-code" if args.is_empty() => Err(SlashParseError::LoginCodeUsage),
+        "login-complete" | "login-code" => Ok(SlashAction::LoginComplete {
+            code: args.to_string(),
         }),
         "close" => Ok(SlashAction::Close),
         "broadcast" if args.is_empty() => Err(SlashParseError::BroadcastUsage),

@@ -127,10 +127,10 @@ impl ApiProvider for AnthropicProvider {
             );
             // include session id for anthropic-side diagnostic correlation.
             // format isn't validated by the server but we mirror claude code
-            if let Some(sid) = &options.session_id {
-                if let Ok(hv) = HeaderValue::from_str(sid.as_ref()) {
-                    headers.insert("x-claude-code-session-id", hv);
-                }
+            if let Some(sid) = &options.session_id
+                && let Ok(hv) = HeaderValue::from_str(sid.as_ref())
+            {
+                headers.insert("x-claude-code-session-id", hv);
             }
             let key = api_key.expose();
             headers.insert(
