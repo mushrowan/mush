@@ -11,7 +11,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::Span;
 
 /// default bar width in characters
-const BAR_WIDTH: usize = 20;
+pub const DEFAULT_BAR_WIDTH: usize = 20;
 
 /// colour for the pace (bottom) layer
 const PACE_COLOUR: Color = Color::DarkGray;
@@ -23,14 +23,24 @@ const EMPTY_COLOUR: Color = Color::DarkGray;
 ///
 /// `usage_pct` and `pace_pct` are 0.0 - 100.0.
 /// returns a vec of spans that can be inserted into a Line.
+#[must_use]
 pub fn render_usage_bar(usage_pct: f32, pace_pct: f32) -> Vec<Span<'static>> {
-    let usage_filled = pct_to_cells(usage_pct);
-    let pace_filled = pct_to_cells(pace_pct);
+    render_usage_bar_width(usage_pct, pace_pct, DEFAULT_BAR_WIDTH)
+}
+
+/// variant of `render_usage_bar` with an explicit width, for fitting into
+/// narrow status bars. bars less than 4 wide look meaningless, so the
+/// minimum is clamped to 4
+#[must_use]
+pub fn render_usage_bar_width(usage_pct: f32, pace_pct: f32, width: usize) -> Vec<Span<'static>> {
+    let width = width.max(4);
+    let usage_filled = pct_to_cells(usage_pct, width);
+    let pace_filled = pct_to_cells(pace_pct, width);
     let usage_colour = colour_for_pct(usage_pct);
 
-    let mut spans = Vec::with_capacity(BAR_WIDTH);
+    let mut spans = Vec::with_capacity(width);
 
-    for i in 0..BAR_WIDTH {
+    for i in 0..width {
         let has_usage = i < usage_filled;
         let has_pace = i < pace_filled;
 
@@ -47,8 +57,8 @@ pub fn render_usage_bar(usage_pct: f32, pace_pct: f32) -> Vec<Span<'static>> {
     spans
 }
 
-fn pct_to_cells(pct: f32) -> usize {
-    ((pct / 100.0 * BAR_WIDTH as f32).round() as usize).min(BAR_WIDTH)
+fn pct_to_cells(pct: f32, bar_width: usize) -> usize {
+    ((pct / 100.0 * bar_width as f32).round() as usize).min(bar_width)
 }
 
 /// usage colour: green < 50%, yellow 50-80%, red > 80%
@@ -69,11 +79,11 @@ mod tests {
     #[test]
     fn bar_length_is_constant() {
         let spans = render_usage_bar(0.0, 0.0);
-        assert_eq!(spans.len(), BAR_WIDTH);
+        assert_eq!(spans.len(), DEFAULT_BAR_WIDTH);
         let spans = render_usage_bar(100.0, 100.0);
-        assert_eq!(spans.len(), BAR_WIDTH);
+        assert_eq!(spans.len(), DEFAULT_BAR_WIDTH);
         let spans = render_usage_bar(37.0, 50.0);
-        assert_eq!(spans.len(), BAR_WIDTH);
+        assert_eq!(spans.len(), DEFAULT_BAR_WIDTH);
     }
 
     #[test]
@@ -144,11 +154,11 @@ mod tests {
 
     #[test]
     fn pct_to_cells_rounds() {
-        assert_eq!(pct_to_cells(0.0), 0);
-        assert_eq!(pct_to_cells(5.0), 1); // 5% of 20 = 1
-        assert_eq!(pct_to_cells(50.0), 10);
-        assert_eq!(pct_to_cells(100.0), 20);
-        assert_eq!(pct_to_cells(2.4), 0); // rounds to 0
-        assert_eq!(pct_to_cells(2.5), 1); // rounds to 1
+        assert_eq!(pct_to_cells(0.0, DEFAULT_BAR_WIDTH), 0);
+        assert_eq!(pct_to_cells(5.0, DEFAULT_BAR_WIDTH), 1); // 5% of 20 = 1
+        assert_eq!(pct_to_cells(50.0, DEFAULT_BAR_WIDTH), 10);
+        assert_eq!(pct_to_cells(100.0, DEFAULT_BAR_WIDTH), 20);
+        assert_eq!(pct_to_cells(2.4, DEFAULT_BAR_WIDTH), 0); // rounds to 0
+        assert_eq!(pct_to_cells(2.5, DEFAULT_BAR_WIDTH), 1); // rounds to 1
     }
 }

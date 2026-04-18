@@ -1452,22 +1452,33 @@ batch: 1/2 succeeded, 1 failed";
 
         // anthropic: short = 5 min, long = 1 hour, none = 0
         assert_eq!(
-            cache_ttl_secs(&Provider::Anthropic, Some(&CacheRetention::Short)),
+            cache_ttl_secs(&Provider::Anthropic, Some(&CacheRetention::Short), false),
             300
         );
         assert_eq!(
-            cache_ttl_secs(&Provider::Anthropic, Some(&CacheRetention::Long)),
+            cache_ttl_secs(&Provider::Anthropic, Some(&CacheRetention::Long), false),
             3600
         );
         assert_eq!(
-            cache_ttl_secs(&Provider::Anthropic, Some(&CacheRetention::None)),
+            cache_ttl_secs(&Provider::Anthropic, Some(&CacheRetention::None), false),
             0
         );
-        assert_eq!(cache_ttl_secs(&Provider::Anthropic, None), 300); // default = short
+        assert_eq!(cache_ttl_secs(&Provider::Anthropic, None, false), 300); // default = short
+
+        // oauth always gets 1h, regardless of retention setting
+        assert_eq!(cache_ttl_secs(&Provider::Anthropic, None, true), 3600);
+        assert_eq!(
+            cache_ttl_secs(&Provider::Anthropic, Some(&CacheRetention::Short), true),
+            3600,
+            "oauth should ignore Short retention and use 1h"
+        );
 
         // openrouter / custom: defaults to 300
-        assert_eq!(cache_ttl_secs(&Provider::OpenRouter, None), 300);
-        assert_eq!(cache_ttl_secs(&Provider::Custom("xai".into()), None), 300);
+        assert_eq!(cache_ttl_secs(&Provider::OpenRouter, None, false), 300);
+        assert_eq!(
+            cache_ttl_secs(&Provider::Custom("xai".into()), None, false),
+            300
+        );
     }
 
     #[test]

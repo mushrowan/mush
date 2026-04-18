@@ -1,9 +1,9 @@
 //! status bar widget - model info, cost, token usage
 
 use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Widget};
+use ratatui::widgets::{Paragraph, Widget, Wrap};
 
 use mush_ai::types::{Dollars, ThinkingLevel, TokenCount};
 
@@ -34,8 +34,21 @@ fn confirm_text(app: &App) -> Option<String> {
     })
 }
 
+/// width of the usage bars in the status bar. scales with window size
+fn usage_bar_width(total_width: u16) -> usize {
+    if total_width >= 140 {
+        20
+    } else if total_width >= 100 {
+        12
+    } else if total_width >= 80 {
+        8
+    } else {
+        5
+    }
+}
+
 /// build the left-side info spans
-fn left_spans(app: &App) -> Vec<Span<'static>> {
+fn left_spans(app: &App, width: u16) -> Vec<Span<'static>> {
     let dim = app.theme.dim;
 
     let thinking_label = match app.thinking_level.normalize_visible() {
@@ -154,18 +167,27 @@ fn left_spans(app: &App) -> Vec<Span<'static>> {
 
     // oauth usage bars
     if let Some(ref usage) = app.oauth_usage {
+        let bar_w = usage_bar_width(width);
         if let Some(ref w) = usage.five_hour {
             let pace = w.pace(mush_ai::oauth::usage::OAuthUsage::FIVE_HOUR);
             spans.push(sep.clone());
             spans.push(Span::styled("5h ", dim));
-            spans.extend(super::usage_bar::render_usage_bar(w.utilization, pace));
+            spans.extend(super::usage_bar::render_usage_bar_width(
+                w.utilization,
+                pace,
+                bar_w,
+            ));
             spans.push(Span::styled(format!(" {}%", w.utilization as u32), dim));
         }
         if let Some(ref w) = usage.seven_day {
             let pace = w.pace(mush_ai::oauth::usage::OAuthUsage::SEVEN_DAY);
             spans.push(sep.clone());
             spans.push(Span::styled("7d ", dim));
-            spans.extend(super::usage_bar::render_usage_bar(w.utilization, pace));
+            spans.extend(super::usage_bar::render_usage_bar_width(
+                w.utilization,
+                pace,
+                bar_w,
+            ));
             spans.push(Span::styled(format!(" {}%", w.utilization as u32), dim));
         }
     }
@@ -212,16 +234,16 @@ fn left_spans(app: &App) -> Vec<Span<'static>> {
     spans
 }
 
-/// calculate how many lines the status bar needs (1 or 2)
+/// calculate how many lines the status bar needs (1 or 2, +1 for confirm prompt).
+/// the render pass uses the same logic to pack overflow spans onto a second line
 pub fn status_bar_height(app: &App, width: u16) -> u16 {
-    let left_len: usize = left_spans(app).iter().map(|s| s.content.len()).sum();
+    let left_len: usize = left_spans(app, width).iter().map(|s| s.content.len()).sum();
     let right = truncate_path(&app.cwd, 30);
     let total = left_len + 2 + right.len(); // 2 for padding between left and right
-    if let Some(confirm) = confirm_text(app) {
-        // confirm prompt gets its own line
-        let _ = confirm;
-        if total > width as usize { 3 } else { 2 }
-    } else if total > width as usize {
+    let wraps = total > width as usize;
+    if confirm_text(app).is_some() {
+        if wraps { 3 } else { 2 }
+    } else if wraps {
         2
     } else {
         1
@@ -243,36 +265,49 @@ impl Widget for StatusBar<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let dim = self.app.theme.dim;
 
-        let mut spans = left_spans(self.app);
+        // build all the info spans
+        let spans = left_spans(self.app, area.width);
         let right_text = truncate_path(&self.app.cwd, 30);
         let confirm = confirm_text(self.app);
 
-        let left_len: usize = spans.iter().map(|s| s.content.len()).sum();
+        // split area: optional confirm line at the bottom, main area above
+        let (main, confirm_area) = if let Some(ref confirm_str) = confirm {
+            let [main, conf] =
+                Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
+            (main, Some((conf, confirm_str.clone())))
+        } else {
+            (area, None)
+        };
 
-        if let Some(ref confirm_str) = confirm {
-            // tool confirmation: show info + cwd on line 1, confirm on line 2
-            let padding = (area.width as usize).saturating_sub(left_len + right_text.len() + 1);
-            if padding > 0 {
-                spans.push(Span::styled(" ".repeat(padding), dim));
-                spans.push(Span::styled(right_text, self.app.theme.status_dim));
-            }
-            let line1 = Line::from(spans);
-            let line2 = Line::from(vec![
+        // split main into left (wrapping content) and right (cwd, single line)
+        // right column has fixed width = cwd len + 1 space gap; shrinks if needed
+        let right_width = (right_text.chars().count() as u16 + 1).min(main.width / 2);
+        let [left_area, right_area] =
+            Layout::horizontal([Constraint::Min(1), Constraint::Length(right_width)]).areas(main);
+
+        // left: wrap spans across lines automatically using Paragraph::wrap.
+        // trim:false so our leading space (Span::raw(" ")) is preserved
+        let left_paragraph = Paragraph::new(Line::from(spans)).wrap(Wrap { trim: false });
+        left_paragraph.render(left_area, buf);
+
+        // right: right-align cwd on the first line of the right column
+        if right_width > 0 {
+            Paragraph::new(Line::from(vec![Span::styled(
+                right_text,
+                self.app.theme.status_dim,
+            )]))
+            .alignment(Alignment::Right)
+            .render(right_area, buf);
+        }
+
+        // confirm prompt on its own line at the bottom
+        if let Some((conf_area, text)) = confirm_area {
+            Paragraph::new(Line::from(vec![
                 Span::styled(" ", dim),
-                Span::styled(confirm_str.clone(), self.app.theme.confirm),
-            ]);
-            Paragraph::new(vec![line1, line2]).render(area, buf);
-            return;
+                Span::styled(text, self.app.theme.confirm),
+            ]))
+            .render(conf_area, buf);
         }
-
-        // single line: right-align cwd
-        let padding = (area.width as usize).saturating_sub(left_len + right_text.len() + 1);
-        if padding > 0 {
-            spans.push(Span::styled(" ".repeat(padding), dim));
-            spans.push(Span::styled(right_text, self.app.theme.status_dim));
-        }
-
-        Paragraph::new(Line::from(spans)).render(area, buf);
     }
 }
 
@@ -346,6 +381,58 @@ mod tests {
         // without hotkey hints, even narrow terminals should fit in 1 line
         assert_eq!(status_bar_height(&app, 80), 1);
         assert_eq!(status_bar_height(&app, 200), 1);
+    }
+
+    #[test]
+    fn status_bar_wraps_to_two_lines_when_content_exceeds_width() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.stats.input_tokens = TokenCount::new(45_000);
+        app.stats.output_tokens = TokenCount::new(12_000);
+        app.stats.cache_read_tokens = TokenCount::new(8_000);
+        app.stats.cache_write_tokens = TokenCount::new(2_000);
+        app.stats.context_tokens = TokenCount::new(45_000);
+        app.interaction.show_cost = true;
+        app.stats.total_cost = Dollars::new(0.1234);
+        // narrow width forces wrapping
+        let height = status_bar_height(&app, 40);
+        assert_eq!(height, 2, "expected 2 lines for narrow width");
+        let buf = render_status(&app, 40, height);
+        let content = buffer_to_string(&buf);
+        // content that exists should still be visible somewhere
+        assert!(
+            content.contains("45k") || content.contains("200k"),
+            "expected wrapped content, got: {content}"
+        );
+    }
+
+    #[test]
+    fn status_bar_shrinks_usage_bars_on_narrow_widths() {
+        use chrono;
+        use mush_ai::oauth::usage::{OAuthUsage, UsageWindow};
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.oauth_usage = Some(OAuthUsage {
+            five_hour: Some(UsageWindow {
+                utilization: 50.0,
+                resets_at: chrono::Utc::now() + chrono::TimeDelta::minutes(120),
+            }),
+            seven_day: None,
+        });
+        // spans at wide width should include the default 20-cell bar
+        let wide_spans = left_spans(&app, 200);
+        let wide_bar_cells = wide_spans
+            .iter()
+            .filter(|s| s.content.as_ref() == "▀" || s.content.as_ref() == "░")
+            .count();
+        // spans at narrow width should have fewer bar cells
+        let narrow_spans = left_spans(&app, 60);
+        let narrow_bar_cells = narrow_spans
+            .iter()
+            .filter(|s| s.content.as_ref() == "▀" || s.content.as_ref() == "░")
+            .count();
+        assert!(
+            narrow_bar_cells < wide_bar_cells,
+            "expected bars to shrink on narrow widths: narrow={narrow_bar_cells} wide={wide_bar_cells}"
+        );
     }
 
     #[test]

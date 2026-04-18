@@ -42,7 +42,7 @@ fn cache_module_exposes_timer_and_stats() {
     assert_eq!(CACHE_WARN_SECS, 60);
     assert_eq!(CACHE_COLD_DISPLAY_SECS, 30);
     assert_eq!(
-        cache_ttl_secs(&Provider::Anthropic, Some(&CacheRetention::Short)),
+        cache_ttl_secs(&Provider::Anthropic, Some(&CacheRetention::Short), false),
         300
     );
 

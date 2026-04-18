@@ -403,9 +403,15 @@ fn handle_model_switch(
         app.model_id = id.into();
         app.stats.context_window = new_model.context_window;
         app.cache.ttl_secs = if tui_config.cache_timer {
+            let is_oauth = tui_config
+                .options
+                .api_key
+                .as_ref()
+                .is_some_and(|k| k.is_oauth_token());
             crate::app::cache_ttl_secs(
                 &new_model.provider,
                 tui_config.options.cache_retention.as_ref(),
+                is_oauth,
             )
         } else {
             0
