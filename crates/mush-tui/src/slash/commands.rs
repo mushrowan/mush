@@ -40,6 +40,7 @@ pub fn handle(
             help.push_str("  /cost          - show session cost\n");
             help.push_str("  /logs [n]      - show last n log entries (default 50)\n");
             help.push_str("  /injection     - toggle prompt injection preview\n");
+            help.push_str("  /settings      - view/modify runtime settings (betas, scope)\n");
             help.push_str("  /close         - close focused pane\n");
             help.push_str("  /broadcast msg - send a message to all panes\n");
             help.push_str("  /lock <path>   - lock a file for this pane\n");
@@ -208,6 +209,10 @@ pub fn handle(
                     "off"
                 }
             ));
+            None
+        }
+        SlashAction::Settings { args } => {
+            handle_settings(app, tui_config, args);
             None
         }
         SlashAction::Undo => {
@@ -461,6 +466,123 @@ pub(crate) fn show_cost(app: &mut App) {
         s.total_tokens,
         s.total_cost
     ));
+}
+
+/// handle `/settings [subcommand ...]`
+///
+/// supported forms:
+/// - `/settings` - show current scope and all anthropic beta toggles
+/// - `/settings scope <value>` - switch scope (global|disabled|repo|session)
+/// - `/settings betas <field> <bool>` - toggle an anthropic beta
+/// - `/settings reset` - restore defaults (session only)
+fn handle_settings(app: &mut App, tui_config: &mut TuiConfig, args: &str) {
+    let args = args.trim();
+    if args.is_empty() {
+        app.push_system_message(format_settings_view(&tui_config.settings));
+        return;
+    }
+
+    let mut parts = args.splitn(3, char::is_whitespace);
+    let sub = parts.next().unwrap_or("");
+    match sub {
+        "scope" => {
+            let Some(value) = parts.next() else {
+                app.push_system_message("usage: /settings scope <global|disabled|repo|session>");
+                return;
+            };
+            let Some(scope) = crate::settings::SettingsScope::parse(value) else {
+                app.push_system_message(format!(
+                    "unknown scope {value:?}. expected one of: global, disabled, repo, session"
+                ));
+                return;
+            };
+            tui_config.settings.scope = scope;
+            app.push_system_message(format!("settings scope → {}", scope.as_str()));
+        }
+        "betas" => {
+            if tui_config.settings.scope == crate::settings::SettingsScope::Disabled {
+                app.push_system_message(
+                    "settings scope is disabled; edit config.toml to change anthropic betas",
+                );
+                return;
+            }
+            let Some(field) = parts.next() else {
+                app.push_system_message(
+                    "usage: /settings betas <field> <true|false>  (fields: context_1m, effort, context_management, redact_thinking, advisor, advanced_tool_use)",
+                );
+                return;
+            };
+            let Some(value) = parts.next() else {
+                app.push_system_message("usage: /settings betas <field> <true|false>");
+                return;
+            };
+            let Some(parsed) = parse_bool(value) else {
+                app.push_system_message(format!("expected true or false, got {value:?}"));
+                return;
+            };
+            let applied =
+                apply_beta_toggle(&mut tui_config.settings.anthropic_betas, field, parsed);
+            if !applied {
+                app.push_system_message(format!("unknown beta field {field:?}"));
+                return;
+            }
+            // sync to the in-flight StreamOptions so the next turn uses it
+            tui_config.options.anthropic_betas = Some(tui_config.settings.anthropic_betas.clone());
+
+            let persist_note = match crate::settings::persist(&tui_config.settings, &tui_config.cwd)
+            {
+                Ok(Some(path)) => format!(" (saved to {})", path.display()),
+                Ok(None) => " (session scope, not persisted)".to_string(),
+                Err(e) => format!(" (persist failed: {e})"),
+            };
+            app.push_system_message(format!("betas.{field} → {parsed}{persist_note}"));
+        }
+        "reset" => {
+            tui_config.settings.anthropic_betas = mush_ai::types::AnthropicBetas::default();
+            tui_config.options.anthropic_betas = Some(tui_config.settings.anthropic_betas.clone());
+            app.push_system_message("anthropic betas reset to defaults");
+        }
+        _ => {
+            app.push_system_message(format!(
+                "unknown /settings subcommand {sub:?}. try: /settings, /settings scope <s>, /settings betas <field> <bool>, /settings reset"
+            ));
+        }
+    }
+}
+
+fn format_settings_view(settings: &crate::settings::ScopedSettings) -> String {
+    let b = &settings.anthropic_betas;
+    let mut out = String::new();
+    let _ = writeln!(out, "scope: {}", settings.scope.as_str());
+    let _ = writeln!(out, "anthropic betas:");
+    let _ = writeln!(out, "  context_1m         = {}", b.context_1m);
+    let _ = writeln!(out, "  effort             = {}", b.effort);
+    let _ = writeln!(out, "  context_management = {}", b.context_management);
+    let _ = writeln!(out, "  redact_thinking    = {}", b.redact_thinking);
+    let _ = writeln!(out, "  advisor            = {}", b.advisor);
+    let _ = write!(out, "  advanced_tool_use  = {}", b.advanced_tool_use);
+    out
+}
+
+fn parse_bool(s: &str) -> Option<bool> {
+    match s.trim().to_lowercase().as_str() {
+        "true" | "on" | "yes" | "1" => Some(true),
+        "false" | "off" | "no" | "0" => Some(false),
+        _ => None,
+    }
+}
+
+fn apply_beta_toggle(betas: &mut mush_ai::types::AnthropicBetas, field: &str, value: bool) -> bool {
+    match field {
+        "context_1m" => betas.context_1m = value,
+        "effort" => betas.effort = value,
+        "context_management" => betas.context_management = value,
+        "redact_thinking" => betas.redact_thinking = value,
+        "advisor" => betas.advisor = value,
+        "advanced_tool_use" => betas.advanced_tool_use = value,
+        _ => return false,
+    }
+    true
 }
 
 fn handle_undo(app: &mut App, conversation: &mut ConversationState) {

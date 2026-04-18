@@ -38,33 +38,65 @@ pub enum SlashAction {
     Keys,
     Clear,
     New,
-    Model { model_id: Option<String> },
+    Model {
+        model_id: Option<String>,
+    },
     Sessions,
-    Resume { session_id: SessionId },
-    Branch { index: Option<usize> },
+    Resume {
+        session_id: SessionId,
+    },
+    Branch {
+        index: Option<usize>,
+    },
     Tree,
     Compact,
     ForkCompact,
-    Export { path: Option<String> },
+    Export {
+        path: Option<String>,
+    },
     Undo,
-    Search { query: String },
+    Search {
+        query: String,
+    },
     Cost,
-    Logs { count: usize },
+    Logs {
+        count: usize,
+    },
     Injection,
+    /// view or modify runtime settings (anthropic betas, scope)
+    Settings {
+        args: String,
+    },
     Close,
-    Broadcast { message: String },
-    Lock { path: String },
-    Unlock { path: String },
+    Broadcast {
+        message: String,
+    },
+    Lock {
+        path: String,
+    },
+    Unlock {
+        path: String,
+    },
     Locks,
-    Label { text: Option<String> },
+    Label {
+        text: Option<String>,
+    },
     Panes,
     Merge,
     Card,
-    TaskClaim { id: String, description: String },
-    TaskRelease { id: String },
+    TaskClaim {
+        id: String,
+        description: String,
+    },
+    TaskRelease {
+        id: String,
+    },
     TaskList,
     Quit,
-    Other { name: String, args: String },
+    Other {
+        name: String,
+        args: String,
+    },
 }
 
 pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
@@ -108,6 +140,9 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
             .map(|count| SlashAction::Logs { count })
             .map_err(|_| SlashParseError::LogsUsage),
         "injection" => Ok(SlashAction::Injection),
+        "settings" => Ok(SlashAction::Settings {
+            args: args.to_string(),
+        }),
         "close" => Ok(SlashAction::Close),
         "broadcast" if args.is_empty() => Err(SlashParseError::BroadcastUsage),
         "broadcast" => Ok(SlashAction::Broadcast {

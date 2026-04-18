@@ -132,6 +132,7 @@ pub struct StreamOptions {
 /// - `context_1m`, `effort`, `context_management` default to `true`
 /// - `redact_thinking`, `advisor`, `advanced_tool_use` default to `false`
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AnthropicBetas {
     /// `context-1m-2025-08-07` - unlocks 1M context window on compatible models
     pub context_1m: bool,

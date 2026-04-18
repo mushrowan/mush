@@ -123,4 +123,6 @@ pub struct TuiConfig {
     pub http_client: Option<reqwest::Client>,
     /// current session id (updated by /new)
     pub session_id: mush_ai::types::SessionId,
+    /// active runtime settings (scope + anthropic betas)
+    pub settings: crate::settings::ScopedSettings,
 }

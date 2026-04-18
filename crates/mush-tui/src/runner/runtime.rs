@@ -28,6 +28,10 @@ const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("cost", "show session cost"),
     ("logs", "show recent log entries"),
     ("injection", "toggle prompt injection preview"),
+    (
+        "settings",
+        "view or modify runtime settings (anthropic betas, scope)",
+    ),
     ("close", "close focused pane"),
     ("broadcast", "send a message to all panes"),
     ("lock", "lock a file for this pane"),
@@ -343,6 +347,7 @@ mod tests {
             compaction_model: None,
             http_client: None,
             session_id: mush_ai::types::SessionId::new(),
+            settings: Default::default(),
         }
     }
 
