@@ -7,6 +7,12 @@ use serde::{Deserialize, Serialize};
 
 use super::OAuthError;
 
+/// eager refresh buffer: credentials are treated as expired once their
+/// remaining lifetime drops below this threshold. prevents a request
+/// from landing with a token that expired in-flight, and gives us room
+/// to refresh before the actual deadline (mirrors opencode's approach)
+const REFRESH_BUFFER_MS: u64 = 5 * 60_000;
+
 /// stored oauth credentials
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OAuthCredentials {
@@ -19,8 +25,10 @@ pub struct OAuthCredentials {
 }
 
 impl OAuthCredentials {
+    /// whether the token is expired or close enough to expiry that we
+    /// should refresh proactively. see [`REFRESH_BUFFER_MS`]
     pub fn is_expired(&self) -> bool {
-        timestamp_ms() >= self.expires_at
+        timestamp_ms().saturating_add(REFRESH_BUFFER_MS) >= self.expires_at
     }
 }
 
@@ -93,13 +101,45 @@ mod tests {
         };
         assert!(creds.is_expired());
 
+        // well beyond the eager refresh buffer
         let creds = OAuthCredentials {
             access_token: "test".into(),
             refresh_token: "test".into(),
-            expires_at: timestamp_ms() + 60_000,
+            expires_at: timestamp_ms() + 60 * 60_000, // 1 hour
             account_id: None,
         };
         assert!(!creds.is_expired());
+    }
+
+    #[test]
+    fn credentials_expired_within_refresh_buffer() {
+        // token that expires in 1 minute counts as "expired" for the
+        // purposes of the eager refresh threshold (5 min by default)
+        let creds = OAuthCredentials {
+            access_token: "test".into(),
+            refresh_token: "test".into(),
+            expires_at: timestamp_ms() + 60_000, // 1 minute
+            account_id: None,
+        };
+        assert!(
+            creds.is_expired(),
+            "token within refresh buffer should be treated as expired"
+        );
+    }
+
+    #[test]
+    fn credentials_not_expired_beyond_refresh_buffer() {
+        // token with > 5 minutes left should NOT be treated as expired
+        let creds = OAuthCredentials {
+            access_token: "test".into(),
+            refresh_token: "test".into(),
+            expires_at: timestamp_ms() + 10 * 60_000, // 10 minutes
+            account_id: None,
+        };
+        assert!(
+            !creds.is_expired(),
+            "token with >5min left should not be treated as expired"
+        );
     }
 
     #[test]
