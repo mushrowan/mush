@@ -17,6 +17,9 @@ pub enum AppEvent {
     ModelSelected {
         model_id: String,
     },
+    /// user toggled a favourite via ctrl+f in the model picker; runner
+    /// should persist the current `app.completion.favourite_models` list
+    PersistFavourites,
     /// user requested quit
     Quit,
     /// user requested abort of current operation

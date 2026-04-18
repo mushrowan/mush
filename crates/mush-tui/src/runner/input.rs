@@ -337,6 +337,11 @@ pub(super) async fn handle_idle_terminal_events(
                                 ));
                             }
                         }
+                        AppEvent::PersistFavourites => {
+                            if let Some(ref saver) = deps.tui_config.save_favourite_models {
+                                saver(&pane_mgr.focused().app.completion.favourite_models);
+                            }
+                        }
                         _ => {}
                     }
                 }

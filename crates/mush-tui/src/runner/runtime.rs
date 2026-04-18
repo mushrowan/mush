@@ -369,6 +369,7 @@ mod tests {
             scroll_lines: crate::app::DEFAULT_SCROLL_LINES,
             favourite_models: Vec::new(),
             favourites_locked: false,
+            save_favourite_models: None,
         }
     }
 
