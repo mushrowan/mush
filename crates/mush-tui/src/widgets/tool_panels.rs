@@ -42,24 +42,28 @@ impl Widget for ToolPanels<'_> {
         }
 
         let n = self.tools.len();
+        // lay out as a grid: cols capped by area.width / MIN_PANEL_WIDTH,
+        // rows = ceil(n / cols). this gives 2x2 for 4 tools on mid-width
+        // terminals instead of a strict horizontal or vertical strip
+        let max_cols = ((area.width / MIN_PANEL_WIDTH) as usize).max(1);
+        let cols = n.min(max_cols);
+        let rows = n.div_ceil(cols);
 
-        // decide layout: side-by-side if wide enough, otherwise stack
-        let side_by_side = area.width / n as u16 >= MIN_PANEL_WIDTH;
-
-        if side_by_side {
-            let constraints: Vec<Constraint> =
-                (0..n).map(|_| Constraint::Ratio(1, n as u32)).collect();
-            let cols = Layout::horizontal(&constraints).split(area);
-            for (i, tool) in self.tools.iter().enumerate() {
-                render_panel(tool, self.throbber_state, self.theme, cols[i], buf);
-            }
-        } else {
-            // stack vertically, divide height equally
-            let constraints: Vec<Constraint> =
-                (0..n).map(|_| Constraint::Ratio(1, n as u32)).collect();
-            let rows = Layout::vertical(&constraints).split(area);
-            for (i, tool) in self.tools.iter().enumerate() {
-                render_panel(tool, self.throbber_state, self.theme, rows[i], buf);
+        let row_constraints: Vec<Constraint> = (0..rows)
+            .map(|_| Constraint::Ratio(1, rows as u32))
+            .collect();
+        let grid_rows = Layout::vertical(&row_constraints).split(area);
+        for (row_idx, row_area) in grid_rows.iter().enumerate() {
+            let start = row_idx * cols;
+            let end = (start + cols).min(n);
+            let row_tools = &self.tools[start..end];
+            let row_cols = row_tools.len();
+            let col_constraints: Vec<Constraint> = (0..row_cols)
+                .map(|_| Constraint::Ratio(1, row_cols as u32))
+                .collect();
+            let cells = Layout::horizontal(&col_constraints).split(*row_area);
+            for (i, tool) in row_tools.iter().enumerate() {
+                render_panel(tool, self.throbber_state, self.theme, cells[i], buf);
             }
         }
     }
@@ -162,13 +166,12 @@ pub fn tool_panels_height(tools: &[ActiveToolState], area_width: u16) -> u16 {
     let has_output = tools
         .iter()
         .any(|t| t.output.is_some() || t.live_output.is_some());
-    let side_by_side = area_width / n as u16 >= MIN_PANEL_WIDTH;
-    let base = if has_output { 8 } else { 5 };
-    if side_by_side {
-        base
-    } else {
-        (n as u16 * (base - 1)).min(12)
-    }
+    // grid layout: cols capped by area_width / MIN_PANEL_WIDTH, rows = ceil(n/cols)
+    let max_cols = (area_width / MIN_PANEL_WIDTH).max(1) as usize;
+    let cols = n.min(max_cols);
+    let rows = n.div_ceil(cols);
+    let per_row = if has_output { 8 } else { 5 };
+    ((rows as u16) * per_row).min(12)
 }
 
 #[cfg(test)]
@@ -270,6 +273,34 @@ mod tests {
         let content = buffer_to_string(&buf);
         assert!(content.contains("Read"));
         assert!(content.contains("Grep"));
+    }
+
+    #[test]
+    fn four_tools_render_as_2x2_grid_on_mid_width() {
+        // 80 wide: 80/30 = 2 cols, 4 tools → 2 rows of 2. both grid rows
+        // should show their respective tool names on the top border
+        let make = |n: &str| ActiveToolState {
+            tool_call_id: n.into(),
+            name: n.into(),
+            summary: format!("{n}.rs"),
+            live_output: None,
+            status: ToolCallStatus::Running,
+            output: None,
+        };
+        let tools = vec![make("Aa"), make("Bb"), make("Cc"), make("Dd")];
+        // need enough height for 2 rows of 5 = 10 rows
+        let buf = render_panels(&tools, 80, 10);
+        let content = buffer_to_string(&buf);
+        for name in &["Aa", "Bb", "Cc", "Dd"] {
+            assert!(content.contains(name), "missing {name}");
+        }
+        // first and second grid rows each have their own top border (with ┌
+        // corners). count how many rows contain "┌" markers
+        let top_border_rows = content.lines().filter(|l| l.contains("┌")).count();
+        assert_eq!(
+            top_border_rows, 2,
+            "expected two grid rows with top borders, got:\n{content}"
+        );
     }
 
     #[test]
