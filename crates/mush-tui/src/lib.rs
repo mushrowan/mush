@@ -30,7 +30,7 @@ pub mod theme;
 pub mod ui;
 pub mod widgets;
 
-pub use app::{App, AppEvent, ThinkingDisplay};
+pub use app::{App, AppEvent, DEFAULT_SCROLL_LINES, ThinkingDisplay};
 pub use file_tracker::IsolationMode;
 pub use runner::{
     HintMode, LastModelSaver, PaneSnapshot, PromptEnricher, SessionSaver, SessionSnapshot,

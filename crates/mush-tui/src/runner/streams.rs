@@ -1496,6 +1496,7 @@ mod tests {
             http_client: None,
             session_id: mush_ai::types::SessionId::new(),
             settings: Default::default(),
+            scroll_lines: crate::app::DEFAULT_SCROLL_LINES,
         }
     }
 

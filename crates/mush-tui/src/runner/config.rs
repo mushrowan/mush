@@ -125,4 +125,6 @@ pub struct TuiConfig {
     pub session_id: mush_ai::types::SessionId,
     /// active runtime settings (scope + anthropic betas)
     pub settings: crate::settings::ScopedSettings,
+    /// lines scrolled per j/k keystroke in scroll mode
+    pub scroll_lines: u16,
 }

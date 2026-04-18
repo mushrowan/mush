@@ -594,6 +594,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
             scope: setup.cfg.settings.scope,
             anthropic_betas: setup.cfg.settings.anthropic_betas.clone(),
         },
+        scroll_lines: setup.cfg.scroll_lines,
     };
 
     mush_tui::run_tui(tui_config, &setup.tools, &setup.registry)

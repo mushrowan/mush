@@ -443,6 +443,7 @@ fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             }
         }
         (_, KeyCode::Char('j')) | (_, KeyCode::Down) => {
+            let scroll_lines = app.scroll_lines;
             if app.navigation.scroll_unit == ScrollUnit::Block {
                 // move to next code block
                 let blocks = app.code_blocks();
@@ -451,25 +452,28 @@ fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
                 {
                     app.navigation.selected_block = Some(sel + 1);
                     app.navigation.selected_message = Some(blocks[sel + 1].msg_idx);
-                    app.scroll_offset = app.scroll_offset.saturating_sub(3);
+                    app.scroll_offset = app.scroll_offset.saturating_sub(scroll_lines);
                     if app.scroll_offset == 0 {
                         app.navigation.has_unread = false;
                     }
                 }
             } else {
-                // message mode
-                app.scroll_offset = app.scroll_offset.saturating_sub(3);
+                // message mode: scroll down, advance selection only if the
+                // next message is visible in the new viewport
+                app.scroll_offset = app.scroll_offset.saturating_sub(scroll_lines);
                 if app.scroll_offset == 0 {
                     app.navigation.has_unread = false;
                 }
                 if let Some(sel) = app.navigation.selected_message
                     && sel + 1 < app.messages.len()
+                    && app.is_message_visible(sel + 1)
                 {
                     app.navigation.selected_message = Some(sel + 1);
                 }
             }
         }
         (_, KeyCode::Char('k')) | (_, KeyCode::Up) => {
+            let scroll_lines = app.scroll_lines;
             if app.navigation.scroll_unit == ScrollUnit::Block {
                 // move to previous code block
                 let blocks = app.code_blocks();
@@ -477,13 +481,17 @@ fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
                     let new_sel = sel.saturating_sub(1);
                     app.navigation.selected_block = Some(new_sel);
                     app.navigation.selected_message = Some(blocks[new_sel].msg_idx);
-                    app.scroll_offset = app.scroll_offset.saturating_add(3);
+                    app.scroll_offset = app.scroll_offset.saturating_add(scroll_lines);
                 }
             } else {
-                // message mode
-                app.scroll_offset = app.scroll_offset.saturating_add(3);
+                // message mode: scroll up, move selection to previous message
+                // only if it's visible in the new viewport
+                app.scroll_offset = app.scroll_offset.saturating_add(scroll_lines);
                 if let Some(sel) = app.navigation.selected_message {
-                    app.navigation.selected_message = Some(sel.saturating_sub(1));
+                    let target = sel.saturating_sub(1);
+                    if target != sel && app.is_message_visible(target) {
+                        app.navigation.selected_message = Some(target);
+                    }
                 }
             }
         }
@@ -1606,5 +1614,118 @@ mod tests {
         // j at end stays at last
         handle_key(&mut app, key(KeyCode::Char('j')));
         assert_eq!(app.navigation.selected_block, Some(1));
+    }
+
+    /// install cached heights for tall messages so viewport intersection
+    /// checks have something to consume. no real render runs in unit tests
+    fn install_tall_message_heights(app: &mut App, height_each: usize, visible: u16) {
+        let count = app.messages.len();
+        let mut cache = app.render_state.height_cache.borrow_mut();
+        cache.resize_with(count, || None);
+        for slot in cache.iter_mut() {
+            *slot = Some(crate::app_state::CachedHeight {
+                content_len: 0,
+                thinking_len: 0,
+                tool_output_len: 0,
+                completed_tool_count: 0,
+                thinking_expanded: false,
+                has_usage: false,
+                width: 80,
+                height: height_each,
+            });
+        }
+        drop(cache);
+        app.render_state.visible_area_height.set(visible);
+    }
+
+    #[test]
+    fn scroll_mode_k_only_advances_selection_when_target_visible() {
+        use crate::app::ScrollUnit;
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        for i in 0..5 {
+            app.push_user_message(format!("msg {i}"));
+        }
+        // 5 msgs, 10 lines each, total 50. visible 10. viewport holds one msg.
+        install_tall_message_heights(&mut app, 10, 10);
+
+        handle_key(&mut app, ctrl(KeyCode::Char('s')));
+        handle_key(&mut app, key(KeyCode::Char('b')));
+        assert_eq!(app.navigation.scroll_unit, ScrollUnit::Message);
+        assert_eq!(app.navigation.selected_message, Some(4));
+        // start at bottom: scroll_offset=0, viewport [40,50), only msg 4 visible
+
+        // press k: scroll_offset → 3, viewport [37,47). msg 3 [30,40) overlaps → visible, select it
+        handle_key(&mut app, key(KeyCode::Char('k')));
+        assert_eq!(app.scroll_offset, 3);
+        assert_eq!(app.navigation.selected_message, Some(3));
+
+        // press k again: scroll_offset → 6, viewport [34,44). msg 2 [20,30):
+        // 20<44 but 30>34 is false → not visible. selection stays on msg 3
+        handle_key(&mut app, key(KeyCode::Char('k')));
+        assert_eq!(app.scroll_offset, 6);
+        assert_eq!(
+            app.navigation.selected_message,
+            Some(3),
+            "selection must not move to an off-screen message"
+        );
+
+        // press k until msg 2 becomes visible. at scroll 11: viewport [29,39).
+        // msg 2 [20,30): 20<39 && 30>29 → visible
+        for _ in 0..2 {
+            handle_key(&mut app, key(KeyCode::Char('k')));
+        }
+        assert_eq!(app.scroll_offset, 12);
+        assert_eq!(app.navigation.selected_message, Some(2));
+    }
+
+    #[test]
+    fn scroll_mode_j_only_advances_selection_when_target_visible() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        for i in 0..5 {
+            app.push_user_message(format!("msg {i}"));
+        }
+        install_tall_message_heights(&mut app, 10, 10);
+
+        handle_key(&mut app, ctrl(KeyCode::Char('s')));
+        handle_key(&mut app, key(KeyCode::Char('b')));
+        // start at bottom then scroll all the way up
+        app.scroll_offset = 40;
+        app.navigation.selected_message = Some(0);
+        // viewport [0,10): only msg 0 visible
+
+        // press j: scroll_offset → 37, viewport [3,13). msg 1 [10,20) overlaps → select
+        handle_key(&mut app, key(KeyCode::Char('j')));
+        assert_eq!(app.scroll_offset, 37);
+        assert_eq!(app.navigation.selected_message, Some(1));
+
+        // press j again: scroll_offset → 34, viewport [6,16). msg 2 [20,30): 20<16 false → not visible
+        handle_key(&mut app, key(KeyCode::Char('j')));
+        assert_eq!(app.scroll_offset, 34);
+        assert_eq!(
+            app.navigation.selected_message,
+            Some(1),
+            "selection must not move to an off-screen message"
+        );
+    }
+
+    #[test]
+    fn scroll_mode_respects_custom_scroll_lines() {
+        // custom scroll_lines=5 should scroll 5 lines per keystroke, not 3
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.scroll_lines = 5;
+        for i in 0..5 {
+            app.push_user_message(format!("msg {i}"));
+        }
+        install_tall_message_heights(&mut app, 10, 10);
+
+        handle_key(&mut app, ctrl(KeyCode::Char('s')));
+        handle_key(&mut app, key(KeyCode::Char('b')));
+        assert_eq!(app.scroll_offset, 0);
+
+        handle_key(&mut app, key(KeyCode::Char('k')));
+        assert_eq!(app.scroll_offset, 5);
+
+        handle_key(&mut app, key(KeyCode::Char('j')));
+        assert_eq!(app.scroll_offset, 0);
     }
 }
