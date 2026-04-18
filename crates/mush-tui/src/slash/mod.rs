@@ -109,6 +109,29 @@ pub enum SlashAction {
     },
 }
 
+impl SlashAction {
+    /// whether this command may run while the LLM is actively streaming.
+    ///
+    /// conservative default: allow. the block list covers actions that
+    /// mutate the conversation history or agent state in ways that would
+    /// corrupt an in-flight turn (clear, compact, branch switching, etc).
+    /// read-only and "apply on next turn" actions are safe to run anytime
+    #[must_use]
+    pub fn is_safe_during_stream(&self) -> bool {
+        !matches!(
+            self,
+            Self::Clear
+                | Self::New
+                | Self::Resume { .. }
+                | Self::Branch { .. }
+                | Self::Compact
+                | Self::ForkCompact
+                | Self::Undo
+                | Self::Merge
+        )
+    }
+}
+
 pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
     let Some(command) = input.strip_prefix('/') else {
         return Err(SlashParseError::MissingPrefix);

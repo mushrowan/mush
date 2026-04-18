@@ -147,11 +147,27 @@ fn handle_streaming_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         }
         let text = app.input.take_text();
         if text.starts_with('/') {
-            app.input.text = text;
-            app.input.cursor = app.input.text.len();
-            app.input.ensure_cursor_visible();
-            app.status = Some("slash commands unavailable while streaming".into());
-            return None;
+            // try to parse. safe commands run immediately; unsafe ones get
+            // rejected with input restored so the user can resubmit later
+            match crate::slash::parse(&text) {
+                Ok(action) if action.is_safe_during_stream() => {
+                    return Some(AppEvent::SlashCommand { action });
+                }
+                Ok(_) => {
+                    app.input.text = text;
+                    app.input.cursor = app.input.text.len();
+                    app.input.ensure_cursor_visible();
+                    app.status = Some(
+                        "this slash command is blocked while streaming; press esc to abort first"
+                            .into(),
+                    );
+                    return None;
+                }
+                Err(error) => {
+                    app.push_system_message(error.to_string());
+                    return None;
+                }
+            }
         }
         return Some(AppEvent::UserSubmit { text });
     }
@@ -1016,16 +1032,34 @@ mod tests {
     fn slash_commands_blocked_while_streaming() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.stream.active = true;
-        app.input.text = "/clear".into();
-        app.input.cursor = 6;
+        app.input.text = "/compact".into();
+        app.input.cursor = app.input.text.len();
         let event = handle_key(&mut app, key(KeyCode::Enter));
-        assert!(event.is_none());
+        assert!(event.is_none(), "expected None, got {event:?}");
         // input preserved so user can submit after streaming ends
-        assert_eq!(app.input.text, "/clear");
-        assert_eq!(
-            app.status.as_deref(),
-            Some("slash commands unavailable while streaming")
+        assert_eq!(app.input.text, "/compact");
+        assert!(
+            app.status
+                .as_deref()
+                .is_some_and(|s| s.contains("blocked while streaming")),
+            "status was {:?}",
+            app.status
         );
+    }
+
+    #[test]
+    fn safe_slash_commands_run_during_streaming() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.stream.active = true;
+        app.input.text = "/help".into();
+        app.input.cursor = 5;
+        let event = handle_key(&mut app, key(KeyCode::Enter));
+        match event {
+            Some(AppEvent::SlashCommand { action }) => {
+                assert_eq!(action, crate::slash::SlashAction::Help);
+            }
+            other => panic!("expected SlashCommand, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1272,7 +1306,8 @@ mod tests {
         app.input.visible_lines.set(2);
         app.input.total_lines.set(8);
         app.input.scroll.set(0);
-        app.input.text = "/model a\nb\nc\nd".into();
+        // use a blocked slash command so the input gets reinserted
+        app.input.text = "/compact a\nb\nc\nd".into();
         app.input.cursor = app.input.text.len();
 
         handle_key(&mut app, key(KeyCode::Enter));
