@@ -240,9 +240,15 @@ fn build_initial_app(tui_config: &TuiConfig, cwd: &Path) -> App {
     app.interaction.show_cost = tui_config.show_cost;
     app.theme = tui_config.theme.clone();
     app.cache.ttl_secs = if tui_config.cache_timer {
+        let is_oauth = tui_config
+            .options
+            .api_key
+            .as_ref()
+            .is_some_and(|k| k.is_oauth_token());
         app::cache_ttl_secs(
             &tui_config.model.provider,
             tui_config.options.cache_retention.as_ref(),
+            is_oauth,
         )
     } else {
         0

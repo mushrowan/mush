@@ -4,15 +4,26 @@ use std::time::Instant;
 
 use mush_ai::types::*;
 
-/// determine cache TTL in seconds from provider and retention settings
-/// returns 0 if caching is disabled or provider doesn't support it
-pub fn cache_ttl_secs(provider: &Provider, retention: Option<&CacheRetention>) -> u16 {
+/// determine cache TTL in seconds from provider, retention, and oauth status.
+/// anthropic oauth always uses 1h regardless of retention setting, mirroring
+/// the actual wire behaviour (we always send `ttl: "1h"` on oauth requests)
+#[must_use]
+pub fn cache_ttl_secs(
+    provider: &Provider,
+    retention: Option<&CacheRetention>,
+    is_oauth: bool,
+) -> u16 {
     match provider {
-        Provider::Anthropic => match retention.copied().unwrap_or(CacheRetention::Short) {
-            CacheRetention::None => 0,
-            CacheRetention::Short => 300, // 5 minutes
-            CacheRetention::Long => 3600, // 1 hour
-        },
+        Provider::Anthropic => {
+            if is_oauth {
+                return 3600;
+            }
+            match retention.copied().unwrap_or(CacheRetention::Short) {
+                CacheRetention::None => 0,
+                CacheRetention::Short => 300, // 5 minutes
+                CacheRetention::Long => 3600, // 1 hour
+            }
+        }
         // openai: automatic caching, ~5-10 min, use 5 as conservative estimate
         // openrouter: passes through to underlying provider, assume anthropic-like
         _ => 300,
