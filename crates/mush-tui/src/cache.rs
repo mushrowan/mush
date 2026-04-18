@@ -85,15 +85,66 @@ pub enum CacheAnomaly {
         prev_cache_read: TokenCount,
         curr_cache_read: TokenCount,
         curr_cache_write: TokenCount,
+        /// classification explaining why the bust happened
+        reason: BustReason,
     },
+}
+
+/// classification of a cache bust.
+/// an "explained" bust is an inevitable consequence of user action
+/// (model switch, thinking-level change, effort change) and should
+/// not trigger scary notifications.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BustReason {
+    /// same model/thinking/effort between calls, genuine mystery bust
+    Unexplained,
+    /// model id differed from previous call
+    ModelChanged,
+    /// thinking level differed from previous call
+    ThinkingChanged,
+    /// effort setting differed from previous call
+    EffortChanged,
+}
+
+/// the subset of per-call configuration that participates in the
+/// anthropic prompt cache key. changing any of these between calls
+/// causes an inevitable (and thus expected) cache bust.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CallConfig {
+    pub model_id: String,
+    pub thinking_level: String,
+    pub effort: Option<String>,
+}
+
+impl CallConfig {
+    #[must_use]
+    fn classify_change(prev: &Self, curr: &Self) -> BustReason {
+        if prev.model_id != curr.model_id {
+            BustReason::ModelChanged
+        } else if prev.thinking_level != curr.thinking_level {
+            BustReason::ThinkingChanged
+        } else if prev.effort != curr.effort {
+            BustReason::EffortChanged
+        } else {
+            BustReason::Unexplained
+        }
+    }
 }
 
 /// compare consecutive API call usages and detect cache anomalies
 ///
 /// returns an empty vec when prev is None (first call) or when
-/// the usage pattern looks normal
+/// the usage pattern looks normal. busts are classified using prev/curr
+/// call configs when available; without configs, busts default to
+/// `BustReason::Unexplained`
 #[must_use]
-pub fn detect_cache_anomalies(prev: Option<&Usage>, curr: &Usage) -> Vec<CacheAnomaly> {
+pub fn detect_cache_anomalies(
+    prev: Option<&Usage>,
+    curr: &Usage,
+    prev_config: Option<&CallConfig>,
+    curr_config: Option<&CallConfig>,
+) -> Vec<CacheAnomaly> {
     let Some(prev) = prev else {
         return Vec::new();
     };
@@ -121,10 +172,15 @@ pub fn detect_cache_anomalies(prev: Option<&Usage>, curr: &Usage) -> Vec<CacheAn
     let write_spiked = curr.cache_write_tokens > prev.cache_write_tokens;
 
     if prev_was_cached && read_dropped && write_spiked {
+        let reason = match (prev_config, curr_config) {
+            (Some(p), Some(c)) => CallConfig::classify_change(p, c),
+            _ => BustReason::Unexplained,
+        };
         anomalies.push(CacheAnomaly::CacheBust {
             prev_cache_read: prev.cache_read_tokens,
             curr_cache_read: curr.cache_read_tokens,
             curr_cache_write: curr.cache_write_tokens,
+            reason,
         });
     }
 
@@ -152,6 +208,8 @@ pub struct TokenStats {
     pub context_window: TokenCount,
     /// usage from the previous API call (for anomaly detection)
     prev_usage: Option<Usage>,
+    /// config snapshot from the previous API call (for bust classification)
+    prev_call_config: Option<CallConfig>,
 }
 
 impl TokenStats {
@@ -164,13 +222,32 @@ impl TokenStats {
         }
     }
 
-    /// accumulate usage from an API call, returning any detected cache anomalies
+    /// accumulate usage from an API call, returning any detected cache anomalies.
+    /// equivalent to `update_with_config(usage, cost, None)`
     pub fn update(&mut self, usage: &Usage, cost: Option<Dollars>) -> Vec<CacheAnomaly> {
+        self.update_with_config(usage, cost, None)
+    }
+
+    /// accumulate usage plus the call config used for the request.
+    /// when provided, cache busts are classified against the previous
+    /// call's config (model/thinking/effort) so expected busts can be
+    /// distinguished from real anomalies
+    pub fn update_with_config(
+        &mut self,
+        usage: &Usage,
+        cost: Option<Dollars>,
+        call_config: Option<CallConfig>,
+    ) -> Vec<CacheAnomaly> {
         if let Some(c) = cost {
             self.total_cost += c;
         }
 
-        let anomalies = detect_cache_anomalies(self.prev_usage.as_ref(), usage);
+        let anomalies = detect_cache_anomalies(
+            self.prev_usage.as_ref(),
+            usage,
+            self.prev_call_config.as_ref(),
+            call_config.as_ref(),
+        );
         for anomaly in &anomalies {
             match anomaly {
                 CacheAnomaly::ContextDecrease { prev, curr } => {
@@ -185,12 +262,14 @@ impl TokenStats {
                     prev_cache_read,
                     curr_cache_read,
                     curr_cache_write,
+                    reason,
                 } => {
                     tracing::warn!(
                         prev_cache_read = prev_cache_read.get(),
                         curr_cache_read = curr_cache_read.get(),
                         curr_cache_write = curr_cache_write.get(),
-                        "cache anomaly: probable cache bust (prefix evicted)"
+                        reason = ?reason,
+                        "cache anomaly: prefix rewritten"
                     );
                 }
             }
@@ -203,6 +282,9 @@ impl TokenStats {
         self.cache_write_tokens += usage.cache_write_tokens;
         self.context_tokens = usage.total_input_tokens();
         self.prev_usage = Some(*usage);
+        if call_config.is_some() {
+            self.prev_call_config = call_config;
+        }
 
         anomalies
     }
@@ -218,6 +300,12 @@ impl TokenStats {
     pub fn prev_usage(&self) -> Option<&Usage> {
         self.prev_usage.as_ref()
     }
+
+    /// snapshot of previous call config for diagnostic dumps
+    #[must_use]
+    pub fn prev_call_config(&self) -> Option<&CallConfig> {
+        self.prev_call_config.as_ref()
+    }
 }
 
 /// diagnostic snapshot written when a cache bust is detected.
@@ -229,6 +317,20 @@ pub struct CacheBustDiagnostic {
     pub cache_ttl_secs: u16,
     pub thinking_level: String,
     pub model_id: String,
+    /// effort value sent to the provider (e.g. "high", "xhigh") if any
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// classification of why the bust happened (config change vs mystery)
+    pub bust_reason: BustReason,
+    /// model_id of the previous API call (None for first call)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prev_model_id: Option<String>,
+    /// thinking level of the previous API call (None for first call)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prev_thinking_level: Option<String>,
+    /// effort value of the previous API call (None if not set or unknown)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prev_effort: Option<String>,
     pub prev_usage: Option<Usage>,
     pub curr_usage: Usage,
     pub prev_context_tokens: u64,
