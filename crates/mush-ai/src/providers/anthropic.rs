@@ -14,6 +14,10 @@ use crate::types::*;
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const API_VERSION: &str = "2023-06-01";
 const ANTHROPIC_DIRECT_API: &str = "api.anthropic.com";
+/// full `user-agent` value sent on oauth requests. bump the version when
+/// matching a newer claude-code release; keeping it close to upstream helps
+/// with any rate-limit or fingerprint-based treatment
+const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/2.1.111";
 
 // stealth mode: mimic claude code's identity for oauth
 const CLAUDE_CODE_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
@@ -106,17 +110,28 @@ impl ApiProvider for AnthropicProvider {
         headers.insert("anthropic-version", HeaderValue::from_static(API_VERSION));
 
         if is_oauth {
+            let betas = options.anthropic_betas.clone().unwrap_or_default();
             headers.insert(
                 "anthropic-beta",
-                HeaderValue::from_static(
-                    "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05",
-                ),
+                HeaderValue::from_str(&betas.to_header_value())?,
             );
             headers.insert(
                 "user-agent",
-                HeaderValue::from_static(concat!("claude-cli/", "2.1.62")),
+                HeaderValue::from_static(CLAUDE_CLI_USER_AGENT),
             );
             headers.insert("x-app", HeaderValue::from_static("cli"));
+            // claude-code sends this to bypass browser-env CORS checks on oauth
+            headers.insert(
+                "anthropic-dangerous-direct-browser-access",
+                HeaderValue::from_static("true"),
+            );
+            // include session id for anthropic-side diagnostic correlation.
+            // format isn't validated by the server but we mirror claude code
+            if let Some(sid) = &options.session_id {
+                if let Ok(hv) = HeaderValue::from_str(sid.as_ref()) {
+                    headers.insert("x-claude-code-session-id", hv);
+                }
+            }
             let key = api_key.expose();
             headers.insert(
                 "authorization",
@@ -1200,6 +1215,43 @@ mod tests {
         assert_eq!(map_stop_reason("max_tokens"), StopReason::Length);
         assert_eq!(map_stop_reason("tool_use"), StopReason::ToolUse);
         assert_eq!(map_stop_reason("unknown"), StopReason::Error);
+    }
+
+    #[test]
+    fn oauth_beta_default_includes_expected_flags() {
+        let header = AnthropicBetas::default().to_header_value();
+        // persistent flags always present
+        assert!(header.contains("claude-code-20250219"), "header={header}");
+        assert!(header.contains("oauth-2025-04-20"), "header={header}");
+        assert!(header.contains("interleaved-thinking-2025-05-14"));
+        assert!(header.contains("prompt-caching-scope-2026-01-05"));
+        // opt-in defaults per spec
+        assert!(header.contains("context-1m-2025-08-07"));
+        assert!(header.contains("effort-2025-11-24"));
+        assert!(header.contains("context-management-2025-06-27"));
+        // off by default per spec
+        assert!(!header.contains("redact-thinking-2026-02-12"));
+        assert!(!header.contains("advisor-tool-2026-03-01"));
+        assert!(!header.contains("advanced-tool-use-2025-11-20"));
+    }
+
+    #[test]
+    fn oauth_beta_toggles_respect_config() {
+        let betas = AnthropicBetas {
+            context_1m: false,
+            effort: false,
+            context_management: false,
+            redact_thinking: true,
+            advisor: true,
+            advanced_tool_use: true,
+        };
+        let header = betas.to_header_value();
+        assert!(!header.contains("context-1m-2025-08-07"));
+        assert!(!header.contains("effort-2025-11-24"));
+        assert!(!header.contains("context-management-2025-06-27"));
+        assert!(header.contains("redact-thinking-2026-02-12"));
+        assert!(header.contains("advisor-tool-2026-03-01"));
+        assert!(header.contains("advanced-tool-use-2025-11-20"));
     }
 
     #[test]

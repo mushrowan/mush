@@ -120,6 +120,80 @@ pub struct StreamOptions {
     pub account_id: Option<String>,
     /// prompt cache retention preference for providers that support it
     pub cache_retention: Option<CacheRetention>,
+    /// anthropic oauth beta flags. `None` falls back to `AnthropicBetas::default()`
+    pub anthropic_betas: Option<AnthropicBetas>,
+}
+
+/// anthropic beta flags enabled via the `anthropic-beta` header on oauth
+/// requests. api-key users don't typically need these; they're claude-code
+/// parity flags for oauth sessions.
+///
+/// defaults follow the policy agreed with mush's primary user:
+/// - `context_1m`, `effort`, `context_management` default to `true`
+/// - `redact_thinking`, `advisor`, `advanced_tool_use` default to `false`
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnthropicBetas {
+    /// `context-1m-2025-08-07` - unlocks 1M context window on compatible models
+    pub context_1m: bool,
+    /// `effort-2025-11-24` - enables the `output_config.effort` request field
+    pub effort: bool,
+    /// `context-management-2025-06-27` - server-side context edits
+    pub context_management: bool,
+    /// `redact-thinking-2026-02-12` - allows thinking redaction in responses
+    pub redact_thinking: bool,
+    /// `advisor-tool-2026-03-01` - claude-code advisor tool support
+    pub advisor: bool,
+    /// `advanced-tool-use-2025-11-20` - advanced tool-use features
+    pub advanced_tool_use: bool,
+}
+
+impl Default for AnthropicBetas {
+    fn default() -> Self {
+        Self {
+            context_1m: true,
+            effort: true,
+            context_management: true,
+            redact_thinking: false,
+            advisor: false,
+            advanced_tool_use: false,
+        }
+    }
+}
+
+impl AnthropicBetas {
+    /// compose the `anthropic-beta` header value for an oauth request.
+    /// always includes the persistent flags required for claude-code parity
+    /// (identity, oauth, streaming, thinking, caching scope). toggleable flags
+    /// are appended based on `self`.
+    #[must_use]
+    pub fn to_header_value(&self) -> String {
+        let mut betas: Vec<&'static str> = vec![
+            "claude-code-20250219",
+            "oauth-2025-04-20",
+            "fine-grained-tool-streaming-2025-05-14",
+            "interleaved-thinking-2025-05-14",
+            "prompt-caching-scope-2026-01-05",
+        ];
+        if self.context_1m {
+            betas.push("context-1m-2025-08-07");
+        }
+        if self.effort {
+            betas.push("effort-2025-11-24");
+        }
+        if self.context_management {
+            betas.push("context-management-2025-06-27");
+        }
+        if self.redact_thinking {
+            betas.push("redact-thinking-2026-02-12");
+        }
+        if self.advisor {
+            betas.push("advisor-tool-2026-03-01");
+        }
+        if self.advanced_tool_use {
+            betas.push("advanced-tool-use-2025-11-20");
+        }
+        betas.join(",")
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
