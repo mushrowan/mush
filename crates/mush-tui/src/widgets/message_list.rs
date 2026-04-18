@@ -105,27 +105,34 @@ impl Widget for MessageList<'_> {
             })
             .collect();
         let estimated_total: usize = heights.iter().sum();
+        // estimate trailing content height (streaming + tool args +
+        // queued) so the viewport calc matches the real scroll target.
+        // without this, `should_render` uses a shorter doc than the
+        // actual rendered lines and messages in the visible region get
+        // marked as off-screen, leaving blank placeholder rows
+        let trailing_estimate =
+            estimate_trailing_height(self.app, area.width, &self.app.render_state);
+        let total_estimate = estimated_total + trailing_estimate;
 
         // compensate scroll for content growth while the user is scrolled up.
         // scroll_offset is "lines from bottom" so when content grows at the
         // bottom, we need to increase the effective offset to keep the
-        // viewport pinned to the same absolute position
+        // viewport pinned to the same absolute position. we track the total
+        // estimate (messages + trailing) so moving content from streaming
+        // into a message on stream-end doesn't trigger a spurious shift
         let prev_total = self.app.render_state.prev_content_lines.get();
         let prev_compensation = self.app.render_state.scroll_compensation.get();
         let compensation = if self.app.scroll_offset > 0 && prev_total > 0 {
-            prev_compensation + estimated_total.saturating_sub(prev_total)
+            prev_compensation + total_estimate.saturating_sub(prev_total)
         } else {
             0
         };
-        self.app
-            .render_state
-            .prev_content_lines
-            .set(estimated_total);
+        self.app.render_state.prev_content_lines.set(total_estimate);
         self.app.render_state.scroll_compensation.set(compensation);
         let effective_offset = (self.app.scroll_offset as usize) + compensation;
 
         let vis_h = area.height as usize;
-        let max_scroll = estimated_total.saturating_sub(vis_h);
+        let max_scroll = total_estimate.saturating_sub(vis_h);
         let scroll_from_top = max_scroll.saturating_sub(effective_offset);
 
         // render messages within the viewport plus one viewport of margin
@@ -1059,6 +1066,54 @@ fn compute_message_height(
         .is_some_and(|u| u.total_tokens() > TokenCount::ZERO)
     {
         h += 1;
+    }
+
+    h
+}
+
+/// estimate trailing content height appended after the message list:
+/// streaming text / thinking, tool-args preview, queued messages.
+/// the viewport calc needs this so messages that end up in the actual
+/// visible region aren't falsely marked as off-screen
+fn estimate_trailing_height(
+    app: &App,
+    width: u16,
+    render_state: &crate::app_state::RenderState,
+) -> usize {
+    let stream_content_width = (width as usize).saturating_sub(1).max(1);
+    let mut h = 0;
+
+    if app.stream.active {
+        let has_thinking = !app.stream.thinking.is_empty()
+            && app.thinking_display != crate::app::ThinkingDisplay::Hidden;
+        let has_text = !app.stream.text.is_empty();
+
+        if has_thinking {
+            // spinner label + indented thinking lines + blank separator
+            h += 1;
+            h += count_estimated_lines(app.visible_streaming_thinking(), stream_content_width);
+            h += 1;
+        }
+        if has_text {
+            h += count_estimated_lines(app.visible_streaming_text(), stream_content_width);
+        }
+        if !has_thinking && !has_text {
+            // spinner "working" line
+            h += 1;
+        }
+    }
+
+    // tool args preview line
+    if app.active_tools.is_empty() && !app.stream.tool_args.is_empty() {
+        h += 1;
+    }
+
+    // queued messages at the bottom (rendered via the normal path)
+    for (i, msg) in app.messages.iter().enumerate() {
+        if msg.queued {
+            h += compute_message_height(msg, i, width, render_state);
+            h += 1; // trailing blank separator between queued
+        }
     }
 
     h
@@ -3388,6 +3443,76 @@ mod tests {
         assert_eq!(
             app.scroll_offset, 20,
             "start_streaming should not reset scroll_offset"
+        );
+    }
+
+    #[test]
+    fn scrolled_up_during_streaming_shows_no_gap_in_viewport() {
+        // bug: while streaming, `estimated_total` for `should_render`
+        // only counts messages, but the final `scroll` uses total lines
+        // (messages + streaming + queued). when streaming content is
+        // taller than the margin, messages actually visible in the
+        // viewport fall outside the should_render window and render as
+        // blank placeholder rows. the user sees gaps mid-scrollback.
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        for i in 0..40 {
+            let role = if i % 2 == 0 {
+                MessageRole::User
+            } else {
+                MessageRole::Assistant
+            };
+            app.messages.push(DisplayMessage::new(
+                role,
+                format!("MSG-{i:03}-marker-{}", "x".repeat(i % 5)),
+            ));
+        }
+
+        // warm caches so heights are known
+        render_app(&app, 60, 20);
+
+        // start streaming with long text (many lines) that exceeds the
+        // viewport margin. this is the scenario that triggers the gap
+        app.start_streaming();
+        let long_stream: String = (0..80).map(|i| format!("stream line {i}\n")).collect();
+        app.push_text_delta(&long_stream);
+        // drain typewriter so the full text is visible
+        for _ in 0..80 {
+            app.tick();
+        }
+
+        // scroll up far enough that some messages are in the viewport
+        // despite the long streaming content appended below. with vh=20
+        // and streaming_N=80, effective_offset must exceed streaming_N
+        // for messages to enter the visible window
+        app.scroll_offset = 90;
+
+        let buf = render_app(&app, 60, 20);
+        let content = buffer_to_string(&buf);
+
+        // at least one message marker should appear in the viewport
+        let any_msg_visible = (0..40).any(|i| content.contains(&format!("MSG-{i:03}-marker")));
+        assert!(
+            any_msg_visible,
+            "viewport should contain at least one message when scrolled up: \n{content}"
+        );
+
+        // count consecutive blank rows. a long run of blanks in the
+        // middle of the viewport indicates placeholder lines where
+        // real message content should have been rendered
+        let rows: Vec<&str> = content.lines().collect();
+        let mut consecutive_blanks = 0;
+        let mut max_consecutive_blanks = 0;
+        for row in &rows {
+            if row.trim().is_empty() {
+                consecutive_blanks += 1;
+                max_consecutive_blanks = max_consecutive_blanks.max(consecutive_blanks);
+            } else {
+                consecutive_blanks = 0;
+            }
+        }
+        assert!(
+            max_consecutive_blanks < 5,
+            "found {max_consecutive_blanks} consecutive blank rows in viewport: \n{content}"
         );
     }
 
