@@ -135,9 +135,41 @@ pub async fn get_oauth_token(provider_id: &str) -> Result<Option<String>, OAuthE
     Ok(Some(token))
 }
 
+/// unconditionally refresh a provider's oauth token, bypassing the
+/// `is_expired` check. used as a safety net when a request comes back
+/// with 401 Unauthorized despite the cached expiry claiming the token
+/// is still valid (clock skew, server-side revocation, stale timestamp)
+pub async fn force_refresh_oauth_token(provider_id: &str) -> Result<Option<String>, OAuthError> {
+    let provider = match get_provider(provider_id) {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+
+    let mut store = load_credentials()?;
+    let Some(creds) = store.providers.get(provider_id) else {
+        return Ok(None);
+    };
+
+    let mut refreshed = provider.refresh_token(&creds.refresh_token).await?;
+    if refreshed.account_id.is_none() {
+        refreshed.account_id = creds.account_id.clone();
+    }
+
+    let token = provider.api_key(&refreshed);
+    store.providers.insert(provider_id.into(), refreshed);
+    save_credentials(&store)?;
+
+    Ok(Some(token))
+}
+
 /// convenience: get anthropic oauth token
 pub async fn get_anthropic_oauth_token() -> Result<Option<String>, OAuthError> {
     get_oauth_token("anthropic").await
+}
+
+/// convenience: force-refresh anthropic oauth token (see [`force_refresh_oauth_token`])
+pub async fn force_refresh_anthropic_oauth_token() -> Result<Option<String>, OAuthError> {
+    force_refresh_oauth_token("anthropic").await
 }
 
 /// convenience: get openai codex oauth token
