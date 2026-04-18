@@ -82,11 +82,27 @@ impl ApiProvider for AnthropicProvider {
         context: &LlmContext,
         options: &StreamOptions,
     ) -> Result<EventStream, ProviderError> {
-        let api_key = options
+        let mut api_key = options
             .api_key
             .clone()
             .or_else(anthropic_api_key)
             .ok_or_else(|| ProviderError::MissingApiKey(Provider::Anthropic))?;
+
+        // long agent turns make many stream() calls all sharing the api_key
+        // that was baked in at turn start. for oauth tokens that's a problem:
+        // claude oauth access tokens expire (~1h) and long turns can outlive
+        // them mid-turn, producing a 401 from anthropic. re-resolve from the
+        // oauth store on every call so we pick up any refresh that happened
+        // since turn start. `get_anthropic_oauth_token` handles the refresh +
+        // 5-minute eager buffer internally. silently falls back to the
+        // existing key when the store is unreadable or credentials are
+        // missing (likely the user is on a plain api key)
+        if api_key.is_oauth_token()
+            && let Ok(Some(fresh)) = crate::oauth::get_anthropic_oauth_token().await
+            && let Some(fresh_key) = ApiKey::new(fresh)
+        {
+            api_key = fresh_key;
+        }
 
         let is_oauth = api_key.is_oauth_token();
 
