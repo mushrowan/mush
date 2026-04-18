@@ -91,10 +91,33 @@
           exec ${craneOutputsProfiling.package}/bin/mush "$@"
         '';
         packages.samply = pkgs.writeShellScriptBin "mush-samply" ''
+          data_dir="''${XDG_DATA_HOME:-$HOME/.local/share}/mush/profiles"
+          mkdir -p "$data_dir"
+          out="$data_dir/mush-$(date +%Y%m%d-%H%M%S).json.gz"
           echo "sampling profiler: cpu flamegraph via samply" >&2
-          echo "firefox profiler will open automatically" >&2
+          echo "recording to: $out" >&2
           echo "" >&2
-          exec ${pkgs.samply}/bin/samply record ${craneOutputsProfiling.package}/bin/mush "$@"
+          ${pkgs.samply}/bin/samply record --save-only -o "$out" \
+            ${craneOutputsProfiling.package}/bin/mush "$@"
+          echo "" >&2
+          echo "profile saved: $out" >&2
+          echo "open it with: nix run .#samply-load -- $out" >&2
+          echo "or manually:  samply load $out" >&2
+        '';
+        packages.samply-load = pkgs.writeShellScriptBin "mush-samply-load" ''
+          data_dir="''${XDG_DATA_HOME:-$HOME/.local/share}/mush/profiles"
+          if [ -n "$1" ]; then
+            target="$1"
+          else
+            target=$(ls -t "$data_dir"/mush-*.json.gz 2>/dev/null | head -n 1)
+            if [ -z "$target" ]; then
+              echo "no saved profiles in $data_dir" >&2
+              echo "record one first with: nix run .#samply" >&2
+              exit 1
+            fi
+            echo "loading latest: $target" >&2
+          fi
+          exec ${pkgs.samply}/bin/samply load "$target"
         '';
 
         checks = {
