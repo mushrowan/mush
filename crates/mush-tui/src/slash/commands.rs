@@ -40,7 +40,10 @@ pub fn handle(
             help.push_str("  /cost          - show session cost\n");
             help.push_str("  /logs [n]      - show last n log entries (default 50)\n");
             help.push_str("  /injection     - toggle prompt injection preview\n");
-            help.push_str("  /settings      - view/modify runtime settings (betas, scope)\n");
+            help.push_str(
+                "  /settings      - open runtime settings overlay (j/k, space toggles)\n",
+            );
+            help.push_str("  /settings show - print current settings state\n");
             help.push_str("  /login [p]     - oauth login to provider (default anthropic)\n");
             help.push_str("  /login-complete <code> - finish the oauth flow with the code\n");
             help.push_str("  /close         - close focused pane\n");
@@ -495,13 +498,18 @@ pub(crate) fn show_cost(app: &mut App) {
 fn handle_settings(app: &mut App, tui_config: &mut TuiConfig, args: &str) {
     let args = args.trim();
     if args.is_empty() {
-        app.push_system_message(format_settings_view(&tui_config.settings));
+        // no args: open the floating menu
+        app.settings_menu = Some(crate::settings::SettingsMenuState::default());
+        app.interaction.mode = crate::app::AppMode::Settings;
         return;
     }
 
     let mut parts = args.splitn(3, char::is_whitespace);
     let sub = parts.next().unwrap_or("");
     match sub {
+        "show" => {
+            app.push_system_message(format_settings_view(&tui_config.settings));
+        }
         "scope" => {
             let Some(value) = parts.next() else {
                 app.push_system_message("usage: /settings scope <global|disabled|repo|session>");

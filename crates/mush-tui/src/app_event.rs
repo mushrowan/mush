@@ -11,6 +11,8 @@ pub enum AppEvent {
     SlashCommand {
         action: crate::slash::SlashAction,
     },
+    /// user toggled the currently selected item in the /settings overlay
+    SettingsToggleSelected,
     /// user requested quit
     Quit,
     /// user requested abort of current operation
@@ -53,4 +55,6 @@ pub enum AppMode {
     Scroll,
     /// search mode: type to filter messages, enter to jump
     Search,
+    /// settings overlay: j/k navigate, space/enter toggle, esc close
+    Settings,
 }

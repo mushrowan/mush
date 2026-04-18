@@ -58,6 +58,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     if app.interaction.mode == AppMode::Search {
         return handle_search_mode(app, key);
     }
+    if app.interaction.mode == AppMode::Settings {
+        return handle_settings_menu_key(app, key);
+    }
 
     // 2. global bindings
     match (key.modifiers, key.code) {
@@ -317,6 +320,29 @@ fn handle_editing(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         // character input
         (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => app.input_char(c),
 
+        _ => {}
+    }
+    None
+}
+
+/// handle keys in /settings overlay mode
+fn handle_settings_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
+    let Some(menu) = app.settings_menu.as_mut() else {
+        app.interaction.mode = AppMode::Normal;
+        return None;
+    };
+    match (key.modifiers, key.code) {
+        (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
+            app.settings_menu = None;
+            app.interaction.mode = AppMode::Normal;
+        }
+        (_, KeyCode::Down | KeyCode::Char('j')) => menu.move_down(),
+        (_, KeyCode::Up | KeyCode::Char('k')) => menu.move_up(),
+        (_, KeyCode::Home | KeyCode::Char('g')) => menu.top(),
+        (_, KeyCode::End | KeyCode::Char('G')) => menu.bottom(),
+        (_, KeyCode::Enter | KeyCode::Char(' ')) => {
+            return Some(AppEvent::SettingsToggleSelected);
+        }
         _ => {}
     }
     None

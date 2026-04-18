@@ -292,6 +292,9 @@ pub(super) async fn handle_idle_terminal_events(
                                 ));
                             }
                         }
+                        AppEvent::SettingsToggleSelected => {
+                            apply_settings_toggle(pane_mgr, deps.tui_config);
+                        }
                         _ => {}
                     }
                 }
@@ -309,6 +312,31 @@ pub(super) async fn handle_idle_terminal_events(
     }
 
     Ok(LoopAction::Redraw)
+}
+
+/// apply a toggle to the selected /settings menu item and sync the result
+/// into the live StreamOptions so the next turn picks up the change
+fn apply_settings_toggle(
+    pane_mgr: &mut crate::pane::PaneManager,
+    tui_config: &mut crate::runner::TuiConfig,
+) {
+    let app = &mut pane_mgr.focused_mut().app;
+    let Some(menu) = app.settings_menu.as_mut() else {
+        return;
+    };
+    let item = menu.current();
+    let new_value = item.activate(&mut tui_config.settings);
+    // mirror beta changes into the in-flight stream options so they take
+    // effect on the next LLM call
+    tui_config.options.anthropic_betas = Some(tui_config.settings.anthropic_betas.clone());
+
+    // persist if scope requires it
+    let persist_note = match crate::settings::persist(&tui_config.settings, &tui_config.cwd) {
+        Ok(Some(path)) => format!(" (saved to {})", path.display()),
+        Ok(None) => String::new(),
+        Err(e) => format!(" (persist failed: {e})"),
+    };
+    app.status = Some(format!("{} → {}{}", item.label(), new_value, persist_note));
 }
 
 async fn paste_clipboard_image(app: &mut App) {

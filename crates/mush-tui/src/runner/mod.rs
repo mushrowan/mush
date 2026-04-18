@@ -65,7 +65,12 @@ pub async fn run_tui(
         }
     });
 
-    draw_panes(&mut terminal, &mut runtime.pane_mgr, &image_picker)?;
+    draw_panes(
+        &mut terminal,
+        &mut runtime.pane_mgr,
+        &image_picker,
+        &tui_config.settings,
+    )?;
 
     let mut agent_streams = new_agent_streams();
     let mut stream_state = StreamState::new();
@@ -141,7 +146,12 @@ pub async fn run_tui(
             || last_draw.elapsed() >= std::time::Duration::from_secs(1);
         if should_draw {
             runtime.poll_usage().await;
-            draw_panes(&mut terminal, &mut runtime.pane_mgr, &image_picker)?;
+            draw_panes(
+                &mut terminal,
+                &mut runtime.pane_mgr,
+                &image_picker,
+                &tui_config.settings,
+            )?;
             last_draw = std::time::Instant::now();
         }
     }
