@@ -89,6 +89,13 @@ pub struct Config {
     /// provider-specific settings (anthropic betas, scope, etc.)
     #[serde(default)]
     pub settings: Settings,
+    /// lines scrolled per j/k keystroke in scroll mode (default 3)
+    #[serde(default = "default_scroll_lines")]
+    pub scroll_lines: u16,
+}
+
+fn default_scroll_lines() -> u16 {
+    mush_tui::DEFAULT_SCROLL_LINES
 }
 
 /// scope for persisting settings changes made during a session

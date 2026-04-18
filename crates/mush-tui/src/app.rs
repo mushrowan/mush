@@ -37,6 +37,10 @@ const UNREAD_FLASH_CYCLE: u8 = 60;
 /// ticks the flash indicator stays "on" within each cycle
 const UNREAD_FLASH_ON: u8 = 30;
 
+/// default lines scrolled per j/k keystroke in scroll mode. overridable
+/// via `scroll_lines` in `config.toml`
+pub const DEFAULT_SCROLL_LINES: u16 = 3;
+
 /// controls how thinking text is displayed
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -116,6 +120,8 @@ pub struct App {
     pub settings_menu: Option<crate::settings::SettingsMenuState>,
     /// colour theme for all widgets
     pub theme: crate::theme::Theme,
+    /// lines scrolled per j/k keystroke in scroll mode
+    pub scroll_lines: u16,
 }
 
 /// state captured when /login starts an oauth flow, consumed when the user
@@ -165,6 +171,7 @@ impl App {
             pending_oauth: None,
             settings_menu: None,
             theme: crate::theme::Theme::default(),
+            scroll_lines: DEFAULT_SCROLL_LINES,
         }
     }
 
@@ -655,6 +662,41 @@ impl App {
     /// whether visual selection mode is active (v in scroll mode)
     pub fn has_selection(&self) -> bool {
         self.navigation.selection_anchor.is_some() && self.navigation.selected_message.is_some()
+    }
+
+    /// whether the message at `msg_idx` overlaps the current viewport based
+    /// on cached heights from the last render. returns true when no render
+    /// has happened yet (`visible_area_height == 0`) so callers do not block
+    /// on missing data. used to gate scroll-mode selection movement so we
+    /// never select a message that is off-screen
+    pub fn is_message_visible(&self, msg_idx: usize) -> bool {
+        if msg_idx >= self.messages.len() {
+            return false;
+        }
+        let visible = self.render_state.visible_area_height.get() as usize;
+        if visible == 0 {
+            return true;
+        }
+        let cache = self.render_state.height_cache.borrow();
+        let height_of = |i: usize| -> usize {
+            if self.messages.get(i).is_none_or(|m| m.queued) {
+                return 0;
+            }
+            cache
+                .get(i)
+                .and_then(|e| e.as_ref())
+                .map_or(0, |e| e.height)
+        };
+        let msg_start: usize = (0..msg_idx).map(height_of).sum();
+        let msg_height = height_of(msg_idx);
+        let total: usize = (0..self.messages.len()).map(height_of).sum();
+        drop(cache);
+
+        let scroll_offset = (self.scroll_offset as usize).min(total.saturating_sub(visible));
+        let top_of_view = total.saturating_sub(scroll_offset + visible);
+        let bottom_of_view = total.saturating_sub(scroll_offset);
+
+        msg_start < bottom_of_view && msg_start + msg_height > top_of_view
     }
 
     /// get the inclusive selection range (min..=max), if active
@@ -1552,6 +1594,75 @@ batch: 1/2 succeeded, 1 failed";
         app.navigation.selection_anchor = Some(2);
         app.navigation.selected_message = Some(2);
         assert_eq!(app.selection_range(), Some((2, 2)));
+    }
+
+    /// set up `app` with `count` messages whose cached render height is
+    /// `height_each`, mimicking a completed render. used by
+    /// `is_message_visible` tests to avoid driving a real terminal
+    fn with_uniform_message_heights(app: &mut App, count: usize, height_each: usize, visible: u16) {
+        for i in 0..count {
+            app.messages
+                .push(DisplayMessage::new(MessageRole::User, format!("msg {i}")));
+        }
+        let mut cache = app.render_state.height_cache.borrow_mut();
+        cache.resize_with(count, || None);
+        for slot in cache.iter_mut() {
+            *slot = Some(crate::app_state::CachedHeight {
+                content_len: 0,
+                thinking_len: 0,
+                tool_output_len: 0,
+                completed_tool_count: 0,
+                thinking_expanded: false,
+                has_usage: false,
+                width: 80,
+                height: height_each,
+            });
+        }
+        drop(cache);
+        app.render_state.visible_area_height.set(visible);
+    }
+
+    #[test]
+    fn is_message_visible_returns_true_before_first_render() {
+        // with visible_area_height == 0 (no render yet) we can't compute
+        // viewport intersection, so don't block the caller
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.messages
+            .push(DisplayMessage::new(MessageRole::User, "hi"));
+        assert!(app.is_message_visible(0));
+    }
+
+    #[test]
+    fn is_message_visible_out_of_bounds_returns_false() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        with_uniform_message_heights(&mut app, 3, 5, 10);
+        assert!(!app.is_message_visible(99));
+    }
+
+    #[test]
+    fn is_message_visible_scroll_zero_shows_bottom_messages() {
+        // 5 msgs, 10 lines each, total 50. visible 15. scroll_offset 0.
+        // viewport shows lines [35, 50): only msgs 3 and 4 overlap
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        with_uniform_message_heights(&mut app, 5, 10, 15);
+        app.scroll_offset = 0;
+        assert!(!app.is_message_visible(0));
+        assert!(!app.is_message_visible(1));
+        assert!(!app.is_message_visible(2));
+        assert!(app.is_message_visible(3));
+        assert!(app.is_message_visible(4));
+    }
+
+    #[test]
+    fn is_message_visible_tracks_scroll_offset() {
+        // same 5x10 layout, scroll_offset 10 → viewport [25, 40)
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        with_uniform_message_heights(&mut app, 5, 10, 15);
+        app.scroll_offset = 10;
+        assert!(!app.is_message_visible(1)); // [10,20) above viewport
+        assert!(app.is_message_visible(2)); // [20,30) overlaps [25,40)
+        assert!(app.is_message_visible(3)); // [30,40) inside
+        assert!(!app.is_message_visible(4)); // [40,50) below viewport
     }
 
     #[test]

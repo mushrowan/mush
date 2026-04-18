@@ -239,6 +239,7 @@ fn build_initial_app(tui_config: &TuiConfig, cwd: &Path) -> App {
     app.thinking_display = tui_config.thinking_display;
     app.interaction.show_cost = tui_config.show_cost;
     app.theme = tui_config.theme.clone();
+    app.scroll_lines = tui_config.scroll_lines;
     app.cache.ttl_secs = if tui_config.cache_timer {
         let is_oauth = tui_config
             .options
@@ -359,6 +360,7 @@ mod tests {
             http_client: None,
             session_id: mush_ai::types::SessionId::new(),
             settings: Default::default(),
+            scroll_lines: crate::app::DEFAULT_SCROLL_LINES,
         }
     }
 
