@@ -563,14 +563,24 @@ pub(super) async fn submit_streaming_input(
 ) {
     let focused_id = pane_mgr.focused().id;
     if let Some(meta) = stream_state.meta(focused_id) {
+        let images = pane_mgr.focused_mut().app.input.take_images();
+        let content = build_user_content(&text, &images);
         meta.steering_queue
             .lock()
             .await
             .push(Message::User(UserMessage {
-                content: UserContent::Text(text.clone()),
+                content,
                 timestamp_ms: Timestamp::now(),
             }));
-        pane_mgr.focused_mut().app.push_queued_message(text);
+        let image_bytes: Vec<Vec<u8>> = images.into_iter().map(|img| img.data).collect();
+        if image_bytes.is_empty() {
+            pane_mgr.focused_mut().app.push_queued_message(text);
+        } else {
+            pane_mgr
+                .focused_mut()
+                .app
+                .push_queued_message_with_images(text, image_bytes);
+        }
     } else {
         let pane = pane_mgr.focused_mut();
         pane.app.push_user_message(text.clone());
@@ -578,6 +588,26 @@ pub(super) async fn submit_streaming_input(
         pane.app.start_streaming();
         pane.pending_prompt = Some(text);
     }
+}
+
+/// build a UserContent, folding any attached images into a parts payload
+/// alongside the text. returns `Text` when there are no images so the
+/// wire format stays minimal for the common case
+fn build_user_content(text: &str, images: &[crate::input_buffer::PendingImage]) -> UserContent {
+    if images.is_empty() {
+        return UserContent::Text(text.to_owned());
+    }
+    let mut parts: Vec<UserContentPart> = vec![UserContentPart::Text(TextContent {
+        text: text.to_owned(),
+    })];
+    for image in images {
+        use base64::Engine;
+        parts.push(UserContentPart::Image(ImageContent {
+            data: base64::engine::general_purpose::STANDARD.encode(&image.data),
+            mime_type: image.mime_type,
+        }));
+    }
+    UserContent::Parts(parts)
 }
 
 pub(super) async fn edit_last_queued_steering(
@@ -1213,6 +1243,100 @@ mod tests {
 
     fn app() -> App {
         App::new(ModelId::from("test-model"), TokenCount::new(4096))
+    }
+
+    #[tokio::test]
+    async fn submit_streaming_input_includes_pending_images_in_steering_queue() {
+        // ctrl+v during streaming stages images on the input buffer; the
+        // steering submit must flush them into the queued UserMessage so the
+        // next agent turn can see the image. regression: only the text was
+        // forwarded and the image silently vanished
+        use crate::input_buffer::PendingImage;
+        use mush_ai::types::ImageMimeType;
+
+        let pane_id = PaneId::new(1);
+        let mut pane_mgr = PaneManager::new(Pane::new(pane_id, app()));
+        let mut stream_state = StreamState::new();
+        let (_confirm_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
+        let steering_queue = Arc::new(Mutex::new(Vec::new()));
+
+        stream_state.register_active(
+            pane_id,
+            StreamMeta {
+                steering_queue: steering_queue.clone(),
+                confirm_req_rx,
+                confirm_reply: Arc::new(Mutex::new(None)),
+                model: models::all_models_with_user().into_iter().next().unwrap(),
+                context_tokens: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                cancel: tokio_util::sync::CancellationToken::new(),
+            },
+        );
+
+        pane_mgr.focused_mut().app.input.images.push(PendingImage {
+            data: vec![1, 2, 3, 4],
+            mime_type: ImageMimeType::Png,
+            dimensions: Some((10, 10)),
+        });
+
+        submit_streaming_input(&mut pane_mgr, &stream_state, "look at this".into()).await;
+
+        let queue = steering_queue.lock().await;
+        assert_eq!(queue.len(), 1, "steering queue should have 1 entry");
+        let Message::User(user_msg) = &queue[0] else {
+            panic!("expected user message in steering queue");
+        };
+        match &user_msg.content {
+            UserContent::Parts(parts) => {
+                let has_image = parts.iter().any(|p| matches!(p, UserContentPart::Image(_)));
+                assert!(
+                    has_image,
+                    "steering user message should carry the pending image as a content part"
+                );
+            }
+            UserContent::Text(_) => {
+                panic!("steering user message dropped the pending image and used Text-only content")
+            }
+        }
+
+        // input buffer images should be drained
+        assert!(
+            pane_mgr.focused().app.input.images.is_empty(),
+            "pending images should be drained after submission"
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_streaming_input_uses_text_only_when_no_images() {
+        // baseline: text-only submit still produces UserContent::Text, keeping
+        // the existing wire format unchanged when no images are attached
+        let pane_id = PaneId::new(1);
+        let mut pane_mgr = PaneManager::new(Pane::new(pane_id, app()));
+        let mut stream_state = StreamState::new();
+        let (_confirm_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
+        let steering_queue = Arc::new(Mutex::new(Vec::new()));
+
+        stream_state.register_active(
+            pane_id,
+            StreamMeta {
+                steering_queue: steering_queue.clone(),
+                confirm_req_rx,
+                confirm_reply: Arc::new(Mutex::new(None)),
+                model: models::all_models_with_user().into_iter().next().unwrap(),
+                context_tokens: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                cancel: tokio_util::sync::CancellationToken::new(),
+            },
+        );
+
+        submit_streaming_input(&mut pane_mgr, &stream_state, "just words".into()).await;
+
+        let queue = steering_queue.lock().await;
+        let Message::User(user_msg) = &queue[0] else {
+            panic!("expected user message in steering queue");
+        };
+        assert!(
+            matches!(&user_msg.content, UserContent::Text(t) if t == "just words"),
+            "text-only submit should keep UserContent::Text"
+        );
     }
 
     #[test]

@@ -239,6 +239,20 @@ impl App {
         self.scroll_offset = 0;
     }
 
+    /// add a queued steering message carrying attached images, so the UI
+    /// reflects the pending image(s) on the queued bubble
+    pub fn push_queued_message_with_images(
+        &mut self,
+        text: impl Into<String>,
+        images: Vec<Vec<u8>>,
+    ) {
+        let mut msg = DisplayMessage::new(MessageRole::User, text);
+        msg.queued = true;
+        msg.images = images;
+        self.messages.push(msg);
+        self.scroll_offset = 0;
+    }
+
     /// remove the last queued steering message from display, return its text
     pub fn pop_last_queued_message(&mut self) -> Option<String> {
         let idx = self.messages.iter().rposition(|m| m.queued)?;

@@ -70,6 +70,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             app.scroll_to_bottom();
             return None;
         }
+        // ctrl+v works in both idle and streaming so the user can stage
+        // images for mid-turn steering without aborting the stream
+        (KeyModifiers::CONTROL, KeyCode::Char('v')) => return Some(AppEvent::PasteImage),
         _ => {}
     }
     match key.code {
@@ -282,7 +285,6 @@ fn handle_idle_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             });
             None
         }
-        (KeyModifiers::CONTROL, KeyCode::Char('v')) => Some(AppEvent::PasteImage),
 
         // everything else falls through to shared editing
         _ => handle_editing(app, key),
@@ -785,6 +787,23 @@ mod tests {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         let event = handle_key(&mut app, ctrl(KeyCode::Char('c')));
         assert!(matches!(event, Some(AppEvent::Quit)));
+    }
+
+    #[test]
+    fn ctrl_v_emits_paste_image_when_idle() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        let event = handle_key(&mut app, ctrl(KeyCode::Char('v')));
+        assert!(matches!(event, Some(AppEvent::PasteImage)));
+    }
+
+    #[test]
+    fn ctrl_v_emits_paste_image_when_streaming() {
+        // regression: ctrl+v fell through to handle_editing during streaming
+        // so image paste only worked while idle, breaking image-based steering
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.stream.active = true;
+        let event = handle_key(&mut app, ctrl(KeyCode::Char('v')));
+        assert!(matches!(event, Some(AppEvent::PasteImage)));
     }
 
     #[test]
