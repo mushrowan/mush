@@ -13,8 +13,9 @@ pub use crate::app_state::{
 };
 pub use crate::batch_output::{BatchSection, parse_batch_output, truncate_output};
 pub use crate::cache::{
-    CACHE_COLD_DISPLAY_SECS, CACHE_WARN_SECS, CacheAnomaly, CacheBustDiagnostic, CacheTimer,
-    TokenStats, cache_ttl_secs, detect_cache_anomalies, dump_cache_bust_diagnostic,
+    BustReason, CACHE_COLD_DISPLAY_SECS, CACHE_WARN_SECS, CacheAnomaly, CacheBustDiagnostic,
+    CacheTimer, CallConfig, TokenStats, cache_ttl_secs, detect_cache_anomalies,
+    dump_cache_bust_diagnostic,
 };
 pub use crate::display_types::{
     ActiveToolState, CodeBlock, DisplayMessage, DisplayToolCall, ImageRenderArea, MessageRole,
@@ -434,22 +435,31 @@ impl App {
 
         if let Some(ref u) = usage {
             let prev_usage_snapshot = self.stats.prev_usage().copied();
+            let prev_config_snapshot = self.stats.prev_call_config().cloned();
             let prev_context_snapshot = self.stats.context_tokens;
-            let anomalies = self.stats.update(u, cost);
+            let curr_config = CallConfig {
+                model_id: self.model_id.to_string(),
+                thinking_level: format!("{:?}", self.thinking_level),
+                // effort is derived from (model, thinking_level) today; a
+                // standalone effort field will land with the effort enum split
+                effort: None,
+            };
+            let anomalies = self
+                .stats
+                .update_with_config(u, cost, Some(curr_config.clone()));
             for anomaly in &anomalies {
-                let msg = match anomaly {
-                    CacheAnomaly::ContextDecrease { prev, curr } => {
-                        format!(
-                            "⚠ context decreased: {}k → {}k (delta -{}k) without compact",
-                            prev.get() / 1000,
-                            curr.get() / 1000,
-                            (prev.get() - curr.get()) / 1000,
-                        )
-                    }
+                let msg_opt: Option<String> = match anomaly {
+                    CacheAnomaly::ContextDecrease { prev, curr } => Some(format!(
+                        "⚠ context decreased: {}k → {}k (delta -{}k) without compact",
+                        prev.get() / 1000,
+                        curr.get() / 1000,
+                        (prev.get() - curr.get()) / 1000,
+                    )),
                     CacheAnomaly::CacheBust {
                         prev_cache_read,
                         curr_cache_read,
                         curr_cache_write,
+                        reason,
                     } => {
                         // dump diagnostic to disk for post-mortem investigation
                         let now = std::time::SystemTime::now()
@@ -460,8 +470,19 @@ impl App {
                             timestamp: format!("{now}"),
                             secs_since_last_cache_activity: self.cache.elapsed_secs(),
                             cache_ttl_secs: self.cache.ttl_secs,
-                            thinking_level: format!("{:?}", self.thinking_level),
-                            model_id: self.model_id.to_string(),
+                            thinking_level: curr_config.thinking_level.clone(),
+                            model_id: curr_config.model_id.clone(),
+                            effort: curr_config.effort.clone(),
+                            bust_reason: reason.clone(),
+                            prev_model_id: prev_config_snapshot
+                                .as_ref()
+                                .map(|c| c.model_id.clone()),
+                            prev_thinking_level: prev_config_snapshot
+                                .as_ref()
+                                .map(|c| c.thinking_level.clone()),
+                            prev_effort: prev_config_snapshot
+                                .as_ref()
+                                .and_then(|c| c.effort.clone()),
                             prev_usage: prev_usage_snapshot,
                             curr_usage: *u,
                             prev_context_tokens: prev_context_snapshot.get(),
@@ -475,15 +496,22 @@ impl App {
                             None => String::new(),
                         };
 
-                        format!(
-                            "⚠ probable cache bust: cache_read {}k → {}k, cache_write {}k (prefix evicted){dump_note}",
-                            prev_cache_read.get() / 1000,
-                            curr_cache_read.get() / 1000,
-                            curr_cache_write.get() / 1000,
-                        )
+                        match reason {
+                            BustReason::Unexplained => Some(format!(
+                                "⚠ probable cache bust: cache_read {}k → {}k, cache_write {}k (prefix evicted){dump_note}",
+                                prev_cache_read.get() / 1000,
+                                curr_cache_read.get() / 1000,
+                                curr_cache_write.get() / 1000,
+                            )),
+                            // expected bust from user-initiated config change:
+                            // dump for forensics but don't alarm the user
+                            _ => None,
+                        }
                     }
                 };
-                self.push_system_message(msg);
+                if let Some(msg) = msg_opt {
+                    self.push_system_message(msg);
+                }
             }
         } else if let Some(c) = cost {
             self.stats.total_cost += c;
@@ -1828,7 +1856,7 @@ batch: 1/2 succeeded, 1 failed";
             cache_read_tokens: TokenCount::new(70_000),
             cache_write_tokens: TokenCount::ZERO,
         };
-        let anomalies = detect_cache_anomalies(Some(&prev), &curr);
+        let anomalies = detect_cache_anomalies(Some(&prev), &curr, None, None);
         assert!(
             anomalies
                 .iter()
@@ -1851,7 +1879,7 @@ batch: 1/2 succeeded, 1 failed";
             cache_read_tokens: TokenCount::ZERO,
             cache_write_tokens: TokenCount::new(100_000),
         };
-        let anomalies = detect_cache_anomalies(Some(&prev), &curr);
+        let anomalies = detect_cache_anomalies(Some(&prev), &curr, None, None);
         assert!(
             anomalies
                 .iter()
@@ -1874,7 +1902,7 @@ batch: 1/2 succeeded, 1 failed";
             cache_read_tokens: TokenCount::new(95_000),
             cache_write_tokens: TokenCount::new(5_000),
         };
-        let anomalies = detect_cache_anomalies(Some(&prev), &curr);
+        let anomalies = detect_cache_anomalies(Some(&prev), &curr, None, None);
         assert!(
             anomalies.is_empty(),
             "normal growth should produce no anomalies"
@@ -1889,7 +1917,7 @@ batch: 1/2 succeeded, 1 failed";
             cache_read_tokens: TokenCount::ZERO,
             cache_write_tokens: TokenCount::new(95_000),
         };
-        let anomalies = detect_cache_anomalies(None, &curr);
+        let anomalies = detect_cache_anomalies(None, &curr, None, None);
         assert!(
             anomalies.is_empty(),
             "first call should not trigger anomalies"
@@ -2014,6 +2042,11 @@ batch: 1/2 succeeded, 1 failed";
             cache_ttl_secs: 300,
             thinking_level: "High".into(),
             model_id: "claude-sonnet-4-20250514".into(),
+            effort: None,
+            bust_reason: BustReason::Unexplained,
+            prev_model_id: None,
+            prev_thinking_level: None,
+            prev_effort: None,
             prev_usage: Some(Usage {
                 input_tokens: TokenCount::new(5_000),
                 output_tokens: TokenCount::new(3_000),
