@@ -14,6 +14,7 @@ use super::panes::drain_inboxes;
 use super::runtime::{RunnerRuntime, RunnerServices};
 use super::streams::{AgentStreams, StreamState, poll_confirmation_prompt, poll_live_tool_output};
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_loop_iteration(
     agent_streams: &mut AgentStreams<'_>,
     stream_state: &mut StreamState,
@@ -22,6 +23,7 @@ pub(super) async fn run_loop_iteration(
     tui_config: &mut TuiConfig,
     registry: &ApiRegistry,
     image_picker: &Option<ratatui_image::picker::Picker>,
+    size_cache: &std::rc::Rc<super::caching_backend::CachedSizeState>,
 ) -> io::Result<LoopAction> {
     if agent_streams.is_empty() {
         handle_idle_iteration(
@@ -31,6 +33,7 @@ pub(super) async fn run_loop_iteration(
             tui_config,
             registry,
             image_picker,
+            size_cache,
         )
         .await
     } else {
@@ -42,6 +45,7 @@ pub(super) async fn run_loop_iteration(
             tui_config,
             registry,
             image_picker,
+            size_cache,
         )
         .await
     }
@@ -53,6 +57,7 @@ fn input_parts<'a>(
     tui_config: &'a mut TuiConfig,
     registry: &'a ApiRegistry,
     image_picker: &'a Option<ratatui_image::picker::Picker>,
+    size_cache: &'a std::rc::Rc<super::caching_backend::CachedSizeState>,
 ) -> (&'a mut crate::pane::PaneManager, InputDeps<'a>) {
     let RunnerRuntime {
         pane_mgr,
@@ -77,10 +82,12 @@ fn input_parts<'a>(
             pending_prompt,
             delegation_queue: &services.delegation_queue,
             image_picker,
+            size_cache,
         },
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_streaming_iteration(
     agent_streams: &mut AgentStreams<'_>,
     stream_state: &mut StreamState,
@@ -89,6 +96,7 @@ async fn handle_streaming_iteration(
     tui_config: &mut TuiConfig,
     registry: &ApiRegistry,
     image_picker: &Option<ratatui_image::picker::Picker>,
+    size_cache: &std::rc::Rc<super::caching_backend::CachedSizeState>,
 ) -> io::Result<LoopAction> {
     let tick = tokio::time::sleep(std::time::Duration::from_millis(16));
     tokio::pin!(tick);
@@ -117,7 +125,7 @@ async fn handle_streaming_iteration(
             poll_live_tool_output(&mut runtime.pane_mgr, &tui_config.tool_output_live);
             drain_inboxes(&mut runtime.pane_mgr, stream_state).await;
 
-            let (pane_mgr, mut deps) = input_parts(runtime, services, tui_config, registry, image_picker);
+            let (pane_mgr, mut deps) = input_parts(runtime, services, tui_config, registry, image_picker, size_cache);
             let action = handle_streaming_terminal_events(pane_mgr, stream_state, &mut deps).await?;
             if matches!(action, LoopAction::Quit) {
                 return Ok(LoopAction::Quit);
@@ -178,6 +186,7 @@ async fn dispatch_agent_event(
     .await;
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_idle_iteration(
     stream_state: &StreamState,
     runtime: &mut RunnerRuntime,
@@ -185,9 +194,17 @@ async fn handle_idle_iteration(
     tui_config: &mut TuiConfig,
     registry: &ApiRegistry,
     image_picker: &Option<ratatui_image::picker::Picker>,
+    size_cache: &std::rc::Rc<super::caching_backend::CachedSizeState>,
 ) -> io::Result<LoopAction> {
     drain_inboxes(&mut runtime.pane_mgr, stream_state).await;
 
-    let (pane_mgr, mut deps) = input_parts(runtime, services, tui_config, registry, image_picker);
+    let (pane_mgr, mut deps) = input_parts(
+        runtime,
+        services,
+        tui_config,
+        registry,
+        image_picker,
+        size_cache,
+    );
     handle_idle_terminal_events(pane_mgr, &mut deps).await
 }
