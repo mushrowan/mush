@@ -1423,6 +1423,44 @@ batch: 1/2 succeeded, 1 failed";
     }
 
     #[test]
+    fn session_picker_filter_is_fuzzy_subsequence() {
+        let sessions = vec![
+            SessionMeta {
+                id: mush_session::SessionId::from("a"),
+                title: Some("rust project".into()),
+                model_id: "m".into(),
+                created_at: Timestamp::now(),
+                updated_at: Timestamp::now(),
+                message_count: 1,
+                cwd: "/tmp".into(),
+            },
+            SessionMeta {
+                id: mush_session::SessionId::from("b"),
+                title: Some("python script".into()),
+                model_id: "m".into(),
+                created_at: Timestamp::now(),
+                updated_at: Timestamp::now(),
+                message_count: 2,
+                cwd: "/tmp".into(),
+            },
+        ];
+
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.open_session_picker(sessions, "/tmp".into());
+
+        // "rpj" is a subsequence of "rust project" but not a substring
+        let picker = app.interaction.session_picker.as_mut().unwrap();
+        picker.filter = "rpj".into();
+        let filtered = filtered_sessions(picker);
+        assert_eq!(
+            filtered.len(),
+            1,
+            "fuzzy filter should subsequence-match 'rust project' from 'rpj'"
+        );
+        assert_eq!(filtered[0].title.as_deref(), Some("rust project"));
+    }
+
+    #[test]
     fn session_picker_scope_filter() {
         let sessions = vec![
             SessionMeta {

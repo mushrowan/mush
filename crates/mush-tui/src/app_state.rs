@@ -40,7 +40,7 @@ pub struct CompletionState {
 }
 
 /// modal and prompt-related ui state
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct InteractionState {
     /// which UI mode we're in
     pub mode: AppMode,
