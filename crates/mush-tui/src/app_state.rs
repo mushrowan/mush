@@ -109,6 +109,18 @@ pub struct CachedHeight {
     pub height: usize,
 }
 
+/// cached per-frame status bar data so `left_spans` (which issues
+/// ~10 format! calls) and `status_bar_height` + `StatusBar::render`
+/// only pay the cost once per frame instead of 3-4 times
+#[derive(Debug, Clone)]
+pub struct CachedStatusBar {
+    pub width: u16,
+    pub spans: Vec<ratatui::text::Span<'static>>,
+    pub right_text: String,
+    pub confirm: Option<String>,
+    pub height: u16,
+}
+
 /// render caches and geometry from the last frame
 #[derive(Debug)]
 pub struct RenderState {
@@ -146,6 +158,11 @@ pub struct RenderState {
     /// accumulated scroll compensation (in lines) for content that grew
     /// while the user was scrolled up. resets when scroll_offset returns to 0
     pub scroll_compensation: Cell<usize>,
+    /// per-frame status bar cache. cleared at the start of each frame so
+    /// stale stats never leak. within a frame all `status_bar_height`,
+    /// `StatusBar::render` and `Ui::cursor_position` callers share the
+    /// same built spans instead of rebuilding with ~10 format! calls
+    pub status_bar_cache: RefCell<Option<CachedStatusBar>>,
 }
 
 impl RenderState {
@@ -165,6 +182,7 @@ impl RenderState {
             content_hash_cache: RefCell::new(Vec::new()),
             prev_content_lines: Cell::new(0),
             scroll_compensation: Cell::new(0),
+            status_bar_cache: RefCell::new(None),
         }
     }
 }

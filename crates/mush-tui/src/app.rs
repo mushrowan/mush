@@ -9,7 +9,7 @@ use throbber_widgets_tui::ThrobberState;
 
 pub use crate::app_event::{AppEvent, AppMode};
 pub use crate::app_state::{
-    CompletionState, InteractionState, NavigationState, RenderState, SearchState,
+    CachedStatusBar, CompletionState, InteractionState, NavigationState, RenderState, SearchState,
 };
 pub use crate::batch_output::{BatchSection, parse_batch_output, truncate_output};
 pub use crate::cache::{

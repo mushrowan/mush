@@ -19,6 +19,13 @@ pub(super) fn draw_panes(
 ) -> io::Result<()> {
     let pane_count = pane_mgr.pane_count() as u16;
     let focused_idx = pane_mgr.focused_index();
+
+    // invalidate per-frame caches on every pane so stats changes
+    // between frames can't leak through the cache
+    for pane in pane_mgr.panes_mut().iter_mut() {
+        pane.app.render_state.status_bar_cache.borrow_mut().take();
+    }
+
     if pane_count > 1 {
         let alert: Option<String> = {
             let busy: Vec<String> = pane_mgr

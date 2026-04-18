@@ -11,6 +11,24 @@ use mush_ai::types::{Dollars, ThinkingLevel, TokenCount};
 use crate::app::App;
 use crate::path_utils::truncate_path;
 
+#[cfg(test)]
+use std::cell::Cell;
+
+#[cfg(test)]
+thread_local! {
+    static LEFT_SPANS_CALLS: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_left_spans_call_count() {
+    LEFT_SPANS_CALLS.with(|c| c.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn left_spans_call_count() -> usize {
+    LEFT_SPANS_CALLS.with(Cell::get)
+}
+
 /// format token count as human-readable (e.g. 45k, 200k, 1.2m)
 fn format_tokens(tokens: mush_ai::types::TokenCount) -> String {
     let n = tokens.get();
@@ -50,6 +68,9 @@ fn usage_bar_width(total_width: u16) -> usize {
 
 /// build the left-side info spans
 fn left_spans(app: &App, width: u16) -> Vec<Span<'static>> {
+    #[cfg(test)]
+    LEFT_SPANS_CALLS.with(|c| c.set(c.get() + 1));
+
     let dim = app.theme.dim;
 
     let thinking_label = match app.thinking_level.normalize_visible() {
@@ -235,26 +256,56 @@ fn left_spans(app: &App, width: u16) -> Vec<Span<'static>> {
     spans
 }
 
-/// calculate how many lines the status bar needs (1 or 2, +1 for confirm prompt).
-/// the render pass uses the same logic to pack overflow spans onto a second line
-pub fn status_bar_height(app: &App, width: u16) -> u16 {
+/// ensure `app.render_state.status_bar_cache` is populated for `width`.
+///
+/// reuses the cache if the width matches. the cache is cleared by
+/// `draw_panes` at the start of each frame so state changes can't
+/// leak between frames
+fn ensure_status_bar_cache(app: &App, width: u16) {
+    {
+        let slot = app.render_state.status_bar_cache.borrow();
+        if let Some(c) = slot.as_ref()
+            && c.width == width
+        {
+            return;
+        }
+    }
+
     let spans = left_spans(app, width);
-    // use display width, not byte length: `│ ↑ ↓ ▀ ░` etc are multi-byte
-    // in utf-8 but 1 column wide. ratatui's Paragraph::wrap uses display
-    // width too, so mixing up byte counts here causes a spurious second
-    // line with blank content when unicode chars overshoot the byte count
+    let right_text = truncate_path(&app.cwd, 30);
+    let confirm = confirm_text(app);
+
     let left_width: usize = spans.iter().map(|s| s.width()).sum();
-    let right = truncate_path(&app.cwd, 30);
-    let right_width = UnicodeWidthStr::width(right.as_str());
-    let total = left_width + 2 + right_width; // 2 for padding between left and right
+    let right_width = UnicodeWidthStr::width(right_text.as_str());
+    let total = left_width + 2 + right_width;
     let wraps = total > width as usize;
-    if confirm_text(app).is_some() {
+    let height = if confirm.is_some() {
         if wraps { 3 } else { 2 }
     } else if wraps {
         2
     } else {
         1
-    }
+    };
+
+    *app.render_state.status_bar_cache.borrow_mut() = Some(crate::app::CachedStatusBar {
+        width,
+        spans,
+        right_text,
+        confirm,
+        height,
+    });
+}
+
+/// calculate how many lines the status bar needs (1 or 2, +1 for confirm prompt).
+/// the render pass uses the same logic to pack overflow spans onto a second line
+pub fn status_bar_height(app: &App, width: u16) -> u16 {
+    ensure_status_bar_cache(app, width);
+    app.render_state
+        .status_bar_cache
+        .borrow()
+        .as_ref()
+        .map(|c| c.height)
+        .unwrap_or(1)
 }
 
 /// renders the status bar
@@ -272,13 +323,14 @@ impl Widget for StatusBar<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let dim = self.app.theme.dim;
 
-        // build all the info spans
-        let spans = left_spans(self.app, area.width);
-        let right_text = truncate_path(&self.app.cwd, 30);
-        let confirm = confirm_text(self.app);
+        ensure_status_bar_cache(self.app, area.width);
+        let cache = self.app.render_state.status_bar_cache.borrow();
+        let Some(data) = cache.as_ref() else {
+            return;
+        };
 
         // split area: optional confirm line at the bottom, main area above
-        let (main, confirm_area) = if let Some(ref confirm_str) = confirm {
+        let (main, confirm_area) = if let Some(confirm_str) = data.confirm.as_ref() {
             let [main, conf] =
                 Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
             (main, Some((conf, confirm_str.clone())))
@@ -287,22 +339,23 @@ impl Widget for StatusBar<'_> {
         };
 
         // split main into left (wrapping content) and right (cwd, single line).
-        // right column has fixed width = cwd display width + 1 space gap; shrinks if needed.
+        // right column has fixed width = cwd display width + 1 space gap, shrinks if needed.
         // `…` (from truncate_path) and any unicode path components use display width
         let right_width =
-            (UnicodeWidthStr::width(right_text.as_str()) as u16 + 1).min(main.width / 2);
+            (UnicodeWidthStr::width(data.right_text.as_str()) as u16 + 1).min(main.width / 2);
         let [left_area, right_area] =
             Layout::horizontal([Constraint::Min(1), Constraint::Length(right_width)]).areas(main);
 
         // left: wrap spans across lines automatically using Paragraph::wrap.
         // trim:false so our leading space (Span::raw(" ")) is preserved
-        let left_paragraph = Paragraph::new(Line::from(spans)).wrap(Wrap { trim: false });
+        let left_paragraph =
+            Paragraph::new(Line::from(data.spans.clone())).wrap(Wrap { trim: false });
         left_paragraph.render(left_area, buf);
 
         // right: right-align cwd on the first line of the right column
         if right_width > 0 {
             Paragraph::new(Line::from(vec![Span::styled(
-                right_text,
+                data.right_text.clone(),
                 self.app.theme.status_dim,
             )]))
             .alignment(HorizontalAlignment::Right)
@@ -552,6 +605,39 @@ mod tests {
             })
             .unwrap();
         terminal.backend().buffer().clone()
+    }
+
+    /// full Ui render so the height + render paths hit together,
+    /// mirroring what `draw_panes` does every frame
+    fn render_full_ui(app: &App, width: u16, height: u16) -> Buffer {
+        use crate::ui::Ui;
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                // mirror draw_panes: height + cursor_position + render
+                let _ = crate::widgets::status_bar::status_bar_height(app, area.width);
+                let _ = Ui::new(app).cursor_position(area);
+                frame.render_widget(Ui::new(app), area);
+            })
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    #[test]
+    fn left_spans_built_once_per_frame() {
+        let mut app = App::new("test-model".into(), TokenCount::new(200_000));
+        app.stats.input_tokens = TokenCount::new(45_000);
+        app.stats.output_tokens = TokenCount::new(12_000);
+
+        reset_left_spans_call_count();
+        let _ = render_full_ui(&app, 120, 20);
+        let calls = left_spans_call_count();
+        assert_eq!(
+            calls, 1,
+            "left_spans should be built once per frame, was {calls}"
+        );
     }
 
     fn buffer_to_string(buf: &Buffer) -> String {
