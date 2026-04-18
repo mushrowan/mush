@@ -97,6 +97,10 @@ pub(super) async fn handle_slash_action(
                 path.as_deref().unwrap_or(""),
             );
         }
+        SlashAction::LoginComplete { code } => {
+            let pane = pane_mgr.focused_mut();
+            complete_login(&mut pane.app, code).await;
+        }
         SlashAction::Broadcast { message } => {
             if !pane_mgr.is_multi_pane() {
                 pane_mgr
@@ -335,5 +339,60 @@ pub(super) fn save_thinking_pref(
     prefs.insert(model_id.to_string(), level.normalize_visible());
     if let Some(saver) = saver {
         saver(prefs);
+    }
+}
+
+/// finish the oauth flow started via /login: exchange the user-supplied
+/// code for credentials using the PKCE challenge stashed on the app.
+/// on success, save credentials so future runs can pick them up
+pub(super) async fn complete_login(app: &mut crate::app::App, code: String) {
+    use mush_ai::oauth;
+
+    let Some(pending) = app.pending_oauth.take() else {
+        app.push_system_message(
+            "no in-progress oauth flow. start one with /login [provider] first",
+        );
+        return;
+    };
+
+    let Some(provider) = oauth::get_provider(&pending.provider_id) else {
+        app.push_system_message(format!(
+            "oauth provider {} is no longer available",
+            pending.provider_id
+        ));
+        return;
+    };
+
+    let trimmed = code.trim();
+    if trimmed.is_empty() {
+        app.push_system_message("no code provided. usage: /login-complete <code>");
+        // keep pending_oauth so they can retry
+        app.pending_oauth = Some(pending);
+        return;
+    }
+
+    match provider.exchange_code(trimmed, &pending.pkce).await {
+        Ok(creds) => {
+            let mut store = oauth::load_credentials().unwrap_or_default();
+            store.providers.insert(pending.provider_id.clone(), creds);
+            match oauth::save_credentials(&store) {
+                Ok(()) => {
+                    app.push_system_message(format!(
+                        "✓ logged in to {} (credentials saved)",
+                        pending.provider_name
+                    ));
+                }
+                Err(e) => {
+                    app.push_system_message(format!(
+                        "logged in but saving credentials failed: {e}"
+                    ));
+                }
+            }
+        }
+        Err(e) => {
+            app.push_system_message(format!("oauth login failed: {e}"));
+            // restore pending state so user can try a different code
+            app.pending_oauth = Some(pending);
+        }
     }
 }

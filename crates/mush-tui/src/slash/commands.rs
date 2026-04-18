@@ -41,6 +41,8 @@ pub fn handle(
             help.push_str("  /logs [n]      - show last n log entries (default 50)\n");
             help.push_str("  /injection     - toggle prompt injection preview\n");
             help.push_str("  /settings      - view/modify runtime settings (betas, scope)\n");
+            help.push_str("  /login [p]     - oauth login to provider (default anthropic)\n");
+            help.push_str("  /login-complete <code> - finish the oauth flow with the code\n");
             help.push_str("  /close         - close focused pane\n");
             help.push_str("  /broadcast msg - send a message to all panes\n");
             help.push_str("  /lock <path>   - lock a file for this pane\n");
@@ -213,6 +215,15 @@ pub fn handle(
         }
         SlashAction::Settings { args } => {
             handle_settings(app, tui_config, args);
+            None
+        }
+        SlashAction::Login { provider } => {
+            handle_login_start(app, provider.as_deref());
+            None
+        }
+        SlashAction::LoginComplete { code: _ } => {
+            // async completion is handled in runner/commands.rs after this
+            // returns. we just acknowledge here so the slash menu closes
             None
         }
         SlashAction::Undo => {
@@ -583,6 +594,73 @@ fn apply_beta_toggle(betas: &mut mush_ai::types::AnthropicBetas, field: &str, va
         _ => return false,
     }
     true
+}
+
+/// kick off an oauth login flow in-TUI. synchronous portion only:
+/// get URL + PKCE, open browser, stash pending state on `app` for
+/// `/login-complete` to pick up.
+fn handle_login_start(app: &mut App, provider_id_opt: Option<&str>) {
+    use mush_ai::oauth;
+
+    let provider_id = match provider_id_opt {
+        Some(id) => id.to_string(),
+        None => {
+            let providers = oauth::list_providers();
+            if providers.len() == 1 {
+                providers[0].0.to_string()
+            } else {
+                let list = providers
+                    .iter()
+                    .map(|(id, name)| format!("  {id} - {name}"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                app.push_system_message(format!(
+                    "available oauth providers:\n{list}\n\nspecify one: /login <provider>"
+                ));
+                return;
+            }
+        }
+    };
+
+    let Some(provider) = oauth::get_provider(&provider_id) else {
+        let available = oauth::list_providers()
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>()
+            .join(", ");
+        app.push_system_message(format!(
+            "unknown oauth provider: {provider_id}\navailable: {available}"
+        ));
+        return;
+    };
+
+    let (prompt, pkce) = match provider.begin_login() {
+        Ok(v) => v,
+        Err(e) => {
+            app.push_system_message(format!("failed to start oauth login: {e}"));
+            return;
+        }
+    };
+
+    let opened = open::that_detached(&prompt.url).is_ok();
+    let open_note = if opened {
+        "opened in your browser"
+    } else {
+        "copy the URL above into your browser"
+    };
+
+    app.push_system_message(format!(
+        "oauth login: {name}\n\n{url}\n\n{open_note}\n\n{instructions}\n\nwhen you have the code, run:\n  /login-complete <code>",
+        name = provider.name(),
+        url = prompt.url,
+        instructions = prompt.instructions,
+    ));
+
+    app.pending_oauth = Some(crate::app::PendingOAuth {
+        provider_id,
+        provider_name: provider.name().to_string(),
+        pkce,
+    });
 }
 
 fn handle_undo(app: &mut App, conversation: &mut ConversationState) {

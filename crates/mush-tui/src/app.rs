@@ -108,8 +108,20 @@ pub struct App {
     current_tool_batch: u32,
     /// oauth usage data (5h and 7d rolling windows)
     pub oauth_usage: Option<mush_ai::oauth::usage::OAuthUsage>,
+    /// in-progress oauth flow started via /login.
+    /// consumed when /login-complete fires with the authorization code
+    pub pending_oauth: Option<PendingOAuth>,
     /// colour theme for all widgets
     pub theme: crate::theme::Theme,
+}
+
+/// state captured when /login starts an oauth flow, consumed when the user
+/// provides the authorization code via /login-complete
+#[derive(Debug, Clone)]
+pub struct PendingOAuth {
+    pub provider_id: String,
+    pub provider_name: String,
+    pub pkce: mush_ai::oauth::PkceChallenge,
 }
 
 impl App {
@@ -147,6 +159,7 @@ impl App {
             cache: CacheTimer::new(300),
             current_tool_batch: 0,
             oauth_usage: None,
+            pending_oauth: None,
             theme: crate::theme::Theme::default(),
         }
     }

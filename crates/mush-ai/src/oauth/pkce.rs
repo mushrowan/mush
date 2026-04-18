@@ -6,7 +6,7 @@ use sha2::Digest;
 use super::OAuthError;
 
 /// PKCE verifier + challenge pair
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PkceChallenge {
     pub verifier: String,
     pub challenge: String,

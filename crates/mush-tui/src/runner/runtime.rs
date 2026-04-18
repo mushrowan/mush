@@ -32,6 +32,11 @@ const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
         "settings",
         "view or modify runtime settings (anthropic betas, scope)",
     ),
+    ("login", "start an oauth login flow for a provider"),
+    (
+        "login-complete",
+        "finish oauth login with the authorization code",
+    ),
     ("close", "close focused pane"),
     ("broadcast", "send a message to all panes"),
     ("lock", "lock a file for this pane"),
