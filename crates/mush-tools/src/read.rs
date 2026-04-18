@@ -2,6 +2,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
 use serde::Deserialize;
@@ -15,6 +16,10 @@ use mush_agent::truncation::{MAX_BYTES, MAX_LINES};
 const CONTENT_LINE_HEADROOM: usize = 5;
 /// per-line length cap (chars). longer lines silently truncated
 const MAX_LINE_CHARS: usize = 500;
+/// once cumulative lines read in this session cross this threshold,
+/// each subsequent read appends a hint suggesting the agent be more
+/// targeted (use grep, offset/limit, around_line, etc)
+const DEFAULT_CUMULATIVE_LINES_THRESHOLD: usize = 10_000;
 
 const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "webp"];
 
@@ -194,11 +199,23 @@ impl ReadArgs {
 
 pub struct ReadTool {
     cwd: Arc<Path>,
+    cumulative_threshold: usize,
+    cumulative_lines: Arc<AtomicUsize>,
 }
 
 impl ReadTool {
     pub fn new(cwd: Arc<Path>) -> Self {
-        Self { cwd }
+        Self {
+            cwd,
+            cumulative_threshold: DEFAULT_CUMULATIVE_LINES_THRESHOLD,
+            cumulative_lines: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_cumulative_threshold(mut self, threshold: usize) -> Self {
+        self.cumulative_threshold = threshold;
+        self
     }
 }
 
@@ -278,10 +295,21 @@ impl AgentTool for ReadTool {
 
         let path = resolve_path(&self.cwd, &args.path);
         let json_output = args.output.is_json();
+        let cumulative = self.cumulative_lines.clone();
+        let threshold = self.cumulative_threshold;
 
-        tokio::task::spawn_blocking(move || read_file(&path, args.offset, args.limit, json_output))
-            .await
-            .unwrap_or_else(|e| ToolResult::error(format!("task join error: {e}")))
+        tokio::task::spawn_blocking(move || {
+            let (mut result, lines_read) = read_file(&path, args.offset, args.limit, json_output);
+            if lines_read > 0 {
+                let prev = cumulative.fetch_add(lines_read, Ordering::Relaxed);
+                if prev + lines_read > threshold {
+                    append_cumulative_hint(&mut result, prev + lines_read, threshold);
+                }
+            }
+            result
+        })
+        .await
+        .unwrap_or_else(|e| ToolResult::error(format!("task join error: {e}")))
     }
 }
 
@@ -296,31 +324,40 @@ fn read_file(
     offset: Option<usize>,
     limit: Option<usize>,
     json_output: bool,
-) -> ToolResult {
+) -> (ToolResult, usize) {
     if !path.exists() {
-        return ToolResult::error(format!("file not found: {}", path.display()));
+        return (
+            ToolResult::error(format!("file not found: {}", path.display())),
+            0,
+        );
     }
 
     if !path.is_file() {
-        return ToolResult::error(format!("not a file: {}", path.display()));
+        return (
+            ToolResult::error(format!("not a file: {}", path.display())),
+            0,
+        );
     }
 
     // handle images
     if is_image(path) {
-        return read_image(path);
+        return (read_image(path), 0);
     }
 
     // read text file
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
-        Err(e) => return ToolResult::error(format!("failed to read file: {e}")),
+        Err(e) => return (ToolResult::error(format!("failed to read file: {e}")), 0),
     };
 
     let lines: Vec<&str> = content.lines().collect();
     let total_lines = lines.len();
 
     if total_lines == 0 {
-        return ToolResult::text(format!("(empty file, {} bytes)", content.len()));
+        return (
+            ToolResult::text(format!("(empty file, {} bytes)", content.len())),
+            0,
+        );
     }
 
     // apply offset (1-indexed)
@@ -385,9 +422,26 @@ fn read_file(
         if let Some(mtime) = modified {
             json["modified_epoch"] = serde_json::json!(mtime);
         }
-        ToolResult::text(json.to_string())
+        (ToolResult::text(json.to_string()), lines_written)
     } else {
-        ToolResult::text(result)
+        (ToolResult::text(result), lines_written)
+    }
+}
+
+/// append a hint to a ToolResult's first text part (if any) suggesting
+/// the agent switch to more targeted search tools
+fn append_cumulative_hint(result: &mut ToolResult, cumulative: usize, threshold: usize) {
+    use mush_ai::types::ToolResultContentPart;
+    let hint = format!(
+        "\n\n[hint: cumulative {cumulative} lines read this session (threshold {threshold}). \
+         consider using grep, find, or offset/limit/around_line for targeted reads \
+         rather than full-file scans]"
+    );
+    for part in &mut result.content {
+        if let ToolResultContentPart::Text(t) = part {
+            t.text.push_str(&hint);
+            return;
+        }
     }
 }
 
@@ -435,7 +489,7 @@ mod tests {
         let file = dir.path().join("test.txt");
         fs::write(&file, "line 1\nline 2\nline 3").unwrap();
 
-        let result = read_file(&file, None, None, false);
+        let (result, _) = read_file(&file, None, None, false);
         assert!(result.outcome.is_success());
         let text = extract_text(&result);
         // output now has L{n}: prefixes
@@ -449,7 +503,7 @@ mod tests {
         let file = dir.path().join("test.txt");
         fs::write(&file, "line 1\nline 2\nline 3\nline 4").unwrap();
 
-        let result = read_file(&file, Some(3), None, false);
+        let (result, _) = read_file(&file, Some(3), None, false);
         let text = extract_text(&result);
         assert!(!text.contains("L1:"));
         assert!(!text.contains("L2:"));
@@ -467,7 +521,7 @@ mod tests {
             .join("\n");
         fs::write(&file, &content).unwrap();
 
-        let result = read_file(&file, None, Some(5), false);
+        let (result, _) = read_file(&file, None, Some(5), false);
         let text = extract_text(&result);
         assert!(text.contains("L1: line 1"));
         assert!(text.contains("L5: line 5"));
@@ -478,14 +532,14 @@ mod tests {
 
     #[test]
     fn read_nonexistent_file() {
-        let result = read_file(Path::new("/nonexistent/file.txt"), None, None, false);
+        let (result, _) = read_file(Path::new("/nonexistent/file.txt"), None, None, false);
         assert!(result.outcome.is_error());
     }
 
     #[test]
     fn read_directory_returns_error() {
         let dir = temp_dir();
-        let result = read_file(dir.path(), None, None, false);
+        let (result, _) = read_file(dir.path(), None, None, false);
         assert!(result.outcome.is_error());
     }
 
@@ -504,7 +558,7 @@ mod tests {
         let file = dir.path().join("empty.txt");
         fs::write(&file, "").unwrap();
 
-        let result = read_file(&file, None, None, false);
+        let (result, _) = read_file(&file, None, None, false);
         let text = extract_text(&result);
         assert!(text.contains("empty file"));
     }
@@ -515,7 +569,7 @@ mod tests {
         let file = dir.path().join("test.txt");
         fs::write(&file, "line 1\nline 2\nline 3").unwrap();
 
-        let result = read_file(&file, None, None, true);
+        let (result, _) = read_file(&file, None, None, true);
         let text = extract_text(&result);
         let json: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(json["total_lines"], 3);
@@ -523,6 +577,33 @@ mod tests {
         assert_eq!(json["end_line"], 3);
         assert_eq!(json["truncated"], false);
         assert!(json["content"].as_str().unwrap().contains("line 1"));
+    }
+
+    #[tokio::test]
+    async fn cumulative_reads_beyond_threshold_emit_warning() {
+        let dir = temp_dir();
+        let small = dir.path().join("a.txt");
+        let big = dir.path().join("b.txt");
+        fs::write(&small, "x\n".repeat(5)).unwrap();
+        fs::write(&big, "y\n".repeat(10)).unwrap();
+
+        let tool = ReadTool::new(dir.path().into()).with_cumulative_threshold(10);
+
+        // first read: 5 lines, cumulative=5, below threshold, no warning
+        let r1 = tool.execute(serde_json::json!({"path": "a.txt"})).await;
+        let t1 = extract_text(&r1);
+        assert!(
+            !t1.contains("cumulative"),
+            "first read should not warn, got: {t1}"
+        );
+
+        // second read: 10 more lines, cumulative=15 > 10, warning should appear
+        let r2 = tool.execute(serde_json::json!({"path": "b.txt"})).await;
+        let t2 = extract_text(&r2);
+        assert!(
+            t2.contains("cumulative"),
+            "second read should warn about cumulative reads, got: {t2}"
+        );
     }
 
     #[tokio::test]
@@ -646,7 +727,7 @@ mod tests {
         let long_line = "x".repeat(1000);
         fs::write(&file, &long_line).unwrap();
 
-        let result = read_file(&file, None, None, false);
+        let (result, _) = read_file(&file, None, None, false);
         let text = extract_text(&result);
         // should be capped at MAX_LINE_CHARS (500)
         assert!(text.starts_with("L1: "));
@@ -660,7 +741,7 @@ mod tests {
         let file = dir.path().join("test.txt");
         fs::write(&file, "line 1\nline 2\nline 3\nline 4").unwrap();
 
-        let result = read_file(&file, Some(3), None, true);
+        let (result, _) = read_file(&file, Some(3), None, true);
         let text = extract_text(&result);
         let json: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(json["total_lines"], 4);
@@ -708,7 +789,7 @@ mod tests {
             .join("\n");
         fs::write(&file, &content).unwrap();
 
-        let result = read_file(&file, None, None, false);
+        let (result, _) = read_file(&file, None, None, false);
         let text = extract_text(&result);
 
         let line_count = text.lines().count();
