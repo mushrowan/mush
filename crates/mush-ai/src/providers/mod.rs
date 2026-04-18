@@ -5,7 +5,10 @@ pub mod openai_responses;
 pub mod sse;
 
 use crate::registry::ApiRegistry;
-use crate::types::{Message, Model, ThinkingLevel, ToolResultTrimming};
+use crate::types::{
+    AssistantMessage, Message, Model, ThinkingLevel, ToolResultMessage, ToolResultTrimming,
+    UserMessage,
+};
 
 /// max chars for tool results in older turns
 const TRIM_TOOL_OUTPUT_CHARS: usize = 1500;
@@ -25,7 +28,7 @@ pub(crate) fn format_error_chain(err: &dyn std::error::Error) -> String {
 }
 
 /// find the message index at which "recent" turns begin (sliding window boundary)
-pub(crate) fn recent_boundary(messages: &[Message]) -> usize {
+fn recent_boundary(messages: &[Message]) -> usize {
     let mut user_count = 0;
     for (i, msg) in messages.iter().enumerate().rev() {
         if matches!(msg, Message::User(_)) {
@@ -36,6 +39,29 @@ pub(crate) fn recent_boundary(messages: &[Message]) -> usize {
         }
     }
     0
+}
+
+/// visitor over a slice of `Message` values, used by provider request
+/// builders to share the iteration + boundary tracking logic while keeping
+/// provider-specific emit decisions in focused trait impls
+pub(crate) trait MessageVisitor {
+    fn on_user(&mut self, msg: &UserMessage);
+    fn on_assistant(&mut self, msg: &AssistantMessage);
+    fn on_tool_result(&mut self, msg: &ToolResultMessage, is_old_turn: bool);
+}
+
+/// walk messages dispatching to a visitor, passing `is_old_turn=true` for
+/// tool results before the sliding window boundary (see `recent_boundary`)
+pub(crate) fn walk_messages<V: MessageVisitor + ?Sized>(messages: &[Message], visitor: &mut V) {
+    let boundary = recent_boundary(messages);
+    for (i, msg) in messages.iter().enumerate() {
+        let is_old_turn = i < boundary;
+        match msg {
+            Message::User(user) => visitor.on_user(user),
+            Message::Assistant(asst) => visitor.on_assistant(asst),
+            Message::ToolResult(tr) => visitor.on_tool_result(tr, is_old_turn),
+        }
+    }
 }
 
 /// trim a tool result string, keeping head and tail previews
@@ -271,6 +297,90 @@ mod tests {
             }
             other => panic!("expected ApiError, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn walk_messages_dispatches_and_marks_old_turns() {
+        fn u(text: &str) -> Message {
+            Message::User(UserMessage {
+                content: UserContent::Text(text.into()),
+                timestamp_ms: Timestamp::now(),
+            })
+        }
+        fn a() -> Message {
+            Message::Assistant(AssistantMessage {
+                content: vec![],
+                model: "x".into(),
+                provider: Provider::Custom("x".into()),
+                api: Api::OpenaiCompletions,
+                usage: Usage::default(),
+                stop_reason: StopReason::Stop,
+                error_message: None,
+                timestamp_ms: Timestamp::now(),
+            })
+        }
+        fn tr(id: &str) -> Message {
+            Message::ToolResult(ToolResultMessage {
+                tool_call_id: id.into(),
+                tool_name: "tool".into(),
+                content: vec![],
+                outcome: ToolOutcome::Success,
+                timestamp_ms: Timestamp::now(),
+            })
+        }
+
+        // 4 user turns with tool results between them; boundary keeps the last
+        // 3 user turns "recent" so tr("t1") is the only old tool result
+        let messages = vec![
+            u("first"),
+            a(),
+            tr("t1"),
+            u("second"),
+            a(),
+            tr("t2"),
+            u("third"),
+            a(),
+            tr("t3"),
+            u("fourth"),
+        ];
+
+        #[derive(Default)]
+        struct Recorder {
+            events: Vec<String>,
+        }
+        impl MessageVisitor for Recorder {
+            fn on_user(&mut self, msg: &UserMessage) {
+                self.events.push(format!("user:{}", msg.text()));
+            }
+            fn on_assistant(&mut self, _msg: &AssistantMessage) {
+                self.events.push("asst".into());
+            }
+            fn on_tool_result(&mut self, msg: &ToolResultMessage, is_old_turn: bool) {
+                self.events.push(format!(
+                    "tr:{}:old={is_old_turn}",
+                    msg.tool_call_id.as_str()
+                ));
+            }
+        }
+
+        let mut rec = Recorder::default();
+        walk_messages(&messages, &mut rec);
+
+        assert_eq!(
+            rec.events,
+            vec![
+                "user:first",
+                "asst",
+                "tr:t1:old=true",
+                "user:second",
+                "asst",
+                "tr:t2:old=false",
+                "user:third",
+                "asst",
+                "tr:t3:old=false",
+                "user:fourth",
+            ]
+        );
     }
 
     #[test]

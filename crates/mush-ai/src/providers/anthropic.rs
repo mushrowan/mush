@@ -465,7 +465,7 @@ fn convert_messages(
     fixed
 }
 
-use super::{maybe_trim_tool_output, recent_boundary};
+use super::{MessageVisitor, maybe_trim_tool_output, walk_messages};
 
 /// raw conversion without orphan fixing
 fn convert_messages_raw(
@@ -473,155 +473,164 @@ fn convert_messages_raw(
     is_oauth: bool,
     trimming: ToolResultTrimming,
 ) -> Vec<RequestMessage> {
-    let mut result = Vec::new();
-    let boundary = recent_boundary(messages);
+    let mut visitor = AnthropicVisitor {
+        is_oauth,
+        trimming,
+        result: Vec::new(),
+    };
+    walk_messages(messages, &mut visitor);
+    visitor.result
+}
 
-    for (msg_idx, msg) in messages.iter().enumerate() {
-        let is_old_turn = msg_idx < boundary;
-        match msg {
-            Message::User(user) => {
-                // always emit as a content block array, never a bare JSON string.
-                // apply_cache_control_to_last_user_message inserts a cache_control
-                // field into the last block of the target message. if we emitted
-                // text as a string here, that function would have to wrap it in an
-                // array, then when cache_control moves to a newer message on the
-                // next request the old message reverts to a bare string. that
-                // format change alters the serialised prefix bytes and busts the
-                // anthropic prompt cache (which does byte-exact prefix matching)
-                let content = match &user.content {
-                    UserContent::Text(text) => serde_json::json!([{
-                        "type": "text",
-                        "text": text,
-                    }]),
-                    UserContent::Parts(parts) => {
-                        let blocks: Vec<serde_json::Value> = parts
-                            .iter()
-                            .filter_map(|part| match part {
-                                UserContentPart::Text(t) if t.text.is_empty() => None,
-                                UserContentPart::Text(t) => Some(serde_json::json!({
-                                    "type": "text",
-                                    "text": t.text,
-                                })),
-                                UserContentPart::Image(img) => Some(serde_json::json!({
-                                    "type": "image",
-                                    "source": {
-                                        "type": "base64",
-                                        "media_type": img.mime_type,
-                                        "data": img.data,
-                                    }
-                                })),
-                            })
-                            .collect();
-                        serde_json::Value::Array(blocks)
-                    }
-                };
-                result.push(RequestMessage {
-                    role: "user".into(),
-                    content,
-                });
-            }
-            Message::Assistant(asst) => {
-                let blocks: Vec<serde_json::Value> = asst
-                    .content
+struct AnthropicVisitor {
+    is_oauth: bool,
+    trimming: ToolResultTrimming,
+    result: Vec<RequestMessage>,
+}
+
+impl MessageVisitor for AnthropicVisitor {
+    fn on_user(&mut self, user: &UserMessage) {
+        // always emit as a content block array, never a bare JSON string.
+        // apply_cache_control_to_last_user_message inserts a cache_control
+        // field into the last block of the target message. if we emitted
+        // text as a string here, that function would have to wrap it in an
+        // array, then when cache_control moves to a newer message on the
+        // next request the old message reverts to a bare string. that
+        // format change alters the serialised prefix bytes and busts the
+        // anthropic prompt cache (which does byte-exact prefix matching)
+        let content = match &user.content {
+            UserContent::Text(text) => serde_json::json!([{
+                "type": "text",
+                "text": text,
+            }]),
+            UserContent::Parts(parts) => {
+                let blocks: Vec<serde_json::Value> = parts
                     .iter()
                     .filter_map(|part| match part {
-                        AssistantContentPart::Text(t) => {
-                            if t.text.is_empty() {
-                                None
-                            } else {
-                                Some(serde_json::json!({
-                                    "type": "text",
-                                    "text": t.text,
-                                }))
-                            }
-                        }
-                        AssistantContentPart::Thinking(t) => match t {
-                            ThinkingContent::Redacted { data } => Some(serde_json::json!({
-                                "type": "redacted_thinking",
-                                "data": data,
-                            })),
-                            ThinkingContent::Thinking {
-                                thinking,
-                                signature,
-                            } => {
-                                if thinking.is_empty() {
-                                    None
-                                } else if let Some(sig) = signature {
-                                    Some(serde_json::json!({
-                                        "type": "thinking",
-                                        "thinking": thinking,
-                                        "signature": sig,
-                                    }))
-                                } else {
-                                    // no signature (eg aborted stream), send as text
-                                    Some(serde_json::json!({
-                                        "type": "text",
-                                        "text": thinking,
-                                    }))
-                                }
-                            }
-                        },
-                        AssistantContentPart::ToolCall(tc) => {
-                            let name = if is_oauth {
-                                to_claude_code_name(tc.name.as_str())
-                            } else {
-                                tc.name.as_str().to_string()
-                            };
-                            Some(serde_json::json!({
-                                "type": "tool_use",
-                                "id": tc.id.as_str(),
-                                "name": name,
-                                "input": tc.arguments,
-                            }))
-                        }
-                    })
-                    .collect();
-
-                if !blocks.is_empty() {
-                    result.push(RequestMessage {
-                        role: "assistant".into(),
-                        content: serde_json::Value::Array(blocks),
-                    });
-                }
-            }
-            Message::ToolResult(tr) => {
-                let content_blocks: Vec<serde_json::Value> = tr
-                    .content
-                    .iter()
-                    .map(|part| match part {
-                        ToolResultContentPart::Text(t) => {
-                            let text = maybe_trim_tool_output(&t.text, is_old_turn, trimming);
-                            serde_json::json!({
-                                "type": "text",
-                                "text": text,
-                            })
-                        }
-                        ToolResultContentPart::Image(img) => serde_json::json!({
+                        UserContentPart::Text(t) if t.text.is_empty() => None,
+                        UserContentPart::Text(t) => Some(serde_json::json!({
+                            "type": "text",
+                            "text": t.text,
+                        })),
+                        UserContentPart::Image(img) => Some(serde_json::json!({
                             "type": "image",
                             "source": {
                                 "type": "base64",
                                 "media_type": img.mime_type,
                                 "data": img.data,
                             }
-                        }),
+                        })),
                     })
                     .collect();
-
-                let content = serde_json::json!([{
-                    "type": "tool_result",
-                    "tool_use_id": tr.tool_call_id.as_str(),
-                    "content": content_blocks,
-                    "is_error": tr.outcome.is_error(),
-                }]);
-                result.push(RequestMessage {
-                    role: "user".into(),
-                    content,
-                });
+                serde_json::Value::Array(blocks)
             }
+        };
+        self.result.push(RequestMessage {
+            role: "user".into(),
+            content,
+        });
+    }
+
+    fn on_assistant(&mut self, asst: &AssistantMessage) {
+        let is_oauth = self.is_oauth;
+        let blocks: Vec<serde_json::Value> = asst
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                AssistantContentPart::Text(t) => {
+                    if t.text.is_empty() {
+                        None
+                    } else {
+                        Some(serde_json::json!({
+                            "type": "text",
+                            "text": t.text,
+                        }))
+                    }
+                }
+                AssistantContentPart::Thinking(t) => match t {
+                    ThinkingContent::Redacted { data } => Some(serde_json::json!({
+                        "type": "redacted_thinking",
+                        "data": data,
+                    })),
+                    ThinkingContent::Thinking {
+                        thinking,
+                        signature,
+                    } => {
+                        if thinking.is_empty() {
+                            None
+                        } else if let Some(sig) = signature {
+                            Some(serde_json::json!({
+                                "type": "thinking",
+                                "thinking": thinking,
+                                "signature": sig,
+                            }))
+                        } else {
+                            // no signature (eg aborted stream), send as text
+                            Some(serde_json::json!({
+                                "type": "text",
+                                "text": thinking,
+                            }))
+                        }
+                    }
+                },
+                AssistantContentPart::ToolCall(tc) => {
+                    let name = if is_oauth {
+                        to_claude_code_name(tc.name.as_str())
+                    } else {
+                        tc.name.as_str().to_string()
+                    };
+                    Some(serde_json::json!({
+                        "type": "tool_use",
+                        "id": tc.id.as_str(),
+                        "name": name,
+                        "input": tc.arguments,
+                    }))
+                }
+            })
+            .collect();
+
+        if !blocks.is_empty() {
+            self.result.push(RequestMessage {
+                role: "assistant".into(),
+                content: serde_json::Value::Array(blocks),
+            });
         }
     }
 
-    result
+    fn on_tool_result(&mut self, tr: &ToolResultMessage, is_old_turn: bool) {
+        let content_blocks: Vec<serde_json::Value> = tr
+            .content
+            .iter()
+            .map(|part| match part {
+                ToolResultContentPart::Text(t) => {
+                    let text = maybe_trim_tool_output(&t.text, is_old_turn, self.trimming);
+                    serde_json::json!({
+                        "type": "text",
+                        "text": text,
+                    })
+                }
+                ToolResultContentPart::Image(img) => serde_json::json!({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": img.mime_type,
+                        "data": img.data,
+                    }
+                }),
+            })
+            .collect();
+
+        let content = serde_json::json!([{
+            "type": "tool_result",
+            "tool_use_id": tr.tool_call_id.as_str(),
+            "content": content_blocks,
+            "is_error": tr.outcome.is_error(),
+        }]);
+        self.result.push(RequestMessage {
+            role: "user".into(),
+            content,
+        });
+    }
 }
 
 /// ensure tool_use/tool_result pairing is consistent.

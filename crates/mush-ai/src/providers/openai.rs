@@ -129,105 +129,11 @@ fn build_request_body(
 
     // openai has automatic caching so always use SlidingWindow
     // (their caching handles prefix changes transparently)
-    let trimming = ToolResultTrimming::SlidingWindow;
-    let boundary = super::recent_boundary(messages);
-
-    for (msg_idx, msg) in messages.iter().enumerate() {
-        let is_old_turn = msg_idx < boundary;
-        match msg {
-            Message::User(user) => {
-                let content = match &user.content {
-                    UserContent::Text(text) => serde_json::json!(text),
-                    UserContent::Parts(parts) => {
-                        let blocks: Vec<serde_json::Value> = parts
-                            .iter()
-                            .filter_map(|part| match part {
-                                UserContentPart::Text(t) if t.text.is_empty() => None,
-                                UserContentPart::Text(t) => Some(serde_json::json!({
-                                    "type": "text",
-                                    "text": t.text,
-                                })),
-                                UserContentPart::Image(img) => Some(serde_json::json!({
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": format!("data:{};base64,{}", img.mime_type, img.data),
-                                    }
-                                })),
-                            })
-                            .collect();
-                        serde_json::Value::Array(blocks)
-                    }
-                };
-                all_messages.push(serde_json::json!({
-                    "role": "user",
-                    "content": content,
-                }));
-            }
-            Message::Assistant(asst) => {
-                let mut msg_obj = serde_json::json!({ "role": "assistant" });
-
-                // text content
-                let text_parts: Vec<&str> = asst
-                    .content
-                    .iter()
-                    .filter_map(|p| match p {
-                        AssistantContentPart::Text(t) if !t.text.is_empty() => {
-                            Some(t.text.as_str())
-                        }
-                        _ => None,
-                    })
-                    .collect();
-
-                if !text_parts.is_empty() {
-                    msg_obj["content"] = serde_json::json!(text_parts.join(""));
-                } else {
-                    msg_obj["content"] = serde_json::Value::Null;
-                }
-
-                // tool calls
-                let tool_calls: Vec<serde_json::Value> = asst
-                    .content
-                    .iter()
-                    .filter_map(|p| match p {
-                        AssistantContentPart::ToolCall(tc) => Some(serde_json::json!({
-                            "id": tc.id.as_str(),
-                            "type": "function",
-                            "function": {
-                                "name": tc.name.as_str(),
-                                "arguments": serde_json::to_string(&tc.arguments).unwrap_or_default(),
-                            }
-                        })),
-                        _ => None,
-                    })
-                    .collect();
-
-                if !tool_calls.is_empty() {
-                    msg_obj["tool_calls"] = serde_json::Value::Array(tool_calls);
-                }
-
-                all_messages.push(msg_obj);
-            }
-            Message::ToolResult(tr) => {
-                let raw_text = tr
-                    .content
-                    .iter()
-                    .filter_map(|p| match p {
-                        ToolResultContentPart::Text(t) => Some(t.text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-
-                let text = super::maybe_trim_tool_output(&raw_text, is_old_turn, trimming);
-
-                all_messages.push(serde_json::json!({
-                    "role": "tool",
-                    "tool_call_id": tr.tool_call_id.as_str(),
-                    "content": text,
-                }));
-            }
-        }
-    }
+    let mut visitor = OpenaiVisitor {
+        trimming: ToolResultTrimming::SlidingWindow,
+        out: &mut all_messages,
+    };
+    super::walk_messages(messages, &mut visitor);
 
     let converted_tools = if tools.is_empty() {
         None
@@ -266,6 +172,105 @@ fn build_request_body(
         stream_options: StreamOpts {
             include_usage: true,
         },
+    }
+}
+
+struct OpenaiVisitor<'a> {
+    trimming: ToolResultTrimming,
+    out: &'a mut Vec<serde_json::Value>,
+}
+
+impl super::MessageVisitor for OpenaiVisitor<'_> {
+    fn on_user(&mut self, user: &UserMessage) {
+        let content = match &user.content {
+            UserContent::Text(text) => serde_json::json!(text),
+            UserContent::Parts(parts) => {
+                let blocks: Vec<serde_json::Value> = parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        UserContentPart::Text(t) if t.text.is_empty() => None,
+                        UserContentPart::Text(t) => Some(serde_json::json!({
+                            "type": "text",
+                            "text": t.text,
+                        })),
+                        UserContentPart::Image(img) => Some(serde_json::json!({
+                            "type": "image_url",
+                            "image_url": {
+                                "url": format!("data:{};base64,{}", img.mime_type, img.data),
+                            }
+                        })),
+                    })
+                    .collect();
+                serde_json::Value::Array(blocks)
+            }
+        };
+        self.out.push(serde_json::json!({
+            "role": "user",
+            "content": content,
+        }));
+    }
+
+    fn on_assistant(&mut self, asst: &AssistantMessage) {
+        let mut msg_obj = serde_json::json!({ "role": "assistant" });
+
+        // text content
+        let text_parts: Vec<&str> = asst
+            .content
+            .iter()
+            .filter_map(|p| match p {
+                AssistantContentPart::Text(t) if !t.text.is_empty() => Some(t.text.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        if text_parts.is_empty() {
+            msg_obj["content"] = serde_json::Value::Null;
+        } else {
+            msg_obj["content"] = serde_json::json!(text_parts.join(""));
+        }
+
+        // tool calls
+        let tool_calls: Vec<serde_json::Value> = asst
+            .content
+            .iter()
+            .filter_map(|p| match p {
+                AssistantContentPart::ToolCall(tc) => Some(serde_json::json!({
+                    "id": tc.id.as_str(),
+                    "type": "function",
+                    "function": {
+                        "name": tc.name.as_str(),
+                        "arguments": serde_json::to_string(&tc.arguments).unwrap_or_default(),
+                    }
+                })),
+                _ => None,
+            })
+            .collect();
+
+        if !tool_calls.is_empty() {
+            msg_obj["tool_calls"] = serde_json::Value::Array(tool_calls);
+        }
+
+        self.out.push(msg_obj);
+    }
+
+    fn on_tool_result(&mut self, tr: &ToolResultMessage, is_old_turn: bool) {
+        let raw_text = tr
+            .content
+            .iter()
+            .filter_map(|p| match p {
+                ToolResultContentPart::Text(t) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let text = super::maybe_trim_tool_output(&raw_text, is_old_turn, self.trimming);
+
+        self.out.push(serde_json::json!({
+            "role": "tool",
+            "tool_call_id": tr.tool_call_id.as_str(),
+            "content": text,
+        }));
     }
 }
 
