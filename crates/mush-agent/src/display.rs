@@ -1,6 +1,9 @@
 //! display helpers for agent output
 
-fn truncate_with_ellipsis(text: &str, max_chars: usize) -> String {
+/// truncate text to at most `max_chars` (unicode-aware), appending an ellipsis
+/// if anything was cut. consumers that render in narrow, non-wrapping widgets
+/// (like pane tool summaries) use this to keep output to a single line
+pub fn truncate_with_ellipsis(text: &str, max_chars: usize) -> String {
     let ellipsis = if max_chars >= 3 { "..." } else { "" };
     let keep = max_chars.saturating_sub(ellipsis.len());
     let mut iter = text.char_indices();
@@ -27,8 +30,10 @@ pub fn summarise_tool_args(tool_name: &str, args: &serde_json::Value) -> String 
         "bash" => {
             let raw = args["command"].as_str().unwrap_or("");
             // collapse newlines into " && " so the summary stays single-line
-            // (ratatui swallows \n inside a Span, concatenating text with no separator)
-            let cmd = if raw.contains('\n') {
+            // (ratatui swallows \n inside a Span, concatenating text with no separator).
+            // full command is returned; consumers that need a one-line preview
+            // truncate explicitly using `truncate_with_ellipsis`
+            if raw.contains('\n') {
                 raw.split('\n')
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
@@ -36,11 +41,6 @@ pub fn summarise_tool_args(tool_name: &str, args: &serde_json::Value) -> String 
                     .join(" && ")
             } else {
                 raw.to_string()
-            };
-            if cmd.chars().count() > 60 {
-                truncate_with_ellipsis(&cmd, 60)
-            } else {
-                cmd
             }
         }
         "grep" => {
@@ -86,12 +86,21 @@ mod tests {
     }
 
     #[test]
-    fn bash_tool_truncates_multibyte_safely() {
+    fn bash_tool_returns_full_command() {
+        // `summarise_tool_args` no longer truncates; consumers that need a
+        // one-line preview (e.g. pane tool summaries) truncate explicitly
         let long_cmd = "—".repeat(100);
-        let long = serde_json::json!({"command": long_cmd});
+        let long = serde_json::json!({"command": long_cmd.clone()});
         let summary = summarise_tool_args("bash", &long);
-        assert!(summary.ends_with("..."));
-        assert!(summary.chars().count() <= 60);
+        assert_eq!(summary, long_cmd);
+    }
+
+    #[test]
+    fn truncate_with_ellipsis_is_multibyte_safe() {
+        let long = "—".repeat(100);
+        let truncated = truncate_with_ellipsis(&long, 20);
+        assert!(truncated.ends_with("..."));
+        assert!(truncated.chars().count() <= 20);
     }
 
     #[test]
