@@ -129,4 +129,10 @@ pub struct TuiConfig {
     pub settings: crate::settings::ScopedSettings,
     /// lines scrolled per j/k keystroke in scroll mode
     pub scroll_lines: u16,
+    /// effective favourite models list (config + disk resolved at startup).
+    /// cycled through with alt+m / alt+shift+m, ★-marked in the picker
+    pub favourite_models: Vec<String>,
+    /// whether the favourites list is pinned by config.toml. when true the
+    /// picker's ctrl+f toggle is rejected with a toast
+    pub favourites_locked: bool,
 }

@@ -86,6 +86,12 @@ pub struct Config {
     /// model tier aliases for delegation and multi-pane
     #[serde(default)]
     pub model_tiers: HashMap<String, String>,
+    /// models the user has pinned as favourites, shown with a star in the
+    /// model picker and cycleable with alt+m. declaring any value here
+    /// locks imperative adds/removes (the tui picker rejects ctrl+f with a
+    /// toast) so config stays the single source of truth
+    #[serde(default)]
+    pub favourite_models: Vec<String>,
     /// optional model to use for compaction (defaults to the active model)
     pub compaction_model: Option<String>,
     /// provider-specific settings (anthropic betas, scope, etc.)
@@ -460,6 +466,56 @@ pub fn save_last_model(model_id: &str) {
         let _ = std::fs::create_dir_all(parent);
     }
     let _ = std::fs::write(path, model_id);
+}
+
+// favourite models persistence (imperative, opt-in)
+
+fn favourite_models_path() -> PathBuf {
+    mush_session::data_dir().join("favourite-models.json")
+}
+
+/// load favourites written by `/favourite` runtime toggles. returns `Vec::new`
+/// if the file doesn't exist or can't be parsed
+pub fn load_favourite_models() -> Vec<String> {
+    load_favourite_models_from(&favourite_models_path())
+}
+
+pub(crate) fn load_favourite_models_from(path: &std::path::Path) -> Vec<String> {
+    if !path.exists() {
+        return Vec::new();
+    }
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .unwrap_or_default()
+}
+
+/// persist favourites after an imperative toggle. callers should gate on
+/// the locked flag from [`resolve_favourites`] before calling
+#[allow(dead_code, reason = "wired up in step 10 when /favourite lands")]
+pub fn save_favourite_models(models: &[String]) {
+    save_favourite_models_to(&favourite_models_path(), models);
+}
+
+pub(crate) fn save_favourite_models_to(path: &std::path::Path, models: &[String]) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(models) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
+/// pick the effective favourites list and whether imperative edits are locked.
+/// config (declarative) takes precedence when non-empty and locks the picker;
+/// otherwise the on-disk imperative list is live
+#[must_use]
+pub fn resolve_favourites(from_config: &[String], from_disk: Vec<String>) -> (Vec<String>, bool) {
+    if from_config.is_empty() {
+        (from_disk, false)
+    } else {
+        (from_config.to_vec(), true)
+    }
 }
 
 #[cfg(test)]
@@ -959,5 +1015,56 @@ strong = "claude-opus-4-7"
             config.compaction_model.as_deref(),
             Some("openai/gpt-5-nano")
         );
+    }
+
+    #[test]
+    fn favourite_models_default_empty() {
+        let config: Config = toml::from_str("").unwrap();
+        assert!(config.favourite_models.is_empty());
+    }
+
+    #[test]
+    fn favourite_models_parses_from_config() {
+        let config: Config =
+            toml::from_str(r#"favourite_models = ["claude-opus-4-7", "openai/gpt-5"]"#).unwrap();
+        assert_eq!(
+            config.favourite_models,
+            vec!["claude-opus-4-7".to_string(), "openai/gpt-5".to_string()]
+        );
+    }
+
+    #[test]
+    fn favourite_models_round_trip_on_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("favourite-models.json");
+        let favs = vec!["a".to_string(), "b".to_string()];
+        save_favourite_models_to(&path, &favs);
+        let loaded = load_favourite_models_from(&path);
+        assert_eq!(loaded, favs);
+    }
+
+    #[test]
+    fn load_favourite_models_returns_empty_when_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("favourite-models.json");
+        let loaded = load_favourite_models_from(&path);
+        assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn resolve_favourites_prefers_config_over_disk() {
+        let from_config = vec!["declared".to_string()];
+        let from_disk = vec!["imperative".to_string()];
+        let (effective, locked) = resolve_favourites(&from_config, from_disk.clone());
+        assert_eq!(effective, from_config);
+        assert!(locked, "non-empty config should lock imperative edits");
+    }
+
+    #[test]
+    fn resolve_favourites_falls_back_to_disk_when_config_empty() {
+        let from_disk = vec!["imperative".to_string()];
+        let (effective, locked) = resolve_favourites(&[], from_disk.clone());
+        assert_eq!(effective, from_disk);
+        assert!(!locked, "empty config lets imperative edits through");
     }
 }

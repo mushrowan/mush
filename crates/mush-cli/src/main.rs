@@ -504,6 +504,8 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
 
     let config_file = config::config_dir().join("config.toml");
     let provider_api_keys = setup.cfg.api_keys.to_map();
+    let (favourite_models, favourites_locked) =
+        config::resolve_favourites(&setup.cfg.favourite_models, config::load_favourite_models());
 
     let tui_config = TuiConfig {
         model: setup.model,
@@ -596,6 +598,8 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
             anthropic_betas: setup.cfg.settings.anthropic_betas.clone(),
         },
         scroll_lines: setup.cfg.scroll_lines,
+        favourite_models: favourite_models.clone(),
+        favourites_locked,
     };
 
     mush_tui::run_tui(tui_config, &setup.tools, &setup.registry)
