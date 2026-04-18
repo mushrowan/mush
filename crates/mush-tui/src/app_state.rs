@@ -37,6 +37,10 @@ pub struct CompletionState {
     pub completions: Vec<String>,
     /// current tab-completion state
     pub(crate) tab_state: Option<TabState>,
+    /// effective favourite model ids (from config + disk, resolved at startup)
+    pub favourite_models: Vec<String>,
+    /// whether favourites are pinned by config.toml
+    pub favourites_locked: bool,
 }
 
 /// modal and prompt-related ui state

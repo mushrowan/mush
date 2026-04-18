@@ -617,7 +617,11 @@ impl App {
                 return;
             }
 
-            self.completion.slash_menu = Some(SlashMenuState::for_models(model_matches));
+            self.completion.slash_menu = Some(SlashMenuState::for_models_with_favourites(
+                model_matches,
+                self.completion.favourite_models.clone(),
+                self.completion.favourites_locked,
+            ));
             self.interaction.mode = AppMode::SlashComplete;
             return;
         }
@@ -677,7 +681,11 @@ impl App {
         }
         self.input.text = "/model ".into();
         self.input.cursor = self.input.text.len();
-        self.completion.slash_menu = Some(SlashMenuState::for_models(model_matches));
+        self.completion.slash_menu = Some(SlashMenuState::for_models_with_favourites(
+            model_matches,
+            self.completion.favourite_models.clone(),
+            self.completion.favourites_locked,
+        ));
         self.interaction.mode = AppMode::SlashComplete;
     }
 

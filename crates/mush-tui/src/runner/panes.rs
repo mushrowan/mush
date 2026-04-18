@@ -141,6 +141,8 @@ pub(super) async fn fork_pane(
     new_app.completion.completions = completions;
     new_app.completion.slash_commands = slash_commands;
     new_app.completion.model_completions = model_completions;
+    new_app.completion.favourite_models = tui_config.favourite_models.clone();
+    new_app.completion.favourites_locked = tui_config.favourites_locked;
     new_app.cwd = cwd.clone();
     new_app.interaction.show_cost = tui_config.show_cost;
     new_app.interaction.show_usage_lines = tui_config.show_usage_lines;
@@ -336,6 +338,8 @@ fn app_from_parent(parent: &crate::pane::Pane, tui_config: &TuiConfig) -> App {
     app.completion.completions = parent.app.completion.completions.clone();
     app.completion.slash_commands = parent.app.completion.slash_commands.clone();
     app.completion.model_completions = parent.app.completion.model_completions.clone();
+    app.completion.favourite_models = parent.app.completion.favourite_models.clone();
+    app.completion.favourites_locked = parent.app.completion.favourites_locked;
     app.cwd = parent.app.cwd.clone();
     app.interaction.show_cost = tui_config.show_cost;
     app.interaction.show_usage_lines = tui_config.show_usage_lines;
