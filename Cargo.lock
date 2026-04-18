@@ -3127,6 +3127,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "futures",
+ "globset",
  "grep-matcher",
  "grep-regex",
  "grep-searcher",

@@ -20,6 +20,7 @@ thiserror.workspace = true
 async-trait.workspace = true
 htmd = "0.5.4"
 similar.workspace = true
+globset = "0.4"
 grep-regex = "0.1"
 grep-searcher = "0.1"
 grep-matcher = "0.1"
