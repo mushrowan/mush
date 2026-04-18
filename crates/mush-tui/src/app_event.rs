@@ -13,6 +13,10 @@ pub enum AppEvent {
     },
     /// user toggled the currently selected item in the /settings overlay
     SettingsToggleSelected,
+    /// user picked a model from the model picker, switch to it
+    ModelSelected {
+        model_id: String,
+    },
     /// user requested quit
     Quit,
     /// user requested abort of current operation

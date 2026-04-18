@@ -162,7 +162,11 @@ pub fn handle(
             None
         }
         SlashAction::Model { model_id: None } => {
-            app.push_system_message(format!("model: {}", app.model_id));
+            if app.completion.model_completions.is_empty() {
+                app.push_system_message(format!("model: {}", app.model_id));
+            } else {
+                app.open_model_picker();
+            }
             None
         }
         SlashAction::Model {

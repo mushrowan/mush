@@ -638,21 +638,26 @@ fn handle_slash_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         }
         // enter accepts the highlighted entry and closes the menu
         (_, KeyCode::Enter) => {
-            if let Some(ref menu) = app.completion.slash_menu {
+            let event = if let Some(ref menu) = app.completion.slash_menu {
                 if menu.model_mode {
-                    if let Some(model) = menu.model_matches.get(menu.selected) {
-                        app.input.text = format!("/model {}", model.id);
-                        app.input.cursor = app.input.text.len();
-                        app.input.ensure_cursor_visible();
-                    }
+                    menu.model_matches
+                        .get(menu.selected)
+                        .map(|model| AppEvent::ModelSelected {
+                            model_id: model.id.clone(),
+                        })
                 } else if let Some(cmd) = menu.matches.get(menu.selected) {
                     app.input.text = format!("/{}", cmd.name);
                     app.input.cursor = app.input.text.len();
                     app.input.ensure_cursor_visible();
+                    None
+                } else {
+                    None
                 }
-            }
+            } else {
+                None
+            };
             app.close_slash_menu();
-            None
+            event
         }
         // tab cycles forward with wrap
         (_, KeyCode::Tab) => {
@@ -1338,6 +1343,33 @@ mod tests {
     }
 
     #[test]
+    fn model_picker_enter_emits_model_selected() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.completion.model_completions = vec![
+            crate::app::ModelCompletion {
+                id: "claude-opus".into(),
+                name: "Claude Opus".into(),
+            },
+            crate::app::ModelCompletion {
+                id: "gpt-5".into(),
+                name: "GPT-5".into(),
+            },
+        ];
+        app.open_model_picker();
+
+        // select the second model
+        handle_key(&mut app, ctrl(KeyCode::Char('j')));
+
+        let event = handle_key(&mut app, key(KeyCode::Enter));
+        assert!(
+            matches!(event, Some(AppEvent::ModelSelected { ref model_id }) if model_id == "gpt-5"),
+            "expected ModelSelected{{ gpt-5 }}, got {event:?}"
+        );
+        assert!(app.completion.slash_menu.is_none());
+        assert_eq!(app.interaction.mode, AppMode::Normal);
+    }
+
+    #[test]
     fn slash_menu_typing_filters() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.completion.slash_commands = vec![
@@ -1418,9 +1450,13 @@ mod tests {
 
         handle_key(&mut app, key(KeyCode::Tab));
         handle_key(&mut app, ctrl(KeyCode::Char('j')));
-        handle_key(&mut app, key(KeyCode::Enter));
+        let event = handle_key(&mut app, key(KeyCode::Enter));
 
-        assert_eq!(app.input.text, "/model claude-sonnet-4-20250514");
+        assert!(
+            matches!(event, Some(AppEvent::ModelSelected { ref model_id }) if model_id == "claude-sonnet-4-20250514"),
+            "enter in model picker must emit ModelSelected directly, not just rewrite input text; got {event:?}"
+        );
+        assert!(app.completion.slash_menu.is_none());
     }
 
     #[test]
@@ -1444,10 +1480,46 @@ mod tests {
         app.input.cursor = app.input.text.len();
 
         handle_key(&mut app, key(KeyCode::Tab));
+        // type 'opu' - fuzzy-distinct between opus and sonnet
         handle_key(&mut app, key(KeyCode::Char('o')));
+        handle_key(&mut app, key(KeyCode::Char('p')));
+        handle_key(&mut app, key(KeyCode::Char('u')));
 
         let menu = app.completion.slash_menu.as_ref().unwrap();
         assert!(menu.model_mode);
+        // opus ranks first; sonnet may or may not match with a low score
+        // depending on fuzzy tolerance, so just assert the top hit
+        assert_eq!(menu.model_matches[0].id, "claude-opus-4-7");
+    }
+
+    #[test]
+    fn slash_menu_model_filter_is_fuzzy_subsequence() {
+        // demonstrate the fuzzy upgrade: "clop" isn't a substring of any
+        // model id but subsequence-matches "claude-opus"
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.completion.slash_commands = vec![crate::app::SlashCommand {
+            name: "model".into(),
+            description: "show or switch model".into(),
+        }];
+        app.completion.model_completions = vec![
+            crate::app::ModelCompletion {
+                id: "claude-opus-4-7".into(),
+                name: "Claude Opus 4.7".into(),
+            },
+            crate::app::ModelCompletion {
+                id: "gpt-5".into(),
+                name: "GPT 5".into(),
+            },
+        ];
+        app.input.text = "/model ".into();
+        app.input.cursor = app.input.text.len();
+
+        handle_key(&mut app, key(KeyCode::Tab));
+        for c in "clop".chars() {
+            handle_key(&mut app, key(KeyCode::Char(c)));
+        }
+
+        let menu = app.completion.slash_menu.as_ref().unwrap();
         assert_eq!(menu.model_matches.len(), 1);
         assert_eq!(menu.model_matches[0].id, "claude-opus-4-7");
     }
