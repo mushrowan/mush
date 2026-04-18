@@ -55,6 +55,7 @@ pub fn handle(
             help.push_str("  /panes         - list all panes with status\n");
             help.push_str("  /card          - show agent capability card\n");
             help.push_str("  /task claim/release/list - cross-agent task locking\n");
+            help.push_str("  /debug         - dump internal state (for bug reports)\n");
             help.push_str("  /quit          - exit mush\n");
             help.push_str("\ntip: type a prompt template name (e.g. /review file.rs) to expand it");
             app.push_system_message(help);
@@ -245,6 +246,10 @@ pub fn handle(
             handle_task(app, &tui_config.cwd, action);
             None
         }
+        SlashAction::Debug => {
+            app.push_system_message(build_debug_dump(app, tui_config.session_id.as_str()));
+            None
+        }
         SlashAction::Quit => {
             app.should_quit = true;
             None
@@ -252,6 +257,110 @@ pub fn handle(
         SlashAction::Other { name, args } => try_template(app, name, args),
         _ => None,
     }
+}
+
+/// dump internal state for troubleshooting. triggered by `/debug`.
+/// keep the output terse and markdown-formatted: callers paste it into
+/// bug reports and profiler session notes
+fn build_debug_dump(app: &App, session_id: &str) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::from("```\nmush debug state\n");
+    let _ = writeln!(out, "cwd: {}", app.cwd);
+    let _ = writeln!(
+        out,
+        "pane: {}",
+        match app.pane_info {
+            Some((idx, total)) => format!("{idx}/{total}"),
+            None => "single".into(),
+        }
+    );
+    let _ = writeln!(out, "pid: {} session: {}", std::process::id(), session_id);
+
+    let _ = writeln!(out, "\n[model]");
+    let _ = writeln!(
+        out,
+        "id: {} thinking: {:?}",
+        app.model_id.as_str(),
+        app.thinking_level
+    );
+
+    let _ = writeln!(out, "\n[messages]");
+    let total = app.messages.len();
+    let queued = app.messages.iter().filter(|m| m.queued).count();
+    let users = app
+        .messages
+        .iter()
+        .filter(|m| matches!(m.role, crate::app::MessageRole::User))
+        .count();
+    let _ = writeln!(
+        out,
+        "total: {total} users: {users} queued: {queued} active_tools: {}",
+        app.active_tools.len()
+    );
+
+    let _ = writeln!(out, "\n[stream]");
+    let _ = writeln!(
+        out,
+        "active: {} text: {}b thinking: {}b tool_args: {}b",
+        app.stream.active,
+        app.stream.text.len(),
+        app.stream.thinking.len(),
+        app.stream.tool_args.len()
+    );
+
+    let _ = writeln!(out, "\n[stats]");
+    let _ = writeln!(
+        out,
+        "in: {} out: {} cache_r: {} cache_w: {} ctx: {}/{}  cost: {}",
+        app.stats.input_tokens.get(),
+        app.stats.output_tokens.get(),
+        app.stats.cache_read_tokens.get(),
+        app.stats.cache_write_tokens.get(),
+        app.stats.context_tokens.get(),
+        app.stats.context_window.get(),
+        app.stats.total_cost
+    );
+
+    let _ = writeln!(out, "\n[render]");
+    let _ = writeln!(
+        out,
+        "scroll_offset: {} compensation: {} total_lines: {} visible: {}",
+        app.scroll_offset,
+        app.render_state.scroll_compensation.get(),
+        app.render_state.total_content_lines.get(),
+        app.render_state.visible_area_height.get()
+    );
+    let _ = writeln!(
+        out,
+        "caches: height={} indented={} markdown={} content_hash={}",
+        app.render_state.height_cache.borrow().len(),
+        app.render_state.indented_cache.borrow().len(),
+        app.render_state.markdown_cache.borrow().len(),
+        app.render_state.content_hash_cache.borrow().len()
+    );
+
+    let _ = writeln!(out, "\n[cache]");
+    let _ = writeln!(
+        out,
+        "ttl: {}s remaining: {:?} elapsed: {:?}",
+        app.cache.ttl_secs,
+        app.cache.remaining_secs(),
+        app.cache.elapsed_secs()
+    );
+
+    if let Some(ref oauth) = app.oauth_usage {
+        let _ = writeln!(out, "\n[oauth usage]");
+        if let Some(w) = &oauth.five_hour {
+            let _ = writeln!(out, "5h: {:.1}% resets: {}", w.utilization, w.resets_at);
+        }
+        if let Some(w) = &oauth.seven_day {
+            let _ = writeln!(out, "7d: {:.1}% resets: {}", w.utilization, w.resets_at);
+        }
+    }
+
+    out.push_str("```");
+    out
 }
 
 fn handle_task(app: &mut App, cwd: &std::path::Path, action: &SlashAction) {
@@ -816,5 +925,39 @@ mod tests {
         let msg = app.messages.last().unwrap();
         assert!(msg.content.contains("reuse 50%"));
         assert!(msg.content.contains("write 16%"));
+    }
+
+    #[test]
+    fn debug_dump_includes_key_state_sections() {
+        let mut app = App::new("claude-opus-4-7".into(), TokenCount::new(200_000));
+        app.stats.input_tokens = TokenCount::new(12_345);
+        app.stats.output_tokens = TokenCount::new(678);
+        app.cwd = "/home/user/project".into();
+        app.pane_info = Some((1, 3));
+
+        let dump = build_debug_dump(&app, "test-session-id");
+
+        // structure
+        assert!(dump.starts_with("```"));
+        assert!(dump.ends_with("```"));
+        for section in [
+            "[model]",
+            "[messages]",
+            "[stream]",
+            "[stats]",
+            "[render]",
+            "[cache]",
+        ] {
+            assert!(
+                dump.contains(section),
+                "debug dump missing section {section}:\n{dump}"
+            );
+        }
+
+        // key facts
+        assert!(dump.contains("/home/user/project"));
+        assert!(dump.contains("pane: 1/3"));
+        assert!(dump.contains("claude-opus-4-7"));
+        assert!(dump.contains("12345"));
     }
 }

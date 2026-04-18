@@ -39,6 +39,18 @@ impl Drop for TerminalStateGuard {
 }
 
 pub(super) fn probe_image_picker(policy: TerminalPolicy) -> Option<ratatui_image::picker::Picker> {
+    // never probe on non-tty stdio: `from_query_stdio` writes escape
+    // queries and blocks reading the response. on a pipe or broken pty
+    // those bytes leak into the output stream and the read can hang
+    let env = crate::terminal_policy::TtyEnvironment::detect();
+    if !env.is_tty() {
+        tracing::debug!(
+            reason = ?env.broken_reason(),
+            "skipping image protocol probe: not a full tty environment"
+        );
+        return None;
+    }
+
     match policy.image_probe {
         ImageProbeMode::Auto => match ratatui_image::picker::Picker::from_query_stdio() {
             Ok(picker) => Some(picker),

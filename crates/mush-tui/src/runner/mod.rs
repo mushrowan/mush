@@ -42,6 +42,23 @@ pub async fn run_tui(
     tools: &ToolRegistry,
     registry: &ApiRegistry,
 ) -> io::Result<()> {
+    // fail fast if we can't host a full TUI. piped stdin/stdout would
+    // otherwise leak raw-mode escape sequences into the output stream,
+    // hang on probe responses, or drop keyboard input. the matching fix
+    // for users is `mush -p` / `mush --print` for one-shot prompts
+    let env = crate::terminal_policy::TtyEnvironment::detect();
+    if !env.is_tty() {
+        let reason = env.broken_reason().unwrap_or("unknown");
+        return Err(io::Error::new(
+            io::ErrorKind::NotConnected,
+            format!(
+                "mush TUI requires an interactive terminal: {reason}. \
+                 try `mush -p \"your prompt\"` for one-shot use, or run mush \
+                 directly in a terminal (not piped, not inside CI)"
+            ),
+        ));
+    }
+
     restore_terminal_state();
 
     let image_picker = probe_image_picker(tui_config.terminal_policy);

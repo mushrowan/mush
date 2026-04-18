@@ -45,6 +45,7 @@ const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("label", "set pane label"),
     ("panes", "list all panes"),
     ("merge", "merge forked pane's work back"),
+    ("debug", "dump internal state (for bug reports)"),
     ("quit", "exit mush"),
 ];
 
