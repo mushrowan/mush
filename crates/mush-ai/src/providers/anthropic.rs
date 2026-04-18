@@ -176,10 +176,50 @@ impl ApiProvider for AnthropicProvider {
         let response = self
             .client
             .post(&url)
-            .headers(headers)
+            .headers(headers.clone())
             .json(&body)
             .send()
             .await?;
+
+        // safety net: if anthropic returns 401 with an oauth token the
+        // cached credentials are stale somehow (clock skew, revoked refresh
+        // token, server-side hiccup). force-refresh once and retry the same
+        // request. on further failure we fall through to check_response so
+        // the user sees the real error
+        let response = if response.status().as_u16() == 401 && is_oauth {
+            tracing::warn!(
+                model = %model.id,
+                "anthropic returned 401 with oauth token, forcing refresh + single retry"
+            );
+            match crate::oauth::force_refresh_anthropic_oauth_token().await {
+                Ok(Some(fresh)) => {
+                    if let Some(fresh_key) = ApiKey::new(fresh) {
+                        let key = fresh_key.expose();
+                        if let Ok(hv) = HeaderValue::from_str(&format!("Bearer {key}")) {
+                            headers.insert("authorization", hv);
+                        }
+                        self.client
+                            .post(&url)
+                            .headers(headers)
+                            .json(&body)
+                            .send()
+                            .await?
+                    } else {
+                        response
+                    }
+                }
+                Ok(None) => {
+                    tracing::warn!("force_refresh_anthropic_oauth_token returned None");
+                    response
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "force_refresh_anthropic_oauth_token failed");
+                    response
+                }
+            }
+        } else {
+            response
+        };
 
         let response =
             super::check_response(response, "anthropic", model.id.as_str(), &url).await?;
