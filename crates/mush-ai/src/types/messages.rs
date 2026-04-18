@@ -162,6 +162,42 @@ pub enum Message {
     ToolResult(ToolResultMessage),
 }
 
+/// pivot role used by [`find_recent_boundary`] to decide which messages
+/// count as turn boundaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnPivot {
+    /// count user messages (provider sliding-window uses this)
+    User,
+    /// count assistant messages (compaction observation masking uses this)
+    Assistant,
+}
+
+/// scan `messages` from the end and return the index where the N most
+/// recent pivot messages begin. returns `None` if the list contains fewer
+/// than `keep` pivots, meaning "not enough turns to define a cutoff".
+///
+/// callers typically treat `None` as "no-op, don't trim/mask anything".
+#[must_use]
+pub fn find_recent_boundary(messages: &[Message], pivot: TurnPivot, keep: usize) -> Option<usize> {
+    if keep == 0 {
+        return None;
+    }
+    let mut count = 0;
+    for (i, msg) in messages.iter().enumerate().rev() {
+        let is_pivot = match pivot {
+            TurnPivot::User => matches!(msg, Message::User(_)),
+            TurnPivot::Assistant => matches!(msg, Message::Assistant(_)),
+        };
+        if is_pivot {
+            count += 1;
+            if count == keep {
+                return Some(i);
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,5 +300,91 @@ mod tests {
     fn tool_outcome_from_bool() {
         assert_eq!(ToolOutcome::from(true), ToolOutcome::Error);
         assert_eq!(ToolOutcome::from(false), ToolOutcome::Success);
+    }
+
+    fn user(text: &str) -> Message {
+        Message::User(UserMessage {
+            content: UserContent::Text(text.into()),
+            timestamp_ms: Timestamp::zero(),
+        })
+    }
+
+    fn assistant() -> Message {
+        Message::Assistant(AssistantMessage {
+            content: vec![],
+            model: ModelId::from("test"),
+            provider: Provider::Anthropic,
+            api: Api::AnthropicMessages,
+            usage: Usage::default(),
+            stop_reason: StopReason::Stop,
+            error_message: None,
+            timestamp_ms: Timestamp::zero(),
+        })
+    }
+
+    fn tool_result() -> Message {
+        Message::ToolResult(ToolResultMessage {
+            tool_call_id: ToolCallId::from("tc"),
+            tool_name: ToolName::from("bash"),
+            content: vec![],
+            outcome: ToolOutcome::Success,
+            timestamp_ms: Timestamp::zero(),
+        })
+    }
+
+    #[test]
+    fn find_recent_boundary_returns_none_when_not_enough_pivots() {
+        let msgs = vec![user("a"), assistant(), user("b")];
+        assert_eq!(
+            find_recent_boundary(&msgs, TurnPivot::User, 3),
+            None,
+            "only 2 users, keep=3 should be None"
+        );
+        assert_eq!(
+            find_recent_boundary(&msgs, TurnPivot::Assistant, 2),
+            None,
+            "only 1 assistant, keep=2 should be None"
+        );
+    }
+
+    #[test]
+    fn find_recent_boundary_locates_nth_pivot_from_end() {
+        // indices:            0       1       2       3       4         5       6
+        let msgs = vec![
+            user("old"),    // 0
+            assistant(),    // 1
+            tool_result(),  // 2
+            user("mid"),    // 3
+            assistant(),    // 4
+            user("recent"), // 5
+            assistant(),    // 6
+        ];
+
+        // 3 most recent user messages: the oldest of those 3 is at idx 0
+        assert_eq!(find_recent_boundary(&msgs, TurnPivot::User, 3), Some(0));
+        // 2 most recent user messages: boundary at idx 3 (user "mid")
+        assert_eq!(find_recent_boundary(&msgs, TurnPivot::User, 2), Some(3));
+        // 1 most recent: user "recent" at idx 5
+        assert_eq!(find_recent_boundary(&msgs, TurnPivot::User, 1), Some(5));
+
+        // assistants: 3 total. keep=3 → idx 1. keep=2 → idx 4. keep=1 → idx 6.
+        assert_eq!(
+            find_recent_boundary(&msgs, TurnPivot::Assistant, 3),
+            Some(1)
+        );
+        assert_eq!(
+            find_recent_boundary(&msgs, TurnPivot::Assistant, 2),
+            Some(4)
+        );
+        assert_eq!(
+            find_recent_boundary(&msgs, TurnPivot::Assistant, 1),
+            Some(6)
+        );
+    }
+
+    #[test]
+    fn find_recent_boundary_zero_keep_returns_none() {
+        let msgs = vec![user("a"), assistant()];
+        assert_eq!(find_recent_boundary(&msgs, TurnPivot::User, 0), None);
     }
 }
