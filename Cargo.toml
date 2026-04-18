@@ -90,7 +90,7 @@ open = "5"
 atty = "0.2"
 
 # parallelism
-rayon = "1.11"
+rayon = "1.12"
 
 # crypto + encoding
 sha2 = "0.11"
