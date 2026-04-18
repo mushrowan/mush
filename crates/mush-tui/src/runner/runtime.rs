@@ -238,6 +238,7 @@ fn build_initial_app(tui_config: &TuiConfig, cwd: &Path) -> App {
         .normalize_visible();
     app.thinking_display = tui_config.thinking_display;
     app.interaction.show_cost = tui_config.show_cost;
+    app.interaction.show_usage_lines = tui_config.show_usage_lines;
     app.theme = tui_config.theme.clone();
     app.scroll_lines = tui_config.scroll_lines;
     app.cache.ttl_secs = if tui_config.cache_timer {
@@ -342,6 +343,7 @@ mod tests {
             auto_compact: false,
             auto_fork_compact: false,
             show_cost: true,
+            show_usage_lines: false,
             debug_cache: false,
             cache_timer: true,
             thinking_display: crate::app::ThinkingDisplay::Collapse,

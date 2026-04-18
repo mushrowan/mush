@@ -58,6 +58,8 @@ pub struct Config {
     pub confirm_tools: bool,
     /// show dollar cost in status bar (off by default, toggle with /cost)
     pub show_cost: bool,
+    /// render per-message usage lines (off by default, same info is in the status bar)
+    pub show_usage_lines: bool,
     /// show cache warmth countdown and send desktop notifications (off by default)
     pub cache_timer: bool,
     /// multi-pane file isolation mode: none (detect-and-warn), worktree, jj
