@@ -1361,6 +1361,52 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn answer_confirmation_deny_sends_false_and_sets_status() {
+        let pane_id = PaneId::new(1);
+        let mut pane_mgr = PaneManager::new(Pane::new(pane_id, app()));
+        let mut stream_state = StreamState::new();
+        let (confirm_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
+
+        stream_state.register_active(
+            pane_id,
+            StreamMeta {
+                steering_queue: Arc::new(Mutex::new(Vec::new())),
+                confirm_req_rx,
+                confirm_reply: Arc::new(Mutex::new(None)),
+                model: models::all_models_with_user().into_iter().next().unwrap(),
+                context_tokens: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                cancel: tokio_util::sync::CancellationToken::new(),
+            },
+        );
+
+        let tool_call_id = ToolCallId::from("tc_esc");
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        confirm_req_tx
+            .send(ConfirmRequest {
+                tool_call_id: tool_call_id.clone(),
+                prompt: "delete everything".into(),
+                reply: reply_tx,
+            })
+            .await
+            .unwrap();
+
+        poll_confirmation_prompt(&mut pane_mgr, &mut stream_state).await;
+        answer_confirmation(&mut pane_mgr, &mut stream_state, false).await;
+
+        // reply channel gets `false` so the agent knows the tool was denied
+        assert!(!reply_rx.await.unwrap());
+        let app = &pane_mgr.focused().app;
+        assert_eq!(app.interaction.mode, crate::app::AppMode::Normal);
+        assert!(app.interaction.confirm_prompt.is_none());
+        assert!(app.interaction.confirm_tool_call_id.is_none());
+        // status message mentions the denied tool so the user sees feedback
+        assert_eq!(
+            app.status.as_deref(),
+            Some(format!("tool denied: {tool_call_id}").as_str())
+        );
+    }
+
     #[test]
     fn poll_live_tool_output_updates_focused_tool() {
         let pane_id = PaneId::new(1);
