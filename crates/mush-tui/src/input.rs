@@ -636,8 +636,8 @@ fn handle_slash_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             app.close_slash_menu();
             None
         }
-        // select the highlighted command
-        (_, KeyCode::Enter) | (_, KeyCode::Tab) => {
+        // enter accepts the highlighted entry and closes the menu
+        (_, KeyCode::Enter) => {
             if let Some(ref menu) = app.completion.slash_menu {
                 if menu.model_mode {
                     if let Some(model) = menu.model_matches.get(menu.selected) {
@@ -654,6 +654,26 @@ fn handle_slash_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             app.close_slash_menu();
             None
         }
+        // tab cycles forward with wrap
+        (_, KeyCode::Tab) => {
+            if let Some(ref mut menu) = app.completion.slash_menu {
+                let len = menu_len(menu);
+                if len > 0 {
+                    menu.selected = (menu.selected + 1) % len;
+                }
+            }
+            None
+        }
+        // shift+backtab cycles backward with wrap
+        (KeyModifiers::SHIFT, KeyCode::BackTab) | (_, KeyCode::BackTab) => {
+            if let Some(ref mut menu) = app.completion.slash_menu {
+                let len = menu_len(menu);
+                if len > 0 {
+                    menu.selected = (menu.selected + len - 1) % len;
+                }
+            }
+            None
+        }
         // navigate
         (_, KeyCode::Up) | (KeyModifiers::CONTROL, KeyCode::Char('k')) => {
             if let Some(ref mut menu) = app.completion.slash_menu {
@@ -663,11 +683,7 @@ fn handle_slash_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         }
         (_, KeyCode::Down) | (KeyModifiers::CONTROL, KeyCode::Char('j')) => {
             if let Some(ref mut menu) = app.completion.slash_menu {
-                let len = if menu.model_mode {
-                    menu.model_matches.len()
-                } else {
-                    menu.matches.len()
-                };
+                let len = menu_len(menu);
                 if menu.selected + 1 < len {
                     menu.selected += 1;
                 }
@@ -691,6 +707,14 @@ fn handle_slash_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             None
         }
         _ => None,
+    }
+}
+
+fn menu_len(menu: &crate::slash_menu::SlashMenuState) -> usize {
+    if menu.model_mode {
+        menu.model_matches.len()
+    } else {
+        menu.matches.len()
     }
 }
 
@@ -1234,6 +1258,74 @@ mod tests {
         handle_key(&mut app, key(KeyCode::Enter));
         assert_eq!(app.interaction.mode, AppMode::Normal);
         assert_eq!(app.input.text, "/help");
+    }
+
+    #[test]
+    fn slash_menu_tab_cycles_selection_with_wrap() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.completion.slash_commands = vec![
+            crate::app::SlashCommand {
+                name: "login".into(),
+                description: "oauth login".into(),
+            },
+            crate::app::SlashCommand {
+                name: "login-complete".into(),
+                description: "finish oauth".into(),
+            },
+        ];
+        app.input.text = "/login".into();
+        app.input.cursor = app.input.text.len();
+
+        // first tab opens the menu with selection 0
+        handle_key(&mut app, key(KeyCode::Tab));
+        assert_eq!(app.interaction.mode, AppMode::SlashComplete);
+        assert_eq!(app.completion.slash_menu.as_ref().unwrap().selected, 0);
+
+        // subsequent tab advances selection
+        handle_key(&mut app, key(KeyCode::Tab));
+        assert_eq!(app.completion.slash_menu.as_ref().unwrap().selected, 1);
+
+        // tab at end wraps to 0
+        handle_key(&mut app, key(KeyCode::Tab));
+        assert_eq!(app.completion.slash_menu.as_ref().unwrap().selected, 0);
+
+        // shift+backtab moves back, wrapping past 0 to last
+        let shift_backtab = KeyEvent {
+            code: KeyCode::BackTab,
+            modifiers: KeyModifiers::SHIFT,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
+        handle_key(&mut app, shift_backtab);
+        assert_eq!(app.completion.slash_menu.as_ref().unwrap().selected, 1);
+
+        // tab no longer accepts, enter does. menu is still open
+        assert!(app.completion.slash_menu.is_some());
+    }
+
+    #[test]
+    fn slash_menu_enter_accepts_and_closes() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.completion.slash_commands = vec![
+            crate::app::SlashCommand {
+                name: "login".into(),
+                description: "oauth login".into(),
+            },
+            crate::app::SlashCommand {
+                name: "login-complete".into(),
+                description: "finish oauth".into(),
+            },
+        ];
+        app.input.text = "/login".into();
+        app.input.cursor = app.input.text.len();
+        handle_key(&mut app, key(KeyCode::Tab));
+        // advance to /login-complete
+        handle_key(&mut app, key(KeyCode::Tab));
+
+        handle_key(&mut app, key(KeyCode::Enter));
+        assert_eq!(app.interaction.mode, AppMode::Normal);
+        assert!(app.completion.slash_menu.is_none());
+        assert_eq!(app.input.text, "/login-complete");
     }
 
     #[test]
