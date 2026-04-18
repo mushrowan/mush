@@ -814,6 +814,18 @@ impl App {
             return None;
         }
         let text = self.input.text.as_str();
+        // suppress ghost when the input is itself an exact slash command name,
+        // otherwise Enter would accept a longer sibling (e.g. /login submitting
+        // /login-complete) instead of running the typed command
+        if let Some(rest) = text.strip_prefix('/')
+            && self
+                .completion
+                .slash_commands
+                .iter()
+                .any(|c| c.name == rest)
+        {
+            return None;
+        }
         let candidate = if let Some(rest) = text.strip_prefix("/model ") {
             self.completion
                 .completions
@@ -2315,6 +2327,48 @@ batch: 1/2 succeeded, 1 failed";
         assert!(
             system_msgs.is_empty(),
             "normal growth should not produce system messages, got: {system_msgs:?}"
+        );
+    }
+
+    #[test]
+    fn ghost_text_shown_for_partial_prefix() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.completion.completions = vec!["/login".into(), "/login-complete".into()];
+        app.completion.slash_commands = vec![
+            SlashCommand {
+                name: "login".into(),
+                description: "start oauth".into(),
+            },
+            SlashCommand {
+                name: "login-complete".into(),
+                description: "finish oauth".into(),
+            },
+        ];
+        app.input.text = "/lo".into();
+        app.input.cursor = 3;
+        assert_eq!(app.ghost_text(), Some("gin"));
+    }
+
+    #[test]
+    fn ghost_text_suppressed_when_input_is_exact_command() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.completion.completions = vec!["/login".into(), "/login-complete".into()];
+        app.completion.slash_commands = vec![
+            SlashCommand {
+                name: "login".into(),
+                description: "start oauth".into(),
+            },
+            SlashCommand {
+                name: "login-complete".into(),
+                description: "finish oauth".into(),
+            },
+        ];
+        app.input.text = "/login".into();
+        app.input.cursor = 6;
+        assert_eq!(
+            app.ghost_text(),
+            None,
+            "/login exactly matches a command so no ghost suffix should leak /login-complete"
         );
     }
 }
