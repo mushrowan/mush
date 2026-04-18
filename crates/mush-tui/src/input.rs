@@ -65,8 +65,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     // 2. global bindings
     match (key.modifiers, key.code) {
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => return Some(AppEvent::Quit),
-        (_, KeyCode::Esc) if app.stream.active => return Some(AppEvent::Abort),
-        (_, KeyCode::Esc) if app.scroll_offset > 0 => {
+        _ if is_cancel_key(key) && app.stream.active => return Some(AppEvent::Abort),
+        _ if is_cancel_key(key) && app.scroll_offset > 0 => {
             app.scroll_to_bottom();
             return None;
         }
@@ -334,7 +334,7 @@ fn handle_settings_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         return None;
     };
     match (key.modifiers, key.code) {
-        (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
+        (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('c' | '[')) => {
             app.settings_menu = None;
             app.interaction.mode = AppMode::Normal;
         }
@@ -354,7 +354,7 @@ fn handle_settings_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
 fn handle_search_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     match (key.modifiers, key.code) {
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => return Some(AppEvent::Quit),
-        (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('f')) => {
+        (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('f' | '[')) => {
             app.interaction.mode = AppMode::Normal;
             app.interaction.search.query.clear();
             app.interaction.search.matches.clear();
@@ -408,7 +408,7 @@ fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
 
     match (key.modifiers, key.code) {
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => return Some(AppEvent::Quit),
-        (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('s')) => {
+        (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('s' | '[')) => {
             if app.navigation.selection_anchor.is_some() {
                 // first esc clears selection, stays in scroll mode
                 app.navigation.selection_anchor = None;
@@ -632,7 +632,7 @@ fn copy_via_shell(text: &str) -> bool {
 
 fn handle_slash_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     match (key.modifiers, key.code) {
-        (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
+        (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('c' | '[')) => {
             app.close_slash_menu();
             None
         }
@@ -718,9 +718,18 @@ fn menu_len(menu: &crate::slash_menu::SlashMenuState) -> usize {
     }
 }
 
+/// ctrl+[ is byte 0x1B, indistinguishable from ESC on terminals without
+/// kitty's DISAMBIGUATE_ESCAPE_CODES. on terminals with it, crossterm reports
+/// ctrl+[ as (CONTROL, Char('[')). this helper treats them equivalently so
+/// users can cancel modals with either on any terminal
+fn is_cancel_key(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Esc)
+        || (key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('['))
+}
+
 fn handle_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     match (key.modifiers, key.code) {
-        (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
+        (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('c' | '[')) => {
             app.close_session_picker();
             None
         }
@@ -1838,5 +1847,80 @@ mod tests {
 
         handle_key(&mut app, key(KeyCode::Char('j')));
         assert_eq!(app.scroll_offset, 0);
+    }
+
+    // ctrl+[ is the same byte as ESC in legacy terminal mode, but terminals
+    // with kitty keyboard enhancement disambiguate them. these tests pin
+    // that ctrl+[ cancels every modal the same way ESC does.
+
+    #[test]
+    fn ctrl_bracket_closes_slash_menu() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.completion.slash_commands = vec![crate::app::SlashCommand {
+            name: "help".into(),
+            description: "show help".into(),
+        }];
+        app.input.text = "/".into();
+        app.input.cursor = 1;
+        handle_key(&mut app, key(KeyCode::Tab));
+        assert_eq!(app.interaction.mode, AppMode::SlashComplete);
+
+        handle_key(&mut app, ctrl(KeyCode::Char('[')));
+        assert_eq!(app.interaction.mode, AppMode::Normal);
+        assert!(app.completion.slash_menu.is_none());
+    }
+
+    #[test]
+    fn ctrl_bracket_exits_scroll_mode() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.push_user_message("one");
+        handle_key(&mut app, ctrl(KeyCode::Char('s')));
+        assert_eq!(app.interaction.mode, AppMode::Scroll);
+
+        handle_key(&mut app, ctrl(KeyCode::Char('[')));
+        assert_eq!(app.interaction.mode, AppMode::Normal);
+    }
+
+    #[test]
+    fn ctrl_bracket_exits_search_mode() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.push_user_message("one");
+        app.interaction.mode = AppMode::Search;
+
+        handle_key(&mut app, ctrl(KeyCode::Char('[')));
+        assert_eq!(app.interaction.mode, AppMode::Normal);
+    }
+
+    #[test]
+    fn ctrl_bracket_closes_session_picker() {
+        use mush_ai::types::{ModelId, SessionId, Timestamp};
+        use mush_session::SessionMeta;
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.open_session_picker(
+            vec![SessionMeta {
+                id: SessionId::new(),
+                title: Some("hello".into()),
+                model_id: ModelId::from("m"),
+                created_at: Timestamp::now(),
+                updated_at: Timestamp::now(),
+                message_count: 1,
+                cwd: "/tmp".into(),
+            }],
+            "/tmp".into(),
+        );
+        assert_eq!(app.interaction.mode, AppMode::SessionPicker);
+
+        handle_key(&mut app, ctrl(KeyCode::Char('[')));
+        assert_eq!(app.interaction.mode, AppMode::Normal);
+        assert!(app.interaction.session_picker.is_none());
+    }
+
+    #[test]
+    fn ctrl_bracket_aborts_streaming() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.stream.active = true;
+
+        let event = handle_key(&mut app, ctrl(KeyCode::Char('[')));
+        assert!(matches!(event, Some(AppEvent::Abort)));
     }
 }
