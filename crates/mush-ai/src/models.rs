@@ -24,6 +24,13 @@ static BUILTIN_MODELS: LazyLock<Vec<Model>> = LazyLock::new(|| {
     models.extend(openrouter_models());
     models.extend(openai_models());
     models.extend(openai_codex_models());
+    models.extend(groq_models());
+    models.extend(deepseek_models());
+    models.extend(xai_models());
+    models.extend(cerebras_models());
+    models.extend(mistral_models());
+    models.extend(together_models());
+    models.extend(deepinfra_models());
     models
 });
 
@@ -311,6 +318,505 @@ pub fn openai_codex_models() -> Vec<Model> {
     ]
 }
 
+/// compact spec for building an OpenAI-compatible model entry.
+/// each field mirrors `Model` but skips the repeated constants
+/// (api = completions, provider wrapped, costs as ModelCost) to keep
+/// the provider bundle tables readable
+struct OaiModel {
+    id: &'static str,
+    name: &'static str,
+    provider: &'static str,
+    base_url: &'static str,
+    reasoning: bool,
+    image: bool,
+    input_cost: f64,
+    output_cost: f64,
+    cache_read_cost: f64,
+    context: u32,
+    max_output: u32,
+}
+
+impl OaiModel {
+    fn into_model(self) -> Model {
+        let mut input = vec![InputModality::Text];
+        if self.image {
+            input.push(InputModality::Image);
+        }
+        Model {
+            id: self.id.into(),
+            name: self.name.into(),
+            api: Api::OpenaiCompletions,
+            provider: Provider::Custom(self.provider.into()),
+            base_url: self.base_url.into(),
+            reasoning: self.reasoning,
+            input,
+            cost: ModelCost {
+                input: self.input_cost,
+                output: self.output_cost,
+                cache_read: self.cache_read_cost,
+                cache_write: 0.0,
+            },
+            context_window: TokenCount::new(self.context as u64),
+            max_output_tokens: TokenCount::new(self.max_output as u64),
+        }
+    }
+}
+
+/// all built-in groq models (openai-compatible, fast LPU inference).
+/// base url: https://api.groq.com/openai/v1
+/// env: GROQ_API_KEY
+#[must_use]
+pub fn groq_models() -> Vec<Model> {
+    const BASE: &str = "https://api.groq.com/openai/v1";
+    [
+        OaiModel {
+            id: "llama-3.3-70b-versatile",
+            name: "Llama 3.3 70B (Groq)",
+            provider: "groq",
+            base_url: BASE,
+            reasoning: false,
+            image: false,
+            input_cost: 0.59,
+            output_cost: 0.79,
+            cache_read_cost: 0.0,
+            context: 131_072,
+            max_output: 32_768,
+        },
+        OaiModel {
+            id: "llama-3.1-8b-instant",
+            name: "Llama 3.1 8B Instant (Groq)",
+            provider: "groq",
+            base_url: BASE,
+            reasoning: false,
+            image: false,
+            input_cost: 0.05,
+            output_cost: 0.08,
+            cache_read_cost: 0.0,
+            context: 131_072,
+            max_output: 8_192,
+        },
+        OaiModel {
+            id: "meta-llama/llama-4-scout-17b-16e-instruct",
+            name: "Llama 4 Scout 17B (Groq)",
+            provider: "groq",
+            base_url: BASE,
+            reasoning: false,
+            image: true,
+            input_cost: 0.11,
+            output_cost: 0.34,
+            cache_read_cost: 0.0,
+            context: 131_072,
+            max_output: 8_192,
+        },
+        OaiModel {
+            id: "moonshotai/kimi-k2-instruct",
+            name: "Kimi K2 Instruct (Groq)",
+            provider: "groq",
+            base_url: BASE,
+            reasoning: false,
+            image: false,
+            input_cost: 1.0,
+            output_cost: 3.0,
+            cache_read_cost: 0.0,
+            context: 131_072,
+            max_output: 16_384,
+        },
+        OaiModel {
+            id: "qwen/qwen3-32b",
+            name: "Qwen3 32B (Groq)",
+            provider: "groq",
+            base_url: BASE,
+            reasoning: true,
+            image: false,
+            input_cost: 0.29,
+            output_cost: 0.59,
+            cache_read_cost: 0.0,
+            context: 131_072,
+            max_output: 16_384,
+        },
+        OaiModel {
+            id: "openai/gpt-oss-120b",
+            name: "GPT-OSS 120B (Groq)",
+            provider: "groq",
+            base_url: BASE,
+            reasoning: true,
+            image: false,
+            input_cost: 0.15,
+            output_cost: 0.75,
+            cache_read_cost: 0.0,
+            context: 131_072,
+            max_output: 32_768,
+        },
+        OaiModel {
+            id: "openai/gpt-oss-20b",
+            name: "GPT-OSS 20B (Groq)",
+            provider: "groq",
+            base_url: BASE,
+            reasoning: true,
+            image: false,
+            input_cost: 0.10,
+            output_cost: 0.50,
+            cache_read_cost: 0.0,
+            context: 131_072,
+            max_output: 32_768,
+        },
+    ]
+    .into_iter()
+    .map(OaiModel::into_model)
+    .collect()
+}
+
+/// all built-in deepseek models (openai-compatible).
+/// base url: https://api.deepseek.com
+/// env: DEEPSEEK_API_KEY
+#[must_use]
+pub fn deepseek_models() -> Vec<Model> {
+    const BASE: &str = "https://api.deepseek.com";
+    [
+        OaiModel {
+            id: "deepseek-chat",
+            name: "DeepSeek V3.2",
+            provider: "deepseek",
+            base_url: BASE,
+            reasoning: false,
+            image: false,
+            input_cost: 0.26,
+            output_cost: 0.38,
+            cache_read_cost: 0.13,
+            context: 163_840,
+            max_output: 8_192,
+        },
+        OaiModel {
+            id: "deepseek-reasoner",
+            name: "DeepSeek R1",
+            provider: "deepseek",
+            base_url: BASE,
+            reasoning: true,
+            image: false,
+            input_cost: 0.50,
+            output_cost: 2.15,
+            cache_read_cost: 0.35,
+            context: 163_840,
+            max_output: 32_768,
+        },
+    ]
+    .into_iter()
+    .map(OaiModel::into_model)
+    .collect()
+}
+
+/// all built-in xAI models (Grok, openai-compatible).
+/// base url: https://api.x.ai/v1
+/// env: XAI_API_KEY
+#[must_use]
+pub fn xai_models() -> Vec<Model> {
+    const BASE: &str = "https://api.x.ai/v1";
+    [
+        OaiModel {
+            id: "grok-4",
+            name: "Grok 4 (xAI)",
+            provider: "xai",
+            base_url: BASE,
+            reasoning: true,
+            image: true,
+            input_cost: 3.0,
+            output_cost: 15.0,
+            cache_read_cost: 0.75,
+            context: 256_000,
+            max_output: 16_384,
+        },
+        OaiModel {
+            id: "grok-code-fast-1",
+            name: "Grok Code Fast 1 (xAI)",
+            provider: "xai",
+            base_url: BASE,
+            reasoning: false,
+            image: false,
+            input_cost: 0.20,
+            output_cost: 1.50,
+            cache_read_cost: 0.02,
+            context: 256_000,
+            max_output: 16_384,
+        },
+        OaiModel {
+            id: "grok-3",
+            name: "Grok 3 (xAI)",
+            provider: "xai",
+            base_url: BASE,
+            reasoning: false,
+            image: true,
+            input_cost: 3.0,
+            output_cost: 15.0,
+            cache_read_cost: 0.75,
+            context: 131_072,
+            max_output: 16_384,
+        },
+    ]
+    .into_iter()
+    .map(OaiModel::into_model)
+    .collect()
+}
+
+/// all built-in cerebras models (openai-compatible, wafer-scale inference).
+/// base url: https://api.cerebras.ai/v1
+/// env: CEREBRAS_API_KEY
+#[must_use]
+pub fn cerebras_models() -> Vec<Model> {
+    const BASE: &str = "https://api.cerebras.ai/v1";
+    [
+        OaiModel {
+            id: "llama-3.3-70b",
+            name: "Llama 3.3 70B (Cerebras)",
+            provider: "cerebras",
+            base_url: BASE,
+            reasoning: false,
+            image: false,
+            input_cost: 0.85,
+            output_cost: 1.20,
+            cache_read_cost: 0.0,
+            context: 131_072,
+            max_output: 8_192,
+        },
+        OaiModel {
+            id: "llama3.1-8b",
+            name: "Llama 3.1 8B (Cerebras)",
+            provider: "cerebras",
+            base_url: BASE,
+            reasoning: false,
+            image: false,
+            input_cost: 0.10,
+            output_cost: 0.10,
+            cache_read_cost: 0.0,
+            context: 131_072,
+            max_output: 8_192,
+        },
+        OaiModel {
+            id: "qwen-3-coder-480b",
+            name: "Qwen3 Coder 480B (Cerebras)",
+            provider: "cerebras",
+            base_url: BASE,
+            reasoning: false,
+            image: false,
+            input_cost: 2.0,
+            output_cost: 2.0,
+            cache_read_cost: 0.0,
+            context: 131_072,
+            max_output: 32_768,
+        },
+        OaiModel {
+            id: "qwen-3-235b-a22b-instruct-2507",
+            name: "Qwen3 235B Instruct (Cerebras)",
+            provider: "cerebras",
+            base_url: BASE,
+            reasoning: false,
+            image: false,
+            input_cost: 0.60,
+            output_cost: 1.20,
+            cache_read_cost: 0.0,
+            context: 131_072,
+            max_output: 16_384,
+        },
+    ]
+    .into_iter()
+    .map(OaiModel::into_model)
+    .collect()
+}
+
+/// all built-in mistral models (openai-compatible via la plateforme).
+/// base url: https://api.mistral.ai/v1
+/// env: MISTRAL_API_KEY
+#[must_use]
+pub fn mistral_models() -> Vec<Model> {
+    const BASE: &str = "https://api.mistral.ai/v1";
+    [
+        OaiModel {
+            id: "mistral-large-latest",
+            name: "Mistral Large",
+            provider: "mistral",
+            base_url: BASE,
+            reasoning: false,
+            image: false,
+            input_cost: 2.0,
+            output_cost: 6.0,
+            cache_read_cost: 0.0,
+            context: 131_072,
+            max_output: 16_384,
+        },
+        OaiModel {
+            id: "mistral-medium-latest",
+            name: "Mistral Medium",
+            provider: "mistral",
+            base_url: BASE,
+            reasoning: false,
+            image: false,
+            input_cost: 0.40,
+            output_cost: 2.0,
+            cache_read_cost: 0.0,
+            context: 131_072,
+            max_output: 16_384,
+        },
+        OaiModel {
+            id: "mistral-small-latest",
+            name: "Mistral Small",
+            provider: "mistral",
+            base_url: BASE,
+            reasoning: false,
+            image: false,
+            input_cost: 0.20,
+            output_cost: 0.60,
+            cache_read_cost: 0.0,
+            context: 131_072,
+            max_output: 8_192,
+        },
+        OaiModel {
+            id: "codestral-latest",
+            name: "Codestral",
+            provider: "mistral",
+            base_url: BASE,
+            reasoning: false,
+            image: false,
+            input_cost: 0.30,
+            output_cost: 0.90,
+            cache_read_cost: 0.0,
+            context: 256_000,
+            max_output: 16_384,
+        },
+    ]
+    .into_iter()
+    .map(OaiModel::into_model)
+    .collect()
+}
+
+/// all built-in together ai models (openai-compatible, many open models).
+/// base url: https://api.together.xyz/v1
+/// env: TOGETHER_API_KEY
+#[must_use]
+pub fn together_models() -> Vec<Model> {
+    const BASE: &str = "https://api.together.xyz/v1";
+    [
+        OaiModel {
+            id: "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+            name: "Llama 4 Maverick (Together)",
+            provider: "together",
+            base_url: BASE,
+            reasoning: false,
+            image: true,
+            input_cost: 0.27,
+            output_cost: 0.85,
+            cache_read_cost: 0.0,
+            context: 524_288,
+            max_output: 16_384,
+        },
+        OaiModel {
+            id: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+            name: "Llama 3.3 70B Turbo (Together)",
+            provider: "together",
+            base_url: BASE,
+            reasoning: false,
+            image: false,
+            input_cost: 0.88,
+            output_cost: 0.88,
+            cache_read_cost: 0.0,
+            context: 131_072,
+            max_output: 16_384,
+        },
+        OaiModel {
+            id: "deepseek-ai/DeepSeek-V3",
+            name: "DeepSeek V3 (Together)",
+            provider: "together",
+            base_url: BASE,
+            reasoning: false,
+            image: false,
+            input_cost: 1.25,
+            output_cost: 1.25,
+            cache_read_cost: 0.0,
+            context: 131_072,
+            max_output: 16_384,
+        },
+        OaiModel {
+            id: "Qwen/Qwen2.5-Coder-32B-Instruct",
+            name: "Qwen 2.5 Coder 32B (Together)",
+            provider: "together",
+            base_url: BASE,
+            reasoning: false,
+            image: false,
+            input_cost: 0.80,
+            output_cost: 0.80,
+            cache_read_cost: 0.0,
+            context: 131_072,
+            max_output: 16_384,
+        },
+    ]
+    .into_iter()
+    .map(OaiModel::into_model)
+    .collect()
+}
+
+/// all built-in deepinfra models (openai-compatible, cheap open models).
+/// base url: https://api.deepinfra.com/v1/openai
+/// env: DEEPINFRA_API_KEY
+#[must_use]
+pub fn deepinfra_models() -> Vec<Model> {
+    const BASE: &str = "https://api.deepinfra.com/v1/openai";
+    [
+        OaiModel {
+            id: "deepseek-ai/DeepSeek-V3.2",
+            name: "DeepSeek V3.2 (DeepInfra)",
+            provider: "deepinfra",
+            base_url: BASE,
+            reasoning: false,
+            image: false,
+            input_cost: 0.26,
+            output_cost: 0.38,
+            cache_read_cost: 0.13,
+            context: 163_840,
+            max_output: 16_384,
+        },
+        OaiModel {
+            id: "moonshotai/Kimi-K2.5",
+            name: "Kimi K2.5 (DeepInfra)",
+            provider: "deepinfra",
+            base_url: BASE,
+            reasoning: false,
+            image: false,
+            input_cost: 0.45,
+            output_cost: 2.80,
+            cache_read_cost: 0.09,
+            context: 262_144,
+            max_output: 32_768,
+        },
+        OaiModel {
+            id: "zai-org/GLM-4.7-Flash",
+            name: "GLM 4.7 Flash (DeepInfra)",
+            provider: "deepinfra",
+            base_url: BASE,
+            reasoning: false,
+            image: false,
+            input_cost: 0.06,
+            output_cost: 0.40,
+            cache_read_cost: 0.01,
+            context: 202_752,
+            max_output: 16_384,
+        },
+        OaiModel {
+            id: "Qwen/Qwen3-Coder-480B-A35B-Instruct",
+            name: "Qwen3 Coder 480B (DeepInfra)",
+            provider: "deepinfra",
+            base_url: BASE,
+            reasoning: false,
+            image: false,
+            input_cost: 0.40,
+            output_cost: 1.60,
+            cache_read_cost: 0.0,
+            context: 262_144,
+            max_output: 32_768,
+        },
+    ]
+    .into_iter()
+    .map(OaiModel::into_model)
+    .collect()
+}
+
 /// all built-in models across all providers
 #[must_use]
 pub fn all_models() -> Vec<Model> {
@@ -498,6 +1004,124 @@ mod tests {
                 .iter()
                 .all(|m| m.provider == Provider::Custom("openai-codex".into()))
         );
+    }
+
+    #[test]
+    fn groq_models_exist_and_use_openai_completions() {
+        let models = groq_models();
+        assert!(!models.is_empty());
+        assert!(models.iter().all(|m| m.api == Api::OpenaiCompletions));
+        assert!(
+            models
+                .iter()
+                .all(|m| m.provider == Provider::Custom("groq".into()))
+        );
+        assert!(
+            models
+                .iter()
+                .all(|m| m.base_url.as_str() == "https://api.groq.com/openai/v1")
+        );
+    }
+
+    #[test]
+    fn deepseek_models_exist_and_use_openai_completions() {
+        let models = deepseek_models();
+        assert!(!models.is_empty());
+        assert!(models.iter().all(|m| m.api == Api::OpenaiCompletions));
+        assert!(
+            models
+                .iter()
+                .all(|m| m.provider == Provider::Custom("deepseek".into()))
+        );
+        assert!(
+            models
+                .iter()
+                .all(|m| m.base_url.as_str() == "https://api.deepseek.com")
+        );
+    }
+
+    #[test]
+    fn xai_models_exist_and_use_openai_completions() {
+        let models = xai_models();
+        assert!(!models.is_empty());
+        assert!(models.iter().all(|m| m.api == Api::OpenaiCompletions));
+        assert!(
+            models
+                .iter()
+                .all(|m| m.provider == Provider::Custom("xai".into()))
+        );
+        assert!(
+            models
+                .iter()
+                .all(|m| m.base_url.as_str() == "https://api.x.ai/v1")
+        );
+    }
+
+    #[test]
+    fn cerebras_models_exist_and_use_openai_completions() {
+        let models = cerebras_models();
+        assert!(!models.is_empty());
+        assert!(models.iter().all(|m| m.api == Api::OpenaiCompletions));
+        assert!(
+            models
+                .iter()
+                .all(|m| m.provider == Provider::Custom("cerebras".into()))
+        );
+    }
+
+    #[test]
+    fn mistral_models_exist_and_use_openai_completions() {
+        let models = mistral_models();
+        assert!(!models.is_empty());
+        assert!(models.iter().all(|m| m.api == Api::OpenaiCompletions));
+        assert!(
+            models
+                .iter()
+                .all(|m| m.provider == Provider::Custom("mistral".into()))
+        );
+    }
+
+    #[test]
+    fn together_models_exist_and_use_openai_completions() {
+        let models = together_models();
+        assert!(!models.is_empty());
+        assert!(models.iter().all(|m| m.api == Api::OpenaiCompletions));
+        assert!(
+            models
+                .iter()
+                .all(|m| m.provider == Provider::Custom("together".into()))
+        );
+    }
+
+    #[test]
+    fn deepinfra_models_exist_and_use_openai_completions() {
+        let models = deepinfra_models();
+        assert!(!models.is_empty());
+        assert!(models.iter().all(|m| m.api == Api::OpenaiCompletions));
+        assert!(
+            models
+                .iter()
+                .all(|m| m.provider == Provider::Custom("deepinfra".into()))
+        );
+    }
+
+    #[test]
+    fn new_oai_compat_providers_registered_in_all_models() {
+        let all = all_models();
+        for provider in [
+            "groq",
+            "deepseek",
+            "xai",
+            "cerebras",
+            "mistral",
+            "together",
+            "deepinfra",
+        ] {
+            let found = all
+                .iter()
+                .any(|m| m.provider == Provider::Custom(provider.into()));
+            assert!(found, "{provider} provider should have registered models");
+        }
     }
 
     #[test]

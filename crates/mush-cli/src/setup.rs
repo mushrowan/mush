@@ -885,7 +885,7 @@ pub fn config_api_key(cfg: &config::Config, provider: &Provider) -> Option<ApiKe
         Provider::Anthropic => cfg.api_keys.anthropic.clone(),
         Provider::OpenRouter => cfg.api_keys.openrouter.clone(),
         Provider::Custom(name) if name == "openai" => cfg.api_keys.openai.clone(),
-        _ => None,
+        Provider::Custom(name) => cfg.api_keys.other.get(name).cloned(),
     };
     raw.and_then(ApiKey::new)
 }
