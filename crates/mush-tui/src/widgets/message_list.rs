@@ -1083,6 +1083,23 @@ fn natural_single_box_width(tc: &DisplayToolCall) -> usize {
         .max(MIN_SINGLE_BOX_WIDTH)
 }
 
+/// compute a grid shape (rows, cols) for laying out `n` panels across
+/// an area of `width` columns with a minimum per-panel width of `min`.
+///
+/// returns `(rows, cols)` where `cols = min(n, max(1, width / min))`
+/// and `rows = ceil(n / cols)`. when the width doesn't fit a single
+/// panel we still return `cols = 1` so callers can stack vertically
+#[must_use]
+pub(crate) fn grid_dimensions(n: usize, width: usize, min: usize) -> (usize, usize) {
+    if n == 0 {
+        return (0, 0);
+    }
+    let max_cols = (width / min).max(1);
+    let cols = n.min(max_cols);
+    let rows = n.div_ceil(cols);
+    (rows, cols)
+}
+
 /// render a group of completed tool calls (same batch) as bordered boxes
 fn render_tool_box_group(
     tools: &[&DisplayToolCall],
@@ -1096,16 +1113,35 @@ fn render_tool_box_group(
     }
 
     let n = tools.len();
-    let side_by_side = n > 1 && usable / n as u16 >= MIN_TOOL_BOX_WIDTH;
+    if n == 1 {
+        // single tool: content-size and render standalone
+        let natural = natural_single_box_width(tools[0]);
+        let width = natural.min(usable as usize);
+        render_single_tool_box(tools[0], width, lines, theme);
+        return;
+    }
 
-    if side_by_side {
-        render_side_by_side_boxes(tools, usable as usize, lines, theme);
-    } else {
+    // multiple tools: lay out as a grid. rows x cols, cols capped by
+    // `usable / MIN_TOOL_BOX_WIDTH`. each grid row is rendered as one
+    // `render_side_by_side_boxes` call; single-column rows fall back
+    // to individual content-sized boxes
+    let (_rows, cols) = grid_dimensions(n, usable as usize, MIN_TOOL_BOX_WIDTH as usize);
+    if cols == 1 {
         for tool in tools {
-            // single tool boxes size to their content (clamped to available)
             let natural = natural_single_box_width(tool);
             let width = natural.min(usable as usize);
             render_single_tool_box(tool, width, lines, theme);
+        }
+        return;
+    }
+    for chunk in tools.chunks(cols) {
+        if chunk.len() == 1 {
+            // tail row with a lone tool: render as single content-sized box
+            let natural = natural_single_box_width(chunk[0]);
+            let width = natural.min(usable as usize);
+            render_single_tool_box(chunk[0], width, lines, theme);
+        } else {
+            render_side_by_side_boxes(chunk, usable as usize, lines, theme);
         }
     }
 }
@@ -1146,7 +1182,7 @@ fn render_single_tool_box(
     let inner = width.saturating_sub(4); // │ + space + space + │
     push_box_content_line(&tc.summary, inner, border, dim, &indent, lines);
 
-    // content: output preview with diff colouring
+    // content: output preview with diff colouring / syntax highlighting
     if let Some(ref output) = tc.output_preview {
         if tc.name == "edit" {
             // edit tool produces structured +/- diffs: render in side-by-side
@@ -1159,6 +1195,19 @@ fn render_single_tool_box(
                 spans.extend(row.spans);
                 spans.push(Span::styled(" │", border));
                 lines.push(Line::from(spans));
+            }
+        } else if tc.name == "read" {
+            // read tool output is `L<n>: content`. right-align dim line
+            // numbers as a gutter, syntect-highlight content when possible
+            let ctx = ReadLineCtx {
+                border,
+                indent: indent.clone(),
+                gutter_width: read_line_number_width(output),
+                lang: crate::syntax::lang_from_path(&tc.summary),
+                theme,
+            };
+            for text_line in output.lines() {
+                push_read_content_line(text_line, inner, &ctx, lines);
             }
         } else {
             for text_line in output.lines() {
@@ -1317,6 +1366,112 @@ fn push_box_content_line<'a>(
             Span::styled(" │", border),
         ]));
     }
+}
+
+/// parse a read-tool output line of the form `L<n>: <content>`. returns
+/// the line number and content on success, `None` when the line doesn't
+/// start with `L<digits>: `
+#[must_use]
+pub(crate) fn parse_read_line(line: &str) -> Option<(u32, &str)> {
+    let rest = line.strip_prefix('L')?;
+    let colon = rest.find(": ")?;
+    let number_str = &rest[..colon];
+    if number_str.is_empty() || !number_str.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let n: u32 = number_str.parse().ok()?;
+    Some((n, &rest[colon + 2..]))
+}
+
+/// widest line number across all `L<n>:` lines in a read-tool output
+/// preview. used for right-aligning the dim line-number gutter so
+/// numbers stack cleanly regardless of their digit count
+#[must_use]
+pub(crate) fn read_line_number_width(text: &str) -> usize {
+    text.lines()
+        .filter_map(parse_read_line)
+        .map(|(n, _)| n.to_string().len())
+        .max()
+        .unwrap_or(0)
+}
+
+/// shared rendering state for a read-tool output block. groups the
+/// invariant-across-lines arguments that `push_read_content_line`
+/// otherwise takes individually (clippy::too_many_arguments).
+/// `indent` is stored by value (Span owns its string) so the ctx
+/// doesn't inherit the borrow lifetime from the outer call site
+struct ReadLineCtx<'a> {
+    border: Style,
+    indent: Span<'static>,
+    gutter_width: usize,
+    lang: Option<&'a str>,
+    theme: &'a Theme,
+}
+
+/// push a read-tool output line inside a bordered box: the `L<n>:`
+/// prefix becomes a right-aligned dim gutter, the content is
+/// syntax-highlighted when `ctx.lang` is known. falls back to plain
+/// rendering for lines that don't match the `L<n>:` pattern
+fn push_read_content_line<'a>(
+    text: &str,
+    inner_width: usize,
+    ctx: &ReadLineCtx<'_>,
+    lines: &mut Vec<Line<'a>>,
+) {
+    let Some((n, content)) = parse_read_line(text) else {
+        push_box_content_line(
+            text,
+            inner_width,
+            ctx.border,
+            ctx.theme.dim,
+            &ctx.indent,
+            lines,
+        );
+        return;
+    };
+
+    // gutter: right-aligned line number followed by 2 spaces of separation
+    let gutter = format!("{:>w$}  ", n, w = ctx.gutter_width);
+    let gutter_chars = gutter.chars().count();
+    let remaining_width = inner_width.saturating_sub(gutter_chars);
+
+    // build content spans via syntect (bg-free, keeps terminal bg) or plain
+    let content_spans: Vec<Span<'static>> = ctx
+        .lang
+        .and_then(|l| crate::syntax::highlight_line(content, l, ctx.theme))
+        .unwrap_or_else(|| vec![Span::raw(content.to_string())]);
+
+    // measure content width so we can pad the tail
+    use unicode_width::UnicodeWidthStr;
+    let content_width: usize = content_spans
+        .iter()
+        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+        .sum();
+
+    // if content overflows the remaining width, fall back to wrapping
+    // without syntax highlighting (simpler and rare for read previews)
+    if content_width > remaining_width {
+        push_box_content_line(
+            text,
+            inner_width,
+            ctx.border,
+            ctx.theme.dim,
+            &ctx.indent,
+            lines,
+        );
+        return;
+    }
+
+    let pad = remaining_width.saturating_sub(content_width);
+    let mut spans: Vec<Span<'a>> = vec![
+        ctx.indent.clone(),
+        Span::styled("│ ", ctx.border),
+        Span::styled(gutter, ctx.theme.dim),
+    ];
+    spans.extend(content_spans);
+    spans.push(Span::raw(" ".repeat(pad)));
+    spans.push(Span::styled(" │", ctx.border));
+    lines.push(Line::from(spans));
 }
 
 /// pre-wrap a styled line to `content_width`, prepending a 1-space indent
@@ -2101,6 +2256,58 @@ mod tests {
         assert!(content.contains("b.rs"), "missing second tool summary");
     }
 
+    // -- grid layout for batched tools --
+
+    #[test]
+    fn grid_dimensions_single_row_when_wide() {
+        assert_eq!(grid_dimensions(4, 200, 30), (1, 4));
+        assert_eq!(grid_dimensions(2, 80, 30), (1, 2));
+    }
+
+    #[test]
+    fn grid_dimensions_forms_grid_on_mid_width() {
+        // 4 tools at width 80, min 30 → 80/30 = 2 cols, so 2x2
+        assert_eq!(grid_dimensions(4, 80, 30), (2, 2));
+        // 6 tools at width 100, min 30 → 100/30 = 3 cols, so 2x3
+        assert_eq!(grid_dimensions(6, 100, 30), (2, 3));
+    }
+
+    #[test]
+    fn grid_dimensions_single_column_when_narrow() {
+        assert_eq!(grid_dimensions(4, 30, 30), (4, 1));
+        assert_eq!(grid_dimensions(3, 20, 30), (3, 1));
+    }
+
+    #[test]
+    fn four_batched_tools_render_as_2x2_grid_on_mid_width() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        let make = |name: &str| crate::app::DisplayToolCall {
+            name: "read".into(),
+            summary: name.into(),
+            status: ToolCallStatus::Done,
+            output_preview: None,
+            image_data: None,
+            batch: 1,
+        };
+        app.messages.push(DisplayMessage {
+            tool_calls: vec![make("a.rs"), make("b.rs"), make("c.rs"), make("d.rs")],
+            ..DisplayMessage::new(MessageRole::Assistant, "reading")
+        });
+        // 80 wide: 80/30 = 2 cols → 2x2 grid, a+b on row 1, c+d on row 2
+        let buf = render_app(&app, 80, 16);
+        let content = buffer_to_string(&buf);
+        // each row should have a ┬ junction (two panels joined)
+        let junction_rows = content.lines().filter(|l| l.contains("┬")).count();
+        assert_eq!(
+            junction_rows, 2,
+            "expected two grid rows with ┬ junctions, got:\n{content}"
+        );
+        // all four summaries visible
+        for name in &["a.rs", "b.rs", "c.rs", "d.rs"] {
+            assert!(content.contains(name), "missing {name} in:\n{content}");
+        }
+    }
+
     #[test]
     fn side_by_side_box_lines_have_equal_width() {
         // regression: content rows were 1 char wider per panel than borders
@@ -2413,6 +2620,86 @@ mod tests {
         assert!(
             box_width >= 38,
             "expected clamped-wide box, got {box_width}"
+        );
+    }
+
+    // -- read tool output syntax highlighting --
+
+    #[test]
+    fn parse_read_line_extracts_number_and_content() {
+        assert_eq!(parse_read_line("L1: fn main() {"), Some((1, "fn main() {")));
+        assert_eq!(
+            parse_read_line("L123: let x = 1;"),
+            Some((123, "let x = 1;"))
+        );
+    }
+
+    #[test]
+    fn parse_read_line_returns_none_for_non_matching() {
+        assert_eq!(parse_read_line("not a line"), None);
+        assert_eq!(parse_read_line("L: missing number"), None);
+        assert_eq!(parse_read_line("Label: not a line number"), None);
+    }
+
+    #[test]
+    fn parse_read_line_handles_empty_content() {
+        // empty line in source still has the prefix but no content
+        assert_eq!(parse_read_line("L5: "), Some((5, "")));
+    }
+
+    #[test]
+    fn read_line_number_width_is_widest_in_block() {
+        let text = "L1: a\nL12: b\nL123: c";
+        assert_eq!(read_line_number_width(text), 3);
+    }
+
+    #[test]
+    fn read_line_number_width_ignores_non_matching() {
+        assert_eq!(read_line_number_width("L1: a\nnot a line"), 1);
+        assert_eq!(read_line_number_width("nothing here"), 0);
+    }
+
+    #[test]
+    fn read_tool_box_renders_dim_line_numbers_with_highlighted_content() {
+        // syntax-highlighted read output: line-number prefix dim, code
+        // portion carries syntect-derived fg (multiple distinct colours
+        // along the "fn main" row)
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.messages.push(DisplayMessage {
+            tool_calls: vec![crate::app::DisplayToolCall {
+                name: "read".into(),
+                summary: "src/main.rs".into(),
+                status: ToolCallStatus::Done,
+                output_preview: Some("L1: fn main() {\nL2:     println!(\"hi\");\nL3: }".into()),
+                image_data: None,
+                batch: 1,
+            }],
+            ..DisplayMessage::new(MessageRole::Assistant, "")
+        });
+        let buf = render_app(&app, 120, 12);
+
+        // find the row containing "fn main" in the buffer
+        let target_row = (0..buf.area.height)
+            .find(|&y| {
+                let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+                row.contains("fn main")
+            })
+            .expect("no row containing 'fn main' in rendered output");
+
+        // gather fg colours along that row for non-space cells inside the box
+        let mut fgs = std::collections::HashSet::new();
+        for x in 0..buf.area.width {
+            let cell = &buf[(x, target_row)];
+            let sym = cell.symbol();
+            if sym.trim().is_empty() || matches!(sym, "│" | "┌" | "┐" | "└" | "┘" | "─")
+            {
+                continue;
+            }
+            fgs.insert(cell.fg);
+        }
+        assert!(
+            fgs.len() >= 2,
+            "expected multiple syntect fgs on highlighted read row, got {fgs:?}"
         );
     }
 
