@@ -25,6 +25,15 @@ pub struct SlashMenuState {
     pub model_mode: bool,
     /// which match is selected
     pub selected: usize,
+    /// effective favourites at open time. model_mode renders a ★ marker for
+    /// ids listed here. empty vec = no favourites
+    pub favourite_models: Vec<String>,
+    /// whether imperative add/remove (ctrl+f in the picker) should be
+    /// refused because the user declared favourites in config.toml
+    pub favourites_locked: bool,
+    /// toast shown at the bottom of the popup (e.g. locked notice). cleared
+    /// on next keystroke
+    pub toast: Option<String>,
 }
 
 impl SlashMenuState {
@@ -35,17 +44,41 @@ impl SlashMenuState {
             model_matches: Vec::new(),
             model_mode: false,
             selected: 0,
+            favourite_models: Vec::new(),
+            favourites_locked: false,
+            toast: None,
         }
     }
 
     #[must_use]
     pub fn for_models(model_matches: Vec<ModelCompletion>) -> Self {
+        Self::for_models_with_favourites(model_matches, Vec::new(), false)
+    }
+
+    /// construct a model-mode menu carrying the effective favourites list so
+    /// the picker can render ★ markers and reject imperative edits when
+    /// favourites are locked by config
+    #[must_use]
+    pub fn for_models_with_favourites(
+        model_matches: Vec<ModelCompletion>,
+        favourite_models: Vec<String>,
+        favourites_locked: bool,
+    ) -> Self {
         Self {
             matches: Vec::new(),
             model_matches,
             model_mode: true,
             selected: 0,
+            favourite_models,
+            favourites_locked,
+            toast: None,
         }
+    }
+
+    /// whether `model_id` is in the effective favourites list
+    #[must_use]
+    pub fn is_favourite(&self, model_id: &str) -> bool {
+        self.favourite_models.iter().any(|f| f == model_id)
     }
 }
 

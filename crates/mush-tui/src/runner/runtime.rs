@@ -287,6 +287,9 @@ fn build_initial_app(tui_config: &TuiConfig, cwd: &Path) -> App {
         });
     }
 
+    app.completion.favourite_models = tui_config.favourite_models.clone();
+    app.completion.favourites_locked = tui_config.favourites_locked;
+
     app
 }
 

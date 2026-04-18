@@ -17,9 +17,11 @@ pub fn render(frame: &mut Frame, menu: &SlashMenuState, input_area: Rect, theme:
     } else {
         menu.matches.len()
     };
+    let toast_rows = usize::from(menu.toast.is_some());
     let max_visible = 12.min(item_count);
-    // popup sits above the input box
-    let height = (max_visible + 2) as u16; // +2 for borders
+    // popup sits above the input box. +2 for borders, +1 more when a
+    // toast needs its own line
+    let height = (max_visible + toast_rows + 2) as u16;
     let width = input_area.width.min(80);
     let x = input_area.x;
     let y = input_area.y.saturating_sub(height);
@@ -59,12 +61,20 @@ pub fn render(frame: &mut Frame, menu: &SlashMenuState, input_area: Rect, theme:
                 Style::default()
             };
             let prefix = if is_selected { "▸ " } else { "  " };
+            // two-char slot so favourited and non-favourited rows stay
+            // vertically aligned
+            let fav_marker = if menu.is_favourite(&model.id) {
+                "★ "
+            } else {
+                "  "
+            };
 
             let id_text = format!("/model {}", model.id);
-            let pad = 34usize.saturating_sub(id_text.len() + prefix.len());
+            let pad = 34usize.saturating_sub(id_text.len() + prefix.len() + fav_marker.len());
 
             lines.push(Line::from(vec![
                 Span::styled(prefix, id_style),
+                Span::styled(fav_marker, theme.menu_description),
                 Span::styled(id_text, id_style),
                 Span::raw(" ".repeat(pad)),
                 Span::styled(&model.name, theme.menu_description),
@@ -93,6 +103,98 @@ pub fn render(frame: &mut Frame, menu: &SlashMenuState, input_area: Rect, theme:
         }
     }
 
+    // toast line at the bottom if present (takes the last visible slot)
+    if let Some(toast) = menu.toast.as_deref() {
+        lines.push(Line::from(Span::styled(toast, theme.menu_description)));
+    }
+
     let text = ratatui::text::Text::from(lines);
     frame.render_widget(text, inner);
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::slash_menu::{ModelCompletion, SlashMenuState};
+    use crate::theme::Theme;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+
+    fn render_menu(menu: &SlashMenuState, width: u16, height: u16) -> Buffer {
+        let theme = Theme::default();
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = ratatui::layout::Rect::new(0, height.saturating_sub(1), width, 1);
+                super::render(frame, menu, area, &theme);
+            })
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn buffer_to_string(buf: &Buffer) -> String {
+        let mut s = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                s.push_str(buf[(x, y)].symbol());
+            }
+            s.push('\n');
+        }
+        s
+    }
+
+    #[test]
+    fn model_row_shows_star_for_favourite() {
+        let menu = SlashMenuState::for_models_with_favourites(
+            vec![
+                ModelCompletion {
+                    id: "claude-opus".into(),
+                    name: "Claude Opus".into(),
+                },
+                ModelCompletion {
+                    id: "gpt-5".into(),
+                    name: "GPT 5".into(),
+                },
+            ],
+            vec!["claude-opus".into()],
+            false,
+        );
+        let buf = render_menu(&menu, 60, 8);
+        let content = buffer_to_string(&buf);
+        // first row (selected + favourite) must show the star
+        let lines: Vec<&str> = content.lines().collect();
+        let fav_row = lines
+            .iter()
+            .find(|l| l.contains("claude-opus"))
+            .unwrap_or(&"");
+        let nonfav_row = lines.iter().find(|l| l.contains("gpt-5")).unwrap_or(&"");
+        assert!(
+            fav_row.contains("★"),
+            "favourited row should render a ★ marker; got: {fav_row:?}"
+        );
+        assert!(
+            !nonfav_row.contains("★"),
+            "non-favourite row must not render ★; got: {nonfav_row:?}"
+        );
+    }
+
+    #[test]
+    fn locked_menu_renders_toast_when_set() {
+        let mut menu = SlashMenuState::for_models_with_favourites(
+            vec![ModelCompletion {
+                id: "claude-opus".into(),
+                name: "Claude Opus".into(),
+            }],
+            Vec::new(),
+            true,
+        );
+        menu.toast = Some("favourites locked by config.toml".into());
+        let buf = render_menu(&menu, 60, 8);
+        let content = buffer_to_string(&buf);
+        assert!(
+            content.contains("favourites locked"),
+            "toast text should appear in the popup: {content:?}"
+        );
+    }
 }
