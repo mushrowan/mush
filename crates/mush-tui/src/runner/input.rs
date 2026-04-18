@@ -40,6 +40,10 @@ pub(super) struct InputDeps<'a> {
     pub pending_prompt: &'a mut Option<String>,
     pub delegation_queue: &'a crate::delegate::DelegationQueue,
     pub image_picker: &'a Option<ratatui_image::picker::Picker>,
+    /// handle to the Terminal backend's size cache so resize events
+    /// can invalidate it (ratatui's autoresize will then pick up the
+    /// new dimensions on the next frame)
+    pub size_cache: &'a std::rc::Rc<super::caching_backend::CachedSizeState>,
 }
 
 fn confirmation_answer(code: KeyCode) -> Option<bool> {
@@ -190,6 +194,17 @@ pub(super) async fn handle_streaming_terminal_events(
             Event::Paste(text) => {
                 pane_mgr.focused_mut().app.input.insert_str(&text);
             }
+            Event::Resize(w, h) => {
+                // invalidate the size cache so ratatui's autoresize
+                // picks up the new dimensions on the next frame
+                deps.size_cache.invalidate();
+                tracing::debug!(
+                    phase = "streaming",
+                    width = w,
+                    height = h,
+                    "terminal resized"
+                );
+            }
             event => trace_dropped_event(event, "streaming"),
         }
     }
@@ -302,6 +317,10 @@ pub(super) async fn handle_idle_terminal_events(
             Event::Mouse(mouse) => handle_mouse(&mut pane_mgr.focused_mut().app, mouse),
             Event::Paste(text) => {
                 pane_mgr.focused_mut().app.input.insert_str(&text);
+            }
+            Event::Resize(w, h) => {
+                deps.size_cache.invalidate();
+                tracing::debug!(phase = "idle", width = w, height = h, "terminal resized");
             }
             event => trace_dropped_event(event, "idle"),
         }

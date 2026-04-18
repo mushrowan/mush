@@ -5,6 +5,7 @@ use std::io;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
+mod caching_backend;
 mod commands;
 mod config;
 mod input;
@@ -18,6 +19,7 @@ mod terminal;
 use mush_agent::tool::ToolRegistry;
 use mush_ai::registry::ApiRegistry;
 
+use self::caching_backend::CachingBackend;
 pub use self::config::{
     HintMode, LastModelSaver, PaneSnapshot, PromptEnricher, SessionSaver, SessionSnapshot,
     ThinkingPrefsSaver, TitleUpdater, TuiConfig,
@@ -48,7 +50,8 @@ pub async fn run_tui(
     enter_tui_terminal(tui_config.terminal_policy)?;
     install_panic_cleanup_hook();
 
-    let backend = CrosstermBackend::new(io::stdout());
+    let backend = CachingBackend::new(CrosstermBackend::new(io::stdout()));
+    let size_cache = backend.cache_handle();
     let mut terminal = Terminal::new(backend)?;
     // alt screen may inherit content from the main screen buffer on some
     // terminals (esp. after pre-tui eprintln output like the startup report).
@@ -124,6 +127,7 @@ pub async fn run_tui(
             &mut tui_config,
             registry,
             &image_picker,
+            &size_cache,
         )
         .await?;
         if matches!(action, LoopAction::Quit) {

@@ -10,9 +10,11 @@ use crate::pane::{LayoutMode, PaneManager};
 use crate::ui::Ui;
 use crate::widgets;
 
+use super::caching_backend::CachingBackend;
+
 #[tracing::instrument(name = "draw_panes", skip_all)]
 pub(super) fn draw_panes(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    terminal: &mut Terminal<CachingBackend<CrosstermBackend<io::Stdout>>>,
     pane_mgr: &mut PaneManager,
     _image_picker: &Option<ratatui_image::picker::Picker>,
     settings: &crate::settings::ScopedSettings,

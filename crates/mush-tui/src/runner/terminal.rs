@@ -158,7 +158,9 @@ pub(super) fn restore_terminal_state() {
     let _ = io::stderr().flush();
 }
 
-pub(super) fn cleanup(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
+pub(super) fn cleanup(
+    terminal: &mut Terminal<super::caching_backend::CachingBackend<CrosstermBackend<io::Stdout>>>,
+) -> io::Result<()> {
     restore_terminal_state();
     terminal.show_cursor()?;
     Ok(())
