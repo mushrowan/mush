@@ -480,7 +480,10 @@ fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
                             .as_deref()
                             .map(|l| format!("{l} block"))
                             .unwrap_or_else(|| "code block".into());
-                        app.status = Some(format!("copied {label}"));
+                        app.status = Some(format!(
+                            "copied {label} ({} chars)",
+                            block.content.chars().count()
+                        ));
                     } else {
                         app.status = Some("clipboard copy failed".into());
                     }
@@ -494,7 +497,10 @@ fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
                     .join("\n\n");
                 let count = end - start + 1;
                 if copy_to_clipboard(&text) {
-                    app.status = Some(format!("copied {count} messages"));
+                    app.status = Some(format!(
+                        "copied {count} messages ({} chars)",
+                        text.chars().count()
+                    ));
                 } else {
                     app.status = Some("clipboard copy failed".into());
                 }
@@ -504,7 +510,10 @@ fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             {
                 // copy single selected message
                 if copy_to_clipboard(&msg.content) {
-                    app.status = Some("copied to clipboard".into());
+                    app.status = Some(format!(
+                        "copied message ({} chars)",
+                        msg.content.chars().count()
+                    ));
                 } else {
                     app.status = Some("clipboard copy failed".into());
                 }
@@ -515,8 +524,32 @@ fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     None
 }
 
-/// copy text to system clipboard using platform tools
+/// copy text to system clipboard. uses OSC 52 primarily (works over SSH
+/// and inside tmux with appropriate config), with shell-based fallbacks
+/// for platforms or terminals that don't support OSC 52.
+///
+/// returns true if at least one method succeeded.
 fn copy_to_clipboard(text: &str) -> bool {
+    // OSC 52 emits an escape sequence the terminal emulator intercepts.
+    // this works transparently over SSH because the escape reaches the
+    // user's local terminal. kitty, iterm2, wezterm, ghostty, alacritty,
+    // and tmux (with set-clipboard passthrough) all support it
+    let osc52 = emit_osc52(text);
+    // also try native clipboard tools for local sessions where the user
+    // might prefer system clipboard integration (paste in non-terminal apps)
+    let native = copy_via_shell(text);
+    osc52 || native
+}
+
+fn emit_osc52(text: &str) -> bool {
+    use crossterm::clipboard::CopyToClipboard;
+    use crossterm::execute;
+
+    let mut stdout = std::io::stdout();
+    execute!(stdout, CopyToClipboard::to_clipboard_from(text)).is_ok()
+}
+
+fn copy_via_shell(text: &str) -> bool {
     use std::io::Write;
     use std::process::{Command, Stdio};
 

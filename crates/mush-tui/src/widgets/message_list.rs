@@ -393,6 +393,20 @@ impl Widget for MessageList<'_> {
                 }
             }
         }
+
+        // highlight rows belonging to selected messages / visual range so the
+        // user can see exactly what `y` will copy. block-mode highlighting is
+        // still handled inline during line building (styled spans) because it
+        // needs to colour only the code-block portion of a message.
+        if in_scroll_mode && self.app.navigation.scroll_unit != crate::app::ScrollUnit::Block {
+            apply_message_highlight(
+                self.app,
+                buf,
+                area,
+                scroll,
+                &self.app.render_state.message_row_ranges.borrow(),
+            );
+        }
     }
 }
 
@@ -1412,6 +1426,58 @@ fn write_lines_to_buf(lines: &[Line<'_>], buf: &mut Buffer, area: Rect, start_y:
     written
 }
 
+/// paint a subtle background tint on rows belonging to the selected
+/// message (or the visual selection range) so the user sees exactly
+/// which content `y` will copy.
+///
+/// called after the main Paragraph has already drawn text, so we only
+/// mutate the `bg` style and preserve foreground content.
+fn apply_message_highlight(
+    app: &App,
+    buf: &mut Buffer,
+    area: Rect,
+    scroll: u16,
+    ranges: &[crate::app::MessageRowRange],
+) {
+    let (sel_start, sel_end) = match app.selection_range() {
+        Some((s, e)) => (s, e),
+        None => match app.navigation.selected_message {
+            Some(sel) => (sel, sel),
+            None => return,
+        },
+    };
+
+    let bg = app.theme.block_highlight_bg;
+    for range in ranges {
+        if range.msg_idx < sel_start || range.msg_idx > sel_end {
+            continue;
+        }
+        let doc_start = range.start as u32;
+        let doc_end = range.end as u32;
+        if doc_end <= scroll as u32 {
+            continue;
+        }
+        let visible_start = doc_start.saturating_sub(scroll as u32);
+        let visible_end = doc_end
+            .saturating_sub(scroll as u32)
+            .min(area.height as u32);
+        if visible_start >= visible_end {
+            continue;
+        }
+        for y_offset in visible_start..visible_end {
+            let y = area.y + y_offset as u16;
+            if y >= area.bottom() {
+                break;
+            }
+            for x in area.x..area.right() {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    cell.set_bg(bg);
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1917,6 +1983,39 @@ mod tests {
         assert!(
             found_highlight,
             "selected code block should have a background highlight"
+        );
+    }
+
+    #[test]
+    fn selected_message_in_message_mode_gets_highlight() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.messages
+            .push(DisplayMessage::new(MessageRole::Assistant, "hello world"));
+        app.messages
+            .push(DisplayMessage::new(MessageRole::User, "second message"));
+        app.interaction.mode = crate::app::AppMode::Scroll;
+        app.navigation.scroll_unit = crate::app::ScrollUnit::Message;
+        app.navigation.selected_message = Some(0); // first message
+
+        let buf = render_app(&app, 60, 20);
+
+        // check that the "h" of "hello" has a non-default bg
+        let mut found_highlight = false;
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                let cell = &buf[(x, y)];
+                if cell.symbol() == "h"
+                    && x + 1 < buf.area.width
+                    && buf[(x + 1, y)].symbol() == "e"
+                    && cell.bg != Color::Reset
+                {
+                    found_highlight = true;
+                }
+            }
+        }
+        assert!(
+            found_highlight,
+            "selected message should have a background highlight"
         );
     }
 
