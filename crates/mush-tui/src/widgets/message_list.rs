@@ -1046,6 +1046,43 @@ const BOX_INDENT: usize = 1;
 /// minimum width per panel for side-by-side tool boxes
 const MIN_TOOL_BOX_WIDTH: u16 = 30;
 
+/// minimum width for a content-sized single tool box. keeps very short
+/// tools from rendering as awkwardly-thin slivers
+const MIN_SINGLE_BOX_WIDTH: usize = 20;
+
+/// when a tool box contains diff output (edit tool), prefer a natural
+/// width that allows `widgets::diff` to pick side-by-side rendering.
+/// this is the side-by-side threshold + box chrome
+const DIFF_PREFERRED_WIDTH: usize = crate::widgets::diff::SIDE_BY_SIDE_MIN_WIDTH + 4;
+
+/// compute the natural width a single tool box needs to render its
+/// title, summary, and output_preview without wrapping any individual
+/// line. the 4 extra columns account for `│ ` + content + ` │` chrome.
+/// tools with diff output grow to `DIFF_PREFERRED_WIDTH` so side-by-side
+/// diffs are reachable on wide terminals. returns a width that the
+/// caller should clamp to available space
+fn natural_single_box_width(tc: &DisplayToolCall) -> usize {
+    use unicode_width::UnicodeWidthStr;
+    // "┌─ icon name ─┐" = corner(2) + icon+spaces(3) + name + space(1) + fill(1) + corner(1)
+    let title_w = UnicodeWidthStr::width(tc.name.as_str()) + 8;
+    let summary_w = UnicodeWidthStr::width(tc.summary.as_str()) + 4;
+    let output_w = tc
+        .output_preview
+        .as_deref()
+        .map(|o| o.lines().map(UnicodeWidthStr::width).max().unwrap_or(0) + 4)
+        .unwrap_or(0);
+    let diff_w = if tc.name == "edit" && tc.output_preview.is_some() {
+        DIFF_PREFERRED_WIDTH
+    } else {
+        0
+    };
+    title_w
+        .max(summary_w)
+        .max(output_w)
+        .max(diff_w)
+        .max(MIN_SINGLE_BOX_WIDTH)
+}
+
 /// render a group of completed tool calls (same batch) as bordered boxes
 fn render_tool_box_group(
     tools: &[&DisplayToolCall],
@@ -1065,7 +1102,10 @@ fn render_tool_box_group(
         render_side_by_side_boxes(tools, usable as usize, lines, theme);
     } else {
         for tool in tools {
-            render_single_tool_box(tool, usable as usize, lines, theme);
+            // single tool boxes size to their content (clamped to available)
+            let natural = natural_single_box_width(tool);
+            let width = natural.min(usable as usize);
+            render_single_tool_box(tool, width, lines, theme);
         }
     }
 }
@@ -2310,6 +2350,70 @@ mod tests {
         );
         // no ellipsis
         assert!(!content.contains("…"), "should wrap, not truncate");
+    }
+
+    #[test]
+    fn short_content_tool_box_sizes_to_content_not_available_width() {
+        // a read tool with a short path on a wide terminal should render a
+        // narrow box, not a full-width one. the border runs should end well
+        // before the right edge
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.messages.push(DisplayMessage {
+            tool_calls: vec![crate::app::DisplayToolCall {
+                name: "read".into(),
+                summary: "a.rs".into(),
+                status: ToolCallStatus::Done,
+                output_preview: None,
+                image_data: None,
+                batch: 1,
+            }],
+            ..DisplayMessage::new(MessageRole::Assistant, "")
+        });
+        let width = 120u16;
+        let buf = render_app(&app, width, 8);
+        let content = buffer_to_string(&buf);
+        // find a line with the top border and confirm it doesn't stretch
+        // across the whole terminal
+        let top_line = content
+            .lines()
+            .find(|l| l.contains("┌"))
+            .expect("top border row present");
+        let box_width = top_line.trim_end().chars().count();
+        assert!(
+            box_width < width as usize,
+            "expected content-sized box, got width {box_width} on {width}-col terminal"
+        );
+    }
+
+    #[test]
+    fn long_content_tool_box_clamps_to_available_width() {
+        // long summary that exceeds the terminal width should clamp to the
+        // available width (same behaviour as before content-sizing)
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        let long_path = "a".repeat(200);
+        app.messages.push(DisplayMessage {
+            tool_calls: vec![crate::app::DisplayToolCall {
+                name: "read".into(),
+                summary: long_path,
+                status: ToolCallStatus::Done,
+                output_preview: None,
+                image_data: None,
+                batch: 1,
+            }],
+            ..DisplayMessage::new(MessageRole::Assistant, "")
+        });
+        let buf = render_app(&app, 40, 12);
+        let content = buffer_to_string(&buf);
+        let top_line = content
+            .lines()
+            .find(|l| l.contains("┌"))
+            .expect("top border row present");
+        // box spans most of the 40-col terminal (accounting for BOX_INDENT = 1)
+        let box_width = top_line.trim_end().chars().count();
+        assert!(
+            box_width >= 38,
+            "expected clamped-wide box, got {box_width}"
+        );
     }
 
     /// helper: convert buffer to string for assertions
