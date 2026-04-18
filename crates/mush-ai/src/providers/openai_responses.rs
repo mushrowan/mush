@@ -228,7 +228,7 @@ fn build_request_body(
     }
 }
 
-use super::{maybe_trim_tool_output, recent_boundary};
+use super::{MessageVisitor, maybe_trim_tool_output, walk_messages};
 
 fn convert_input_messages(
     model: &Model,
@@ -236,7 +236,6 @@ fn convert_input_messages(
     messages: &[Message],
     trimming: ToolResultTrimming,
 ) -> Vec<serde_json::Value> {
-    let boundary = recent_boundary(messages);
     let mut converted = Vec::new();
 
     if let Some(prompt) = system_prompt {
@@ -251,108 +250,45 @@ fn convert_input_messages(
         }));
     }
 
-    for (msg_idx, msg) in messages.iter().enumerate() {
-        let is_old_turn = msg_idx < boundary;
-        match msg {
-            Message::User(user) => match &user.content {
-                UserContent::Text(text) => {
-                    converted.push(serde_json::json!({
-                        "role": "user",
-                        "content": [{ "type": "input_text", "text": text }],
-                    }));
-                }
-                UserContent::Parts(parts) => {
-                    let mut content = Vec::new();
-                    for part in parts {
-                        match part {
-                            UserContentPart::Text(text) if text.text.is_empty() => {}
-                            UserContentPart::Text(text) => {
-                                content.push(serde_json::json!({
-                                    "type": "input_text",
-                                    "text": text.text,
-                                }));
-                            }
-                            UserContentPart::Image(img)
-                                if model.input.contains(&InputModality::Image) =>
-                            {
-                                content.push(serde_json::json!({
-                                    "type": "input_image",
-                                    "detail": "auto",
-                                    "image_url": format!(
-                                        "data:{};base64,{}",
-                                        img.mime_type, img.data
-                                    ),
-                                }));
-                            }
-                            UserContentPart::Image(_) => {}
-                        }
-                    }
+    let mut visitor = OpenaiResponsesVisitor {
+        model,
+        trimming,
+        out: &mut converted,
+    };
+    walk_messages(messages, &mut visitor);
 
-                    if !content.is_empty() {
-                        converted.push(serde_json::json!({
-                            "role": "user",
-                            "content": content,
-                        }));
-                    }
-                }
-            },
-            Message::Assistant(asst) => {
-                for part in &asst.content {
-                    match part {
-                        AssistantContentPart::Text(text) if !text.text.is_empty() => {
-                            converted.push(serde_json::json!({
-                                "type": "message",
-                                "role": "assistant",
-                                "content": [{ "type": "output_text", "text": text.text }],
-                            }));
-                        }
-                        AssistantContentPart::ToolCall(tc) => {
-                            converted.push(serde_json::json!({
-                                "type": "function_call",
-                                "call_id": normalized_call_id(tc.id.as_str()),
-                                "name": tc.name.as_str(),
-                                "arguments": serde_json::to_string(&tc.arguments).unwrap_or_else(|_| "{}".into()),
-                            }));
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            Message::ToolResult(tr) => {
-                let raw_text = tr
-                    .content
-                    .iter()
-                    .filter_map(|p| match p {
-                        ToolResultContentPart::Text(t) => Some(t.text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
+    converted
+}
 
-                let text = maybe_trim_tool_output(&raw_text, is_old_turn, trimming);
+struct OpenaiResponsesVisitor<'a> {
+    model: &'a Model,
+    trimming: ToolResultTrimming,
+    out: &'a mut Vec<serde_json::Value>,
+}
 
-                let has_images = tr
-                    .content
-                    .iter()
-                    .any(|p| matches!(p, ToolResultContentPart::Image(_)));
-
-                converted.push(serde_json::json!({
-                    "type": "function_call_output",
-                    "call_id": normalized_call_id(tr.tool_call_id.as_str()),
-                    "output": if text.is_empty() && has_images {
-                        "(see attached image)".to_string()
-                    } else {
-                        text
-                    },
+impl MessageVisitor for OpenaiResponsesVisitor<'_> {
+    fn on_user(&mut self, user: &UserMessage) {
+        match &user.content {
+            UserContent::Text(text) => {
+                self.out.push(serde_json::json!({
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": text }],
                 }));
-
-                if has_images && model.input.contains(&InputModality::Image) {
-                    let mut content = vec![serde_json::json!({
-                        "type": "input_text",
-                        "text": "attached image(s) from tool result:",
-                    })];
-                    for part in &tr.content {
-                        if let ToolResultContentPart::Image(img) = part {
+            }
+            UserContent::Parts(parts) => {
+                let mut content = Vec::new();
+                for part in parts {
+                    match part {
+                        UserContentPart::Text(text) if text.text.is_empty() => {}
+                        UserContentPart::Text(text) => {
+                            content.push(serde_json::json!({
+                                "type": "input_text",
+                                "text": text.text,
+                            }));
+                        }
+                        UserContentPart::Image(img)
+                            if self.model.input.contains(&InputModality::Image) =>
+                        {
                             content.push(serde_json::json!({
                                 "type": "input_image",
                                 "detail": "auto",
@@ -362,8 +298,12 @@ fn convert_input_messages(
                                 ),
                             }));
                         }
+                        UserContentPart::Image(_) => {}
                     }
-                    converted.push(serde_json::json!({
+                }
+
+                if !content.is_empty() {
+                    self.out.push(serde_json::json!({
                         "role": "user",
                         "content": content,
                     }));
@@ -372,7 +312,80 @@ fn convert_input_messages(
         }
     }
 
-    converted
+    fn on_assistant(&mut self, asst: &AssistantMessage) {
+        for part in &asst.content {
+            match part {
+                AssistantContentPart::Text(text) if !text.text.is_empty() => {
+                    self.out.push(serde_json::json!({
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{ "type": "output_text", "text": text.text }],
+                    }));
+                }
+                AssistantContentPart::ToolCall(tc) => {
+                    self.out.push(serde_json::json!({
+                        "type": "function_call",
+                        "call_id": normalized_call_id(tc.id.as_str()),
+                        "name": tc.name.as_str(),
+                        "arguments": serde_json::to_string(&tc.arguments).unwrap_or_else(|_| "{}".into()),
+                    }));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn on_tool_result(&mut self, tr: &ToolResultMessage, is_old_turn: bool) {
+        let raw_text = tr
+            .content
+            .iter()
+            .filter_map(|p| match p {
+                ToolResultContentPart::Text(t) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let text = maybe_trim_tool_output(&raw_text, is_old_turn, self.trimming);
+
+        let has_images = tr
+            .content
+            .iter()
+            .any(|p| matches!(p, ToolResultContentPart::Image(_)));
+
+        self.out.push(serde_json::json!({
+            "type": "function_call_output",
+            "call_id": normalized_call_id(tr.tool_call_id.as_str()),
+            "output": if text.is_empty() && has_images {
+                "(see attached image)".to_string()
+            } else {
+                text
+            },
+        }));
+
+        if has_images && self.model.input.contains(&InputModality::Image) {
+            let mut content = vec![serde_json::json!({
+                "type": "input_text",
+                "text": "attached image(s) from tool result:",
+            })];
+            for part in &tr.content {
+                if let ToolResultContentPart::Image(img) = part {
+                    content.push(serde_json::json!({
+                        "type": "input_image",
+                        "detail": "auto",
+                        "image_url": format!(
+                            "data:{};base64,{}",
+                            img.mime_type, img.data
+                        ),
+                    }));
+                }
+            }
+            self.out.push(serde_json::json!({
+                "role": "user",
+                "content": content,
+            }));
+        }
+    }
 }
 
 fn normalized_call_id(id: &str) -> &str {
