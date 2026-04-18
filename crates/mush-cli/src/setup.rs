@@ -524,6 +524,10 @@ fn build_system_prompt_from_context(
          - Use edit for precise changes (old text must match exactly)\n\
          - Use write only for new files or complete rewrites\n\
          - Be concise in your responses\n\
+         - Explore with targeted tools first: prefer grep, find, or glob to locate \
+         relevant code before reading. When reading large files, use offset/limit, \
+         start_line/end_line, or around_line to fetch only the sections you need \
+         instead of dumping the whole file\n\
          - Batch independent operations: when you need to read, edit, or operate on \
          multiple files that don't depend on each other, use the Batch tool to do them \
          all in a single call. This saves round-trips and helps you reason about \
@@ -1096,6 +1100,27 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn default_prompt_encourages_targeted_exploration() {
+        let context = ProjectContext {
+            agents_md: vec![],
+            skills: vec![],
+        };
+        let prompt = build_system_prompt_from_context(
+            &context,
+            std::path::Path::new("/repo"),
+            config::ContextStrategy::Summaries,
+        );
+        assert!(
+            prompt.contains("grep"),
+            "expected guidance to mention grep for exploration"
+        );
+        assert!(
+            prompt.contains("targeted"),
+            "expected prompt to mention targeted reads"
+        );
     }
 
     #[test]
