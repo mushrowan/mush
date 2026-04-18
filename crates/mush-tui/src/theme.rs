@@ -69,6 +69,10 @@ pub struct Theme {
     // diff colouring in tool output
     pub diff_added: Style,
     pub diff_removed: Style,
+    /// intra-line highlight for word-level changes (differing tokens)
+    /// within a paired removed/added line
+    pub diff_added_intra: Style,
+    pub diff_removed_intra: Style,
 
     // context pressure colours
     pub context_ok: Style,
@@ -174,6 +178,10 @@ impl Theme {
 
             diff_added: Style::default().fg(Color::Green),
             diff_removed: Style::default().fg(Color::Red),
+            // dark-red (52) and dark-green (22) backgrounds - muted enough
+            // to read over but loud enough to catch the eye on changed tokens
+            diff_added_intra: Style::default().fg(Color::Green).bg(Color::Indexed(22)),
+            diff_removed_intra: Style::default().fg(Color::Red).bg(Color::Indexed(52)),
 
             context_ok: Style::default().fg(Color::Green),
             context_warn: Style::default().fg(Color::Yellow),
@@ -269,6 +277,10 @@ impl Theme {
 
             diff_added: Style::default().fg(Color::Green),
             diff_removed: Style::default().fg(Color::Red),
+            // light terminals: indexed 194 (pale green) / 224 (pale red) bg
+            // reads well on white without being harsh
+            diff_added_intra: Style::default().fg(Color::Green).bg(Color::Indexed(194)),
+            diff_removed_intra: Style::default().fg(Color::Red).bg(Color::Indexed(224)),
 
             context_ok: Style::default().fg(Color::Green),
             context_warn: Style::default().fg(Color::Yellow),
