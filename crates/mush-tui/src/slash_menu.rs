@@ -75,10 +75,20 @@ pub(crate) fn filter_model_matches(
     model_completions: &[ModelCompletion],
     prefix: &str,
 ) -> Vec<ModelCompletion> {
-    let query = prefix.to_lowercase();
-    model_completions
+    use crate::fuzzy::FuzzyFilter;
+    if prefix.is_empty() {
+        return model_completions.to_vec();
+    }
+    // match against the id + name concatenation so either field can
+    // contribute to the score. fuzzy gives subsequence + typo tolerance
+    let haystacks: Vec<String> = model_completions
         .iter()
-        .filter(|m| m.id.starts_with(prefix) || m.name.to_lowercase().contains(&query))
-        .cloned()
+        .map(|m| format!("{} {}", m.id, m.name))
+        .collect();
+    let mut matcher = FuzzyFilter::new();
+    let indices = matcher.filter(&haystacks, prefix, String::as_str);
+    indices
+        .into_iter()
+        .map(|i| model_completions[i].clone())
         .collect()
 }

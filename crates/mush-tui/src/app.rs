@@ -667,6 +667,20 @@ impl App {
         self.interaction.mode = AppMode::Normal;
     }
 
+    /// open the model picker: a model-mode slash menu seeded with every
+    /// available model, no filter. fired by `/model` with no arg or any
+    /// keybind that wants to pop the picker directly
+    pub fn open_model_picker(&mut self) {
+        let model_matches = self.completion.model_completions.clone();
+        if model_matches.is_empty() {
+            return;
+        }
+        self.input.text = "/model ".into();
+        self.input.cursor = self.input.text.len();
+        self.completion.slash_menu = Some(SlashMenuState::for_models(model_matches));
+        self.interaction.mode = AppMode::SlashComplete;
+    }
+
     /// jump to bottom of conversation and clear unread indicator
     pub fn scroll_to_bottom(&mut self) {
         self.scroll_offset = 0;
@@ -2408,5 +2422,39 @@ batch: 1/2 succeeded, 1 failed";
             None,
             "/login exactly matches a command so no ghost suffix should leak /login-complete"
         );
+    }
+
+    #[test]
+    fn open_model_picker_populates_menu_with_all_models() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.completion.model_completions = vec![
+            ModelCompletion {
+                id: "claude-opus".into(),
+                name: "Claude Opus".into(),
+            },
+            ModelCompletion {
+                id: "gpt-5".into(),
+                name: "GPT-5".into(),
+            },
+        ];
+        app.open_model_picker();
+        assert_eq!(app.interaction.mode, AppMode::SlashComplete);
+        let menu = app
+            .completion
+            .slash_menu
+            .as_ref()
+            .expect("picker should be open");
+        assert!(menu.model_mode);
+        assert_eq!(menu.model_matches.len(), 2);
+        assert_eq!(menu.selected, 0);
+    }
+
+    #[test]
+    fn open_model_picker_is_noop_without_models() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.completion.model_completions.clear();
+        app.open_model_picker();
+        assert!(app.completion.slash_menu.is_none());
+        assert_eq!(app.interaction.mode, AppMode::Normal);
     }
 }

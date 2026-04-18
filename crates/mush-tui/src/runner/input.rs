@@ -310,6 +310,33 @@ pub(super) async fn handle_idle_terminal_events(
                         AppEvent::SettingsToggleSelected => {
                             apply_settings_toggle(pane_mgr, deps.tui_config);
                         }
+                        AppEvent::ModelSelected { model_id } => {
+                            // route through the same slash action so the
+                            // switch-model logic stays single-sourced
+                            let state_changed = handle_slash_action(
+                                pane_mgr,
+                                crate::slash::SlashAction::Model {
+                                    model_id: Some(model_id),
+                                },
+                                SlashEnv {
+                                    tui_config: deps.tui_config,
+                                    thinking_prefs: deps.thinking_prefs,
+                                    registry: deps.registry,
+                                    message_bus: deps.message_bus,
+                                    file_tracker: deps.file_tracker,
+                                    lifecycle_hooks: deps.lifecycle_hooks,
+                                    cwd: deps.cwd,
+                                    pending_prompt: deps.pending_prompt,
+                                },
+                            )
+                            .await;
+                            if state_changed && let Some(ref saver) = deps.tui_config.save_session {
+                                saver(super::streams::build_session_snapshot(
+                                    pane_mgr,
+                                    deps.tui_config,
+                                ));
+                            }
+                        }
                         _ => {}
                     }
                 }
