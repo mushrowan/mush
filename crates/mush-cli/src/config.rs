@@ -86,6 +86,23 @@ pub struct Config {
     pub model_tiers: HashMap<String, String>,
     /// optional model to use for compaction (defaults to the active model)
     pub compaction_model: Option<String>,
+    /// provider-specific settings (anthropic betas, scope, etc.)
+    #[serde(default)]
+    pub settings: Settings,
+}
+
+/// scope for persisting settings changes made during a session
+pub type SettingsScope = mush_tui::settings::SettingsScope;
+
+/// session settings with scope control.
+/// `scope` determines where runtime changes (via `/settings`) get persisted
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct Settings {
+    /// scope for runtime changes made via `/settings`
+    pub scope: SettingsScope,
+    /// anthropic oauth beta flag toggles
+    pub anthropic_betas: mush_ai::types::AnthropicBetas,
 }
 
 /// lifecycle hook config sections
@@ -413,6 +430,52 @@ openai = "sk-openai-test"
         assert!(config.debug_cache);
         assert_eq!(config.api_keys.anthropic.as_deref(), Some("sk-ant-test"));
         assert_eq!(config.api_keys.openai.as_deref(), Some("sk-openai-test"));
+    }
+
+    #[test]
+    fn settings_default_matches_anthropic_betas_default() {
+        let config: Config = toml::from_str("").unwrap();
+        assert_eq!(config.settings.scope, SettingsScope::Session);
+        assert_eq!(
+            config.settings.anthropic_betas,
+            mush_ai::types::AnthropicBetas::default()
+        );
+    }
+
+    #[test]
+    fn settings_parses_scope_and_betas() {
+        let toml = r#"
+[settings]
+scope = "global"
+
+[settings.anthropic_betas]
+context_1m = false
+redact_thinking = true
+advisor = true
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.settings.scope, SettingsScope::Global);
+        assert!(!config.settings.anthropic_betas.context_1m);
+        assert!(config.settings.anthropic_betas.redact_thinking);
+        assert!(config.settings.anthropic_betas.advisor);
+        // unspecified fields keep their defaults
+        assert!(config.settings.anthropic_betas.effort);
+        assert!(config.settings.anthropic_betas.context_management);
+        assert!(!config.settings.anthropic_betas.advanced_tool_use);
+    }
+
+    #[test]
+    fn settings_scope_variants_parse() {
+        for (s, expected) in [
+            ("global", SettingsScope::Global),
+            ("disabled", SettingsScope::Disabled),
+            ("repo", SettingsScope::Repo),
+            ("session", SettingsScope::Session),
+        ] {
+            let toml = format!("[settings]\nscope = {s:?}\n");
+            let config: Config = toml::from_str(&toml).unwrap();
+            assert_eq!(config.settings.scope, expected, "scope={s}");
+        }
     }
 
     #[test]

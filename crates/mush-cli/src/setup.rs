@@ -124,6 +124,7 @@ impl AppSetup {
             thinking: thinking_level,
             max_tokens: args.max_tokens.or(cfg.max_tokens).map(TokenCount::new),
             cache_retention: cfg.cache_retention,
+            anthropic_betas: Some(cfg.settings.anthropic_betas.clone()),
             ..Default::default()
         };
         resolve_api_key(&mut options, &model, &cfg).await;

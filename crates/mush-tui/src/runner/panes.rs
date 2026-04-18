@@ -520,6 +520,7 @@ mod tests {
             compaction_model: None,
             http_client: None,
             session_id: mush_ai::types::SessionId::new(),
+            settings: Default::default(),
         };
 
         process_delegations(&mut pane_mgr, &tui_config, &bus, &queue);

@@ -590,6 +590,10 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         compaction_model: setup.compaction_model,
         http_client: Some(setup.http_client),
         session_id: session_id.clone(),
+        settings: mush_tui::settings::ScopedSettings {
+            scope: setup.cfg.settings.scope,
+            anthropic_betas: setup.cfg.settings.anthropic_betas.clone(),
+        },
     };
 
     mush_tui::run_tui(tui_config, &setup.tools, &setup.registry)
