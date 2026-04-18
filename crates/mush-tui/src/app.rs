@@ -111,6 +111,9 @@ pub struct App {
     /// in-progress oauth flow started via /login.
     /// consumed when /login-complete fires with the authorization code
     pub pending_oauth: Option<PendingOAuth>,
+    /// state for the /settings floating menu (only populated when
+    /// interaction.mode == AppMode::Settings)
+    pub settings_menu: Option<crate::settings::SettingsMenuState>,
     /// colour theme for all widgets
     pub theme: crate::theme::Theme,
 }
@@ -160,6 +163,7 @@ impl App {
             current_tool_batch: 0,
             oauth_usage: None,
             pending_oauth: None,
+            settings_menu: None,
             theme: crate::theme::Theme::default(),
         }
     }

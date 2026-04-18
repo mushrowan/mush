@@ -50,6 +50,168 @@ pub struct ScopedSettings {
     pub anthropic_betas: AnthropicBetas,
 }
 
+impl SettingsScope {
+    /// return the next variant when cycling via space/enter in the menu
+    #[must_use]
+    pub fn cycle_next(self) -> Self {
+        match self {
+            Self::Session => Self::Global,
+            Self::Global => Self::Repo,
+            Self::Repo => Self::Disabled,
+            Self::Disabled => Self::Session,
+        }
+    }
+}
+
+/// menu item kinds surfaced by the /settings overlay
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuItemKind {
+    Scope,
+    ContextOneM,
+    Effort,
+    ContextManagement,
+    RedactThinking,
+    Advisor,
+    AdvancedToolUse,
+}
+
+impl MenuItemKind {
+    #[must_use]
+    pub fn all() -> &'static [MenuItemKind] {
+        &[
+            Self::Scope,
+            Self::ContextOneM,
+            Self::Effort,
+            Self::ContextManagement,
+            Self::RedactThinking,
+            Self::Advisor,
+            Self::AdvancedToolUse,
+        ]
+    }
+
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Scope => "scope",
+            Self::ContextOneM => "context_1m",
+            Self::Effort => "effort",
+            Self::ContextManagement => "context_management",
+            Self::RedactThinking => "redact_thinking",
+            Self::Advisor => "advisor",
+            Self::AdvancedToolUse => "advanced_tool_use",
+        }
+    }
+
+    #[must_use]
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Scope => "where /settings changes get persisted",
+            Self::ContextOneM => "context-1m-2025-08-07: 1M context on claude models",
+            Self::Effort => "effort-2025-11-24: send output_config.effort",
+            Self::ContextManagement => "context-management-2025-06-27: server-side edits",
+            Self::RedactThinking => "redact-thinking-2026-02-12: allow thinking redaction",
+            Self::Advisor => "advisor-tool-2026-03-01: advisor tool (not yet supported)",
+            Self::AdvancedToolUse => {
+                "advanced-tool-use-2025-11-20: advanced tool-use (experimental)"
+            }
+        }
+    }
+
+    /// toggle or cycle the underlying value. returns the new display value
+    pub fn activate(self, settings: &mut ScopedSettings) -> String {
+        match self {
+            Self::Scope => {
+                settings.scope = settings.scope.cycle_next();
+                settings.scope.as_str().to_string()
+            }
+            Self::ContextOneM => {
+                settings.anthropic_betas.context_1m = !settings.anthropic_betas.context_1m;
+                bool_str(settings.anthropic_betas.context_1m).to_string()
+            }
+            Self::Effort => {
+                settings.anthropic_betas.effort = !settings.anthropic_betas.effort;
+                bool_str(settings.anthropic_betas.effort).to_string()
+            }
+            Self::ContextManagement => {
+                settings.anthropic_betas.context_management =
+                    !settings.anthropic_betas.context_management;
+                bool_str(settings.anthropic_betas.context_management).to_string()
+            }
+            Self::RedactThinking => {
+                settings.anthropic_betas.redact_thinking =
+                    !settings.anthropic_betas.redact_thinking;
+                bool_str(settings.anthropic_betas.redact_thinking).to_string()
+            }
+            Self::Advisor => {
+                settings.anthropic_betas.advisor = !settings.anthropic_betas.advisor;
+                bool_str(settings.anthropic_betas.advisor).to_string()
+            }
+            Self::AdvancedToolUse => {
+                settings.anthropic_betas.advanced_tool_use =
+                    !settings.anthropic_betas.advanced_tool_use;
+                bool_str(settings.anthropic_betas.advanced_tool_use).to_string()
+            }
+        }
+    }
+
+    /// current display value for the given settings (without mutating)
+    #[must_use]
+    pub fn value(self, settings: &ScopedSettings) -> String {
+        match self {
+            Self::Scope => settings.scope.as_str().to_string(),
+            Self::ContextOneM => bool_str(settings.anthropic_betas.context_1m).to_string(),
+            Self::Effort => bool_str(settings.anthropic_betas.effort).to_string(),
+            Self::ContextManagement => {
+                bool_str(settings.anthropic_betas.context_management).to_string()
+            }
+            Self::RedactThinking => bool_str(settings.anthropic_betas.redact_thinking).to_string(),
+            Self::Advisor => bool_str(settings.anthropic_betas.advisor).to_string(),
+            Self::AdvancedToolUse => {
+                bool_str(settings.anthropic_betas.advanced_tool_use).to_string()
+            }
+        }
+    }
+}
+
+fn bool_str(b: bool) -> &'static str {
+    if b { "on" } else { "off" }
+}
+
+/// ui state for the /settings floating menu
+#[derive(Debug, Clone, Default)]
+pub struct SettingsMenuState {
+    /// index of the currently selected row
+    pub selected: usize,
+    /// scroll offset for long menus
+    pub scroll_offset: usize,
+}
+
+impl SettingsMenuState {
+    pub fn move_down(&mut self) {
+        let max = MenuItemKind::all().len().saturating_sub(1);
+        if self.selected < max {
+            self.selected += 1;
+        }
+    }
+
+    pub fn move_up(&mut self) {
+        self.selected = self.selected.saturating_sub(1);
+    }
+
+    pub fn top(&mut self) {
+        self.selected = 0;
+    }
+
+    pub fn bottom(&mut self) {
+        self.selected = MenuItemKind::all().len().saturating_sub(1);
+    }
+
+    #[must_use]
+    pub fn current(&self) -> MenuItemKind {
+        MenuItemKind::all()[self.selected.min(MenuItemKind::all().len() - 1)]
+    }
+}
+
 /// serialisable form of `ScopedSettings` for persistence
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PersistedSettings {

@@ -15,6 +15,7 @@ pub(super) fn draw_panes(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     pane_mgr: &mut PaneManager,
     _image_picker: &Option<ratatui_image::picker::Picker>,
+    settings: &crate::settings::ScopedSettings,
 ) -> io::Result<()> {
     let pane_count = pane_mgr.pane_count() as u16;
     let focused_idx = pane_mgr.focused_index();
@@ -150,6 +151,9 @@ pub(super) fn draw_panes(
 
         if let Some(ref picker) = focused_app.interaction.session_picker {
             widgets::session_picker::render(frame, picker, &focused_app.theme);
+        }
+        if let Some(ref menu) = focused_app.settings_menu {
+            widgets::settings_menu::render(frame, menu, settings, &focused_app.theme);
         }
         if let Some(ref menu) = focused_app.completion.slash_menu {
             let input_h = crate::ui::input_height(&focused_app.input, focused_area.width);
