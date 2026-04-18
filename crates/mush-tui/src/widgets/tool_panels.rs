@@ -123,8 +123,11 @@ fn render_panel(
 
     let mut lines: Vec<Line<'_>> = Vec::new();
 
-    // summary line (args)
-    lines.push(Line::styled(tool.summary.as_str(), theme.dim));
+    // summary line: truncate to panel width since ratatui won't wrap for us.
+    // summarise_tool_args returns the full command; we cap it here
+    let summary =
+        mush_agent::display::truncate_with_ellipsis(tool.summary.as_str(), inner.width as usize);
+    lines.push(Line::styled(summary, theme.dim));
 
     // show output: live output for running, final output for done
     let output = match tool.status {
