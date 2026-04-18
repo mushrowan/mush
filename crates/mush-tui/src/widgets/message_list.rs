@@ -676,8 +676,15 @@ fn render_message(
     }
 
     // usage line (compact: total tokens + cost, with cache reuse + write ratios)
-    // gated on show_usage_lines since the same info is in the status bar
+    // gated on show_usage_lines since the same info is in the status bar.
+    // deferred while any tool is still running to avoid a "premature" usage
+    // line appearing above the running tool panel
+    let has_running_tool = msg
+        .tool_calls
+        .iter()
+        .any(|tc| tc.status == ToolCallStatus::Running);
     if app.interaction.show_usage_lines
+        && !has_running_tool
         && let Some(ref usage) = msg.usage
     {
         let total = usage.total_tokens();
@@ -1741,6 +1748,49 @@ mod tests {
         assert!(
             shown.contains("320tok"),
             "usage line should render when toggled on, got: {shown}"
+        );
+    }
+
+    #[test]
+    fn usage_line_deferred_while_tool_running() {
+        // MessageEnd attaches usage before tools complete; rendering the usage
+        // line immediately produces a "premature" line while the tool is still
+        // running in the active_tools panel. the usage line should stay hidden
+        // until every tool on the message finishes
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.interaction.show_usage_lines = true;
+        app.messages.push(DisplayMessage {
+            tool_calls: vec![crate::app::DisplayToolCall {
+                name: "bash".into(),
+                summary: "ls -la".into(),
+                status: ToolCallStatus::Running,
+                output_preview: None,
+                image_data: None,
+                batch: 1,
+            }],
+            usage: Some(Usage {
+                input_tokens: TokenCount::new(100),
+                output_tokens: TokenCount::new(20),
+                cache_read_tokens: TokenCount::new(150),
+                cache_write_tokens: TokenCount::new(50),
+            }),
+            cost: Some(Dollars::new(0.0012)),
+            ..DisplayMessage::new(MessageRole::Assistant, "running now")
+        });
+
+        let running = buffer_to_string(&render_app(&app, 70, 12));
+        assert!(
+            !running.contains("320tok"),
+            "usage line should be deferred while a tool is running, got: {running}"
+        );
+
+        // once the tool finishes, the usage line appears
+        app.messages[0].tool_calls[0].status = ToolCallStatus::Done;
+        app.messages[0].tool_calls[0].output_preview = Some("ok".into());
+        let done = buffer_to_string(&render_app(&app, 70, 12));
+        assert!(
+            done.contains("320tok"),
+            "usage line should render after tools complete, got: {done}"
         );
     }
 
