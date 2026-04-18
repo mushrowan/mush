@@ -95,6 +95,24 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         return Some(event);
     }
 
+    // alt+m / alt+shift+m cycle through favourite models. works while
+    // streaming so the user can hot-swap mid-turn without aborting
+    match (key.modifiers, key.code) {
+        (KeyModifiers::ALT, KeyCode::Char('m')) => {
+            if let Some(event) = cycle_favourite_model(app, 1) {
+                return Some(event);
+            }
+            return None;
+        }
+        (m, KeyCode::Char('M')) if m.contains(KeyModifiers::ALT) => {
+            if let Some(event) = cycle_favourite_model(app, -1) {
+                return Some(event);
+            }
+            return None;
+        }
+        _ => {}
+    }
+
     // 4. multiline enter (before mode-specific enter handling)
     match (key.modifiers, key.code) {
         (KeyModifiers::ALT | KeyModifiers::SHIFT, KeyCode::Enter)
@@ -734,13 +752,38 @@ fn menu_len(menu: &crate::slash_menu::SlashMenuState) -> usize {
     }
 }
 
+/// cycle to the next (direction=+1) or previous (direction=-1) favourite
+/// model relative to the currently active model. empty favourites → status
+/// message nudge + no event
+fn cycle_favourite_model(app: &mut App, direction: isize) -> Option<AppEvent> {
+    let favs = &app.completion.favourite_models;
+    if favs.is_empty() {
+        app.status =
+            Some("no favourite models yet, open /model and ★ some with ctrl+f".to_string());
+        return None;
+    }
+    // find current position. if current model isn't a favourite, start from
+    // -1 so the first step lands on index 0 (for +1) or the last (for -1)
+    let current = favs.iter().position(|id| id == app.model_id.as_str());
+    let len = favs.len();
+    let next_idx = match (current, direction) {
+        (Some(i), d) => (i as isize + d).rem_euclid(len as isize) as usize,
+        (None, d) if d > 0 => 0,
+        (None, _) => len - 1,
+    };
+    let next_id = favs[next_idx].clone();
+    if next_id == app.model_id.as_str() {
+        // single-favourite list and we're already on it; nothing to do
+        return None;
+    }
+    Some(AppEvent::ModelSelected { model_id: next_id })
+}
+
 /// toggle favourite status on the currently-selected model row. returns
 /// `AppEvent::PersistFavourites` when the list actually changed so the
 /// runner can save to disk. no-op + toast when locked
 fn toggle_selected_favourite(app: &mut App) -> Option<AppEvent> {
-    let Some(ref mut menu) = app.completion.slash_menu else {
-        return None;
-    };
+    let menu = app.completion.slash_menu.as_mut()?;
     if !menu.model_mode {
         return None;
     }
@@ -748,9 +791,7 @@ fn toggle_selected_favourite(app: &mut App) -> Option<AppEvent> {
         menu.toast = Some("favourites are locked by config.toml".to_string());
         return None;
     }
-    let Some(model) = menu.model_matches.get(menu.selected) else {
-        return None;
-    };
+    let model = menu.model_matches.get(menu.selected)?;
     let id = model.id.clone();
     if let Some(pos) = app
         .completion
@@ -1572,6 +1613,66 @@ mod tests {
             menu.toast.as_deref().is_some_and(|t| t.contains("locked")),
             "expected locked toast, got {:?}",
             menu.toast
+        );
+    }
+
+    #[test]
+    fn alt_m_cycles_to_next_favourite_model() {
+        let mut app = App::new("a".into(), TokenCount::new(200_000));
+        app.completion.favourite_models = vec!["a".into(), "b".into(), "c".into()];
+
+        let event = handle_key(&mut app, alt(KeyCode::Char('m')));
+        assert!(
+            matches!(event, Some(AppEvent::ModelSelected { ref model_id }) if model_id == "b"),
+            "alt+m from 'a' should pick 'b', got {event:?}"
+        );
+
+        app.model_id = "c".into();
+        let event = handle_key(&mut app, alt(KeyCode::Char('m')));
+        assert!(
+            matches!(event, Some(AppEvent::ModelSelected { ref model_id }) if model_id == "a"),
+            "alt+m from end should wrap to 'a', got {event:?}"
+        );
+    }
+
+    #[test]
+    fn alt_shift_m_cycles_backward() {
+        let mut app = App::new("b".into(), TokenCount::new(200_000));
+        app.completion.favourite_models = vec!["a".into(), "b".into(), "c".into()];
+
+        let shift_alt = KeyEvent {
+            code: KeyCode::Char('M'),
+            modifiers: KeyModifiers::ALT | KeyModifiers::SHIFT,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
+        let event = handle_key(&mut app, shift_alt);
+        assert!(
+            matches!(event, Some(AppEvent::ModelSelected { ref model_id }) if model_id == "a"),
+            "alt+shift+m from 'b' should pick 'a', got {event:?}"
+        );
+
+        app.model_id = "a".into();
+        let event = handle_key(&mut app, shift_alt);
+        assert!(
+            matches!(event, Some(AppEvent::ModelSelected { ref model_id }) if model_id == "c"),
+            "alt+shift+m from start should wrap to 'c', got {event:?}"
+        );
+    }
+
+    #[test]
+    fn alt_m_with_no_favourites_nudges_via_status() {
+        let mut app = App::new("a".into(), TokenCount::new(200_000));
+        assert!(app.completion.favourite_models.is_empty());
+
+        let event = handle_key(&mut app, alt(KeyCode::Char('m')));
+        assert!(event.is_none());
+        assert!(
+            app.status
+                .as_deref()
+                .is_some_and(|s| s.contains("favourite")),
+            "expected a status nudge about favourites, got {:?}",
+            app.status
         );
     }
 
