@@ -1082,15 +1082,26 @@ fn render_single_tool_box(
 
     // content: output preview with diff colouring
     if let Some(ref output) = tc.output_preview {
-        for text_line in output.lines() {
-            push_box_content_line(
-                text_line,
-                inner,
-                border,
-                diff_line_style(text_line, theme),
-                &indent,
-                lines,
-            );
+        if tc.name == "edit" {
+            // edit tool produces structured +/- diffs: render in side-by-side
+            // columns when the inner panel is wide enough, otherwise inline
+            for row in super::diff::render_diff(output, inner, theme) {
+                let mut spans = vec![indent.clone(), Span::styled("│ ", border)];
+                spans.extend(row.spans);
+                spans.push(Span::styled(" │", border));
+                lines.push(Line::from(spans));
+            }
+        } else {
+            for text_line in output.lines() {
+                push_box_content_line(
+                    text_line,
+                    inner,
+                    border,
+                    diff_line_style(text_line, theme),
+                    &indent,
+                    lines,
+                );
+            }
         }
     }
 
@@ -1722,6 +1733,65 @@ mod tests {
         let content = buffer_to_string(&buf);
         assert!(content.contains("bash"));
         assert!(content.contains("read"));
+    }
+
+    #[test]
+    fn edit_tool_renders_side_by_side_diff_when_wide() {
+        // edit tool output contains +/- diff lines. at wide widths the box
+        // should render a side-by-side column layout with `│` separating
+        // removed (left) from added (right)
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.messages.push(DisplayMessage {
+            tool_calls: vec![crate::app::DisplayToolCall {
+                name: "edit".into(),
+                summary: "src/main.rs".into(),
+                status: ToolCallStatus::Done,
+                output_preview: Some("- println!(\"hello\")\n+ println!(\"world\")".into()),
+                image_data: None,
+                batch: 1,
+            }],
+            ..DisplayMessage::new(MessageRole::Assistant, "patching")
+        });
+        let buf = render_app(&app, 120, 10);
+        let content = buffer_to_string(&buf);
+        // both versions visible on the same row implies side-by-side
+        let row_with_both = content
+            .lines()
+            .find(|row| row.contains("println!(\"hello\")") && row.contains("println!(\"world\")"));
+        assert!(
+            row_with_both.is_some(),
+            "expected side-by-side row with both versions, got:\n{content}"
+        );
+    }
+
+    #[test]
+    fn edit_tool_renders_inline_diff_when_narrow() {
+        // at narrow widths the diff falls back to inline: +/- lines stack
+        // vertically like the current default
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.messages.push(DisplayMessage {
+            tool_calls: vec![crate::app::DisplayToolCall {
+                name: "edit".into(),
+                summary: "src/main.rs".into(),
+                status: ToolCallStatus::Done,
+                output_preview: Some("- println!(\"hello\")\n+ println!(\"world\")".into()),
+                image_data: None,
+                batch: 1,
+            }],
+            ..DisplayMessage::new(MessageRole::Assistant, "patching")
+        });
+        let buf = render_app(&app, 60, 10);
+        let content = buffer_to_string(&buf);
+        // no single row should have both sides: `hello` and `world` on different lines
+        let any_row_with_both = content
+            .lines()
+            .any(|row| row.contains("println!(\"hello\")") && row.contains("println!(\"world\")"));
+        assert!(
+            !any_row_with_both,
+            "narrow mode should render inline, not side-by-side; got:\n{content}"
+        );
+        assert!(content.contains("hello"));
+        assert!(content.contains("world"));
     }
 
     #[test]
