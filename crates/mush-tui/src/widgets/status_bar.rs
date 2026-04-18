@@ -1,9 +1,10 @@
 //! status bar widget - model info, cost, token usage
 
 use ratatui::buffer::Buffer;
-use ratatui::layout::{Alignment, Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, HorizontalAlignment, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget, Wrap};
+use unicode_width::UnicodeWidthStr;
 
 use mush_ai::types::{Dollars, ThinkingLevel, TokenCount};
 
@@ -237,9 +238,15 @@ fn left_spans(app: &App, width: u16) -> Vec<Span<'static>> {
 /// calculate how many lines the status bar needs (1 or 2, +1 for confirm prompt).
 /// the render pass uses the same logic to pack overflow spans onto a second line
 pub fn status_bar_height(app: &App, width: u16) -> u16 {
-    let left_len: usize = left_spans(app, width).iter().map(|s| s.content.len()).sum();
+    let spans = left_spans(app, width);
+    // use display width, not byte length: `│ ↑ ↓ ▀ ░` etc are multi-byte
+    // in utf-8 but 1 column wide. ratatui's Paragraph::wrap uses display
+    // width too, so mixing up byte counts here causes a spurious second
+    // line with blank content when unicode chars overshoot the byte count
+    let left_width: usize = spans.iter().map(|s| s.width()).sum();
     let right = truncate_path(&app.cwd, 30);
-    let total = left_len + 2 + right.len(); // 2 for padding between left and right
+    let right_width = UnicodeWidthStr::width(right.as_str());
+    let total = left_width + 2 + right_width; // 2 for padding between left and right
     let wraps = total > width as usize;
     if confirm_text(app).is_some() {
         if wraps { 3 } else { 2 }
@@ -279,9 +286,11 @@ impl Widget for StatusBar<'_> {
             (area, None)
         };
 
-        // split main into left (wrapping content) and right (cwd, single line)
-        // right column has fixed width = cwd len + 1 space gap; shrinks if needed
-        let right_width = (right_text.chars().count() as u16 + 1).min(main.width / 2);
+        // split main into left (wrapping content) and right (cwd, single line).
+        // right column has fixed width = cwd display width + 1 space gap; shrinks if needed.
+        // `…` (from truncate_path) and any unicode path components use display width
+        let right_width =
+            (UnicodeWidthStr::width(right_text.as_str()) as u16 + 1).min(main.width / 2);
         let [left_area, right_area] =
             Layout::horizontal([Constraint::Min(1), Constraint::Length(right_width)]).areas(main);
 
@@ -296,7 +305,7 @@ impl Widget for StatusBar<'_> {
                 right_text,
                 self.app.theme.status_dim,
             )]))
-            .alignment(Alignment::Right)
+            .alignment(HorizontalAlignment::Right)
             .render(right_area, buf);
         }
 
@@ -402,6 +411,40 @@ mod tests {
         assert!(
             content.contains("45k") || content.contains("200k"),
             "expected wrapped content, got: {content}"
+        );
+    }
+
+    #[test]
+    fn status_bar_height_uses_display_width_not_byte_length() {
+        // regression: content.len() sums bytes, so multi-byte unicode chars
+        // like │ ↑ ↓ R W (3 bytes each, 1 column wide) overshoot the width
+        // check and force a spurious 2-line status bar. ratatui's Paragraph::wrap
+        // uses display width so only renders 1 line, leaving a blank second line
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.stats.input_tokens = TokenCount::new(45_000);
+        app.stats.output_tokens = TokenCount::new(12_000);
+        app.stats.cache_read_tokens = TokenCount::new(8_000);
+        app.stats.cache_write_tokens = TokenCount::new(2_000);
+        app.stats.context_tokens = TokenCount::new(45_000);
+        app.cwd = "~".into();
+
+        let spans = left_spans(&app, 200);
+        let display_width: usize = spans.iter().map(|s| s.width()).sum();
+        let byte_length: usize = spans.iter().map(|s| s.content.len()).sum();
+        assert!(
+            display_width < byte_length,
+            "test scenario must have multi-byte chars: display={display_width}, bytes={byte_length}"
+        );
+
+        // pick a width that fits display + cwd but would trip the byte-length check.
+        // right column = cwd (1 char) + 1 space. 2 for padding between left/right.
+        let right_width = app.cwd.chars().count();
+        let width = (display_width + 2 + right_width) as u16;
+        let height = status_bar_height(&app, width);
+        assert_eq!(
+            height, 1,
+            "expected 1 line when content fits by display width \
+             (display={display_width}, bytes={byte_length}, width={width})"
         );
     }
 
