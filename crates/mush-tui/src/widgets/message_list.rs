@@ -4,7 +4,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Paragraph, Widget};
+use ratatui::widgets::Widget;
 
 use throbber_widgets_tui::{BRAILLE_SIX, Throbber, WhichUse};
 
@@ -68,7 +68,7 @@ impl<'a> MessageList<'a> {
 }
 
 /// tracks where cached content was replaced with placeholders
-/// so we can overlay it directly after Paragraph renders
+/// so we can overlay it directly after the main line pass
 struct DeferredCacheRender {
     msg_idx: usize,
     /// position in the flat lines vec (before padding)
@@ -324,16 +324,7 @@ impl Widget for MessageList<'_> {
                 .clear();
         }
 
-        let text = if padding > 0 {
-            let mut padded = vec![Line::raw(""); padding];
-            padded.extend(lines);
-            Text::from(padded)
-        } else {
-            Text::from(lines)
-        };
-
         let total_lines = content_lines + padding as u16;
-        let paragraph = Paragraph::new(text);
         let max_scroll = total_lines.saturating_sub(visible);
         let effective_offset_u16 = effective_offset.min(u16::MAX as usize) as u16;
         let scroll = max_scroll.saturating_sub(effective_offset_u16);
@@ -371,7 +362,32 @@ impl Widget for MessageList<'_> {
         }
         *self.app.render_state.image_render_areas.borrow_mut() = render_areas;
 
-        paragraph.scroll((scroll, 0)).render(area, buf);
+        // render lines directly to the buffer, bypassing ratatui's
+        // `Paragraph`. lines are pre-wrapped to `content_width` by
+        // `indent_line`, so Paragraph's internal `LineTruncator` would
+        // just re-grapheme-scan content that already fits. profiling
+        // showed this accounted for ~40% of main-thread CPU in long
+        // sessions (LineTruncator::next_line + Graphemes::next +
+        // unicode_width::lookup_width). writing via `set_line` skips
+        // the whole reflow pipeline
+        let scroll_usize = scroll as usize;
+        let visible_usize = visible as usize;
+        for screen_y in 0..visible_usize {
+            let doc_y = scroll_usize + screen_y;
+            if doc_y < padding {
+                continue; // blank padding row, buffer is already empty
+            }
+            let line_idx = doc_y - padding;
+            if line_idx >= lines.len() {
+                break;
+            }
+            buf.set_line(
+                area.x,
+                area.y + screen_y as u16,
+                &lines[line_idx],
+                area.width,
+            );
+        }
 
         // overlay deferred cached content directly to the buffer.
         // during the lines build, cached content was replaced with empty
