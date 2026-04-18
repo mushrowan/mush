@@ -1,5 +1,8 @@
 //! session picker state and filtering helpers
 
+use std::cell::RefCell;
+
+use crate::fuzzy::FuzzyFilter;
 use mush_session::SessionMeta;
 
 /// session picker scope
@@ -12,7 +15,7 @@ pub enum SessionScope {
 }
 
 /// state for the session picker overlay
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct SessionPickerState {
     pub sessions: Vec<SessionMeta>,
     pub selected: usize,
@@ -20,6 +23,10 @@ pub struct SessionPickerState {
     pub scope: SessionScope,
     /// current working directory for scope filtering
     pub cwd: String,
+    /// cached fuzzy matcher reused across filter calls. `RefCell` since
+    /// `filtered_sessions` takes `&self` for read-only render paths but
+    /// nucleo's scoring wants `&mut Matcher`
+    matcher: RefCell<FuzzyFilter>,
 }
 
 impl SessionPickerState {
@@ -31,11 +38,14 @@ impl SessionPickerState {
             filter: String::new(),
             scope: SessionScope::ThisDir,
             cwd,
+            matcher: RefCell::new(FuzzyFilter::new()),
         }
     }
 }
 
-/// get sessions matching the current filter and scope
+/// get sessions matching the current filter and scope. empty filter returns
+/// all scope-matched sessions in original order, otherwise fuzzy-ranks by
+/// title + id + cwd with highest score first
 #[must_use]
 pub fn filtered_sessions(picker: &SessionPickerState) -> Vec<&SessionMeta> {
     let scope_filtered: Vec<&SessionMeta> = match picker.scope {
@@ -48,20 +58,19 @@ pub fn filtered_sessions(picker: &SessionPickerState) -> Vec<&SessionMeta> {
     };
 
     if picker.filter.is_empty() {
-        scope_filtered
-    } else {
-        let filter_lower = picker.filter.to_lowercase();
-        scope_filtered
-            .into_iter()
-            .filter(|s| {
-                s.title
-                    .as_deref()
-                    .unwrap_or("")
-                    .to_lowercase()
-                    .contains(&filter_lower)
-                    || s.id.contains(&filter_lower)
-                    || s.cwd.to_lowercase().contains(&filter_lower)
-            })
-            .collect()
+        return scope_filtered;
     }
+
+    // score against the concatenation of searchable fields so a match in
+    // any of title/id/cwd contributes to the ranking
+    let haystacks: Vec<String> = scope_filtered
+        .iter()
+        .map(|s| {
+            let title = s.title.as_deref().unwrap_or("");
+            format!("{title} {} {}", s.id.as_str(), s.cwd)
+        })
+        .collect();
+    let mut matcher = picker.matcher.borrow_mut();
+    let indices = matcher.filter(&haystacks, &picker.filter, String::as_str);
+    indices.into_iter().map(|i| scope_filtered[i]).collect()
 }

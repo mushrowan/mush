@@ -13,6 +13,12 @@ pub struct FuzzyFilter {
     matcher: Matcher,
 }
 
+impl std::fmt::Debug for FuzzyFilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FuzzyFilter").finish_non_exhaustive()
+    }
+}
+
 impl Default for FuzzyFilter {
     fn default() -> Self {
         Self::new()
