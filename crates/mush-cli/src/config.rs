@@ -362,7 +362,9 @@ pub fn load_config() -> Config {
     config
 }
 
-fn try_load_persisted_settings(path: &std::path::Path) -> Option<mush_tui::settings::PersistedSettings> {
+fn try_load_persisted_settings(
+    path: &std::path::Path,
+) -> Option<mush_tui::settings::PersistedSettings> {
     let content = std::fs::read_to_string(path).ok()?;
     match toml::from_str(&content) {
         Ok(p) => Some(p),
