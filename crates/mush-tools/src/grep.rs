@@ -11,7 +11,6 @@ use std::sync::Arc;
 use grep_regex::RegexMatcherBuilder;
 use grep_searcher::{BinaryDetection, SearcherBuilder, Sink, SinkContext, SinkMatch};
 use ignore::WalkBuilder;
-use ignore::overrides::OverrideBuilder;
 use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
 use serde::Deserialize;
 
@@ -259,7 +258,7 @@ fn run_search(
 
 /// collect files to search, respecting .gitignore
 fn collect_files(
-    cwd: &Path,
+    _cwd: &Path,
     search_path: &Path,
     include: Option<&str>,
 ) -> io::Result<Vec<PathBuf>> {
@@ -271,24 +270,33 @@ fn collect_files(
     let mut walk = WalkBuilder::new(search_path);
     walk.hidden(true).git_ignore(true).parents(true);
 
-    if let Some(glob) = include {
-        let mut overrides = OverrideBuilder::new(cwd);
-        // ignore crate uses `!` prefix for excludes, bare patterns for includes.
-        // when an include glob is given, we need to exclude everything else
-        // first, then include the pattern
-        let _ = overrides.add("!*");
-        let _ = overrides.add(glob);
-        if let Ok(built) = overrides.build() {
-            walk.overrides(built);
-        }
-    }
+    // post-filter on include glob. we used to use OverrideBuilder here but
+    // `!*` also excluded directories, which broke recursion. the `globset`
+    // approach below filters files by basename and cost-effectively skips
+    // nothing else
+    let include_matcher = include
+        .map(|glob| {
+            globset::Glob::new(glob)
+                .and_then(|g| globset::GlobSetBuilder::new().add(g).build())
+                .map_err(|e| io::Error::other(format!("invalid include glob {glob:?}: {e}")))
+        })
+        .transpose()?;
 
     let mut files = Vec::new();
     for entry in walk.build() {
         let entry = entry.map_err(io::Error::other)?;
-        if entry.file_type().is_some_and(|ft| ft.is_file()) {
-            files.push(entry.into_path());
+        if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+            continue;
         }
+        if let Some(ref matcher) = include_matcher {
+            let path = entry.path();
+            let matches =
+                matcher.is_match(path) || path.file_name().is_some_and(|n| matcher.is_match(n));
+            if !matches {
+                continue;
+            }
+        }
+        files.push(entry.into_path());
     }
     files.sort();
     Ok(files)
@@ -585,6 +593,36 @@ mod tests {
         let text = extract_text(&result);
         assert!(text.contains("main"));
         assert!(!text.contains("other"));
+    }
+
+    /// regression: include glob must not suppress directory recursion. the
+    /// previous `!*` override excluded directories too, so searches rooted at
+    /// a parent directory returned no matches for files inside subdirectories.
+    #[tokio::test]
+    async fn grep_include_recurses_into_subdirectories() {
+        let dir = temp_dir();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("nested.rs"), "ThinkingLevel::High").unwrap();
+        fs::write(sub.join("nested.txt"), "ThinkingLevel noise").unwrap();
+
+        let tool = GrepTool::new(dir.path().into());
+        let result = tool
+            .execute(serde_json::json!({
+                "pattern": "ThinkingLevel",
+                "path": dir.path().to_str().unwrap(),
+                "include": "*.rs"
+            }))
+            .await;
+        let text = extract_text(&result);
+        assert!(
+            text.contains("nested.rs"),
+            "expected match in nested.rs, got: {text}"
+        );
+        assert!(
+            !text.contains("nested.txt"),
+            "nested.txt should be excluded by include glob, got: {text}"
+        );
     }
 
     #[tokio::test]
