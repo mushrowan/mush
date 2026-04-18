@@ -7,6 +7,24 @@
 use ratatui::style::{Color, Modifier, Style};
 use serde::Deserialize;
 
+/// how to render +/- lines in diffs.
+///
+/// `Highlight` tints the whole line with a subtle background colour so the
+/// change stands out like github or vscode. `Prefix` keeps only the
+/// `+`/`-` prefix + fg colour, matching classic diff output.
+///
+/// a future `Bar` variant could draw a coloured `▎` bar in the gutter with
+/// dim text, but the two styles below cover the main preferences
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DiffLineStyle {
+    /// classic: `+ text` / `- text` with fg colour only
+    Prefix,
+    /// github/vscode style: whole-line bg tint for +/- lines
+    #[default]
+    Highlight,
+}
+
 /// the full colour theme for the TUI
 #[derive(Debug, Clone)]
 pub struct Theme {
@@ -73,6 +91,13 @@ pub struct Theme {
     /// within a paired removed/added line
     pub diff_added_intra: Style,
     pub diff_removed_intra: Style,
+    /// subtle line-level bg for Highlight mode. applied to the whole row
+    /// (prefix + equal tokens + padding) while intra tokens use the
+    /// stronger `*_intra` bg on top
+    pub diff_added_bg: Color,
+    pub diff_removed_bg: Color,
+    /// how to render +/- lines (Prefix: fg only; Highlight: line bg tint)
+    pub diff_line_style: DiffLineStyle,
 
     // context pressure colours
     pub context_ok: Style,
@@ -117,6 +142,27 @@ impl Default for Theme {
 }
 
 impl Theme {
+    /// effective base style for a diff +/- line. in Highlight mode the
+    /// line-level bg is folded into the base fg; in Prefix mode the base
+    /// style is fg-only. used by `widgets::diff` for prefix, equal tokens
+    /// and padding so the whole row reads as a single tinted band
+    #[must_use]
+    pub fn diff_base_added(&self) -> Style {
+        match self.diff_line_style {
+            DiffLineStyle::Prefix => self.diff_added,
+            DiffLineStyle::Highlight => self.diff_added.bg(self.diff_added_bg),
+        }
+    }
+
+    /// see [`Self::diff_base_added`]
+    #[must_use]
+    pub fn diff_base_removed(&self) -> Style {
+        match self.diff_line_style {
+            DiffLineStyle::Prefix => self.diff_removed,
+            DiffLineStyle::Highlight => self.diff_removed.bg(self.diff_removed_bg),
+        }
+    }
+
     /// dark terminal defaults (ANSI colours that adapt to the palette)
     pub fn dark() -> Self {
         let dim = Style::default()
@@ -178,10 +224,15 @@ impl Theme {
 
             diff_added: Style::default().fg(Color::Green),
             diff_removed: Style::default().fg(Color::Red),
-            // dark-red (52) and dark-green (22) backgrounds - muted enough
-            // to read over but loud enough to catch the eye on changed tokens
-            diff_added_intra: Style::default().fg(Color::Green).bg(Color::Indexed(22)),
-            diff_removed_intra: Style::default().fg(Color::Red).bg(Color::Indexed(52)),
+            // intra-highlight uses the stronger (medium) shade so changed
+            // tokens pop against the subtler whole-line bg below
+            diff_added_intra: Style::default().fg(Color::Green).bg(Color::Indexed(28)),
+            diff_removed_intra: Style::default().fg(Color::Red).bg(Color::Indexed(88)),
+            // whole-line bg in Highlight mode: dark green / dark red, muted
+            // enough to read over while still signalling the +/- status
+            diff_added_bg: Color::Indexed(22),
+            diff_removed_bg: Color::Indexed(52),
+            diff_line_style: DiffLineStyle::Highlight,
 
             context_ok: Style::default().fg(Color::Green),
             context_warn: Style::default().fg(Color::Yellow),
@@ -277,10 +328,12 @@ impl Theme {
 
             diff_added: Style::default().fg(Color::Green),
             diff_removed: Style::default().fg(Color::Red),
-            // light terminals: indexed 194 (pale green) / 224 (pale red) bg
-            // reads well on white without being harsh
-            diff_added_intra: Style::default().fg(Color::Green).bg(Color::Indexed(194)),
-            diff_removed_intra: Style::default().fg(Color::Red).bg(Color::Indexed(224)),
+            // light terminals: stronger intra greens/reds + dimmer line-bg
+            diff_added_intra: Style::default().fg(Color::Green).bg(Color::Indexed(157)),
+            diff_removed_intra: Style::default().fg(Color::Red).bg(Color::Indexed(217)),
+            diff_added_bg: Color::Indexed(194),
+            diff_removed_bg: Color::Indexed(224),
+            diff_line_style: DiffLineStyle::Highlight,
 
             context_ok: Style::default().fg(Color::Green),
             context_warn: Style::default().fg(Color::Yellow),
