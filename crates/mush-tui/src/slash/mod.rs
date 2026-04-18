@@ -102,6 +102,8 @@ pub enum SlashAction {
         id: String,
     },
     TaskList,
+    /// dump internal state for debugging (active panes, streams, token stats)
+    Debug,
     Quit,
     Other {
         name: String,
@@ -203,6 +205,7 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
         "panes" => Ok(SlashAction::Panes),
         "merge" => Ok(SlashAction::Merge),
         "task" | "tasks" => parse_task_subcommand(args),
+        "debug" => Ok(SlashAction::Debug),
         "quit" | "exit" | "q" => Ok(SlashAction::Quit),
         other => Ok(SlashAction::Other {
             name: other.to_string(),
@@ -333,5 +336,10 @@ mod tests {
                 args: String::new(),
             }
         );
+    }
+
+    #[test]
+    fn parse_debug_produces_debug_action() {
+        assert_eq!(parse("/debug").unwrap(), SlashAction::Debug);
     }
 }
