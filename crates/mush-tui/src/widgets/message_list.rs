@@ -338,16 +338,15 @@ impl Widget for MessageList<'_> {
         // compute image render areas based on scroll position
         let mut render_areas = Vec::new();
         if !image_placeholders.is_empty() && area.width > 0 {
-            let img_height = IMAGE_HEIGHT.saturating_sub(1); // minus the label
             let scroll_i = scroll as i32;
             let padding_i = padding as i32;
             let visible_i = visible as i32;
             for (i, ph) in image_placeholders.iter().enumerate() {
                 let y_before = img_y_positions[i] as i32;
-                // doc-space y: label sits at padding + line_idx, image
-                // body starts on the next row
-                let doc_top = padding_i + y_before + 1;
-                let doc_bot = doc_top + img_height as i32;
+                // placeholder line_idx now points directly at the first body
+                // row, so no +1 offset
+                let doc_top = padding_i + y_before;
+                let doc_bot = doc_top + ph.cell_height as i32;
                 let screen_top = doc_top - scroll_i;
                 let screen_bot = doc_bot - scroll_i;
                 // hide-on-partial: only render when fully inside the
@@ -358,14 +357,13 @@ impl Widget for MessageList<'_> {
                     continue;
                 }
                 let visible_y = area.y + screen_top as u16;
-                // indent 4 chars, leave some right margin
-                let img_x = area.x + 4;
-                let img_w = area.width.saturating_sub(8); // 4 left + 4 right
+                let img_x = area.x + ph.x_offset;
+                let img_w = ph.cell_width;
                 if img_w > 0 {
                     render_areas.push(ImageRenderArea {
                         msg_idx: ph.msg_idx,
                         tc_idx: ph.tc_idx,
-                        area: Rect::new(img_x, visible_y, img_w, img_height),
+                        area: Rect::new(img_x, visible_y, img_w, ph.cell_height),
                     });
                 }
             }
@@ -439,12 +437,25 @@ impl Widget for MessageList<'_> {
 /// height reserved for inline image rendering (in lines)
 const IMAGE_HEIGHT: u16 = 12;
 
+/// height of an image body inside a user-message attachment cell (excludes
+/// the top border; the shared divider row with the message box is free)
+const ATTACH_INNER_H: u16 = 8;
+
 /// tracks where an image placeholder starts in the lines vec
 struct ImagePlaceholder {
     msg_idx: usize,
     tc_idx: usize,
-    /// line index in the lines vec where the placeholder starts
+    /// line index in the lines vec where the image body starts (not the
+    /// label or top border)
     line_idx: usize,
+    /// column offset (relative to the render area x) where the image cell
+    /// begins. used for per-attachment cells in user messages so each
+    /// image lands inside its own cell instead of across the full width
+    x_offset: u16,
+    /// cell width in columns (image render width)
+    cell_width: u16,
+    /// image body height in rows
+    cell_height: u16,
 }
 
 /// scroll/selection state passed to render_message
@@ -529,42 +540,7 @@ fn render_message(
             lines.extend(indent_line(styled, cw));
         }
     } else if is_user {
-        let w = width as usize;
-        // 1-space indent, so content wraps within w-1 chars
-        let content_width = w.saturating_sub(1);
-        // blank padding line above
-        lines.push(Line::from(Span::styled(
-            " ".repeat(w),
-            app.theme.user_msg_bg,
-        )));
-        for line in msg.content.lines() {
-            for wrapped in wrap_text(line, content_width) {
-                let text = format!(" {wrapped}");
-                let pad = w.saturating_sub(text.chars().count());
-                let padded = format!("{text}{}", " ".repeat(pad));
-                lines.push(Line::from(Span::styled(padded, app.theme.user_msg_bg)));
-            }
-        }
-        // blank padding line below
-        lines.push(Line::from(Span::styled(
-            " ".repeat(w),
-            app.theme.user_msg_bg,
-        )));
-        // user message images
-        for (img_idx, _) in msg.images.iter().enumerate() {
-            image_placeholders.push(ImagePlaceholder {
-                msg_idx,
-                tc_idx: img_idx,
-                line_idx: lines.len(),
-            });
-            lines.push(Line::from(vec![
-                Span::styled("    📷 ", Style::default()),
-                Span::styled("image", app.theme.image_label),
-            ]));
-            for _ in 1..IMAGE_HEIGHT {
-                lines.push(Line::raw(""));
-            }
-        }
+        render_user_message_box(app, msg, msg_idx, width, lines, image_placeholders);
     } else {
         // determine if a code block in this message is selected
         let highlight_block = if app.interaction.mode == crate::app::AppMode::Scroll
@@ -684,19 +660,26 @@ fn render_message(
         );
 
         // after the boxes, render any image placeholders. register the
-        // placeholder at the label row so the render-area compute lands
-        // the image body on the next row
+        // placeholder at the body row so the render-area compute lands
+        // the image overlay on the right set of rows
         for &gi in &image_group_indices {
             let (tc_idx, _tc) = group[gi];
-            image_placeholders.push(ImagePlaceholder {
-                msg_idx,
-                tc_idx,
-                line_idx: lines.len(),
-            });
             lines.push(Line::from(vec![
                 Span::styled("    📷 ", Style::default()),
                 Span::styled("image", app.theme.image_label),
             ]));
+            // placeholder points at the first body row (after the label)
+            image_placeholders.push(ImagePlaceholder {
+                msg_idx,
+                tc_idx,
+                line_idx: lines.len(),
+                // tool-call images span the available inner area with a
+                // small horizontal margin, unchanged from pre-attachment
+                // layout
+                x_offset: 4,
+                cell_width: width.saturating_sub(8),
+                cell_height: IMAGE_HEIGHT.saturating_sub(1),
+            });
             for _ in 1..IMAGE_HEIGHT {
                 lines.push(Line::raw(""));
             }
@@ -735,6 +718,145 @@ fn render_message(
             lines.push(Line::styled(parts.join(" | "), app.theme.usage));
         }
     }
+}
+
+/// render a user message as a rounded-cornered box with optional
+/// attachment row above. attachments share the message box's top border
+/// via left/right tees so the visual is a unified stack
+fn render_user_message_box<'a>(
+    app: &App,
+    msg: &DisplayMessage,
+    msg_idx: usize,
+    width: u16,
+    lines: &mut Vec<Line<'a>>,
+    image_placeholders: &mut Vec<ImagePlaceholder>,
+) {
+    let w = width as usize;
+    if w < 6 {
+        // too narrow for a proper box; fall back to plain text so we don't
+        // render broken UI on extreme widths
+        for line in msg.content.lines() {
+            lines.push(Line::raw(line.to_string()));
+        }
+        return;
+    }
+
+    let border_style = app.theme.dim;
+    let bg = app.theme.user_msg_bg;
+    let image_count = msg.images.len();
+    let inner = w.saturating_sub(2); // space between left and right walls
+
+    // attachment row above the message box (when images are attached)
+    if image_count > 0 {
+        let cell_widths = compute_attach_cell_widths(inner, image_count);
+
+        // top border: `┌` + title-aware run + `┬` dividers + ... + `┐`
+        let title = if image_count == 1 {
+            " attachment "
+        } else {
+            " attachments "
+        };
+        let title_chars = title.chars().count();
+        let mut top = String::from("┌");
+        for (i, cw) in cell_widths.iter().enumerate() {
+            let run = if i == 0 && *cw >= title_chars + 2 {
+                let dash_count = cw.saturating_sub(title_chars + 1);
+                format!("─{title}{}", "─".repeat(dash_count))
+            } else {
+                "─".repeat(*cw)
+            };
+            top.push_str(&run);
+            if i + 1 < image_count {
+                top.push('┬');
+            }
+        }
+        top.push('┐');
+        lines.push(Line::styled(top, border_style));
+
+        // inner rows: `│` + cell + `│` + cell + ... + `│`. register each
+        // image placeholder on the first inner row so the render-area
+        // compute can place the overlay inside its cell
+        let body_start = lines.len();
+        for _row in 0..ATTACH_INNER_H {
+            let mut row_str = String::from("│");
+            for (i, cw) in cell_widths.iter().enumerate() {
+                row_str.push_str(&" ".repeat(*cw));
+                if i + 1 < image_count {
+                    row_str.push('│');
+                }
+            }
+            row_str.push('│');
+            lines.push(Line::styled(row_str, border_style));
+        }
+
+        // register placeholders with cell x-offsets
+        let mut x_offset: u16 = 1; // after the leftmost `│`
+        for (img_idx, cw) in cell_widths.iter().enumerate() {
+            image_placeholders.push(ImagePlaceholder {
+                msg_idx,
+                tc_idx: img_idx,
+                line_idx: body_start,
+                x_offset,
+                cell_width: *cw as u16,
+                cell_height: ATTACH_INNER_H,
+            });
+            x_offset = x_offset.saturating_add(*cw as u16).saturating_add(1);
+        }
+
+        // divider row shared with msg box top: `├` + runs + `┴` where cell
+        // dividers end + `┤`
+        let mut divider = String::from("├");
+        for (i, cw) in cell_widths.iter().enumerate() {
+            divider.push_str(&"─".repeat(*cw));
+            if i + 1 < image_count {
+                divider.push('┴');
+            }
+        }
+        divider.push('┤');
+        lines.push(Line::styled(divider, border_style));
+    } else {
+        // plain rounded top when no attachments
+        let mut top = String::from("╭");
+        top.push_str(&"─".repeat(inner));
+        top.push('╮');
+        lines.push(Line::styled(top, border_style));
+    }
+
+    // message body rows: `│ content │` with bg fill
+    let content_width = inner.saturating_sub(2); // minus 1 space left + 1 space right
+    for line in msg.content.lines() {
+        for wrapped in wrap_text(line, content_width) {
+            let pad = content_width.saturating_sub(wrapped.chars().count());
+            let padded = format!(" {wrapped}{} ", " ".repeat(pad));
+            lines.push(Line::from(vec![
+                Span::styled("│", border_style),
+                Span::styled(padded, bg),
+                Span::styled("│", border_style),
+            ]));
+        }
+    }
+
+    // rounded bottom border
+    let mut bottom = String::from("╰");
+    bottom.push_str(&"─".repeat(inner));
+    bottom.push('╯');
+    lines.push(Line::styled(bottom, border_style));
+}
+
+/// distribute `inner` columns across `n` cells joined by (n-1) `│`
+/// dividers. leftover columns go to the first few cells so the total
+/// always matches the message box inner width exactly
+fn compute_attach_cell_widths(inner: usize, n: usize) -> Vec<usize> {
+    if n == 0 {
+        return Vec::new();
+    }
+    let divider_count = n.saturating_sub(1);
+    let cells_total = inner.saturating_sub(divider_count);
+    let base = cells_total / n;
+    let remainder = cells_total % n;
+    (0..n)
+        .map(|i| if i < remainder { base + 1 } else { base })
+        .collect()
 }
 
 /// hash string content for cache keying
@@ -887,9 +1009,19 @@ fn compute_message_height(
 
     // content
     if matches!(msg.role, MessageRole::User) {
-        h += 2; // top + bottom padding
-        h += count_estimated_lines(&msg.content, cw);
-        h += msg.images.len() * IMAGE_HEIGHT as usize;
+        // user msg body width is inner-less-2 (1 space each side)
+        let body_width = (width as usize).saturating_sub(4).max(1);
+        // rounded top + content + rounded bottom
+        h += 2;
+        h += count_estimated_lines(&msg.content, body_width);
+        // attach row above when images present: top border + inner rows
+        // + shared divider. divider counts once (replaces plain top)
+        if !msg.images.is_empty() {
+            h += 1 /* top border */ + ATTACH_INNER_H as usize + 1 /* divider */;
+            // the plain rounded top we counted above is replaced by the
+            // divider row, so subtract 1 to avoid double-counting
+            h = h.saturating_sub(1);
+        }
     } else if !msg.content.is_empty() && !matches!(msg.role, MessageRole::System) {
         // try indented cache for exact content line count
         let exact = {
@@ -1884,6 +2016,64 @@ mod tests {
     }
 
     #[test]
+    fn user_message_without_images_uses_rounded_box() {
+        // user messages render inside a rounded-corner box so the attachment
+        // row design can share borders cleanly with the message body
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.push_user_message("hi clob");
+        let buf = render_app(&app, 30, 8);
+        let content = buffer_to_string(&buf);
+        assert!(content.contains('╭'), "missing rounded top-left corner");
+        assert!(content.contains('╮'), "missing rounded top-right corner");
+        assert!(content.contains('╰'), "missing rounded bottom-left corner");
+        assert!(content.contains('╯'), "missing rounded bottom-right corner");
+        assert!(content.contains("hi clob"));
+    }
+
+    #[test]
+    fn user_message_with_image_renders_attachment_row_above() {
+        // attachments sit above the message box and share the message box's
+        // top border via left/right tees. the attach row itself is a bordered
+        // strip with square top corners and vertical dividers between cells
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.push_user_message_with_images("look here", vec![vec![0u8; 100]]);
+        let buf = render_app(&app, 40, 20);
+        let content = buffer_to_string(&buf);
+
+        assert!(content.contains('┌'), "missing attach top-left corner");
+        assert!(content.contains('┐'), "missing attach top-right corner");
+        // shared-divider row between attach and msg box: left-tee ├ and right-tee ┤
+        assert!(
+            content.contains('├'),
+            "missing left-tee on attach/msg divider"
+        );
+        assert!(
+            content.contains('┤'),
+            "missing right-tee on attach/msg divider"
+        );
+        // msg body still closes with rounded bottom corners
+        assert!(content.contains('╰'));
+        assert!(content.contains('╯'));
+        // and the message text is rendered
+        assert!(content.contains("look here"));
+
+        // image render area should land inside the attach cell (between the
+        // top border and the divider row), so some area row must sit above
+        // the msg box body
+        let areas = app.render_state.image_render_areas.borrow();
+        assert_eq!(areas.len(), 1, "image render area should be produced");
+        // locate the divider row by scanning buffer for ├
+        let divider_row = (0..buf.area.height)
+            .find(|&y| (0..buf.area.width).any(|x| buf[(x, y)].symbol() == "├"))
+            .expect("divider row with ├ present in buffer");
+        assert!(
+            areas[0].area.y < divider_row,
+            "image render area (y={}) should sit above the divider row (y={divider_row})",
+            areas[0].area.y
+        );
+    }
+
+    #[test]
     fn assistant_message_renders() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.start_streaming();
@@ -2280,12 +2470,11 @@ mod tests {
         let _ = render_app(&app, 60, 30);
 
         let areas = app.render_state.image_render_areas.borrow();
-        let img_body = IMAGE_HEIGHT.saturating_sub(1);
         for a in areas.iter() {
             assert_eq!(
-                a.area.height, img_body,
-                "render area has cropped height ({}) instead of full body height \
-                 ({img_body}); partial images should be hidden: {a:?}",
+                a.area.height, ATTACH_INNER_H,
+                "render area has cropped height ({}) instead of full cell height \
+                 ({ATTACH_INNER_H}); partial images should be hidden: {a:?}",
                 a.area.height
             );
         }
@@ -3247,7 +3436,11 @@ mod tests {
         app.messages.push(msg);
         let buf = render_app(&app, 60, 30);
         let content = buffer_to_string(&buf);
-        assert!(content.contains("📷"));
+        // new attachment-box layout shows the title inside the top border
+        assert!(
+            content.contains("attachment"),
+            "attachment title should appear in the top border"
+        );
         let areas = app.render_state.image_render_areas.borrow();
         assert_eq!(areas.len(), 1);
         assert_eq!(areas[0].msg_idx, 0);
