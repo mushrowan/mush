@@ -10,6 +10,7 @@ pub mod delegate;
 pub mod display_types;
 pub mod event_handler;
 pub mod file_tracker;
+pub mod fuzzy;
 pub mod input;
 pub mod input_buffer;
 pub mod isolation;
