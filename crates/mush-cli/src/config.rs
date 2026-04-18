@@ -324,24 +324,54 @@ pub fn config_path() -> PathBuf {
     config_dir().join("config.toml")
 }
 
-/// load config, returning default if file doesn't exist
+/// load config, returning default if file doesn't exist.
+/// also merges in persisted settings from `settings.toml` (global) and
+/// `<cwd>/.mush/settings.toml` (repo) so /settings changes round-trip.
 pub fn load_config() -> Config {
     let path = config_path();
-    if !path.exists() {
-        return Config::default();
-    }
-
-    match std::fs::read_to_string(&path) {
-        Ok(content) => match toml::from_str(&content) {
-            Ok(config) => config,
+    let mut config = if !path.exists() {
+        Config::default()
+    } else {
+        match std::fs::read_to_string(&path) {
+            Ok(content) => match toml::from_str::<Config>(&content) {
+                Ok(config) => config,
+                Err(e) => {
+                    eprintln!("\x1b[33mwarning: failed to parse config: {e}\x1b[0m");
+                    Config::default()
+                }
+            },
             Err(e) => {
-                eprintln!("\x1b[33mwarning: failed to parse config: {e}\x1b[0m");
+                eprintln!("\x1b[33mwarning: failed to read config: {e}\x1b[0m");
                 Config::default()
             }
-        },
+        }
+    };
+
+    // layer persisted settings overrides (global first, then repo)
+    let global = config_dir().join("settings.toml");
+    if let Some(persisted) = try_load_persisted_settings(&global) {
+        config.settings.anthropic_betas = persisted.anthropic_betas;
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        let repo = cwd.join(".mush").join("settings.toml");
+        if let Some(persisted) = try_load_persisted_settings(&repo) {
+            config.settings.anthropic_betas = persisted.anthropic_betas;
+        }
+    }
+
+    config
+}
+
+fn try_load_persisted_settings(path: &std::path::Path) -> Option<mush_tui::settings::PersistedSettings> {
+    let content = std::fs::read_to_string(path).ok()?;
+    match toml::from_str(&content) {
+        Ok(p) => Some(p),
         Err(e) => {
-            eprintln!("\x1b[33mwarning: failed to read config: {e}\x1b[0m");
-            Config::default()
+            eprintln!(
+                "\x1b[33mwarning: failed to parse {}: {e}\x1b[0m",
+                path.display()
+            );
+            None
         }
     }
 }
