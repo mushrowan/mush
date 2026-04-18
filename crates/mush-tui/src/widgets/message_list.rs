@@ -338,25 +338,35 @@ impl Widget for MessageList<'_> {
         // compute image render areas based on scroll position
         let mut render_areas = Vec::new();
         if !image_placeholders.is_empty() && area.width > 0 {
+            let img_height = IMAGE_HEIGHT.saturating_sub(1); // minus the label
+            let scroll_i = scroll as i32;
+            let padding_i = padding as i32;
+            let visible_i = visible as i32;
             for (i, ph) in image_placeholders.iter().enumerate() {
-                let y_before = img_y_positions[i];
-                // skip the label line, image starts on the line after
-                let img_y = y_before.saturating_add(1).saturating_sub(scroll);
-                let img_height = IMAGE_HEIGHT.saturating_sub(1); // minus the label
-                // check if visible
-                if img_y < visible && img_y + img_height > 0 {
-                    let visible_y = area.y + img_y;
-                    let visible_h = img_height.min(visible.saturating_sub(img_y));
-                    // indent 4 chars, leave some right margin
-                    let img_x = area.x + 4;
-                    let img_w = area.width.saturating_sub(8); // 4 left + 4 right margin
-                    if img_w > 0 && visible_h > 0 {
-                        render_areas.push(ImageRenderArea {
-                            msg_idx: ph.msg_idx,
-                            tc_idx: ph.tc_idx,
-                            area: Rect::new(img_x, visible_y, img_w, visible_h),
-                        });
-                    }
+                let y_before = img_y_positions[i] as i32;
+                // doc-space y: label sits at padding + line_idx, image
+                // body starts on the next row
+                let doc_top = padding_i + y_before + 1;
+                let doc_bot = doc_top + img_height as i32;
+                let screen_top = doc_top - scroll_i;
+                let screen_bot = doc_bot - scroll_i;
+                // hide-on-partial: only render when fully inside the
+                // viewport. ratatui_image's Fit resize would squish a
+                // partial rect, and cropping needs upstream support
+                // (see untracked-docs/todo.md)
+                if screen_top < 0 || screen_bot > visible_i {
+                    continue;
+                }
+                let visible_y = area.y + screen_top as u16;
+                // indent 4 chars, leave some right margin
+                let img_x = area.x + 4;
+                let img_w = area.width.saturating_sub(8); // 4 left + 4 right
+                if img_w > 0 {
+                    render_areas.push(ImageRenderArea {
+                        msg_idx: ph.msg_idx,
+                        tc_idx: ph.tc_idx,
+                        area: Rect::new(img_x, visible_y, img_w, img_height),
+                    });
                 }
             }
         }
@@ -660,15 +670,11 @@ fn render_message(
         let group = &completed[group_start..i];
 
         // collect image placeholders before rendering the group
-        for &(tc_idx, tc) in group {
-            if tc.image_data.is_some() {
-                image_placeholders.push(ImagePlaceholder {
-                    msg_idx,
-                    tc_idx,
-                    line_idx: lines.len(),
-                });
-            }
-        }
+        let image_group_indices: Vec<usize> = group
+            .iter()
+            .enumerate()
+            .filter_map(|(i, (_, tc))| tc.image_data.is_some().then_some(i))
+            .collect();
 
         render_tool_box_group(
             &group.iter().map(|(_, tc)| *tc).collect::<Vec<_>>(),
@@ -677,16 +683,22 @@ fn render_message(
             &app.theme,
         );
 
-        // after the boxes, render any image placeholders
-        for &(_, tc) in group {
-            if tc.image_data.is_some() {
-                lines.push(Line::from(vec![
-                    Span::styled("    📷 ", Style::default()),
-                    Span::styled("image", app.theme.image_label),
-                ]));
-                for _ in 1..IMAGE_HEIGHT {
-                    lines.push(Line::raw(""));
-                }
+        // after the boxes, render any image placeholders. register the
+        // placeholder at the label row so the render-area compute lands
+        // the image body on the next row
+        for &gi in &image_group_indices {
+            let (tc_idx, _tc) = group[gi];
+            image_placeholders.push(ImagePlaceholder {
+                msg_idx,
+                tc_idx,
+                line_idx: lines.len(),
+            });
+            lines.push(Line::from(vec![
+                Span::styled("    📷 ", Style::default()),
+                Span::styled("image", app.theme.image_label),
+            ]));
+            for _ in 1..IMAGE_HEIGHT {
+                lines.push(Line::raw(""));
             }
         }
     }
@@ -2173,6 +2185,78 @@ mod tests {
         // area should have reasonable dimensions
         assert!(areas[0].area.height > 0);
         assert!(areas[0].area.width > 0);
+    }
+
+    #[test]
+    fn image_render_area_respects_bottom_anchor_padding() {
+        // short content in a tall area gets bottom-anchored via top padding.
+        // the image render y must include that padding so the overlay lands
+        // next to its label instead of at the top of the area
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.push_user_message_with_images("hi", vec![vec![0u8; 100]]);
+
+        let _ = render_app(&app, 60, 40);
+        let areas = app.render_state.image_render_areas.borrow();
+        assert_eq!(areas.len(), 1);
+        // user msg + label + image body is well under 40 rows, so padding
+        // pushes the image past the first 15 rows of the area
+        assert!(
+            areas[0].area.y > 15,
+            "image render y should account for bottom-anchor padding, got y={}",
+            areas[0].area.y
+        );
+    }
+
+    #[test]
+    fn image_render_areas_never_pin_to_top_when_scrolled_past() {
+        // saturating_sub(scroll) used to clamp off-screen images to y=0
+        // and stack them at the top of the viewport at full height. after
+        // the fix, images that would need a negative screen-y are hidden
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        for _ in 0..5 {
+            app.push_user_message_with_images("hi", vec![vec![0u8; 100]]);
+        }
+        // bottom-anchored view of the newest content; older images are
+        // scrolled off the top
+        app.scroll_offset = 0;
+        let _ = render_app(&app, 60, 30);
+
+        let areas = app.render_state.image_render_areas.borrow();
+        // no two render areas may share the same y: the buggy stacking
+        // always placed every off-screen image at y=0
+        let mut ys: Vec<u16> = areas.iter().map(|a| a.area.y).collect();
+        ys.sort();
+        let before = ys.len();
+        ys.dedup();
+        assert_eq!(
+            ys.len(),
+            before,
+            "images are stacked on the same row (pin-to-top bug): {areas:?}"
+        );
+    }
+
+    #[test]
+    fn image_render_area_hidden_when_partially_above_viewport() {
+        // hide-on-partial policy: an image straddling the top edge of the
+        // viewport is not rendered (ratatui_image would squish rather than
+        // crop, and partial rendering needs upstream support)
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        for _ in 0..5 {
+            app.push_user_message_with_images("hi", vec![vec![0u8; 100]]);
+        }
+        app.scroll_offset = 10;
+        let _ = render_app(&app, 60, 30);
+
+        let areas = app.render_state.image_render_areas.borrow();
+        let img_body = IMAGE_HEIGHT.saturating_sub(1);
+        for a in areas.iter() {
+            assert_eq!(
+                a.area.height, img_body,
+                "render area has cropped height ({}) instead of full body height \
+                 ({img_body}); partial images should be hidden: {a:?}",
+                a.area.height
+            );
+        }
     }
 
     #[test]
