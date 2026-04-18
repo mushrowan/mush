@@ -1,5 +1,7 @@
 //! shared setup helpers for both print and TUI modes
 
+use std::sync::Arc;
+
 use color_eyre::eyre::{Result, eyre};
 use mush_ai::models;
 use mush_ai::providers;
@@ -195,7 +197,7 @@ fn init_builtin_tools(
         return mush_agent::tool::ToolRegistry::new();
     }
     mush_tools::builtin_tools_with_options(
-        cwd.to_path_buf(),
+        Arc::from(cwd),
         output_sink,
         model.uses_patch_tool(),
         http_client.clone(),

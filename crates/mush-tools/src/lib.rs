@@ -17,7 +17,7 @@ pub mod web_fetch;
 pub mod web_search;
 pub mod write;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use mush_agent::tool::{SharedTool, ToolRegistry};
@@ -43,7 +43,7 @@ pub fn supports_native_parallel_calls(model_id: &str) -> bool {
 }
 
 /// create the full set of built-in tools for a given working directory
-pub fn builtin_tools(cwd: PathBuf, http_client: reqwest::Client) -> ToolRegistry {
+pub fn builtin_tools(cwd: Arc<Path>, http_client: reqwest::Client) -> ToolRegistry {
     let mut tools = builtin_tools_with_options(cwd, None, false, http_client);
     add_batch_tool(&mut tools);
     tools
@@ -51,7 +51,7 @@ pub fn builtin_tools(cwd: PathBuf, http_client: reqwest::Client) -> ToolRegistry
 
 /// create built-in tools with an optional bash output sink for streaming
 pub fn builtin_tools_with_sink(
-    cwd: PathBuf,
+    cwd: Arc<Path>,
     output_sink: Option<bash::OutputSink>,
     http_client: reqwest::Client,
 ) -> ToolRegistry {
@@ -66,12 +66,11 @@ pub fn builtin_tools_with_sink(
 /// does NOT include the batch tool. call `add_batch_tool` after registering
 /// all additional tools (skill, MCP, LSP) so batch can access them all.
 pub fn builtin_tools_with_options(
-    cwd: PathBuf,
+    cwd: Arc<Path>,
     output_sink: Option<bash::OutputSink>,
     use_patch: bool,
     http_client: reqwest::Client,
 ) -> ToolRegistry {
-    let cwd: Arc<Path> = Arc::from(cwd);
     let bg_registry = background::BackgroundJobRegistry::new();
 
     let bash_tool: SharedTool = {
