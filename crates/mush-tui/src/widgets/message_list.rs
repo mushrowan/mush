@@ -1215,6 +1215,7 @@ fn render_single_tool_box(
                 border,
                 indent: indent.clone(),
                 gutter_width: read_line_number_width(output),
+                strip_indent: read_min_content_indent(output),
                 lang: crate::syntax::lang_from_path(&tc.summary),
                 theme,
             };
@@ -1407,6 +1408,20 @@ pub(crate) fn read_line_number_width(text: &str) -> usize {
         .unwrap_or(0)
 }
 
+/// minimum leading-space count across the `L<n>:` content in a read-tool
+/// output preview. blank content rows and non-matching rows are skipped
+/// so they don't collapse the result to zero. returns 0 when no matching
+/// non-blank rows are found
+#[must_use]
+pub(crate) fn read_min_content_indent(text: &str) -> usize {
+    text.lines()
+        .filter_map(parse_read_line)
+        .filter(|(_, content)| !content.trim().is_empty())
+        .map(|(_, content)| content.chars().take_while(|c| *c == ' ').count())
+        .min()
+        .unwrap_or(0)
+}
+
 /// shared rendering state for a read-tool output block. groups the
 /// invariant-across-lines arguments that `push_read_content_line`
 /// otherwise takes individually (clippy::too_many_arguments).
@@ -1416,6 +1431,9 @@ struct ReadLineCtx<'a> {
     border: Style,
     indent: Span<'static>,
     gutter_width: usize,
+    /// leading spaces common to every non-blank content row, stripped
+    /// before display so the smallest-indent row sits against the gutter
+    strip_indent: usize,
     lang: Option<&'a str>,
     theme: &'a Theme,
 }
@@ -1440,6 +1458,20 @@ fn push_read_content_line<'a>(
             lines,
         );
         return;
+    };
+
+    // strip the shared leading indent so deeply nested code doesn't sit
+    // half-way across the preview box. only applied to non-blank rows so
+    // blank-content lines stay blank (their indent was already 0 or less
+    // than strip_indent by definition)
+    let content = if content.len() >= ctx.strip_indent
+        && content.as_bytes()[..ctx.strip_indent]
+            .iter()
+            .all(|b| *b == b' ')
+    {
+        &content[ctx.strip_indent..]
+    } else {
+        content
     };
 
     // gutter: right-aligned line number followed by 2 spaces of separation
@@ -2741,6 +2773,75 @@ mod tests {
     fn read_line_number_width_ignores_non_matching() {
         assert_eq!(read_line_number_width("L1: a\nnot a line"), 1);
         assert_eq!(read_line_number_width("nothing here"), 0);
+    }
+
+    #[test]
+    fn read_min_content_indent_computes_min_leading_spaces() {
+        // min of 4/6/4 leading spaces across content is 4
+        let text = "L1:     foo\nL2:       bar\nL3:     baz";
+        assert_eq!(read_min_content_indent(text), 4);
+    }
+
+    #[test]
+    fn read_min_content_indent_ignores_blank_content_lines() {
+        // blank content lines don't bias the min toward zero
+        let text = "L1:     foo\nL2: \nL3:     bar";
+        assert_eq!(read_min_content_indent(text), 4);
+    }
+
+    #[test]
+    fn read_min_content_indent_returns_zero_when_any_line_flush_left() {
+        let text = "L1: foo\nL2:     bar";
+        assert_eq!(read_min_content_indent(text), 0);
+    }
+
+    #[test]
+    fn read_min_content_indent_ignores_non_matching_lines() {
+        let text = "L1:     foo\nplain narrative\nL2:       bar";
+        assert_eq!(read_min_content_indent(text), 4);
+    }
+
+    #[test]
+    fn read_tool_box_trims_shared_leading_indent() {
+        // regression: deeply nested code shown via the read tool used to
+        // render with the raw source indent, pushing content halfway across
+        // the preview box. the renderer must strip the common leading
+        // whitespace so the smallest-indent row sits against the gutter
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.messages.push(DisplayMessage {
+            tool_calls: vec![crate::app::DisplayToolCall {
+                name: "read".into(),
+                summary: "src/main.rs".into(),
+                status: ToolCallStatus::Done,
+                output_preview: Some(
+                    "L1:         fn main() {\n\
+                     L2:             println!(\"hi\");\n\
+                     L3:         }"
+                        .into(),
+                ),
+                image_data: None,
+                batch: 1,
+            }],
+            ..DisplayMessage::new(MessageRole::Assistant, "")
+        });
+        let buf = render_app(&app, 120, 12);
+        let content = buffer_to_string(&buf);
+
+        let fn_line = content
+            .lines()
+            .find(|l| l.contains("fn main"))
+            .expect("fn main row present");
+        // work in char units: `│` is multibyte so byte positions mislead
+        let pipe_char = fn_line.chars().position(|c| c == '│').unwrap();
+        let fn_byte = fn_line.find("fn main").unwrap();
+        let fn_char = fn_line[..fn_byte].chars().count();
+        let gap = fn_char - pipe_char;
+        // layout: │ + space + "1" + 2-space sep = 5 chars, fn should sit at +5
+        assert!(
+            gap <= 6,
+            "fn main should sit against the gutter after trimming 8 leading \
+             spaces, got char gap={gap} on line {fn_line:?}"
+        );
     }
 
     #[test]
