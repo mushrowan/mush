@@ -50,6 +50,11 @@ pub async fn run_tui(
 
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
+    // alt screen may inherit content from the main screen buffer on some
+    // terminals (esp. after pre-tui eprintln output like the startup report).
+    // clear explicitly so no stale lines leak through cells that widgets
+    // don't overwrite
+    terminal.clear()?;
     let (mut runtime, services) = RunnerRuntime::new(&mut tui_config).await;
 
     // start IPC listener if we have an agent card
