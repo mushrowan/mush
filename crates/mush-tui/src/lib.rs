@@ -25,6 +25,7 @@ pub mod shared_state;
 pub mod slash;
 pub mod slash_menu;
 pub mod streaming;
+pub mod syntax;
 pub mod terminal_policy;
 pub mod theme;
 pub mod ui;
