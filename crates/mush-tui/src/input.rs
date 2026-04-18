@@ -659,9 +659,17 @@ fn handle_slash_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             app.close_slash_menu();
             event
         }
-        // tab cycles forward with wrap
+        // tab: in command mode cycle selection forward, in model mode
+        // toggle between all / favourites-only
         (_, KeyCode::Tab) => {
-            if let Some(ref mut menu) = app.completion.slash_menu {
+            let favourites_only = app
+                .completion
+                .slash_menu
+                .as_ref()
+                .is_some_and(|m| m.model_mode);
+            if favourites_only {
+                toggle_model_favourites_view(app);
+            } else if let Some(ref mut menu) = app.completion.slash_menu {
                 let len = menu_len(menu);
                 if len > 0 {
                     menu.selected = (menu.selected + 1) % len;
@@ -720,6 +728,49 @@ fn menu_len(menu: &crate::slash_menu::SlashMenuState) -> usize {
         menu.model_matches.len()
     } else {
         menu.matches.len()
+    }
+}
+
+/// toggle the model picker between all-models and favourites-only views.
+/// swaps `menu.model_matches` to the subset of `model_completions` that are
+/// favourited (or back to all). leaves the picker open. when favourites are
+/// empty, sets a "no favourites yet" toast and stays in the all view
+fn toggle_model_favourites_view(app: &mut App) {
+    let Some(ref mut menu) = app.completion.slash_menu else {
+        return;
+    };
+    if !menu.model_mode {
+        return;
+    }
+    // a favourites-only view is one where every visible row is a favourite
+    // AND the count is smaller than the all-models set. flip by comparing
+    // current matches to the full list: if any non-favourite is visible, we
+    // were in "all" → switch to favourites
+    let has_non_favourite = menu
+        .model_matches
+        .iter()
+        .any(|m| !menu.favourite_models.contains(&m.id));
+    if has_non_favourite {
+        // currently showing all. switch to favourites-only
+        if menu.favourite_models.is_empty() {
+            menu.toast = Some("no favourites yet, ★ some with ctrl+f".to_string());
+            return;
+        }
+        let favs: Vec<_> = app
+            .completion
+            .model_completions
+            .iter()
+            .filter(|m| menu.favourite_models.contains(&m.id))
+            .cloned()
+            .collect();
+        menu.model_matches = favs;
+        menu.selected = 0;
+        menu.toast = Some("showing favourites only".to_string());
+    } else {
+        // currently favourites-only (or empty). switch back to all
+        menu.model_matches = app.completion.model_completions.clone();
+        menu.selected = 0;
+        menu.toast = None;
     }
 }
 
@@ -1367,6 +1418,70 @@ mod tests {
         );
         assert!(app.completion.slash_menu.is_none());
         assert_eq!(app.interaction.mode, AppMode::Normal);
+    }
+
+    #[test]
+    fn model_picker_tab_toggles_favourites_only_view() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.completion.model_completions = vec![
+            crate::app::ModelCompletion {
+                id: "claude-opus".into(),
+                name: "Claude Opus".into(),
+            },
+            crate::app::ModelCompletion {
+                id: "gpt-5".into(),
+                name: "GPT-5".into(),
+            },
+            crate::app::ModelCompletion {
+                id: "gemini".into(),
+                name: "Gemini".into(),
+            },
+        ];
+        app.completion.favourite_models = vec!["claude-opus".into()];
+        app.open_model_picker();
+        let menu = app.completion.slash_menu.as_ref().unwrap();
+        assert_eq!(menu.model_matches.len(), 3, "all 3 visible by default");
+
+        // tab toggles to favourites-only
+        handle_key(&mut app, key(KeyCode::Tab));
+        let menu = app.completion.slash_menu.as_ref().unwrap();
+        assert_eq!(
+            menu.model_matches.len(),
+            1,
+            "favourites-only view should restrict to 1 model"
+        );
+        assert_eq!(menu.model_matches[0].id, "claude-opus");
+
+        // tab again toggles back to all
+        handle_key(&mut app, key(KeyCode::Tab));
+        let menu = app.completion.slash_menu.as_ref().unwrap();
+        assert_eq!(menu.model_matches.len(), 3, "all models visible again");
+    }
+
+    #[test]
+    fn model_picker_tab_toasts_when_no_favourites() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.completion.model_completions = vec![crate::app::ModelCompletion {
+            id: "claude-opus".into(),
+            name: "Claude Opus".into(),
+        }];
+        assert!(app.completion.favourite_models.is_empty());
+        app.open_model_picker();
+
+        handle_key(&mut app, key(KeyCode::Tab));
+        let menu = app.completion.slash_menu.as_ref().unwrap();
+        assert_eq!(
+            menu.model_matches.len(),
+            1,
+            "no favourites means the all-view must stay"
+        );
+        assert!(
+            menu.toast
+                .as_deref()
+                .is_some_and(|t| t.contains("no favourites")),
+            "expected a 'no favourites' toast, got {:?}",
+            menu.toast
+        );
     }
 
     #[test]
