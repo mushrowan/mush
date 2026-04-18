@@ -96,27 +96,13 @@ pub fn mask_observations(
     let keep = keep_recent_turns.unwrap_or(DEFAULT_KEEP_OBSERVATIONS);
 
     // find the cutoff: the index of the `keep`th assistant message from
-    // the end. everything before this index is "old" and gets masked.
-    let mut assistant_count = 0;
-    let mut cutoff_index = 0;
-    let mut found = false;
-    for (i, msg) in messages.iter().enumerate().rev() {
-        if matches!(msg, Message::Assistant(_)) {
-            assistant_count += 1;
-            if assistant_count == keep {
-                cutoff_index = i;
-                found = true;
-                break;
-            }
-        }
-    }
-
-    if !found {
+    // the end. everything before this index is "old" and gets masked
+    let Some(cutoff_index) = find_recent_boundary(messages, TurnPivot::Assistant, keep) else {
         return ObservationMaskResult {
             masked_count: 0,
             tokens_saved: 0,
         };
-    }
+    };
 
     // mask tool results before the cutoff
     let mut masked_count = 0;

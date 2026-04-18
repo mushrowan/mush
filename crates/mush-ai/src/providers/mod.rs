@@ -7,7 +7,7 @@ pub mod sse;
 use crate::registry::ApiRegistry;
 use crate::types::{
     AssistantMessage, Message, Model, ThinkingLevel, ToolResultMessage, ToolResultTrimming,
-    UserMessage,
+    TurnPivot, UserMessage, find_recent_boundary,
 };
 
 /// max chars for tool results in older turns
@@ -29,16 +29,7 @@ pub(crate) fn format_error_chain(err: &dyn std::error::Error) -> String {
 
 /// find the message index at which "recent" turns begin (sliding window boundary)
 fn recent_boundary(messages: &[Message]) -> usize {
-    let mut user_count = 0;
-    for (i, msg) in messages.iter().enumerate().rev() {
-        if matches!(msg, Message::User(_)) {
-            user_count += 1;
-            if user_count >= RECENT_TURNS_TO_KEEP {
-                return i;
-            }
-        }
-    }
-    0
+    find_recent_boundary(messages, TurnPivot::User, RECENT_TURNS_TO_KEEP).unwrap_or(0)
 }
 
 /// visitor over a slice of `Message` values, used by provider request
