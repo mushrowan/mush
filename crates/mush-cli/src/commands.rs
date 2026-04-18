@@ -226,6 +226,30 @@ pub fn status(terminal_overrides: mush_tui::TerminalPolicyOverrides) -> Result<(
         println!("\x1b[2m - not configured\x1b[0m");
     }
 
+    // additional openai-compatible providers. env vars follow the
+    // convention `{PROVIDER}_API_KEY` (matches `env_api_key` in mush-ai)
+    for provider in [
+        "groq",
+        "deepseek",
+        "xai",
+        "cerebras",
+        "mistral",
+        "together",
+        "deepinfra",
+    ] {
+        let env_name = format!("{}_API_KEY", provider.to_uppercase().replace('-', "_"));
+        let has_env = std::env::var(&env_name).is_ok();
+        let has_cfg = cfg.api_keys.get(provider).is_some();
+        print!("  {provider:<13}");
+        if has_env {
+            println!("\x1b[32m✓ env var\x1b[0m");
+        } else if has_cfg {
+            println!("\x1b[32m✓ config file\x1b[0m");
+        } else {
+            println!("\x1b[2m- not configured\x1b[0m");
+        }
+    }
+
     // sessions
     let store = SessionStore::new(SessionStore::default_dir());
     let session_count = store.list().map(|s| s.len()).unwrap_or(0);

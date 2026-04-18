@@ -288,13 +288,20 @@ impl Config {
     }
 }
 
-/// api key overrides from config file
+/// api key overrides from config file.
+///
+/// named fields cover the common paths used throughout the codebase.
+/// the flattened `other` map catches any additional provider name so
+/// users can add keys for groq, deepseek, xai, cerebras, mistral,
+/// together, deepinfra, etc. without a new named field each time
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct ApiKeys {
     pub anthropic: Option<String>,
     pub openrouter: Option<String>,
     pub openai: Option<String>,
+    #[serde(flatten)]
+    pub other: HashMap<String, String>,
 }
 
 impl ApiKeys {
@@ -311,7 +318,22 @@ impl ApiKeys {
         if let Some(key) = &self.openai {
             map.insert("openai".into(), key.clone());
         }
+        for (k, v) in &self.other {
+            // named fields take priority over flattened map entries
+            map.entry(k.clone()).or_insert_with(|| v.clone());
+        }
         map
+    }
+
+    /// look up an api key by provider name (named field first, then `other`)
+    #[must_use]
+    pub fn get(&self, name: &str) -> Option<&str> {
+        match name {
+            "anthropic" => self.anthropic.as_deref(),
+            "openrouter" => self.openrouter.as_deref(),
+            "openai" => self.openai.as_deref(),
+            _ => self.other.get(name).map(String::as_str),
+        }
     }
 }
 
@@ -458,6 +480,8 @@ debug_cache = true
 anthropic = "sk-ant-test"
 openrouter = "sk-or-test"
 openai = "sk-openai-test"
+groq = "sk-groq-test"
+xai = "sk-xai-test"
 "#;
 
         let config: Config = toml::from_str(toml).unwrap();
@@ -471,6 +495,15 @@ openai = "sk-openai-test"
         assert!(config.debug_cache);
         assert_eq!(config.api_keys.anthropic.as_deref(), Some("sk-ant-test"));
         assert_eq!(config.api_keys.openai.as_deref(), Some("sk-openai-test"));
+        // flattened extra providers picked up via the `other` map
+        assert_eq!(config.api_keys.get("groq"), Some("sk-groq-test"));
+        assert_eq!(config.api_keys.get("xai"), Some("sk-xai-test"));
+        // unknown providers fall through to None
+        assert_eq!(config.api_keys.get("unknown-provider"), None);
+        // to_map merges named fields with `other`
+        let map = config.api_keys.to_map();
+        assert_eq!(map.get("groq"), Some(&"sk-groq-test".to_string()));
+        assert_eq!(map.get("anthropic"), Some(&"sk-ant-test".to_string()));
     }
 
     #[test]
