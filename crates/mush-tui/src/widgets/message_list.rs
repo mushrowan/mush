@@ -676,7 +676,10 @@ fn render_message(
     }
 
     // usage line (compact: total tokens + cost, with cache reuse + write ratios)
-    if let Some(ref usage) = msg.usage {
+    // gated on show_usage_lines since the same info is in the status bar
+    if app.interaction.show_usage_lines
+        && let Some(ref usage) = msg.usage
+    {
         let total = usage.total_tokens();
         if total > TokenCount::ZERO {
             let mut parts = vec![format!(" {total}tok")];
@@ -1660,6 +1663,7 @@ mod tests {
     #[test]
     fn usage_line_shows_reuse_and_write_ratios() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.interaction.show_usage_lines = true;
         app.messages.push(DisplayMessage {
             usage: Some(Usage {
                 input_tokens: TokenCount::new(100),
@@ -1686,6 +1690,7 @@ mod tests {
         // old formula (cache_read / (cache_read + input)) would show 99%,
         // new formula (cache_read / total_input) correctly shows ~4%
         let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.interaction.show_usage_lines = true;
         app.messages.push(DisplayMessage {
             usage: Some(Usage {
                 input_tokens: TokenCount::new(50),
@@ -1702,6 +1707,40 @@ mod tests {
         assert!(
             content.contains("reuse 4%"),
             "during a cache bust reuse should reflect total input, got: {content}"
+        );
+    }
+
+    #[test]
+    fn usage_line_hidden_by_default_shown_when_enabled() {
+        // default: show_usage_lines = false, usage line must not render
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.messages.push(DisplayMessage {
+            usage: Some(Usage {
+                input_tokens: TokenCount::new(100),
+                output_tokens: TokenCount::new(20),
+                cache_read_tokens: TokenCount::new(150),
+                cache_write_tokens: TokenCount::new(50),
+            }),
+            cost: Some(Dollars::new(0.0012)),
+            ..DisplayMessage::new(MessageRole::Assistant, "done")
+        });
+
+        let hidden = buffer_to_string(&render_app(&app, 70, 10));
+        assert!(
+            !hidden.contains("320tok"),
+            "usage line should be hidden by default, got: {hidden}"
+        );
+        assert!(
+            !hidden.contains("reuse"),
+            "usage line should be hidden by default, got: {hidden}"
+        );
+
+        // flipping the toggle shows the usage line
+        app.interaction.show_usage_lines = true;
+        let shown = buffer_to_string(&render_app(&app, 70, 10));
+        assert!(
+            shown.contains("320tok"),
+            "usage line should render when toggled on, got: {shown}"
         );
     }
 

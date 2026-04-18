@@ -56,6 +56,8 @@ pub struct InteractionState {
     pub show_prompt_injection: bool,
     /// whether to show dollar cost in status bar
     pub show_cost: bool,
+    /// whether to render per-message usage lines (off by default, same info is in status bar)
+    pub show_usage_lines: bool,
 }
 
 impl Default for InteractionState {
@@ -68,6 +70,7 @@ impl Default for InteractionState {
             confirm_tool_call_id: None,
             show_prompt_injection: false,
             show_cost: false,
+            show_usage_lines: false,
         }
     }
 }

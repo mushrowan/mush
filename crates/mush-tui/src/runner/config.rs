@@ -90,6 +90,8 @@ pub struct TuiConfig {
     pub auto_fork_compact: bool,
     /// show dollar cost in status bar (off by default, toggle with /cost)
     pub show_cost: bool,
+    /// render per-message usage lines (off by default, same info is in status bar)
+    pub show_usage_lines: bool,
     /// emit system messages when cache reads are observed
     pub debug_cache: bool,
     /// show cache warmth countdown in status bar and send desktop notifications

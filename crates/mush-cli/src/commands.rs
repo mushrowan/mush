@@ -98,6 +98,7 @@ pub fn open_config() -> Result<()> {
              # cache_retention = \"short\"  # none | short | long\n\
              # debug_cache = false\n\
              # show_cost = false  # toggle with /cost\n\
+             # show_usage_lines = false  # render usage lines under each message\n\
              # cache_timer = false  # cache warmth countdown + notifications\n\
              # system_prompt = \"\"\n\
              \n\
