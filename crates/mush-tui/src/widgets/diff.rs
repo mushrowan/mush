@@ -90,9 +90,9 @@ fn cell<'a>(text: String, width: usize, style: Style) -> Vec<Span<'a>> {
 
 /// fit a sequence of pre-styled spans to exactly `width` display columns,
 /// truncating with `…` when the combined content exceeds the budget and
-/// padding with spaces when short. preserves per-span styling on retained
-/// content so intra-line highlights carry through
-fn fit_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Span<'static>> {
+/// padding with `pad_style`-styled spaces when short. preserves per-span
+/// styling on retained content so intra-line highlights carry through
+fn fit_spans(spans: Vec<Span<'static>>, width: usize, pad_style: Style) -> Vec<Span<'static>> {
     use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
     let total: usize = spans
         .iter()
@@ -102,7 +102,7 @@ fn fit_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Span<'static>> {
         let mut out = spans;
         let pad = width - total;
         if pad > 0 {
-            out.push(Span::raw(" ".repeat(pad)));
+            out.push(Span::styled(" ".repeat(pad), pad_style));
         }
         return out;
     }
@@ -143,9 +143,10 @@ fn fit_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Span<'static>> {
 ///
 /// returns `(removed_spans, added_spans)` where tokens that differ between
 /// the two strings are styled with `theme.diff_removed_intra` /
-/// `theme.diff_added_intra` and matching tokens use the base
-/// `theme.diff_removed` / `theme.diff_added` styles. whitespace is kept
-/// with the adjacent token
+/// `theme.diff_added_intra` and matching tokens use the effective base
+/// styles from `Theme::diff_base_removed` / `Theme::diff_base_added`
+/// (which picks up line-level bg tint in Highlight mode). whitespace is
+/// kept with the adjacent token
 #[must_use]
 pub fn paired_change_spans(
     removed: &str,
@@ -153,6 +154,8 @@ pub fn paired_change_spans(
     theme: &Theme,
 ) -> (Vec<Span<'static>>, Vec<Span<'static>>) {
     let diff = TextDiff::from_words(removed, added);
+    let base_removed = theme.diff_base_removed();
+    let base_added = theme.diff_base_added();
     let mut removed_spans: Vec<Span<'static>> = Vec::new();
     let mut added_spans: Vec<Span<'static>> = Vec::new();
     for change in diff.iter_all_changes() {
@@ -162,8 +165,8 @@ pub fn paired_change_spans(
         }
         match change.tag() {
             ChangeTag::Equal => {
-                removed_spans.push(Span::styled(text.clone(), theme.diff_removed));
-                added_spans.push(Span::styled(text, theme.diff_added));
+                removed_spans.push(Span::styled(text.clone(), base_removed));
+                added_spans.push(Span::styled(text, base_added));
             }
             ChangeTag::Delete => {
                 removed_spans.push(Span::styled(text, theme.diff_removed_intra));
@@ -208,7 +211,9 @@ fn split_run(run: &[DiffEvent]) -> (Vec<&str>, Vec<&str>) {
 /// build spans for one side of a paired diff row: prefix + styled content.
 /// `removed` / `added` are the paired strings (always in that argument
 /// order) and `side` selects which one to emit. when `side` is missing
-/// its string (unpaired end of a run) an empty span list is returned
+/// its string (unpaired end of a run) an empty span list is returned.
+/// the base style picks up the line-level bg tint in Highlight mode via
+/// `Theme::diff_base_*`
 fn build_side(
     prefix: &str,
     removed: Option<&str>,
@@ -217,8 +222,8 @@ fn build_side(
     side: Side,
 ) -> Vec<Span<'static>> {
     let (own, base) = match side {
-        Side::Removed => (removed, theme.diff_removed),
-        Side::Added => (added, theme.diff_added),
+        Side::Removed => (removed, theme.diff_base_removed()),
+        Side::Added => (added, theme.diff_base_added()),
     };
     let Some(own) = own else {
         return Vec::new();
@@ -238,6 +243,18 @@ fn build_side(
         }
     }
     spans
+}
+
+impl Side {
+    /// pad style for fitting a row to a target width. in Highlight mode
+    /// this matches the line bg so the tint extends to the edge; in Prefix
+    /// mode it's the default (no bg)
+    fn pad_style(self, theme: &Theme) -> Style {
+        match self {
+            Side::Removed => theme.diff_base_removed(),
+            Side::Added => theme.diff_base_added(),
+        }
+    }
 }
 
 #[derive(Copy, Clone)]
@@ -279,7 +296,8 @@ fn render_inline(events: &[DiffEvent], inner_width: usize, theme: &Theme) -> Vec
                         theme,
                         Side::Removed,
                     );
-                    rows.push(Line::from(fit_spans(spans, inner_width)));
+                    let pad = Side::Removed.pad_style(theme);
+                    rows.push(Line::from(fit_spans(spans, inner_width, pad)));
                 }
                 for (idx, added_text) in added.iter().enumerate() {
                     let spans = build_side(
@@ -289,7 +307,8 @@ fn render_inline(events: &[DiffEvent], inner_width: usize, theme: &Theme) -> Vec
                         theme,
                         Side::Added,
                     );
-                    rows.push(Line::from(fit_spans(spans, inner_width)));
+                    let pad = Side::Added.pad_style(theme);
+                    rows.push(Line::from(fit_spans(spans, inner_width, pad)));
                 }
             }
         }
@@ -356,9 +375,14 @@ fn render_side_by_side(
                         theme,
                         Side::Added,
                     );
-                    let mut spans = fit_spans(left_spans, left_width);
+                    let mut spans =
+                        fit_spans(left_spans, left_width, Side::Removed.pad_style(theme));
                     spans.push(Span::styled(" │ ", sep_style));
-                    spans.extend(fit_spans(right_spans, right_width));
+                    spans.extend(fit_spans(
+                        right_spans,
+                        right_width,
+                        Side::Added.pad_style(theme),
+                    ));
                     rows.push(Line::from(spans));
                 }
             }
@@ -540,10 +564,12 @@ mod tests {
             "expected 'qux' at intra style, got {added:?}"
         );
 
-        // common tokens on the removed side carry the base removed style
+        // common tokens on the removed side carry the effective base style
+        // (which folds in line bg when line_style = Highlight)
+        let base_removed = theme.diff_base_removed();
         let has_base_foo = removed
             .iter()
-            .any(|s| s.content.contains("foo") && s.style == theme.diff_removed);
+            .any(|s| s.content.contains("foo") && s.style == base_removed);
         assert!(
             has_base_foo,
             "expected 'foo' at base removed style, got {removed:?}"
@@ -554,15 +580,17 @@ mod tests {
     fn paired_change_spans_identical_inputs_have_no_intra_highlight() {
         let theme = Theme::dark();
         let (removed, added) = paired_change_spans("same text", "same text", &theme);
+        let base_removed = theme.diff_base_removed();
+        let base_added = theme.diff_base_added();
         assert!(
             removed
                 .iter()
-                .all(|s| s.style == theme.diff_removed || s.content.is_empty())
+                .all(|s| s.style == base_removed || s.content.is_empty())
         );
         assert!(
             added
                 .iter()
-                .all(|s| s.style == theme.diff_added || s.content.is_empty())
+                .all(|s| s.style == base_added || s.content.is_empty())
         );
     }
 
@@ -610,6 +638,63 @@ mod tests {
                     .all(|s| s.style != theme.diff_removed_intra),
                 "unpaired removed should not have intra style, got {:?}",
                 row.spans
+            );
+        }
+    }
+
+    // -- outer line style (Prefix vs Highlight) --
+
+    #[test]
+    fn theme_default_uses_highlight_diff_line_style() {
+        let theme = Theme::dark();
+        assert_eq!(
+            theme.diff_line_style,
+            crate::theme::DiffLineStyle::Highlight
+        );
+    }
+
+    #[test]
+    fn render_diff_highlight_mode_tints_full_added_row_with_bg() {
+        let theme = Theme::dark();
+        let rows = render_diff("- foo bar baz\n+ foo qux baz\n", 40, &theme);
+        assert_eq!(rows.len(), 2);
+        // every span on the added row (including prefix, equal tokens, and
+        // padding) must carry the added-side bg when Highlight is active
+        for span in &rows[1].spans {
+            let bg = span.style.bg;
+            assert!(
+                bg.is_some(),
+                "added row span missing bg in Highlight mode: {span:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn render_diff_prefix_mode_has_no_line_bg() {
+        let mut theme = Theme::dark();
+        theme.diff_line_style = crate::theme::DiffLineStyle::Prefix;
+        let rows = render_diff("- foo bar baz\n+ foo qux baz\n", 40, &theme);
+        assert_eq!(rows.len(), 2);
+        // Prefix mode: only the intra-highlighted tokens have bg; prefix and
+        // equal tokens stay fg-only
+        let prefix_has_no_bg = rows[0]
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref() == "- ")
+            .is_some_and(|s| s.style.bg.is_none());
+        assert!(prefix_has_no_bg, "Prefix mode should not tint prefix");
+    }
+
+    #[test]
+    fn render_diff_highlight_mode_pads_context_without_bg() {
+        // context lines stay dim in both modes, no bg tint
+        let theme = Theme::dark();
+        let rows = render_diff("  unchanged line\n", 40, &theme);
+        assert_eq!(rows.len(), 1);
+        for span in &rows[0].spans {
+            assert!(
+                span.style.bg.is_none(),
+                "context row should not have bg, got {span:?}"
             );
         }
     }
