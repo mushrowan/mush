@@ -342,6 +342,12 @@ pub struct IncrementalRepoMap {
     pool: ParserPool,
     file_data: FxHashMap<PathBuf, FileData>,
     current: RepoMap,
+    /// fingerprint of the last edge graph we ran pagerank over
+    last_edges_fp: u64,
+    /// cached ranks keyed by file path, reused when `last_edges_fp` matches
+    last_ranks: FxHashMap<PathBuf, f64>,
+    /// total number of pagerank computations performed (diagnostic)
+    pagerank_runs: u64,
 }
 
 impl IncrementalRepoMap {
@@ -352,18 +358,34 @@ impl IncrementalRepoMap {
         let files = discover_files(root);
         let file_data = parse_files_parallel(&files);
 
-        let current = build_from_data(root, &file_data);
+        let BuildOutcome {
+            map,
+            edges_fp,
+            ranks_by_path,
+        } = build_from_data(root, &file_data, None);
         Self {
             root: root.to_path_buf(),
             pool,
             file_data,
-            current,
+            current: map,
+            last_edges_fp: edges_fp,
+            last_ranks: ranks_by_path,
+            pagerank_runs: 1,
         }
     }
 
     /// get the current repo map
     pub fn map(&self) -> &RepoMap {
         &self.current
+    }
+
+    /// how many times pagerank has actually been computed since construction
+    ///
+    /// useful for diagnostics: a healthy edit loop should see this grow
+    /// slower than the number of `update` calls (incremental edits that
+    /// don't change the reference graph skip pagerank entirely)
+    pub fn pagerank_runs(&self) -> u64 {
+        self.pagerank_runs
     }
 
     /// update after files changed or were removed
@@ -412,7 +434,21 @@ impl IncrementalRepoMap {
         }
 
         if any_change {
-            self.current = build_from_data(&self.root, &self.file_data);
+            let BuildOutcome {
+                map,
+                edges_fp,
+                ranks_by_path,
+            } = build_from_data(
+                &self.root,
+                &self.file_data,
+                Some((self.last_edges_fp, &self.last_ranks)),
+            );
+            if edges_fp != self.last_edges_fp {
+                self.pagerank_runs += 1;
+            }
+            self.current = map;
+            self.last_edges_fp = edges_fp;
+            self.last_ranks = ranks_by_path;
         }
 
         any_change
@@ -434,10 +470,34 @@ impl IncrementalRepoMap {
     }
 }
 
+/// result of a full `build_from_data` pass
+struct BuildOutcome {
+    map: RepoMap,
+    /// fingerprint of the edge set (files keyed by relative path) used
+    /// to compute the ranks in `map`. stable across equivalent graphs
+    edges_fp: u64,
+    /// ranks keyed by absolute file path, suitable for caching across
+    /// incremental updates
+    ranks_by_path: FxHashMap<PathBuf, f64>,
+}
+
 /// shared core: build a RepoMap from pre-parsed file data
-fn build_from_data(root: &Path, file_data: &FxHashMap<PathBuf, FileData>) -> RepoMap {
+///
+/// when `cached` is `Some((fp, ranks))` and the newly computed edge
+/// fingerprint matches `fp`, we reuse the cached per-path ranks instead
+/// of running pagerank. this is the hot-path for small edits that don't
+/// alter the reference graph (comments, formatting, renames of locals)
+fn build_from_data(
+    root: &Path,
+    file_data: &FxHashMap<PathBuf, FileData>,
+    cached: Option<(u64, &FxHashMap<PathBuf, f64>)>,
+) -> BuildOutcome {
     if file_data.is_empty() {
-        return RepoMap { files: vec![] };
+        return BuildOutcome {
+            map: RepoMap { files: vec![] },
+            edges_fp: 0,
+            ranks_by_path: FxHashMap::default(),
+        };
     }
 
     // build global definition index
@@ -448,18 +508,25 @@ fn build_from_data(root: &Path, file_data: &FxHashMap<PathBuf, FileData>) -> Rep
         }
     }
 
-    // build file-level edges
-    let file_indices: FxHashMap<&PathBuf, usize> =
-        file_data.keys().enumerate().map(|(i, p)| (p, i)).collect();
+    // deterministic enumeration: sort by path so indices (and therefore
+    // the edge fingerprint) are stable across HashMap iteration orders
+    let mut ordered_paths: Vec<&PathBuf> = file_data.keys().collect();
+    ordered_paths.sort();
+    let file_indices: FxHashMap<&PathBuf, usize> = ordered_paths
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (*p, i))
+        .collect();
     let n = file_indices.len();
 
     let mut edges: Vec<(usize, usize)> = Vec::new();
-    for (path, data) in file_data {
-        let from = file_indices[path];
+    for path in &ordered_paths {
+        let from = file_indices[*path];
+        let data = &file_data[*path];
         for ref_name in &data.references {
             if let Some(def_files) = def_index.get(ref_name.as_str()) {
                 for def_path in def_files {
-                    if *def_path != path {
+                    if *def_path != *path {
                         let to = file_indices[def_path];
                         edges.push((from, to));
                     }
@@ -471,7 +538,24 @@ fn build_from_data(root: &Path, file_data: &FxHashMap<PathBuf, FileData>) -> Rep
     edges.sort_unstable();
     edges.dedup();
 
-    let ranks = pagerank(&edges, n, 0.85, 20);
+    let edges_fp = edges_fingerprint(&ordered_paths, &edges);
+
+    // reuse cached ranks when the graph shape is identical
+    let reused_ranks = cached
+        .filter(|(prev_fp, prev_ranks)| *prev_fp == edges_fp && prev_ranks.len() == n)
+        .and_then(|(_, prev_ranks)| {
+            ordered_paths
+                .iter()
+                .map(|p| prev_ranks.get(*p).copied())
+                .collect::<Option<Vec<f64>>>()
+        });
+    let ranks = reused_ranks.unwrap_or_else(|| pagerank(&edges, n, 0.85, 20));
+
+    let ranks_by_path: FxHashMap<PathBuf, f64> = ordered_paths
+        .iter()
+        .enumerate()
+        .map(|(i, p)| ((*p).clone(), ranks[i]))
+        .collect();
 
     let mut ranked: Vec<RankedFile> = file_data
         .iter()
@@ -495,7 +579,30 @@ fn build_from_data(root: &Path, file_data: &FxHashMap<PathBuf, FileData>) -> Rep
 
     ranked.retain(|f| !f.symbols.is_empty());
 
-    RepoMap { files: ranked }
+    BuildOutcome {
+        map: RepoMap { files: ranked },
+        edges_fp,
+        ranks_by_path,
+    }
+}
+
+/// fingerprint the edge graph so we can skip pagerank when unchanged
+///
+/// hashes both the node ordering (paths) and the deduped edge list so
+/// that any structural change -- a new reference, a new def, a removed
+/// file -- produces a different value
+fn edges_fingerprint(ordered_paths: &[&PathBuf], edges: &[(usize, usize)]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = rustc_hash::FxHasher::default();
+    ordered_paths.len().hash(&mut hasher);
+    for p in ordered_paths {
+        p.hash(&mut hasher);
+    }
+    edges.len().hash(&mut hasher);
+    for e in edges {
+        e.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 #[cfg(test)]
@@ -833,6 +940,56 @@ pub fn helper() -> String {
 
         assert!(!incr.update(&[], &[]));
         assert!(!incr.add_new_files());
+    }
+
+    #[test]
+    fn incremental_update_skips_pagerank_when_edges_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_test_repo(dir.path());
+
+        let mut incr = IncrementalRepoMap::new(dir.path());
+        // initial build runs pagerank exactly once
+        assert_eq!(incr.pagerank_runs(), 1);
+
+        // touch config.rs with a comment (no def/ref changes)
+        let config_path = dir.path().join("src/config.rs");
+        let original = fs::read_to_string(&config_path).unwrap();
+        fs::write(
+            &config_path,
+            format!("// cosmetic change, no structural effect\n{original}"),
+        )
+        .unwrap();
+
+        let changed = incr.update(std::slice::from_ref(&config_path), &[]);
+        assert!(changed, "update should still report parse change");
+        assert_eq!(
+            incr.pagerank_runs(),
+            1,
+            "pagerank should be skipped when edge graph is unchanged"
+        );
+
+        // now add a genuinely new reference that changes the graph
+        fs::write(
+            &config_path,
+            r#"
+use crate::server::Server;
+
+pub struct Config {
+    pub port: u16,
+    pub host: String,
+    pub server: Option<Server>,
+}
+"#,
+        )
+        .unwrap();
+
+        let changed = incr.update(&[config_path], &[]);
+        assert!(changed);
+        assert_eq!(
+            incr.pagerank_runs(),
+            2,
+            "pagerank must re-run when edge graph changes"
+        );
     }
 
     #[test]
