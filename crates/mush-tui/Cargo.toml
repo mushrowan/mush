@@ -15,6 +15,7 @@ mush-tools.workspace = true
 tokio.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
+ansi-to-tui.workspace = true
 crokey.workspace = true
 futures.workspace = true
 serde.workspace = true
