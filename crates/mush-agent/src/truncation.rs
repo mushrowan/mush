@@ -47,7 +47,7 @@ fn save_full_output(content: &str) -> Option<PathBuf> {
         .unwrap_or_default()
         .as_millis();
     let path = dir.join(format!("tool_{ts}.txt"));
-    std::fs::write(&path, content).ok()?;
+    mush_ai::private_io::write_private(&path, content).ok()?;
     Some(path)
 }
 

@@ -69,14 +69,14 @@ pub fn load_credentials_from(path: &PathBuf) -> Result<CredentialStore, OAuthErr
     Ok(store)
 }
 
-/// save credentials to disk
+/// save credentials to disk with private permissions (0o600 on unix)
 pub fn save_credentials(store: &CredentialStore) -> Result<(), OAuthError> {
     let path = credentials_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let json = serde_json::to_string_pretty(store)?;
-    std::fs::write(path, json)?;
+    crate::private_io::write_private(&path, json)?;
     Ok(())
 }
 

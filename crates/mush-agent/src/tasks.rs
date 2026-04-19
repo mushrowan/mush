@@ -71,7 +71,7 @@ impl TaskStore {
 
         let json = serde_json::to_string_pretty(lock)
             .unwrap_or_else(|_| "{{\"error\": \"serialisation failed\"}}".into());
-        std::fs::write(&path, json)?;
+        mush_ai::private_io::write_private(&path, json)?;
         Ok(())
     }
 
