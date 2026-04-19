@@ -123,7 +123,20 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         _ => {}
     }
 
-    // 5. streaming vs idle dispatch
+    // 5. up / ctrl+k lift the last queued steering message into the
+    // input for editing when the input is empty. falls through when
+    // input has text (so ctrl+k keeps its kill-line semantic and up
+    // does nothing) or when no queued message exists
+    if app.input.text.is_empty() && app.has_queued_messages() {
+        let is_up = key.modifiers.is_empty() && matches!(key.code, KeyCode::Up);
+        let is_ctrl_k =
+            key.modifiers == KeyModifiers::CONTROL && matches!(key.code, KeyCode::Char('k'));
+        if is_up || is_ctrl_k {
+            return Some(AppEvent::EditSteering);
+        }
+    }
+
+    // 6. streaming vs idle dispatch
     if app.stream.active {
         handle_streaming_keys(app, key)
     } else {
@@ -2301,5 +2314,84 @@ mod tests {
 
         let event = handle_key(&mut app, ctrl(KeyCode::Char('[')));
         assert!(matches!(event, Some(AppEvent::Abort)));
+    }
+
+    #[test]
+    fn up_arrow_lifts_queued_when_input_empty_streaming() {
+        // user is streaming with a queued steering message. pressing Up
+        // on an empty input line should lift the queued message back
+        // into the input for editing, matching the behaviour of Alt+K
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.stream.active = true;
+        app.push_queued_message("queued steering");
+
+        let event = handle_key(&mut app, key(KeyCode::Up));
+        assert!(
+            matches!(event, Some(AppEvent::EditSteering)),
+            "Up on empty input with queued msg should lift, got {event:?}"
+        );
+    }
+
+    #[test]
+    fn ctrl_k_lifts_queued_when_input_empty_streaming() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.stream.active = true;
+        app.push_queued_message("queued steering");
+
+        let event = handle_key(&mut app, ctrl(KeyCode::Char('k')));
+        assert!(
+            matches!(event, Some(AppEvent::EditSteering)),
+            "Ctrl+K on empty input with queued msg should lift, got {event:?}"
+        );
+    }
+
+    #[test]
+    fn up_arrow_lifts_queued_when_input_empty_idle() {
+        // lift also works when the agent isn't streaming (queue may
+        // still have pending entries between turns)
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.stream.active = false;
+        app.push_queued_message("queued steering");
+
+        let event = handle_key(&mut app, key(KeyCode::Up));
+        assert!(
+            matches!(event, Some(AppEvent::EditSteering)),
+            "Up in idle mode with queued msg should lift, got {event:?}"
+        );
+    }
+
+    #[test]
+    fn ctrl_k_deletes_to_end_when_input_has_text() {
+        // classic emacs kill-line behaviour must still work when the
+        // user has typed something or when no queued message exists
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.input.text = "hello world".into();
+        app.input.cursor = 5;
+        app.push_queued_message("queued steering");
+
+        let event = handle_key(&mut app, ctrl(KeyCode::Char('k')));
+        assert!(
+            event.is_none(),
+            "Ctrl+K should kill-line (not lift) when input has text: {event:?}"
+        );
+        assert_eq!(
+            app.input.text, "hello",
+            "Ctrl+K should have killed from cursor to end"
+        );
+    }
+
+    #[test]
+    fn up_arrow_without_queued_does_not_emit_edit_steering() {
+        // without a queued message there's nothing to lift, so Up falls
+        // through to existing behaviour (no-op in editing mode)
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.stream.active = true;
+        // no queued messages pushed
+
+        let event = handle_key(&mut app, key(KeyCode::Up));
+        assert!(
+            !matches!(event, Some(AppEvent::EditSteering)),
+            "Up without queued msg must not emit EditSteering: {event:?}"
+        );
     }
 }
