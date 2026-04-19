@@ -111,7 +111,11 @@ fn cell<'a>(text: String, width: usize, style: Style) -> Vec<Span<'a>> {
 /// truncating with `…` when the combined content exceeds the budget and
 /// padding with `pad_style`-styled spaces when short. preserves per-span
 /// styling on retained content so intra-line highlights carry through
-fn fit_spans(spans: Vec<Span<'static>>, width: usize, pad_style: Style) -> Vec<Span<'static>> {
+pub(crate) fn fit_spans(
+    spans: Vec<Span<'static>>,
+    width: usize,
+    pad_style: Style,
+) -> Vec<Span<'static>> {
     use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
     let total: usize = spans
         .iter()

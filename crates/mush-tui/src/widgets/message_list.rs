@@ -1459,15 +1459,24 @@ fn render_single_tool_box(
                 push_read_content_line(text_line, inner, &ctx, lines);
             }
         } else {
+            // generic tool output: parse ANSI SGR escapes into styled spans
+            // so bash / cargo / jj output doesn't render as garbage escape
+            // sequences. fall back to the old plain path for output that
+            // contains no escapes at all
             for text_line in output.lines() {
-                push_box_content_line(
-                    text_line,
-                    inner,
-                    border,
-                    diff_line_style(text_line, theme),
-                    &indent,
-                    lines,
-                );
+                let base_style = diff_line_style(text_line, theme);
+                if text_line.contains('\x1b') {
+                    let rows = super::ansi::ansi_lines(text_line, base_style);
+                    for spans in rows {
+                        let fitted = super::diff::fit_spans(spans, inner, base_style);
+                        let mut line_spans = vec![indent.clone(), Span::styled("│ ", border)];
+                        line_spans.extend(fitted);
+                        line_spans.push(Span::styled(" │", border));
+                        lines.push(Line::from(line_spans));
+                    }
+                } else {
+                    push_box_content_line(text_line, inner, border, base_style, &indent, lines);
+                }
             }
         }
     }
@@ -1547,7 +1556,16 @@ fn render_side_by_side_boxes(
                 content.push(wrapped);
             }
             if let Some(ref output) = tc.output_preview {
-                for line in output.lines() {
+                // side-by-side panels can't easily preserve ANSI colouring
+                // because they pack multiple tool outputs into a single
+                // line-per-row grid. strip escapes so content is at least
+                // readable; the single-panel path keeps full colour
+                let cleaned = if output.contains('\x1b') {
+                    super::ansi::strip_ansi(output)
+                } else {
+                    output.clone()
+                };
+                for line in cleaned.lines() {
                     for wrapped in wrap_text(line, text_width) {
                         content.push(wrapped);
                     }
