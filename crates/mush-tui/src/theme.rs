@@ -98,6 +98,10 @@ pub struct Theme {
     pub diff_removed_bg: Color,
     /// how to render +/- lines (Prefix: fg only; Highlight: line bg tint)
     pub diff_line_style: DiffLineStyle,
+    /// style for the truncation footer ("… (N more lines)") inside a
+    /// diff block. full-row style so the footer reads as part of the
+    /// block instead of floating below the last coloured row
+    pub diff_footer: Style,
 
     // context pressure colours
     pub context_ok: Style,
@@ -233,6 +237,9 @@ impl Theme {
             diff_added_bg: Color::Indexed(22),
             diff_removed_bg: Color::Indexed(52),
             diff_line_style: DiffLineStyle::Highlight,
+            // neutral dim-grey bg so the footer ties in with the diff
+            // block regardless of which +/- tint preceded it
+            diff_footer: Style::default().fg(Color::DarkGray).bg(Color::Indexed(236)),
 
             context_ok: Style::default().fg(Color::Green),
             context_warn: Style::default().fg(Color::Yellow),
@@ -334,6 +341,7 @@ impl Theme {
             diff_added_bg: Color::Indexed(194),
             diff_removed_bg: Color::Indexed(224),
             diff_line_style: DiffLineStyle::Highlight,
+            diff_footer: Style::default().fg(Color::DarkGray).bg(Color::Indexed(253)),
 
             context_ok: Style::default().fg(Color::Green),
             context_warn: Style::default().fg(Color::Yellow),
