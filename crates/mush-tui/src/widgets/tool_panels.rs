@@ -9,6 +9,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Widget, Wrap};
 use throbber_widgets_tui::{BRAILLE_SIX, Throbber, ThrobberState, WhichUse};
 
 use crate::app::{ActiveToolState, ToolCallStatus};
+use crate::path_utils::truncate_path;
 use crate::theme::Theme;
 
 /// minimum width per tool panel before stacking vertically
@@ -128,9 +129,14 @@ fn render_panel(
     let mut lines: Vec<Line<'_>> = Vec::new();
 
     // summary line: truncate to panel width since ratatui won't wrap for us.
-    // summarise_tool_args returns the full command; we cap it here
-    let summary =
-        mush_agent::display::truncate_with_ellipsis(tool.summary.as_str(), inner.width as usize);
+    // summarise_tool_args returns the full command; we cap it here.
+    // file-path tools (read/write/edit/ls) keep the tail (filename) so the
+    // interesting end stays visible; everything else keeps the head
+    let summary = if is_path_summary_tool(&tool.name) {
+        truncate_path(tool.summary.as_str(), inner.width as usize)
+    } else {
+        mush_agent::display::truncate_with_ellipsis(tool.summary.as_str(), inner.width as usize)
+    };
     lines.push(Line::styled(summary, theme.dim));
 
     // show output: live output for running, final output for done
@@ -155,6 +161,16 @@ fn render_panel(
     Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .render(inner, buf);
+}
+
+/// tools whose `summary` field is a file path and should be truncated from
+/// the head (keeping the filename) when it overflows the panel width.
+/// matches normalisation done in `summarise_tool_args`
+fn is_path_summary_tool(name: &str) -> bool {
+    matches!(
+        name.to_lowercase().replace('_', "").as_str(),
+        "read" | "write" | "edit" | "ls"
+    )
 }
 
 /// compute the height needed for the tool panels area
@@ -358,6 +374,30 @@ mod tests {
             output: Some("result".into()),
         }];
         assert_eq!(tool_panels_height(&tools, 80), 8);
+    }
+
+    #[test]
+    fn long_read_tool_path_truncates_from_head_keeping_filename() {
+        // a long path in a narrow panel should show `…/path/main.rs`,
+        // not a head-truncated path with the filename cut off
+        let tools = vec![ActiveToolState {
+            tool_call_id: "tc1".into(),
+            name: "Read".into(),
+            summary: "/home/user/dev/mush/crates/mush-tui/src/widgets/message_list.rs".into(),
+            live_output: None,
+            status: ToolCallStatus::Running,
+            output: None,
+        }];
+        let buf = render_panels(&tools, 30, 5);
+        let content = buffer_to_string(&buf);
+        assert!(
+            content.contains("message_list.rs"),
+            "expected filename in panel, got: {content}"
+        );
+        assert!(
+            content.contains('…'),
+            "expected leading ellipsis, got: {content}"
+        );
     }
 
     #[test]
