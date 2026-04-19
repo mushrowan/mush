@@ -608,6 +608,14 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
                 config::save_favourite_models(favs);
             }))
         },
+        keymap: {
+            let mut km = mush_tui::KeyMap::default();
+            let warnings = km.override_from(&setup.cfg.keys.raw);
+            for warning in warnings {
+                tracing::warn!("keybind config: {warning}");
+            }
+            km
+        },
     };
 
     mush_tui::run_tui(tui_config, &setup.tools, &setup.registry)

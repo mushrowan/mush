@@ -84,6 +84,11 @@ ratatui = { version = "0.30", features = [
 unicode-width = "0.2"
 crossterm = { version = "0.29", features = ["osc52"] }
 
+# configurable keybind parsing ("ctrl-k", "alt-enter", ...). wraps
+# crossterm so bindings loaded from the user's config.toml land in the
+# same KeyEvent shape the input handlers already match against
+crokey = { version = "1.4", features = ["serde"] }
+
 # cli
 clap = { version = "4", features = ["derive", "env"] }
 # open URLs in the user's browser (used by /login)

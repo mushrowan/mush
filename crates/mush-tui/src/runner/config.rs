@@ -143,4 +143,6 @@ pub struct TuiConfig {
     pub favourites_locked: bool,
     /// callback to persist favourites after an imperative toggle
     pub save_favourite_models: Option<FavouriteModelsSaver>,
+    /// resolved keybind map applied to every new App
+    pub keymap: crate::keybinds::KeyMap,
 }
