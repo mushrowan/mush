@@ -3,6 +3,54 @@
 //! the calling agent forks a new pane with a task prompt.
 //! the sub-agent runs independently and sends results back
 //! via the messaging system.
+//!
+//! ## status
+//!
+//! this tool is currently NOT registered with the agent (see
+//! `runner/streams.rs` `build_extra_tools`). the module and queue
+//! live on so that re-enabling is a one-line change once the known
+//! reliability issues are addressed.
+//!
+//! ## audit findings (2026-04, kept here as the single source of truth
+//! for anyone re-enabling delegation)
+//!
+//! 1. `complete_delegation` in `runner/streams.rs` appends a User
+//!    message straight onto the parent's conversation. on its own that
+//!    is borrow-safe because every mutation is driven from the main
+//!    TUI loop, but it injects turns out-of-band w.r.t. steering queue
+//!    ordering. if delegation completes mid-stream on the parent, the
+//!    injected turn lands after the in-flight assistant message in the
+//!    history but isn't visible to the API call until the next turn.
+//!    prefer `parent.steering_queue.push(...)` when the parent has an
+//!    active stream so ordering matches user-submitted steering.
+//!
+//! 2. `DelegateTaskTool::execute` doesn't cap queue length. a runaway
+//!    agent could push thousands of pending delegations in one turn
+//!    before the TUI loop drains them. add a hard cap (e.g. 8) and
+//!    return an error when exceeded.
+//!
+//! 3. `rand_id()` uses the low 32 bits of wall-clock millis. two
+//!    delegations created in the same millisecond collide. swap for
+//!    an atomic counter plus an incarnation prefix.
+//!
+//! 4. sub-agent panes inherit the parent's cwd but not its per-pane
+//!    VCS isolation. a jj or worktree parent spawning a delegation
+//!    pane will write to the isolation root, not the branch. decide
+//!    whether delegation should branch the isolation too.
+//!
+//! 5. no overall timeout. `DELEGATION_MAX_TURNS` bounds agent turns
+//!    inside the pane but a sub-agent stuck between turns (api error
+//!    loop, missing confirmation) can sit forever. wrap the whole
+//!    delegation in a wall-clock deadline.
+//!
+//! 6. silent drop on pane-manager push failure. `process_delegations`
+//!    `add_pane` can't fail today but the flow has no channel to
+//!    report "couldn't start" back to the parent. wire an error path.
+//!
+//! re-enable checklist:
+//!   - pick a fix for (1) first, it's the only race-shaped concern
+//!   - add (2) as a guardrail before any live test
+//!   - (3)-(6) can land gradually once the tool proves useful
 
 use std::sync::{Arc, Mutex};
 
@@ -21,6 +69,11 @@ pub struct PendingDelegation {
 
 /// shared queue of pending delegations (tool writes, TUI loop reads)
 pub type DelegationQueue = Arc<Mutex<Vec<PendingDelegation>>>;
+
+/// hard cap on pending delegations. a misbehaving agent could flood the
+/// queue with thousands of tasks before the TUI loop drains it, so bound
+/// queue length and return an error when exceeded
+const MAX_PENDING_DELEGATIONS: usize = 8;
 
 /// create a new empty delegation queue
 pub fn new_queue() -> DelegationQueue {
@@ -91,9 +144,7 @@ impl AgentTool for DelegateTaskTool {
             Err(e) => return e,
         };
 
-        let task_id = params
-            .task_id
-            .unwrap_or_else(|| format!("del-{}", rand_id()));
+        let task_id = params.task_id.unwrap_or_else(next_task_id);
 
         let model_note = params
             .model
@@ -102,16 +153,22 @@ impl AgentTool for DelegateTaskTool {
             .unwrap_or_default();
 
         let delegation = PendingDelegation {
-            task: params.task.clone(),
+            task: params.task,
             from: self.sender_id,
             task_id: task_id.clone(),
             model: params.model,
         };
 
-        self.queue
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(delegation);
+        {
+            let mut q = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+            if q.len() >= MAX_PENDING_DELEGATIONS {
+                return ToolResult::error(format!(
+                    "delegation queue full ({MAX_PENDING_DELEGATIONS} pending). \
+                     wait for a sub-agent to finish before spawning more"
+                ));
+            }
+            q.push(delegation);
+        }
 
         ToolResult::text(format!(
             "delegated task to a new pane (task_id: {task_id}{model_note}). \
@@ -121,13 +178,18 @@ impl AgentTool for DelegateTaskTool {
     }
 }
 
-fn rand_id() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let t = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+/// monotonically increasing task id: `del-<counter>-<millis-suffix>`.
+/// the counter prevents two calls in the same millisecond from colliding,
+/// the millis suffix keeps ids roughly time-ordered across restarts.
+fn next_task_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    format!("{:x}", t & 0xFFFF_FFFF)
+    format!("del-{n}-{:x}", t & 0xFFFF)
 }
 
 #[cfg(test)]
@@ -208,5 +270,50 @@ mod tests {
         let result = tool.execute(serde_json::json!({})).await;
         assert!(result.outcome.is_error());
         assert!(q.lock().unwrap_or_else(|e| e.into_inner()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn delegate_tool_rejects_when_queue_full() {
+        // guardrail: a misbehaving agent that keeps submitting delegations
+        // faster than the TUI can drain them should get a clear error
+        // once the cap is hit, not flood the queue unboundedly
+        let q = new_queue();
+        let tool = DelegateTaskTool {
+            sender_id: PaneId::new(1),
+            queue: q.clone(),
+        };
+
+        for i in 0..MAX_PENDING_DELEGATIONS {
+            let result = tool
+                .execute(serde_json::json!({ "task": format!("task {i}") }))
+                .await;
+            assert!(result.outcome.is_success(), "task {i} should enqueue");
+        }
+
+        let result = tool
+            .execute(serde_json::json!({ "task": "one too many" }))
+            .await;
+        assert!(
+            result.outcome.is_error(),
+            "submission past the cap should error out"
+        );
+        assert_eq!(
+            q.lock().unwrap_or_else(|e| e.into_inner()).len(),
+            MAX_PENDING_DELEGATIONS,
+            "queue length must not exceed the cap"
+        );
+    }
+
+    #[test]
+    fn next_task_id_is_unique_across_same_millisecond() {
+        // counter-based ids prevent collisions when two delegations land
+        // inside the same wall-clock millisecond. the old rand_id() used
+        // only millis and would collide
+        let ids: std::collections::HashSet<String> = (0..100).map(|_| next_task_id()).collect();
+        assert_eq!(
+            ids.len(),
+            100,
+            "100 rapid calls must produce 100 unique ids"
+        );
     }
 }
