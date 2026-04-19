@@ -430,10 +430,9 @@ fn build_headers(
     let key = api_key.expose();
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    headers.insert(
-        AUTHORIZATION,
-        HeaderValue::from_str(&format!("Bearer {key}"))?,
-    );
+    let mut auth = HeaderValue::from_str(&format!("Bearer {key}"))?;
+    auth.set_sensitive(true);
+    headers.insert(AUTHORIZATION, auth);
 
     if is_codex {
         let account_id = options
@@ -1175,6 +1174,23 @@ mod tests {
         let headers = build_headers(&key, &options, false).expect("headers should build");
         let auth = headers.get("authorization").unwrap().to_str().unwrap();
         assert_eq!(auth, "Bearer sk-test-secret-key-123");
+    }
+
+    #[test]
+    fn auth_header_marked_sensitive_so_debug_redacts_it() {
+        let options = StreamOptions::default();
+        let key = ApiKey::new("sk-test-secret-key-123").unwrap();
+        let headers = build_headers(&key, &options, false).expect("headers should build");
+        let hv = headers.get("authorization").unwrap();
+        assert!(
+            hv.is_sensitive(),
+            "authorization header must be sensitive so HeaderMap Debug doesn't leak the bearer"
+        );
+        let dbg = format!("{headers:?}");
+        assert!(
+            !dbg.contains("sk-test-secret-key-123"),
+            "bearer leaked in HeaderMap Debug: {dbg}"
+        );
     }
 
     #[test]

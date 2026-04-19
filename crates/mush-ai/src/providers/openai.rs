@@ -43,10 +43,9 @@ impl ApiProvider for OpenaiCompletionsProvider {
 
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {api_key_str}"))?,
-        );
+        let mut auth = HeaderValue::from_str(&format!("Bearer {api_key_str}"))?;
+        auth.set_sensitive(true);
+        headers.insert(AUTHORIZATION, auth);
 
         let base_url = &model.base_url;
         let url = format!("{base_url}/chat/completions");

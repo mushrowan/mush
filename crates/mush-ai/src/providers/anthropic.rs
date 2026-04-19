@@ -149,10 +149,9 @@ impl ApiProvider for AnthropicProvider {
                 headers.insert("x-claude-code-session-id", hv);
             }
             let key = api_key.expose();
-            headers.insert(
-                "authorization",
-                HeaderValue::from_str(&format!("Bearer {key}"))?,
-            );
+            let mut auth = HeaderValue::from_str(&format!("Bearer {key}"))?;
+            auth.set_sensitive(true);
+            headers.insert("authorization", auth);
         } else {
             let key = api_key.expose();
             headers.insert(
@@ -161,7 +160,9 @@ impl ApiProvider for AnthropicProvider {
                     "fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14",
                 ),
             );
-            headers.insert("x-api-key", HeaderValue::from_str(key)?);
+            let mut api_key_hv = HeaderValue::from_str(key)?;
+            api_key_hv.set_sensitive(true);
+            headers.insert("x-api-key", api_key_hv);
         }
 
         let base_url = if model.base_url.is_empty() {
@@ -195,7 +196,8 @@ impl ApiProvider for AnthropicProvider {
                 Ok(Some(fresh)) => {
                     if let Some(fresh_key) = ApiKey::new(fresh) {
                         let key = fresh_key.expose();
-                        if let Ok(hv) = HeaderValue::from_str(&format!("Bearer {key}")) {
+                        if let Ok(mut hv) = HeaderValue::from_str(&format!("Bearer {key}")) {
+                            hv.set_sensitive(true);
                             headers.insert("authorization", hv);
                         }
                         self.client
