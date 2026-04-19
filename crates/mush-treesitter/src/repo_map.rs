@@ -7,8 +7,10 @@
 //! the map shows file paths with their most important symbol signatures,
 //! giving the LLM a high-level understanding of the codebase
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+
+use rustc_hash::FxHashMap;
 
 use crate::references::extract_references;
 use crate::symbols::{self, SymbolInfo, SymbolKind};
@@ -99,7 +101,7 @@ pub fn build_repo_map(root: &Path) -> RepoMap {
 /// rank symbols within a file by reference count and kind
 fn rank_symbols(
     definitions: &[SymbolInfo],
-    def_index: &HashMap<&str, Vec<&PathBuf>>,
+    def_index: &FxHashMap<&str, Vec<&PathBuf>>,
 ) -> Vec<SymbolInfo> {
     let mut scored: Vec<(usize, &SymbolInfo)> = definitions
         .iter()
@@ -282,8 +284,8 @@ fn parse_file_standalone(path: &Path) -> Result<FileData, crate::ParseError> {
     use std::cell::RefCell;
 
     thread_local! {
-        static PARSERS: RefCell<HashMap<Language, tree_sitter::Parser>> =
-            RefCell::new(HashMap::new());
+        static PARSERS: RefCell<std::collections::HashMap<Language, tree_sitter::Parser>> =
+            RefCell::new(std::collections::HashMap::new());
     }
 
     let language = Language::detect(path)
@@ -315,7 +317,7 @@ fn parse_file_standalone(path: &Path) -> Result<FileData, crate::ParseError> {
 
 /// parse files in parallel using rayon with per-thread parsers.
 /// returns a map of path -> parsed data, skipping files that fail to parse.
-fn parse_files_parallel(files: &[PathBuf]) -> HashMap<PathBuf, FileData> {
+fn parse_files_parallel(files: &[PathBuf]) -> FxHashMap<PathBuf, FileData> {
     use rayon::prelude::*;
 
     files
@@ -338,7 +340,7 @@ fn parse_files_parallel(files: &[PathBuf]) -> HashMap<PathBuf, FileData> {
 pub struct IncrementalRepoMap {
     root: PathBuf,
     pool: ParserPool,
-    file_data: HashMap<PathBuf, FileData>,
+    file_data: FxHashMap<PathBuf, FileData>,
     current: RepoMap,
 }
 
@@ -433,13 +435,13 @@ impl IncrementalRepoMap {
 }
 
 /// shared core: build a RepoMap from pre-parsed file data
-fn build_from_data(root: &Path, file_data: &HashMap<PathBuf, FileData>) -> RepoMap {
+fn build_from_data(root: &Path, file_data: &FxHashMap<PathBuf, FileData>) -> RepoMap {
     if file_data.is_empty() {
         return RepoMap { files: vec![] };
     }
 
     // build global definition index
-    let mut def_index: HashMap<&str, Vec<&PathBuf>> = HashMap::new();
+    let mut def_index: FxHashMap<&str, Vec<&PathBuf>> = FxHashMap::default();
     for (path, data) in file_data {
         for sym in &data.definitions {
             def_index.entry(sym.name.as_str()).or_default().push(path);
@@ -447,7 +449,7 @@ fn build_from_data(root: &Path, file_data: &HashMap<PathBuf, FileData>) -> RepoM
     }
 
     // build file-level edges
-    let file_indices: HashMap<&PathBuf, usize> =
+    let file_indices: FxHashMap<&PathBuf, usize> =
         file_data.keys().enumerate().map(|(i, p)| (p, i)).collect();
     let n = file_indices.len();
 
@@ -916,7 +918,7 @@ pub fn helper() -> String {
 
         // serial parse via existing path
         let pool = ParserPool::new();
-        let mut serial: HashMap<PathBuf, FileData> = HashMap::new();
+        let mut serial: FxHashMap<PathBuf, FileData> = FxHashMap::default();
         for path in &files {
             if let Ok(data) = parse_file_data(&pool, path) {
                 serial.insert(path.clone(), data);

@@ -95,6 +95,9 @@ atty = "0.2"
 # parallelism
 rayon = "1.12"
 
+# fast non-crypto hash for internal maps
+rustc-hash = "2.1"
+
 # crypto + encoding
 sha2 = "0.11"
 getrandom = "0.4"

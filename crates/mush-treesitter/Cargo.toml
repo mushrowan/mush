@@ -13,6 +13,7 @@ rayon.workspace = true
 tracing.workspace = true
 ignore = "0.4"
 notify.workspace = true
+rustc-hash.workspace = true
 
 # grammar crates (all optional, default-enabled)
 tree-sitter-rust = { version = "0.24", optional = true }
