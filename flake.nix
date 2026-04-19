@@ -169,11 +169,13 @@
 
         treefmt = {
           projectRootFile = "flake.nix";
+          # rust formatting stays with cargo (crane runs `cargo fmt --check`
+          # against the pinned nightly toolchain). treefmt covers everything
+          # else so the two formatters never disagree on style edition.
           programs = {
             alejandra.enable = true;
             deadnix.enable = true;
             statix.enable = true;
-            rustfmt.enable = true;
             taplo.enable = true;
           };
         };
