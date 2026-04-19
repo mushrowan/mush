@@ -228,14 +228,19 @@ impl Theme {
 
             diff_added: Style::default().fg(Color::Green),
             diff_removed: Style::default().fg(Color::Red),
-            // intra-highlight uses the stronger (medium) shade so changed
-            // tokens pop against the subtler whole-line bg below
-            diff_added_intra: Style::default().fg(Color::Green).bg(Color::Indexed(28)),
-            diff_removed_intra: Style::default().fg(Color::Red).bg(Color::Indexed(88)),
-            // whole-line bg in Highlight mode: dark green / dark red, muted
-            // enough to read over while still signalling the +/- status
-            diff_added_bg: Color::Indexed(22),
-            diff_removed_bg: Color::Indexed(52),
+            // intra-highlight: lighter, less saturated green/red that pop
+            // against the very subtle whole-line bg tint below
+            diff_added_intra: Style::default()
+                .fg(Color::Rgb(150, 210, 150))
+                .bg(Color::Rgb(25, 65, 35)),
+            diff_removed_intra: Style::default()
+                .fg(Color::Rgb(230, 150, 150))
+                .bg(Color::Rgb(75, 30, 40)),
+            // whole-line bg in Highlight mode: very dark muted green / red,
+            // desaturated enough to sit gently on top of the background rather
+            // than the saturated primary-colour splashes we had before
+            diff_added_bg: Color::Rgb(12, 38, 20),
+            diff_removed_bg: Color::Rgb(50, 18, 24),
             diff_line_style: DiffLineStyle::Highlight,
             // neutral dim-grey bg so the footer ties in with the diff
             // block regardless of which +/- tint preceded it
@@ -335,11 +340,16 @@ impl Theme {
 
             diff_added: Style::default().fg(Color::Green),
             diff_removed: Style::default().fg(Color::Red),
-            // light terminals: stronger intra greens/reds + dimmer line-bg
-            diff_added_intra: Style::default().fg(Color::Green).bg(Color::Indexed(157)),
-            diff_removed_intra: Style::default().fg(Color::Red).bg(Color::Indexed(217)),
-            diff_added_bg: Color::Indexed(194),
-            diff_removed_bg: Color::Indexed(224),
+            // light terminals: softer intra tints with darker fg so the
+            // changed tokens still pop against the whole-line bg
+            diff_added_intra: Style::default()
+                .fg(Color::Rgb(25, 90, 40))
+                .bg(Color::Rgb(200, 240, 210)),
+            diff_removed_intra: Style::default()
+                .fg(Color::Rgb(130, 30, 40))
+                .bg(Color::Rgb(245, 210, 215)),
+            diff_added_bg: Color::Rgb(225, 245, 230),
+            diff_removed_bg: Color::Rgb(250, 230, 232),
             diff_line_style: DiffLineStyle::Highlight,
             diff_footer: Style::default().fg(Color::DarkGray).bg(Color::Indexed(253)),
 
