@@ -14,6 +14,7 @@ use crate::app::{
     App, CodeBlock, DisplayMessage, DisplayToolCall, ImageRenderArea, MessageRole, ToolCallStatus,
 };
 use crate::app_state::CachedHeight;
+use crate::text::truncate_with_ellipsis;
 
 #[cfg(test)]
 use std::cell::Cell;
@@ -523,13 +524,8 @@ fn render_message(
                 lines.extend(indent_line(styled, cw));
             }
         } else {
-            let preview = thinking.lines().next().unwrap_or("...");
-            let trimmed = if preview.chars().count() > 60 {
-                let truncated: String = preview.chars().take(57).collect();
-                format!("{truncated}...")
-            } else {
-                preview.to_string()
-            };
+            let preview = thinking.lines().next().unwrap_or("…");
+            let trimmed = truncate_with_ellipsis(preview, 60);
             lines.push(Line::from(vec![
                 Span::styled(" 💭 ", app.theme.thinking),
                 Span::styled(trimmed, app.theme.dim),

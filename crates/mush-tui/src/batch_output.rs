@@ -64,7 +64,7 @@ pub fn truncate_output(output: &str) -> String {
         .map(|l| {
             if l.len() > MAX_PREVIEW_LINE_LEN {
                 let end = l.floor_char_boundary(MAX_PREVIEW_LINE_LEN);
-                format!("{}...", &l[..end])
+                format!("{}…", &l[..end])
             } else {
                 l.to_string()
             }
@@ -72,7 +72,7 @@ pub fn truncate_output(output: &str) -> String {
         .collect();
     let mut result = preview.join("\n");
     if total > MAX_PREVIEW_LINES {
-        result.push_str(&format!("\n... ({} more lines)", total - MAX_PREVIEW_LINES));
+        result.push_str(&format!("\n… ({} more lines)", total - MAX_PREVIEW_LINES));
     }
     result
 }

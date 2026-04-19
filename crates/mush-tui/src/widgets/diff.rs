@@ -1,7 +1,7 @@
 //! diff parsing and rendering for tool output.
 //!
 //! the edit tool emits diffs with line prefixes: `+ ` for additions,
-//! `- ` for removals, `  ` for context, `  ...` for omitted gaps. this
+//! `- ` for removals, `  ` for context, `  …` for omitted gaps. this
 //! module parses that format into structured events and renders them as
 //! either inline or side-by-side rows depending on available width.
 
@@ -28,7 +28,8 @@ pub enum DiffEvent {
     Removed(String),
     /// added line (was `+ ` prefixed in source)
     Added(String),
-    /// elided gap between change groups (was `  ...` in source)
+    /// elided gap between change groups (was `  …` in source, or `  ...`
+    /// for legacy/session-resumed output)
     Gap,
 }
 
@@ -43,7 +44,7 @@ pub fn parse_diff_lines(text: &str) -> Vec<DiffEvent> {
                 DiffEvent::Added(rest.to_string())
             } else if let Some(rest) = line.strip_prefix("- ") {
                 DiffEvent::Removed(rest.to_string())
-            } else if line.trim_start() == "..." {
+            } else if matches!(line.trim_start(), "..." | "…") {
                 DiffEvent::Gap
             } else if let Some(rest) = line.strip_prefix("  ") {
                 DiffEvent::Context(rest.to_string())
@@ -433,7 +434,7 @@ fn render_inline(
                 i += 1;
             }
             DiffEvent::Gap => {
-                rows.push(Line::from(cell("  ...".into(), inner_width, theme.dim)));
+                rows.push(Line::from(cell("  …".into(), inner_width, theme.dim)));
                 i += 1;
             }
             DiffEvent::Removed(_) | DiffEvent::Added(_) => {
@@ -505,9 +506,9 @@ fn render_side_by_side(
                 i += 1;
             }
             DiffEvent::Gap => {
-                let mut spans = cell("  ...".into(), left_width, theme.dim);
+                let mut spans = cell("  …".into(), left_width, theme.dim);
                 spans.push(Span::styled(" │ ", sep_style));
-                spans.extend(cell("  ...".into(), right_width, theme.dim));
+                spans.extend(cell("  …".into(), right_width, theme.dim));
                 rows.push(Line::from(spans));
                 i += 1;
             }
@@ -573,12 +574,19 @@ mod tests {
 
     #[test]
     fn parse_identifies_context_and_gap() {
-        let text = "  kept line\n  ...\n";
+        let text = "  kept line\n  …\n";
         let events = parse_diff_lines(text);
         assert_eq!(
             events,
             vec![DiffEvent::Context("kept line".into()), DiffEvent::Gap]
         );
+    }
+
+    #[test]
+    fn parse_accepts_legacy_three_dot_gap() {
+        // older sessions still contain `  ...` in saved tool output
+        let events = parse_diff_lines("  ...\n");
+        assert_eq!(events, vec![DiffEvent::Gap]);
     }
 
     #[test]

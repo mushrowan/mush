@@ -1200,7 +1200,19 @@ mod tests {
         let long = "x".repeat(200);
         let output = truncate_output(&long);
         assert!(output.len() < 200);
-        assert!(output.ends_with("..."));
+        assert!(output.ends_with('…'));
+        assert!(!output.contains("..."));
+    }
+
+    #[test]
+    fn truncate_more_lines_footer_uses_single_ellipsis() {
+        let lines = (0..20)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let output = truncate_output(&lines);
+        assert!(output.contains("… (8 more lines)"));
+        assert!(!output.contains("... (8 more lines)"));
     }
 
     #[test]

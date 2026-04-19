@@ -28,6 +28,7 @@ pub mod slash_menu;
 pub mod streaming;
 pub mod syntax;
 pub mod terminal_policy;
+pub mod text;
 pub mod theme;
 pub mod ui;
 pub mod widgets;
