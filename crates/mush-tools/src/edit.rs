@@ -369,12 +369,12 @@ fn find_line_trimmed_matches(content: &str, old_text: &str) -> Vec<String> {
     let content_lines: Vec<&str> = content.split_inclusive('\n').collect();
     let search_lines: Vec<&str> = old_text.split_inclusive('\n').collect();
 
-    if search_lines.is_empty() {
+    if search_lines.is_empty() || content_lines.len() < search_lines.len() {
         return vec![];
     }
 
     let mut results = Vec::new();
-    let max_start = content_lines.len().saturating_sub(search_lines.len());
+    let max_start = content_lines.len() - search_lines.len();
 
     'outer: for i in 0..=max_start {
         for (j, search_line) in search_lines.iter().enumerate() {
@@ -726,6 +726,49 @@ mod tests {
 
         let result = edit_file(&path, "unchanged", "unchanged", &EditOpts::default());
         assert!(result.outcome.is_error());
+    }
+
+    #[test]
+    fn edit_on_empty_file_returns_error_does_not_panic() {
+        // regression: find_line_trimmed_matches used to panic with
+        // "index out of bounds: the len is 0 but the index is 0" when
+        // the file (or line-restricted region) was shorter than oldText
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.txt");
+        fs::write(&path, "").unwrap();
+
+        let result = edit_file(&path, "missing", "present", &EditOpts::default());
+        assert!(result.outcome.is_error());
+    }
+
+    #[test]
+    fn edit_oldtext_longer_than_file_returns_error_does_not_panic() {
+        // regression: same panic, but with non-empty file that's still
+        // shorter than oldText
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("short.txt");
+        fs::write(&path, "single line\n").unwrap();
+
+        let result = edit_file(
+            &path,
+            "line 1\nline 2\nline 3\nline 4",
+            "replaced",
+            &EditOpts::default(),
+        );
+        assert!(result.outcome.is_error());
+    }
+
+    #[test]
+    fn find_line_trimmed_matches_empty_content_does_not_panic() {
+        // direct unit test for the panic site
+        let matches = find_line_trimmed_matches("", "anything");
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn find_line_trimmed_matches_content_shorter_than_oldtext_does_not_panic() {
+        let matches = find_line_trimmed_matches("one\n", "one\ntwo\nthree\n");
+        assert!(matches.is_empty());
     }
 
     #[test]
