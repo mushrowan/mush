@@ -1,14 +1,25 @@
 # home-manager module for mush
 #
-# usage (import the module, then):
+# options under `programs.mush.settings.*` are generated from the rust
+# `Config` struct via nixcfg + a JSON Schema checked in at
+# `nix/config-schema.json`. a flake check re-runs the emitter and
+# diffs to stop drift.
+#
+# anything that isn't part of the runtime config (package choice,
+# AGENTS.md content, skill installer) stays hand-written at the
+# top level.
+#
+# usage:
 #   programs.mush = {
 #     enable = true;
-#     model = "claude-sonnet-4-20250514";
-#     thinking = true;
-#     theme.assistant = "#7aa2f7";
-#     mcp.git = {
-#       type = "local";
-#       command = ["uvx" "mcp-server-git"];
+#     settings = {
+#       model = "claude-sonnet-4-20250514";
+#       thinking = "high";
+#       theme.assistant = "#7aa2f7";
+#       mcp.git = {
+#         type = "local";
+#         command = ["uvx" "mcp-server-git"];
+#       };
 #     };
 #     agentsMd = ''
 #       # global instructions
@@ -26,7 +37,11 @@ self: {
   ...
 }: let
   cfg = config.programs.mush;
+  schema = ./config-schema.json;
+  nixcfg = self.inputs.nixcfg.lib;
   tomlFormat = pkgs.formats.toml {};
+
+  # -- skills installer -------------------------------------------------
 
   # structured skill with separate description and content
   skillModule = lib.types.submodule {
@@ -97,14 +112,14 @@ self: {
         ) (skill.files or {})
     );
 
-  colourType = lib.types.nullOr lib.types.str;
-  colourOption = description:
-    lib.mkOption {
-      type = colourType;
-      default = null;
-      inherit description;
-      example = "#7aa2f7";
-    };
+  # -- mcp submodule (manual override) ----------------------------------
+  #
+  # schemars emits McpServerConfig as an `oneOf` over Local/Remote tagged
+  # variants. nixcfg's mapType picks the outer-struct submodule shape and
+  # can't render the tagged union natively yet, so we hand-roll the nix
+  # type here and slot it in via `overrides` below. keeps mcp usable as
+  # `programs.mush.settings.mcp.<name> = { type = "local"; ...; }` the
+  # same way it did pre-migration
 
   mcpServerModule = lib.types.submodule {
     options = {
@@ -153,7 +168,24 @@ self: {
     };
   };
 
-  # remove null values and empty attrsets for clean toml
+  # -- schema → nix module ----------------------------------------------
+
+  schemaModule = nixcfg.mkModule {
+    inherit schema;
+    prefix = ["programs"];
+    settingsAttr = "settings";
+    overrides = {
+      # mcp and keys are free-form maps whose values need custom nix types
+      # that don't round-trip cleanly through schemars yet. the schema
+      # still describes them for cli/env/config consumers
+      mcp.type = lib.types.attrsOf mcpServerModule;
+      keys.type = lib.types.attrsOf (lib.types.either lib.types.str (lib.types.listOf lib.types.str));
+    };
+  };
+
+  # -- config.toml generation -------------------------------------------
+
+  # remove nulls + empty attrsets so the emitted toml stays tidy
   clean = attrs: let
     filtered = lib.filterAttrs (_: v: v != null) attrs;
     mapped = lib.mapAttrs (_: v:
@@ -164,259 +196,86 @@ self: {
   in
     lib.filterAttrs (_: v: !(lib.isAttrs v && v == {})) mapped;
 
-  mcpServerToAttrs = _: srv: let
-    base =
-      {inherit (srv) type enabled timeout;}
-      // lib.optionalAttrs (srv.environment != {}) {
-        inherit (srv) environment;
-      };
-    transport =
-      if srv.type == "local"
-      then {inherit (srv) command;}
-      else
-        {inherit (srv) url;}
-        // lib.optionalAttrs (srv.headers != {}) {
-          inherit (srv) headers;
-        };
-  in
-    base // transport;
-
+  # user-visible settings attrset (matches the on-disk `config.toml`
+  # layout one-to-one). keep api-key *paths* out of the toml because
+  # mush reads keys from env vars; the paths on disk are purely nix-side
+  # metadata for future secret-wiring (agenix / sops etc)
   tomlSettings = clean (
-    {
-      inherit (cfg) model;
-      inherit (cfg) thinking;
-      max_tokens = cfg.maxTokens;
-      max_turns = cfg.maxTurns;
-      system_prompt = cfg.systemPrompt;
-      log_filter = cfg.logFilter;
-    }
-    // lib.optionalAttrs (cfg.hintMode != "message") {
-      hint_mode = cfg.hintMode;
-    }
-    // lib.optionalAttrs cfg.cacheTimer {
-      cache_timer = true;
-    }
-    // lib.optionalAttrs (cfg.apiKeys.anthropic != null || cfg.apiKeys.openrouter != null) {
+    (removeAttrs cfg.settings ["apiKeys"])
+    // lib.optionalAttrs (cfg.settings.apiKeys or {} != {}) {
       api_keys = clean {
-        inherit (cfg.apiKeys) anthropic openrouter;
+        # secret suffix stripped: on-disk toml uses the original field name
+        anthropic = cfg.settings.apiKeys.anthropicPath or null;
+        openrouter = cfg.settings.apiKeys.openrouterPath or null;
+        openai = cfg.settings.apiKeys.openaiPath or null;
       };
     }
-    // (let
-      t = clean cfg.theme;
-    in
-      lib.optionalAttrs (t != {}) {theme = t;})
-    // lib.optionalAttrs (cfg.mcp != {}) {
-      mcp = lib.mapAttrs mcpServerToAttrs cfg.mcp;
-    }
-    // cfg.settings
   );
-in {
-  options.programs.mush = {
-    enable = lib.mkEnableOption "mush coding agent";
 
-    package = lib.mkOption {
-      type = lib.types.package;
-      inherit (self.packages.${pkgs.system}) default;
-      defaultText = lib.literalExpression "pkgs.mush";
-      description = "the mush package to install";
-    };
-
-    model = lib.mkOption {
-      type = lib.types.nullOr lib.types.str;
-      default = null;
-      example = "claude-sonnet-4-20250514";
-      description = "default model to use";
-    };
-
-    thinking = lib.mkOption {
-      type = lib.types.nullOr lib.types.bool;
-      default = null;
-      description = "enable extended thinking";
-    };
-
-    maxTokens = lib.mkOption {
-      type = lib.types.nullOr lib.types.ints.positive;
-      default = null;
-      example = 8192;
-      description = "maximum output tokens per response";
-    };
-
-    maxTurns = lib.mkOption {
-      type = lib.types.nullOr lib.types.ints.positive;
-      default = null;
-      example = 20;
-      description = "maximum agent turns per request";
-    };
-
-    systemPrompt = lib.mkOption {
-      type = lib.types.nullOr lib.types.str;
-      default = null;
-      description = "custom system prompt override";
-    };
-
-    hintMode = lib.mkOption {
-      type = lib.types.enum ["message" "transform" "none"];
-      default = "message";
-      description = ''
-        how to inject skill relevance hints.
-        "message" prepends hints to user messages,
-        "transform" re-evaluates before each LLM call,
-        "none" disables hints
-      '';
-    };
-
-    apiKeys = lib.mkOption {
-      type = lib.types.submodule {
-        options = {
-          anthropic = lib.mkOption {
-            type = lib.types.nullOr lib.types.str;
-            default = null;
-            description = "anthropic API key (prefer ANTHROPIC_API_KEY env var)";
-          };
-
-          openrouter = lib.mkOption {
-            type = lib.types.nullOr lib.types.str;
-            default = null;
-            description = "openrouter API key (prefer OPENROUTER_API_KEY env var)";
-          };
-        };
+  localModule = {...}: {
+    options.programs.mush = {
+      package = lib.mkOption {
+        type = lib.types.package;
+        default = self.packages.${pkgs.system}.default;
+        defaultText = lib.literalExpression "pkgs.mush";
+        description = "the mush package to install";
       };
-      default = {};
-      description = ''
-        API key overrides. prefer environment variables over config file
-        for secrets (ANTHROPIC_API_KEY, OPENROUTER_API_KEY)
-      '';
-    };
 
-    theme = lib.mkOption {
-      type = lib.types.submodule {
-        options = {
-          user = colourOption "colour for user message labels";
-          assistant = colourOption "colour for assistant message labels";
-          system = colourOption "colour for system message labels";
-          thinking = colourOption "colour for thinking/reasoning text";
-          code = colourOption "colour for code blocks and inline code";
-          heading = colourOption "colour for markdown headings";
-          tool_running = colourOption "colour for running tool indicators";
-          tool_done = colourOption "colour for completed tool indicators";
-          tool_error = colourOption "colour for failed tool indicators";
-          status = colourOption "colour for status bar model name";
-          border = colourOption "colour for input box border";
-        };
+      agentsMd = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = ''
+          # global agent instructions
+          - british spelling
+          - no em dashes or semicolons
+        '';
+        description = ''
+          content for ~/.config/mush/AGENTS.md (user-global agent instructions).
+          mush loads this alongside any project-level AGENTS.md files
+        '';
       };
-      default = {};
-      description = ''
-        theme colour overrides. accepts colour names (red, blue, cyan),
-        hex codes (#rrggbb), or 256-colour indices (196)
-      '';
-    };
 
-    mcp = lib.mkOption {
-      type = lib.types.attrsOf mcpServerModule;
-      default = {};
-      example = lib.literalExpression ''
-        {
-          git = {
-            type = "local";
-            command = ["uvx" "mcp-server-git"];
-          };
-          api = {
-            type = "remote";
-            url = "https://mcp.example.com/sse";
-            timeout = 60;
-          };
-        }
-      '';
-      description = "MCP (Model Context Protocol) server configurations";
-    };
+      skills = lib.mkOption {
+        type = lib.types.attrsOf skillType;
+        default = {};
+        example = lib.literalExpression ''
+          {
+            # raw SKILL.md text (e.g. from builtins.readFile)
+            jj = builtins.readFile ./skills/jj.md;
 
-    logFilter = lib.mkOption {
-      type = lib.types.nullOr lib.types.str;
-      default = null;
-      example = "mush=debug,warn";
-      description = "tracing filter string (RUST_LOG env var takes priority over this)";
-    };
-
-    cacheTimer = lib.mkOption {
-      type = lib.types.bool;
-      default = true;
-      description = ''
-        show cache warmth countdown in the status bar and send desktop
-        notifications when the prompt cache is about to expire
-      '';
-    };
-
-    agentsMd = lib.mkOption {
-      type = lib.types.nullOr lib.types.str;
-      default = null;
-      example = ''
-        # global agent instructions
-        - british spelling
-        - no em dashes or semicolons
-      '';
-      description = ''
-        content for ~/.config/mush/AGENTS.md (user-global agent instructions).
-        mush loads this alongside any project-level AGENTS.md files
-      '';
-    };
-
-    skills = lib.mkOption {
-      type = lib.types.attrsOf skillType;
-      default = {};
-      example = lib.literalExpression ''
-        {
-          # raw SKILL.md text (e.g. from builtins.readFile)
-          jj = builtins.readFile ./skills/jj.md;
-
-          # structured form (frontmatter is generated)
-          rust-idioms = {
-            description = "Rust idioms and best practices";
-            content = '''
-              ## When to use me
-              Use when writing or reviewing Rust code.
-            ''';
-          };
-
-          # with additional reference files
-          nix = {
-            description = "Nix flake conventions";
-            content = "## flakes\nuse flake-parts";
-            files = {
-              "references/flake-parts.md" = ./skills/nix/flake-parts.md;
-              "references/inline.md" = "# written inline";
+            # structured form (frontmatter is generated)
+            rust-idioms = {
+              description = "Rust idioms and best practices";
+              content = '''
+                ## When to use me
+                Use when writing or reviewing Rust code.
+              ''';
             };
+          }
+        '';
+        description = ''
+          skills to install in ~/.config/mush/skills/. each key becomes a
+          subdirectory containing a SKILL.md. accepts either a raw markdown
+          string (with yaml frontmatter) or a { description, content } set
+        '';
+      };
+    };
+
+    config = lib.mkIf cfg.enable {
+      home.packages = [cfg.package];
+
+      xdg.configFile =
+        {
+          "mush/config.toml" = lib.mkIf (tomlSettings != {}) {
+            source = tomlFormat.generate "mush-config" tomlSettings;
           };
         }
-      '';
-      description = ''
-        skills to install in ~/.config/mush/skills/. each key becomes a
-        subdirectory containing a SKILL.md. accepts either a raw markdown
-        string (with yaml frontmatter) or a { description, content } set
-      '';
-    };
-
-    settings = lib.mkOption {
-      inherit (tomlFormat) type;
-      default = {};
-      description = ''
-        additional settings merged into config.toml. use this for options
-        not yet exposed as typed module options
-      '';
+        // lib.optionalAttrs (cfg.agentsMd != null) {
+          "mush/AGENTS.md".text = cfg.agentsMd;
+        }
+        // lib.concatMapAttrs skillToFiles cfg.skills;
     };
   };
-
-  config = lib.mkIf cfg.enable {
-    home.packages = [cfg.package];
-
-    xdg.configFile =
-      {
-        "mush/config.toml" = lib.mkIf (tomlSettings != {}) {
-          source = tomlFormat.generate "mush-config" tomlSettings;
-        };
-      }
-      // lib.optionalAttrs (cfg.agentsMd != null) {
-        "mush/AGENTS.md".text = cfg.agentsMd;
-      }
-      // lib.concatMapAttrs skillToFiles cfg.skills;
-  };
+in {
+  imports = [(schemaModule {}) localModule];
 }

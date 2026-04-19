@@ -1,10 +1,10 @@
 //! MCP server configuration types
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// configuration for an MCP server
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct McpServerConfig {
     #[serde(flatten)]
     pub server_type: McpServerType,
@@ -20,7 +20,7 @@ pub struct McpServerConfig {
 }
 
 /// how to connect to the MCP server
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum McpServerType {
     /// local server spawned as a subprocess (stdio transport)

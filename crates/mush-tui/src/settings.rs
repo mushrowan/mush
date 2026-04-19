@@ -7,7 +7,7 @@
 use mush_ai::types::AnthropicBetas;
 
 /// scope for persisting settings changes made during a session
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum SettingsScope {
     /// changes persist to `~/.config/mush/settings.toml` (global defaults)

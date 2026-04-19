@@ -85,7 +85,7 @@ impl Model {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ThinkingLevel {
     Off,
@@ -131,7 +131,7 @@ pub struct StreamOptions {
 /// defaults follow the policy agreed with mush's primary user:
 /// - `context_1m`, `effort`, `context_management` default to `true`
 /// - `redact_thinking`, `advisor`, `advanced_tool_use` default to `false`
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct AnthropicBetas {
     /// `context-1m-2025-08-07` - unlocks 1M context window on compatible models
@@ -197,7 +197,7 @@ impl AnthropicBetas {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CacheRetention {
     None,

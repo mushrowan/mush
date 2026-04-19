@@ -13,6 +13,7 @@ async-trait.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+schemars.workspace = true
 derive_more.workspace = true
 sha2.workspace = true
 getrandom.workspace = true

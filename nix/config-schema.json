@@ -1,0 +1,938 @@
+{
+  "$defs": {
+    "AnthropicBetas": {
+      "description": "anthropic beta flags enabled via the `anthropic-beta` header on oauth\nrequests. api-key users don't typically need these; they're claude-code\nparity flags for oauth sessions.\n\ndefaults follow the policy agreed with mush's primary user:\n- `context_1m`, `effort`, `context_management` default to `true`\n- `redact_thinking`, `advisor`, `advanced_tool_use` default to `false`",
+      "properties": {
+        "advanced_tool_use": {
+          "default": false,
+          "description": "`advanced-tool-use-2025-11-20` - advanced tool-use features",
+          "type": "boolean"
+        },
+        "advisor": {
+          "default": false,
+          "description": "`advisor-tool-2026-03-01` - claude-code advisor tool support",
+          "type": "boolean"
+        },
+        "context_1m": {
+          "default": true,
+          "description": "`context-1m-2025-08-07` - unlocks 1M context window on compatible models",
+          "type": "boolean"
+        },
+        "context_management": {
+          "default": true,
+          "description": "`context-management-2025-06-27` - server-side context edits",
+          "type": "boolean"
+        },
+        "effort": {
+          "default": true,
+          "description": "`effort-2025-11-24` - enables the `output_config.effort` request field",
+          "type": "boolean"
+        },
+        "redact_thinking": {
+          "default": false,
+          "description": "`redact-thinking-2026-02-12` - allows thinking redaction in responses",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "ApiKey": {
+      "description": "an API key (redacted in Debug/Display, non-empty when present)",
+      "type": "string"
+    },
+    "ApiKeys": {
+      "description": "api key overrides from config file.\n\nnamed fields cover the common paths used throughout the codebase.\nthe flattened `other` map catches any additional provider name so\nusers can add keys for groq, deepseek, xai, cerebras, mistral,\ntogether, deepinfra, etc. without a new named field each time\n\nall key values are `ApiKey`, whose Debug/Display are redacted so\nsecrets can't accidentally leak into trace output, panic messages,\nor captured error bodies. access the raw value via `ApiKey::expose`",
+      "properties": {
+        "anthropic": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApiKey"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "x-nixcfg-secret": true
+        },
+        "openai": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApiKey"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "x-nixcfg-secret": true
+        },
+        "openrouter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApiKey"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "x-nixcfg-secret": true
+        }
+      },
+      "type": "object"
+    },
+    "BindingSource": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      ],
+      "description": "a string or list-of-strings that deserialises into a `Binding`.\nthis is the wire format users see in config.toml"
+    },
+    "CacheRetention": {
+      "enum": [
+        "none",
+        "short",
+        "long"
+      ],
+      "type": "string"
+    },
+    "ContextStrategy": {
+      "description": "how skills are discovered and injected into context\n\neach strategy trades off token cost vs accuracy vs latency:\n- `prepended`: all skills in system prompt\n- `summaries`: skill catalogue in prompt, `skill` tool on demand\n- `embedded`: skill catalogue plus embedding hints, `skill` tool on demand\n- `embed_inject`: auto-inject from embeddings, no tool needed",
+      "oneOf": [
+        {
+          "const": "prepended",
+          "description": "all skill bodies dumped into the system prompt",
+          "type": "string"
+        },
+        {
+          "const": "summaries",
+          "description": "names + descriptions listed, `skill` tool for on-demand reading",
+          "type": "string"
+        },
+        {
+          "const": "embedded",
+          "description": "embedding similarity hints + `skill` tool",
+          "type": "string"
+        },
+        {
+          "const": "embed_inject",
+          "description": "embedding auto-injects matched skill content, no tool needed",
+          "type": "string"
+        }
+      ]
+    },
+    "EmbeddingModel": {
+      "description": "which local embedding model to use for semantic search",
+      "oneOf": [
+        {
+          "const": "coderank",
+          "description": "nomic CodeRankEmbed-137M, code-specialised, fast",
+          "type": "string"
+        },
+        {
+          "const": "gemma",
+          "description": "google EmbeddingGemma-300M, general purpose, larger",
+          "type": "string"
+        }
+      ]
+    },
+    "HintMode": {
+      "description": "how to inject skill relevance hints into the conversation",
+      "oneOf": [
+        {
+          "const": "message",
+          "description": "prepend hint to user message (evaluated once per message)",
+          "type": "string"
+        },
+        {
+          "const": "transform",
+          "description": "inject via context transform (re-evaluated before each LLM call)",
+          "type": "string"
+        },
+        {
+          "const": "none",
+          "description": "no hint (all skills still loaded in system prompt)",
+          "type": "string"
+        }
+      ]
+    },
+    "HookEntry": {
+      "description": "a single hook entry in config",
+      "properties": {
+        "blocking": {
+          "default": false,
+          "description": "whether failure blocks the operation (default false)",
+          "type": "boolean"
+        },
+        "command": {
+          "description": "shell command to run",
+          "type": "string"
+        },
+        "match": {
+          "default": "*",
+          "description": "tool name pattern: \"*\" for all, \"edit|write\" for specific tools",
+          "type": "string"
+        },
+        "timeout": {
+          "default": 30,
+          "description": "timeout in seconds (default 30)",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
+    "HooksConfig": {
+      "description": "lifecycle hook config sections",
+      "properties": {
+        "post_compaction": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/HookEntry"
+          },
+          "type": "array"
+        },
+        "post_tool_use": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/HookEntry"
+          },
+          "type": "array"
+        },
+        "pre_session": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/HookEntry"
+          },
+          "type": "array"
+        },
+        "pre_tool_use": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/HookEntry"
+          },
+          "type": "array"
+        },
+        "stop": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/HookEntry"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "ImageProbeMode": {
+      "enum": [
+        "auto",
+        "disabled"
+      ],
+      "type": "string"
+    },
+    "IsolationMode": {
+      "description": "how pane file access is isolated",
+      "oneOf": [
+        {
+          "const": "none",
+          "description": "detect-and-warn: track modifications, advisory locks (default)",
+          "type": "string"
+        },
+        {
+          "const": "worktree",
+          "description": "git worktree per pane: full filesystem isolation",
+          "type": "string"
+        },
+        {
+          "const": "jj",
+          "description": "jj change per pane: separate changes in same working dir",
+          "type": "string"
+        }
+      ]
+    },
+    "KeyboardEnhancementMode": {
+      "enum": [
+        "auto",
+        "enabled",
+        "disabled"
+      ],
+      "type": "string"
+    },
+    "KeysConfig": {
+      "additionalProperties": {
+        "$ref": "#/$defs/BindingSource"
+      },
+      "description": "config-side type used by `KeysConfig` below. users put these in\n`[keys]` in config.toml. `deserialise_keys` turns the toml table\ninto raw strings so `KeyMap::override_from` can layer them on top\nof the defaults without losing context on which actions are known",
+      "type": "object"
+    },
+    "LspConfig": {
+      "description": "LSP integration configuration",
+      "properties": {
+        "diagnostics": {
+          "default": false,
+          "description": "enable auto-injecting diagnostics after file-modifying tools (default false)",
+          "type": "boolean"
+        },
+        "servers": {
+          "additionalProperties": {
+            "$ref": "#/$defs/LspServerEntry"
+          },
+          "default": {},
+          "description": "custom server overrides, keyed by language name (e.g. \"rust\", \"python\")",
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "LspServerEntry": {
+      "description": "a custom LSP server config entry",
+      "properties": {
+        "args": {
+          "default": [],
+          "description": "command line arguments",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "command": {
+          "description": "command to run",
+          "type": "string"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
+    "McpServerConfig": {
+      "description": "configuration for an MCP server",
+      "oneOf": [
+        {
+          "description": "local server spawned as a subprocess (stdio transport)",
+          "properties": {
+            "command": {
+              "description": "command and arguments to run the server",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "local",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "command"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "remote server accessed over HTTP",
+          "properties": {
+            "headers": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {},
+              "description": "optional HTTP headers",
+              "type": "object"
+            },
+            "type": {
+              "const": "remote",
+              "type": "string"
+            },
+            "url": {
+              "description": "URL of the MCP server",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "url"
+          ],
+          "type": "object"
+        }
+      ],
+      "properties": {
+        "enabled": {
+          "default": true,
+          "description": "whether the server is enabled (default: true)",
+          "type": "boolean"
+        },
+        "environment": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "environment variables to set (local servers only)",
+          "type": "object"
+        },
+        "timeout": {
+          "default": 30,
+          "description": "timeout in seconds for requests (default: 30)",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "MouseTrackingMode": {
+      "enum": [
+        "minimal",
+        "disabled"
+      ],
+      "type": "string"
+    },
+    "RetrievalConfig": {
+      "description": "retrieval tier configuration\n\ncontrols which auto-context sources are active and how much\nof the context budget they can use.",
+      "properties": {
+        "auto_load_threshold": {
+          "default": 0.5,
+          "description": "cosine similarity threshold for auto-loading full skill content (default 0.5)",
+          "format": "float",
+          "type": "number"
+        },
+        "context_budget": {
+          "default": 2048,
+          "description": "total token budget for all retrieval context (default 2048)",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "context_strategy": {
+          "$ref": "#/$defs/ContextStrategy",
+          "default": "summaries",
+          "description": "how skills are discovered and injected"
+        },
+        "embedding_model": {
+          "$ref": "#/$defs/EmbeddingModel",
+          "default": "coderank",
+          "description": "which embedding model to use: \"coderank\" (default) or \"gemma\""
+        },
+        "repo_map": {
+          "default": true,
+          "description": "tier 1: tree-sitter repo map in system prompt",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "Settings": {
+      "description": "session settings with scope control.\n`scope` determines where runtime changes (via `/settings`) get persisted",
+      "properties": {
+        "anthropic_betas": {
+          "$ref": "#/$defs/AnthropicBetas",
+          "default": {
+            "advanced_tool_use": false,
+            "advisor": false,
+            "context_1m": true,
+            "context_management": true,
+            "effort": true,
+            "redact_thinking": false
+          },
+          "description": "anthropic oauth beta flag toggles"
+        },
+        "scope": {
+          "$ref": "#/$defs/SettingsScope",
+          "default": "session",
+          "description": "scope for runtime changes made via `/settings`"
+        }
+      },
+      "type": "object"
+    },
+    "SettingsScope": {
+      "description": "scope for persisting settings changes made during a session",
+      "oneOf": [
+        {
+          "const": "global",
+          "description": "changes persist to `~/.config/mush/settings.toml` (global defaults)",
+          "type": "string"
+        },
+        {
+          "const": "disabled",
+          "description": "no runtime changes allowed; base config is authoritative",
+          "type": "string"
+        },
+        {
+          "const": "repo",
+          "description": "changes persist to `<repo>/.mush/settings.toml` (per-project)",
+          "type": "string"
+        },
+        {
+          "const": "session",
+          "description": "changes only apply to the current session, not persisted",
+          "type": "string"
+        }
+      ]
+    },
+    "StatusBarConfig": {
+      "description": "toggles for individual status bar segments\n\neverything defaults on so existing setups are unaffected. per-field\n`show_cost` and `show_token_counters` live on `InteractionState`\n(separately toggleable at runtime via `/cost`), not here",
+      "properties": {
+        "show_background_alerts": {
+          "default": true,
+          "description": "background pane notifications",
+          "type": "boolean"
+        },
+        "show_context": {
+          "default": true,
+          "description": "`<used>/<window>` context + cache warmth segment",
+          "type": "boolean"
+        },
+        "show_cwd": {
+          "default": true,
+          "description": "cwd in the right column",
+          "type": "boolean"
+        },
+        "show_oauth_usage": {
+          "default": true,
+          "description": "oauth 5h / 7d usage bars (claude code plan)",
+          "type": "boolean"
+        },
+        "show_pane_indicator": {
+          "default": true,
+          "description": "`[i/n]` pane indicator when multi-pane",
+          "type": "boolean"
+        },
+        "show_scroll_position": {
+          "default": true,
+          "description": "`N%` percent-from-top when scrolled up",
+          "type": "boolean"
+        },
+        "show_status_messages": {
+          "default": true,
+          "description": "ephemeral status messages from slash commands, tools, etc",
+          "type": "boolean"
+        },
+        "show_thinking": {
+          "default": true,
+          "description": "`thinking: <level>` segment",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "TerminalPolicy": {
+      "properties": {
+        "image_probe": {
+          "$ref": "#/$defs/ImageProbeMode",
+          "default": "auto"
+        },
+        "keyboard_enhancement": {
+          "$ref": "#/$defs/KeyboardEnhancementMode",
+          "default": "auto"
+        },
+        "mouse_tracking": {
+          "$ref": "#/$defs/MouseTrackingMode",
+          "default": "minimal"
+        }
+      },
+      "type": "object"
+    },
+    "ThemeConfig": {
+      "description": "serialisable theme config (subset of colours)",
+      "properties": {
+        "assistant": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "border": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "code": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "heading": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "system": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "thinking": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool_done": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool_error": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool_running": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "user": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ThinkingConfigWire": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "$ref": "#/$defs/ThinkingLevel"
+        }
+      ],
+      "description": "wire format for the `thinking` field: accepts a bool (legacy) or a\n`ThinkingLevel` string. the resulting `Option<ThinkingLevel>` in\n[`Config`] is what the rest of the code sees.\n\nTODO: this bool-or-enum legacy form generates an `anyOf` in the\nJSON Schema that nixcfg maps to `types.either bool (enum [...])`.\nthe `either` form is usable but fiddly for nix users; a future\nrefactor can drop the bool form, announce a one-line breaking\nchange (`thinking = true` → `thinking = \"high\"`), and simplify\nthe schema to just the enum. kept in option A shape for now per\nthe migration plan"
+    },
+    "ThinkingDisplay": {
+      "description": "controls how thinking text is displayed",
+      "oneOf": [
+        {
+          "const": "hidden",
+          "description": "never show thinking text",
+          "type": "string"
+        },
+        {
+          "const": "collapse",
+          "description": "show while streaming, collapse to one-line preview when done",
+          "type": "string"
+        },
+        {
+          "const": "expanded",
+          "description": "always show thinking text expanded",
+          "type": "string"
+        }
+      ]
+    },
+    "ThinkingLevel": {
+      "enum": [
+        "off",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "top-level config",
+  "properties": {
+    "api_keys": {
+      "$ref": "#/$defs/ApiKeys",
+      "default": {
+        "anthropic": null,
+        "openai": null,
+        "openrouter": null
+      }
+    },
+    "auto_compact": {
+      "default": false,
+      "description": "automatically compact conversation when approaching context limit (off by default)",
+      "type": "boolean"
+    },
+    "auto_fork_compact": {
+      "default": false,
+      "description": "fork the session tree before auto-compacting (preserves uncompacted original)",
+      "type": "boolean"
+    },
+    "cache_retention": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CacheRetention"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "cache_timer": {
+      "default": false,
+      "description": "show cache warmth countdown and send desktop notifications (off by default)",
+      "type": "boolean"
+    },
+    "compaction_model": {
+      "default": null,
+      "description": "optional model to use for compaction (defaults to the active model)",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "confirm_tools": {
+      "default": false,
+      "description": "prompt for confirmation before executing tools (off by default)",
+      "type": "boolean"
+    },
+    "debug_cache": {
+      "default": false,
+      "type": "boolean"
+    },
+    "dynamic_mcp": {
+      "default": false,
+      "description": "use dynamic meta-tools for MCP instead of loading all schemas (default false)",
+      "type": "boolean"
+    },
+    "favourite_models": {
+      "default": [],
+      "description": "models the user has pinned as favourites, shown with a star in the\nmodel picker and cycleable with alt+m. declaring any value here\nlocks imperative adds/removes (the tui picker rejects ctrl+f with a\ntoast) so config stays the single source of truth",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "hint_mode": {
+      "$ref": "#/$defs/HintMode",
+      "default": "message"
+    },
+    "hooks": {
+      "$ref": "#/$defs/HooksConfig",
+      "default": {
+        "post_compaction": [],
+        "post_tool_use": [],
+        "pre_session": [],
+        "pre_tool_use": [],
+        "stop": []
+      },
+      "description": "lifecycle hooks"
+    },
+    "isolation": {
+      "$ref": "#/$defs/IsolationMode",
+      "default": "none",
+      "description": "multi-pane file isolation mode: none (detect-and-warn), worktree, jj"
+    },
+    "keys": {
+      "$ref": "#/$defs/KeysConfig",
+      "default": {},
+      "description": "configurable keybinds: action → key combination(s)"
+    },
+    "log_filter": {
+      "default": null,
+      "description": "tracing filter string (e.g. \"mush=debug,warn\")",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "lsp": {
+      "$ref": "#/$defs/LspConfig",
+      "default": {
+        "diagnostics": false,
+        "servers": {}
+      },
+      "description": "LSP integration settings"
+    },
+    "max_tokens": {
+      "default": null,
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "max_turns": {
+      "default": null,
+      "format": "uint",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "mcp": {
+      "additionalProperties": {
+        "$ref": "#/$defs/McpServerConfig"
+      },
+      "default": {},
+      "description": "MCP server configurations keyed by name",
+      "type": "object"
+    },
+    "model": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "model_tiers": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "default": {},
+      "description": "model tier aliases for delegation and multi-pane",
+      "type": "object"
+    },
+    "retrieval": {
+      "$ref": "#/$defs/RetrievalConfig",
+      "default": {
+        "auto_load_threshold": 0.5,
+        "context_budget": 2048,
+        "context_strategy": "summaries",
+        "embedding_model": "coderank",
+        "repo_map": true
+      },
+      "description": "retrieval / auto-context settings"
+    },
+    "scroll_lines": {
+      "default": 3,
+      "description": "lines scrolled per j/k keystroke in scroll mode (default 3)",
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "settings": {
+      "$ref": "#/$defs/Settings",
+      "default": {
+        "anthropic_betas": {
+          "advanced_tool_use": false,
+          "advisor": false,
+          "context_1m": true,
+          "context_management": true,
+          "effort": true,
+          "redact_thinking": false
+        },
+        "scope": "session"
+      },
+      "description": "provider-specific settings (anthropic betas, scope, etc.)"
+    },
+    "show_cost": {
+      "default": false,
+      "description": "show dollar cost in status bar (off by default, toggle with /cost)",
+      "type": "boolean"
+    },
+    "show_token_counters": {
+      "default": false,
+      "description": "show the ↑/↓/R/W token counter segment in the status bar (off by default)",
+      "type": "boolean"
+    },
+    "show_usage_lines": {
+      "default": false,
+      "description": "render per-message usage lines (off by default, same info is in the status bar)",
+      "type": "boolean"
+    },
+    "status_bar": {
+      "$ref": "#/$defs/StatusBarConfig",
+      "default": {
+        "show_background_alerts": true,
+        "show_context": true,
+        "show_cwd": true,
+        "show_oauth_usage": true,
+        "show_pane_indicator": true,
+        "show_scroll_position": true,
+        "show_status_messages": true,
+        "show_thinking": true
+      },
+      "description": "per-segment visibility toggles for the status bar"
+    },
+    "system_prompt": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "terminal": {
+      "$ref": "#/$defs/TerminalPolicy",
+      "default": {
+        "image_probe": "auto",
+        "keyboard_enhancement": "auto",
+        "mouse_tracking": "minimal"
+      },
+      "description": "terminal behaviour overrides"
+    },
+    "theme": {
+      "$ref": "#/$defs/ThemeConfig",
+      "default": {
+        "assistant": null,
+        "border": null,
+        "code": null,
+        "heading": null,
+        "status": null,
+        "system": null,
+        "thinking": null,
+        "tool_done": null,
+        "tool_error": null,
+        "tool_running": null,
+        "user": null
+      }
+    },
+    "thinking": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ThinkingConfigWire"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "thinking_display": {
+      "$ref": "#/$defs/ThinkingDisplay",
+      "default": "expanded",
+      "description": "how to display thinking text (hidden, collapse, expanded)"
+    }
+  },
+  "title": "Config",
+  "type": "object",
+  "x-nixcfg-config-format": "toml",
+  "x-nixcfg-name": "mush"
+}

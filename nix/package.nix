@@ -1,4 +1,5 @@
 {
+  pkgs,
   craneLib,
   src,
   fd,
@@ -102,4 +103,24 @@ in {
     // {
       inherit cargoArtifacts;
     });
+
+  # emit the config schema from rust and diff it against the checked-in
+  # nix/config-schema.json. catches drift when any field in `Config` or
+  # its nested types changes without regenerating the schema.
+  #
+  # regenerate with:
+  #   cargo run -p mush-cli --bin mush-config-schema > nix/config-schema.json
+  schemaEmitter = craneLib.buildPackage (commonArgs
+    // {
+      inherit cargoArtifacts;
+      pname = "mush-config-schema";
+      cargoExtraArgs = commonArgs.cargoExtraArgs + " --bin mush-config-schema";
+      doCheck = false;
+    });
+
+  schemaCheck = pkgs.runCommand "mush-config-schema-check" {} ''
+    ${pkgs.diffutils}/bin/diff -u ${../nix/config-schema.json} \
+      <(${schemaEmitter}/bin/mush-config-schema)
+    touch $out
+  '';
 }
