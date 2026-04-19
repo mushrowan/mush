@@ -112,62 +112,6 @@ self: {
         ) (skill.files or {})
     );
 
-  # -- mcp submodule (manual override) ----------------------------------
-  #
-  # schemars emits McpServerConfig as an `oneOf` over Local/Remote tagged
-  # variants. nixcfg's mapType picks the outer-struct submodule shape and
-  # can't render the tagged union natively yet, so we hand-roll the nix
-  # type here and slot it in via `overrides` below. keeps mcp usable as
-  # `programs.mush.settings.mcp.<name> = { type = "local"; ...; }` the
-  # same way it did pre-migration
-
-  mcpServerModule = lib.types.submodule {
-    options = {
-      type = lib.mkOption {
-        type = lib.types.enum ["local" "remote"];
-        description = "transport type for the MCP server";
-      };
-
-      command = lib.mkOption {
-        type = lib.types.listOf lib.types.str;
-        default = [];
-        example = ["uvx" "mcp-server-git"];
-        description = "command and arguments for local servers";
-      };
-
-      url = lib.mkOption {
-        type = lib.types.nullOr lib.types.str;
-        default = null;
-        example = "https://mcp.example.com/sse";
-        description = "URL for remote servers";
-      };
-
-      headers = lib.mkOption {
-        type = lib.types.attrsOf lib.types.str;
-        default = {};
-        description = "HTTP headers for remote servers";
-      };
-
-      enabled = lib.mkOption {
-        type = lib.types.bool;
-        default = true;
-        description = "whether this server is enabled";
-      };
-
-      timeout = lib.mkOption {
-        type = lib.types.ints.positive;
-        default = 30;
-        description = "request timeout in seconds";
-      };
-
-      environment = lib.mkOption {
-        type = lib.types.attrsOf lib.types.str;
-        default = {};
-        description = "environment variables for the server process";
-      };
-    };
-  };
-
   # -- schema → nix module ----------------------------------------------
 
   schemaModule = nixcfg.mkModule {
@@ -175,10 +119,9 @@ self: {
     prefix = ["programs"];
     settingsAttr = "settings";
     overrides = {
-      # mcp and keys are free-form maps whose values need custom nix types
-      # that don't round-trip cleanly through schemars yet. the schema
-      # still describes them for cli/env/config consumers
-      mcp.type = lib.types.attrsOf mcpServerModule;
+      # `keys` is mush's keybindings map (action → key string or list of
+      # key strings). schemars can't infer the value shape from the
+      # untyped HashMap so we pin it here
       keys.type = lib.types.attrsOf (lib.types.either lib.types.str (lib.types.listOf lib.types.str));
     };
   };
