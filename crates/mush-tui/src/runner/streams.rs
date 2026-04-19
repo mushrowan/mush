@@ -73,7 +73,7 @@ pub(super) struct StreamConfig {
     pub max_turns: usize,
     pub prompt_enricher: Option<PromptEnricher>,
     pub hint_mode: HintMode,
-    pub provider_api_keys: HashMap<String, String>,
+    pub provider_api_keys: HashMap<String, mush_ai::ApiKey>,
     pub confirm_tools: bool,
     pub auto_compact: bool,
     /// separate model + options for compaction (None = use active model)

@@ -75,7 +75,7 @@ pub struct TuiConfig {
     /// path to config file for hot-reload
     pub config_path: Option<std::path::PathBuf>,
     /// per-provider api keys from config
-    pub provider_api_keys: std::collections::HashMap<String, String>,
+    pub provider_api_keys: std::collections::HashMap<String, mush_ai::ApiKey>,
     /// per-model thinking level prefs (loaded from disk at startup)
     pub thinking_prefs: std::collections::HashMap<String, ThinkingLevel>,
     /// callback to save thinking prefs when they change

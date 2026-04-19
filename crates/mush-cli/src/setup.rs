@@ -881,13 +881,12 @@ pub fn build_prompt_enricher(
 
 /// resolve API key from config file for a given provider
 pub fn config_api_key(cfg: &config::Config, provider: &Provider) -> Option<ApiKey> {
-    let raw = match provider {
+    match provider {
         Provider::Anthropic => cfg.api_keys.anthropic.clone(),
         Provider::OpenRouter => cfg.api_keys.openrouter.clone(),
         Provider::Custom(name) if name == "openai" => cfg.api_keys.openai.clone(),
         Provider::Custom(name) => cfg.api_keys.other.get(name).cloned(),
-    };
-    raw.and_then(ApiKey::new)
+    }
 }
 
 /// resolve the thinking level from CLI flags, saved prefs, and config
