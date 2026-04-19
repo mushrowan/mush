@@ -178,10 +178,12 @@ pub fn benchmark_build_input_layout(
     }
 }
 
-fn image_token(img: Option<&crate::app::PendingImage>) -> String {
+fn image_token(index: usize, img: Option<&crate::app::PendingImage>) -> String {
+    // 1-indexed so users reading "the second image shows X" can count naturally
+    let n = index + 1;
     match img.and_then(|i| i.dimensions) {
-        Some((w, h)) => format!("[📷 {w}x{h}]"),
-        None => "[📷]".to_string(),
+        Some((w, h)) => format!("[📷 #{n} {w}x{h}]"),
+        None => format!("[📷 #{n}]"),
     }
 }
 
@@ -205,7 +207,7 @@ pub fn expand_input(
         }
         if ch == IMAGE_PLACEHOLDER {
             let start = text.len();
-            let token = image_token(images.get(img_idx));
+            let token = image_token(img_idx, images.get(img_idx));
             text.push_str(&token);
             image_spans.push((start, text.len()));
             img_idx += 1;
