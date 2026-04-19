@@ -391,7 +391,7 @@ fn apply_settings_toggle(
 }
 
 async fn paste_clipboard_image(app: &mut App) {
-    app.status = Some("reading clipboard...".into());
+    app.status = Some("reading clipboard…".into());
     match tokio::task::spawn_blocking(crate::clipboard::read_clipboard_image).await {
         Ok(Some(image)) => {
             let mime = image.mime_type.as_str();

@@ -31,7 +31,7 @@ pub async fn handle_compact(
         return;
     }
 
-    app.status = Some("compacting...".into());
+    app.status = Some("compacting…".into());
     let (compacted_messages, tokens_before, tokens_after, summarised_count) =
         run_compaction(messages, model, options, registry, lifecycle_hooks, cwd).await;
 
@@ -64,7 +64,7 @@ pub async fn handle_fork_compact(
         return;
     }
 
-    app.status = Some("fork-compacting...".into());
+    app.status = Some("fork-compacting…".into());
     let result = fork_and_compact(
         conversation,
         "forked",

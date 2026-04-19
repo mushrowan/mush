@@ -290,7 +290,7 @@ impl AgentTool for BatchTool {
                     let truncated = truncate_to_budget(item_text, per_item_budget);
                     output.push_str(truncated);
                     let omitted = item_text.len() - truncated.len();
-                    output.push_str(&format!("\n[...truncated, {omitted} bytes omitted"));
+                    output.push_str(&format!("\n[…truncated, {omitted} bytes omitted"));
                     if let Some(path) = file_ref {
                         output.push_str(&format!(". full output: {path}"));
                     }

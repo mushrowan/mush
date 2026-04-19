@@ -578,7 +578,7 @@ fn format_edit_diff(old_text: &str, new_text: &str) -> String {
                     last_was_gap = false;
                 } else if !last_was_gap && i > 0 && i < changes.len() - 1 {
                     // omitted lines between change groups
-                    result.push_str("  ...\n");
+                    result.push_str("  …\n");
                     last_was_gap = true;
                 }
             }

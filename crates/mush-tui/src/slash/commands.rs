@@ -11,6 +11,7 @@ use mush_session::ConversationState;
 use crate::TuiConfig;
 use crate::app::App;
 use crate::runner::HintMode;
+use crate::text::truncate_with_ellipsis;
 
 use super::SlashAction;
 
@@ -448,12 +449,7 @@ fn show_tree(app: &mut App, conversation: &ConversationState) {
                 UserContent::Text(t) => t.as_str(),
                 _ => "(parts)",
             };
-            let preview = if text.chars().count() > 60 {
-                let truncated: String = text.chars().take(57).collect();
-                format!("{truncated}...")
-            } else {
-                text.to_string()
-            };
+            let preview = truncate_with_ellipsis(text, 60);
             let marker = if tree.is_branch_point(&entry.id) {
                 " ⑂"
             } else {
@@ -474,11 +470,7 @@ fn handle_branch(app: &mut App, conversation: &mut ConversationState, n: usize) 
             mush_session::tree::EntryKind::Message {
                 message: Message::User(u),
             } => match &u.content {
-                UserContent::Text(t) if t.chars().count() > 40 => {
-                    let truncated: String = t.chars().take(37).collect();
-                    format!("{truncated}...")
-                }
-                UserContent::Text(t) => t.clone(),
+                UserContent::Text(t) => truncate_with_ellipsis(t, 40),
                 _ => "message".into(),
             },
             _ => "message".into(),
@@ -889,12 +881,7 @@ pub fn handle_export(app: &mut App, conversation: &ConversationState, args: &str
                     })
                     .collect::<Vec<_>>()
                     .join("");
-                let preview = if output.chars().count() > 200 {
-                    let truncated: String = output.chars().take(197).collect();
-                    format!("{truncated}...")
-                } else {
-                    output
-                };
+                let preview = truncate_with_ellipsis(&output, 200);
                 md.push_str(&format!(
                     "**{}** `{}`\n\n```\n{preview}\n```\n\n",
                     if tr.outcome.is_error() { "✗" } else { "✓" },
