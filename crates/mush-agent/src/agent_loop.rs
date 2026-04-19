@@ -585,12 +585,28 @@ pub fn agent_loop(
                         break 'outer;
                     }
 
-                    // execute all allowed tools concurrently
-                    let futs: Vec<_> = allowed
-                        .iter()
-                        .map(|tc| execute_tool(&config.tools, tc))
-                        .collect();
-                    let results = futures::future::join_all(futs).await;
+                    // execute all allowed tools concurrently. racing the
+                    // batch against the cancel token lets the user abort
+                    // a long-running tool: tool futures get dropped on
+                    // cancel, which triggers kill_on_drop on the bash
+                    // child processes (see mush-tools::bash)
+                    let futs = async {
+                        let joined: Vec<_> = allowed
+                            .iter()
+                            .map(|tc| execute_tool(&config.tools, tc))
+                            .collect();
+                        futures::future::join_all(joined).await
+                    };
+                    let results = match config.cancel.as_ref() {
+                        Some(token) => tokio::select! {
+                            r = futs => r,
+                            _ = token.cancelled() => {
+                                tracing::info!("agent_loop cancelled during tool execution");
+                                break 'outer;
+                            }
+                        },
+                        None => futs.await,
+                    };
 
                     // emit results, run post-tool hooks, push to messages
                     for (tc, mut result) in allowed.iter().zip(results) {
