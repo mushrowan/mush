@@ -19,8 +19,8 @@
 use mush_cli::config::Config;
 
 fn main() {
-    let mut schema = serde_json::to_value(schemars::schema_for!(Config))
-        .expect("Config schema serialises");
+    let mut schema =
+        serde_json::to_value(schemars::schema_for!(Config)).expect("Config schema serialises");
     let defaults = serde_json::to_value(Config::default()).expect("Config default serialises");
 
     if let serde_json::Value::Object(map) = defaults {
@@ -91,7 +91,6 @@ fn merge_defaults(
         }
 
         // annotation defaults (from `#[schemars(default)]`) take priority
-        prop.entry("default")
-            .or_insert_with(|| default_val.clone());
+        prop.entry("default").or_insert_with(|| default_val.clone());
     }
 }

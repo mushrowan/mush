@@ -212,11 +212,11 @@ self: {
     }
   );
 
-  localModule = {...}: {
+  localModule = _: {
     options.programs.mush = {
       package = lib.mkOption {
         type = lib.types.package;
-        default = self.packages.${pkgs.system}.default;
+        inherit (self.packages.${pkgs.system}) default;
         defaultText = lib.literalExpression "pkgs.mush";
         description = "the mush package to install";
       };
