@@ -11,6 +11,21 @@ use crate::app::{
 };
 use crate::batch_output::{parse_batch_output, truncate_output};
 
+/// extract the summary body from a compacted user message produced by
+/// `mush_session::compact::compact_with_summary`. the source text starts
+/// with `COMPACTION_SUMMARY_PREFIX` and wraps the summary in `<summary>`
+/// tags. returns `None` for non-compaction messages so the caller can fall
+/// through to the normal user-message path
+fn extract_compaction_summary(text: &str) -> Option<String> {
+    let rest = text.strip_prefix(mush_session::COMPACTION_SUMMARY_PREFIX)?;
+    let rest = rest.trim_start();
+    let inner = rest
+        .strip_prefix("<summary>")
+        .and_then(|s| s.strip_suffix("</summary>"))
+        .unwrap_or(rest);
+    Some(inner.trim().to_string())
+}
+
 pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
     app.clear_messages();
 
@@ -20,7 +35,14 @@ pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
     let mut batch_counter: u32 = 0;
     for message in conversation {
         match message {
-            Message::User(user) => app.push_user_message(user.text()),
+            Message::User(user) => {
+                let text = user.text();
+                if let Some(body) = extract_compaction_summary(&text) {
+                    app.push_system_message(format!("━ compacted summary ━\n\n{body}"));
+                } else {
+                    app.push_user_message(text);
+                }
+            }
             Message::Assistant(assistant) => {
                 let msg_idx = app.messages.len();
                 let mut tool_calls = Vec::new();
@@ -300,6 +322,38 @@ mod tests {
             Some("fn main() {}")
         );
         assert_eq!(app.stats.total_tokens, TokenCount::new(15));
+    }
+
+    #[test]
+    fn rebuild_display_renders_compaction_summary_as_system_message() {
+        let mut app = app();
+        let summary = "the user and assistant discussed X, Y, and Z";
+        let msg = user_message(&format!(
+            "{}\n\n<summary>\n{summary}\n</summary>",
+            mush_session::COMPACTION_SUMMARY_PREFIX
+        ));
+        let conversation = vec![msg, user_message("next user turn after compaction")];
+        rebuild_display(&mut app, &conversation);
+
+        assert_eq!(app.messages.len(), 2, "one summary msg + one user msg");
+        assert_eq!(app.messages[0].role, MessageRole::System);
+        assert!(
+            app.messages[0].content.contains("compacted summary"),
+            "expected compaction header in display content, got: {:?}",
+            app.messages[0].content
+        );
+        assert!(
+            app.messages[0].content.contains(summary),
+            "expected summary body in display content, got: {:?}",
+            app.messages[0].content
+        );
+        assert!(
+            !app.messages[0].content.contains("<summary>"),
+            "raw xml tags leaked into display: {:?}",
+            app.messages[0].content
+        );
+        assert_eq!(app.messages[1].role, MessageRole::User);
+        assert_eq!(app.messages[1].content, "next user turn after compaction");
     }
 
     #[test]
