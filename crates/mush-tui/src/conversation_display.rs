@@ -180,7 +180,7 @@ fn apply_tool_result(
     };
 
     tool_call.status = display_tool_status(result.outcome);
-    tool_call.output_preview = tool_result_preview(&result.content);
+    tool_call.output_preview = tool_result_preview(&result.tool_name, &result.content);
 }
 
 /// distribute a batch tool result to individual sub-call display entries
@@ -239,7 +239,10 @@ fn display_tool_status(outcome: ToolOutcome) -> ToolCallStatus {
     }
 }
 
-fn tool_result_preview(content: &[ToolResultContentPart]) -> Option<String> {
+fn tool_result_preview(
+    tool_name: &mush_ai::types::ToolName,
+    content: &[ToolResultContentPart],
+) -> Option<String> {
     let text = content
         .iter()
         .filter_map(|part| match part {
@@ -249,6 +252,13 @@ fn tool_result_preview(content: &[ToolResultContentPart]) -> Option<String> {
         .collect::<Vec<_>>()
         .join("");
     if !text.is_empty() {
+        // keep edit diffs at full length so reloaded sessions match the
+        // fresh-submit preview budget. other tools still cap at the
+        // generous single-tool line count so runaway logs don't blow up
+        // the message view
+        if tool_name.as_str().eq_ignore_ascii_case("edit") {
+            return Some(text);
+        }
         return Some(truncate_output_large(&text));
     }
 

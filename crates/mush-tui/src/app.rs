@@ -43,6 +43,20 @@ const UNREAD_FLASH_ON: u8 = 30;
 /// via `scroll_lines` in `config.toml`
 pub const DEFAULT_SCROLL_LINES: u16 = 3;
 
+/// truncate a tool's output for the preview/panel display.
+///
+/// edit diffs are preserved whole because they're bounded by the size of
+/// the change under review and the message viewport scrolls naturally
+/// for the rest. every other tool gets the generous single-tool cap so
+/// a runaway bash log or massive grep doesn't paint thousands of rows
+fn preview_for_tool(name: &str, output: &str) -> String {
+    if name.eq_ignore_ascii_case("edit") {
+        output.to_owned()
+    } else {
+        truncate_output_large(output)
+    }
+}
+
 /// controls how thinking text is displayed
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -427,14 +441,14 @@ impl App {
             .find(|t| &t.tool_call_id == tool_call_id)
         {
             tool.status = status;
-            tool.output = output.map(truncate_output_large);
+            tool.output = output.map(|o| preview_for_tool(name, o));
             tool.live_output = None;
         }
         if let Some(last) = self.messages.last_mut()
             && let Some(tc) = last.tool_calls.iter_mut().rfind(|t| t.name == name)
         {
             tc.status = status;
-            tc.output_preview = output.map(truncate_output_large);
+            tc.output_preview = output.map(|o| preview_for_tool(name, o));
             tc.image_data = image_data;
         }
     }
@@ -1255,6 +1269,48 @@ mod tests {
         let tc = &app.messages.last().unwrap().tool_calls[0];
         assert!(tc.output_preview.is_some());
         assert!(tc.output_preview.as_ref().unwrap().contains("fn main()"));
+    }
+
+    #[test]
+    fn edit_tool_output_preserves_long_diffs_without_truncation() {
+        // regression: truncate_output_large caps at MAX_SINGLE_TOOL_LINES
+        // (40) which cut legitimate edit diffs in half even when the
+        // terminal had plenty of vertical room. edit diffs are bounded by
+        // the size of the change the user is reviewing, so they should
+        // render at full length and let the scroll viewport handle overflow
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.messages
+            .push(DisplayMessage::new(MessageRole::Assistant, ""));
+        let tool_call_id = ToolCallId::from("tc_edit");
+        app.start_tool(&tool_call_id, "edit", "src/main.rs");
+        // a realistic 80-line edit diff
+        let diff: String = (0..80_usize)
+            .map(|i| {
+                if i.is_multiple_of(3) {
+                    format!("- line {i}\n+ line {i} (changed)")
+                } else {
+                    format!("  line {i}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.end_tool(
+            &tool_call_id,
+            "edit",
+            ToolOutcome::Success,
+            Some(&diff),
+            None,
+        );
+        let tc = &app.messages.last().unwrap().tool_calls[0];
+        let preview = tc.output_preview.as_ref().expect("preview stored");
+        assert!(
+            preview.contains("line 79"),
+            "full edit diff should be preserved (last line missing): {preview}"
+        );
+        assert!(
+            !preview.contains("more lines"),
+            "edit diffs should not be preview-truncated: {preview}"
+        );
     }
 
     #[test]
