@@ -13,8 +13,12 @@ use super::OAuthError;
 /// to refresh before the actual deadline (mirrors opencode's approach)
 const REFRESH_BUFFER_MS: u64 = 5 * 60_000;
 
-/// stored oauth credentials
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// stored oauth credentials. manual `Debug` impl redacts the tokens so
+/// they can't leak via tracing / dbg / assertion messages. explicit
+/// field access (`creds.access_token`) is still unrestricted because
+/// the HTTP code needs the bearer value - this is leak-prevention for
+/// logging, not a full `secrecy` crate style sealed wrapper
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OAuthCredentials {
     pub access_token: String,
     pub refresh_token: String,
@@ -22,6 +26,28 @@ pub struct OAuthCredentials {
     pub expires_at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,
+}
+
+impl std::fmt::Debug for OAuthCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthCredentials")
+            .field("access_token", &redacted_token(&self.access_token))
+            .field("refresh_token", &redacted_token(&self.refresh_token))
+            .field("expires_at", &self.expires_at)
+            .field("account_id", &self.account_id)
+            .finish()
+    }
+}
+
+/// format an oauth token for debug output: first 4 chars + `…` when long
+/// enough to recognise without leaking, else `***`. mirrors `ApiKey`
+fn redacted_token(token: &str) -> String {
+    if token.chars().count() > 8 {
+        let prefix: String = token.chars().take(4).collect();
+        format!("{prefix}…")
+    } else {
+        "***".into()
+    }
 }
 
 impl OAuthCredentials {
@@ -90,6 +116,34 @@ fn timestamp_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credentials_debug_redacts_tokens() {
+        let creds = OAuthCredentials {
+            access_token: "sk-ant-oat-this-is-a-real-looking-token".into(),
+            refresh_token: "sk-ant-ort-this-is-the-refresh-secret".into(),
+            expires_at: 12345,
+            account_id: Some("account-abc".into()),
+        };
+        let dbg = format!("{creds:?}");
+        assert!(
+            !dbg.contains("this-is-a-real-looking-token"),
+            "access_token leaked in Debug: {dbg}"
+        );
+        assert!(
+            !dbg.contains("this-is-the-refresh-secret"),
+            "refresh_token leaked in Debug: {dbg}"
+        );
+        // non-secret fields should still surface
+        assert!(
+            dbg.contains("12345"),
+            "expires_at missing from debug: {dbg}"
+        );
+        assert!(
+            dbg.contains("account-abc"),
+            "account_id missing from debug: {dbg}"
+        );
+    }
 
     #[test]
     fn credentials_expired_check() {
