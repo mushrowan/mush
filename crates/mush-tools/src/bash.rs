@@ -13,6 +13,12 @@ const DEFAULT_TIMEOUT_SECS: u64 = 120;
 /// (builds, test suites), use background: true which has no cap
 const MAX_FOREGROUND_TIMEOUT_SECS: u64 = 600;
 
+/// background jobs without an explicit timeout default to this much
+/// wall clock before they get killed. matches the registry's expiry
+/// so a caller using only `bash_status` polling is guaranteed to see
+/// the final state before the job record is reaped
+const BACKGROUND_DEFAULT_TIMEOUT_SECS: u64 = 30 * 60;
+
 /// if a foreground command produces zero bytes of output for this long,
 /// kill it. catches servers, daemons, and commands that hang waiting
 /// for a TTY (e.g. jj split, jj describe without -m)
@@ -36,8 +42,11 @@ impl BashOutput {
 #[serde(deny_unknown_fields)]
 struct BashArgs {
     command: String,
-    #[serde(default = "default_timeout_secs")]
-    timeout: u64,
+    /// explicit timeout override (seconds). when omitted, defaults depend on
+    /// background mode: foreground = DEFAULT_TIMEOUT_SECS, background =
+    /// BACKGROUND_DEFAULT_TIMEOUT_SECS. the UI-facing default is still 120
+    #[serde(default)]
+    timeout: Option<u64>,
     #[serde(default)]
     output: BashOutput,
     /// run the command in the background and return a job id immediately.
@@ -52,18 +61,20 @@ struct BashArgs {
     concurrent: bool,
 }
 
-const fn default_timeout_secs() -> u64 {
-    DEFAULT_TIMEOUT_SECS
-}
-
 impl BashArgs {
-    /// effective timeout, capping foreground commands to prevent runaways.
-    /// background jobs are not capped since they're polled explicitly
+    /// effective timeout.
+    ///
+    /// background jobs without an explicit value get a generous half-hour
+    /// so typical nix builds and big test runs finish well before the
+    /// inner `tokio::time::timeout` fires. foreground commands keep the
+    /// 120s default and get hard-capped at 10 minutes.
     fn effective_timeout(&self) -> u64 {
         if self.background {
-            self.timeout
+            self.timeout.unwrap_or(BACKGROUND_DEFAULT_TIMEOUT_SECS)
         } else {
-            self.timeout.min(MAX_FOREGROUND_TIMEOUT_SECS)
+            self.timeout
+                .unwrap_or(DEFAULT_TIMEOUT_SECS)
+                .min(MAX_FOREGROUND_TIMEOUT_SECS)
         }
     }
 }
@@ -279,13 +290,25 @@ async fn run_background_command(
             return;
         }
         Err(_) => {
-            let _ = child.kill().await;
+            // timeout fired. the child might have exited at the same instant,
+            // so try_wait first: if it reaped naturally, prefer the real exit
+            // code over TimedOut so the agent doesn't see spurious timeouts
+            // on long-but-finite builds that land right on the boundary
+            let reaped = child.try_wait().ok().flatten();
+            if reaped.is_none() {
+                let _ = child.kill().await;
+            }
             let stdout = stdout_handle.await.unwrap_or_default();
             let stderr = stderr_handle.await.unwrap_or_default();
             let mut state = handle.write().await;
             state.stdout = stdout;
             state.stderr = stderr;
-            state.status = crate::background::JobStatus::TimedOut;
+            state.status = match reaped {
+                Some(status) => crate::background::JobStatus::Done {
+                    exit_code: status.code().unwrap_or(-1),
+                },
+                None => crate::background::JobStatus::TimedOut,
+            };
             return;
         }
     };
@@ -791,6 +814,38 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(args.effective_timeout(), 3600);
+    }
+
+    #[test]
+    fn background_timeout_defaults_to_thirty_minutes_when_unset() {
+        // regression: an unset timeout used to inherit the 120s foreground
+        // default, which killed nix builds / long test runs around the 2
+        // minute mark and reported them as TimedOut. background jobs must
+        // default to a generous wall-clock so bash_status polling observes
+        // natural completion
+        let args: BashArgs = serde_json::from_value(serde_json::json!({
+            "command": "nix build",
+            "background": true
+        }))
+        .unwrap();
+        assert_eq!(args.effective_timeout(), BACKGROUND_DEFAULT_TIMEOUT_SECS);
+        assert!(
+            args.effective_timeout() >= 30 * 60,
+            "background default should give nix builds and big test runs enough room to finish"
+        );
+    }
+
+    #[test]
+    fn background_timeout_explicit_override_honoured() {
+        // when the agent knows the job is quick it can still shorten the
+        // timeout explicitly
+        let args: BashArgs = serde_json::from_value(serde_json::json!({
+            "command": "sleep 5",
+            "background": true,
+            "timeout": 10
+        }))
+        .unwrap();
+        assert_eq!(args.effective_timeout(), 10);
     }
 
     #[tokio::test]
