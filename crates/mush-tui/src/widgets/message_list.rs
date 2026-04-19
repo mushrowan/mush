@@ -16,6 +16,23 @@ use crate::app::{
 use crate::app_state::CachedHeight;
 use crate::text::truncate_with_ellipsis;
 
+/// horizontal padding cells reserved around message body content.
+///
+/// the left side is the indent span (`" "`) prepended by `indent_line`.
+/// the right side is currently 0 (content may run flush to the right
+/// edge). changing this one constant rebalances every wrap/height
+/// calculation so the indent math stays declared in exactly one place
+pub(crate) const MESSAGE_INDENT_LEFT: usize = 1;
+pub(crate) const MESSAGE_INDENT_RIGHT: usize = 0;
+
+/// usable width for message body content given an outer column width.
+/// subtracts both the left indent and any right-side reservation so
+/// renderers and height estimators agree on wrap points
+#[must_use]
+pub(crate) fn message_content_width(outer_width: usize) -> usize {
+    outer_width.saturating_sub(MESSAGE_INDENT_LEFT + MESSAGE_INDENT_RIGHT)
+}
+
 #[cfg(test)]
 use std::cell::Cell;
 
@@ -204,7 +221,7 @@ impl Widget for MessageList<'_> {
                 .throbber_set(BRAILLE_SIX)
                 .use_type(WhichUse::Spin);
             let spinner_span = throbber.to_symbol_span(&self.app.throbber_state);
-            let stream_content_width = (area.width as usize).saturating_sub(1);
+            let stream_content_width = message_content_width(area.width as usize);
 
             if !self.app.stream.thinking.is_empty()
                 && self.app.thinking_display != crate::app::ThinkingDisplay::Hidden
@@ -518,7 +535,7 @@ fn render_message(
     // thinking block
     if let Some(ref thinking) = msg.thinking {
         if msg.thinking_expanded {
-            let cw = (width as usize).saturating_sub(1);
+            let cw = message_content_width(width as usize);
             for text_line in thinking.lines() {
                 let styled = Line::styled(text_line.to_string(), app.theme.thinking);
                 lines.extend(indent_line(styled, cw));
@@ -537,7 +554,7 @@ fn render_message(
     // main content (markdown rendered)
     if msg.queued {
         let dim = app.theme.dim;
-        let cw = (width as usize).saturating_sub(1);
+        let cw = message_content_width(width as usize);
         for text_line in msg.content.lines() {
             let styled = Line::styled(text_line.to_string(), dim);
             lines.extend(indent_line(styled, cw));
@@ -566,7 +583,7 @@ fn render_message(
             None
         };
 
-        let content_width = (width as usize).saturating_sub(1);
+        let content_width = message_content_width(width as usize);
         let highlight_range =
             highlight_block.and_then(|b| code_block_line_ranges(&msg.content).get(b).copied());
 
@@ -993,7 +1010,7 @@ fn compute_message_height(
     width: u16,
     render_state: &crate::app_state::RenderState,
 ) -> usize {
-    let cw = (width as usize).saturating_sub(1).max(1);
+    let cw = message_content_width(width as usize).max(1);
     let mut h = 1; // separator line
 
     // system label
@@ -1076,7 +1093,7 @@ fn estimate_trailing_height(
     width: u16,
     render_state: &crate::app_state::RenderState,
 ) -> usize {
-    let stream_content_width = (width as usize).saturating_sub(1).max(1);
+    let stream_content_width = message_content_width(width as usize).max(1);
     let mut h = 0;
 
     if app.stream.active {
