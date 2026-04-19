@@ -124,6 +124,57 @@ self: {
       # untyped HashMap so we pin it here
       keys.type = lib.types.attrsOf (lib.types.either lib.types.str (lib.types.listOf lib.types.str));
     };
+
+    # nix-only options that sit alongside `enable` (not part of the
+    # rust-side Config). package selection, AGENTS.md content, and the
+    # skills installer all belong here rather than in `settings`
+    topLevelExtraOverrides = {
+      package = {
+        type = lib.types.package;
+        inherit (self.packages.${pkgs.system}) default;
+        defaultText = lib.literalExpression "pkgs.mush";
+        description = "the mush package to install";
+      };
+
+      agentsMd = {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = ''
+          # global agent instructions
+          - british spelling
+          - no em dashes or semicolons
+        '';
+        description = ''
+          content for ~/.config/mush/AGENTS.md (user-global agent instructions).
+          mush loads this alongside any project-level AGENTS.md files
+        '';
+      };
+
+      skills = {
+        type = lib.types.attrsOf skillType;
+        default = {};
+        example = lib.literalExpression ''
+          {
+            # raw SKILL.md text (e.g. from builtins.readFile)
+            jj = builtins.readFile ./skills/jj.md;
+
+            # structured form (frontmatter is generated)
+            rust-idioms = {
+              description = "Rust idioms and best practices";
+              content = '''
+                ## When to use me
+                Use when writing or reviewing Rust code.
+              ''';
+            };
+          }
+        '';
+        description = ''
+          skills to install in ~/.config/mush/skills/. each key becomes a
+          subdirectory containing a SKILL.md. accepts either a raw markdown
+          string (with yaml frontmatter) or a { description, content } set
+        '';
+      };
+    };
   };
 
   # -- config.toml generation -------------------------------------------
@@ -155,55 +206,10 @@ self: {
     }
   );
 
-  localModule = _: {
-    options.programs.mush = {
-      package = lib.mkOption {
-        type = lib.types.package;
-        inherit (self.packages.${pkgs.system}) default;
-        defaultText = lib.literalExpression "pkgs.mush";
-        description = "the mush package to install";
-      };
-
-      agentsMd = lib.mkOption {
-        type = lib.types.nullOr lib.types.str;
-        default = null;
-        example = ''
-          # global agent instructions
-          - british spelling
-          - no em dashes or semicolons
-        '';
-        description = ''
-          content for ~/.config/mush/AGENTS.md (user-global agent instructions).
-          mush loads this alongside any project-level AGENTS.md files
-        '';
-      };
-
-      skills = lib.mkOption {
-        type = lib.types.attrsOf skillType;
-        default = {};
-        example = lib.literalExpression ''
-          {
-            # raw SKILL.md text (e.g. from builtins.readFile)
-            jj = builtins.readFile ./skills/jj.md;
-
-            # structured form (frontmatter is generated)
-            rust-idioms = {
-              description = "Rust idioms and best practices";
-              content = '''
-                ## When to use me
-                Use when writing or reviewing Rust code.
-              ''';
-            };
-          }
-        '';
-        description = ''
-          skills to install in ~/.config/mush/skills/. each key becomes a
-          subdirectory containing a SKILL.md. accepts either a raw markdown
-          string (with yaml frontmatter) or a { description, content } set
-        '';
-      };
-    };
-
+  # the schemaModule provides options + the `enable` toggle; this
+  # second module wires up the actual file outputs (config.toml,
+  # AGENTS.md, skills directory)
+  configModule = _: {
     config = lib.mkIf cfg.enable {
       home.packages = [cfg.package];
 
@@ -220,5 +226,5 @@ self: {
     };
   };
 in {
-  imports = [(schemaModule {}) localModule];
+  imports = [(schemaModule {}) configModule];
 }
