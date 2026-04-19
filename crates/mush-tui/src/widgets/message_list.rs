@@ -1719,46 +1719,98 @@ fn indent_line<'a>(line: Line<'a>, content_width: usize) -> Vec<Line<'a>> {
         return vec![Line::from(spans).style(line_style)];
     }
 
-    // walk spans character by character, splitting at content_width
-    let mut result: Vec<Line<'a>> = Vec::new();
-    let mut current: Vec<Span<'a>> = Vec::new();
-    let mut current_width: usize = 0;
+    // flatten spans into (char, style, width) triples so word-boundary
+    // wrap logic doesn't have to track span boundaries separately
+    let cells: Vec<(char, Style, usize)> = line
+        .spans
+        .iter()
+        .flat_map(|span| {
+            let style = span.style;
+            span.content.chars().map(move |ch| {
+                let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
+                (ch, style, w)
+            })
+        })
+        .collect();
 
-    for span in line.spans {
-        let style = span.style;
-        let text: &str = &span.content;
-        let mut seg_start = 0;
+    // walk cells, tracking last-space index within the current row so we
+    // can backtrack to it when the row overflows. when we do backtrack,
+    // the space itself is dropped so the next row doesn't start with a
+    // leading ghost space
+    let mut rows: Vec<Vec<(char, Style)>> = Vec::new();
+    let mut row: Vec<(char, Style, usize)> = Vec::new();
+    let mut row_width: usize = 0;
+    let mut last_space: Option<usize> = None;
 
-        for (byte_pos, ch) in text.char_indices() {
-            let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
-            if current_width + ch_w > content_width && current_width > 0 {
-                // flush the segment up to this point
-                if byte_pos > seg_start {
-                    current.push(Span::styled(text[seg_start..byte_pos].to_string(), style));
-                }
-                result.push(Line::from(std::mem::take(&mut current)).style(line_style));
-                current_width = 0;
-                seg_start = byte_pos;
+    for (ch, style, w) in cells {
+        if row_width + w > content_width && !row.is_empty() {
+            if let Some(sp) = last_space {
+                // split at last space: [..sp] becomes a row, sp itself is
+                // dropped, [sp+1..] starts the next row
+                let tail: Vec<(char, Style, usize)> = row.drain(sp + 1..).collect();
+                let _space = row.pop();
+                rows.push(strip_row(&row));
+                row_width = tail.iter().map(|(_, _, w)| w).sum();
+                row = tail;
+                last_space = row.iter().rposition(|(c, _, _)| *c == ' ');
+            } else {
+                rows.push(strip_row(&row));
+                row.clear();
+                row_width = 0;
+                last_space = None;
             }
-            current_width += ch_w;
         }
-
-        // remainder of span
-        if seg_start < text.len() {
-            current.push(Span::styled(text[seg_start..].to_string(), style));
+        if ch == ' ' {
+            last_space = Some(row.len());
         }
+        row.push((ch, style, w));
+        row_width += w;
     }
 
-    if !current.is_empty() {
-        result.push(Line::from(current).style(line_style));
+    if !row.is_empty() {
+        rows.push(strip_row(&row));
     }
 
-    // prepend the indent to every line
-    for line in &mut result {
-        line.spans.insert(0, Span::raw(" "));
+    // rebuild Line<'a> for each row, coalescing consecutive same-style chars
+    // into Span<'static> to minimise allocations downstream
+    let mut result: Vec<Line<'a>> = Vec::with_capacity(rows.len());
+    for cells in rows {
+        let mut spans: Vec<Span<'a>> = vec![Span::raw(" ")];
+        let mut buf = String::new();
+        let mut cur_style: Option<Style> = None;
+        for (ch, style) in cells {
+            match cur_style {
+                Some(s) if s == style => buf.push(ch),
+                _ => {
+                    if let Some(s) = cur_style
+                        && !buf.is_empty()
+                    {
+                        spans.push(Span::styled(std::mem::take(&mut buf), s));
+                    }
+                    cur_style = Some(style);
+                    buf.push(ch);
+                }
+            }
+        }
+        if let Some(s) = cur_style
+            && !buf.is_empty()
+        {
+            spans.push(Span::styled(buf, s));
+        }
+        result.push(Line::from(spans).style(line_style));
     }
 
     result
+}
+
+/// drop any trailing spaces from a row so wrap boundaries don't leave
+/// ghost whitespace
+fn strip_row(row: &[(char, Style, usize)]) -> Vec<(char, Style)> {
+    let end = row
+        .iter()
+        .rposition(|(c, _, _)| *c != ' ')
+        .map_or(0, |p| p + 1);
+    row[..end].iter().map(|(c, s, _)| (*c, *s)).collect()
 }
 
 /// wrap text to fit within `width` chars, breaking at spaces first,
@@ -3162,6 +3214,63 @@ mod tests {
                 "wrapped line missing indent: {trimmed:?}"
             );
         }
+    }
+
+    #[test]
+    fn indent_line_breaks_at_word_boundary_when_possible() {
+        // "hello world foo" with content width 8 should break after "hello"
+        // (at the space) rather than mid-word as "hello wo\nrld foo"
+        let line = Line::raw("hello world foo");
+        let wrapped = indent_line(line, 8);
+        // inspect the produced lines' text content (ignore the leading space indent)
+        let texts: Vec<String> = wrapped
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        // each wrapped line includes the leading " " indent span
+        // strip it for assertion clarity
+        let bodies: Vec<&str> = texts.iter().map(|s| s.trim_start_matches(' ')).collect();
+        assert!(
+            bodies.iter().all(|b| !b.ends_with(' ')),
+            "no row should end with a trailing space: {bodies:?}"
+        );
+        assert!(
+            bodies.iter().all(|b| !b.starts_with(' ')),
+            "no row body should start with a space (ghost indent): {bodies:?}"
+        );
+        assert!(
+            bodies.iter().any(|b| b == &"hello"),
+            "expected a row containing exactly \"hello\" (clean word break), got {bodies:?}"
+        );
+    }
+
+    #[test]
+    fn indent_line_falls_back_to_char_split_for_long_words() {
+        // a word longer than content width must still wrap char-wise
+        // (word-aware fallback); don't lose any characters
+        let line = Line::raw("abcdefghijklmnop");
+        let wrapped = indent_line(line, 5);
+        let bodies: Vec<String> = wrapped
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+                    .trim_start_matches(' ')
+                    .to_string()
+            })
+            .collect();
+        let joined = bodies.join("");
+        assert_eq!(
+            joined, "abcdefghijklmnop",
+            "all chars preserved across wrap: {bodies:?}"
+        );
     }
 
     #[test]
