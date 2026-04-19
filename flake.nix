@@ -94,6 +94,32 @@
           data_dir="''${XDG_DATA_HOME:-$HOME/.local/share}/mush/profiles"
           mkdir -p "$data_dir"
           out="$data_dir/mush-$(date +%Y%m%d-%H%M%S).json.gz"
+
+          # samply's child-exit path can leave the terminal in a weird
+          # state: raw mode still on, mouse tracking still reporting,
+          # alt-screen not restored, or escape codes echoed literally.
+          # this happens whether mush exits cleanly, panics, or gets
+          # killed by samply on ctrl+c.
+          #
+          # guarantee cleanup on every exit path (normal, error, signal)
+          # via an EXIT trap so the user's shell is always usable afterwards
+          restore_terminal() {
+            # disable mouse tracking modes that mush enabled
+            printf '\e[?1002l\e[?1003l\e[?1006l' >&2 2>/dev/null || true
+            # pop keyboard enhancement flags (kitty protocol)
+            printf '\e[<u' >&2 2>/dev/null || true
+            # disable bracketed paste and focus change reporting
+            printf '\e[?2004l\e[?1004l' >&2 2>/dev/null || true
+            # leave alt screen, show cursor, reset styling
+            printf '\e[?1049l\e[?25h\e[0m' >&2 2>/dev/null || true
+            # restore default cursor shape
+            printf '\e[0 q' >&2 2>/dev/null || true
+            # drop raw mode + echo as a belt-and-braces for any leftover
+            # tty state (harmless no-op if stdin isn't a tty)
+            stty sane 2>/dev/null || true
+          }
+          trap restore_terminal EXIT INT TERM
+
           echo "sampling profiler: cpu flamegraph via samply" >&2
           echo "recording to: $out" >&2
           echo "" >&2
