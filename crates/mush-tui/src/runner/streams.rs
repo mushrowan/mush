@@ -638,14 +638,34 @@ pub(super) async fn edit_last_queued_steering(
 
         if let Some(meta) = stream_state.meta(focused_id) {
             let mut steering_queue = meta.steering_queue.lock().await;
-            if let Some(pos) = steering_queue.iter().rposition(|message| {
+            let target = queued_text.trim();
+            // first try exact match, then trimmed match so the queue stays
+            // in sync even if the display content and the User message's
+            // joined text() drifted by whitespace
+            let pos = steering_queue.iter().rposition(|message| {
                 if let Message::User(user_message) = message {
                     user_message.content.text() == queued_text
                 } else {
                     false
                 }
-            }) {
+            });
+            let pos = pos.or_else(|| {
+                steering_queue.iter().rposition(|message| {
+                    if let Message::User(user_message) = message {
+                        user_message.content.text().trim() == target
+                    } else {
+                        false
+                    }
+                })
+            });
+            if let Some(pos) = pos {
                 steering_queue.remove(pos);
+            } else {
+                tracing::warn!(
+                    queued_text = %queued_text,
+                    "could not find matching steering queue entry to remove \
+                     on lift; the next stream may see duplicate content"
+                );
             }
         }
     } else {
@@ -1336,6 +1356,81 @@ mod tests {
         assert!(
             matches!(&user_msg.content, UserContent::Text(t) if t == "just words"),
             "text-only submit should keep UserContent::Text"
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_last_queued_steering_replaces_queue_entry_not_duplicates() {
+        // regression: lifting a queued steering message, editing it, and
+        // resubmitting used to leave the ORIGINAL queue entry in place
+        // when the content-match lookup couldn't find it. the agent then
+        // saw both copies separated by a newline on the next turn (or on
+        // abort, which joins leftovers with \n). after lift+submit the
+        // queue should contain exactly the edited text, not both
+        let pane_id = PaneId::new(1);
+        let mut pane_mgr = PaneManager::new(Pane::new(pane_id, app()));
+        let mut stream_state = StreamState::new();
+        let (_confirm_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
+        let steering_queue = Arc::new(Mutex::new(Vec::new()));
+
+        stream_state.register_active(
+            pane_id,
+            StreamMeta {
+                steering_queue: steering_queue.clone(),
+                confirm_req_rx,
+                confirm_reply: Arc::new(Mutex::new(None)),
+                model: models::all_models_with_user().into_iter().next().unwrap(),
+                context_tokens: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                cancel: tokio_util::sync::CancellationToken::new(),
+            },
+        );
+
+        // first submit: "original message "  (with trailing space to exercise
+        // whitespace-sensitive content match)
+        submit_streaming_input(&mut pane_mgr, &stream_state, "original message ".into()).await;
+        assert_eq!(
+            steering_queue.lock().await.len(),
+            1,
+            "first submit puts one entry in queue"
+        );
+
+        // lift: pulls the queued message back into input.text and should
+        // remove it from the steering queue. input is empty at this point
+        // so the preservation branch doesn't fire
+        edit_last_queued_steering(&mut pane_mgr, &stream_state).await;
+        let queue_len_after_lift = steering_queue.lock().await.len();
+        assert_eq!(
+            queue_len_after_lift, 0,
+            "lift should remove the original entry from the queue \
+             (had {queue_len_after_lift} left over)"
+        );
+        assert_eq!(
+            pane_mgr.focused().app.input.text,
+            "original message ",
+            "lifted text should land in the input buffer"
+        );
+
+        // edit + resubmit
+        pane_mgr.focused_mut().app.input.text = "edited message".into();
+        pane_mgr.focused_mut().app.input.cursor = "edited message".len();
+        let edited = pane_mgr.focused_mut().app.input.take_text();
+        submit_streaming_input(&mut pane_mgr, &stream_state, edited).await;
+
+        let queue = steering_queue.lock().await;
+        assert_eq!(
+            queue.len(),
+            1,
+            "after lift+resubmit the queue must hold exactly the edited text, \
+             not the original too (got {} entries)",
+            queue.len()
+        );
+        let Message::User(user_msg) = &queue[0] else {
+            panic!("expected user message in steering queue");
+        };
+        assert!(
+            matches!(&user_msg.content, UserContent::Text(t) if t == "edited message"),
+            "queue should contain the edited text, got {:?}",
+            user_msg.content
         );
     }
 

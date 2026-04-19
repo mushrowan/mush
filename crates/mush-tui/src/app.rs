@@ -276,6 +276,12 @@ impl App {
         Some(msg.content)
     }
 
+    /// whether any queued steering messages are currently visible
+    #[must_use]
+    pub fn has_queued_messages(&self) -> bool {
+        self.messages.iter().any(|m| m.queued)
+    }
+
     /// start streaming a new assistant message
     pub fn start_streaming(&mut self) {
         self.stream.start();
