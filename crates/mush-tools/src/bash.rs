@@ -332,7 +332,11 @@ async fn run_command_with_no_output_timeout(
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        // if the tool future is dropped (agent cancellation, pane closed,
+        // user abort), the child process gets SIGKILLed rather than
+        // continuing to run as an orphan consuming cpu / holding files
+        .kill_on_drop(true);
 
     // prevent accidental editor launches (`jj commit`, `git commit`,
     // `crontab -e`, ...) from hanging the agent forever. the child
@@ -567,6 +571,29 @@ mod tests {
         assert!(
             text.contains("editor=false"),
             "expected EDITOR=false in child env, got {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_run_command_future_kills_child_process() {
+        // kill_on_drop(true) means an aborted tool future SIGKILLs the
+        // bash child so sleeps / servers / editor-hangs don't linger
+        // past cancellation. use a marker tempfile that only gets
+        // touched if the child is allowed to finish its sleep.
+        let tmp = tempfile::tempdir().unwrap();
+        let marker = tmp.path().join("completed");
+        let marker_str = marker.display().to_string();
+        let cwd = std::env::current_dir().unwrap();
+        // 5s sleep then touch the marker. abort after 200ms.
+        let cmd = format!("sleep 5 && touch {marker_str}");
+        let fut = run_command(&cwd, &cmd, 30, None, false);
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(200), fut).await;
+        // give the OS a moment to settle, then confirm the marker never
+        // got created because the bash child was killed mid-sleep
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(
+            !marker.exists(),
+            "child process survived after future was dropped"
         );
     }
 
