@@ -434,7 +434,7 @@ impl Theme {
 }
 
 /// serialisable theme config (subset of colours)
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, serde::Serialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ThemeConfig {
     pub user: Option<String>,

@@ -6,25 +6,38 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use mush_ai::types::ThinkingLevel;
-use serde::{Deserialize, Deserializer};
+use schemars::JsonSchema;
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// deserialise thinking from bool (legacy) or ThinkingLevel string
 fn deserialise_thinking<'de, D: Deserializer<'de>>(
     d: D,
 ) -> Result<Option<ThinkingLevel>, D::Error> {
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Raw {
-        Bool(bool),
-        Level(ThinkingLevel),
-    }
-    Option::<Raw>::deserialize(d).map(|opt| {
+    Option::<ThinkingConfigWire>::deserialize(d).map(|opt| {
         opt.map(|raw| match raw {
-            Raw::Bool(true) => ThinkingLevel::High,
-            Raw::Bool(false) => ThinkingLevel::Off,
-            Raw::Level(l) => l,
+            ThinkingConfigWire::Bool(true) => ThinkingLevel::High,
+            ThinkingConfigWire::Bool(false) => ThinkingLevel::Off,
+            ThinkingConfigWire::Level(l) => l,
         })
     })
+}
+
+/// wire format for the `thinking` field: accepts a bool (legacy) or a
+/// `ThinkingLevel` string. the resulting `Option<ThinkingLevel>` in
+/// [`Config`] is what the rest of the code sees.
+///
+/// TODO: this bool-or-enum legacy form generates an `anyOf` in the
+/// JSON Schema that nixcfg maps to `types.either bool (enum [...])`.
+/// the `either` form is usable but fiddly for nix users; a future
+/// refactor can drop the bool form, announce a one-line breaking
+/// change (`thinking = true` → `thinking = "high"`), and simplify
+/// the schema to just the enum. kept in option A shape for now per
+/// the migration plan
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(untagged)]
+enum ThinkingConfigWire {
+    Bool(bool),
+    Level(ThinkingLevel),
 }
 
 pub use mush_tui::HintMode;
@@ -33,11 +46,13 @@ pub use mush_tui::StatusBarConfig;
 pub use mush_tui::TerminalPolicy;
 
 /// top-level config
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize, JsonSchema)]
+#[schemars(extend("x-nixcfg-name" = "mush", "x-nixcfg-config-format" = "toml"))]
 #[serde(default)]
 pub struct Config {
     pub model: Option<String>,
     #[serde(default, deserialize_with = "deserialise_thinking")]
+    #[schemars(with = "Option<ThinkingConfigWire>")]
     pub thinking: Option<ThinkingLevel>,
     pub max_tokens: Option<u64>,
     pub max_turns: Option<usize>,
@@ -120,7 +135,7 @@ pub type SettingsScope = mush_tui::settings::SettingsScope;
 
 /// session settings with scope control.
 /// `scope` determines where runtime changes (via `/settings`) get persisted
-#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(default)]
 pub struct Settings {
     /// scope for runtime changes made via `/settings`
@@ -130,7 +145,7 @@ pub struct Settings {
 }
 
 /// lifecycle hook config sections
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(default)]
 pub struct HooksConfig {
     pub pre_session: Vec<HookEntry>,
@@ -141,7 +156,7 @@ pub struct HooksConfig {
 }
 
 /// a single hook entry in config
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct HookEntry {
     /// tool name pattern: "*" for all, "edit|write" for specific tools
     #[serde(default = "default_match")]
@@ -165,7 +180,7 @@ fn default_timeout() -> u64 {
 }
 
 /// which local embedding model to use for semantic search
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum EmbeddingModel {
     /// nomic CodeRankEmbed-137M, code-specialised, fast
@@ -176,7 +191,7 @@ pub enum EmbeddingModel {
 }
 
 /// LSP integration configuration
-#[derive(Debug, Default, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Deserialize, Serialize, JsonSchema, Clone, PartialEq, Eq)]
 #[serde(default)]
 pub struct LspConfig {
     /// enable auto-injecting diagnostics after file-modifying tools (default false)
@@ -187,7 +202,7 @@ pub struct LspConfig {
 }
 
 /// a custom LSP server config entry
-#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema, Clone, PartialEq, Eq)]
 pub struct LspServerEntry {
     /// command to run
     pub command: String,
@@ -203,7 +218,7 @@ pub struct LspServerEntry {
 /// - `summaries`: skill catalogue in prompt, `skill` tool on demand
 /// - `embedded`: skill catalogue plus embedding hints, `skill` tool on demand
 /// - `embed_inject`: auto-inject from embeddings, no tool needed
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextStrategy {
     /// all skill bodies dumped into the system prompt
@@ -234,7 +249,7 @@ impl ContextStrategy {
 ///
 /// controls which auto-context sources are active and how much
 /// of the context budget they can use.
-#[derive(Debug, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema, Clone, PartialEq)]
 #[serde(default)]
 pub struct RetrievalConfig {
     /// tier 1: tree-sitter repo map in system prompt
@@ -313,13 +328,17 @@ impl Config {
 /// all key values are `ApiKey`, whose Debug/Display are redacted so
 /// secrets can't accidentally leak into trace output, panic messages,
 /// or captured error bodies. access the raw value via `ApiKey::expose`
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(default)]
 pub struct ApiKeys {
+    #[schemars(extend("x-nixcfg-secret" = true))]
     pub anthropic: Option<mush_ai::types::ApiKey>,
+    #[schemars(extend("x-nixcfg-secret" = true))]
     pub openrouter: Option<mush_ai::types::ApiKey>,
+    #[schemars(extend("x-nixcfg-secret" = true))]
     pub openai: Option<mush_ai::types::ApiKey>,
     #[serde(flatten)]
+    #[schemars(skip)]
     pub other: HashMap<String, mush_ai::types::ApiKey>,
 }
 

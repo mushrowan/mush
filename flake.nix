@@ -25,6 +25,11 @@
       url = "github:cachix/git-hooks.nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+
+    nixcfg = {
+      url = "github:mushrowan/nixcfg";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs = inputs @ {flake-parts, ...}:
@@ -63,12 +68,12 @@
         src = craneLib.cleanCargoSource ./.;
 
         craneOutputs = import ./nix/package.nix {
-          inherit craneLib src;
+          inherit craneLib pkgs src;
           inherit (pkgs) fd onnxruntime pkg-config openssl cacert;
         };
 
         craneOutputsProfiling = import ./nix/package.nix {
-          inherit craneLib src;
+          inherit craneLib pkgs src;
           inherit (pkgs) fd onnxruntime pkg-config openssl cacert;
           enableProfiling = true;
         };
@@ -147,7 +152,7 @@
         '';
 
         checks = {
-          inherit (craneOutputs) package clippy test fmt deny doctest;
+          inherit (craneOutputs) package clippy test fmt deny doctest schemaCheck;
         };
 
         devShells.default = import ./nix/devshell.nix {

@@ -31,7 +31,7 @@ use std::str::FromStr;
 
 use crokey::KeyCombination;
 use crossterm::event::KeyEvent;
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
 
 /// a single named action the user can rebind. keep this enum alphabetised
 /// so the config key space stays predictable.
@@ -110,7 +110,7 @@ impl Binding {
 
 /// a string or list-of-strings that deserialises into a `Binding`.
 /// this is the wire format users see in config.toml
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum BindingSource {
     One(String),
@@ -222,16 +222,11 @@ impl Default for KeyMap {
 /// `[keys]` in config.toml. `deserialise_keys` turns the toml table
 /// into raw strings so `KeyMap::override_from` can layer them on top
 /// of the defaults without losing context on which actions are known
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, serde::Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(transparent)]
+#[schemars(transparent)]
 pub struct KeysConfig {
     pub raw: HashMap<String, BindingSource>,
-}
-
-impl<'de> Deserialize<'de> for KeysConfig {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let raw = HashMap::<String, BindingSource>::deserialize(d)?;
-        Ok(Self { raw })
-    }
 }
 
 impl FromStr for Binding {

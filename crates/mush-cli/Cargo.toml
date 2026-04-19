@@ -16,6 +16,13 @@ profiling = ["dep:tracing-chrome"]
 name = "mush"
 path = "src/main.rs"
 
+[[bin]]
+name = "mush-config-schema"
+path = "src/bin/config_schema.rs"
+
+[lib]
+path = "src/lib.rs"
+
 [dependencies]
 mush-ai.workspace = true
 mush-agent.workspace = true
@@ -30,6 +37,7 @@ tokio.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+schemars.workspace = true
 futures.workspace = true
 color-eyre.workspace = true
 toml.workspace = true

@@ -363,7 +363,7 @@ impl From<String> for BaseUrl {
 }
 
 /// an API key (redacted in Debug/Display, non-empty when present)
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ApiKey(String);
 
 impl ApiKey {

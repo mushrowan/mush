@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use mush_ai::types::ToolCallId;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Text};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::app::ScrollUnit;
 use crate::app_event::AppMode;
@@ -49,7 +49,7 @@ pub struct CompletionState {
 /// everything defaults on so existing setups are unaffected. per-field
 /// `show_cost` and `show_token_counters` live on `InteractionState`
 /// (separately toggleable at runtime via `/cost`), not here
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct StatusBarConfig {
     /// `thinking: <level>` segment

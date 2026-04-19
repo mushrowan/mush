@@ -14,7 +14,7 @@ use serde::Deserialize;
 use crate::pane::PaneId;
 
 /// how pane file access is isolated
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, serde::Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum IsolationMode {
     /// detect-and-warn: track modifications, advisory locks (default)

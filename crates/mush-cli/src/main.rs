@@ -1,11 +1,5 @@
 //! mush cli - fast little robot harness 🍄
 
-mod commands;
-mod config;
-mod logging;
-mod setup;
-mod timing;
-
 use clap::Parser;
 use color_eyre::eyre::{Result, eyre};
 use futures::StreamExt;
@@ -16,6 +10,7 @@ use mush_ai::stream::StreamEvent;
 use mush_ai::types::*;
 use mush_session::{PaneSession, Session, SessionStore};
 
+use mush_cli::{commands, config, logging, setup, timing};
 use mush_tui::TuiConfig;
 
 use setup::{
