@@ -406,6 +406,15 @@ mod tests {
 
     #[test]
     fn hint_includes_file_path_when_saved() {
+        // isolate to a tempdir so tests don't pollute ~/.local/share/mush
+        // and don't race with parallel test processes hitting the same
+        // timestamp-ms filename in the shared tool-output directory
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: nextest runs each test in its own process so mutating
+        // env here can't race with sibling tests (they're separate procs)
+        unsafe {
+            std::env::set_var("MUSH_DATA_DIR", tmp.path());
+        }
         let big = make_lines(5000);
         let out = apply(ToolResult::text(big), OutputLimit::Tail);
         assert_text(&out, |t| {
