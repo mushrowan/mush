@@ -15,21 +15,6 @@
         "type": "github"
       }
     },
-    "crane_2": {
-      "locked": {
-        "lastModified": 1772080396,
-        "narHash": "sha256-84W9UNtSk9DNMh43WBkOjpkbfODlmg+RDi854PnNgLE=",
-        "owner": "ipetkov",
-        "repo": "crane",
-        "rev": "8525580bc0316c39dbfa18bd09a1331e98c9e463",
-        "type": "github"
-      },
-      "original": {
-        "owner": "ipetkov",
-        "repo": "crane",
-        "type": "github"
-      }
-    },
     "flake-compat": {
       "flake": false,
       "locked": {
@@ -193,45 +178,21 @@
         "type": "github"
       }
     },
-    "nix-gleam": {
-      "inputs": {
-        "nixpkgs": [
-          "nixcfg",
-          "nixpkgs"
-        ]
-      },
-      "locked": {
-        "lastModified": 1766688795,
-        "narHash": "sha256-v2ICvF6VzwEzVX5qVUs/KuOfqPqjOq+NpmsI3j1zEF8=",
-        "owner": "arnarg",
-        "repo": "nix-gleam",
-        "rev": "fd6945ed3919b87a0edcc791f3a91b43cf25a371",
-        "type": "github"
-      },
-      "original": {
-        "owner": "arnarg",
-        "repo": "nix-gleam",
-        "type": "github"
-      }
-    },
     "nixcfg": {
       "inputs": {
-        "crane": "crane_2",
         "flake-parts": "flake-parts_2",
         "git-hooks": "git-hooks_2",
-        "nix-gleam": "nix-gleam",
         "nixpkgs": [
           "nixpkgs"
         ],
-        "rust-overlay": "rust-overlay",
         "treefmt-nix": "treefmt-nix"
       },
       "locked": {
-        "lastModified": 1776608499,
-        "narHash": "sha256-c1A0rvcpbwJvZK/K3e5Y9TonXrzjPcmRZrJ1FGUBxIc=",
+        "lastModified": 1776614024,
+        "narHash": "sha256-78FugVdfSSobDuWkuT3NFuFOJ5ILBuLzyrIRD4iUS6Y=",
         "owner": "mushrowan",
         "repo": "nixcfg",
-        "rev": "792122bed35a83da16729dc98ccc2268f18e4f71",
+        "rev": "bad1babe28938c66e95c98317232c5fd572c101d",
         "type": "github"
       },
       "original": {
@@ -264,32 +225,11 @@
         "git-hooks": "git-hooks",
         "nixcfg": "nixcfg",
         "nixpkgs": "nixpkgs",
-        "rust-overlay": "rust-overlay_2",
+        "rust-overlay": "rust-overlay",
         "treefmt-nix": "treefmt-nix_2"
       }
     },
     "rust-overlay": {
-      "inputs": {
-        "nixpkgs": [
-          "nixcfg",
-          "nixpkgs"
-        ]
-      },
-      "locked": {
-        "lastModified": 1772334676,
-        "narHash": "sha256-Jrc0J3AH+iNJDlUze3+FJZv2R0BZnhANFnD52V4kyvI=",
-        "owner": "oxalica",
-        "repo": "rust-overlay",
-        "rev": "9879be11f30fd3bbf848e653a7f991549e8973b5",
-        "type": "github"
-      },
-      "original": {
-        "owner": "oxalica",
-        "repo": "rust-overlay",
-        "type": "github"
-      }
-    },
-    "rust-overlay_2": {
       "inputs": {
         "nixpkgs": [
           "nixpkgs"
