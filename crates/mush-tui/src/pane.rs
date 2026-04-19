@@ -113,6 +113,45 @@ impl Pane {
             &mut self.image_protos,
         )
     }
+
+    /// ensure `image_protos` has a protocol for every `(msg_idx, tc_idx)`
+    /// referenced by `render_areas`, creating missing entries on demand
+    /// from the raw bytes stored on the matching message or tool call.
+    ///
+    /// this is a safety net for paths that register image render areas
+    /// without eagerly creating a protocol: session reloads (protocols
+    /// aren't persisted), steering submits with attached images, and
+    /// any future pushes via `push_user_message_with_images` from a
+    /// code path that forgets to poke `image_protos`
+    pub fn ensure_image_protocols(
+        &mut self,
+        picker: &ratatui_image::picker::Picker,
+        render_areas: &[crate::display_types::ImageRenderArea],
+    ) {
+        use crate::display_types::MessageRole;
+        for area in render_areas {
+            let key = (area.msg_idx, area.tc_idx);
+            if self.image_protos.contains_key(&key) {
+                continue;
+            }
+            let Some(msg) = self.app.messages.get(area.msg_idx) else {
+                continue;
+            };
+            let bytes: Option<&[u8]> = if msg.role == MessageRole::User {
+                msg.images.get(area.tc_idx).map(Vec::as_slice)
+            } else {
+                msg.tool_calls
+                    .get(area.tc_idx)
+                    .and_then(|tc| tc.image_data.as_deref())
+            };
+            let Some(bytes) = bytes else { continue };
+            let Ok(dyn_img) = image::load_from_memory(bytes) else {
+                continue;
+            };
+            self.image_protos
+                .insert(key, picker.new_resize_protocol(dyn_img));
+        }
+    }
 }
 
 /// min column width before falling back to tabs
@@ -625,5 +664,82 @@ mod tests {
         let area = Rect::new(0, 0, 80, 24);
         let mode = mgr.compute_layout(area);
         assert_eq!(mode, LayoutMode::Tabs);
+    }
+
+    /// build a minimal valid png (1x1 red pixel) for protocol-ensure tests
+    fn tiny_png_bytes() -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 0, 0, 255]));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut buf, image::ImageFormat::Png)
+            .unwrap();
+        buf.into_inner()
+    }
+
+    #[test]
+    fn ensure_image_protocols_creates_proto_for_user_message_image() {
+        // regression: push_user_message_with_images (fresh submit, steering
+        // submit, session reload rehydration) can leave image_protos empty
+        // for a message that has real bytes in msg.images. the render path's
+        // safety net must lazily create a StatefulProtocol from those bytes
+        // so the attachment box isn't left blank
+        let mut pane = test_pane(1);
+        pane.app
+            .push_user_message_with_images("look here", vec![tiny_png_bytes()]);
+        assert!(
+            pane.image_protos.is_empty(),
+            "precondition: image_protos starts empty"
+        );
+        let picker = ratatui_image::picker::Picker::halfblocks();
+        let render_areas = vec![crate::display_types::ImageRenderArea {
+            msg_idx: 0,
+            tc_idx: 0,
+            area: Rect::new(0, 0, 10, 5),
+        }];
+        pane.ensure_image_protocols(&picker, &render_areas);
+        assert!(
+            pane.image_protos.contains_key(&(0, 0)),
+            "protocol should have been lazy-created from msg.images[0] bytes"
+        );
+    }
+
+    #[test]
+    fn ensure_image_protocols_is_idempotent() {
+        // repeated calls (every frame) must not thrash: if the key is
+        // already present we skip the image decode + protocol create
+        let mut pane = test_pane(1);
+        pane.app
+            .push_user_message_with_images("look here", vec![tiny_png_bytes()]);
+        let picker = ratatui_image::picker::Picker::halfblocks();
+        let render_areas = vec![crate::display_types::ImageRenderArea {
+            msg_idx: 0,
+            tc_idx: 0,
+            area: Rect::new(0, 0, 10, 5),
+        }];
+        pane.ensure_image_protocols(&picker, &render_areas);
+        let len_after_first = pane.image_protos.len();
+        pane.ensure_image_protocols(&picker, &render_areas);
+        assert_eq!(
+            pane.image_protos.len(),
+            len_after_first,
+            "repeated ensure should be a no-op when proto already exists"
+        );
+    }
+
+    #[test]
+    fn ensure_image_protocols_tolerates_missing_bytes() {
+        // render_areas may reference an index with no matching image bytes
+        // (e.g. a stale area from a previous frame). must not panic or
+        // create a bogus entry
+        let mut pane = test_pane(1);
+        pane.app.push_user_message("no images here");
+        let picker = ratatui_image::picker::Picker::halfblocks();
+        let render_areas = vec![crate::display_types::ImageRenderArea {
+            msg_idx: 0,
+            tc_idx: 0,
+            area: Rect::new(0, 0, 10, 5),
+        }];
+        pane.ensure_image_protocols(&picker, &render_areas);
+        assert!(pane.image_protos.is_empty(), "no bytes -> no proto created");
     }
 }

@@ -26,6 +26,26 @@ fn extract_compaction_summary(text: &str) -> Option<String> {
     Some(inner.trim().to_string())
 }
 
+/// decode any image parts on a user message back into raw bytes, in order.
+/// used on session reload so the attachment box renders with the same
+/// images that were attached when the message was first sent
+fn extract_user_images(user: &mush_ai::types::UserMessage) -> Vec<Vec<u8>> {
+    use base64::Engine;
+    use mush_ai::types::{UserContent, UserContentPart};
+    let UserContent::Parts(parts) = &user.content else {
+        return Vec::new();
+    };
+    parts
+        .iter()
+        .filter_map(|p| match p {
+            UserContentPart::Image(img) => base64::engine::general_purpose::STANDARD
+                .decode(&img.data)
+                .ok(),
+            _ => None,
+        })
+        .collect()
+}
+
 pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
     app.clear_messages();
 
@@ -40,7 +60,12 @@ pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
                 if let Some(body) = extract_compaction_summary(&text) {
                     app.push_system_message(format!("━ compacted summary ━\n\n{body}"));
                 } else {
-                    app.push_user_message(text);
+                    let images = extract_user_images(user);
+                    if images.is_empty() {
+                        app.push_user_message(text);
+                    } else {
+                        app.push_user_message_with_images(text, images);
+                    }
                 }
             }
             Message::Assistant(assistant) => {
@@ -371,6 +396,45 @@ mod tests {
         assert_eq!(
             app.messages[0].tool_calls[0].output_preview.as_deref(),
             Some("permission denied")
+        );
+    }
+
+    #[test]
+    fn rebuild_display_restores_user_images_from_parts() {
+        // regression: a user message persisted with UserContent::Parts
+        // carrying image data used to rebuild with empty msg.images, so
+        // the attachment box would either not show or show blank after a
+        // session reload. rebuild_display must decode the base64 image
+        // bytes back onto the DisplayMessage so the render path can show
+        // them
+        use base64::Engine;
+        use mush_ai::types::{ImageContent, ImageMimeType, UserContentPart};
+
+        let raw = b"fake-png-bytes".to_vec();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&raw);
+        let parts = vec![
+            UserContentPart::Text(TextContent {
+                text: "look at this".into(),
+            }),
+            UserContentPart::Image(ImageContent {
+                data: encoded,
+                mime_type: ImageMimeType::Png,
+            }),
+        ];
+        let conversation = vec![Message::User(UserMessage {
+            content: UserContent::Parts(parts),
+            timestamp_ms: Timestamp::now(),
+        })];
+
+        let mut app = app();
+        rebuild_display(&mut app, &conversation);
+
+        assert_eq!(app.messages.len(), 1);
+        assert_eq!(app.messages[0].role, MessageRole::User);
+        assert_eq!(
+            app.messages[0].images,
+            vec![raw],
+            "image bytes should be recovered from the Parts payload"
         );
     }
 }
