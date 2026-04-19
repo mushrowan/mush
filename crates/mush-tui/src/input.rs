@@ -96,21 +96,26 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     }
 
     // alt+m / alt+shift+m cycle through favourite models. works while
-    // streaming so the user can hot-swap mid-turn without aborting
-    match (key.modifiers, key.code) {
-        (KeyModifiers::ALT, KeyCode::Char('m')) => {
-            if let Some(event) = cycle_favourite_model(app, 1) {
-                return Some(event);
-            }
-            return None;
+    // streaming so the user can hot-swap mid-turn without aborting.
+    // bindings come from the [keys] config; see keybinds.rs for
+    // cycle_favourite / cycle_favourite_backward
+    if app
+        .keymap
+        .matches(crate::keybinds::Action::CycleFavouriteBackward, key)
+    {
+        if let Some(event) = cycle_favourite_model(app, -1) {
+            return Some(event);
         }
-        (m, KeyCode::Char('M')) if m.contains(KeyModifiers::ALT) => {
-            if let Some(event) = cycle_favourite_model(app, -1) {
-                return Some(event);
-            }
-            return None;
+        return None;
+    }
+    if app
+        .keymap
+        .matches(crate::keybinds::Action::CycleFavourite, key)
+    {
+        if let Some(event) = cycle_favourite_model(app, 1) {
+            return Some(event);
         }
-        _ => {}
+        return None;
     }
 
     // 4. multiline enter (before mode-specific enter handling)
@@ -218,32 +223,38 @@ fn handle_streaming_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
 
 /// keys specific to idle: mode switches, toggles, submit with slash parsing
 fn handle_idle_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
-    match (key.modifiers, key.code) {
-        // mode switches
-        (KeyModifiers::CONTROL, KeyCode::Char('f')) => {
-            app.interaction.mode = AppMode::Search;
-            app.interaction.search.query.clear();
-            app.interaction.search.matches.clear();
-            app.interaction.search.selected = 0;
-            None
+    // mode switches: bindings come from the [keys] config
+    if app
+        .keymap
+        .matches(crate::keybinds::Action::EnterSearch, key)
+    {
+        app.interaction.mode = AppMode::Search;
+        app.interaction.search.query.clear();
+        app.interaction.search.matches.clear();
+        app.interaction.search.selected = 0;
+        return None;
+    }
+    if app
+        .keymap
+        .matches(crate::keybinds::Action::EnterScroll, key)
+    {
+        app.interaction.mode = AppMode::Scroll;
+        if !app.messages.is_empty() {
+            app.navigation.selected_message = Some(app.messages.len() - 1);
         }
-        (KeyModifiers::CONTROL, KeyCode::Char('s')) => {
-            app.interaction.mode = AppMode::Scroll;
-            if !app.messages.is_empty() {
-                app.navigation.selected_message = Some(app.messages.len() - 1);
-            }
-            // initialise block selection when entering in block mode
-            if app.navigation.scroll_unit == crate::app::ScrollUnit::Block {
-                let blocks = app.code_blocks();
-                app.navigation.selected_block = if blocks.is_empty() {
-                    None
-                } else {
-                    Some(blocks.len() - 1)
-                };
-            }
-            None
+        // initialise block selection when entering in block mode
+        if app.navigation.scroll_unit == crate::app::ScrollUnit::Block {
+            let blocks = app.code_blocks();
+            app.navigation.selected_block = if blocks.is_empty() {
+                None
+            } else {
+                Some(blocks.len() - 1)
+            };
         }
+        return None;
+    }
 
+    match (key.modifiers, key.code) {
         // tab completion / slash menu
         (_, KeyCode::Tab) | (KeyModifiers::SHIFT, KeyCode::BackTab) => {
             if app.input.text.starts_with('/')

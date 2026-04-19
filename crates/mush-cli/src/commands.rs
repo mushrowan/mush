@@ -105,6 +105,10 @@ pub fn open_config() -> Result<()> {
              \n\
              # [keys]\n\
              # edit_steering = [\"alt+k\", \"up\", \"ctrl+k\"]  # lift queued steering msg\n\
+             # cycle_favourite = \"alt+m\"          # next favourite model\n\
+             # cycle_favourite_backward = \"alt+shift+m\"  # prev favourite model\n\
+             # enter_search = \"ctrl+f\"            # enter fullscreen search\n\
+             # enter_scroll = \"ctrl+s\"            # enter scroll / selection mode\n\
              \n\
              # [status_bar]\n\
              # show_thinking = true          # `thinking: <level>` segment\n\

@@ -41,22 +41,40 @@ use serde::{Deserialize, Deserializer};
 /// [`KeyMap::matches`] instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Action {
+    /// cycle forward through favourite models. default binding: `alt-m`
+    CycleFavourite,
+    /// cycle backward through favourite models. default binding: `alt-shift-m`
+    CycleFavouriteBackward,
     /// pop the last queued steering message back into the input for
     /// editing. default bindings: `alt-k`, `up`, `ctrl-k` (the latter
     /// two only fire when the input is empty)
     EditSteering,
+    /// enter fullscreen search mode. default binding: `ctrl-f`
+    EnterSearch,
+    /// enter scroll / selection mode. default binding: `ctrl-s`
+    EnterScroll,
 }
 
 impl Action {
     /// toml-key form: the snake_case string users write in config.toml
     pub const fn config_key(self) -> &'static str {
         match self {
+            Self::CycleFavourite => "cycle_favourite",
+            Self::CycleFavouriteBackward => "cycle_favourite_backward",
             Self::EditSteering => "edit_steering",
+            Self::EnterSearch => "enter_search",
+            Self::EnterScroll => "enter_scroll",
         }
     }
 
     /// every variant, for iteration in default population and tests
-    pub const ALL: &'static [Self] = &[Self::EditSteering];
+    pub const ALL: &'static [Self] = &[
+        Self::CycleFavourite,
+        Self::CycleFavouriteBackward,
+        Self::EditSteering,
+        Self::EnterSearch,
+        Self::EnterScroll,
+    ];
 }
 
 /// zero or more key combinations bound to a single action
@@ -78,10 +96,15 @@ impl Binding {
     }
 
     /// does this binding fire for the given key event?
+    ///
+    /// both the incoming event and the stored combos are run through
+    /// crokey's `normalized()` first so `shift+m` vs uppercase `M`
+    /// differences between config syntax and crossterm's delivery
+    /// don't cause spurious misses
     #[must_use]
     pub fn matches(&self, key: KeyEvent) -> bool {
-        let combo = KeyCombination::from(key);
-        self.0.contains(&combo)
+        let combo = KeyCombination::from(key).normalized();
+        self.0.iter().any(|b| b.normalized() == combo)
     }
 }
 
@@ -162,6 +185,35 @@ impl Default for KeyMap {
             ]),
         );
 
+        bindings.insert(
+            Action::CycleFavourite,
+            Binding::single(KeyCombination::new(KeyCode::Char('m'), KeyModifiers::ALT)),
+        );
+
+        // note: crossterm delivers shift-m as KeyCode::Char('M') with
+        // the ALT modifier set (no explicit SHIFT), so that's how the
+        // binding must be declared to match incoming events
+        bindings.insert(
+            Action::CycleFavouriteBackward,
+            Binding::single(KeyCombination::new(KeyCode::Char('M'), KeyModifiers::ALT)),
+        );
+
+        bindings.insert(
+            Action::EnterSearch,
+            Binding::single(KeyCombination::new(
+                KeyCode::Char('f'),
+                KeyModifiers::CONTROL,
+            )),
+        );
+
+        bindings.insert(
+            Action::EnterScroll,
+            Binding::single(KeyCombination::new(
+                KeyCode::Char('s'),
+                KeyModifiers::CONTROL,
+            )),
+        );
+
         Self { bindings }
     }
 }
@@ -225,6 +277,27 @@ mod tests {
         assert!(map.matches(Action::EditSteering, alt_k));
         assert!(map.matches(Action::EditSteering, up));
         assert!(map.matches(Action::EditSteering, ctrl_k));
+    }
+
+    #[test]
+    fn default_keymap_has_cycle_favourite_triggers() {
+        let map = KeyMap::default();
+        let alt_m = KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT);
+        let alt_shift_m = KeyEvent::new(KeyCode::Char('M'), KeyModifiers::ALT);
+        assert!(map.matches(Action::CycleFavourite, alt_m));
+        assert!(map.matches(Action::CycleFavouriteBackward, alt_shift_m));
+        // not cross-bound
+        assert!(!map.matches(Action::CycleFavourite, alt_shift_m));
+        assert!(!map.matches(Action::CycleFavouriteBackward, alt_m));
+    }
+
+    #[test]
+    fn default_keymap_has_mode_switch_triggers() {
+        let map = KeyMap::default();
+        let ctrl_f = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL);
+        let ctrl_s = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        assert!(map.matches(Action::EnterSearch, ctrl_f));
+        assert!(map.matches(Action::EnterScroll, ctrl_s));
     }
 
     #[test]
