@@ -16,7 +16,7 @@ use super::caching_backend::CachingBackend;
 pub(super) fn draw_panes(
     terminal: &mut Terminal<CachingBackend<CrosstermBackend<io::Stdout>>>,
     pane_mgr: &mut PaneManager,
-    _image_picker: &Option<ratatui_image::picker::Picker>,
+    image_picker: &Option<ratatui_image::picker::Picker>,
     settings: &crate::settings::ScopedSettings,
 ) -> io::Result<()> {
     let pane_count = pane_mgr.pane_count() as u16;
@@ -122,6 +122,9 @@ pub(super) fn draw_panes(
             frame.render_widget(Ui::new(&pane.app).hide_status(is_multi), pane_area);
 
             let render_areas = pane.app.render_state.image_render_areas.borrow().clone();
+            if let Some(picker) = image_picker.as_ref() {
+                pane.ensure_image_protocols(picker, &render_areas);
+            }
             for img_area in &render_areas {
                 if let Some(proto) = pane
                     .image_protos
