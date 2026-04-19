@@ -42,6 +42,9 @@
       "x-nixcfg-secret": true
     },
     "ApiKeys": {
+      "additionalProperties": {
+        "$ref": "#/$defs/ApiKey"
+      },
       "description": "api key overrides from config file.\n\nnamed fields cover the common paths used throughout the codebase.\nthe flattened `other` map catches any additional provider name so\nusers can add keys for groq, deepseek, xai, cerebras, mistral,\ntogether, deepinfra, etc. without a new named field each time\n\nall key values are `ApiKey`, whose Debug/Display are redacted so\nsecrets can't accidentally leak into trace output, panic messages,\nor captured error bodies. access the raw value via `ApiKey::expose`",
       "properties": {
         "anthropic": {

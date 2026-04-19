@@ -334,8 +334,10 @@ pub struct ApiKeys {
     pub anthropic: Option<mush_ai::types::ApiKey>,
     pub openrouter: Option<mush_ai::types::ApiKey>,
     pub openai: Option<mush_ai::types::ApiKey>,
+    /// any other provider keyed by short name (groq, deepseek, xai, ...)
+    /// surfaces as a freeform submodule in the nix module so values can
+    /// be set imperatively from nix in addition to env vars
     #[serde(flatten)]
-    #[schemars(skip)]
     pub other: HashMap<String, mush_ai::types::ApiKey>,
 }
 
