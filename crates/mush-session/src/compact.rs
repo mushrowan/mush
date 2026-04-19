@@ -23,6 +23,12 @@ const CHARS_PER_TOKEN: usize = 4;
 /// rough char-equivalent for images in token estimation
 const IMAGE_CHAR_ESTIMATE: usize = 1000;
 
+/// prefix of the synthetic user message produced by compaction.
+/// kept public so display layers can detect and re-render the
+/// compaction summary distinctly (not as a user turn)
+pub const COMPACTION_SUMMARY_PREFIX: &str =
+    "The conversation history before this point was compacted into the following summary:";
+
 /// result of compaction
 #[derive(Debug)]
 pub struct CompactionResult {
@@ -275,7 +281,7 @@ pub fn compact_with_summary(
 
     let summary_msg = Message::User(UserMessage {
         content: UserContent::Text(format!(
-            "The conversation history before this point was compacted into the following summary:\n\n\
+            "{COMPACTION_SUMMARY_PREFIX}\n\n\
              <summary>\n{summary}\n</summary>"
         )),
         timestamp_ms: Timestamp::now(),
