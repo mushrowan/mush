@@ -149,8 +149,10 @@ impl Widget for Ui<'_> {
     }
 }
 
-/// overlay `┴` on the input box's bottom border wherever the status
-/// bar has a `│` divider in its top row directly below
+/// overlay `┬` on the input box's bottom border wherever the status
+/// bar has a `│` divider in its top row directly below. the stem on
+/// `┬` points down so the border visually carries through into the
+/// status bar divider sitting beneath it
 fn join_status_dividers(regions: &LayoutRegions, buf: &mut Buffer) {
     if regions.status.height == 0 || regions.input.height == 0 {
         return;
@@ -170,7 +172,7 @@ fn join_status_dividers(regions: &LayoutRegions, buf: &mut Buffer) {
         }
         let border_cell = &mut buf[(x, input_bottom_y)];
         if border_cell.symbol() == "─" {
-            border_cell.set_symbol("┴");
+            border_cell.set_symbol("┬");
         }
     }
 }
@@ -374,8 +376,9 @@ mod tests {
     #[test]
     fn status_bar_dividers_tee_into_input_box_border() {
         // any column where the status bar opens with a `│` should flip the
-        // input box's bottom border from `─` to `┴` in the row above,
-        // turning the floating pipe into a visually joined tee
+        // input box's bottom border from `─` to `┬` in the row above,
+        // turning the floating pipe into a visually joined tee with the
+        // stem pointing down into the status bar
         let app = App::new("claude-sonnet-4".into(), TokenCount::new(200_000));
         let buf = render_full(&app, 120, 24);
 
@@ -396,8 +399,8 @@ mod tests {
         let (pipe_x, pipe_y) = status_row.expect("no status bar `│` divider rendered");
         let border_cell = buf[(pipe_x, pipe_y - 1)].symbol().to_string();
         assert_eq!(
-            border_cell, "┴",
-            "input bottom border above divider at col {pipe_x} should be `┴`, was `{border_cell}`"
+            border_cell, "┬",
+            "input bottom border above divider at col {pipe_x} should be `┬`, was `{border_cell}`"
         );
     }
 }
