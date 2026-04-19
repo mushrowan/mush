@@ -23,7 +23,7 @@ use crate::text::truncate_with_ellipsis;
 /// edge). changing this one constant rebalances every wrap/height
 /// calculation so the indent math stays declared in exactly one place
 pub(crate) const MESSAGE_INDENT_LEFT: usize = 1;
-pub(crate) const MESSAGE_INDENT_RIGHT: usize = 0;
+pub(crate) const MESSAGE_INDENT_RIGHT: usize = 1;
 
 /// usable width for message body content given an outer column width.
 /// subtracts both the left indent and any right-side reservation so
