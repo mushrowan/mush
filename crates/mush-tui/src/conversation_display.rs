@@ -9,7 +9,7 @@ use mush_ai::types::{
 use crate::app::{
     App, DisplayMessage, DisplayToolCall, MessageRole, ThinkingDisplay, ToolCallStatus,
 };
-use crate::batch_output::{parse_batch_output, truncate_output};
+use crate::batch_output::{parse_batch_output, truncate_output, truncate_output_large};
 
 /// extract the summary body from a compacted user message produced by
 /// `mush_session::compact::compact_with_summary`. the source text starts
@@ -224,7 +224,7 @@ fn tool_result_preview(content: &[ToolResultContentPart]) -> Option<String> {
         .collect::<Vec<_>>()
         .join("");
     if !text.is_empty() {
-        return Some(truncate_output(&text));
+        return Some(truncate_output_large(&text));
     }
 
     content

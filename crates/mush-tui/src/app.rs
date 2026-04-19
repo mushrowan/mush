@@ -11,7 +11,9 @@ pub use crate::app_event::{AppEvent, AppMode};
 pub use crate::app_state::{
     CachedStatusBar, CompletionState, InteractionState, NavigationState, RenderState, SearchState,
 };
-pub use crate::batch_output::{BatchSection, parse_batch_output, truncate_output};
+pub use crate::batch_output::{
+    BatchSection, parse_batch_output, truncate_output, truncate_output_large,
+};
 pub use crate::cache::{
     BustReason, CACHE_COLD_DISPLAY_SECS, CACHE_WARN_SECS, CacheAnomaly, CacheBustDiagnostic,
     CacheTimer, CallConfig, TokenStats, cache_ttl_secs, detect_cache_anomalies,
@@ -425,14 +427,14 @@ impl App {
             .find(|t| &t.tool_call_id == tool_call_id)
         {
             tool.status = status;
-            tool.output = output.map(truncate_output);
+            tool.output = output.map(truncate_output_large);
             tool.live_output = None;
         }
         if let Some(last) = self.messages.last_mut()
             && let Some(tc) = last.tool_calls.iter_mut().rfind(|t| t.name == name)
         {
             tc.status = status;
-            tc.output_preview = output.map(truncate_output);
+            tc.output_preview = output.map(truncate_output_large);
             tc.image_data = image_data;
         }
     }
@@ -1213,6 +1215,27 @@ mod tests {
         let output = truncate_output(&lines);
         assert!(output.contains("… (8 more lines)"));
         assert!(!output.contains("... (8 more lines)"));
+    }
+
+    #[test]
+    fn truncate_output_large_allows_more_lines_than_small() {
+        let lines = (0..30)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        // 30 lines: small cap (12) truncates, large cap (40) does not
+        let small = truncate_output(&lines);
+        let large = truncate_output_large(&lines);
+        assert!(
+            small.contains("more lines"),
+            "small cap should truncate 30 lines"
+        );
+        assert!(
+            !large.contains("more lines"),
+            "large cap should fit 30 lines: {large}"
+        );
+        assert!(large.contains("line 0"));
+        assert!(large.contains("line 29"));
     }
 
     #[test]
