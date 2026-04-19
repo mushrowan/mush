@@ -44,6 +44,10 @@ fn extract_file_path(text: &str) -> Option<&str> {
 #[serde(deny_unknown_fields)]
 struct BatchArgs {
     tool_calls: Vec<BatchCall>,
+    /// when true, run tool_calls strictly in submission order and stop
+    /// at the first failure. defaults to false (parallel / path-grouped)
+    #[serde(default)]
+    sequential: bool,
 }
 
 #[derive(Deserialize)]
@@ -148,7 +152,7 @@ impl AgentTool for BatchTool {
     }
 
     fn description(&self) -> &str {
-        "Execute multiple tool calls concurrently to reduce latency. Each call gets the same output limits as a standalone call. Do NOT nest batch inside batch.\n\nGood for: reading multiple files, grep+glob combos, multiple bash commands, multi-part edits.\nBad for: operations that depend on prior output, ordered stateful mutations."
+        "Execute multiple tool calls concurrently to reduce latency. Each call gets the same output limits as a standalone call. Do NOT nest batch inside batch.\n\nGood for: reading multiple files, grep+glob combos, multiple bash commands, multi-part edits.\nBad for: operations that depend on prior output, ordered stateful mutations.\n\nSet sequential=true to run calls strictly in submission order, stopping at the first failure. Use for dependent operations (e.g. mkdir then cd then run)."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -172,6 +176,10 @@ impl AgentTool for BatchTool {
                         },
                         "required": ["tool", "parameters"]
                     }
+                },
+                "sequential": {
+                    "type": "boolean",
+                    "description": "when true, run tool_calls in order and stop at the first failure. default false"
                 }
             },
             "required": ["tool_calls"]
@@ -202,19 +210,48 @@ impl AgentTool for BatchTool {
 
         let total = params.tool_calls.len();
 
-        // group same-path file-mutating calls so they run sequentially,
-        // everything else runs in parallel across groups
-        let groups = group_by_path(params.tool_calls);
-        let group_futures = groups.into_iter().map(|group| async {
-            let mut results = Vec::with_capacity(group.len());
-            for (i, call) in group {
-                results.push(run_call(i, call, &self.tools).await);
+        let mut results: Vec<CallResult> = if params.sequential {
+            // sequential mode: one call at a time, abort remaining on first
+            // failure. the unrun tail is reported as "skipped" so the agent
+            // sees what didn't execute
+            let mut out = Vec::with_capacity(total);
+            let mut aborted = false;
+            for (i, call) in params.tool_calls.into_iter().enumerate() {
+                if aborted {
+                    out.push((
+                        i,
+                        call.tool,
+                        None,
+                        Err("skipped after earlier failure (sequential=true)".to_string()),
+                    ));
+                    continue;
+                }
+                let result = run_call(i, call, &self.tools).await;
+                let is_failure = match &result.3 {
+                    Err(_) => true,
+                    Ok(tr) => tr.outcome.is_error(),
+                };
+                out.push(result);
+                if is_failure {
+                    aborted = true;
+                }
             }
-            results
-        });
-
-        let all_groups = futures::future::join_all(group_futures).await;
-        let mut results: Vec<CallResult> = all_groups.into_iter().flatten().collect();
+            out
+        } else {
+            // parallel mode: same-path file-mutating calls share a group
+            // (executed sequentially), everything else gets its own group
+            // (executed in parallel with all other groups)
+            let groups = group_by_path(params.tool_calls);
+            let group_futures = groups.into_iter().map(|group| async {
+                let mut results = Vec::with_capacity(group.len());
+                for (i, call) in group {
+                    results.push(run_call(i, call, &self.tools).await);
+                }
+                results
+            });
+            let all_groups = futures::future::join_all(group_futures).await;
+            all_groups.into_iter().flatten().collect()
+        };
         results.sort_by_key(|(i, _, _, _)| *i);
 
         let mut success_count = 0;
@@ -618,6 +655,149 @@ mod tests {
         assert_eq!(
             content, "AAA\nBBB\nCCC\n",
             "all three edits should be reflected in the file"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sequential_mode_runs_in_order_and_stops_on_first_failure() {
+        // a tool that records the order of calls and errors on the marked
+        // call. sequential=true should run calls strictly in submission
+        // order and refuse to execute anything after a failure
+        use std::sync::Mutex;
+
+        struct OrderTool {
+            log: std::sync::Arc<Mutex<Vec<String>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl AgentTool for OrderTool {
+            fn name(&self) -> &str {
+                "order"
+            }
+            fn label(&self) -> &str {
+                "order"
+            }
+            fn description(&self) -> &str {
+                "records call order"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn execute(&self, params: serde_json::Value) -> ToolResult {
+                let id = params["id"].as_str().unwrap_or("?").to_string();
+                self.log.lock().unwrap().push(id.clone());
+                if params
+                    .get("fail")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
+                    return ToolResult::error(format!("boom at {id}"));
+                }
+                ToolResult::text(format!("ran {id}"))
+            }
+        }
+
+        let log = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let tool = BatchTool::new(ToolRegistry::from_boxed(vec![Box::new(OrderTool {
+            log: log.clone(),
+        })]));
+
+        let result = tool
+            .execute(serde_json::json!({
+                "sequential": true,
+                "tool_calls": [
+                    {"tool": "order", "parameters": {"id": "a"}},
+                    {"tool": "order", "parameters": {"id": "b", "fail": true}},
+                    {"tool": "order", "parameters": {"id": "c"}},
+                    {"tool": "order", "parameters": {"id": "d"}},
+                ]
+            }))
+            .await;
+
+        // only a and b should have actually run; c and d were skipped
+        let log = log.lock().unwrap().clone();
+        assert_eq!(
+            log,
+            vec!["a".to_string(), "b".to_string()],
+            "sequential should stop after first failure, got log {log:?}"
+        );
+
+        let text = match &result.content[0] {
+            ToolResultContentPart::Text(t) => &t.text,
+            _ => panic!("expected text"),
+        };
+        // all four entries appear in the output (either ran or skipped)
+        for id in ["a", "b", "c", "d"] {
+            assert!(
+                text.contains(&format!(
+                    "[{}]",
+                    ["a", "b", "c", "d"].iter().position(|x| *x == id).unwrap()
+                )),
+                "missing header for {id}: {text}"
+            );
+        }
+        assert!(
+            text.contains("skipped after earlier failure"),
+            "skipped entries should explain why: {text}"
+        );
+        // summary counts: 1 success, 3 failures (b failed, c+d skipped-as-error)
+        assert!(
+            text.contains("1/4 succeeded"),
+            "expected 1/4 succeeded in summary: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sequential_mode_preserves_order_without_failures() {
+        use std::sync::Mutex;
+
+        struct OrderTool {
+            log: std::sync::Arc<Mutex<Vec<String>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl AgentTool for OrderTool {
+            fn name(&self) -> &str {
+                "order"
+            }
+            fn label(&self) -> &str {
+                "order"
+            }
+            fn description(&self) -> &str {
+                "records"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn execute(&self, params: serde_json::Value) -> ToolResult {
+                let id = params["id"].as_str().unwrap_or("?").to_string();
+                // short sleep so parallel-mode would interleave but
+                // sequential mode still observes strict order
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                self.log.lock().unwrap().push(id.clone());
+                ToolResult::text(format!("ran {id}"))
+            }
+        }
+
+        let log = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let tool = BatchTool::new(ToolRegistry::from_boxed(vec![Box::new(OrderTool {
+            log: log.clone(),
+        })]));
+        let _ = tool
+            .execute(serde_json::json!({
+                "sequential": true,
+                "tool_calls": [
+                    {"tool": "order", "parameters": {"id": "a"}},
+                    {"tool": "order", "parameters": {"id": "b"}},
+                    {"tool": "order", "parameters": {"id": "c"}},
+                ]
+            }))
+            .await;
+        let log = log.lock().unwrap().clone();
+        assert_eq!(
+            log,
+            vec!["a".to_string(), "b".to_string(), "c".to_string()],
+            "sequential should observe submission order: {log:?}"
         );
     }
 
