@@ -393,7 +393,9 @@ impl<'a> InputBox<'a> {
 impl Widget for InputBox<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let streaming_idle = self.app.is_busy() && self.app.input.text.is_empty();
-        let prompt = if streaming_idle { "..." } else { "> " };
+        // 2 cols to match `"> "` so the cursor column doesn't jump when the
+        // stream starts or ends. `… ` = 1 cell ellipsis + 1 trailing space
+        let prompt = if streaming_idle { "… " } else { "> " };
         let style = if streaming_idle {
             self.app.theme.dim
         } else {
@@ -746,7 +748,7 @@ mod tests {
         app.stream.active = true;
         let buf = render_input(&app, 40, 3);
         let content = buffer_to_string(&buf);
-        assert!(content.contains("..."));
+        assert!(content.contains("…"));
     }
 
     #[test]
@@ -758,7 +760,7 @@ mod tests {
         let buf = render_input(&app, 40, 3);
         let content = buffer_to_string(&buf);
         assert!(content.contains("> hold on"));
-        assert!(!content.contains("..."));
+        assert!(!content.contains("…"));
     }
 
     #[test]
