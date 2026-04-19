@@ -20,6 +20,7 @@ crokey.workspace = true
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+schemars.workspace = true
 async-trait.workspace = true
 throbber-widgets-tui = { version = "0.11.0", default-features = false }
 similar.workspace = true
@@ -43,9 +44,12 @@ ratatui-image = { version = "10.0.6", default-features = false, features = [
   "image-defaults",
 ] }
 nucleo-matcher = "0.3"
+chrono.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
-chrono.workspace = true
 criterion.workspace = true
 pretty_assertions.workspace = true
 tempfile.workspace = true

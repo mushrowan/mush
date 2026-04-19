@@ -3,8 +3,6 @@
 //! maps AgentEvents to App state mutations, managing conversation
 //! history, session tree, and image protocol state
 
-use crossterm::terminal::enable_raw_mode;
-
 use mush_agent::{AgentEvent, summarise_tool_args};
 use mush_ai::models;
 use mush_ai::stream::StreamEvent;
@@ -90,11 +88,6 @@ pub fn handle_agent_event(
             tool_name,
             result,
         } => {
-            // re-apply raw mode after external tool execution in case the child
-            // process modified terminal settings (e.g. via /dev/tty)
-            if tool_name.as_str() == "bash" {
-                let _ = enable_raw_mode();
-            }
             let output_text = result.content.iter().find_map(|p| match p {
                 ToolResultContentPart::Text(t) => Some(t.text.as_str()),
                 _ => None,
