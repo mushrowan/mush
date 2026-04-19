@@ -3146,6 +3146,7 @@ dependencies = [
  "notify",
  "pretty_assertions",
  "rayon",
+ "rustc-hash",
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
