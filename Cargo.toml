@@ -57,6 +57,10 @@ serde_json = "1"
 similar = "3"
 toml = "1.1"
 
+# json schema generation for the nix module codegen pipeline
+# (see crates/mush-cli/src/bin/mush_config_schema.rs)
+schemars = "1"
+
 # derive helpers
 derive_more = { version = "2.1", features = [
   "display",

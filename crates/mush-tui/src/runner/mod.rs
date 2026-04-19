@@ -8,6 +8,7 @@ use ratatui::backend::CrosstermBackend;
 mod caching_backend;
 mod commands;
 mod config;
+mod diag;
 mod input;
 mod looping;
 mod panes;
@@ -35,6 +36,8 @@ use self::terminal::{
     TerminalStateGuard, cleanup, enter_tui_terminal, install_panic_cleanup_hook,
     probe_image_picker, restore_terminal_state,
 };
+
+use self::diag::verify_terminal_restored;
 
 /// run the interactive TUI
 pub async fn run_tui(
@@ -184,5 +187,6 @@ pub async fn run_tui(
 
     cleanup(&mut terminal)?;
     terminal_guard.disarm();
+    verify_terminal_restored(vec!["exit path: run_tui clean return".into()]);
     Ok(())
 }

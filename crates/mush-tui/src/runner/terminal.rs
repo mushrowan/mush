@@ -34,6 +34,9 @@ impl Drop for TerminalStateGuard {
     fn drop(&mut self) {
         if self.active {
             restore_terminal_state();
+            super::diag::verify_terminal_restored(vec![
+                "exit path: TerminalStateGuard::drop (early return or panic unwind)".into(),
+            ]);
         }
     }
 }
@@ -69,18 +72,47 @@ pub(super) fn probe_image_picker(policy: TerminalPolicy) -> Option<ratatui_image
 pub(super) fn enter_tui_terminal(policy: TerminalPolicy) -> io::Result<()> {
     enable_raw_mode()?;
     io::stdout().execute(EnterAlternateScreen)?;
-    io::stdout().execute(event::EnableBracketedPaste)?;
-    io::stdout().execute(event::EnableFocusChange)?;
-    enable_mouse_tracking(policy.mouse_tracking)?;
-    enable_keyboard_enhancement(policy.keyboard_enhancement);
-    let _ = io::stdout().execute(SetCursorStyle::BlinkingBar);
+    apply_tty_modes(policy)?;
 
+    // give the terminal a moment to react to the enable bursts, then
+    // drain any response bytes (cursor probes, keyboard enhancement
+    // acknowledgements) that would otherwise surface as spurious events
     std::thread::sleep(std::time::Duration::from_millis(50));
     while event::poll(std::time::Duration::ZERO)? {
         let stale = event::read()?;
         tracing::debug!(?stale, "drained stale event from terminal probe");
     }
 
+    Ok(())
+}
+
+/// re-apply the non-alt-screen mode enables.
+///
+/// called after tool executions that may have touched `/dev/tty` or
+/// otherwise stripped our modes (e.g. bash running `stty sane`,
+/// `reset`, or a pager that pops kitty kbd flags and bracketed paste
+/// on exit). we deliberately don't re-enter alt screen: the user's
+/// tui buffer is already there, and re-entering can clear it
+pub(super) fn reapply_tui_modes_after_tool(policy: TerminalPolicy) {
+    if let Err(error) = enable_raw_mode() {
+        tracing::debug!(?error, "failed to re-enable raw mode after tool");
+    }
+    if let Err(error) = apply_tty_modes(policy) {
+        tracing::debug!(?error, "failed to reapply tty modes after tool");
+    }
+}
+
+/// shared body for the enable bursts that don't depend on alt screen:
+/// bracketed paste, focus change, mouse tracking, keyboard
+/// enhancement, cursor shape. raw mode is applied separately by each
+/// caller because the ordering differs (enter wants raw before alt
+/// screen, reapply has no alt screen to guard)
+fn apply_tty_modes(policy: TerminalPolicy) -> io::Result<()> {
+    io::stdout().execute(event::EnableBracketedPaste)?;
+    io::stdout().execute(event::EnableFocusChange)?;
+    enable_mouse_tracking(policy.mouse_tracking)?;
+    enable_keyboard_enhancement(policy.keyboard_enhancement);
+    let _ = io::stdout().execute(SetCursorStyle::BlinkingBar);
     Ok(())
 }
 
@@ -120,8 +152,22 @@ pub(super) fn install_panic_cleanup_hook() {
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         restore_terminal_state();
+        super::diag::verify_terminal_restored(vec![format!(
+            "exit path: panic hook, payload: {}",
+            panic_payload_str(info)
+        )]);
         prev_hook(info);
     }));
+}
+
+fn panic_payload_str(info: &std::panic::PanicHookInfo<'_>) -> String {
+    if let Some(s) = info.payload().downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = info.payload().downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "<non-string panic payload>".into()
+    }
 }
 
 /// enable mouse tracking: clicks, scroll, and drag with sgr coordinates

@@ -184,6 +184,24 @@ async fn dispatch_agent_event(
         registry,
     )
     .await;
+
+    // tools that touch /dev/tty (bash running `stty sane`, `reset`,
+    // a pager popping kitty kbd flags, etc) silently strip the modes
+    // we enabled at startup. restore them on every tool-end so the
+    // next redraw loop has a sane terminal underneath it
+    if let AgentEvent::ToolExecEnd { tool_name, .. } = &event
+        && tool_exec_may_touch_tty(tool_name.as_str())
+    {
+        super::terminal::reapply_tui_modes_after_tool(tui_config.terminal_policy);
+    }
+}
+
+/// tools whose execution can legitimately mutate the real tty state
+/// (via `/dev/tty` writes or child processes that take over input).
+/// keep this list narrow so we don't thrash the terminal after every
+/// tool call; bash is the only current offender worth handling
+fn tool_exec_may_touch_tty(tool_name: &str) -> bool {
+    tool_name == "bash"
 }
 
 #[allow(clippy::too_many_arguments)]
