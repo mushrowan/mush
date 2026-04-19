@@ -102,6 +102,9 @@ pub struct Config {
     /// lines scrolled per j/k keystroke in scroll mode (default 3)
     #[serde(default = "default_scroll_lines")]
     pub scroll_lines: u16,
+    /// configurable keybinds: action → key combination(s)
+    #[serde(default)]
+    pub keys: mush_tui::KeysConfig,
 }
 
 fn default_scroll_lines() -> u16 {

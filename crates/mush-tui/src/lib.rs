@@ -14,6 +14,7 @@ pub mod fuzzy;
 pub mod input;
 pub mod input_buffer;
 pub mod isolation;
+pub mod keybinds;
 pub mod markdown;
 pub mod messaging;
 pub mod notify;
@@ -35,6 +36,7 @@ pub mod widgets;
 
 pub use app::{App, AppEvent, DEFAULT_SCROLL_LINES, ThinkingDisplay};
 pub use file_tracker::IsolationMode;
+pub use keybinds::{Action as KeybindAction, KeyMap, KeysConfig};
 pub use runner::{
     HintMode, LastModelSaver, PaneSnapshot, PromptEnricher, SessionSaver, SessionSnapshot,
     ThinkingPrefsSaver, TuiConfig, run_tui,

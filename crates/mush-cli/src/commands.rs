@@ -103,6 +103,9 @@ pub fn open_config() -> Result<()> {
              # cache_timer = false  # cache warmth countdown + notifications\n\
              # system_prompt = \"\"\n\
              \n\
+             # [keys]\n\
+             # edit_steering = [\"alt+k\", \"up\", \"ctrl+k\"]  # lift queued steering msg\n\
+             \n\
              # [terminal]\n\
              # keyboard_enhancement = \"auto\"  # auto | enabled | disabled\n\
              # mouse_tracking = \"minimal\"     # minimal | disabled\n\

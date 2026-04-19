@@ -138,6 +138,8 @@ pub struct App {
     pub theme: crate::theme::Theme,
     /// lines scrolled per j/k keystroke in scroll mode
     pub scroll_lines: u16,
+    /// keybind map: action → key combination(s)
+    pub keymap: crate::keybinds::KeyMap,
 }
 
 /// state captured when /login starts an oauth flow, consumed when the user
@@ -188,6 +190,7 @@ impl App {
             settings_menu: None,
             theme: crate::theme::Theme::default(),
             scroll_lines: DEFAULT_SCROLL_LINES,
+            keymap: crate::keybinds::KeyMap::default(),
         }
     }
 

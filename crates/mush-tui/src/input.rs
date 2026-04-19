@@ -123,15 +123,19 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         _ => {}
     }
 
-    // 5. up / ctrl+k lift the last queued steering message into the
-    // input for editing when the input is empty. falls through when
-    // input has text (so ctrl+k keeps its kill-line semantic and up
-    // does nothing) or when no queued message exists
-    if app.input.text.is_empty() && app.has_queued_messages() {
-        let is_up = key.modifiers.is_empty() && matches!(key.code, KeyCode::Up);
-        let is_ctrl_k =
-            key.modifiers == KeyModifiers::CONTROL && matches!(key.code, KeyCode::Char('k'));
-        if is_up || is_ctrl_k {
+    // 5. edit_steering action: lift the last queued steering message
+    // back into the input for editing. the binding set is configurable
+    // via [keys] in config.toml. to avoid clobbering real typing,
+    // bindings without an Alt modifier require the input to be empty;
+    // Alt-prefixed bindings fire unconditionally because alt combos
+    // aren't produced by normal typing
+    if app.has_queued_messages()
+        && app
+            .keymap
+            .matches(crate::keybinds::Action::EditSteering, key)
+    {
+        let is_alt_combo = key.modifiers.contains(KeyModifiers::ALT);
+        if is_alt_combo || app.input.text.is_empty() {
             return Some(AppEvent::EditSteering);
         }
     }
@@ -207,14 +211,6 @@ fn handle_streaming_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             }
         }
         return Some(AppEvent::UserSubmit { text });
-    }
-
-    // alt+k: edit queued steering messages
-    if matches!(
-        (key.modifiers, key.code),
-        (KeyModifiers::ALT, KeyCode::Char('k'))
-    ) {
-        return Some(AppEvent::EditSteering);
     }
 
     handle_editing(app, key)
