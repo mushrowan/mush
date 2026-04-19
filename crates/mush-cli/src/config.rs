@@ -309,20 +309,28 @@ impl Config {
 /// the flattened `other` map catches any additional provider name so
 /// users can add keys for groq, deepseek, xai, cerebras, mistral,
 /// together, deepinfra, etc. without a new named field each time
+///
+/// all key values are `ApiKey`, whose Debug/Display are redacted so
+/// secrets can't accidentally leak into trace output, panic messages,
+/// or captured error bodies. access the raw value via `ApiKey::expose`
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct ApiKeys {
-    pub anthropic: Option<String>,
-    pub openrouter: Option<String>,
-    pub openai: Option<String>,
+    pub anthropic: Option<mush_ai::types::ApiKey>,
+    pub openrouter: Option<mush_ai::types::ApiKey>,
+    pub openai: Option<mush_ai::types::ApiKey>,
     #[serde(flatten)]
-    pub other: HashMap<String, String>,
+    pub other: HashMap<String, mush_ai::types::ApiKey>,
 }
 
 impl ApiKeys {
     /// collect non-None keys into a provider → key map for the TUI
+    ///
+    /// returns `ApiKey` values so the caller has to explicitly call
+    /// `.expose()` to reach the raw secret, keeping the redaction
+    /// guarantee from the config struct through to the auth layer
     #[must_use]
-    pub fn to_map(&self) -> HashMap<String, String> {
+    pub fn to_map(&self) -> HashMap<String, mush_ai::types::ApiKey> {
         let mut map = HashMap::new();
         if let Some(key) = &self.anthropic {
             map.insert("anthropic".into(), key.clone());
@@ -342,12 +350,12 @@ impl ApiKeys {
 
     /// look up an api key by provider name (named field first, then `other`)
     #[must_use]
-    pub fn get(&self, name: &str) -> Option<&str> {
+    pub fn get(&self, name: &str) -> Option<&mush_ai::types::ApiKey> {
         match name {
-            "anthropic" => self.anthropic.as_deref(),
-            "openrouter" => self.openrouter.as_deref(),
-            "openai" => self.openai.as_deref(),
-            _ => self.other.get(name).map(String::as_str),
+            "anthropic" => self.anthropic.as_ref(),
+            "openrouter" => self.openrouter.as_ref(),
+            "openai" => self.openai.as_ref(),
+            _ => self.other.get(name),
         }
     }
 }
@@ -557,17 +565,60 @@ xai = "sk-xai-test"
             Some(mush_ai::types::CacheRetention::Long)
         );
         assert!(config.debug_cache);
-        assert_eq!(config.api_keys.anthropic.as_deref(), Some("sk-ant-test"));
-        assert_eq!(config.api_keys.openai.as_deref(), Some("sk-openai-test"));
+        assert_eq!(
+            config.api_keys.anthropic.as_ref().map(|k| k.expose()),
+            Some("sk-ant-test")
+        );
+        assert_eq!(
+            config.api_keys.openai.as_ref().map(|k| k.expose()),
+            Some("sk-openai-test")
+        );
         // flattened extra providers picked up via the `other` map
-        assert_eq!(config.api_keys.get("groq"), Some("sk-groq-test"));
-        assert_eq!(config.api_keys.get("xai"), Some("sk-xai-test"));
+        assert_eq!(
+            config
+                .api_keys
+                .get("groq")
+                .map(mush_ai::types::ApiKey::expose),
+            Some("sk-groq-test")
+        );
+        assert_eq!(
+            config
+                .api_keys
+                .get("xai")
+                .map(mush_ai::types::ApiKey::expose),
+            Some("sk-xai-test")
+        );
         // unknown providers fall through to None
-        assert_eq!(config.api_keys.get("unknown-provider"), None);
+        assert!(config.api_keys.get("unknown-provider").is_none());
         // to_map merges named fields with `other`
         let map = config.api_keys.to_map();
-        assert_eq!(map.get("groq"), Some(&"sk-groq-test".to_string()));
-        assert_eq!(map.get("anthropic"), Some(&"sk-ant-test".to_string()));
+        assert_eq!(map.get("groq").map(|k| k.expose()), Some("sk-groq-test"));
+        assert_eq!(
+            map.get("anthropic").map(|k| k.expose()),
+            Some("sk-ant-test")
+        );
+    }
+
+    #[test]
+    fn api_keys_debug_output_redacts_secrets() {
+        // secrets must never leak into Debug output (trace!, dbg!, panic
+        // messages, etc). anthropic is a known field; xai-prefixed key
+        // goes through the `other` HashMap to cover both code paths
+        let toml = r#"
+[api_keys]
+anthropic = "sk-ant-VERY-SECRET-DO-NOT-LEAK-abc123"
+xai = "sk-xai-ALSO-SECRET-xyz789"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let debug = format!("{:?}", config.api_keys);
+        assert!(
+            !debug.contains("VERY-SECRET-DO-NOT-LEAK-abc123"),
+            "anthropic secret leaked in Debug: {debug}"
+        );
+        assert!(
+            !debug.contains("ALSO-SECRET-xyz789"),
+            "xai secret leaked in Debug: {debug}"
+        );
     }
 
     #[test]
