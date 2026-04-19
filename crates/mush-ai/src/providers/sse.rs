@@ -293,7 +293,7 @@ pub(crate) fn write_decode_snapshot(
         .as_millis();
     let file = format!("decode-{provider}-{model_id}-{ts}.bin");
     let path = dir.join(file);
-    if std::fs::write(&path, bytes).is_ok() {
+    if crate::private_io::write_private(&path, bytes).is_ok() {
         Some(path.display().to_string())
     } else {
         None

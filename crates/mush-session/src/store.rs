@@ -50,7 +50,7 @@ impl SessionStore {
         self.init()?;
         let path = self.session_path(&session.meta.id);
         let json = serde_json::to_string_pretty(session)?;
-        std::fs::write(path, json)?;
+        mush_ai::private_io::write_private(&path, json)?;
         Ok(())
     }
 
@@ -183,5 +183,22 @@ mod tests {
         let (_dir, store) = temp_store();
         let list = store.list().unwrap();
         assert!(list.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_session_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_dir, store) = temp_store();
+        let session = Session::new("test-model", "/tmp");
+        store.save(&session).unwrap();
+
+        let path = store.session_path(&session.meta.id);
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "session file contains user conversations and must be owner-only, got {mode:o}"
+        );
     }
 }
