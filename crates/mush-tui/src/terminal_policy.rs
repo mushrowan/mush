@@ -17,7 +17,9 @@ pub enum ParseTerminalPolicyError {
     ImageProbe(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, serde::Serialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, serde::Serialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum KeyboardEnhancementMode {
     #[default]
@@ -55,7 +57,9 @@ impl FromStr for KeyboardEnhancementMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, serde::Serialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, serde::Serialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum MouseTrackingMode {
     #[default]
@@ -89,7 +93,9 @@ impl FromStr for MouseTrackingMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, serde::Serialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, serde::Serialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum ImageProbeMode {
     #[default]
@@ -130,7 +136,9 @@ pub struct TerminalPolicyOverrides {
     pub image_probe: Option<ImageProbeMode>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, serde::Serialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, serde::Serialize, schemars::JsonSchema,
+)]
 #[serde(default)]
 pub struct TerminalPolicy {
     pub keyboard_enhancement: KeyboardEnhancementMode,

@@ -58,7 +58,17 @@ fn preview_for_tool(name: &str, output: &str) -> String {
 }
 
 /// controls how thinking text is displayed
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum ThinkingDisplay {
     /// never show thinking text

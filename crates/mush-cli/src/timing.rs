@@ -21,6 +21,12 @@ pub struct StartupReport {
     total: Duration,
 }
 
+impl Default for PhaseTimer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PhaseTimer {
     pub fn new() -> Self {
         let now = Instant::now();
