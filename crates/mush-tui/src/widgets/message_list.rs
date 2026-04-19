@@ -33,6 +33,38 @@ pub(crate) fn message_content_width(outer_width: usize) -> usize {
     outer_width.saturating_sub(MESSAGE_INDENT_LEFT + MESSAGE_INDENT_RIGHT)
 }
 
+/// minimum leading-space count across non-empty lines.
+///
+/// Claude's thinking content commonly prefixes every line with a
+/// single space. when we then prepend our own indent span, the body
+/// visually appears shifted right relative to the header. strip the
+/// common prefix so relative indentation inside the thinking block
+/// is still preserved
+#[must_use]
+pub(crate) fn common_leading_space(text: &str) -> usize {
+    text.lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.chars().take_while(|c| *c == ' ').count())
+        .min()
+        .unwrap_or(0)
+}
+
+/// drop up to `count` leading space characters from `line`. lines with
+/// fewer leading spaces than `count` have all their leading whitespace
+/// removed; non-space characters are left untouched
+#[must_use]
+pub(crate) fn drop_leading_spaces(line: &str, count: usize) -> &str {
+    let mut end = 0;
+    for (i, c) in line.char_indices().take(count) {
+        if c == ' ' {
+            end = i + 1;
+        } else {
+            break;
+        }
+    }
+    &line[end..]
+}
+
 #[cfg(test)]
 use std::cell::Cell;
 
@@ -232,8 +264,10 @@ impl Widget for MessageList<'_> {
                     Span::styled(" thinking", dim),
                 ]));
                 let visible_thinking = self.app.visible_streaming_thinking();
+                let strip = common_leading_space(visible_thinking);
                 for text_line in visible_thinking.lines() {
-                    let styled = Line::styled(text_line.to_string(), self.app.theme.thinking);
+                    let body = drop_leading_spaces(text_line, strip);
+                    let styled = Line::styled(body.to_string(), self.app.theme.thinking);
                     lines.extend(indent_line(styled, stream_content_width));
                 }
                 lines.push(Line::raw(""));
@@ -536,8 +570,10 @@ fn render_message(
     if let Some(ref thinking) = msg.thinking {
         if msg.thinking_expanded {
             let cw = message_content_width(width as usize);
+            let strip = common_leading_space(thinking);
             for text_line in thinking.lines() {
-                let styled = Line::styled(text_line.to_string(), app.theme.thinking);
+                let body = drop_leading_spaces(text_line, strip);
+                let styled = Line::styled(body.to_string(), app.theme.thinking);
                 lines.extend(indent_line(styled, cw));
             }
         } else {
@@ -2467,6 +2503,32 @@ mod tests {
     }
 
     #[test]
+    fn thinking_with_leading_space_does_not_double_indent() {
+        // Claude's thinking content typically starts each line with a single
+        // leading space. indent_line prepends its own space so without
+        // normalisation the body would render with two leading columns of
+        // whitespace, looking over-indented relative to the spinner header
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.messages.push(DisplayMessage {
+            thinking: Some(" I'm thinking about the problem\n I should reconsider".into()),
+            thinking_expanded: true,
+            ..DisplayMessage::new(MessageRole::Assistant, "answer")
+        });
+        let buf = render_app(&app, 60, 10);
+        let content = buffer_to_string(&buf);
+        for line in content.lines() {
+            if let Some(col) = line.find("I'm thinking") {
+                assert_eq!(
+                    col, 1,
+                    "expected 1-col indent for thinking body, got col {col} in line {line:?}"
+                );
+                return;
+            }
+        }
+        panic!("thinking text not found in rendered buffer:\n{content}");
+    }
+
+    #[test]
     fn expanded_thinking_uses_thinking_style() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.messages.push(DisplayMessage {
@@ -3082,6 +3144,27 @@ mod tests {
     fn read_line_number_width_ignores_non_matching() {
         assert_eq!(read_line_number_width("L1: a\nnot a line"), 1);
         assert_eq!(read_line_number_width("nothing here"), 0);
+    }
+
+    #[test]
+    fn common_leading_space_returns_min_across_non_empty_lines() {
+        assert_eq!(common_leading_space(" a\n  b\n c"), 1);
+        assert_eq!(common_leading_space("  a\n  b"), 2);
+        assert_eq!(common_leading_space("a\n  b"), 0);
+        // blank lines ignored
+        assert_eq!(common_leading_space(" a\n\n  b"), 1);
+        assert_eq!(common_leading_space(""), 0);
+    }
+
+    #[test]
+    fn drop_leading_spaces_preserves_relative_indent() {
+        assert_eq!(drop_leading_spaces(" hello", 1), "hello");
+        assert_eq!(drop_leading_spaces("  nested", 1), " nested");
+        assert_eq!(drop_leading_spaces("flush left", 1), "flush left");
+        // fewer spaces than count removes only what's there
+        assert_eq!(drop_leading_spaces(" x", 3), "x");
+        // no-op on count=0
+        assert_eq!(drop_leading_spaces("  body", 0), "  body");
     }
 
     #[test]
