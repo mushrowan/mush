@@ -168,13 +168,26 @@ impl InputBuffer {
         self.ensure_cursor_visible();
     }
 
-    /// take the input text, clearing the buffer and returning text without
-    /// image placeholders
+    /// take the input text, clearing the buffer and returning text where
+    /// each IMAGE_PLACEHOLDER is replaced by a visible `[image N]` marker
+    /// (1-indexed). the markers let the LLM bind "the second image" style
+    /// references to the correct attachment even though images are sent
+    /// as separate content blocks
     pub fn take_text(&mut self) -> String {
         self.cursor = 0;
         self.scroll.set(0);
         let input = std::mem::take(&mut self.text);
-        input.replace(IMAGE_PLACEHOLDER, "")
+        let mut n = 0;
+        let mut out = String::with_capacity(input.len());
+        for ch in input.chars() {
+            if ch == IMAGE_PLACEHOLDER {
+                n += 1;
+                out.push_str(&format!("[image {n}]"));
+            } else {
+                out.push(ch);
+            }
+        }
+        out
     }
 
     /// take pending images (clearing them from the buffer)
