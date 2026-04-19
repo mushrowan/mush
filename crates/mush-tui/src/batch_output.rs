@@ -1,7 +1,14 @@
 //! helpers for parsing and previewing batch tool output
 
-/// max lines to show in tool output preview
+/// max lines for batch sub-call previews where multiple tools compete
+/// for vertical space. batches render several panels in a row so each
+/// gets a tight budget
 const MAX_PREVIEW_LINES: usize = 12;
+/// max lines for single-tool previews. single tools own the full message
+/// width and have plenty of vertical room, so the old 12-line cap
+/// truncated edit diffs even when there was no reason to. 40 lines shows
+/// a useful diff hunk while still bounding very large tool outputs
+const MAX_SINGLE_TOOL_LINES: usize = 40;
 /// max chars per preview line
 const MAX_PREVIEW_LINE_LEN: usize = 120;
 
@@ -56,11 +63,23 @@ pub fn parse_batch_output(text: &str) -> Vec<BatchSection> {
 
 #[must_use]
 pub fn truncate_output(output: &str) -> String {
+    truncate_output_with_cap(output, MAX_PREVIEW_LINES)
+}
+
+/// preview builder for single-tool (non-batch) outputs. uses the larger
+/// `MAX_SINGLE_TOOL_LINES` cap so edit diffs and read previews keep more
+/// content visible when they own the full message width
+#[must_use]
+pub fn truncate_output_large(output: &str) -> String {
+    truncate_output_with_cap(output, MAX_SINGLE_TOOL_LINES)
+}
+
+fn truncate_output_with_cap(output: &str, max_lines: usize) -> String {
     let lines: Vec<&str> = output.lines().collect();
     let total = lines.len();
     let preview: Vec<String> = lines
         .into_iter()
-        .take(MAX_PREVIEW_LINES)
+        .take(max_lines)
         .map(|l| {
             if l.len() > MAX_PREVIEW_LINE_LEN {
                 let end = l.floor_char_boundary(MAX_PREVIEW_LINE_LEN);
@@ -71,8 +90,8 @@ pub fn truncate_output(output: &str) -> String {
         })
         .collect();
     let mut result = preview.join("\n");
-    if total > MAX_PREVIEW_LINES {
-        result.push_str(&format!("\n… ({} more lines)", total - MAX_PREVIEW_LINES));
+    if total > max_lines {
+        result.push_str(&format!("\n… ({} more lines)", total - max_lines));
     }
     result
 }
