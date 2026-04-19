@@ -331,11 +331,8 @@ impl Config {
 #[derive(Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(default)]
 pub struct ApiKeys {
-    #[schemars(extend("x-nixcfg-secret" = true))]
     pub anthropic: Option<mush_ai::types::ApiKey>,
-    #[schemars(extend("x-nixcfg-secret" = true))]
     pub openrouter: Option<mush_ai::types::ApiKey>,
-    #[schemars(extend("x-nixcfg-secret" = true))]
     pub openai: Option<mush_ai::types::ApiKey>,
     #[serde(flatten)]
     #[schemars(skip)]
