@@ -272,7 +272,10 @@ fn ensure_status_bar_cache(app: &App, width: u16) {
     }
 
     let spans = left_spans(app, width);
-    let right_text = truncate_path(&app.cwd, 30);
+    // trailing space on the right side matches the leading space on the
+    // left (`Span::styled(" ", dim)` in left_spans) so the whole bar has
+    // symmetric 1-col padding instead of flush-right cwd
+    let right_text = format!("{} ", truncate_path(&app.cwd, 30));
     let confirm = confirm_text(app);
 
     let left_width: usize = spans.iter().map(|s| s.width()).sum();
@@ -490,8 +493,8 @@ mod tests {
         );
 
         // pick a width that fits display + cwd but would trip the byte-length check.
-        // right column = cwd (1 char) + 1 space. 2 for padding between left/right.
-        let right_width = app.cwd.chars().count();
+        // right column = cwd + 1 trailing pad space + 1 gap from left-column.
+        let right_width = app.cwd.chars().count() + 1;
         let width = (display_width + 2 + right_width) as u16;
         let height = status_bar_height(&app, width);
         assert_eq!(
@@ -649,6 +652,26 @@ mod tests {
             s.push('\n');
         }
         s
+    }
+
+    #[test]
+    fn status_bar_right_side_has_symmetric_trailing_padding() {
+        // left side starts with a 1-col leading pad (Span::styled(" ", dim)).
+        // to look visually balanced, the right edge should also leave 1 col
+        // of breathing room between the cwd text and the rightmost column
+        let mut app = App::new("test-model".into(), TokenCount::new(200_000));
+        app.cwd = "~/dev/mush".into();
+        let buf = render_status(&app, 60, 1);
+        let content = buffer_to_string(&buf);
+        let line = content.lines().next().unwrap_or("");
+        assert!(
+            line.contains("~/dev/mush"),
+            "cwd should render on status bar: {line:?}"
+        );
+        assert!(
+            line.ends_with(' '),
+            "right edge of status bar should have a trailing pad space, got {line:?}"
+        );
     }
 
     #[test]
