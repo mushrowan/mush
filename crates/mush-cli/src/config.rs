@@ -29,6 +29,7 @@ fn deserialise_thinking<'de, D: Deserializer<'de>>(
 
 pub use mush_tui::HintMode;
 pub use mush_tui::IsolationMode;
+pub use mush_tui::StatusBarConfig;
 pub use mush_tui::TerminalPolicy;
 
 /// top-level config
@@ -62,6 +63,9 @@ pub struct Config {
     pub show_usage_lines: bool,
     /// show the ↑/↓/R/W token counter segment in the status bar (off by default)
     pub show_token_counters: bool,
+    /// per-segment visibility toggles for the status bar
+    #[serde(default)]
+    pub status_bar: StatusBarConfig,
     /// show cache warmth countdown and send desktop notifications (off by default)
     pub cache_timer: bool,
     /// multi-pane file isolation mode: none (detect-and-warn), worktree, jj

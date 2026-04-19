@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use mush_ai::types::ToolCallId;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Text};
+use serde::Deserialize;
 
 use crate::app::ScrollUnit;
 use crate::app_event::AppMode;
@@ -43,6 +44,47 @@ pub struct CompletionState {
     pub favourites_locked: bool,
 }
 
+/// toggles for individual status bar segments
+///
+/// everything defaults on so existing setups are unaffected. per-field
+/// `show_cost` and `show_token_counters` live on `InteractionState`
+/// (separately toggleable at runtime via `/cost`), not here
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct StatusBarConfig {
+    /// `thinking: <level>` segment
+    pub show_thinking: bool,
+    /// `<used>/<window>` context + cache warmth segment
+    pub show_context: bool,
+    /// oauth 5h / 7d usage bars (claude code plan)
+    pub show_oauth_usage: bool,
+    /// ephemeral status messages from slash commands, tools, etc
+    pub show_status_messages: bool,
+    /// `N%` percent-from-top when scrolled up
+    pub show_scroll_position: bool,
+    /// background pane notifications
+    pub show_background_alerts: bool,
+    /// `[i/n]` pane indicator when multi-pane
+    pub show_pane_indicator: bool,
+    /// cwd in the right column
+    pub show_cwd: bool,
+}
+
+impl Default for StatusBarConfig {
+    fn default() -> Self {
+        Self {
+            show_thinking: true,
+            show_context: true,
+            show_oauth_usage: true,
+            show_status_messages: true,
+            show_scroll_position: true,
+            show_background_alerts: true,
+            show_pane_indicator: true,
+            show_cwd: true,
+        }
+    }
+}
+
 /// modal and prompt-related ui state
 #[derive(Debug)]
 pub struct InteractionState {
@@ -64,6 +106,8 @@ pub struct InteractionState {
     pub show_usage_lines: bool,
     /// whether to show the ↑/↓/R/W token counters in the status bar (off by default)
     pub show_token_counters: bool,
+    /// per-segment visibility toggles for the status bar
+    pub status_bar: StatusBarConfig,
 }
 
 impl Default for InteractionState {
@@ -78,6 +122,7 @@ impl Default for InteractionState {
             show_cost: false,
             show_usage_lines: false,
             show_token_counters: false,
+            status_bar: StatusBarConfig::default(),
         }
     }
 }

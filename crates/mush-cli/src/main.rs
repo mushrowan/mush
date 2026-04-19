@@ -562,6 +562,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         show_cost: setup.cfg.show_cost,
         show_usage_lines: setup.cfg.show_usage_lines,
         show_token_counters: setup.cfg.show_token_counters,
+        status_bar_config: setup.cfg.status_bar.clone(),
         debug_cache: setup.debug_cache,
         cache_timer: setup.cfg.cache_timer,
         thinking_display: setup.cfg.thinking_display,

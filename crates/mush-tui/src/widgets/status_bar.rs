@@ -85,7 +85,9 @@ fn left_spans(app: &App, width: u16) -> Vec<Span<'static>> {
     let mut spans = vec![Span::styled(" ", dim)];
 
     // pane indicator when multi-pane
-    if let Some((pane_idx, pane_count)) = app.pane_info {
+    if app.interaction.status_bar.show_pane_indicator
+        && let Some((pane_idx, pane_count)) = app.pane_info
+    {
         spans.push(Span::styled(
             format!("[{pane_idx}/{pane_count}] "),
             app.theme.status_model,
@@ -94,18 +96,21 @@ fn left_spans(app: &App, width: u16) -> Vec<Span<'static>> {
 
     let sep = Span::styled(" │ ", dim);
 
-    spans.extend([
-        Span::styled(app.model_id.abbreviated(), app.theme.status_model),
-        sep.clone(),
-        Span::styled(
+    spans.push(Span::styled(
+        app.model_id.abbreviated(),
+        app.theme.status_model,
+    ));
+    if app.interaction.status_bar.show_thinking {
+        spans.push(sep.clone());
+        spans.push(Span::styled(
             format!("thinking: {thinking_label}"),
             if app.thinking_level == ThinkingLevel::Off {
                 dim
             } else {
                 app.theme.status_model
             },
-        ),
-    ]);
+        ));
+    }
 
     if app.interaction.show_token_counters {
         if app.stats.input_tokens > TokenCount::ZERO {
@@ -134,7 +139,7 @@ fn left_spans(app: &App, width: u16) -> Vec<Span<'static>> {
         }
     }
 
-    if app.stats.context_tokens > TokenCount::ZERO {
+    if app.interaction.status_bar.show_context && app.stats.context_tokens > TokenCount::ZERO {
         let ctx = format_tokens(app.stats.context_tokens);
         let window = format_tokens(app.stats.context_window);
         let pct = app
@@ -190,7 +195,9 @@ fn left_spans(app: &App, width: u16) -> Vec<Span<'static>> {
     }
 
     // oauth usage bars
-    if let Some(ref usage) = app.oauth_usage {
+    if app.interaction.status_bar.show_oauth_usage
+        && let Some(ref usage) = app.oauth_usage
+    {
         let bar_w = usage_bar_width(width);
         if let Some(ref w) = usage.five_hour {
             let pace = w.pace(mush_ai::oauth::usage::OAuthUsage::FIVE_HOUR);
@@ -216,7 +223,8 @@ fn left_spans(app: &App, width: u16) -> Vec<Span<'static>> {
         }
     }
 
-    if let Some(ref status) = app.status
+    if app.interaction.status_bar.show_status_messages
+        && let Some(ref status) = app.status
         && status != "config reloaded"
     {
         spans.push(sep.clone());
@@ -237,7 +245,7 @@ fn left_spans(app: &App, width: u16) -> Vec<Span<'static>> {
     }
 
     // scroll position indicator (only when scrolled away from bottom)
-    if app.scroll_offset > 0 {
+    if app.interaction.status_bar.show_scroll_position && app.scroll_offset > 0 {
         let total = app.render_state.total_content_lines.get();
         let visible = app.render_state.visible_area_height.get();
         let max_scroll = total.saturating_sub(visible);
@@ -250,7 +258,9 @@ fn left_spans(app: &App, width: u16) -> Vec<Span<'static>> {
     }
 
     // background pane alerts
-    if let Some(ref alert) = app.background_alert {
+    if app.interaction.status_bar.show_background_alerts
+        && let Some(ref alert) = app.background_alert
+    {
         spans.push(sep.clone());
         spans.push(Span::styled(alert.clone(), app.theme.alert));
     }
@@ -277,7 +287,11 @@ fn ensure_status_bar_cache(app: &App, width: u16) {
     // trailing space on the right side matches the leading space on the
     // left (`Span::styled(" ", dim)` in left_spans) so the whole bar has
     // symmetric 1-col padding instead of flush-right cwd
-    let right_text = format!("{} ", truncate_path(&app.cwd, 30));
+    let right_text = if app.interaction.status_bar.show_cwd {
+        format!("{} ", truncate_path(&app.cwd, 30))
+    } else {
+        String::new()
+    };
     let confirm = confirm_text(app);
 
     let left_width: usize = spans.iter().map(|s| s.width()).sum();
@@ -607,6 +621,64 @@ mod tests {
         assert!(
             content.contains("thinking:"),
             "missing thinking: label: {content}"
+        );
+    }
+
+    #[test]
+    fn status_bar_hides_thinking_when_toggle_off() {
+        let mut app = App::new("test-model".into(), TokenCount::new(200_000));
+        app.interaction.status_bar.show_thinking = false;
+        let buf = render_status(&app, 120, 1);
+        let content = buffer_to_string(&buf);
+        assert!(
+            !content.contains("thinking:"),
+            "thinking segment should be hidden: {content}"
+        );
+    }
+
+    #[test]
+    fn status_bar_hides_context_when_toggle_off() {
+        let mut app = App::new("test-model".into(), TokenCount::new(200_000));
+        app.stats.context_tokens = TokenCount::new(10_000);
+        app.interaction.status_bar.show_context = false;
+        let buf = render_status(&app, 120, 1);
+        let content = buffer_to_string(&buf);
+        assert!(
+            !content.contains("10k/200k"),
+            "context segment should be hidden: {content}"
+        );
+    }
+
+    #[test]
+    fn status_bar_hides_cwd_when_toggle_off() {
+        let mut app = App::new("test-model".into(), TokenCount::new(200_000));
+        app.cwd = "/home/user/dev/mush".into();
+        app.interaction.status_bar.show_cwd = false;
+        let buf = render_status(&app, 120, 1);
+        let content = buffer_to_string(&buf);
+        assert!(
+            !content.contains("mush"),
+            "cwd segment should be hidden: {content}"
+        );
+    }
+
+    #[test]
+    fn status_bar_hides_oauth_usage_when_toggle_off() {
+        use mush_ai::oauth::usage::{OAuthUsage, UsageWindow};
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.oauth_usage = Some(OAuthUsage {
+            five_hour: Some(UsageWindow {
+                utilization: 37.0,
+                resets_at: chrono::Utc::now() + chrono::TimeDelta::minutes(150),
+            }),
+            seven_day: None,
+        });
+        app.interaction.status_bar.show_oauth_usage = false;
+        let buf = render_status(&app, 140, 1);
+        let content = buffer_to_string(&buf);
+        assert!(
+            !content.contains("5h"),
+            "5h oauth bar should be hidden: {content}"
         );
     }
 

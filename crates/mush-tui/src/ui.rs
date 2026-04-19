@@ -135,11 +135,42 @@ impl Widget for Ui<'_> {
         InputBox::new(self.app).render(regions.input, buf);
         if !self.hide_status {
             StatusBar::new(self.app).render(regions.status, buf);
+            // join status bar dividers into the input box's bottom border:
+            // wherever the top row of the status bar holds a `│`, tee the
+            // cell directly above so the bar reads as one visual unit with
+            // the input frame instead of a floating set of pipes
+            join_status_dividers(&regions, buf);
         }
 
         // floating popups
         if self.app.interaction.mode == AppMode::Search {
             SearchPopup::new(self.app).render(area, buf);
+        }
+    }
+}
+
+/// overlay `┴` on the input box's bottom border wherever the status
+/// bar has a `│` divider in its top row directly below
+fn join_status_dividers(regions: &LayoutRegions, buf: &mut Buffer) {
+    if regions.status.height == 0 || regions.input.height == 0 {
+        return;
+    }
+    let input_bottom_y = regions.input.y + regions.input.height - 1;
+    let status_top_y = regions.status.y;
+    if status_top_y != input_bottom_y + 1 {
+        // non-adjacent layout (tools panel etc) - nothing to join
+        return;
+    }
+    let x_start = regions.status.x;
+    let x_end = regions.status.x + regions.status.width;
+    for x in x_start..x_end {
+        let status_cell = &buf[(x, status_top_y)];
+        if status_cell.symbol() != "│" {
+            continue;
+        }
+        let border_cell = &mut buf[(x, input_bottom_y)];
+        if border_cell.symbol() == "─" {
+            border_cell.set_symbol("┴");
         }
     }
 }
@@ -338,5 +369,35 @@ mod tests {
             s.push('\n');
         }
         s
+    }
+
+    #[test]
+    fn status_bar_dividers_tee_into_input_box_border() {
+        // any column where the status bar opens with a `│` should flip the
+        // input box's bottom border from `─` to `┴` in the row above,
+        // turning the floating pipe into a visually joined tee
+        let app = App::new("claude-sonnet-4".into(), TokenCount::new(200_000));
+        let buf = render_full(&app, 120, 24);
+
+        // find the input bottom border row: it's a run of `─` immediately
+        // above the first row that contains a status bar `│` divider
+        let mut status_row = None;
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                if buf[(x, y)].symbol() == "│" {
+                    status_row = Some((x, y));
+                    break;
+                }
+            }
+            if status_row.is_some() {
+                break;
+            }
+        }
+        let (pipe_x, pipe_y) = status_row.expect("no status bar `│` divider rendered");
+        let border_cell = buf[(pipe_x, pipe_y - 1)].symbol().to_string();
+        assert_eq!(
+            border_cell, "┴",
+            "input bottom border above divider at col {pipe_x} should be `┴`, was `{border_cell}`"
+        );
     }
 }

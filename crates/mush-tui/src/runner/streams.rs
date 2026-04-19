@@ -1699,6 +1699,7 @@ mod tests {
             show_cost: false,
             show_usage_lines: false,
             show_token_counters: false,
+            status_bar_config: Default::default(),
             debug_cache: false,
             cache_timer: false,
             thinking_display: crate::app::ThinkingDisplay::Collapse,
