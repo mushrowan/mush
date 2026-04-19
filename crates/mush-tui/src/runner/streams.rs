@@ -1603,6 +1603,7 @@ mod tests {
             auto_fork_compact: false,
             show_cost: false,
             show_usage_lines: false,
+            show_token_counters: false,
             debug_cache: false,
             cache_timer: false,
             thinking_display: crate::app::ThinkingDisplay::Collapse,

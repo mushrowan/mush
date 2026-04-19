@@ -96,6 +96,8 @@ pub struct TuiConfig {
     pub show_cost: bool,
     /// render per-message usage lines (off by default, same info is in status bar)
     pub show_usage_lines: bool,
+    /// show ↑/↓/R/W token counter segment in status bar (off by default)
+    pub show_token_counters: bool,
     /// emit system messages when cache reads are observed
     pub debug_cache: bool,
     /// show cache warmth countdown in status bar and send desktop notifications

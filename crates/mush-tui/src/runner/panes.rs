@@ -146,6 +146,7 @@ pub(super) async fn fork_pane(
     new_app.cwd = cwd.clone();
     new_app.interaction.show_cost = tui_config.show_cost;
     new_app.interaction.show_usage_lines = tui_config.show_usage_lines;
+    new_app.interaction.show_token_counters = tui_config.show_token_counters;
     new_app.cache.ttl_secs = if tui_config.cache_timer {
         let is_oauth = tui_config
             .options
@@ -343,6 +344,7 @@ fn app_from_parent(parent: &crate::pane::Pane, tui_config: &TuiConfig) -> App {
     app.cwd = parent.app.cwd.clone();
     app.interaction.show_cost = tui_config.show_cost;
     app.interaction.show_usage_lines = tui_config.show_usage_lines;
+    app.interaction.show_token_counters = tui_config.show_token_counters;
     app
 }
 
@@ -516,6 +518,7 @@ mod tests {
             auto_fork_compact: false,
             show_cost: false,
             show_usage_lines: false,
+            show_token_counters: false,
             debug_cache: false,
             cache_timer: false,
             thinking_display: crate::app::ThinkingDisplay::Collapse,
