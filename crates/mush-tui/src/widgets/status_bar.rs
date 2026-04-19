@@ -107,29 +107,31 @@ fn left_spans(app: &App, width: u16) -> Vec<Span<'static>> {
         ),
     ]);
 
-    if app.stats.input_tokens > TokenCount::ZERO {
-        spans.push(Span::styled(
-            format!(" ↑{}", format_tokens(app.stats.input_tokens)),
-            dim,
-        ));
-    }
-    if app.stats.output_tokens > TokenCount::ZERO {
-        spans.push(Span::styled(
-            format!(" ↓{}", format_tokens(app.stats.output_tokens)),
-            dim,
-        ));
-    }
-    if app.stats.cache_read_tokens > TokenCount::ZERO {
-        spans.push(Span::styled(
-            format!(" R{}", format_tokens(app.stats.cache_read_tokens)),
-            dim,
-        ));
-    }
-    if app.stats.cache_write_tokens > TokenCount::ZERO {
-        spans.push(Span::styled(
-            format!(" W{}", format_tokens(app.stats.cache_write_tokens)),
-            dim,
-        ));
+    if app.interaction.show_token_counters {
+        if app.stats.input_tokens > TokenCount::ZERO {
+            spans.push(Span::styled(
+                format!(" ↑{}", format_tokens(app.stats.input_tokens)),
+                dim,
+            ));
+        }
+        if app.stats.output_tokens > TokenCount::ZERO {
+            spans.push(Span::styled(
+                format!(" ↓{}", format_tokens(app.stats.output_tokens)),
+                dim,
+            ));
+        }
+        if app.stats.cache_read_tokens > TokenCount::ZERO {
+            spans.push(Span::styled(
+                format!(" R{}", format_tokens(app.stats.cache_read_tokens)),
+                dim,
+            ));
+        }
+        if app.stats.cache_write_tokens > TokenCount::ZERO {
+            spans.push(Span::styled(
+                format!(" W{}", format_tokens(app.stats.cache_write_tokens)),
+                dim,
+            ));
+        }
     }
 
     if app.stats.context_tokens > TokenCount::ZERO {
@@ -398,6 +400,7 @@ mod tests {
         let mut app = App::new("test-model".into(), TokenCount::new(200_000));
         app.stats.total_cost = Dollars::new(0.0123);
         app.interaction.show_cost = true;
+        app.interaction.show_token_counters = true;
         app.stats.input_tokens = TokenCount::new(45_000);
         app.stats.output_tokens = TokenCount::new(12_000);
         app.stats.cache_read_tokens = TokenCount::new(8_000);
@@ -411,6 +414,36 @@ mod tests {
         assert!(content.contains("W2k"));
         assert!(content.contains("45k/200k"));
         assert!(content.contains("$0.0123"));
+    }
+
+    #[test]
+    fn status_bar_hides_token_counters_by_default() {
+        // the ↑/↓/R/W counters are noisy for most users. context tokens
+        // and cache state are already shown via the ctx/window segment,
+        // so hide them unless opted in via `show_token_counters`
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.stats.input_tokens = TokenCount::new(45_000);
+        app.stats.output_tokens = TokenCount::new(12_000);
+        app.stats.cache_read_tokens = TokenCount::new(8_000);
+        app.stats.cache_write_tokens = TokenCount::new(2_000);
+        let buf = render_status(&app, 120, 1);
+        let content = buffer_to_string(&buf);
+        assert!(
+            !content.contains("↑45k"),
+            "input counter should be hidden by default: {content}"
+        );
+        assert!(
+            !content.contains("↓12k"),
+            "output counter should be hidden by default: {content}"
+        );
+        assert!(
+            !content.contains("R8k"),
+            "cache-read counter should be hidden by default: {content}"
+        );
+        assert!(
+            !content.contains("W2k"),
+            "cache-write counter should be hidden by default: {content}"
+        );
     }
 
     #[test]
@@ -451,6 +484,7 @@ mod tests {
     #[test]
     fn status_bar_wraps_to_two_lines_when_content_exceeds_width() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.interaction.show_token_counters = true;
         app.stats.input_tokens = TokenCount::new(45_000);
         app.stats.output_tokens = TokenCount::new(12_000);
         app.stats.cache_read_tokens = TokenCount::new(8_000);
@@ -477,6 +511,7 @@ mod tests {
         // check and force a spurious 2-line status bar. ratatui's Paragraph::wrap
         // uses display width so only renders 1 line, leaving a blank second line
         let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.interaction.show_token_counters = true;
         app.stats.input_tokens = TokenCount::new(45_000);
         app.stats.output_tokens = TokenCount::new(12_000);
         app.stats.cache_read_tokens = TokenCount::new(8_000);

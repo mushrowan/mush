@@ -99,6 +99,7 @@ pub fn open_config() -> Result<()> {
              # debug_cache = false\n\
              # show_cost = false  # toggle with /cost\n\
              # show_usage_lines = false  # render usage lines under each message\n\
+             # show_token_counters = false  # ↑/↓/R/W token counters in status bar\n\
              # cache_timer = false  # cache warmth countdown + notifications\n\
              # system_prompt = \"\"\n\
              \n\

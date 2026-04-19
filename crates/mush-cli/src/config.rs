@@ -60,6 +60,8 @@ pub struct Config {
     pub show_cost: bool,
     /// render per-message usage lines (off by default, same info is in the status bar)
     pub show_usage_lines: bool,
+    /// show the ↑/↓/R/W token counter segment in the status bar (off by default)
+    pub show_token_counters: bool,
     /// show cache warmth countdown and send desktop notifications (off by default)
     pub cache_timer: bool,
     /// multi-pane file isolation mode: none (detect-and-warn), worktree, jj

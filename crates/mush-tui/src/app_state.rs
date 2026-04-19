@@ -62,6 +62,8 @@ pub struct InteractionState {
     pub show_cost: bool,
     /// whether to render per-message usage lines (off by default, same info is in status bar)
     pub show_usage_lines: bool,
+    /// whether to show the ↑/↓/R/W token counters in the status bar (off by default)
+    pub show_token_counters: bool,
 }
 
 impl Default for InteractionState {
@@ -75,6 +77,7 @@ impl Default for InteractionState {
             show_prompt_injection: false,
             show_cost: false,
             show_usage_lines: false,
+            show_token_counters: false,
         }
     }
 }
