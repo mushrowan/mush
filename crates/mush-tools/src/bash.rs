@@ -119,6 +119,9 @@ impl AgentTool for BashTool {
          For searching file contents, use the Grep tool instead of running grep or rg via bash. \
          For locating files, use the Find or Glob tools instead of running find via bash. \
          Do not run interactive commands (e.g. vim, python REPL, less) as stdin is not available. \
+         Commands like `jj commit`, `git commit` or `crontab -e` without an explicit -m/--message \
+         will fail fast because EDITOR is set to `false` in the child environment - always pass \
+         the message explicitly on the command line. \
          Commands that produce no output for 240s are killed automatically."
     }
 
@@ -240,6 +243,11 @@ async fn run_background_command(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
+    // same editor-launch guard as run_command_with_no_output_timeout
+    for var in ["EDITOR", "VISUAL", "GIT_EDITOR", "JJ_EDITOR"] {
+        cmd.env(var, "false");
+    }
+
     #[cfg(unix)]
     cmd.process_group(0);
 
@@ -325,6 +333,13 @@ async fn run_command_with_no_output_timeout(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+
+    // prevent accidental editor launches (`jj commit`, `git commit`,
+    // `crontab -e`, ...) from hanging the agent forever. the child
+    // fails with a non-zero exit the llm can read and retry with -m
+    for var in ["EDITOR", "VISUAL", "GIT_EDITOR", "JJ_EDITOR"] {
+        cmd.env(var, "false");
+    }
 
     // isolate child from the TUI's process group so it can't write to the
     // controlling terminal (which would inject bytes into crossterm's parser)
@@ -537,6 +552,22 @@ mod tests {
         assert!(result.outcome.is_success());
         let text = extract_text(&result);
         assert!(text.contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn editor_var_is_false_so_editor_launches_fail_fast() {
+        // commands like `jj commit` or `git commit` without -m try to
+        // launch $EDITOR in a non-interactive context and hang forever.
+        // we force EDITOR/VISUAL/GIT_EDITOR/JJ_EDITOR = false so the
+        // child immediately fails with a clear error that the agent
+        // can read and retry correctly.
+        let cwd = std::env::current_dir().unwrap();
+        let result = run_command(&cwd, "echo editor=$EDITOR", 10, None, false).await;
+        let text = extract_text(&result);
+        assert!(
+            text.contains("editor=false"),
+            "expected EDITOR=false in child env, got {text}"
+        );
     }
 
     #[tokio::test]
