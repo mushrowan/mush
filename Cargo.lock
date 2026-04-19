@@ -3064,6 +3064,7 @@ dependencies = [
  "mush-tools",
  "mush-treesitter",
  "mush-tui",
+ "nixcfg-rs",
  "pretty_assertions",
  "reqwest 0.13.2",
  "schemars",
@@ -3319,6 +3320,29 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
+]
+
+[[package]]
+name = "nixcfg-rs"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "48b91c4b40c25675ddd1f6f2d90414dda5a276985e39267a08cf87c575d2084c"
+dependencies = [
+ "nixcfg-rs-derive",
+ "schemars",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nixcfg-rs-derive"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "390a8442c2e15bb3b578fa867c67602a15d005be537b11ef9d989ca1b0392a43"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]
