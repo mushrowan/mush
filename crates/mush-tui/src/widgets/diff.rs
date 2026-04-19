@@ -154,7 +154,7 @@ fn fit_spans(spans: Vec<Span<'static>>, width: usize, pad_style: Style) -> Vec<S
         }
         break;
     }
-    out.push(Span::raw(ELLIPSIS.to_string()));
+    out.push(Span::styled(ELLIPSIS.to_string(), pad_style));
     out
 }
 
@@ -965,6 +965,30 @@ mod tests {
             let text_b: String = row_b.spans.iter().map(|s| s.content.as_ref()).collect();
             assert_eq!(text_a, text_b);
         }
+    }
+
+    #[test]
+    fn render_diff_ellipsis_on_truncated_added_line_inherits_line_bg() {
+        // regression: when a + line is truncated with `…`, the ellipsis
+        // span used Span::raw (default style), leaving an unhighlighted
+        // gap at the end of an otherwise-tinted row. the ellipsis should
+        // carry the same pad style as the rest of the line so the bg tint
+        // stays continuous across the whole row
+        let theme = Theme::dark();
+        let long = "x".repeat(200);
+        let rows = render_diff(&format!("+ {long}\n"), 40, &theme);
+        let row = rows.first().expect("one added row");
+        let ellipsis_span = row
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref() == "…")
+            .expect("row ends with an ellipsis span");
+        assert_eq!(
+            ellipsis_span.style.bg,
+            theme.diff_base_added().bg,
+            "ellipsis on added row should inherit added bg, got {:?}",
+            ellipsis_span.style
+        );
     }
 
     #[test]
