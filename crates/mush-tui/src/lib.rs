@@ -35,6 +35,7 @@ pub mod ui;
 pub mod widgets;
 
 pub use app::{App, AppEvent, DEFAULT_SCROLL_LINES, ThinkingDisplay};
+pub use app_state::StatusBarConfig;
 pub use file_tracker::IsolationMode;
 pub use keybinds::{Action as KeybindAction, KeyMap, KeysConfig};
 pub use runner::{
