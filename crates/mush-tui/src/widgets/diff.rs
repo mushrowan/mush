@@ -31,6 +31,10 @@ pub enum DiffEvent {
     /// elided gap between change groups (was `  …` in source, or `  ...`
     /// for legacy/session-resumed output)
     Gap,
+    /// "… (N more lines)" footer emitted by truncate_output when the
+    /// preview exceeds the cap. rendered with a full-width subtle bg
+    /// so it reads as part of the diff block, not a floating row
+    TruncationFooter(String),
 }
 
 /// parse diff text into a sequence of events.
@@ -46,6 +50,8 @@ pub fn parse_diff_lines(text: &str) -> Vec<DiffEvent> {
                 DiffEvent::Removed(rest.to_string())
             } else if matches!(line.trim_start(), "..." | "…") {
                 DiffEvent::Gap
+            } else if is_truncation_footer(line) {
+                DiffEvent::TruncationFooter(line.trim_start().to_string())
             } else if let Some(rest) = line.strip_prefix("  ") {
                 DiffEvent::Context(rest.to_string())
             } else {
@@ -54,6 +60,14 @@ pub fn parse_diff_lines(text: &str) -> Vec<DiffEvent> {
             }
         })
         .collect()
+}
+
+/// detect the `… (N more lines)` footer written by `truncate_output` /
+/// `truncate_output_large`. matches either the ASCII three-dot form
+/// (from pre-unicode sessions) or the single-char `…` form
+fn is_truncation_footer(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    (trimmed.starts_with('…') || trimmed.starts_with("...")) && trimmed.contains("more line")
 }
 
 /// truncate `text` so its unicode display width is at most `max`,
@@ -81,12 +95,16 @@ fn truncate_display(text: &str, max: usize) -> String {
 }
 
 /// render a styled cell of fixed display width, padding with spaces
+/// that carry the same style so backgrounds extend to the edge
 fn cell<'a>(text: String, width: usize, style: Style) -> Vec<Span<'a>> {
     use unicode_width::UnicodeWidthStr;
     let truncated = truncate_display(&text, width);
     let used = UnicodeWidthStr::width(truncated.as_str());
     let pad = width.saturating_sub(used);
-    vec![Span::styled(truncated, style), Span::raw(" ".repeat(pad))]
+    vec![
+        Span::styled(truncated, style),
+        Span::styled(" ".repeat(pad), style),
+    ]
 }
 
 /// fit a sequence of pre-styled spans to exactly `width` display columns,
@@ -437,6 +455,14 @@ fn render_inline(
                 rows.push(Line::from(cell("  …".into(), inner_width, theme.dim)));
                 i += 1;
             }
+            DiffEvent::TruncationFooter(s) => {
+                rows.push(Line::from(cell(
+                    format!("  {s}"),
+                    inner_width,
+                    theme.diff_footer,
+                )));
+                i += 1;
+            }
             DiffEvent::Removed(_) | DiffEvent::Added(_) => {
                 let run_start = i;
                 while i < events.len()
@@ -509,6 +535,16 @@ fn render_side_by_side(
                 let mut spans = cell("  …".into(), left_width, theme.dim);
                 spans.push(Span::styled(" │ ", sep_style));
                 spans.extend(cell("  …".into(), right_width, theme.dim));
+                rows.push(Line::from(spans));
+                i += 1;
+            }
+            DiffEvent::TruncationFooter(s) => {
+                // footer spans the full row as one unit; split across the two
+                // columns but use the diff_footer style for both halves plus
+                // the separator so the bg is visually continuous
+                let mut spans = cell(format!("  {s}"), left_width, theme.diff_footer);
+                spans.push(Span::styled(" │ ", theme.diff_footer));
+                spans.extend(cell(String::new(), right_width, theme.diff_footer));
                 rows.push(Line::from(spans));
                 i += 1;
             }
@@ -587,6 +623,37 @@ mod tests {
         // older sessions still contain `  ...` in saved tool output
         let events = parse_diff_lines("  ...\n");
         assert_eq!(events, vec![DiffEvent::Gap]);
+    }
+
+    #[test]
+    fn parse_identifies_truncation_footer() {
+        // the "… (N more lines)" pattern emitted by truncate_output /
+        // truncate_output_large becomes a distinct event so the renderer
+        // can style it as a block-footer instead of floating context
+        let events = parse_diff_lines("+ added line\n… (12 more lines)\n");
+        assert_eq!(
+            events,
+            vec![
+                DiffEvent::Added("added line".into()),
+                DiffEvent::TruncationFooter("… (12 more lines)".into()),
+            ],
+            "footer should parse as TruncationFooter, not Context"
+        );
+    }
+
+    #[test]
+    fn render_diff_truncation_footer_uses_footer_style() {
+        let theme = Theme::default();
+        let rows = render_diff("+ line one\n+ line two\n… (5 more lines)\n", 40, &theme);
+        let last = rows.last().expect("footer row exists");
+        // every span on the footer row should carry the diff_footer bg so
+        // the bar extends across the whole row rather than stopping mid-way
+        for span in &last.spans {
+            assert_eq!(
+                span.style.bg, theme.diff_footer.bg,
+                "footer row span missing diff_footer bg: {span:?}"
+            );
+        }
     }
 
     #[test]
