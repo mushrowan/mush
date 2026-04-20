@@ -61,9 +61,18 @@ impl CacheTimer {
         self.expired_sent = false;
     }
 
-    /// seconds remaining before cache expires, None if no active cache
+    /// seconds remaining before cache expires.
+    ///
+    /// returns `None` when the timer isn't actively tracking: either
+    /// the cache was never warmed (`last_active.is_none()`) or the
+    /// idle timer is disabled for this provider/config (`ttl_secs == 0`).
+    /// returning `None` in the disabled case prevents the status bar
+    /// from rendering " cold" even though we aren't observing warmth
     #[must_use]
     pub fn remaining_secs(&self) -> Option<u16> {
+        if self.ttl_secs == 0 {
+            return None;
+        }
         let elapsed = self.last_active?.elapsed().as_secs() as u16;
         if elapsed >= self.ttl_secs {
             Some(0)

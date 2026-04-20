@@ -602,6 +602,25 @@ mod tests {
     }
 
     #[test]
+    fn status_bar_hides_cold_when_cache_timer_disabled() {
+        // when ttl_secs == 0 the idle timer is off: we shouldn't claim the
+        // cache is "cold" because we aren't tracking warmth at all. prior
+        // behaviour: refresh() with ttl=0 set last_active=Some, remaining_secs
+        // returned Some(0), suffix rendered as " cold" during active use
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.cache.ttl_secs = 0;
+        app.stats.context_tokens = TokenCount::new(10_000);
+        app.cache.refresh();
+        let buf = render_status(&app, 120, 1);
+        let content = buffer_to_string(&buf);
+        assert!(content.contains("10k/200k"));
+        assert!(
+            !content.contains("cold"),
+            "expected no 'cold' suffix with idle timer off, got: {content}"
+        );
+    }
+
+    #[test]
     fn truncate_path_long_keeps_tail() {
         let long = "~/dev/some/deep/nested/project";
         let result = truncate_path(long, 20);
