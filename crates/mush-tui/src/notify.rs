@@ -15,7 +15,7 @@ pub enum Sound {
 
 impl Sound {
     /// freedesktop sound theme filename
-    pub(crate) fn filename(self) -> &'static str {
+    fn filename(self) -> &'static str {
         match self {
             // message.oga is a soft mail-like ping. complete.oga (big chime)
             // is meant for the end of long batch tasks and gets grating as

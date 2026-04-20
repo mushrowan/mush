@@ -1,5 +1,6 @@
 //! agent tool trait and result types
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -111,16 +112,19 @@ fn preview_args(args: &serde_json::Value) -> String {
                 .collect();
             format!("{{{}}}", parts.join(", "))
         }
-        other => truncate_preview(&other.to_string()),
+        other => truncate_preview(&other.to_string()).into_owned(),
     }
 }
 
-fn truncate_preview(s: &str) -> String {
-    if s.chars().count() <= PREVIEW_VALUE_CHARS {
-        return s.to_string();
+fn truncate_preview(s: &str) -> Cow<'_, str> {
+    // `.chars().nth(N).is_some()` is O(N+1) instead of O(len): we only
+    // need to know "more than N chars?" not the exact count. returns
+    // `Cow::Borrowed` for short inputs to skip a heap allocation
+    if s.chars().nth(PREVIEW_VALUE_CHARS).is_none() {
+        return Cow::Borrowed(s);
     }
     let head: String = s.chars().take(PREVIEW_VALUE_CHARS).collect();
-    format!("{head}…")
+    Cow::Owned(format!("{head}…"))
 }
 
 pub fn parse_tool_args<T>(args: serde_json::Value) -> Result<T, ToolResult>
