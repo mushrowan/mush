@@ -65,18 +65,23 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     // 2. global bindings
     match (key.modifiers, key.code) {
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => return Some(AppEvent::Quit),
-        // scroll cascade: esc first jumps to bottom if scrolled up, only
-        // aborts once already anchored there. this applies even while
-        // streaming so users can re-anchor without cancelling a long turn
-        _ if is_cancel_key(key) && app.scroll_offset > 0 => {
-            app.scroll_to_bottom();
-            return None;
-        }
-        _ if is_cancel_key(key) && app.stream.active => return Some(AppEvent::Abort),
         // ctrl+v works in both idle and streaming so the user can stage
         // images for mid-turn steering without aborting the stream
         (KeyModifiers::CONTROL, KeyCode::Char('v')) => return Some(AppEvent::PasteImage),
         _ => {}
+    }
+    // scroll / cancel cascade: esc (or ctrl+[) first jumps to bottom if
+    // scrolled up, only aborts once already anchored there. this applies
+    // even while streaming so users can re-anchor without cancelling a
+    // long turn. single check + internal branches avoids duplicate guards
+    if is_cancel_key(key) {
+        if app.scroll_offset > 0 {
+            app.scroll_to_bottom();
+            return None;
+        }
+        if app.stream.active {
+            return Some(AppEvent::Abort);
+        }
     }
     // dedicated "go to bottom" hotkey: configurable, default shift+End.
     // fires regardless of stream state and never aborts
@@ -362,13 +367,17 @@ fn try_expand_at_template(app: &mut App) -> bool {
     else {
         return false;
     };
+    // disjoint-field borrow: &app.completion.templates and
+    // &mut app.input.text don't alias, so no clone needed on content
     let Some(template) = crate::at_template::find_exact(&app.completion.templates, &trigger) else {
         return false;
     };
-    let content = template.content.clone();
     let end = app.input.cursor;
-    app.input.text.replace_range(trigger.start..end, &content);
-    app.input.cursor = trigger.start + content.len();
+    let new_cursor = trigger.start + template.content.len();
+    app.input
+        .text
+        .replace_range(trigger.start..end, &template.content);
+    app.input.cursor = new_cursor;
     app.input.ensure_cursor_visible();
     true
 }
