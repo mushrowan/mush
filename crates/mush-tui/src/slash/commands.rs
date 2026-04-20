@@ -804,21 +804,20 @@ fn handle_undo(app: &mut App, conversation: &mut ConversationState) {
 }
 
 fn try_template(app: &mut App, name: &str, args: &str) -> Option<String> {
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let templates = mush_ext::discover_templates(&cwd);
-    if let Some(tmpl) = mush_ext::find_template(&templates, name) {
-        let arg_list: Vec<&str> = if args.is_empty() {
-            vec![]
-        } else {
-            args.split_whitespace().collect()
-        };
-        let expanded = mush_ext::substitute_args(&tmpl.content, &arg_list);
-        app.push_user_message(expanded.clone());
-        Some(expanded)
-    } else {
+    // templates are loaded at startup into `app.completion.templates`;
+    // use the cache instead of re-reading disk on every `/name` invocation
+    let Some(tmpl) = mush_ext::find_template(&app.completion.templates, name) else {
         app.push_system_message(format!("unknown command: /{name}  (try /help)"));
-        None
-    }
+        return None;
+    };
+    let arg_list: Vec<&str> = if args.is_empty() {
+        vec![]
+    } else {
+        args.split_whitespace().collect()
+    };
+    let expanded = mush_ext::substitute_args(&tmpl.content, &arg_list);
+    app.push_user_message(expanded.clone());
+    Some(expanded)
 }
 
 /// expand /template_name args... into template content
