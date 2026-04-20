@@ -29,6 +29,10 @@
 #       description = "Rust idioms and best practices";
 #       content = "prefer Result over unwrap";
 #     };
+#     prompts.summarise = {
+#       description = "summarise the given jj change";
+#       content = "summarise change $1 in one paragraph.";
+#     };
 #   };
 self: {
   config,
@@ -112,6 +116,52 @@ self: {
         ) (skill.files or {})
     );
 
+  # -- prompt template installer ----------------------------------------
+
+  # a prompt template is either a raw markdown string (possibly with
+  # yaml frontmatter containing `description: ...`) or a structured
+  # { description, content } attrset from which we synthesise the
+  # frontmatter. unlike skills, prompts are single flat files under
+  # `~/.config/mush/prompts/<name>.md` so no `files` attribute
+  promptModule = lib.types.submodule {
+    options = {
+      description = lib.mkOption {
+        type = lib.types.str;
+        description = "one-line description shown in the /command picker";
+        example = "summarise the given jj change";
+      };
+
+      content = lib.mkOption {
+        type = lib.types.str;
+        description = ''
+          prompt body. supports positional placeholders `$1`, `$2`, ...,
+          and `$@` / `$ARGUMENTS` for all args joined. invoked via
+          `@name<tab>` or `/name args...`
+        '';
+        example = ''
+          summarise change $1 in one paragraph. no markdown, prose only.
+        '';
+      };
+    };
+  };
+
+  promptType = lib.types.either lib.types.str promptModule;
+
+  promptToText = _name: prompt:
+    if lib.isString prompt
+    then prompt
+    else ''
+      ---
+      description: ${prompt.description}
+      ---
+
+      ${prompt.content}
+    '';
+
+  promptToFile = name: prompt: {
+    "mush/prompts/${name}.md".text = promptToText name prompt;
+  };
+
   # -- schema → nix module ----------------------------------------------
 
   schemaModule = nixcfg.mkModule {
@@ -174,6 +224,30 @@ self: {
           string (with yaml frontmatter) or a { description, content } set
         '';
       };
+
+      prompts = {
+        type = lib.types.attrsOf promptType;
+        default = {};
+        example = lib.literalExpression ''
+          {
+            # raw markdown (possibly with yaml frontmatter)
+            summarise = builtins.readFile ./prompts/summarise.md;
+
+            # structured form: frontmatter is generated
+            review = {
+              description = "review code for issues";
+              content = "review $1 for issues and suggest fixes.";
+            };
+          }
+        '';
+        description = ''
+          prompt templates to install in ~/.config/mush/prompts/. each
+          key becomes `<name>.md` under that directory. invoked via
+          `@name<tab>` or `/name args...`. accepts either a raw markdown
+          string (with yaml frontmatter) or a { description, content } set.
+          supports `$1`, `$2`, `$@` / `$ARGUMENTS` placeholders for args
+        '';
+      };
     };
   };
 
@@ -222,7 +296,8 @@ self: {
         // lib.optionalAttrs (cfg.agentsMd != null) {
           "mush/AGENTS.md".text = cfg.agentsMd;
         }
-        // lib.concatMapAttrs skillToFiles cfg.skills;
+        // lib.concatMapAttrs skillToFiles cfg.skills
+        // lib.concatMapAttrs promptToFile cfg.prompts;
     };
   };
 in {
