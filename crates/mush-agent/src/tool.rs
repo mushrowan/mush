@@ -90,12 +90,47 @@ pub trait AgentTool: Send + Sync {
 
 pub type SharedTool = Arc<dyn AgentTool>;
 
+/// max characters shown per field value in the invalid-args preview.
+/// short enough to keep the error readable in a terminal, long enough
+/// to let the model tell typical paths / strings apart
+const PREVIEW_VALUE_CHARS: usize = 40;
+
+/// render a compact preview of the args that failed to parse.
+///
+/// objects render as `{key: value, key: value}` with each value
+/// truncated to [`PREVIEW_VALUE_CHARS`] characters (with an ellipsis
+/// marker). non-object values stringify via serde_json directly,
+/// truncated the same way. the preview is best-effort debug output,
+/// so we don't try to round-trip or re-parse it
+fn preview_args(args: &serde_json::Value) -> String {
+    match args {
+        serde_json::Value::Object(map) => {
+            let parts: Vec<String> = map
+                .iter()
+                .map(|(k, v)| format!("{k}: {}", truncate_preview(&v.to_string())))
+                .collect();
+            format!("{{{}}}", parts.join(", "))
+        }
+        other => truncate_preview(&other.to_string()),
+    }
+}
+
+fn truncate_preview(s: &str) -> String {
+    if s.chars().count() <= PREVIEW_VALUE_CHARS {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(PREVIEW_VALUE_CHARS).collect();
+    format!("{head}…")
+}
+
 pub fn parse_tool_args<T>(args: serde_json::Value) -> Result<T, ToolResult>
 where
     T: DeserializeOwned,
 {
-    serde_json::from_value(args)
-        .map_err(|error| ToolResult::error(format!("invalid arguments: {error}")))
+    let preview = preview_args(&args);
+    serde_json::from_value(args).map_err(|error| {
+        ToolResult::error(format!("invalid arguments: {error}\nreceived: {preview}"))
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -207,6 +242,85 @@ mod tests {
     fn tool_result_error() {
         let result = ToolResult::error("something went wrong");
         assert!(result.outcome.is_error());
+    }
+
+    #[test]
+    fn parse_tool_args_includes_received_args_preview() {
+        // when the model sends args that don't match the schema, include
+        // a compact preview of what was actually received so the agent
+        // (or a human reading the log) can tell what went wrong at a
+        // glance. particularly helpful for models that confuse similar
+        // tools and send the wrong shape
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        struct Expected {
+            path: String,
+        }
+
+        let wrong = serde_json::json!({
+            "patern": "not a path",
+            "limit": 42,
+        });
+        let err = match parse_tool_args::<Expected>(wrong) {
+            Ok(_) => panic!("expected parse failure"),
+            Err(result) => result,
+        };
+        let ToolResultContentPart::Text(text) = &err.content[0] else {
+            panic!("expected text content in error");
+        };
+        // the serde error is still there
+        assert!(
+            text.text.contains("invalid arguments"),
+            "error should still say 'invalid arguments', got: {}",
+            text.text
+        );
+        // the received field names should appear so the model can see
+        // what it sent
+        assert!(
+            text.text.contains("patern"),
+            "error should include the keys actually sent, got: {}",
+            text.text
+        );
+        assert!(
+            text.text.contains("limit"),
+            "error should include all keys, got: {}",
+            text.text
+        );
+    }
+
+    #[test]
+    fn parse_tool_args_truncates_long_values_in_preview() {
+        // long strings are clipped to keep the preview readable at roughly
+        // 40 chars per field. this matters when a model sends a
+        // multi-kilobyte blob as the wrong field and the error would
+        // otherwise drown the terminal
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        struct Expected {
+            path: String,
+        }
+
+        let big = "x".repeat(500);
+        let wrong = serde_json::json!({ "wrong_field": big });
+        let err = match parse_tool_args::<Expected>(wrong) {
+            Ok(_) => panic!("expected parse failure"),
+            Err(result) => result,
+        };
+        let ToolResultContentPart::Text(text) = &err.content[0] else {
+            panic!("expected text content");
+        };
+        // the full 500-char string must not appear verbatim; an ellipsis
+        // should indicate truncation
+        assert!(
+            !text.text.contains(&"x".repeat(100)),
+            "long value should be truncated, got: {}",
+            text.text
+        );
+        assert!(
+            text.text.contains("…") || text.text.contains("..."),
+            "truncated value should include an ellipsis marker, got: {}",
+            text.text
+        );
     }
 
     struct EchoTool;
