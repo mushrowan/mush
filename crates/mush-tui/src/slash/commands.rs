@@ -70,7 +70,7 @@ pub fn handle(
             keys.push_str("  ctrl+c         - quit\n");
             keys.push_str("  esc            - scroll to bottom / abort stream (in that order)\n");
             keys.push_str("  shift+end      - jump to bottom without aborting\n");
-            keys.push_str("  tab            - autocomplete / command menu\n");
+            keys.push_str("  tab            - autocomplete / command menu / expand @template\n");
             keys.push_str("  ctrl+j/k       - navigate menus\n");
             keys.push_str("  ctrl+v         - paste image from clipboard\n");
             keys.push_str("  ctrl+d         - quit (empty input) / delete char\n");

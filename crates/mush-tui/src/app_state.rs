@@ -42,6 +42,10 @@ pub struct CompletionState {
     pub favourite_models: Vec<String>,
     /// whether favourites are pinned by config.toml
     pub favourites_locked: bool,
+    /// loaded prompt templates, used for `@name<tab>` expansion.
+    /// populated at runtime from user + project prompts directories
+    /// (`~/.config/mush/prompts/`, `.mush/prompts/`)
+    pub templates: Vec<mush_ext::PromptTemplate>,
 }
 
 /// toggles for individual status bar segments

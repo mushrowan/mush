@@ -280,6 +280,7 @@ fn build_initial_app(tui_config: &TuiConfig, cwd: &Path) -> App {
             name: template.name.clone(),
             description: template.description.clone(),
         });
+        app.completion.templates.push(template);
     }
 
     for model in models::all_models_with_user() {

@@ -269,6 +269,13 @@ fn handle_idle_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     match (key.modifiers, key.code) {
         // tab completion / slash menu
         (_, KeyCode::Tab) | (KeyModifiers::SHIFT, KeyCode::BackTab) => {
+            // @-template expansion takes priority over generic tab completion
+            // so users can type `@review<tab>` and get the template content.
+            // bare `@` with no matching template falls through to normal
+            // tab behaviour so typing `@ ` in code/paths still works
+            if try_expand_at_template(app) {
+                return None;
+            }
             if app.input.text.starts_with('/')
                 && app.completion.slash_menu.is_none()
                 && !app.completion.slash_commands.is_empty()
@@ -339,6 +346,31 @@ fn handle_idle_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         // everything else falls through to shared editing
         _ => handle_editing(app, key),
     }
+}
+
+/// try expanding an `@name` prompt template adjacent to the cursor.
+///
+/// returns `true` when the trigger was found and a matching template
+/// got inserted (replacing the `@name` span in the input). returns
+/// `false` when there's no trigger or no matching template, so the
+/// caller can fall through to regular tab completion.
+///
+/// positional placeholders (`$1`, `$2`, `$@`) are inserted verbatim
+/// for now. a follow-up cycle will add slot-editing with tab/shift+tab
+fn try_expand_at_template(app: &mut App) -> bool {
+    let Some(trigger) = crate::at_template::parse_at_trigger(&app.input.text, app.input.cursor)
+    else {
+        return false;
+    };
+    let Some(template) = crate::at_template::find_exact(&app.completion.templates, &trigger) else {
+        return false;
+    };
+    let content = template.content.clone();
+    let end = app.input.cursor;
+    app.input.text.replace_range(trigger.start..end, &content);
+    app.input.cursor = trigger.start + content.len();
+    app.input.ensure_cursor_visible();
+    true
 }
 
 /// shared text editing bindings (cursor movement, deletion, character input)
@@ -1409,6 +1441,60 @@ mod tests {
         // typing resets completion state
         handle_key(&mut app, key(KeyCode::Char('x')));
         assert_eq!(app.input.text, "/helpx");
+    }
+
+    fn push_test_template(app: &mut App, name: &str, content: &str) {
+        app.completion.templates.push(mush_ext::PromptTemplate {
+            name: name.into(),
+            description: String::new(),
+            content: content.into(),
+            source: mush_ext::TemplateSource::User,
+            path: std::path::PathBuf::from("/tmp/test.md"),
+        });
+    }
+
+    #[test]
+    fn at_template_tab_expands_exact_match() {
+        // tab on `@review` where a template named "review" exists should
+        // replace the `@review` span with the template content. the rest
+        // of the input stays untouched
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        push_test_template(&mut app, "review", "please review the changes");
+        app.input.text = "hi @review".into();
+        app.input.cursor = app.input.text.len();
+        handle_key(&mut app, key(KeyCode::Tab));
+        assert_eq!(app.input.text, "hi please review the changes");
+    }
+
+    #[test]
+    fn at_template_enter_sends_literal_without_expansion() {
+        // design pin: `@asdf<return>` sends `@asdf` verbatim,
+        // even when a template named `asdf` exists. only tab expands
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        push_test_template(&mut app, "asdf", "TEMPLATE CONTENT");
+        app.input.text = "@asdf".into();
+        app.input.cursor = app.input.text.len();
+        let event = handle_key(&mut app, key(KeyCode::Enter));
+        match event {
+            Some(AppEvent::UserSubmit { text }) => {
+                assert_eq!(text, "@asdf", "enter must send the raw @word");
+            }
+            other => panic!("expected UserSubmit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn at_template_tab_falls_through_when_no_match() {
+        // tab on `@unknown` should NOT consume the keystroke: without a
+        // matching template the tab falls through to regular completion.
+        // today that just cycles generic completions (none here), but the
+        // input must stay intact
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        push_test_template(&mut app, "review", "irrelevant");
+        app.input.text = "@missing".into();
+        app.input.cursor = app.input.text.len();
+        handle_key(&mut app, key(KeyCode::Tab));
+        assert_eq!(app.input.text, "@missing");
     }
 
     #[test]
