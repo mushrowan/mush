@@ -1,6 +1,7 @@
 pub mod app;
 pub mod app_event;
 pub mod app_state;
+pub mod at_template;
 pub mod batch_output;
 pub mod cache;
 pub mod clipboard;
