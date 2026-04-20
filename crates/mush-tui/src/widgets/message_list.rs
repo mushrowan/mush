@@ -25,6 +25,37 @@ use crate::text::truncate_with_ellipsis;
 pub(crate) const MESSAGE_INDENT_LEFT: usize = 1;
 pub(crate) const MESSAGE_INDENT_RIGHT: usize = 1;
 
+/// capture or clear the scroll baseline based on the current scroll_offset.
+/// returns the baseline to use for this frame's compensation math
+fn update_scroll_baseline(app: &App) -> usize {
+    let baseline = match (app.scroll_offset, app.render_state.scroll_baseline.get()) {
+        (0, _) => 0,
+        // first frame scrolled up: pin to prev actual
+        (_, 0) => app.render_state.prev_content_lines.get(),
+        (_, current) => current,
+    };
+    app.render_state.scroll_baseline.set(baseline);
+    baseline
+}
+
+/// signed compensation in lines to keep scroll_from_top pinned at the
+/// baseline as content grows or shrinks. `total` is the candidate total
+/// line count (estimate during preview, actual for the final scroll).
+/// returns 0 when no baseline is set (i.e. user is at the bottom or
+/// the first render hasn't captured a baseline yet)
+fn scroll_compensation(baseline: usize, total: usize) -> isize {
+    if baseline == 0 {
+        0
+    } else {
+        total as isize - baseline as isize
+    }
+}
+
+/// combine scroll_offset with a signed compensation, clamping at 0
+fn clamped_effective_offset(scroll_offset: u16, compensation: isize) -> usize {
+    (scroll_offset as isize + compensation).max(0) as usize
+}
+
 /// usable width for message body content given an outer column width.
 /// subtracts both the left indent and any right-side reservation so
 /// renderers and height estimators agree on wrap points
@@ -164,28 +195,25 @@ impl Widget for MessageList<'_> {
             estimate_trailing_height(self.app, area.width, &self.app.render_state);
         let total_estimate = estimated_total + trailing_estimate;
 
-        // compensate scroll for content height change while the user is
-        // scrolled up. scroll_offset is "lines from bottom" so when content
-        // grows or shrinks at the bottom, we need to adjust the effective
-        // offset so the viewport stays pinned to the same absolute content
-        // line. compensation is signed: growth adds, shrinkage subtracts.
-        // using a usize with saturating_sub would absorb shrinks silently
-        // and cause the view to "shake" each time content oscillates
-        // (word-wrap reflow, trailing estimate drift between frames).
-        // when applying, `scroll_offset + compensation` may be negative
-        // if content shrunk past where we were anchored; in that case
-        // we clamp at 0 (we've fallen off the end of the new content)
-        let prev_total = self.app.render_state.prev_content_lines.get();
-        let prev_compensation = self.app.render_state.scroll_compensation.get();
-        let compensation = if self.app.scroll_offset > 0 && prev_total > 0 {
-            let delta = total_estimate as isize - prev_total as isize;
-            prev_compensation + delta
-        } else {
-            0
-        };
-        self.app.render_state.prev_content_lines.set(total_estimate);
-        self.app.render_state.scroll_compensation.set(compensation);
-        let effective_offset = (self.app.scroll_offset as isize + compensation).max(0) as usize;
+        // keep the viewport pinned to a stable content line while scrolled
+        // up. scroll_offset is "lines from bottom", so as content grows or
+        // shrinks below, effective_offset has to follow along by the same
+        // amount for max_scroll - effective_offset to stay constant.
+        //
+        // we snapshot the actual total line count the first frame the user
+        // scrolls up from the bottom, then compensation = (current total) -
+        // baseline. applied as effective_offset = scroll_offset + compensation,
+        // scroll_from_top = baseline - visible - scroll_offset: the current
+        // total cancels out, which is why the preview pass (using estimate)
+        // and final pass (using actual) still agree even when those two
+        // disagree. the previous delta-accumulator approach accumulated any
+        // estimate/actual divergence (code fences, headings, elided `**`
+        // markers) into effective_offset and the viewport drifted by that
+        // error each frame: the shake.
+        let baseline = update_scroll_baseline(self.app);
+        let preview_compensation = scroll_compensation(baseline, total_estimate);
+        let effective_offset =
+            clamped_effective_offset(self.app.scroll_offset, preview_compensation);
 
         let vis_h = area.height as usize;
         let max_scroll = total_estimate.saturating_sub(vis_h);
@@ -391,8 +419,24 @@ impl Widget for MessageList<'_> {
 
         let total_lines = content_lines + padding as u16;
         let max_scroll = total_lines.saturating_sub(visible);
-        let effective_offset_u16 = effective_offset.min(u16::MAX as usize) as u16;
+
+        // recompute with this frame's actual total. preview above used the
+        // estimate, which is fine for virtual-scroll decisions (thanks to
+        // the baseline anchor the preview scroll_from_top equals the final
+        // scroll by construction), but the final scroll must reflect actual
+        // line counts so buffer writes land at the right rows
+        let total_lines_usize = total_lines as usize;
+        let compensation = scroll_compensation(baseline, total_lines_usize);
+        let effective_offset_final = clamped_effective_offset(self.app.scroll_offset, compensation);
+        let effective_offset_u16 = effective_offset_final.min(u16::MAX as usize) as u16;
         let scroll = max_scroll.saturating_sub(effective_offset_u16);
+
+        // persist for next frame + status bar
+        self.app
+            .render_state
+            .prev_content_lines
+            .set(total_lines_usize);
+        self.app.render_state.scroll_compensation.set(compensation);
 
         // expose scroll geometry for the status bar
         self.app.render_state.total_content_lines.set(total_lines);
@@ -3826,6 +3870,64 @@ mod tests {
             cached_height, actual_total,
             "height_cache should converge to actual rendered height \
              (cached={cached_height}, actual={actual_total})"
+        );
+    }
+
+    #[test]
+    fn scroll_stays_stable_while_streaming_typewriter_reveals_text() {
+        // regression: while scrolled up during streaming, the viewport drifts
+        // each frame because compensation is computed from *estimated* total
+        // (count_estimated_lines on raw chars) but scroll uses *actual* total
+        // (markdown-rendered lines). when the estimate over- or under-counts
+        // (e.g. code fences, heading style rows, `**bold**` markers), the
+        // effective_offset diverges from actual content growth and the view
+        // creeps up/down by the estimate error.
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        for i in 0..30 {
+            app.messages.push(DisplayMessage::new(
+                MessageRole::Assistant,
+                format!("message {i} with stable content here"),
+            ));
+        }
+        // warm caches
+        render_app(&app, 60, 20);
+
+        // scroll up into history
+        app.scroll_offset = 15;
+        render_app(&app, 60, 20);
+        let scroll_anchor = app.render_state.render_scroll.get();
+
+        // stream markdown chunks where char-count estimate diverges from
+        // the actual rendered line count (code fence, bold, heading).
+        // drive typewriter between chunks the way real streaming does.
+        app.start_streaming();
+        let chunks = [
+            "# heading\n",
+            "here is some **bold** text\n",
+            "```rust\n",
+            "let x = 1;\n",
+            "let y = 2;\n",
+            "```\n",
+        ];
+        let mut scrolls = vec![scroll_anchor];
+        for chunk in chunks {
+            app.push_text_delta(chunk);
+            for _ in 0..8 {
+                app.tick();
+                render_app(&app, 60, 20);
+                scrolls.push(app.render_state.render_scroll.get());
+            }
+        }
+
+        // the viewport should stay pinned at its original content line.
+        // allow no more than a single line of noise across the whole
+        // stream: any drift beyond that is the bug.
+        let min = *scrolls.iter().min().unwrap();
+        let max = *scrolls.iter().max().unwrap();
+        assert!(
+            max - min <= 1,
+            "render_scroll drifted during streaming (anchor={scroll_anchor}, \
+             min={min}, max={max}): {scrolls:?}"
         );
     }
 

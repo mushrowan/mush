@@ -208,15 +208,23 @@ pub struct RenderState {
     /// avoids rehashing full content string every frame when checking
     /// indented cache validity. keyed by byte length (O(1) check)
     pub content_hash_cache: RefCell<Vec<Option<(usize, u64)>>>,
-    /// estimated total content lines from the previous render frame.
-    /// used to detect content growth while scrolled up
+    /// total content lines (actual) from the previous render frame.
+    /// used to anchor scroll compensation during content fluctuation
     pub prev_content_lines: Cell<usize>,
-    /// accumulated scroll compensation (in lines) for content that changed
-    /// size while the user was scrolled up. resets when scroll_offset
-    /// returns to 0. signed so shrinkage can be tracked (if content
-    /// shrinks then regrows, compensation tracks back to the original
-    /// value instead of being absorbed by saturating_sub, which would
-    /// cause the viewport to shake when streaming content oscillates)
+    /// actual total content lines at the moment the user scrolled up
+    /// from the bottom. while `scroll_offset > 0`, compensation keeps
+    /// the viewport pinned to this baseline by offsetting scroll by
+    /// `current_actual_total - baseline`. reset to 0 when scroll_offset
+    /// returns to 0 so the next scroll-up re-captures the baseline.
+    /// this makes the viewport stable against estimate/actual drift
+    /// during streaming (the previous estimate-based delta approach
+    /// accumulated errors whenever count_estimated_lines disagreed
+    /// with markdown-rendered line count)
+    pub scroll_baseline: Cell<usize>,
+    /// scroll compensation (in lines) exposed for the status bar
+    /// and tests. derived post-render as `total_content_lines -
+    /// scroll_baseline` while scrolled up, otherwise 0. signed so
+    /// shrinkage past the baseline is handled correctly
     pub scroll_compensation: Cell<isize>,
     /// per-frame status bar cache. cleared at the start of each frame so
     /// stale stats never leak. within a frame all `status_bar_height`,
@@ -241,6 +249,7 @@ impl RenderState {
             height_cache: RefCell::new(Vec::new()),
             content_hash_cache: RefCell::new(Vec::new()),
             prev_content_lines: Cell::new(0),
+            scroll_baseline: Cell::new(0),
             scroll_compensation: Cell::new(0),
             status_bar_cache: RefCell::new(None),
         }
