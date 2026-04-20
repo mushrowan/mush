@@ -15,9 +15,12 @@ pub enum Sound {
 
 impl Sound {
     /// freedesktop sound theme filename
-    fn filename(self) -> &'static str {
+    pub(crate) fn filename(self) -> &'static str {
         match self {
-            Sound::Complete => "complete.oga",
+            // message.oga is a soft mail-like ping. complete.oga (big chime)
+            // is meant for the end of long batch tasks and gets grating as
+            // a per-turn completion alert
+            Sound::Complete => "message.oga",
             Sound::Attention => "dialog-information.oga",
             Sound::Error => "dialog-warning.oga",
         }
@@ -81,4 +84,24 @@ fn play_sound(sound: Sound) {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn complete_sound_is_softer_than_default_complete() {
+        // `complete.oga` in the freedesktop sound theme is a chime meant
+        // for the end of a long batch task. used as our per-turn completion
+        // alert it gets grating fast, so we pick a softer sound
+        assert_eq!(Sound::Complete.filename(), "message.oga");
+    }
+
+    #[test]
+    fn attention_and_error_sounds_use_dialog_theme() {
+        // these are the conventional freedesktop dialog sounds and stay put
+        assert_eq!(Sound::Attention.filename(), "dialog-information.oga");
+        assert_eq!(Sound::Error.filename(), "dialog-warning.oga");
+    }
 }
