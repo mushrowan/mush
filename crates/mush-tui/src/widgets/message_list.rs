@@ -164,22 +164,28 @@ impl Widget for MessageList<'_> {
             estimate_trailing_height(self.app, area.width, &self.app.render_state);
         let total_estimate = estimated_total + trailing_estimate;
 
-        // compensate scroll for content growth while the user is scrolled up.
-        // scroll_offset is "lines from bottom" so when content grows at the
-        // bottom, we need to increase the effective offset to keep the
-        // viewport pinned to the same absolute position. we track the total
-        // estimate (messages + trailing) so moving content from streaming
-        // into a message on stream-end doesn't trigger a spurious shift
+        // compensate scroll for content height change while the user is
+        // scrolled up. scroll_offset is "lines from bottom" so when content
+        // grows or shrinks at the bottom, we need to adjust the effective
+        // offset so the viewport stays pinned to the same absolute content
+        // line. compensation is signed: growth adds, shrinkage subtracts.
+        // using a usize with saturating_sub would absorb shrinks silently
+        // and cause the view to "shake" each time content oscillates
+        // (word-wrap reflow, trailing estimate drift between frames).
+        // when applying, `scroll_offset + compensation` may be negative
+        // if content shrunk past where we were anchored; in that case
+        // we clamp at 0 (we've fallen off the end of the new content)
         let prev_total = self.app.render_state.prev_content_lines.get();
         let prev_compensation = self.app.render_state.scroll_compensation.get();
         let compensation = if self.app.scroll_offset > 0 && prev_total > 0 {
-            prev_compensation + total_estimate.saturating_sub(prev_total)
+            let delta = total_estimate as isize - prev_total as isize;
+            prev_compensation + delta
         } else {
             0
         };
         self.app.render_state.prev_content_lines.set(total_estimate);
         self.app.render_state.scroll_compensation.set(compensation);
-        let effective_offset = (self.app.scroll_offset as usize) + compensation;
+        let effective_offset = (self.app.scroll_offset as isize + compensation).max(0) as usize;
 
         let vis_h = area.height as usize;
         let max_scroll = total_estimate.saturating_sub(vis_h);
@@ -3653,6 +3659,53 @@ mod tests {
             app.render_state.scroll_compensation.get(),
             0,
             "compensation should reset when at bottom"
+        );
+    }
+
+    #[test]
+    fn scroll_position_stable_when_content_fluctuates() {
+        // bug: while scrolled up during streaming, the message log "shakes"
+        // by ±1 line. root cause: compensation uses `saturating_sub` so
+        // only positive deltas update it. when content height oscillates
+        // (word-wrap reflowing as tokens arrive, trailing estimate drifting
+        // between frames) shrinks are absorbed silently, so effective
+        // offset is too high once content grows back, drifting the view
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        for i in 0..20 {
+            app.messages.push(DisplayMessage::new(
+                MessageRole::Assistant,
+                format!("message number {i} with some stable content"),
+            ));
+        }
+        // give the last message real multi-line content so shrink/grow
+        // actually changes the rendered line count
+        let long_multiline = "line a is here\nline b is here\nline c is here\nline d is here";
+        app.messages.last_mut().unwrap().content = long_multiline.into();
+        app.scroll_offset = 15;
+
+        render_app(&app, 60, 20);
+        let scroll_baseline = app.render_state.render_scroll.get();
+        assert!(scroll_baseline > 0, "precondition: viewport scrolled up");
+
+        // shrink last message by collapsing to a single line
+        app.messages.last_mut().unwrap().content = "just one line".into();
+        render_app(&app, 60, 20);
+        let scroll_after_shrink = app.render_state.render_scroll.get();
+        assert_eq!(
+            scroll_baseline, scroll_after_shrink,
+            "viewport should stay pinned to the same content line when \
+             content shrinks while scrolled (baseline={scroll_baseline}, \
+             after_shrink={scroll_after_shrink})"
+        );
+
+        // grow back to original height
+        app.messages.last_mut().unwrap().content = long_multiline.into();
+        render_app(&app, 60, 20);
+        let scroll_after_regrow = app.render_state.render_scroll.get();
+        assert_eq!(
+            scroll_baseline, scroll_after_regrow,
+            "viewport should return to baseline after grow restores content \
+             (baseline={scroll_baseline}, after_regrow={scroll_after_regrow})"
         );
     }
 

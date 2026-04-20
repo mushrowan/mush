@@ -207,9 +207,13 @@ pub struct RenderState {
     /// estimated total content lines from the previous render frame.
     /// used to detect content growth while scrolled up
     pub prev_content_lines: Cell<usize>,
-    /// accumulated scroll compensation (in lines) for content that grew
-    /// while the user was scrolled up. resets when scroll_offset returns to 0
-    pub scroll_compensation: Cell<usize>,
+    /// accumulated scroll compensation (in lines) for content that changed
+    /// size while the user was scrolled up. resets when scroll_offset
+    /// returns to 0. signed so shrinkage can be tracked (if content
+    /// shrinks then regrows, compensation tracks back to the original
+    /// value instead of being absorbed by saturating_sub, which would
+    /// cause the viewport to shake when streaming content oscillates)
+    pub scroll_compensation: Cell<isize>,
     /// per-frame status bar cache. cleared at the start of each frame so
     /// stale stats never leak. within a frame all `status_bar_height`,
     /// `StatusBar::render` and `Ui::cursor_position` callers share the
