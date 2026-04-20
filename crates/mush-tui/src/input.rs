@@ -65,15 +65,27 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     // 2. global bindings
     match (key.modifiers, key.code) {
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => return Some(AppEvent::Quit),
-        _ if is_cancel_key(key) && app.stream.active => return Some(AppEvent::Abort),
+        // scroll cascade: esc first jumps to bottom if scrolled up, only
+        // aborts once already anchored there. this applies even while
+        // streaming so users can re-anchor without cancelling a long turn
         _ if is_cancel_key(key) && app.scroll_offset > 0 => {
             app.scroll_to_bottom();
             return None;
         }
+        _ if is_cancel_key(key) && app.stream.active => return Some(AppEvent::Abort),
         // ctrl+v works in both idle and streaming so the user can stage
         // images for mid-turn steering without aborting the stream
         (KeyModifiers::CONTROL, KeyCode::Char('v')) => return Some(AppEvent::PasteImage),
         _ => {}
+    }
+    // dedicated "go to bottom" hotkey: configurable, default shift+End.
+    // fires regardless of stream state and never aborts
+    if app
+        .keymap
+        .matches(crate::keybinds::Action::JumpToBottom, key)
+    {
+        app.scroll_to_bottom();
+        return None;
     }
     match key.code {
         KeyCode::PageUp => {
@@ -1003,10 +1015,50 @@ mod tests {
     }
 
     #[test]
+    fn escape_scrolls_to_bottom_before_aborting_when_streaming_and_scrolled_up() {
+        // cascade:
+        //   1. scroll mode with selection: esc clears selection
+        //   2. scroll mode no selection: esc exits scroll mode
+        //   3. normal mode scrolled up: esc scrolls to bottom (even mid-stream)
+        //   4. normal mode at bottom + streaming: esc aborts
+        // this test covers step 3: esc while streaming + scrolled shouldn't
+        // immediately abort. it should scroll to bottom first; the next esc
+        // is the one that cancels
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.stream.active = true;
+        app.scroll_offset = 25;
+        let event = handle_key(&mut app, key(KeyCode::Esc));
+        assert!(
+            event.is_none(),
+            "first esc should scroll to bottom, not abort (got {event:?})"
+        );
+        assert_eq!(app.scroll_offset, 0);
+        // second esc now aborts since we're at bottom
+        let event = handle_key(&mut app, key(KeyCode::Esc));
+        assert!(matches!(event, Some(AppEvent::Abort)));
+    }
+
+    #[test]
     fn escape_does_nothing_when_idle() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         let event = handle_key(&mut app, key(KeyCode::Esc));
         assert!(event.is_none());
+    }
+
+    #[test]
+    fn jump_to_bottom_hotkey_scrolls_without_aborting() {
+        // a direct hotkey for "go to bottom", independent of the esc cascade.
+        // default binding: shift+End. works in any state without cancelling
+        // the stream so it's safe to mash while the agent's working
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.stream.active = true;
+        app.scroll_offset = 40;
+        let event = handle_key(&mut app, KeyEvent::new(KeyCode::End, KeyModifiers::SHIFT));
+        assert!(
+            event.is_none(),
+            "jump_to_bottom should not emit Abort (got {event:?})"
+        );
+        assert_eq!(app.scroll_offset, 0);
     }
 
     #[test]

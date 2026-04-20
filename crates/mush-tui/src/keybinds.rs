@@ -53,6 +53,9 @@ pub enum Action {
     EnterSearch,
     /// enter scroll / selection mode. default binding: `ctrl-s`
     EnterScroll,
+    /// jump the message log to the bottom without aborting or
+    /// otherwise affecting the stream. default binding: `shift-end`
+    JumpToBottom,
 }
 
 impl Action {
@@ -64,6 +67,7 @@ impl Action {
             Self::EditSteering => "edit_steering",
             Self::EnterSearch => "enter_search",
             Self::EnterScroll => "enter_scroll",
+            Self::JumpToBottom => "jump_to_bottom",
         }
     }
 
@@ -74,6 +78,7 @@ impl Action {
         Self::EditSteering,
         Self::EnterSearch,
         Self::EnterScroll,
+        Self::JumpToBottom,
     ];
 }
 
@@ -214,6 +219,14 @@ impl Default for KeyMap {
             )),
         );
 
+        // shift+End: jump the message log to the bottom without touching
+        // the stream. plain End is line-end in the input editor; ctrl+End
+        // isn't reliably delivered across terminals
+        bindings.insert(
+            Action::JumpToBottom,
+            Binding::single(KeyCombination::new(KeyCode::End, KeyModifiers::SHIFT)),
+        );
+
         Self { bindings }
     }
 }
@@ -293,6 +306,17 @@ mod tests {
         let ctrl_s = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
         assert!(map.matches(Action::EnterSearch, ctrl_f));
         assert!(map.matches(Action::EnterScroll, ctrl_s));
+    }
+
+    #[test]
+    fn default_keymap_has_jump_to_bottom_trigger() {
+        // shift+End jumps the message log to the bottom without aborting
+        // the stream. chosen because plain End is already line-end in the
+        // input editor, and ctrl+End isn't consistently delivered across
+        // terminals. the action stays opt-in configurable via [keys]
+        let map = KeyMap::default();
+        let shift_end = KeyEvent::new(KeyCode::End, KeyModifiers::SHIFT);
+        assert!(map.matches(Action::JumpToBottom, shift_end));
     }
 
     #[test]
