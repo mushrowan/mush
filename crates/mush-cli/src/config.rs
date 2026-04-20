@@ -46,7 +46,7 @@ pub use mush_tui::StatusBarConfig;
 pub use mush_tui::TerminalPolicy;
 
 /// top-level config
-#[derive(Debug, Default, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(extend("x-nixcfg-name" = "mush", "x-nixcfg-config-format" = "toml"))]
 #[serde(default)]
 pub struct Config {
@@ -81,7 +81,8 @@ pub struct Config {
     /// per-segment visibility toggles for the status bar
     #[serde(default)]
     pub status_bar: StatusBarConfig,
-    /// show cache warmth countdown and send desktop notifications (off by default)
+    /// show cache warmth countdown and send desktop notifications (on by default)
+    #[serde(default = "default_cache_timer")]
     pub cache_timer: bool,
     /// multi-pane file isolation mode: none (detect-and-warn), worktree, jj
     pub isolation: IsolationMode,
@@ -128,6 +129,50 @@ pub struct Config {
 
 fn default_scroll_lines() -> u16 {
     mush_tui::DEFAULT_SCROLL_LINES
+}
+
+fn default_cache_timer() -> bool {
+    true
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            model: None,
+            thinking: None,
+            max_tokens: None,
+            max_turns: None,
+            cache_retention: None,
+            debug_cache: false,
+            system_prompt: None,
+            hint_mode: HintMode::default(),
+            log_filter: None,
+            thinking_display: mush_tui::ThinkingDisplay::default(),
+            auto_compact: false,
+            auto_fork_compact: false,
+            confirm_tools: false,
+            show_cost: false,
+            show_usage_lines: false,
+            show_token_counters: false,
+            status_bar: StatusBarConfig::default(),
+            cache_timer: default_cache_timer(),
+            isolation: IsolationMode::default(),
+            terminal: TerminalPolicy::default(),
+            api_keys: ApiKeys::default(),
+            theme: mush_tui::ThemeConfig::default(),
+            mcp: std::collections::HashMap::default(),
+            dynamic_mcp: false,
+            hooks: HooksConfig::default(),
+            retrieval: RetrievalConfig::default(),
+            lsp: LspConfig::default(),
+            model_tiers: HashMap::default(),
+            favourite_models: Vec::new(),
+            compaction_model: None,
+            settings: Settings::default(),
+            scroll_lines: default_scroll_lines(),
+            keys: mush_tui::KeysConfig::default(),
+        }
+    }
 }
 
 /// scope for persisting settings changes made during a session
@@ -809,15 +854,25 @@ image_probe = "disabled"
     }
 
     #[test]
-    fn cache_timer_defaults_to_false() {
+    fn cache_timer_defaults_to_true() {
         let config: Config = toml::from_str("").unwrap();
+        assert!(config.cache_timer);
+    }
+
+    #[test]
+    fn cache_timer_can_be_disabled() {
+        let config: Config = toml::from_str("cache_timer = false").unwrap();
         assert!(!config.cache_timer);
     }
 
     #[test]
-    fn cache_timer_can_be_enabled() {
-        let config: Config = toml::from_str("cache_timer = true").unwrap();
-        assert!(config.cache_timer);
+    fn cache_timer_default_matches_struct_default() {
+        // `#[serde(default)]` at struct level delegates to Default::default().
+        // keep the manual Default impl in sync with the field-level serde default
+        // so deserialising `""` matches constructing with `Config::default()`
+        let from_empty: Config = toml::from_str("").unwrap();
+        let from_default = Config::default();
+        assert_eq!(from_empty.cache_timer, from_default.cache_timer);
     }
 
     #[test]

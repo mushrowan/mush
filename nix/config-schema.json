@@ -704,8 +704,8 @@
       "default": null
     },
     "cache_timer": {
-      "default": false,
-      "description": "show cache warmth countdown and send desktop notifications (off by default)",
+      "default": true,
+      "description": "show cache warmth countdown and send desktop notifications (on by default)",
       "type": "boolean"
     },
     "compaction_model": {
