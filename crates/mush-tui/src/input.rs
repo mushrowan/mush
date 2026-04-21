@@ -73,13 +73,17 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     // scroll / cancel cascade: esc (or ctrl+[) first jumps to bottom if
     // scrolled up, only aborts once already anchored there. this applies
     // even while streaming so users can re-anchor without cancelling a
-    // long turn. single check + internal branches avoids duplicate guards
+    // long turn. single check + internal branches avoids duplicate guards.
+    // we key off `is_busy()` rather than just `stream.active` so esc still
+    // works during the tool-execution window between an assistant
+    // `MessageEnd` and the next `TurnStart`, when text is no longer
+    // streaming but the agent is still cranking through tool calls
     if is_cancel_key(key) {
         if app.scroll_offset > 0 {
             app.scroll_to_bottom();
             return None;
         }
-        if app.stream.active {
+        if app.is_busy() {
             return Some(AppEvent::Abort);
         }
     }
@@ -1084,6 +1088,34 @@ mod tests {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         let event = handle_key(&mut app, key(KeyCode::Esc));
         assert!(event.is_none());
+    }
+
+    #[test]
+    fn escape_aborts_while_tool_runs_between_messages() {
+        // between `MessageEnd` and the next `TurnStart`, `stream.active`
+        // flips to false even though the agent is still busy executing
+        // tools. esc used to only check `stream.active`, so the user had
+        // no way to cancel a long-running tool (e.g. a 15 minute bash
+        // call via bash_status polling). cancel should fire whenever
+        // the agent is busy, not only while text is streaming
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.stream.active = false;
+        app.active_tools
+            .push(crate::display_types::ActiveToolState {
+                tool_call_id: "bash_1".into(),
+                name: "bash".into(),
+                summary: "running".into(),
+                live_output: None,
+                status: crate::display_types::ToolCallStatus::Running,
+                output: None,
+            });
+        assert!(app.is_busy());
+
+        let event = handle_key(&mut app, key(KeyCode::Esc));
+        assert!(
+            matches!(event, Some(AppEvent::Abort)),
+            "esc should abort while a tool is running, got {event:?}"
+        );
     }
 
     #[test]
