@@ -264,15 +264,24 @@ self: {
   in
     lib.filterAttrs (_: v: !(lib.isAttrs v && v == {})) mapped;
 
+  # nixcfg renders schema properties as camelCase nix options (its default
+  # naming convention), so cfg.settings carries `cacheTimer`, `statusBar`,
+  # `postCompaction`, etc. the on-disk config.toml that mush's rust loader
+  # deserialises expects snake_case. `toConfigAttrs` walks the schema,
+  # renames recursively (including nested objects like status_bar and
+  # hooks), and applies the secret `_path` suffix convention. without
+  # this, every nix-managed setting was silently dropped on load
+  parsedSchema = builtins.fromJSON (builtins.readFile schema);
+  convertedSettings = nixcfg.toConfigAttrs {} parsedSchema cfg.settings;
+
   # user-visible settings attrset (matches the on-disk `config.toml`
-  # layout one-to-one). keep api-key *paths* out of the toml because
-  # mush reads keys from env vars; the paths on disk are purely nix-side
-  # metadata for future secret-wiring (agenix / sops etc)
+  # layout one-to-one). override `api_keys` with mush's bespoke layout:
+  # nixcfg would write `api_keys.anthropic_path`, but the rust side reads
+  # `api_keys.anthropic` and lets the value stand in for a key/path
   tomlSettings = clean (
-    (removeAttrs cfg.settings ["apiKeys"])
+    (removeAttrs convertedSettings ["api_keys"])
     // lib.optionalAttrs (cfg.settings.apiKeys or {} != {}) {
       api_keys = clean {
-        # secret suffix stripped: on-disk toml uses the original field name
         anthropic = cfg.settings.apiKeys.anthropicPath or null;
         openrouter = cfg.settings.apiKeys.openrouterPath or null;
         openai = cfg.settings.apiKeys.openaiPath or null;
