@@ -24,6 +24,71 @@ const BACKGROUND_DEFAULT_TIMEOUT_SECS: u64 = 30 * 60;
 /// for a TTY (e.g. jj split, jj describe without -m)
 const NO_OUTPUT_TIMEOUT_SECS: u64 = 240;
 
+/// drop guard that SIGKILLs the bash child's process group when the tool
+/// future is cancelled (user abort, agent-loop cancel, dropped pane).
+///
+/// `tokio::process::Child::kill_on_drop` only SIGKILLs the direct child.
+/// pipelines and backgrounded subshells (`cargo test | tail`,
+/// `(sleep) & wait`, etc.) inherit the process group set by
+/// `cmd.process_group(0)` but would otherwise keep running after bash
+/// itself is dead. a surviving descendant that still holds the stdout
+/// write-end also blocks the stream_handle await forever.
+///
+/// all explicit kill paths (timeout, no-output) call `kill_now()` before
+/// awaiting the stream handles so the pipe closes and the handles drain.
+/// paths that saw the child exit naturally call `disarm()` so the drop
+/// kill becomes a no-op and we never SIGKILL a recycled pid.
+#[cfg(unix)]
+struct ProcessGroupKillOnDrop {
+    pgid: Option<libc::pid_t>,
+}
+
+#[cfg(unix)]
+impl ProcessGroupKillOnDrop {
+    fn new(child: &tokio::process::Child) -> Self {
+        Self {
+            pgid: child.id().map(|p| p as libc::pid_t),
+        }
+    }
+
+    /// send SIGKILL to the whole group right now and disarm the drop
+    /// kill. harmless if the group is already empty (ESRCH).
+    fn kill_now(&mut self) {
+        if let Some(pgid) = self.pgid.take() {
+            // safety: libc::kill with a negated pgid targets the whole
+            // group and has no safety preconditions beyond a valid signal
+            unsafe {
+                libc::kill(-pgid, libc::SIGKILL);
+            }
+        }
+    }
+
+    /// disarm after the child has exited naturally so we don't send
+    /// a stray SIGKILL to a pid that may have been recycled
+    fn disarm(&mut self) {
+        self.pgid = None;
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ProcessGroupKillOnDrop {
+    fn drop(&mut self) {
+        self.kill_now();
+    }
+}
+
+#[cfg(not(unix))]
+struct ProcessGroupKillOnDrop;
+
+#[cfg(not(unix))]
+impl ProcessGroupKillOnDrop {
+    fn new(_child: &tokio::process::Child) -> Self {
+        Self
+    }
+    fn kill_now(&mut self) {}
+    fn disarm(&mut self) {}
+}
+
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum BashOutput {
@@ -271,6 +336,11 @@ async fn run_background_command(
         }
     };
 
+    // kill the whole process group if this task is cancelled (jj abandon,
+    // pane close, agent shutdown) so nothing is left running in the
+    // background after the registry drops the job.
+    let mut pg_guard = ProcessGroupKillOnDrop::new(&child);
+
     let timeout = tokio::time::Duration::from_secs(timeout_secs);
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
@@ -281,6 +351,7 @@ async fn run_background_command(
     let status = match tokio::time::timeout(timeout, child.wait()).await {
         Ok(Ok(status)) => status,
         Ok(Err(e)) => {
+            pg_guard.disarm();
             let stdout = stdout_handle.await.unwrap_or_default();
             let stderr = stderr_handle.await.unwrap_or_default();
             let mut state = handle.write().await;
@@ -295,8 +366,12 @@ async fn run_background_command(
             // code over TimedOut so the agent doesn't see spurious timeouts
             // on long-but-finite builds that land right on the boundary
             let reaped = child.try_wait().ok().flatten();
-            if reaped.is_none() {
-                let _ = child.kill().await;
+            if reaped.is_some() {
+                pg_guard.disarm();
+            } else {
+                // kill the whole group so descendants release the pipes
+                // and the stream handles can drain to EOF
+                pg_guard.kill_now();
             }
             let stdout = stdout_handle.await.unwrap_or_default();
             let stderr = stderr_handle.await.unwrap_or_default();
@@ -313,6 +388,7 @@ async fn run_background_command(
         }
     };
 
+    pg_guard.disarm();
     let stdout = stdout_handle.await.unwrap_or_default();
     let stderr = stderr_handle.await.unwrap_or_default();
     let exit_code = status.code().unwrap_or(-1);
@@ -378,6 +454,12 @@ async fn run_command_with_no_output_timeout(
         Err(e) => return ToolResult::error(format!("failed to spawn command: {e}")),
     };
 
+    // on cancel/drop, kill the whole process group so pipelines and
+    // backgrounded subshells die with bash. kill_on_drop(true) alone
+    // leaves descendants orphaned and holding the stdout pipe open,
+    // which hangs stdout_handle.await on the timeout/no-output paths.
+    let mut pg_guard = ProcessGroupKillOnDrop::new(&child);
+
     let started = std::time::Instant::now();
     let timeout = tokio::time::Duration::from_secs(timeout_secs);
     let no_output_timeout = tokio::time::Duration::from_secs(no_output_timeout_secs);
@@ -422,15 +504,23 @@ async fn run_command_with_no_output_timeout(
 
     match result {
         WaitResult::Exited(Ok(status)) => {
+            pg_guard.disarm();
             let stdout = stdout_handle.await.unwrap_or_default();
             let stderr = stderr_handle.await.unwrap_or_default();
             let exit_code = status.code().unwrap_or(-1);
             let duration = started.elapsed();
             format_result(stdout, stderr, exit_code, false, duration, json_output)
         }
-        WaitResult::Exited(Err(e)) => ToolResult::error(format!("command failed: {e}")),
+        WaitResult::Exited(Err(e)) => {
+            pg_guard.disarm();
+            ToolResult::error(format!("command failed: {e}"))
+        }
         WaitResult::TimedOut => {
-            let _ = child.kill().await;
+            // kill the whole group (bash + cargo + tail + ...) so the
+            // stdout pipe drains and stdout_handle.await returns. killing
+            // only bash leaves descendants holding the write end, which
+            // would hang this function forever.
+            pg_guard.kill_now();
             let stdout = stdout_handle.await.unwrap_or_default();
             let stderr = stderr_handle.await.unwrap_or_default();
             let duration = started.elapsed();
@@ -440,7 +530,7 @@ async fn run_command_with_no_output_timeout(
             ToolResult::error(format!("command timed out after {timeout_secs}s"))
         }
         WaitResult::NoOutput => {
-            let _ = child.kill().await;
+            pg_guard.kill_now();
             let stdout = stdout_handle.await.unwrap_or_default();
             let stderr = stderr_handle.await.unwrap_or_default();
             let duration = started.elapsed();
@@ -617,6 +707,75 @@ mod tests {
         assert!(
             !marker.exists(),
             "child process survived after future was dropped"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_future_kills_bash_descendants() {
+        // regression: kill_on_drop(true) only SIGKILLs the direct bash
+        // child. descendants spawned via subshells, pipelines, or & keep
+        // running after bash dies because they land in a different parent
+        // but share the same process group. we must SIGKILL the whole
+        // group so infinite-loop tests (cargo nextest | tail, etc.) die
+        // when the user aborts.
+        let tmp = tempfile::tempdir().unwrap();
+        let marker = tmp.path().join("completed");
+        let marker_str = marker.display().to_string();
+        let cwd = std::env::current_dir().unwrap();
+        // bash backgrounds a subshell that outlives bash's foreground
+        // wait. if we only kill the bash pid, the subshell sleeps then
+        // touches the marker.
+        let cmd = format!("( sleep 3 && touch {marker_str} ) & wait");
+        let fut = run_command(&cwd, &cmd, 30, None, false);
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(200), fut).await;
+        // wait past the subshell's sleep so a surviving descendant
+        // would have created the marker by now
+        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+        assert!(
+            !marker.exists(),
+            "descendant process survived after future was dropped"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timeout_kills_bash_descendants_and_returns() {
+        // regression: on timeout we used to SIGKILL only bash and then
+        // await the stdout handle. if bash had spawned descendants that
+        // held the pipe open (e.g. cargo test | tail), read_line blocks
+        // forever and the tool future hangs, so the agent loop never
+        // sees the timeout. killing the whole group closes the pipe and
+        // lets the stream drain.
+        let tmp = tempfile::tempdir().unwrap();
+        let marker = tmp.path().join("completed");
+        let marker_str = marker.display().to_string();
+        let cwd = std::env::current_dir().unwrap();
+        // bash backgrounds a descendant that holds stdout open. a
+        // surviving descendant keeps the pipe open and would block the
+        // stdout handle forever.
+        let cmd = format!("( sleep 10 && touch {marker_str} ) & wait");
+        let start = std::time::Instant::now();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run_command(&cwd, &cmd, 1, None, false),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "run_command hung instead of returning on timeout"
+        );
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_secs() < 5,
+            "timeout path took too long: {elapsed:?}"
+        );
+        // give any surviving descendant its chance to finish the sleep.
+        // if the group kill worked, the marker is never created.
+        tokio::time::sleep(std::time::Duration::from_secs(11)).await;
+        assert!(
+            !marker.exists(),
+            "descendant process survived after timeout kill"
         );
     }
 

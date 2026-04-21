@@ -26,6 +26,9 @@ grep-searcher = "0.1"
 grep-matcher = "0.1"
 ignore = "0.4"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 pretty_assertions.workspace = true
 tempfile.workspace = true
