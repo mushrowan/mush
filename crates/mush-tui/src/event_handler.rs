@@ -41,19 +41,7 @@ pub fn handle_agent_event(
             _ => {}
         },
         AgentEvent::MessageEnd { message } => {
-            let cost = models::calculate_cost(model, &message.usage);
-            app.finish_streaming(Some(message.usage), Some(cost.total()));
-            if message.usage.cache_read_tokens > TokenCount::ZERO
-                || message.usage.cache_write_tokens > TokenCount::ZERO
-            {
-                app.cache.refresh();
-            }
-            if debug_cache && message.usage.cache_read_tokens > TokenCount::ZERO {
-                app.push_system_message(format!(
-                    "cache read detected: {} tokens",
-                    message.usage.cache_read_tokens
-                ));
-            }
+            apply_message_end(app, message, model, debug_cache);
             let msg = Message::Assistant(message.clone());
             conversation.append_message(msg);
         }
@@ -193,6 +181,37 @@ pub fn would_inject_hint(
     enricher: &(dyn Fn(&str) -> Option<String> + Send + Sync),
 ) -> bool {
     hinted_user_message(msgs, enricher).is_some()
+}
+
+/// settle a streamed assistant `MessageEnd` into app state. in-band
+/// errors (stop_reason=Error or non-empty error_message, e.g. anthropic
+/// `Overloaded`) surface as a system message and bypass stats, since
+/// the carrier message has no real usage data and would otherwise
+/// trip the context-decrease anomaly detector
+fn apply_message_end(app: &mut App, message: &AssistantMessage, model: &Model, debug_cache: bool) {
+    if message.stop_reason == StopReason::Error || message.error_message.is_some() {
+        let err = message
+            .error_message
+            .as_deref()
+            .unwrap_or("stream ended with an error");
+        app.push_system_message(format!("⚠ API error: {err}"));
+        app.finish_streaming(None, None);
+        return;
+    }
+
+    let cost = models::calculate_cost(model, &message.usage);
+    app.finish_streaming(Some(message.usage), Some(cost.total()));
+    if message.usage.cache_read_tokens > TokenCount::ZERO
+        || message.usage.cache_write_tokens > TokenCount::ZERO
+    {
+        app.cache.refresh();
+    }
+    if debug_cache && message.usage.cache_read_tokens > TokenCount::ZERO {
+        app.push_system_message(format!(
+            "cache read detected: {} tokens",
+            message.usage.cache_read_tokens
+        ));
+    }
 }
 
 fn hinted_user_message(
@@ -683,5 +702,81 @@ mod tests {
         let last = ctx.app.messages.last().expect("should have a message");
         assert_eq!(last.role, MessageRole::System);
         assert!(last.content.contains("max turns"));
+    }
+
+    #[test]
+    fn errored_message_end_surfaces_error_and_skips_stats() {
+        // regression: anthropic sometimes delivers an in-band error (e.g.
+        // `Overloaded`) via an SSE error event. the stream processor sets
+        // stop_reason=Error + error_message=Some(_) and the stream still
+        // finishes with a `Done` event carrying a zero-usage message. the
+        // old flow fed that phantom Usage::default() into stats, tripping
+        // a false-positive "context decreased: 32k → 0k without compact"
+        // system message, while the actual error was only written to the
+        // log. user saw confusing noise, not the real error.
+        use crate::app::{App, MessageRole};
+        use mush_ai::types::{TokenCount, Usage};
+
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+
+        // seed prev usage so the anomaly detector has a baseline to
+        // compare against (this is what makes the old bug fire)
+        let prev_usage = Usage {
+            input_tokens: TokenCount::new(32_000),
+            output_tokens: TokenCount::new(100),
+            cache_read_tokens: TokenCount::ZERO,
+            cache_write_tokens: TokenCount::ZERO,
+        };
+        app.stats.update(&prev_usage, None);
+
+        let mut conversation = ConversationState::new();
+        let mut image_protos = std::collections::HashMap::new();
+        let model = mush_ai::models::all_models().first().unwrap().clone();
+
+        // errored assistant message: stop_reason=Error, zero usage
+        let errored = AssistantMessage {
+            content: vec![],
+            model: model.id.clone(),
+            provider: model.provider.clone(),
+            api: model.api,
+            usage: Usage::default(),
+            stop_reason: StopReason::Error,
+            error_message: Some("Overloaded".into()),
+            timestamp_ms: Timestamp::now(),
+        };
+        let mut ctx = EventCtx {
+            app: &mut app,
+            conversation: &mut conversation,
+            image_protos: &mut image_protos,
+        };
+        handle_agent_event(
+            &mut ctx,
+            &AgentEvent::MessageEnd { message: errored },
+            &model,
+            false,
+            &None,
+        );
+
+        // no "context decreased" anomaly should have fired
+        let has_context_decrease = ctx
+            .app
+            .messages
+            .iter()
+            .any(|m| m.role == MessageRole::System && m.content.contains("context decreased"));
+        assert!(
+            !has_context_decrease,
+            "zero-usage error message should not trigger context-decrease anomaly"
+        );
+
+        // the real error should surface as a system message
+        let has_error_msg = ctx
+            .app
+            .messages
+            .iter()
+            .any(|m| m.role == MessageRole::System && m.content.contains("Overloaded"));
+        assert!(
+            has_error_msg,
+            "the actual error (Overloaded) should be shown to the user"
+        );
     }
 }
