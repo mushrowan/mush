@@ -64,24 +64,37 @@ impl AgentTool for NotifyUserTool {
         let title = args.title;
         let body = args.body;
 
-        let notif_result = std::process::Command::new("notify-send")
+        // use tokio::process here so the call doesn't block the executor
+        // if the notification daemon is slow or unavailable. fire-and-forget
+        // pw-play alongside, reaped in a detached task to avoid leaving
+        // `<defunct>` zombies behind.
+        let mut notif_cmd = tokio::process::Command::new("notify-send");
+        notif_cmd
             .arg("--app-name=mush")
             .arg(&title)
             .arg(&body)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
+            .stderr(std::process::Stdio::null());
+        let notif_result = notif_cmd.status().await;
 
         let sound_path =
             "/run/current-system/sw/share/sounds/freedesktop/stereo/message-new-instant.oga";
         if std::path::Path::new(sound_path).exists() {
-            let _ = std::process::Command::new("pw-play")
+            let mut sound_cmd = tokio::process::Command::new("pw-play");
+            sound_cmd
                 .arg(sound_path)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn();
+                .stderr(std::process::Stdio::null());
+            if let Ok(mut child) = sound_cmd.spawn() {
+                // tokio's global orphan queue reaps dropped children on
+                // SIGCHLD, but explicitly waiting in a task is clearer and
+                // doesn't rely on that implementation detail
+                tokio::spawn(async move {
+                    let _ = child.wait().await;
+                });
+            }
         }
 
         match notif_result {
@@ -89,8 +102,7 @@ impl AgentTool for NotifyUserTool {
                 ToolResult::text(format!("notification sent: {title}"))
             }
             Ok(status) => ToolResult::text(format!(
-                "notify-send exited with {}, notification may not have appeared",
-                status
+                "notify-send exited with {status}, notification may not have appeared"
             )),
             Err(_) => ToolResult::text("notification attempted (notify-send not available)"),
         }
