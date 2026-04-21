@@ -3173,6 +3173,7 @@ dependencies = [
  "grep-searcher",
  "htmd",
  "ignore",
+ "libc",
  "mush-agent",
  "mush-ai",
  "pretty_assertions",
