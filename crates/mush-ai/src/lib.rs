@@ -4,6 +4,7 @@ pub mod oauth;
 pub mod private_io;
 pub mod providers;
 pub mod registry;
+pub mod request_snapshot;
 pub mod stream;
 pub mod types;
 

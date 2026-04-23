@@ -120,6 +120,37 @@ impl ApiProvider for AnthropicProvider {
             "anthropic request body"
         );
 
+        // snapshot the outgoing body for cache-bust triage. serialise
+        // once here so the fingerprint hashes the exact bytes that
+        // sibling sections end up on the wire. kept best-effort: a
+        // filesystem hiccup shouldn't affect the actual api call
+        if let Ok(body_json) = serde_json::to_string(&body) {
+            let system_json = body
+                .system
+                .as_ref()
+                .and_then(|s| serde_json::to_string(s).ok())
+                .unwrap_or_default();
+            let tools_json = body
+                .tools
+                .as_ref()
+                .and_then(|t| serde_json::to_string(t).ok())
+                .unwrap_or_default();
+            let messages_json = serde_json::to_string(&body.messages).unwrap_or_default();
+            let fp = crate::request_snapshot::RequestFingerprint::from_json_sections(
+                &system_json,
+                &tools_json,
+                &messages_json,
+            );
+            tracing::info!(
+                system = fp.system,
+                tools = fp.tools,
+                messages_prefix = fp.messages_prefix,
+                last_user = fp.last_user,
+                "anthropic request fingerprint"
+            );
+            let _ = crate::request_snapshot::dump("anthropic", &fp, &body_json);
+        }
+
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
