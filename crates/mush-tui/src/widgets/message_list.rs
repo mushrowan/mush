@@ -3090,7 +3090,7 @@ mod tests {
     #[test]
     fn tool_box_wraps_long_summary() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        let long_path = "/home/rowan/dev/mush/crates/mush-tui/src/widgets/message_list.rs";
+        let long_path = "/home/user/dev/mush/crates/mush-tui/src/widgets/message_list.rs";
         app.messages.push(DisplayMessage {
             tool_calls: vec![crate::app::DisplayToolCall {
                 name: "read".into(),
@@ -3919,13 +3919,13 @@ mod tests {
             }
         }
 
-        // the viewport should stay pinned at its original content line.
-        // allow no more than a single line of noise across the whole
-        // stream: any drift beyond that is the bug.
+        // viewport should stay pinned at its original content line with
+        // zero drift: no ±1 shimmer while scrolled up and streaming.
+        // any movement of `render_scroll` here is the bug.
         let min = *scrolls.iter().min().unwrap();
         let max = *scrolls.iter().max().unwrap();
-        assert!(
-            max - min <= 1,
+        assert_eq!(
+            min, max,
             "render_scroll drifted during streaming (anchor={scroll_anchor}, \
              min={min}, max={max}): {scrolls:?}"
         );
