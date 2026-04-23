@@ -773,7 +773,11 @@ async fn execute_tool(tools: &ToolRegistry, tool_call: &ToolCall) -> ToolResult 
         }
         None => {
             tracing::error!(tool = %tool_call.name, "tool not found");
-            ToolResult::error(format!("tool not found: {}", tool_call.name))
+            let preview = crate::tool::preview_args(&tool_call.arguments);
+            ToolResult::error(format!(
+                "tool not found: {}\nreceived: {preview}",
+                tool_call.name
+            ))
         }
     }
 }
@@ -830,11 +834,27 @@ mod tests {
         let tc = ToolCall {
             id: "tc_1".into(),
             name: "nonexistent".into(),
-            arguments: serde_json::json!({}),
+            arguments: serde_json::json!({"path": "/etc/passwd", "count": 3}),
         };
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(execute_tool(&tools, &tc));
         assert!(result.outcome.is_error());
+        // the tool-not-found error should include the attempted args so a
+        // model (or human reading the log) can see which call was
+        // malformed. particularly useful when a misspelled tool name is
+        // masking a real operation the model was trying to perform.
+        let text = match &result.content[0] {
+            mush_ai::types::ToolResultContentPart::Text(t) => &t.text,
+            _ => panic!("expected text content"),
+        };
+        assert!(
+            text.contains("nonexistent"),
+            "error should name the missing tool, got: {text}"
+        );
+        assert!(
+            text.contains("path") && text.contains("/etc/passwd") && text.contains("count"),
+            "error should preview attempted args, got: {text}"
+        );
     }
 
     #[test]

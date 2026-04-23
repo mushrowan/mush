@@ -103,7 +103,7 @@ const PREVIEW_VALUE_CHARS: usize = 40;
 /// marker). non-object values stringify via serde_json directly,
 /// truncated the same way. the preview is best-effort debug output,
 /// so we don't try to round-trip or re-parse it
-fn preview_args(args: &serde_json::Value) -> String {
+pub(crate) fn preview_args(args: &serde_json::Value) -> String {
     match args {
         serde_json::Value::Object(map) => {
             let parts: Vec<String> = map
