@@ -139,6 +139,9 @@ pub fn handle_agent_event(
             before_count,
             after_count,
         } => {
+            app.push_system_message(format!(
+                "━ compacted: {before_count} → {after_count} messages ━"
+            ));
             app.status = Some(format!(
                 "compacted: {before_count} → {after_count} messages"
             ));
@@ -678,6 +681,42 @@ mod tests {
         let last = ctx.app.messages.last().expect("should have a message");
         assert_eq!(last.role, MessageRole::System);
         assert!(last.content.contains("400 Bad Request"));
+    }
+
+    #[test]
+    fn context_transformed_surfaces_in_message_log() {
+        use crate::app::{App, MessageRole};
+        use mush_ai::types::TokenCount;
+
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        let mut conversation = ConversationState::new();
+        let mut image_protos = std::collections::HashMap::new();
+        let model = mush_ai::models::all_models().first().unwrap().clone();
+        let mut ctx = EventCtx {
+            app: &mut app,
+            conversation: &mut conversation,
+            image_protos: &mut image_protos,
+        };
+
+        let event = AgentEvent::ContextTransformed {
+            before_count: 42,
+            after_count: 7,
+        };
+        handle_agent_event(&mut ctx, &event, &model, false, &None);
+
+        let last = ctx
+            .app
+            .messages
+            .last()
+            .expect("compaction should surface in message log");
+        assert_eq!(last.role, MessageRole::System);
+        assert!(
+            last.content.contains("compacted")
+                && last.content.contains("42")
+                && last.content.contains('7'),
+            "expected counts in log message, got: {:?}",
+            last.content
+        );
     }
 
     #[test]
