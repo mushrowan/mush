@@ -23,14 +23,16 @@ pub fn render(frame: &mut Frame, picker: &SessionPickerState, theme: &Theme) {
     // clear the area behind the popup
     frame.render_widget(Clear, popup);
 
-    // title shows current scope
-    let title = match picker.scope {
-        SessionScope::ThisDir => " sessions (this dir) ",
-        SessionScope::AllDirs => " sessions (all) ",
+    // title shows current scope with loader status when streaming
+    let title = match (picker.scope, picker.loading) {
+        (SessionScope::ThisDir, false) => " sessions (this dir) ".to_string(),
+        (SessionScope::AllDirs, false) => " sessions (all) ".to_string(),
+        (SessionScope::ThisDir, true) => " sessions (this dir) · loading… ".to_string(),
+        (SessionScope::AllDirs, true) => " sessions (all) · loading… ".to_string(),
     };
 
     let block = Block::default()
-        .title(title)
+        .title(title.as_str())
         .borders(Borders::ALL)
         .border_style(theme.search_border)
         .padding(Padding::horizontal(1));
@@ -135,7 +137,7 @@ pub fn render(frame: &mut Frame, picker: &SessionPickerState, theme: &Theme) {
 
     if sessions.is_empty() {
         let msg = match picker.scope {
-            SessionScope::ThisDir => "  no sessions in this directory — press tab for all",
+            SessionScope::ThisDir => "  no sessions in this directory · press tab for all",
             SessionScope::AllDirs => "  no sessions found",
         };
         lines.push(Line::styled(msg, theme.dim));

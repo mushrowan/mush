@@ -133,17 +133,27 @@ pub fn handle(
         }
         SlashAction::Sessions => {
             let store = mush_session::SessionStore::new(mush_session::SessionStore::default_dir());
-            match store.list() {
-                Ok(sessions) => {
-                    if sessions.is_empty() {
-                        app.push_system_message("no saved sessions");
-                    } else {
-                        let cwd = std::env::current_dir()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .into_owned();
-                        app.open_session_picker(sessions, cwd);
-                    }
+            match store.list_paths() {
+                Ok(paths) => {
+                    let cwd = std::env::current_dir()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned();
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    app.open_session_picker_streaming(rx, cwd);
+                    // load metas off the event loop so the picker opens
+                    // instantly even with hundreds of saved sessions. the
+                    // task is best-effort: on send failure the picker
+                    // was closed and we drop out silently
+                    std::thread::spawn(move || {
+                        for path in paths {
+                            if let Ok(meta) = mush_session::load_meta(&path)
+                                && tx.send(meta).is_err()
+                            {
+                                break;
+                            }
+                        }
+                    });
                 }
                 Err(e) => app.push_system_message(format!("failed to list sessions: {e}")),
             }
