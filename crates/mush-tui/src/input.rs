@@ -2262,6 +2262,50 @@ mod tests {
     }
 
     #[test]
+    fn esc_cascade_scroll_select_to_abort() {
+        // regression for L290 (todo.md): pressing esc repeatedly should
+        // walk a 4-step cascade when streaming:
+        //   1. clear visual selection (stay in scroll mode)
+        //   2. exit scroll mode (stay scrolled up)
+        //   3. scroll to bottom (stay in normal mode)
+        //   4. abort the in-flight stream
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        for i in 0..5 {
+            app.push_user_message(format!("msg {i}"));
+        }
+
+        // enter scroll mode, select a message, start visual selection,
+        // then scroll up so the later scroll_offset > 0 branch fires.
+        // ctrl+s is an idle-only binding, so enter scroll mode before
+        // simulating the in-flight stream
+        handle_key(&mut app, ctrl(KeyCode::Char('s')));
+        handle_key(&mut app, key(KeyCode::Char('b')));
+        handle_key(&mut app, key(KeyCode::Char('v')));
+        assert!(app.navigation.selection_anchor.is_some());
+        app.scroll_offset = 20;
+        app.stream.active = true;
+
+        // 1. first esc: clears selection, scroll mode retained
+        assert!(handle_key(&mut app, key(KeyCode::Esc)).is_none());
+        assert_eq!(app.interaction.mode, AppMode::Scroll);
+        assert!(app.navigation.selection_anchor.is_none());
+        assert_eq!(app.scroll_offset, 20);
+
+        // 2. second esc: exits scroll mode, stays scrolled up
+        assert!(handle_key(&mut app, key(KeyCode::Esc)).is_none());
+        assert_eq!(app.interaction.mode, AppMode::Normal);
+        assert_eq!(app.scroll_offset, 20);
+
+        // 3. third esc: anchors at bottom of message log
+        assert!(handle_key(&mut app, key(KeyCode::Esc)).is_none());
+        assert_eq!(app.scroll_offset, 0);
+
+        // 4. fourth esc: now at bottom, cancels the stream
+        let event = handle_key(&mut app, key(KeyCode::Esc));
+        assert!(matches!(event, Some(AppEvent::Abort)));
+    }
+
+    #[test]
     fn scroll_mode_b_toggles_scroll_unit() {
         use crate::app::ScrollUnit;
         let mut app = App::new("test".into(), TokenCount::new(200_000));
