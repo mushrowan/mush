@@ -45,7 +45,10 @@ pub fn render(source: &str, theme: &Theme) -> Text<'static> {
     let mut code_block_lang = String::new();
     let mut code_block_lines: Vec<String> = Vec::new();
 
-    for raw_line in source.lines() {
+    let source_lines: Vec<&str> = source.lines().collect();
+    let mut idx = 0;
+    while idx < source_lines.len() {
+        let raw_line = source_lines[idx];
         if raw_line.starts_with("```") {
             if in_code_block {
                 // end code block - highlight and emit
@@ -58,21 +61,31 @@ pub fn render(source: &str, theme: &Theme) -> Text<'static> {
                 code_block_lang = raw_line.trim_start_matches('`').trim().to_string();
                 in_code_block = true;
             }
+            idx += 1;
             continue;
         }
 
         if in_code_block {
             code_block_lines.push(raw_line.to_string());
+            idx += 1;
+            continue;
+        }
+
+        // table: `| ... |` header row, `|---|---|` separator, then `| ... |` body rows
+        if let Some(consumed) = try_render_table(&source_lines[idx..], theme, &mut lines) {
+            idx += consumed;
             continue;
         }
 
         // headings
         if let Some(rest) = raw_line.strip_prefix("### ") {
             lines.push(Line::styled(rest.to_string(), theme.heading_h3));
+            idx += 1;
             continue;
         }
         if let Some(rest) = raw_line.strip_prefix("## ") {
             lines.push(Line::styled(rest.to_string(), theme.heading));
+            idx += 1;
             continue;
         }
         if let Some(rest) = raw_line.strip_prefix("# ") {
@@ -80,12 +93,14 @@ pub fn render(source: &str, theme: &Theme) -> Text<'static> {
                 rest.to_string(),
                 theme.heading.add_modifier(Modifier::UNDERLINED),
             ));
+            idx += 1;
             continue;
         }
 
         // horizontal rule
         if raw_line == "---" || raw_line == "***" || raw_line == "___" {
             lines.push(Line::styled("─".repeat(40), theme.horizontal_rule));
+            idx += 1;
             continue;
         }
 
@@ -97,6 +112,7 @@ pub fn render(source: &str, theme: &Theme) -> Text<'static> {
             let mut spans = vec![Span::styled("• ", theme.list_bullet)];
             spans.extend(render_inline_spans(rest, theme));
             lines.push(Line::from(spans));
+            idx += 1;
             continue;
         }
 
@@ -105,6 +121,7 @@ pub fn render(source: &str, theme: &Theme) -> Text<'static> {
             let mut spans = vec![Span::styled(format!("{prefix} "), theme.list_bullet)];
             spans.extend(render_inline_spans(rest, theme));
             lines.push(Line::from(spans));
+            idx += 1;
             continue;
         }
 
@@ -114,6 +131,7 @@ pub fn render(source: &str, theme: &Theme) -> Text<'static> {
         } else {
             lines.push(Line::from(render_inline_spans(raw_line, theme)));
         }
+        idx += 1;
     }
 
     // close any unclosed code block
@@ -154,6 +172,7 @@ fn is_plain_text_line(line: &str) -> bool {
             && !line.starts_with("# ")
             && !line.starts_with("- ")
             && !line.starts_with("* ")
+            && !line.trim_start().starts_with('|')
             && line != "---"
             && line != "***"
             && line != "___"
@@ -172,6 +191,128 @@ fn numbered_list_item(line: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((&line[..=dot_pos], &line[dot_pos + 2..]))
+}
+
+/// parse a `| a | b | c |` row into trimmed cell strings. returns `None`
+/// if the line doesn't look like a table row (no surrounding pipes, no
+/// inner pipes). the outer pipes are stripped before splitting so cells
+/// never contain the delimiter itself
+fn parse_table_row(line: &str) -> Option<Vec<&str>> {
+    let trimmed = line.trim();
+    let inner = trimmed.strip_prefix('|')?.strip_suffix('|')?;
+    if !inner.contains('|') {
+        return None;
+    }
+    Some(inner.split('|').map(str::trim).collect())
+}
+
+/// a separator row uses dashes (with optional colons for alignment)
+/// between the pipes. every cell must be a dash/colon run, and there
+/// must be at least one dash to disambiguate from header rows that
+/// contain only colons
+fn is_table_separator_row(line: &str) -> bool {
+    let Some(cells) = parse_table_row(line) else {
+        return false;
+    };
+    if cells.is_empty() {
+        return false;
+    }
+    cells.iter().all(|cell| {
+        !cell.is_empty() && cell.chars().all(|c| c == '-' || c == ':') && cell.contains('-')
+    })
+}
+
+/// try to recognise and render a gfm table starting at `lines[0]`.
+/// returns the number of source lines consumed, or `None` if the
+/// prefix doesn't form a valid table (missing separator row, ragged
+/// cell counts, etc)
+fn try_render_table(source: &[&str], theme: &Theme, out: &mut Vec<Line<'static>>) -> Option<usize> {
+    let header = parse_table_row(source.first()?)?;
+    let separator = source.get(1)?;
+    if !is_table_separator_row(separator) {
+        return None;
+    }
+    let col_count = header.len();
+
+    let mut body_rows: Vec<Vec<String>> = Vec::new();
+    let mut idx = 2;
+    while idx < source.len() {
+        let Some(cells) = parse_table_row(source[idx]) else {
+            break;
+        };
+        // pad or truncate to header column count so the grid stays rectangular
+        let mut row: Vec<String> = cells.into_iter().map(str::to_string).collect();
+        row.resize(col_count, String::new());
+        body_rows.push(row);
+        idx += 1;
+    }
+
+    // compute column widths (display width) across header + body
+    let mut widths: Vec<usize> = header
+        .iter()
+        .map(|c| unicode_width::UnicodeWidthStr::width(*c))
+        .collect();
+    for row in &body_rows {
+        for (i, cell) in row.iter().enumerate() {
+            if i < widths.len() {
+                let w = unicode_width::UnicodeWidthStr::width(cell.as_str());
+                if w > widths[i] {
+                    widths[i] = w;
+                }
+            }
+        }
+    }
+
+    out.push(Line::styled(
+        build_table_border(&widths, '┌', '┬', '┐'),
+        theme.horizontal_rule,
+    ));
+    out.push(build_table_row(&header, &widths, theme));
+    out.push(Line::styled(
+        build_table_border(&widths, '├', '┼', '┤'),
+        theme.horizontal_rule,
+    ));
+    for row in &body_rows {
+        let cells: Vec<&str> = row.iter().map(String::as_str).collect();
+        out.push(build_table_row(&cells, &widths, theme));
+    }
+    out.push(Line::styled(
+        build_table_border(&widths, '└', '┴', '┘'),
+        theme.horizontal_rule,
+    ));
+
+    Some(idx)
+}
+
+fn build_table_border(widths: &[usize], left: char, mid: char, right: char) -> String {
+    let mut out = String::new();
+    out.push(left);
+    for (i, w) in widths.iter().enumerate() {
+        if i > 0 {
+            out.push(mid);
+        }
+        // pad with 2 (one space each side) + content width
+        for _ in 0..w + 2 {
+            out.push('─');
+        }
+    }
+    out.push(right);
+    out
+}
+
+fn build_table_row(cells: &[&str], widths: &[usize], theme: &Theme) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    spans.push(Span::styled("│", theme.horizontal_rule));
+    for (i, cell) in cells.iter().enumerate() {
+        let width = widths.get(i).copied().unwrap_or(0);
+        let cell_w = unicode_width::UnicodeWidthStr::width(*cell);
+        let pad = width.saturating_sub(cell_w);
+        spans.push(Span::raw(" "));
+        spans.extend(render_inline_spans(cell, theme));
+        spans.push(Span::raw(format!("{} ", " ".repeat(pad))));
+        spans.push(Span::styled("│", theme.horizontal_rule));
+    }
+    Line::from(spans)
 }
 
 fn render_code_block(code_lines: &[String], lang: &str, theme: &Theme) -> Vec<Line<'static>> {
@@ -559,5 +700,79 @@ mod tests {
     fn mixed_content() {
         let text = render("# title\n\nsome **bold** and `code`\n\n- a list item", &t());
         assert!(text.lines.len() >= 4);
+    }
+
+    #[test]
+    fn table_renders_as_aligned_grid() {
+        // L325: markdown tables should render as a readable box-drawing
+        // grid so LLM output with tables doesn't appear as raw pipes
+        let source = "\
+| Name  | Age |
+|-------|-----|
+| Alice | 30  |
+| Bob   | 25  |";
+        let text = render(source, &t());
+        let rendered: Vec<String> = text.lines.iter().map(Line::to_string).collect();
+        // 6 lines: top border, header, separator, row1, row2, bottom border
+        assert_eq!(
+            rendered.len(),
+            6,
+            "expected 6 grid lines, got {}: {rendered:?}",
+            rendered.len()
+        );
+        assert!(
+            rendered[0].starts_with('┌') && rendered[0].contains('┬') && rendered[0].ends_with('┐')
+        );
+        assert!(
+            rendered[1].contains("Name")
+                && rendered[1].contains("Age")
+                && rendered[1].starts_with('│')
+        );
+        assert!(
+            rendered[2].starts_with('├') && rendered[2].contains('┼') && rendered[2].ends_with('┤')
+        );
+        assert!(rendered[3].contains("Alice") && rendered[3].contains("30"));
+        assert!(rendered[4].contains("Bob") && rendered[4].contains("25"));
+        assert!(
+            rendered[5].starts_with('└') && rendered[5].contains('┴') && rendered[5].ends_with('┘')
+        );
+
+        // columns should be aligned: header and data rows equal width
+        assert_eq!(rendered[1].chars().count(), rendered[3].chars().count());
+        assert_eq!(rendered[3].chars().count(), rendered[4].chars().count());
+    }
+
+    #[test]
+    fn table_in_mixed_content() {
+        // a table appearing between prose should render as a grid and
+        // not disturb the surrounding paragraphs
+        let source = "\
+here is a table:
+
+| a | b |
+|---|---|
+| 1 | 2 |
+
+done.";
+        let text = render(source, &t());
+        let rendered: Vec<String> = text.lines.iter().map(Line::to_string).collect();
+        assert!(rendered.iter().any(|l| l.contains("here is a table:")));
+        assert!(rendered.iter().any(|l| l.contains("done.")));
+        // 5 grid lines (top, header, sep, row, bottom)
+        assert!(
+            rendered.iter().filter(|l| l.starts_with('│')).count() == 2,
+            "expected 2 grid content rows, got: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn incomplete_table_falls_back_to_plain() {
+        // a lone pipe line without a separator row is not a table and
+        // should render as regular prose, not a broken grid
+        let source = "| just | one | line |";
+        let text = render(source, &t());
+        let rendered: Vec<String> = text.lines.iter().map(Line::to_string).collect();
+        assert_eq!(rendered.len(), 1);
+        assert_eq!(rendered[0], "| just | one | line |");
     }
 }
