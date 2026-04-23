@@ -330,7 +330,7 @@ impl TokenStats {
 
 /// diagnostic snapshot written when a cache bust is detected.
 /// captures everything needed to figure out why the bust happened
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct CacheBustDiagnostic {
     pub timestamp: String,
     pub secs_since_last_cache_activity: Option<u64>,
@@ -367,22 +367,65 @@ pub struct CacheBustDiagnostic {
 }
 
 /// write a cache bust diagnostic to ~/.local/state/mush/cache-busts/.
-/// always writes regardless of log level. returns the path on success
+/// always writes regardless of log level. returns the path on success.
+/// referenced request snapshots are pinned into a sibling dir so the
+/// forensic bundle survives live-ring rotation (see
+/// [`dump_cache_bust_diagnostic_in`] for the testable core)
 pub fn dump_cache_bust_diagnostic(diag: &CacheBustDiagnostic) -> Option<std::path::PathBuf> {
-    let dir = cache_bust_dir();
-    if let Err(e) = std::fs::create_dir_all(&dir) {
+    dump_cache_bust_diagnostic_in(&cache_bust_dir(), diag)
+}
+
+/// core of [`dump_cache_bust_diagnostic`] parameterised on the target
+/// directory so tests can use a tempdir without racing the global
+/// `XDG_STATE_HOME` env var
+pub fn dump_cache_bust_diagnostic_in(
+    dir: &std::path::Path,
+    diag: &CacheBustDiagnostic,
+) -> Option<std::path::PathBuf> {
+    if let Err(e) = std::fs::create_dir_all(dir) {
         tracing::error!(error = %e, "failed to create cache bust dump dir");
         return None;
     }
 
     // include enough of the timestamp to be unique without being unwieldy
-    let filename = format!(
-        "bust-{}.json",
+    let stem = format!(
+        "bust-{}",
         diag.timestamp.replace([':', ' '], "-").replace('T', "_")
     );
-    let path = dir.join(filename);
+    let path = dir.join(format!("{stem}.json"));
 
-    match serde_json::to_string_pretty(diag) {
+    // pin referenced snapshots into a sibling dir so the bundle is
+    // self-contained and survives rotation of the live ring. we rewrite
+    // the paths in the serialised diagnostic to point at the copies
+    let mut diag_out = diag.clone();
+    if !diag.recent_request_snapshots.is_empty() {
+        let pin_dir = dir.join(format!("{stem}-snapshots"));
+        if let Err(e) = std::fs::create_dir_all(&pin_dir) {
+            tracing::error!(error = %e, "failed to create pin dir for bust snapshots");
+        } else {
+            let mut pinned = Vec::with_capacity(diag.recent_request_snapshots.len());
+            for (i, src) in diag.recent_request_snapshots.iter().enumerate() {
+                let filename = src.file_name().map_or_else(
+                    || std::ffi::OsString::from(format!("snapshot-{i}.json")),
+                    std::ffi::OsStr::to_os_string,
+                );
+                let dst = pin_dir.join(&filename);
+                match std::fs::copy(src, &dst) {
+                    Ok(_) => pinned.push(dst),
+                    Err(e) => {
+                        tracing::warn!(
+                            src = %src.display(),
+                            error = %e,
+                            "failed to pin request snapshot for bust bundle"
+                        );
+                    }
+                }
+            }
+            diag_out.recent_request_snapshots = pinned;
+        }
+    }
+
+    match serde_json::to_string_pretty(&diag_out) {
         Ok(json) => match std::fs::write(&path, json) {
             Ok(()) => Some(path),
             Err(e) => {
