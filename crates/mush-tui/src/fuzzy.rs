@@ -49,11 +49,11 @@ impl FuzzyFilter {
             Normalization::Smart,
             AtomKind::Fuzzy,
         );
-        pattern.score(haystack, &mut self.matcher).and_then(|s| {
-            // nucleo returns 0 for empty patterns which we handle above, so a
-            // real match is always >0. downstream callers rely on that invariant
-            if s == 0 { None } else { Some(s) }
-        })
+        // nucleo returns 0 for empty patterns which we handle above, so a
+        // real match is always >0. downstream callers rely on that invariant
+        pattern
+            .score(haystack, &mut self.matcher)
+            .filter(|&s| s != 0)
     }
 
     /// filter and rank a slice of items by `query`. returns indices into the
