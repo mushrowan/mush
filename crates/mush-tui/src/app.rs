@@ -947,6 +947,19 @@ impl App {
         self.interaction.mode = AppMode::SessionPicker;
     }
 
+    /// open the session picker backed by a streaming loader. sessions
+    /// arrive via the receiver and are drained into the picker by the
+    /// main event loop tick, so the overlay is visible immediately and
+    /// fills in as metadata parses
+    pub fn open_session_picker_streaming(
+        &mut self,
+        incoming: std::sync::mpsc::Receiver<SessionMeta>,
+        cwd: String,
+    ) {
+        self.interaction.session_picker = Some(SessionPickerState::new_streaming(incoming, cwd));
+        self.interaction.mode = AppMode::SessionPicker;
+    }
+
     /// close the session picker
     pub fn close_session_picker(&mut self) {
         self.interaction.session_picker = None;

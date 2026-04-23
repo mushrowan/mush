@@ -70,12 +70,7 @@ impl SessionStore {
         self.init()?;
         let mut sessions = Vec::new();
 
-        for entry in std::fs::read_dir(&self.base_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
-            }
+        for path in self.list_paths()? {
             match load_meta(&path) {
                 Ok(meta) => sessions.push(meta),
                 Err(_) => continue, // skip corrupt files
@@ -85,6 +80,24 @@ impl SessionStore {
         // sort by updated_at descending (most recent first)
         sessions.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
         Ok(sessions)
+    }
+
+    /// enumerate session file paths without parsing them. cheap
+    /// readdir-only pass: callers that want to stream metadata
+    /// progressively (e.g. the TUI `/sessions` picker) drive json
+    /// parsing per-path off the hot path
+    pub fn list_paths(&self) -> Result<Vec<PathBuf>, StoreError> {
+        self.init()?;
+        let mut paths = Vec::new();
+        for entry in std::fs::read_dir(&self.base_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            paths.push(path);
+        }
+        Ok(paths)
     }
 
     /// delete a session
@@ -98,7 +111,7 @@ impl SessionStore {
 }
 
 /// load just the metadata from a session file without deserialising all messages
-fn load_meta(path: &Path) -> Result<SessionMeta, StoreError> {
+pub fn load_meta(path: &Path) -> Result<SessionMeta, StoreError> {
     // for now we load the full file - could optimise later with streaming json
     let json = std::fs::read_to_string(path)?;
     let session: Session = serde_json::from_str(&json)?;

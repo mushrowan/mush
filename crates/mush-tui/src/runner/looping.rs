@@ -123,6 +123,7 @@ async fn handle_streaming_iteration(
         _ = tick => {
             poll_confirmation_prompt(&mut runtime.pane_mgr, stream_state).await;
             poll_live_tool_output(&mut runtime.pane_mgr, &tui_config.tool_output_live);
+            drain_session_picker(&mut runtime.pane_mgr);
             drain_inboxes(&mut runtime.pane_mgr, stream_state).await;
 
             let (pane_mgr, mut deps) = input_parts(runtime, services, tui_config, registry, image_picker, size_cache);
@@ -204,6 +205,18 @@ fn tool_exec_may_touch_tty(tool_name: &str) -> bool {
     tool_name == "bash"
 }
 
+/// pull any freshly-loaded session metadata into each pane's picker
+/// state. the /sessions slash command kicks off a thread that parses
+/// session files off the event loop; the results land here on the next
+/// tick so the overlay populates progressively
+fn drain_session_picker(pane_mgr: &mut crate::pane::PaneManager) {
+    for pane in pane_mgr.panes_mut() {
+        if let Some(picker) = pane.app.interaction.session_picker.as_mut() {
+            picker.drain_incoming();
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_idle_iteration(
     stream_state: &StreamState,
@@ -215,6 +228,7 @@ async fn handle_idle_iteration(
     size_cache: &std::rc::Rc<super::caching_backend::CachedSizeState>,
 ) -> io::Result<LoopAction> {
     drain_inboxes(&mut runtime.pane_mgr, stream_state).await;
+    drain_session_picker(&mut runtime.pane_mgr);
 
     let (pane_mgr, mut deps) = input_parts(
         runtime,
