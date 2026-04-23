@@ -357,6 +357,13 @@ pub struct CacheBustDiagnostic {
     pub curr_context_tokens: u64,
     pub session_total_cost: String,
     pub session_api_calls: u64,
+    /// paths to the most recent request body snapshots (newest first),
+    /// populated best-effort from the provider-agnostic snapshot dir.
+    /// lets an operator diff the last two outgoing bodies by hand to
+    /// see which bytes drifted before the bust. empty when snapshots
+    /// are disabled or the dir is unreadable
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub recent_request_snapshots: Vec<std::path::PathBuf>,
 }
 
 /// write a cache bust diagnostic to ~/.local/state/mush/cache-busts/.

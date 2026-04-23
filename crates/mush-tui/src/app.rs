@@ -539,31 +539,34 @@ impl App {
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
                             .as_secs();
-                        let diag = CacheBustDiagnostic {
-                            timestamp: format!("{now}"),
-                            secs_since_last_cache_activity: self.cache.elapsed_secs(),
-                            cache_ttl_secs: self.cache.ttl_secs,
-                            thinking_level: curr_config.thinking_level.clone(),
-                            model_id: curr_config.model_id.clone(),
-                            effort: curr_config.effort.clone(),
-                            bust_reason: reason.clone(),
-                            prev_model_id: prev_config_snapshot
-                                .as_ref()
-                                .map(|c| c.model_id.clone()),
-                            prev_thinking_level: prev_config_snapshot
-                                .as_ref()
-                                .map(|c| c.thinking_level.clone()),
-                            prev_effort: prev_config_snapshot
-                                .as_ref()
-                                .and_then(|c| c.effort.clone()),
-                            prev_usage: prev_usage_snapshot,
-                            curr_usage: *u,
-                            prev_context_tokens: prev_context_snapshot.get(),
-                            curr_context_tokens: u.total_input_tokens().get(),
-                            session_total_cost: format!("{:.4}", self.stats.total_cost.get()),
-                            session_api_calls: self.stats.total_tokens.get()
-                                / u.total_tokens().get().max(1),
-                        };
+                        let diag =
+                            CacheBustDiagnostic {
+                                timestamp: format!("{now}"),
+                                secs_since_last_cache_activity: self.cache.elapsed_secs(),
+                                cache_ttl_secs: self.cache.ttl_secs,
+                                thinking_level: curr_config.thinking_level.clone(),
+                                model_id: curr_config.model_id.clone(),
+                                effort: curr_config.effort.clone(),
+                                bust_reason: reason.clone(),
+                                prev_model_id: prev_config_snapshot
+                                    .as_ref()
+                                    .map(|c| c.model_id.clone()),
+                                prev_thinking_level: prev_config_snapshot
+                                    .as_ref()
+                                    .map(|c| c.thinking_level.clone()),
+                                prev_effort: prev_config_snapshot
+                                    .as_ref()
+                                    .and_then(|c| c.effort.clone()),
+                                prev_usage: prev_usage_snapshot,
+                                curr_usage: *u,
+                                prev_context_tokens: prev_context_snapshot.get(),
+                                curr_context_tokens: u.total_input_tokens().get(),
+                                session_total_cost: format!("{:.4}", self.stats.total_cost.get()),
+                                session_api_calls: self.stats.total_tokens.get()
+                                    / u.total_tokens().get().max(1),
+                                recent_request_snapshots:
+                                    mush_ai::request_snapshot::recent_snapshots("anthropic", 2),
+                            };
                         let dump_note = match dump_cache_bust_diagnostic(&diag) {
                             Some(path) => format!(" (dump: {})", path.display()),
                             None => String::new(),
@@ -2411,6 +2414,7 @@ batch: 1/2 succeeded, 1 failed";
             curr_context_tokens: 105_000,
             session_total_cost: "1.2345".into(),
             session_api_calls: 7,
+            recent_request_snapshots: Vec::new(),
         };
 
         // test the dump function directly using internal helper
@@ -2425,6 +2429,43 @@ batch: 1/2 succeeded, 1 failed";
         assert_eq!(parsed["thinking_level"], "High");
         assert_eq!(parsed["prev_usage"]["cache_read_tokens"], 90_000);
         assert_eq!(parsed["curr_usage"]["cache_write_tokens"], 100_000);
+        // no snapshots set → field should be absent via skip_serializing_if
+        assert!(parsed.get("recent_request_snapshots").is_none());
+    }
+
+    #[test]
+    fn cache_bust_diagnostic_includes_request_snapshots_when_present() {
+        // when request snapshots are available at bust time, their
+        // paths should land in the json so a reader can diff them.
+        // the field is declared skip_serializing_if_empty, so presence
+        // in the json proves both the hookup and the serde contract
+        let diag = CacheBustDiagnostic {
+            timestamp: "1722470400".into(),
+            secs_since_last_cache_activity: Some(10),
+            cache_ttl_secs: 3600,
+            thinking_level: "High".into(),
+            model_id: "claude-opus-4-7".into(),
+            effort: None,
+            bust_reason: BustReason::Unexplained,
+            prev_model_id: None,
+            prev_thinking_level: None,
+            prev_effort: None,
+            prev_usage: None,
+            curr_usage: Usage::default(),
+            prev_context_tokens: 0,
+            curr_context_tokens: 0,
+            session_total_cost: "0.0".into(),
+            session_api_calls: 1,
+            recent_request_snapshots: vec![
+                std::path::PathBuf::from("/tmp/mush/snapshots/anthropic-001.json"),
+                std::path::PathBuf::from("/tmp/mush/snapshots/anthropic-000.json"),
+            ],
+        };
+        let json = serde_json::to_string(&diag).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let paths = parsed["recent_request_snapshots"].as_array().unwrap();
+        assert_eq!(paths.len(), 2);
+        assert!(paths[0].as_str().unwrap().ends_with("anthropic-001.json"));
     }
 
     #[test]
