@@ -16,8 +16,6 @@ pub use compaction::{fork_and_compact, handle_compact, handle_fork_compact, run_
 pub enum SlashParseError {
     #[error("slash commands must start with /")]
     MissingPrefix,
-    #[error("usage: /resume <session-id>")]
-    ResumeUsage,
     #[error("usage: /branch <number> (try /tree first)")]
     BranchUsage,
     #[error("usage: /logs [n]")]
@@ -45,7 +43,8 @@ pub enum SlashAction {
     },
     Sessions,
     Resume {
-        session_id: SessionId,
+        /// `None` means "most recent session in the current cwd"
+        session_id: Option<SessionId>,
     },
     Branch {
         index: Option<usize>,
@@ -148,9 +147,9 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
             model_id: (!args.is_empty()).then(|| args.to_string()),
         }),
         "sessions" => Ok(SlashAction::Sessions),
-        "resume" if args.is_empty() => Err(SlashParseError::ResumeUsage),
+        "resume" if args.is_empty() => Ok(SlashAction::Resume { session_id: None }),
         "resume" => Ok(SlashAction::Resume {
-            session_id: SessionId::from(args),
+            session_id: Some(SessionId::from(args)),
         }),
         "branch" if args.is_empty() => Ok(SlashAction::Branch { index: None }),
         "branch" => args
@@ -341,5 +340,26 @@ mod tests {
     #[test]
     fn parse_debug_produces_debug_action() {
         assert_eq!(parse("/debug").unwrap(), SlashAction::Debug);
+    }
+
+    #[test]
+    fn parse_resume_no_arg_means_most_recent_in_cwd() {
+        // bare `/resume` is a quick "pick up where i left off" shortcut.
+        // the handler resolves None to the most recent session in the
+        // current cwd. an explicit id still works for surgical targeting
+        assert_eq!(
+            parse("/resume").unwrap(),
+            SlashAction::Resume { session_id: None }
+        );
+    }
+
+    #[test]
+    fn parse_resume_with_id_keeps_explicit_target() {
+        assert_eq!(
+            parse("/resume abc123").unwrap(),
+            SlashAction::Resume {
+                session_id: Some(SessionId::from("abc123")),
+            }
+        );
     }
 }

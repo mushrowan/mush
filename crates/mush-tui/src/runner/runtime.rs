@@ -19,6 +19,7 @@ const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("new", "save session, start fresh"),
     ("model", "show or switch model"),
     ("sessions", "browse and resume sessions"),
+    ("resume", "resume last session in cwd (or by id)"),
     ("branch", "branch from nth user message"),
     ("tree", "show conversation tree"),
     ("compact", "summarise old messages to free context"),
