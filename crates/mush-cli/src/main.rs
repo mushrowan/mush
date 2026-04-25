@@ -378,11 +378,17 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
             } => {
                 eprintln!("\x1b[2m(compacted: {before_count} → {after_count} messages)\x1b[0m");
             }
-            AgentEvent::SteeringInjected { count } => {
-                eprintln!("\x1b[2m(steering: {count} messages injected)\x1b[0m");
+            AgentEvent::SteeringInjected { messages } => {
+                eprintln!(
+                    "\x1b[2m(steering: {} messages injected)\x1b[0m",
+                    messages.len()
+                );
             }
-            AgentEvent::FollowUpInjected { count } => {
-                eprintln!("\x1b[2m(follow-up: {count} messages queued)\x1b[0m");
+            AgentEvent::FollowUpInjected { messages } => {
+                eprintln!(
+                    "\x1b[2m(follow-up: {} messages queued)\x1b[0m",
+                    messages.len()
+                );
             }
             AgentEvent::MaxTurnsReached { max_turns } => {
                 eprintln!("\n\x1b[33m⚠ hit max turns limit ({max_turns})\x1b[0m");
