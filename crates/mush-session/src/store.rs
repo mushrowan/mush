@@ -162,6 +162,58 @@ mod tests {
     }
 
     #[test]
+    fn system_prompt_round_trips() {
+        // the system prompt is part of the cached request prefix on the
+        // anthropic side. if we don't persist it with the session, a
+        // resumed session re-derives the prompt from current AGENTS.md
+        // and any drift busts the cache on the first call. round-trip
+        // through json must preserve the exact string
+        let (_dir, store) = temp_store();
+        let mut session = Session::new("test-model", "/tmp");
+        session.system_prompt = Some("you are running inside mush\n\nproject context: foo".into());
+        store.save(&session).unwrap();
+
+        let loaded = store.load(&session.meta.id).unwrap();
+        assert_eq!(
+            loaded.system_prompt.as_deref(),
+            Some("you are running inside mush\n\nproject context: foo")
+        );
+    }
+
+    #[test]
+    fn legacy_session_without_system_prompt_loads_with_none() {
+        // older session files were written before system_prompt existed.
+        // they must still load, deserialising the missing field as None
+        let (dir, store) = temp_store();
+        let id = SessionId::from("legacy");
+        let legacy_json = format!(
+            r#"{{
+                "meta": {{
+                    "id": "{id}",
+                    "title": null,
+                    "model_id": "test-model",
+                    "created_at": 0,
+                    "updated_at": 0,
+                    "message_count": 0,
+                    "cwd": "/tmp"
+                }},
+                "tree_nodes": [],
+                "current_branch": null,
+                "panes": []
+            }}"#
+        );
+        std::fs::create_dir_all(dir.path().join("sessions")).unwrap();
+        std::fs::write(
+            dir.path().join("sessions").join(format!("{id}.json")),
+            legacy_json,
+        )
+        .unwrap();
+
+        let loaded = store.load(&id).unwrap();
+        assert!(loaded.system_prompt.is_none());
+    }
+
+    #[test]
     fn load_nonexistent_session() {
         let (_dir, store) = temp_store();
         let id = SessionId::from("nonexistent");

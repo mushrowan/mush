@@ -53,6 +53,11 @@ pub struct SessionSnapshot {
     pub model_id: String,
     /// additional panes (empty for single-pane sessions)
     pub panes: Vec<PaneSnapshot>,
+    /// active system prompt at snapshot time. carrying it with the
+    /// snapshot lets resumed sessions reuse the exact cached prompt
+    /// instead of rebuilding from AGENTS.md (which would mismatch
+    /// the provider-side prefix cache)
+    pub system_prompt: Option<String>,
 }
 
 /// snapshot of a single additional pane

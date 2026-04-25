@@ -478,6 +478,16 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
     let session_id = session.meta.id.clone();
     setup.options.session_id = Some(session_id.clone());
 
+    // resumed sessions reuse the system prompt that was cached on the
+    // provider side. without this the rebuilt prompt (from current
+    // AGENTS.md and skills) drifts and busts the prefix cache on the
+    // first call after resume. fresh sessions fall back to the just-built
+    // setup.system_prompt
+    let system_prompt = session
+        .system_prompt
+        .clone()
+        .unwrap_or(setup.system_prompt);
+
     let theme = mush_tui::Theme::from_config(&setup.cfg.theme);
     let prompt_enricher =
         build_prompt_enricher(&setup.cwd, &setup.cfg.retrieval, &setup.tool_descriptions);
@@ -504,7 +514,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
 
     let tui_config = TuiConfig {
         model: setup.model,
-        system_prompt: Some(setup.system_prompt),
+        system_prompt: Some(system_prompt),
         options: setup.options,
         max_turns: setup.max_turns,
         initial_messages,
@@ -535,6 +545,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
                     let mut session = Session::new(&snapshot.model_id, &cwd_s);
                     session.meta.id = snapshot.session_id;
                     session.conversation = snapshot.primary;
+                    session.system_prompt = snapshot.system_prompt;
                     session.meta.message_count = session.conversation.context_len();
                     session.panes = snapshot
                         .panes

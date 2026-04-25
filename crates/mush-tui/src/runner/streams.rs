@@ -1219,6 +1219,7 @@ pub(crate) fn build_session_snapshot(
         primary: primary.conversation.clone(),
         model_id: primary.app.model_id.to_string(),
         panes: additional,
+        system_prompt: tui_config.system_prompt.clone(),
     }
 }
 
@@ -1921,6 +1922,25 @@ mod tests {
             "abort should drain delegations from the focused pane"
         );
         assert_eq!(remaining[0].from, PaneId::new(2));
+    }
+
+    #[test]
+    fn build_session_snapshot_carries_system_prompt() {
+        // the system prompt is part of the cached request prefix on the
+        // anthropic side. persisting it with the session lets a resumed
+        // session reuse the exact prompt that was cached, instead of
+        // rebuilding from current AGENTS.md (which would bust the cache
+        // on the first call after resume)
+        let pane_mgr = PaneManager::new(Pane::new(PaneId::new(1), app()));
+        let mut config = test_tui_config();
+        config.system_prompt = Some("you are running inside mush\nproject context: foo".into());
+
+        let snapshot = build_session_snapshot(&pane_mgr, &config);
+
+        assert_eq!(
+            snapshot.system_prompt.as_deref(),
+            Some("you are running inside mush\nproject context: foo")
+        );
     }
 
     #[test]
