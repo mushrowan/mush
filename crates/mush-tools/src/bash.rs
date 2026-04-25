@@ -145,6 +145,151 @@ impl BashArgs {
 }
 
 /// sender for streaming partial output lines from bash
+/// detect a command pattern that would hang waiting on `$EDITOR` in
+/// non-interactive use, and return a helpful error explaining how to
+/// rephrase it. returns `None` for commands that look safe.
+///
+/// `EDITOR=false` is also set in the child env as a safety net so even
+/// patterns this function misses fail fast (with a less helpful error)
+/// instead of hanging indefinitely. this function exists to upgrade the
+/// most common cases to an actionable message before we even spawn the
+/// process
+#[must_use]
+pub(crate) fn editor_hang_warning(command: &str) -> Option<String> {
+    // a bash command line can chain segments with `;`, `&&`, `||`, `|`
+    // or background them with `&`. check each segment independently so
+    // a hang anywhere in the chain still trips the warning
+    for segment in split_command_segments(command) {
+        let trimmed = segment.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(msg) = check_segment(trimmed) {
+            return Some(msg);
+        }
+    }
+    None
+}
+
+/// split a command line on shell metachars that separate distinct
+/// commands. simple lexer: tracks single/double quotes so chars inside
+/// quoted strings are passed through verbatim. close enough for the
+/// patterns we care about (jj/git/crontab subcommand detection)
+fn split_command_segments(command: &str) -> Vec<&str> {
+    let mut segments = Vec::new();
+    let bytes = command.as_bytes();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if !in_single && b == b'"' {
+            in_double = !in_double;
+            i += 1;
+            continue;
+        }
+        if !in_double && b == b'\'' {
+            in_single = !in_single;
+            i += 1;
+            continue;
+        }
+        if in_single || in_double {
+            i += 1;
+            continue;
+        }
+        let split_len = match (b, bytes.get(i + 1).copied()) {
+            (b'&', Some(b'&')) | (b'|', Some(b'|')) => 2,
+            (b';' | b'&' | b'|', _) => 1,
+            _ => 0,
+        };
+        if split_len > 0 {
+            segments.push(&command[start..i]);
+            i += split_len;
+            start = i;
+            continue;
+        }
+        i += 1;
+    }
+    segments.push(&command[start..]);
+    segments
+}
+
+fn check_segment(segment: &str) -> Option<String> {
+    // tokenise on whitespace. simple split is fine: we're only looking
+    // at the first 2-3 tokens to recognise a subcommand and we tolerate
+    // quoted args being mangled because we never inspect them anyway
+    let tokens: Vec<&str> = segment.split_whitespace().collect();
+    let head = tokens.first().copied()?;
+    match head {
+        "jj" => check_jj(&tokens),
+        "git" => check_git(&tokens),
+        "crontab" => check_crontab(&tokens),
+        _ => None,
+    }
+}
+
+fn check_jj(tokens: &[&str]) -> Option<String> {
+    let sub = tokens.get(1).copied()?;
+    if !matches!(sub, "describe" | "commit") {
+        return None;
+    }
+    if has_message_flag(&tokens[2..]) {
+        return None;
+    }
+    Some(format!(
+        "`jj {sub}` without -m / --message would open $EDITOR and hang in this context. \
+         pass the message inline, e.g. `jj {sub} -m 'your message'`"
+    ))
+}
+
+fn check_git(tokens: &[&str]) -> Option<String> {
+    let sub = tokens.get(1).copied()?;
+    if sub != "commit" {
+        return None;
+    }
+    let rest = &tokens[2..];
+    if has_message_flag(rest)
+        || rest.iter().any(|t| {
+            *t == "--no-edit"
+                || *t == "-F"
+                || t.starts_with("--file=")
+                || *t == "--file"
+                || *t == "-c"
+                || *t == "-C"
+        })
+    {
+        return None;
+    }
+    Some(
+        "`git commit` without -m / -F / --no-edit would open $EDITOR and hang in this context. \
+         pass `-m 'your message'`, `-F file`, or `--amend --no-edit` to keep the existing message"
+            .to_string(),
+    )
+}
+
+fn check_crontab(tokens: &[&str]) -> Option<String> {
+    if tokens.contains(&"-e") {
+        return Some(
+            "`crontab -e` opens $EDITOR and hangs in this context. \
+             write the new crontab to a file and pipe it in: `cat new.cron | crontab -`"
+                .to_string(),
+        );
+    }
+    None
+}
+
+/// look for `-m`, `-m=value`, `--message`, `--message=value`, or `--stdin`
+fn has_message_flag(tokens: &[&str]) -> bool {
+    tokens.iter().any(|t| {
+        *t == "-m"
+            || t.starts_with("-m=")
+            || *t == "--message"
+            || t.starts_with("--message=")
+            || *t == "--stdin"
+    })
+}
+
 pub type OutputSink = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
 
 pub struct BashTool {
@@ -240,6 +385,10 @@ impl AgentTool for BashTool {
             Ok(args) => args,
             Err(error) => return error,
         };
+
+        if let Some(warning) = editor_hang_warning(&args.command) {
+            return ToolResult::error(warning);
+        }
 
         if args.background {
             return self.execute_background(args).await;
@@ -669,6 +818,89 @@ mod tests {
         assert!(result.outcome.is_success());
         let text = extract_text(&result);
         assert!(text.contains("hello"));
+    }
+
+    #[test]
+    fn editor_hang_warning_flags_jj_describe_without_message() {
+        // common pitfall: `jj describe` opens $EDITOR. without -m the
+        // command would hang in non-interactive use. surface a clear
+        // error pointing at the missing flag instead of letting the
+        // EDITOR=false fallback emit something cryptic
+        let warning = editor_hang_warning("jj describe");
+        assert!(warning.is_some());
+        let msg = warning.unwrap();
+        assert!(
+            msg.contains("jj describe") && msg.contains("-m"),
+            "expected actionable warning, got {msg:?}"
+        );
+    }
+
+    #[test]
+    fn editor_hang_warning_accepts_jj_describe_with_message() {
+        assert!(editor_hang_warning("jj describe -m 'feat: thing'").is_none());
+        assert!(editor_hang_warning("jj describe --message='feat: thing'").is_none());
+    }
+
+    #[test]
+    fn editor_hang_warning_flags_jj_commit_without_message() {
+        let warning = editor_hang_warning("jj commit");
+        assert!(warning.is_some());
+        assert!(warning.unwrap().contains("-m"));
+    }
+
+    #[test]
+    fn editor_hang_warning_flags_git_commit_without_message_or_no_edit() {
+        let warning = editor_hang_warning("git commit");
+        assert!(warning.is_some());
+        let msg = warning.unwrap();
+        assert!(
+            msg.contains("git commit") && (msg.contains("-m") || msg.contains("--no-edit")),
+            "expected git-commit warning, got {msg:?}"
+        );
+    }
+
+    #[test]
+    fn editor_hang_warning_accepts_git_commit_with_safe_flag() {
+        assert!(editor_hang_warning("git commit -m 'fix'").is_none());
+        assert!(editor_hang_warning("git commit --no-edit").is_none());
+        assert!(editor_hang_warning("git commit -F message.txt").is_none());
+        assert!(editor_hang_warning("git commit --amend --no-edit").is_none());
+    }
+
+    #[test]
+    fn editor_hang_warning_flags_crontab_e() {
+        assert!(editor_hang_warning("crontab -e").is_some());
+        // -l (list) and -r (remove) don't open the editor
+        assert!(editor_hang_warning("crontab -l").is_none());
+    }
+
+    #[test]
+    fn editor_hang_warning_handles_chained_commands() {
+        // first segment is fine, second would hang. each segment must
+        // be checked independently so the warning catches the bad one
+        let warning = editor_hang_warning("jj st && jj describe");
+        assert!(
+            warning.is_some(),
+            "chained command with hang in the second segment must warn"
+        );
+    }
+
+    #[test]
+    fn editor_hang_warning_passes_through_safe_commands() {
+        for cmd in [
+            "echo hello",
+            "ls -la",
+            "jj log",
+            "git status",
+            "git push",
+            "jj describe -m 'msg'",
+            "rg pattern src/",
+        ] {
+            assert!(
+                editor_hang_warning(cmd).is_none(),
+                "false positive on `{cmd}`"
+            );
+        }
     }
 
     #[tokio::test]
