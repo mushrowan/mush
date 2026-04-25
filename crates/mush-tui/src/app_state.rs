@@ -48,6 +48,27 @@ pub struct CompletionState {
     pub templates: Vec<mush_ext::PromptTemplate>,
 }
 
+/// state for the `@`-template picker popup. opens when the user presses
+/// tab on an `@<word>` that doesn't match any template exactly but does
+/// have one or more prefix matches. tab/shift+tab cycle, enter inserts,
+/// esc closes without touching the input
+#[derive(Debug, Clone)]
+pub struct AtPickerState {
+    /// templates that prefix-match the trigger word, in source order
+    pub matches: Vec<mush_ext::PromptTemplate>,
+    /// which match is selected
+    pub selected: usize,
+    /// byte offset of the `@` sign in the input. used to know where the
+    /// trigger word starts so insertion can replace `@<word>` with the
+    /// template content
+    pub trigger_start: usize,
+    /// byte offset of the cursor at trigger time, i.e. the end of the
+    /// `@<word>` token. captured up-front so the replace range stays
+    /// stable even if the user types into the input while the picker is
+    /// open (which closes it without inserting)
+    pub trigger_end: usize,
+}
+
 /// toggles for individual status bar segments
 ///
 /// everything defaults on so existing setups are unaffected. per-field
@@ -112,6 +133,9 @@ pub struct InteractionState {
     pub show_token_counters: bool,
     /// per-segment visibility toggles for the status bar
     pub status_bar: StatusBarConfig,
+    /// `@`-template picker state, populated when the user pressed tab
+    /// on a partial-match trigger. presence implies `mode == AtPicker`
+    pub at_picker: Option<AtPickerState>,
 }
 
 impl Default for InteractionState {
@@ -127,6 +151,7 @@ impl Default for InteractionState {
             show_usage_lines: false,
             show_token_counters: false,
             status_bar: StatusBarConfig::default(),
+            at_picker: None,
         }
     }
 }

@@ -181,6 +181,20 @@ pub(super) fn draw_panes(
             let regions = crate::ui::layout(focused_area, input_h, tools_h, status_h);
             widgets::slash_menu::render(frame, menu, regions.input, &focused_app.theme);
         }
+        if let Some(ref picker) = focused_app.interaction.at_picker {
+            let input_h = crate::ui::input_height(&focused_app.input, focused_area.width);
+            let tools_h = crate::widgets::tool_panels::tool_panels_height(
+                &focused_app.active_tools,
+                focused_area.width,
+            );
+            let status_h = if is_multi {
+                0
+            } else {
+                crate::widgets::status_bar::status_bar_height(focused_app, focused_area.width)
+            };
+            let regions = crate::ui::layout(focused_area, input_h, tools_h, status_h);
+            widgets::at_picker::render(frame, picker, regions.input, &focused_app.theme);
+        }
     })?;
     Ok(())
 }

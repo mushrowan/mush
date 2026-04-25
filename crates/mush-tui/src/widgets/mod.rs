@@ -1,4 +1,5 @@
 pub mod ansi;
+pub mod at_picker;
 pub mod diff;
 pub mod input_box;
 pub mod message_list;
