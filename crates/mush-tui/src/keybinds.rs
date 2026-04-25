@@ -45,6 +45,9 @@ pub enum Action {
     CycleFavourite,
     /// cycle backward through favourite models. default binding: `alt-shift-m`
     CycleFavouriteBackward,
+    /// cycle through thinking levels (off → low → medium → high → xhigh).
+    /// default binding: `ctrl-t`
+    CycleThinkingLevel,
     /// pop the last queued steering message back into the input for
     /// editing. default bindings: `alt-k`, `up`, `ctrl-k` (the latter
     /// two only fire when the input is empty)
@@ -56,6 +59,12 @@ pub enum Action {
     /// jump the message log to the bottom without aborting or
     /// otherwise affecting the stream. default binding: `shift-end`
     JumpToBottom,
+    /// toggle the prompt-injection preview in the chat history.
+    /// default binding: `ctrl-i`
+    TogglePromptInjection,
+    /// expand or collapse the thinking text on the focused message.
+    /// default binding: `ctrl-o`
+    ToggleThinkingExpanded,
 }
 
 impl Action {
@@ -64,10 +73,13 @@ impl Action {
         match self {
             Self::CycleFavourite => "cycle_favourite",
             Self::CycleFavouriteBackward => "cycle_favourite_backward",
+            Self::CycleThinkingLevel => "cycle_thinking_level",
             Self::EditSteering => "edit_steering",
             Self::EnterSearch => "enter_search",
             Self::EnterScroll => "enter_scroll",
             Self::JumpToBottom => "jump_to_bottom",
+            Self::TogglePromptInjection => "toggle_prompt_injection",
+            Self::ToggleThinkingExpanded => "toggle_thinking_expanded",
         }
     }
 
@@ -75,10 +87,13 @@ impl Action {
     pub const ALL: &'static [Self] = &[
         Self::CycleFavourite,
         Self::CycleFavouriteBackward,
+        Self::CycleThinkingLevel,
         Self::EditSteering,
         Self::EnterSearch,
         Self::EnterScroll,
         Self::JumpToBottom,
+        Self::TogglePromptInjection,
+        Self::ToggleThinkingExpanded,
     ];
 }
 
@@ -227,6 +242,30 @@ impl Default for KeyMap {
             Binding::single(KeyCombination::new(KeyCode::End, KeyModifiers::SHIFT)),
         );
 
+        bindings.insert(
+            Action::CycleThinkingLevel,
+            Binding::single(KeyCombination::new(
+                KeyCode::Char('t'),
+                KeyModifiers::CONTROL,
+            )),
+        );
+
+        bindings.insert(
+            Action::ToggleThinkingExpanded,
+            Binding::single(KeyCombination::new(
+                KeyCode::Char('o'),
+                KeyModifiers::CONTROL,
+            )),
+        );
+
+        bindings.insert(
+            Action::TogglePromptInjection,
+            Binding::single(KeyCombination::new(
+                KeyCode::Char('i'),
+                KeyModifiers::CONTROL,
+            )),
+        );
+
         Self { bindings }
     }
 }
@@ -297,6 +336,26 @@ mod tests {
         // not cross-bound
         assert!(!map.matches(Action::CycleFavourite, alt_shift_m));
         assert!(!map.matches(Action::CycleFavouriteBackward, alt_m));
+    }
+
+    #[test]
+    fn default_keymap_has_toggle_actions() {
+        // ctrl+t / ctrl+o / ctrl+i used to be hardcoded in input.rs.
+        // they're now configurable so users can rebind them without
+        // editing the source. defaults stay the same as before
+        let map = KeyMap::default();
+        assert!(map.matches(
+            Action::CycleThinkingLevel,
+            KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL)
+        ));
+        assert!(map.matches(
+            Action::ToggleThinkingExpanded,
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)
+        ));
+        assert!(map.matches(
+            Action::TogglePromptInjection,
+            KeyEvent::new(KeyCode::Char('i'), KeyModifiers::CONTROL)
+        ));
     }
 
     #[test]
