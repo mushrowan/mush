@@ -280,6 +280,32 @@ fn handle_idle_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         }
         return None;
     }
+    if app
+        .keymap
+        .matches(crate::keybinds::Action::CycleThinkingLevel, key)
+    {
+        app.cycle_thinking_level();
+        return Some(AppEvent::CycleThinkingLevel);
+    }
+    if app
+        .keymap
+        .matches(crate::keybinds::Action::ToggleThinkingExpanded, key)
+    {
+        app.toggle_thinking_expanded();
+        return None;
+    }
+    if app
+        .keymap
+        .matches(crate::keybinds::Action::TogglePromptInjection, key)
+    {
+        app.interaction.show_prompt_injection = !app.interaction.show_prompt_injection;
+        app.status = Some(if app.interaction.show_prompt_injection {
+            "prompt injection visible".into()
+        } else {
+            "prompt injection hidden".into()
+        });
+        return None;
+    }
 
     match (key.modifiers, key.code) {
         // tab completion / slash menu
@@ -339,25 +365,6 @@ fn handle_idle_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
                 return Some(AppEvent::Quit);
             }
             app.input.delete();
-            None
-        }
-
-        // toggles
-        (KeyModifiers::CONTROL, KeyCode::Char('t')) => {
-            app.cycle_thinking_level();
-            Some(AppEvent::CycleThinkingLevel)
-        }
-        (KeyModifiers::CONTROL, KeyCode::Char('o')) => {
-            app.toggle_thinking_expanded();
-            None
-        }
-        (KeyModifiers::CONTROL, KeyCode::Char('i')) => {
-            app.interaction.show_prompt_injection = !app.interaction.show_prompt_injection;
-            app.status = Some(if app.interaction.show_prompt_injection {
-                "prompt injection visible".into()
-            } else {
-                "prompt injection hidden".into()
-            });
             None
         }
 
