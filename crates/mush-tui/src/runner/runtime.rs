@@ -47,6 +47,7 @@ const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("panes", "list all panes"),
     ("merge", "merge forked pane's work back"),
     ("debug", "dump internal state (for bug reports)"),
+    ("reload", "rebuild AGENTS.md, prompt templates, and skills"),
     ("quit", "exit mush"),
 ];
 
@@ -378,6 +379,7 @@ mod tests {
             favourites_locked: false,
             save_favourite_models: None,
             keymap: crate::keybinds::KeyMap::default(),
+            reload_context: None,
         }
     }
 

@@ -14,7 +14,8 @@ use mush_cli::{commands, config, logging, setup, timing};
 use mush_tui::TuiConfig;
 
 use setup::{
-    AppSetup, SetupArgs, auto_compact, build_prompt_enricher, expand_template, format_error,
+    AppSetup, SetupArgs, auto_compact, build_prompt_enricher, build_system_prompt_from_context,
+    expand_template, format_error,
 };
 
 #[derive(Parser)]
@@ -483,10 +484,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
     // AGENTS.md and skills) drifts and busts the prefix cache on the
     // first call after resume. fresh sessions fall back to the just-built
     // setup.system_prompt
-    let system_prompt = session
-        .system_prompt
-        .clone()
-        .unwrap_or(setup.system_prompt);
+    let system_prompt = session.system_prompt.clone().unwrap_or(setup.system_prompt);
 
     let theme = mush_tui::Theme::from_config(&setup.cfg.theme);
     let prompt_enricher =
@@ -622,6 +620,20 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
                 tracing::warn!("keybind config: {warning}");
             }
             km
+        },
+        reload_context: {
+            let strategy = setup.cfg.retrieval.context_strategy;
+            Some(std::sync::Arc::new(
+                move |cwd: &std::path::Path| -> mush_tui::ReloadedContext {
+                    let project = mush_ext::loader::discover_project_context(cwd);
+                    let system_prompt = build_system_prompt_from_context(&project, cwd, strategy);
+                    let templates = mush_ext::discover_templates(cwd);
+                    mush_tui::ReloadedContext {
+                        system_prompt,
+                        templates,
+                    }
+                },
+            ))
         },
     };
 

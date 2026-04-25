@@ -507,7 +507,7 @@ fn join_prompt_hints(hints: impl IntoIterator<Item = Option<String>>) -> Option<
 }
 
 /// build the default system prompt from pre-discovered project context
-fn build_system_prompt_from_context(
+pub fn build_system_prompt_from_context(
     context: &loader::ProjectContext,
     cwd: &std::path::Path,
     strategy: config::ContextStrategy,

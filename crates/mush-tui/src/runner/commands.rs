@@ -263,6 +263,27 @@ pub(super) async fn handle_slash_action(
             app.status = Some("new session started (previous session saved)".into());
             state_changed = true;
         }
+        SlashAction::Reload => {
+            let Some(reload) = tui_config.reload_context.clone() else {
+                pane_mgr
+                    .focused_mut()
+                    .app
+                    .push_system_message("/reload not supported in this build".to_string());
+                return false;
+            };
+            let reloaded = reload(cwd);
+            tui_config.system_prompt = Some(reloaded.system_prompt);
+            apply_reloaded_templates(pane_mgr, &reloaded.templates);
+            pane_mgr.focused_mut().app.status = Some(format!(
+                "reloaded AGENTS.md and {n} prompt template{s}",
+                n = reloaded.templates.len(),
+                s = if reloaded.templates.len() == 1 {
+                    ""
+                } else {
+                    "s"
+                },
+            ));
+        }
         SlashAction::Close => {
             close_focused_pane(pane_mgr, None, message_bus, file_tracker, cwd).await;
         }
@@ -330,6 +351,46 @@ pub(super) async fn handle_slash_action(
     state_changed
 }
 
+/// replace each pane's discovered prompt-template entries (the ones
+/// preceded by `/` in the slash menu and the @-trigger expansion list)
+/// with a freshly-discovered set. preserves the built-in slash commands
+/// because those don't change at runtime
+fn apply_reloaded_templates(pane_mgr: &mut PaneManager, templates: &[mush_ext::PromptTemplate]) {
+    for pane in pane_mgr.panes_mut() {
+        let template_names: std::collections::HashSet<&str> = pane
+            .app
+            .completion
+            .templates
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
+        pane.app
+            .completion
+            .completions
+            .retain(|c| !template_names.contains(c.trim_start_matches('/')));
+        pane.app
+            .completion
+            .slash_commands
+            .retain(|c| !template_names.contains(c.name.as_str()));
+
+        pane.app.completion.templates.clear();
+        for template in templates {
+            pane.app
+                .completion
+                .completions
+                .push(format!("/{}", template.name));
+            pane.app
+                .completion
+                .slash_commands
+                .push(crate::app::SlashCommand {
+                    name: template.name.clone(),
+                    description: template.description.clone(),
+                });
+            pane.app.completion.templates.push(template.clone());
+        }
+    }
+}
+
 pub(super) fn save_thinking_pref(
     prefs: &mut HashMap<String, ThinkingLevel>,
     saver: &Option<super::ThinkingPrefsSaver>,
@@ -394,5 +455,82 @@ pub(super) async fn complete_login(app: &mut crate::app::App, code: String) {
             // restore pending state so user can try a different code
             app.pending_oauth = Some(pending);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{App, SlashCommand};
+    use crate::pane::{Pane, PaneId, PaneManager};
+    use mush_ai::types::{ModelId, TokenCount};
+
+    fn template(name: &str, description: &str) -> mush_ext::PromptTemplate {
+        mush_ext::PromptTemplate {
+            name: name.into(),
+            description: description.into(),
+            content: format!("template body: {name}"),
+            source: mush_ext::TemplateSource::User,
+            path: std::path::PathBuf::from(format!("/tmp/{name}.md")),
+        }
+    }
+
+    fn pane_with_existing_template() -> Pane {
+        let app = App::new(ModelId::from("test"), TokenCount::new(1024));
+        let mut pane = Pane::new(PaneId::new(1), app);
+        pane.app.completion.completions.push("/help".into());
+        pane.app.completion.slash_commands.push(SlashCommand {
+            name: "help".into(),
+            description: "show help".into(),
+        });
+        pane.app.completion.completions.push("/old-template".into());
+        pane.app.completion.slash_commands.push(SlashCommand {
+            name: "old-template".into(),
+            description: "stale".into(),
+        });
+        pane.app
+            .completion
+            .templates
+            .push(template("old-template", "stale"));
+        pane
+    }
+
+    #[test]
+    fn apply_reloaded_templates_replaces_template_entries_only() {
+        // /reload swaps the discovered prompt-template entries for the
+        // freshly-found set. existing built-in slash commands (here
+        // /help) must survive untouched. stale templates must be
+        // removed from completions, slash_commands, and templates lists
+        let mut pane_mgr = PaneManager::new(pane_with_existing_template());
+        let new_templates = vec![
+            template("review", "review code"),
+            template("plan", "plan it"),
+        ];
+
+        apply_reloaded_templates(&mut pane_mgr, &new_templates);
+
+        let app = &pane_mgr.focused().app;
+        let names: Vec<&str> = app
+            .completion
+            .templates
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["review", "plan"]);
+        assert!(
+            !app.completion
+                .completions
+                .iter()
+                .any(|c| c == "/old-template"),
+            "stale template completion should be cleared"
+        );
+        assert!(
+            app.completion.completions.iter().any(|c| c == "/help"),
+            "built-in slash commands must survive a /reload"
+        );
+        assert!(
+            app.completion.completions.iter().any(|c| c == "/review"),
+            "newly-discovered templates should be added as completions"
+        );
     }
 }
