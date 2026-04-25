@@ -516,6 +516,10 @@ impl App {
                 // effort is derived from (model, thinking_level) today; a
                 // standalone effort field will land with the effort enum split
                 effort: None,
+                // populated below from the most recent request snapshot
+                // taken by the provider (anthropic-only today)
+                messages_prefix_fingerprint:
+                    mush_ai::request_snapshot::last_messages_prefix_fingerprint(),
             };
             let anomalies = self
                 .stats
@@ -557,6 +561,11 @@ impl App {
                                 prev_effort: prev_config_snapshot
                                     .as_ref()
                                     .and_then(|c| c.effort.clone()),
+                                prev_messages_prefix_fingerprint: prev_config_snapshot
+                                    .as_ref()
+                                    .and_then(|c| c.messages_prefix_fingerprint),
+                                curr_messages_prefix_fingerprint: curr_config
+                                    .messages_prefix_fingerprint,
                                 prev_usage: prev_usage_snapshot,
                                 curr_usage: *u,
                                 prev_context_tokens: prev_context_snapshot.get(),
@@ -2398,6 +2407,8 @@ batch: 1/2 succeeded, 1 failed";
             prev_model_id: None,
             prev_thinking_level: None,
             prev_effort: None,
+            prev_messages_prefix_fingerprint: None,
+            curr_messages_prefix_fingerprint: None,
             prev_usage: Some(Usage {
                 input_tokens: TokenCount::new(5_000),
                 output_tokens: TokenCount::new(3_000),
@@ -2450,6 +2461,8 @@ batch: 1/2 succeeded, 1 failed";
             prev_model_id: None,
             prev_thinking_level: None,
             prev_effort: None,
+            prev_messages_prefix_fingerprint: None,
+            curr_messages_prefix_fingerprint: None,
             prev_usage: None,
             curr_usage: Usage::default(),
             prev_context_tokens: 0,

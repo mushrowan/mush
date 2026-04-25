@@ -125,6 +125,12 @@ pub enum BustReason {
     ThinkingChanged,
     /// effort setting differed from previous call
     EffortChanged,
+    /// the messages_prefix fingerprint differed from the previous call,
+    /// meaning the conversation history before the last user turn was
+    /// mutated (eg branching, lost steering, manual prune). the bust is
+    /// expected once we know about the reshape but still surfaces as a
+    /// distinct reason so it doesn't hide as "unexplained"
+    HistoryReshaped,
 }
 
 /// the subset of per-call configuration that participates in the
@@ -135,6 +141,14 @@ pub struct CallConfig {
     pub model_id: String,
     pub thinking_level: String,
     pub effort: Option<String>,
+    /// fingerprint of the messages prefix (everything before the last
+    /// user text message). populated by anthropic-style providers that
+    /// emit per-request snapshots. comparing prev vs curr lets the
+    /// classifier flag history mutations as `HistoryReshaped` rather
+    /// than `Unexplained`. `None` when the provider doesn't snapshot
+    /// or for the first call of a session
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub messages_prefix_fingerprint: Option<u64>,
 }
 
 impl CallConfig {
@@ -146,6 +160,12 @@ impl CallConfig {
             BustReason::ThinkingChanged
         } else if prev.effort != curr.effort {
             BustReason::EffortChanged
+        } else if let (Some(p), Some(c)) = (
+            prev.messages_prefix_fingerprint,
+            curr.messages_prefix_fingerprint,
+        ) && p != c
+        {
+            BustReason::HistoryReshaped
         } else {
             BustReason::Unexplained
         }
@@ -351,6 +371,17 @@ pub struct CacheBustDiagnostic {
     /// effort value of the previous API call (None if not set or unknown)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prev_effort: Option<String>,
+    /// `messages_prefix` fingerprint of the previous API call. when
+    /// this differs from `curr_messages_prefix_fingerprint` the prefix
+    /// drifted (history reshape, lost steering, branching). only
+    /// populated by providers that emit request snapshots
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prev_messages_prefix_fingerprint: Option<u64>,
+    /// `messages_prefix` fingerprint of the current API call (the one
+    /// that observed the bust). compare with the prev value to confirm
+    /// a `HistoryReshaped` classification
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub curr_messages_prefix_fingerprint: Option<u64>,
     pub prev_usage: Option<Usage>,
     pub curr_usage: Usage,
     pub prev_context_tokens: u64,
