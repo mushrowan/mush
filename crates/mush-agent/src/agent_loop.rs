@@ -45,10 +45,15 @@ pub enum AgentEvent {
         tool_name: ToolName,
         result: ToolResult,
     },
-    /// steering messages injected mid-run
-    SteeringInjected { count: usize },
-    /// follow-up messages continuing the loop
-    FollowUpInjected { count: usize },
+    /// steering messages injected mid-run.
+    /// the actual messages are carried so consumers can persist them
+    /// to a conversation tree (else the cache prefix drifts on the
+    /// next stream when the tree-derived context omits them)
+    SteeringInjected { messages: Vec<Message> },
+    /// follow-up messages continuing the loop.
+    /// carries the messages for the same persistence reason as
+    /// [`AgentEvent::SteeringInjected`]
+    FollowUpInjected { messages: Vec<Message> },
     /// lifecycle hook ran
     HookRan {
         point: crate::hooks::HookPoint,
@@ -307,9 +312,9 @@ pub fn agent_loop(
 
                 // inject pending messages
                 if !pending.is_empty() {
-                    let count = pending.len();
+                    let injected = pending.clone();
                     messages.append(&mut pending);
-                    yield AgentEvent::SteeringInjected { count };
+                    yield AgentEvent::SteeringInjected { messages: injected };
                 }
 
                 yield AgentEvent::TurnStart { turn_index };
@@ -708,9 +713,9 @@ pub fn agent_loop(
             {
                 let follow_up = config.hooks.get_follow_up().await;
                 if !follow_up.is_empty() {
-                    let count = follow_up.len();
+                    let injected = follow_up.clone();
                     pending = follow_up;
-                    yield AgentEvent::FollowUpInjected { count };
+                    yield AgentEvent::FollowUpInjected { messages: injected };
                     continue 'outer;
                 }
             }
@@ -1136,9 +1141,22 @@ mod tests {
 
         let follow_up_count = events
             .iter()
-            .filter(|e| matches!(e, AgentEvent::FollowUpInjected { count: 1 }))
+            .filter(|e| match e {
+                AgentEvent::FollowUpInjected { messages } => messages.len() == 1,
+                _ => false,
+            })
             .count();
         assert_eq!(follow_up_count, 1);
+        assert!(
+            events.iter().any(|e| match e {
+                AgentEvent::FollowUpInjected { messages } => messages.iter().any(|m| match m {
+                    Message::User(u) => u.text() == "queued follow-up",
+                    _ => false,
+                }),
+                _ => false,
+            }),
+            "follow-up event should carry the actual injected user message so consumers can persist it to the conversation tree"
+        );
         assert!(
             events
                 .iter()

@@ -128,13 +128,29 @@ pub fn handle_agent_event(
                 app.start_streaming();
             }
         }
-        AgentEvent::SteeringInjected { count } => {
+        AgentEvent::SteeringInjected { messages } => {
             // mark queued display messages as no longer pending
-            for msg in app.messages.iter_mut().rev().take(*count) {
+            for msg in app.messages.iter_mut().rev().take(messages.len()) {
                 msg.queued = false;
             }
+            // persist injected steering into the conversation tree.
+            // without this the messages are visible to the LLM during
+            // this stream (the agent loop appended them to its internal
+            // vec) but absent from `conversation.context()` next stream,
+            // shifting the prefix bytes and busting the prompt cache.
+            // mirrors the existing `MessageEnd`/`ToolResult` handling
+            for msg in messages {
+                conversation.append_message(msg.clone());
+            }
         }
-        AgentEvent::FollowUpInjected { .. } => {}
+        AgentEvent::FollowUpInjected { messages } => {
+            // same persistence reason as `SteeringInjected`. follow-ups
+            // come from the same queue but fire when the agent would
+            // otherwise stop, so they need the same tree treatment
+            for msg in messages {
+                conversation.append_message(msg.clone());
+            }
+        }
         AgentEvent::ContextTransformed {
             before_count,
             after_count,
@@ -681,6 +697,81 @@ mod tests {
         let last = ctx.app.messages.last().expect("should have a message");
         assert_eq!(last.role, MessageRole::System);
         assert!(last.content.contains("400 Bad Request"));
+    }
+
+    #[test]
+    fn steering_injection_persists_messages_to_conversation_tree() {
+        // regression: steering messages typed during streaming used to
+        // exist only in the agent's transient `messages` vec. on the
+        // next stream `conversation.context()` rebuilt from the tree
+        // and silently dropped them, shifting the prefix bytes and
+        // busting the prompt cache. event handler must persist them
+        use crate::app::App;
+        use mush_ai::types::{TokenCount, UserContent, UserMessage};
+
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        let mut conversation = ConversationState::new();
+        let mut image_protos = std::collections::HashMap::new();
+        let model = mush_ai::models::all_models().first().unwrap().clone();
+        let mut ctx = EventCtx {
+            app: &mut app,
+            conversation: &mut conversation,
+            image_protos: &mut image_protos,
+        };
+
+        let injected = vec![Message::User(UserMessage {
+            content: UserContent::Text("steered mid-stream".into()),
+            timestamp_ms: Timestamp::zero(),
+        })];
+
+        let event = AgentEvent::SteeringInjected {
+            messages: injected.clone(),
+        };
+        handle_agent_event(&mut ctx, &event, &model, false, &None);
+
+        let context = ctx.conversation.context();
+        assert_eq!(context.len(), 1, "steering message should land in tree");
+        assert!(
+            matches!(&context[0], Message::User(u) if u.text() == "steered mid-stream"),
+            "tree should contain the steered text, got: {:?}",
+            context
+        );
+    }
+
+    #[test]
+    fn follow_up_injection_persists_messages_to_conversation_tree() {
+        // follow-ups come from the same steering queue and need the
+        // same tree treatment so the next stream sees them
+        use crate::app::App;
+        use mush_ai::types::{TokenCount, UserContent, UserMessage};
+
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        let mut conversation = ConversationState::new();
+        let mut image_protos = std::collections::HashMap::new();
+        let model = mush_ai::models::all_models().first().unwrap().clone();
+        let mut ctx = EventCtx {
+            app: &mut app,
+            conversation: &mut conversation,
+            image_protos: &mut image_protos,
+        };
+
+        let injected = vec![Message::User(UserMessage {
+            content: UserContent::Text("follow up".into()),
+            timestamp_ms: Timestamp::zero(),
+        })];
+
+        let event = AgentEvent::FollowUpInjected {
+            messages: injected.clone(),
+        };
+        handle_agent_event(&mut ctx, &event, &model, false, &None);
+
+        let context = ctx.conversation.context();
+        assert_eq!(context.len(), 1, "follow-up message should land in tree");
+        assert!(
+            matches!(&context[0], Message::User(u) if u.text() == "follow up"),
+            "tree should contain the follow-up text, got: {:?}",
+            context
+        );
     }
 
     #[test]
