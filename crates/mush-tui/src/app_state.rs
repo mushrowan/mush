@@ -69,6 +69,20 @@ pub struct AtPickerState {
     pub trigger_end: usize,
 }
 
+/// state for the interactive slot editor that fills in `$1`/`$2`/`$@`
+/// placeholders after a template expands. tab cycles between slot byte
+/// offsets in `input.text`; typing/backspace at the current slot shifts
+/// the later slot offsets to keep them aligned with the live text
+#[derive(Debug, Clone)]
+pub struct SlotEditState {
+    /// byte offsets in `input.text` where each slot lives. updated as
+    /// the user types so later slots stay aligned with their actual
+    /// position in the input
+    pub slots: Vec<usize>,
+    /// index of the slot the cursor is currently in
+    pub current: usize,
+}
+
 /// toggles for individual status bar segments
 ///
 /// everything defaults on so existing setups are unaffected. per-field
@@ -136,6 +150,9 @@ pub struct InteractionState {
     /// `@`-template picker state, populated when the user pressed tab
     /// on a partial-match trigger. presence implies `mode == AtPicker`
     pub at_picker: Option<AtPickerState>,
+    /// slot editor state, populated when an expanded template contains
+    /// `$1`/`$2`/`$@` placeholders. presence implies `mode == SlotEdit`
+    pub slot_edit: Option<SlotEditState>,
 }
 
 impl Default for InteractionState {
@@ -152,6 +169,7 @@ impl Default for InteractionState {
             show_token_counters: false,
             status_bar: StatusBarConfig::default(),
             at_picker: None,
+            slot_edit: None,
         }
     }
 }

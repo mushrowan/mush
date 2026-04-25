@@ -101,6 +101,73 @@ pub fn find_prefix<'a>(
         .collect()
 }
 
+/// a single `$N` / `$@` / `$ARGUMENTS` placeholder occurrence inside
+/// template content. produced by [`find_placeholders`] for the slot
+/// editor: each placeholder becomes an empty slot the user fills in
+/// interactively after the template expands
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Placeholder {
+    /// byte offset of the leading `$` in the template content
+    pub start: usize,
+    /// total length in bytes (`$1` = 2, `$ARGUMENTS` = 10)
+    pub len: usize,
+}
+
+/// scan template content for `$1`..`$9`, `$@`, and `$ARGUMENTS`
+/// placeholders and return them in source order. uses the same syntax
+/// as [`mush_ext::substitute_args`] so non-interactive `/cmd arg1 arg2`
+/// invocations and the interactive slot editor share placeholder
+/// semantics
+#[must_use]
+pub fn find_placeholders(content: &str) -> Vec<Placeholder> {
+    let bytes = content.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'$' {
+            i += 1;
+            continue;
+        }
+        let next = bytes.get(i + 1).copied();
+        match next {
+            Some(b'1'..=b'9') | Some(b'@') => {
+                out.push(Placeholder { start: i, len: 2 });
+                i += 2;
+            }
+            Some(b'A') if bytes.get(i..i + 10) == Some(b"$ARGUMENTS") => {
+                out.push(Placeholder { start: i, len: 10 });
+                i += 10;
+            }
+            _ => i += 1,
+        }
+    }
+    out
+}
+
+/// remove every `$N` / `$@` / `$ARGUMENTS` placeholder from `content`
+/// and return the cleaned text together with the byte offsets where
+/// each slot lived in the cleaned text. these offsets are what the
+/// slot editor jumps the cursor between
+#[must_use]
+pub fn strip_placeholders(content: &str) -> (String, Vec<usize>) {
+    let placeholders = find_placeholders(content);
+    if placeholders.is_empty() {
+        return (content.to_string(), Vec::new());
+    }
+    let mut clean = String::with_capacity(content.len());
+    let mut slots = Vec::with_capacity(placeholders.len());
+    let mut prev_end = 0usize;
+    for placeholder in &placeholders {
+        clean.push_str(&content[prev_end..placeholder.start]);
+        // slot lands at the current end of `clean`, where the placeholder
+        // used to be after stripping all earlier ones
+        slots.push(clean.len());
+        prev_end = placeholder.start + placeholder.len;
+    }
+    clean.push_str(&content[prev_end..]);
+    (clean, slots)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,5 +306,56 @@ mod tests {
             word: "review".into(),
         };
         assert!(find_prefix(&templates, &trigger).is_empty());
+    }
+
+    #[test]
+    fn find_placeholders_locates_dollar_digit_and_at() {
+        // `$1`, `$2`, ..., `$9`, `$@`, `$ARGUMENTS` are the slot syntax
+        // shared with mush_ext::substitute_args. detection should return
+        // them in source order with byte offsets so we can replace each
+        // with an empty slot for interactive filling
+        let content = "fix $1 in $2 and run $@";
+        let found = find_placeholders(content);
+        let positions: Vec<(usize, usize)> = found.iter().map(|p| (p.start, p.len)).collect();
+        assert_eq!(
+            positions,
+            vec![(4, 2), (10, 2), (21, 2)],
+            "expected three placeholders at $1, $2, $@"
+        );
+    }
+
+    #[test]
+    fn find_placeholders_recognises_arguments_long_form() {
+        let found = find_placeholders("hello $ARGUMENTS world");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].start, 6);
+        assert_eq!(found[0].len, 10);
+    }
+
+    #[test]
+    fn find_placeholders_ignores_unrelated_dollar_signs() {
+        // `$0`, `$foo`, `$$`, and a bare trailing `$` are not slots
+        let found = find_placeholders("price $0 and $foo, $$ and $");
+        assert!(found.is_empty(), "expected no slots, got {found:?}");
+    }
+
+    #[test]
+    fn strip_placeholders_returns_cleaned_text_and_slot_offsets() {
+        // input: "fix $1 in $2 file"
+        //         0123456789012345678 (positions)
+        // after stripping the two `$N`s (each 2 bytes), slot offsets in
+        // the cleaned text are where each placeholder used to be:
+        //   $1 was at byte 4 → slot 0 lives at byte 4 of the clean text
+        //   $2 was at byte 10 → after removing $1 (-2), it lives at 8
+        let (clean, slots) = strip_placeholders("fix $1 in $2 file");
+        assert_eq!(clean, "fix  in  file");
+        assert_eq!(slots, vec![4, 8]);
+    }
+
+    #[test]
+    fn strip_placeholders_returns_empty_slots_when_none_present() {
+        let (clean, slots) = strip_placeholders("plain text");
+        assert_eq!(clean, "plain text");
+        assert!(slots.is_empty());
     }
 }
