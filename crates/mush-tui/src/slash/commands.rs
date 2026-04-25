@@ -31,6 +31,7 @@ pub fn handle(
             help.push_str("  /new           - save session, start fresh\n");
             help.push_str("  /model [id]    - show or switch model\n");
             help.push_str("  /sessions      - browse and resume sessions\n");
+            help.push_str("  /resume [id]   - resume session (most recent in cwd if no id)\n");
             help.push_str("  /branch [n]    - branch from nth user message\n");
             help.push_str("  /tree          - show conversation tree\n");
             help.push_str("  /compact       - summarise old messages to free context\n");
@@ -161,11 +162,43 @@ pub fn handle(
         }
         SlashAction::Resume { session_id } => {
             let store = mush_session::SessionStore::new(mush_session::SessionStore::default_dir());
-            match store.load(session_id) {
+
+            // bare `/resume` resolves to the most recent session whose
+            // cwd matches the current process. comparing the raw paths
+            // is fine: SessionMeta.cwd is what was passed to Session::new
+            // (rendered via Display), so a TuiConfig built with the same
+            // path produces a string-equal value
+            let target_id = match session_id {
+                Some(id) => Some(id.clone()),
+                None => {
+                    let cwd_str = tui_config.cwd.display().to_string();
+                    match store.list() {
+                        Ok(metas) => metas.into_iter().find(|m| m.cwd == cwd_str).map(|m| m.id),
+                        Err(e) => {
+                            app.push_system_message(format!("failed to list sessions: {e}"));
+                            None
+                        }
+                    }
+                }
+            };
+
+            let Some(id) = target_id else {
+                if session_id.is_none() {
+                    app.push_system_message(
+                        "no recent session for this directory. start one with /new".to_string(),
+                    );
+                }
+                return None;
+            };
+
+            match store.load(&id) {
                 Ok(session) => {
                     *conversation = session.conversation;
                     rebuild_display(app, &conversation.context());
-                    tui_config.session_id = session_id.clone();
+                    tui_config.session_id = id;
+                    if let Some(prompt) = session.system_prompt {
+                        tui_config.system_prompt = Some(prompt);
+                    }
                     let title = session.meta.title.as_deref().unwrap_or("untitled");
                     app.status = Some(format!("resumed: {title}"));
                 }
