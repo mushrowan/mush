@@ -86,6 +86,21 @@ pub fn find_exact<'a>(
     templates.iter().find(|t| t.name == trigger.word)
 }
 
+/// candidates whose name starts with `trigger.word`. used to populate
+/// the `@`-template picker when an exact match isn't available.
+/// preserves source order so the picker shows templates in the same
+/// order they appear in the slash menu
+#[must_use]
+pub fn find_prefix<'a>(
+    templates: &'a [PromptTemplate],
+    trigger: &AtTrigger,
+) -> Vec<&'a PromptTemplate> {
+    templates
+        .iter()
+        .filter(|t| t.name.starts_with(&trigger.word))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,5 +185,59 @@ mod tests {
             word: "missing".into(),
         };
         assert!(find_exact(&templates, &trigger).is_none());
+    }
+
+    fn make_template(name: &str) -> PromptTemplate {
+        PromptTemplate {
+            name: name.into(),
+            description: format!("description: {name}"),
+            content: format!("body: {name}"),
+            source: mush_ext::TemplateSource::User,
+            path: std::path::PathBuf::from(format!("/tmp/{name}.md")),
+        }
+    }
+
+    #[test]
+    fn find_prefix_returns_all_candidates_that_start_with_word() {
+        // @rev<tab> with templates [review, review-pr, plan] should
+        // surface the two `review*` ones for the picker. exact-name
+        // entries are still included so the picker can let the user
+        // pick the longer match if they want
+        let templates = vec![
+            make_template("review"),
+            make_template("review-pr"),
+            make_template("plan"),
+        ];
+        let trigger = AtTrigger {
+            start: 0,
+            word: "rev".into(),
+        };
+
+        let matches = find_prefix(&templates, &trigger);
+        let names: Vec<&str> = matches.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["review", "review-pr"]);
+    }
+
+    #[test]
+    fn find_prefix_with_empty_word_returns_everything() {
+        // bare `@<tab>` is the user asking "show me all my templates"
+        let templates = vec![make_template("review"), make_template("plan")];
+        let trigger = AtTrigger {
+            start: 0,
+            word: String::new(),
+        };
+
+        let matches = find_prefix(&templates, &trigger);
+        assert_eq!(matches.len(), 2);
+    }
+
+    #[test]
+    fn find_prefix_returns_empty_when_no_candidate_matches() {
+        let templates = vec![make_template("plan")];
+        let trigger = AtTrigger {
+            start: 0,
+            word: "review".into(),
+        };
+        assert!(find_prefix(&templates, &trigger).is_empty());
     }
 }

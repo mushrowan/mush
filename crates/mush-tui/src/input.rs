@@ -52,6 +52,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     if app.interaction.mode == AppMode::SlashComplete {
         return handle_slash_menu_key(app, key);
     }
+    if app.interaction.mode == AppMode::AtPicker {
+        return handle_at_picker_key(app, key);
+    }
     if app.interaction.mode == AppMode::Scroll {
         return handle_scroll_mode(app, key);
     }
@@ -285,6 +288,9 @@ fn handle_idle_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             if try_expand_at_template(app) {
                 return None;
             }
+            if try_open_at_picker(app) {
+                return None;
+            }
             if app.input.text.starts_with('/')
                 && app.completion.slash_menu.is_none()
                 && !app.completion.slash_commands.is_empty()
@@ -384,6 +390,123 @@ fn try_expand_at_template(app: &mut App) -> bool {
     app.input.cursor = new_cursor;
     app.input.ensure_cursor_visible();
     true
+}
+
+/// open the @-template picker if the trigger word has prefix matches
+/// but no exact match. returns whether the picker was opened. callers
+/// should fall through to normal tab completion when this returns false
+fn try_open_at_picker(app: &mut App) -> bool {
+    let Some(trigger) = crate::at_template::parse_at_trigger(&app.input.text, app.input.cursor)
+    else {
+        return false;
+    };
+    let matches: Vec<mush_ext::PromptTemplate> =
+        crate::at_template::find_prefix(&app.completion.templates, &trigger)
+            .into_iter()
+            .cloned()
+            .collect();
+    if matches.is_empty() {
+        return false;
+    }
+    app.interaction.at_picker = Some(crate::app_state::AtPickerState {
+        matches,
+        selected: 0,
+        trigger_start: trigger.start,
+        trigger_end: app.input.cursor,
+    });
+    app.interaction.mode = AppMode::AtPicker;
+    true
+}
+
+/// key handler while the `@`-template picker popup is open. tab and
+/// shift+tab cycle, enter inserts the selected template and closes,
+/// esc / ctrl+[ close without touching the input. typing characters
+/// narrows the filter; if the user types past every match the picker
+/// closes and the character still lands in the input
+fn handle_at_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
+    let Some(picker) = app.interaction.at_picker.as_mut() else {
+        // shouldn't happen, but recover gracefully
+        app.interaction.mode = AppMode::Normal;
+        return None;
+    };
+    let count = picker.matches.len();
+    match (key.modifiers, key.code) {
+        (KeyModifiers::SHIFT, KeyCode::BackTab) => {
+            picker.selected = (picker.selected + count - 1) % count;
+            None
+        }
+        (_, KeyCode::Tab) => {
+            picker.selected = (picker.selected + 1) % count;
+            None
+        }
+        (_, KeyCode::Up) | (KeyModifiers::CONTROL, KeyCode::Char('k')) => {
+            picker.selected = (picker.selected + count - 1) % count;
+            None
+        }
+        (_, KeyCode::Down) | (KeyModifiers::CONTROL, KeyCode::Char('j')) => {
+            picker.selected = (picker.selected + 1) % count;
+            None
+        }
+        (_, KeyCode::Enter) => {
+            // copy out the fields we need before replacing the input,
+            // since insertion mutates app.input via &mut
+            let template = picker.matches[picker.selected].clone();
+            let start = picker.trigger_start;
+            let end = picker.trigger_end;
+            app.interaction.at_picker = None;
+            app.interaction.mode = AppMode::Normal;
+            let new_cursor = start + template.content.len();
+            app.input.text.replace_range(start..end, &template.content);
+            app.input.cursor = new_cursor;
+            app.input.ensure_cursor_visible();
+            None
+        }
+        (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('[')) => {
+            app.interaction.at_picker = None;
+            app.interaction.mode = AppMode::Normal;
+            None
+        }
+        (_, KeyCode::Backspace) => {
+            // backspacing into the trigger narrows the filter. dropping
+            // back past the `@` closes the picker entirely
+            app.input.backspace();
+            refresh_at_picker(app);
+            None
+        }
+        (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
+            app.input_char(c);
+            refresh_at_picker(app);
+            None
+        }
+        _ => None,
+    }
+}
+
+/// re-evaluate the picker after the input changed mid-mode. closes the
+/// picker if the trigger has dissolved or no candidates match the new
+/// word; otherwise updates `matches` and clamps `selected`
+fn refresh_at_picker(app: &mut App) {
+    let Some(trigger) = crate::at_template::parse_at_trigger(&app.input.text, app.input.cursor)
+    else {
+        app.interaction.at_picker = None;
+        app.interaction.mode = AppMode::Normal;
+        return;
+    };
+    let matches: Vec<mush_ext::PromptTemplate> =
+        crate::at_template::find_prefix(&app.completion.templates, &trigger)
+            .into_iter()
+            .cloned()
+            .collect();
+    if matches.is_empty() {
+        app.interaction.at_picker = None;
+        app.interaction.mode = AppMode::Normal;
+        return;
+    }
+    if let Some(picker) = app.interaction.at_picker.as_mut() {
+        picker.trigger_end = app.input.cursor;
+        picker.selected = picker.selected.min(matches.len().saturating_sub(1));
+        picker.matches = matches;
+    }
 }
 
 /// shared text editing bindings (cursor movement, deletion, character input)
@@ -1536,6 +1659,172 @@ mod tests {
         app.input.cursor = app.input.text.len();
         handle_key(&mut app, key(KeyCode::Tab));
         assert_eq!(app.input.text, "@missing");
+    }
+
+    #[test]
+    fn at_template_tab_opens_picker_when_multiple_prefix_matches() {
+        // d2: tab on `@rev` with two `rev*` templates and no exact match
+        // opens the AtPicker popup. input stays untouched until enter
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        push_test_template(&mut app, "review", "review body");
+        push_test_template(&mut app, "review-pr", "review-pr body");
+        push_test_template(&mut app, "plan", "plan body");
+        app.input.text = "@rev".into();
+        app.input.cursor = app.input.text.len();
+
+        handle_key(&mut app, key(KeyCode::Tab));
+
+        assert_eq!(app.interaction.mode, AppMode::AtPicker);
+        let picker = app
+            .interaction
+            .at_picker
+            .as_ref()
+            .expect("picker state should be populated");
+        let names: Vec<&str> = picker.matches.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["review", "review-pr"]);
+        assert_eq!(picker.selected, 0);
+        assert_eq!(app.input.text, "@rev", "input untouched until enter");
+    }
+
+    #[test]
+    fn at_picker_tab_cycles_selection() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        push_test_template(&mut app, "review", "a");
+        push_test_template(&mut app, "review-pr", "b");
+        app.input.text = "@rev".into();
+        app.input.cursor = app.input.text.len();
+        handle_key(&mut app, key(KeyCode::Tab));
+
+        handle_key(&mut app, key(KeyCode::Tab));
+        assert_eq!(app.interaction.at_picker.as_ref().unwrap().selected, 1);
+
+        // tab wraps from the end back to the top
+        handle_key(&mut app, key(KeyCode::Tab));
+        assert_eq!(app.interaction.at_picker.as_ref().unwrap().selected, 0);
+    }
+
+    #[test]
+    fn at_picker_shift_tab_cycles_backwards() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        push_test_template(&mut app, "review", "a");
+        push_test_template(&mut app, "review-pr", "b");
+        app.input.text = "@rev".into();
+        app.input.cursor = app.input.text.len();
+        handle_key(&mut app, key(KeyCode::Tab));
+
+        // shift+tab from selected==0 wraps to the bottom
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+        );
+        assert_eq!(app.interaction.at_picker.as_ref().unwrap().selected, 1);
+    }
+
+    #[test]
+    fn at_picker_enter_inserts_selected_template() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        push_test_template(&mut app, "review", "REVIEW");
+        push_test_template(&mut app, "review-pr", "REVIEW PR");
+        app.input.text = "hi @rev".into();
+        app.input.cursor = app.input.text.len();
+        handle_key(&mut app, key(KeyCode::Tab));
+        // cycle to the second match (review-pr)
+        handle_key(&mut app, key(KeyCode::Tab));
+
+        let event = handle_key(&mut app, key(KeyCode::Enter));
+
+        // enter inside the picker inserts and closes; it must NOT submit
+        assert!(
+            event.is_none(),
+            "enter inside the picker must not submit, got {event:?}"
+        );
+        assert_eq!(app.input.text, "hi REVIEW PR");
+        assert_eq!(app.interaction.mode, AppMode::Normal);
+        assert!(app.interaction.at_picker.is_none());
+    }
+
+    #[test]
+    fn at_picker_esc_closes_without_touching_input() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        push_test_template(&mut app, "review", "REVIEW");
+        push_test_template(&mut app, "review-pr", "REVIEW PR");
+        app.input.text = "@rev".into();
+        app.input.cursor = app.input.text.len();
+        handle_key(&mut app, key(KeyCode::Tab));
+        assert_eq!(app.interaction.mode, AppMode::AtPicker);
+
+        handle_key(&mut app, key(KeyCode::Esc));
+
+        assert_eq!(app.interaction.mode, AppMode::Normal);
+        assert!(app.interaction.at_picker.is_none());
+        assert_eq!(app.input.text, "@rev", "esc preserves the trigger text");
+    }
+
+    #[test]
+    fn at_picker_typing_narrows_matches() {
+        // typing while the picker is open extends the trigger word and
+        // narrows the candidate list. mirrors the slash menu UX so the
+        // user can keep refining without esc-ing first
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        push_test_template(&mut app, "review", "REVIEW");
+        push_test_template(&mut app, "review-pr", "REVIEW PR");
+        push_test_template(&mut app, "release", "RELEASE");
+        app.input.text = "@re".into();
+        app.input.cursor = app.input.text.len();
+        handle_key(&mut app, key(KeyCode::Tab));
+
+        // type 'v' → @rev → drops `release`, keeps `review` + `review-pr`
+        handle_key(&mut app, key(KeyCode::Char('v')));
+
+        assert_eq!(app.input.text, "@rev");
+        assert_eq!(app.interaction.mode, AppMode::AtPicker);
+        let names: Vec<&str> = app
+            .interaction
+            .at_picker
+            .as_ref()
+            .unwrap()
+            .matches
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["review", "review-pr"]);
+    }
+
+    #[test]
+    fn at_picker_typing_past_all_matches_closes_and_keeps_text() {
+        // when the user types something that no template prefix-matches,
+        // the picker closes silently and the typed character stays put
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        push_test_template(&mut app, "review", "REVIEW");
+        app.input.text = "@re".into();
+        app.input.cursor = app.input.text.len();
+        handle_key(&mut app, key(KeyCode::Tab));
+
+        // type 'z' → @rez → no template matches
+        handle_key(&mut app, key(KeyCode::Char('z')));
+
+        assert_eq!(app.input.text, "@rez");
+        assert_eq!(app.interaction.mode, AppMode::Normal);
+        assert!(app.interaction.at_picker.is_none());
+    }
+
+    #[test]
+    fn at_picker_backspace_past_at_sign_closes() {
+        // backspacing past the `@` dissolves the trigger entirely; the
+        // picker must close so we don't keep stale matches around
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        push_test_template(&mut app, "review", "REVIEW");
+        push_test_template(&mut app, "review-pr", "REVIEW PR");
+        app.input.text = "@r".into();
+        app.input.cursor = app.input.text.len();
+        handle_key(&mut app, key(KeyCode::Tab));
+        // backspace twice: @r → @ → empty (no trigger)
+        handle_key(&mut app, key(KeyCode::Backspace));
+        handle_key(&mut app, key(KeyCode::Backspace));
+
+        assert_eq!(app.input.text, "");
+        assert_eq!(app.interaction.mode, AppMode::Normal);
+        assert!(app.interaction.at_picker.is_none());
     }
 
     #[test]

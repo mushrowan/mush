@@ -56,6 +56,10 @@ pub enum AppMode {
     SessionPicker,
     /// slash command completion menu visible above input
     SlashComplete,
+    /// `@<word>` template picker open after a tab on a partial-match
+    /// trigger. tab cycles, enter inserts, esc closes without touching
+    /// the input
+    AtPicker,
     /// waiting for user to confirm a tool call (y/n)
     ToolConfirm,
     /// scroll mode: j/k scroll, y copies message, esc exits
