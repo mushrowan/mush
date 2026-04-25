@@ -22,8 +22,8 @@ use mush_ai::registry::ApiRegistry;
 
 use self::caching_backend::CachingBackend;
 pub use self::config::{
-    HintMode, LastModelSaver, PaneSnapshot, PromptEnricher, SessionSaver, SessionSnapshot,
-    ThinkingPrefsSaver, TitleUpdater, TuiConfig,
+    HintMode, LastModelSaver, PaneSnapshot, PromptEnricher, ReloadCallback, ReloadedContext,
+    SessionSaver, SessionSnapshot, ThinkingPrefsSaver, TitleUpdater, TuiConfig,
 };
 use self::input::LoopAction;
 use self::looping::run_loop_iteration;

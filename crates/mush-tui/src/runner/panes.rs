@@ -547,6 +547,7 @@ mod tests {
             favourites_locked: false,
             save_favourite_models: None,
             keymap: crate::keybinds::KeyMap::default(),
+            reload_context: None,
         };
 
         process_delegations(&mut pane_mgr, &tui_config, &bus, &queue);

@@ -103,6 +103,10 @@ pub enum SlashAction {
     TaskList,
     /// dump internal state for debugging (active panes, streams, token stats)
     Debug,
+    /// re-discover AGENTS.md and prompt templates without restart.
+    /// rebuilds the system prompt and slash menu, busting the provider
+    /// prefix cache as a side effect (intentional and explicit)
+    Reload,
     Quit,
     Other {
         name: String,
@@ -129,6 +133,7 @@ impl SlashAction {
                 | Self::ForkCompact
                 | Self::Undo
                 | Self::Merge
+                | Self::Reload
         )
     }
 }
@@ -205,6 +210,7 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
         "merge" => Ok(SlashAction::Merge),
         "task" | "tasks" => parse_task_subcommand(args),
         "debug" => Ok(SlashAction::Debug),
+        "reload" => Ok(SlashAction::Reload),
         "quit" | "exit" | "q" => Ok(SlashAction::Quit),
         other => Ok(SlashAction::Other {
             name: other.to_string(),
@@ -361,5 +367,14 @@ mod tests {
                 session_id: Some(SessionId::from("abc123")),
             }
         );
+    }
+
+    #[test]
+    fn parse_reload_command() {
+        // /reload is the explicit cache-bust button: refreshes AGENTS.md
+        // and template discovery so the user can pick up file edits
+        // without restarting mush. opt-in because it does bust the
+        // provider-side prefix cache by changing the system prompt
+        assert_eq!(parse("/reload").unwrap(), SlashAction::Reload);
     }
 }

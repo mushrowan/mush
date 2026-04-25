@@ -32,6 +32,7 @@ pub fn handle(
             help.push_str("  /model [id]    - show or switch model\n");
             help.push_str("  /sessions      - browse and resume sessions\n");
             help.push_str("  /resume [id]   - resume session (most recent in cwd if no id)\n");
+            help.push_str("  /reload        - rebuild AGENTS.md and templates without restart\n");
             help.push_str("  /branch [n]    - branch from nth user message\n");
             help.push_str("  /tree          - show conversation tree\n");
             help.push_str("  /compact       - summarise old messages to free context\n");
@@ -116,6 +117,11 @@ pub fn handle(
         }
         SlashAction::New => {
             // handled in runner/commands.rs where save_session is available
+            None
+        }
+        SlashAction::Reload => {
+            // handled in runner/commands.rs where the reload callback +
+            // pane manager are available
             None
         }
         SlashAction::Tree => {

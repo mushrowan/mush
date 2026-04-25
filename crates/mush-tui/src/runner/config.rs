@@ -71,6 +71,20 @@ pub struct PaneSnapshot {
 /// callback to persist session state (all panes)
 pub type SessionSaver = std::sync::Arc<dyn Fn(SessionSnapshot) + Send + Sync>;
 
+/// freshly-discovered project context returned by a `/reload` callback.
+/// the runner applies these to the live `TuiConfig` and `App`
+pub struct ReloadedContext {
+    /// rebuilt system prompt incorporating any AGENTS.md edits
+    pub system_prompt: String,
+    /// re-discovered prompt templates (replaces the existing list)
+    pub templates: Vec<mush_ext::PromptTemplate>,
+}
+
+/// callback fired by `/reload`. takes the project root and returns the
+/// rebuilt context. supplied by the binary (mush-cli) where the
+/// discovery primitives live
+pub type ReloadCallback = std::sync::Arc<dyn Fn(&std::path::Path) -> ReloadedContext + Send + Sync>;
+
 /// configuration for the TUI runner (owned, 'static-friendly)
 pub struct TuiConfig {
     pub model: Model,
@@ -162,4 +176,8 @@ pub struct TuiConfig {
     pub save_favourite_models: Option<FavouriteModelsSaver>,
     /// resolved keybind map applied to every new App
     pub keymap: crate::keybinds::KeyMap,
+    /// callback fired by /reload to refresh AGENTS.md and templates.
+    /// `None` means /reload reports "not supported" rather than silently
+    /// becoming a no-op
+    pub reload_context: Option<ReloadCallback>,
 }
