@@ -118,6 +118,33 @@ pub const SNAPSHOT_RETENTION: usize = 5;
 /// fine since we sort dumps by mtime anyway
 static SNAPSHOT_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// most recent `messages_prefix` fingerprint published by a provider's
+/// `dump` call. read by the cache-bust classifier so it can spot
+/// history mutations across consecutive turns. `0` means "never set",
+/// which (a) can't be confused with a real hash because hashing happens
+/// inside `RequestFingerprint::from_json_sections` and (b) is only used
+/// as a sentinel through [`last_messages_prefix_fingerprint`].
+///
+/// process-global rather than per-pane: today there's at most one
+/// in-flight LLM call per pane and panes don't stream simultaneously
+/// often enough to matter for classification accuracy. multi-pane
+/// concurrency can reshape this into per-stream state if it ever
+/// causes false negatives
+static LAST_MESSAGES_PREFIX: AtomicU64 = AtomicU64::new(0);
+static LAST_MESSAGES_PREFIX_SET: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// read the most recent `messages_prefix` fingerprint published by
+/// [`dump`]. returns `None` before the first dump of the process
+#[must_use]
+pub fn last_messages_prefix_fingerprint() -> Option<u64> {
+    if LAST_MESSAGES_PREFIX_SET.load(Ordering::Relaxed) {
+        Some(LAST_MESSAGES_PREFIX.load(Ordering::Relaxed))
+    } else {
+        None
+    }
+}
+
 /// write a request snapshot: a JSON file containing the fingerprint
 /// as a `_snapshot` header followed by the raw body. returns the path
 /// on success. rotates the dir to keep at most [`SNAPSHOT_RETENTION`]
@@ -164,6 +191,12 @@ pub fn dump_in(
             if std::fs::write(&path, json).is_err() {
                 return None;
             }
+            // publish the prefix fingerprint so the cache-bust classifier
+            // can compare against the previous turn's value. done after
+            // the file write so observers only see the value once it's
+            // safely durable
+            LAST_MESSAGES_PREFIX.store(fingerprint.messages_prefix, Ordering::Relaxed);
+            LAST_MESSAGES_PREFIX_SET.store(true, Ordering::Relaxed);
             prune_old_snapshots(dir, provider);
             Some(path)
         }
@@ -300,6 +333,25 @@ mod tests {
         assert!(
             fp.messages_prefix != fp.last_user,
             "prefix and last_user should differ for a non-trivial conversation"
+        );
+    }
+
+    #[test]
+    fn dump_publishes_messages_prefix_fingerprint() {
+        // dump must publish the prefix fingerprint so the cache-bust
+        // classifier can compare prev vs curr without re-reading files
+        let dir = tempfile::tempdir().unwrap();
+        let fp = RequestFingerprint::from_json_sections(
+            "[]",
+            "[]",
+            r#"[{"role":"user","content":[{"type":"text","text":"hi"}]}]"#,
+        );
+        dump_in(dir.path(), "anthropic", &fp, "{}").expect("dump succeeds");
+        let observed = last_messages_prefix_fingerprint();
+        assert_eq!(
+            observed,
+            Some(fp.messages_prefix),
+            "dump should publish the prefix fingerprint atomically"
         );
     }
 

@@ -10,6 +10,21 @@ fn test_config(model: &str, thinking: &str, effort: Option<&str>) -> CallConfig 
         model_id: model.into(),
         thinking_level: thinking.into(),
         effort: effort.map(Into::into),
+        messages_prefix_fingerprint: None,
+    }
+}
+
+fn test_config_with_prefix(
+    model: &str,
+    thinking: &str,
+    effort: Option<&str>,
+    prefix: u64,
+) -> CallConfig {
+    CallConfig {
+        model_id: model.into(),
+        thinking_level: thinking.into(),
+        effort: effort.map(Into::into),
+        messages_prefix_fingerprint: Some(prefix),
     }
 }
 
@@ -134,6 +149,66 @@ fn bust_reason_unexplained_when_config_stable() {
 }
 
 #[test]
+fn bust_reason_history_reshaped_when_prefix_changes() {
+    // same model/thinking/effort between calls, but the messages_prefix
+    // fingerprint differs: someone mutated the conversation history
+    // (lost steering messages, branch reshuffle, manual prune). this
+    // should classify as HistoryReshaped, not Unexplained
+    let mut stats = TokenStats::new(TokenCount::new(200_000));
+    stats.update_with_config(
+        &prev_usage(),
+        None,
+        Some(test_config_with_prefix(
+            "opus-4-7",
+            "High",
+            Some("high"),
+            0xAAAA,
+        )),
+    );
+    let anomalies = stats.update_with_config(
+        &curr_usage(),
+        None,
+        Some(test_config_with_prefix(
+            "opus-4-7",
+            "High",
+            Some("high"),
+            0xBBBB,
+        )),
+    );
+    assert_eq!(bust_reason(&anomalies), Some(BustReason::HistoryReshaped));
+}
+
+#[test]
+fn bust_reason_prefers_explicit_config_change_over_history() {
+    // when both the model changed AND the prefix shifted, the model
+    // change is the higher-signal explanation: the prefix would have
+    // shifted anyway because anthropic keys cache by model id. preserve
+    // the existing precedence (model > thinking > effort > history)
+    let mut stats = TokenStats::new(TokenCount::new(200_000));
+    stats.update_with_config(
+        &prev_usage(),
+        None,
+        Some(test_config_with_prefix(
+            "opus-4-6",
+            "High",
+            Some("high"),
+            0xAAAA,
+        )),
+    );
+    let anomalies = stats.update_with_config(
+        &curr_usage(),
+        None,
+        Some(test_config_with_prefix(
+            "opus-4-7",
+            "High",
+            Some("high"),
+            0xBBBB,
+        )),
+    );
+    assert_eq!(bust_reason(&anomalies), Some(BustReason::ModelChanged));
+}
+
+#[test]
 fn plain_update_defaults_to_unexplained() {
     // legacy callers without config context still detect busts
     let mut stats = TokenStats::new(TokenCount::new(200_000));
@@ -170,6 +245,8 @@ fn dump_pins_referenced_request_snapshots() {
         prev_model_id: None,
         prev_thinking_level: None,
         prev_effort: None,
+        prev_messages_prefix_fingerprint: None,
+        curr_messages_prefix_fingerprint: None,
         prev_usage: None,
         curr_usage: Usage::default(),
         prev_context_tokens: 0,
