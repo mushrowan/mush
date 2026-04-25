@@ -55,6 +55,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     if app.interaction.mode == AppMode::AtPicker {
         return handle_at_picker_key(app, key);
     }
+    if app.interaction.mode == AppMode::SlotEdit {
+        return handle_slot_edit_key(app, key);
+    }
     if app.interaction.mode == AppMode::Scroll {
         return handle_scroll_mode(app, key);
     }
@@ -382,14 +385,36 @@ fn try_expand_at_template(app: &mut App) -> bool {
     let Some(template) = crate::at_template::find_exact(&app.completion.templates, &trigger) else {
         return false;
     };
+    let content = template.content.clone();
     let end = app.input.cursor;
-    let new_cursor = trigger.start + template.content.len();
-    app.input
-        .text
-        .replace_range(trigger.start..end, &template.content);
-    app.input.cursor = new_cursor;
-    app.input.ensure_cursor_visible();
+    insert_template(app, trigger.start, end, &content);
     true
+}
+
+/// replace the byte range `[start, end)` of `app.input.text` with
+/// `content`, then if the content has placeholders enter slot-edit
+/// mode parking the cursor at the first slot. shared by the exact-match
+/// path and the picker `enter` path so both routes get slot-editing for
+/// free
+fn insert_template(app: &mut App, start: usize, end: usize, content: &str) {
+    let (clean, slot_offsets) = crate::at_template::strip_placeholders(content);
+    app.input.text.replace_range(start..end, &clean);
+
+    if slot_offsets.is_empty() {
+        // no placeholders: simple expansion, cursor at end of insertion
+        app.input.cursor = start + clean.len();
+        app.input.ensure_cursor_visible();
+        return;
+    }
+
+    // shift slot offsets into absolute byte positions in `input.text`
+    let slots: Vec<usize> = slot_offsets.iter().map(|&o| start + o).collect();
+    app.input.cursor = slots[0];
+    app.input.ensure_cursor_visible();
+    let slot_count = slots.len();
+    app.interaction.slot_edit = Some(crate::app_state::SlotEditState { slots, current: 0 });
+    app.interaction.mode = AppMode::SlotEdit;
+    app.status = Some(format!("slot 1/{slot_count} · tab to cycle, ⏎ to finish"));
 }
 
 /// open the @-template picker if the trigger word has prefix matches
@@ -455,10 +480,7 @@ fn handle_at_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             let end = picker.trigger_end;
             app.interaction.at_picker = None;
             app.interaction.mode = AppMode::Normal;
-            let new_cursor = start + template.content.len();
-            app.input.text.replace_range(start..end, &template.content);
-            app.input.cursor = new_cursor;
-            app.input.ensure_cursor_visible();
+            insert_template(app, start, end, &template.content);
             None
         }
         (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('[')) => {
@@ -506,6 +528,89 @@ fn refresh_at_picker(app: &mut App) {
         picker.trigger_end = app.input.cursor;
         picker.selected = picker.selected.min(matches.len().saturating_sub(1));
         picker.matches = matches;
+    }
+}
+
+/// key handler while the slot editor is active. tab cycles forward
+/// through slots, shift+tab cycles back, enter / esc exit the mode and
+/// keep the typed text in place. typing inserts at the cursor and
+/// shifts every later slot offset by the same byte count so they keep
+/// pointing at the right place
+fn handle_slot_edit_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
+    let Some(state) = app.interaction.slot_edit.as_ref() else {
+        app.interaction.mode = AppMode::Normal;
+        return None;
+    };
+    let count = state.slots.len();
+    match (key.modifiers, key.code) {
+        (KeyModifiers::SHIFT, KeyCode::BackTab) => {
+            let next = (state.current + count - 1) % count;
+            jump_to_slot(app, next);
+            None
+        }
+        (_, KeyCode::Tab) => {
+            let next = (state.current + 1) % count;
+            jump_to_slot(app, next);
+            None
+        }
+        (_, KeyCode::Enter) | (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('[')) => {
+            app.interaction.slot_edit = None;
+            app.interaction.mode = AppMode::Normal;
+            None
+        }
+        (_, KeyCode::Backspace) => {
+            // shift later slots back by 1 if a byte gets removed. avoid
+            // deleting past the current slot's start so users can't
+            // accidentally chew through earlier verbatim template content
+            let state = app.interaction.slot_edit.as_ref()?;
+            let slot_start = state.slots[state.current];
+            if app.input.cursor <= slot_start {
+                return None;
+            }
+            let cursor = app.input.cursor;
+            app.input.backspace();
+            shift_later_slots(app, cursor, -1);
+            None
+        }
+        (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
+            let cursor = app.input.cursor;
+            app.input_char(c);
+            let inserted = app.input.cursor - cursor;
+            shift_later_slots(app, cursor, inserted as isize);
+            None
+        }
+        // arrow keys, home/end, etc fall through silently so cursor
+        // movement keeps working without breaking slot-tracking
+        _ => None,
+    }
+}
+
+/// move the cursor to slot index `target` and update `current`
+fn jump_to_slot(app: &mut App, target: usize) {
+    if let Some(state) = app.interaction.slot_edit.as_mut() {
+        state.current = target;
+        let position = state.slots[target];
+        let total = state.slots.len();
+        app.input.cursor = position;
+        app.input.ensure_cursor_visible();
+        app.status = Some(format!(
+            "slot {}/{total} · tab to cycle, ⏎ to finish",
+            target + 1
+        ));
+    }
+}
+
+/// shift every slot strictly after `cutoff` by `delta` bytes. used
+/// after inserts and deletes inside the current slot so later slot
+/// offsets keep pointing at their actual position in the live input.
+/// strictly-greater so the current slot's own start byte stays put
+fn shift_later_slots(app: &mut App, cutoff: usize, delta: isize) {
+    if let Some(state) = app.interaction.slot_edit.as_mut() {
+        for slot in &mut state.slots {
+            if *slot > cutoff {
+                *slot = (*slot as isize + delta) as usize;
+            }
+        }
     }
 }
 
@@ -1825,6 +1930,172 @@ mod tests {
         assert_eq!(app.input.text, "");
         assert_eq!(app.interaction.mode, AppMode::Normal);
         assert!(app.interaction.at_picker.is_none());
+    }
+
+    #[test]
+    fn template_with_placeholders_enters_slot_edit_mode() {
+        // d3: expanding a template that contains `$1`/`$2`/`$@` should
+        // enter slot edit mode with placeholders stripped to empty slots
+        // and the cursor parked at the first slot
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        push_test_template(&mut app, "review", "review $1 with $2");
+        app.input.text = "@review".into();
+        app.input.cursor = app.input.text.len();
+        handle_key(&mut app, key(KeyCode::Tab));
+
+        // template content "review $1 with $2" expands to "review  with "
+        // with two slots at byte offsets 7 and 13 of the input
+        assert_eq!(app.input.text, "review  with ");
+        assert_eq!(app.interaction.mode, AppMode::SlotEdit);
+        let slot_state = app
+            .interaction
+            .slot_edit
+            .as_ref()
+            .expect("slot state should be populated");
+        assert_eq!(slot_state.slots, vec![7, 13]);
+        assert_eq!(slot_state.current, 0);
+        assert_eq!(app.input.cursor, 7);
+    }
+
+    #[test]
+    fn template_without_placeholders_stays_in_normal_mode() {
+        // expanding a placeholder-free template must NOT enter slot mode
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        push_test_template(&mut app, "review", "plain content");
+        app.input.text = "@review".into();
+        app.input.cursor = app.input.text.len();
+        handle_key(&mut app, key(KeyCode::Tab));
+
+        assert_eq!(app.input.text, "plain content");
+        assert_eq!(app.interaction.mode, AppMode::Normal);
+        assert!(app.interaction.slot_edit.is_none());
+    }
+
+    #[test]
+    fn slot_edit_typing_shifts_later_slot_offsets() {
+        // typing inside a slot pushes later slots' byte offsets right by
+        // the inserted byte count so tab still parks on the right place
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        push_test_template(&mut app, "review", "$1 then $2");
+        app.input.text = "@review".into();
+        app.input.cursor = app.input.text.len();
+        handle_key(&mut app, key(KeyCode::Tab));
+        // initial slots: [0, 6] (after "$1" stripped: " then ", $2 lived at 8 → now 6)
+
+        // type "abc" into slot 0
+        for c in "abc".chars() {
+            handle_key(&mut app, key(KeyCode::Char(c)));
+        }
+        assert_eq!(app.input.text, "abc then ");
+        let state = app.interaction.slot_edit.as_ref().unwrap();
+        assert_eq!(state.slots, vec![0, 9]);
+    }
+
+    #[test]
+    fn slot_edit_tab_jumps_to_next_slot() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        push_test_template(&mut app, "review", "$1 then $2");
+        app.input.text = "@review".into();
+        app.input.cursor = app.input.text.len();
+        handle_key(&mut app, key(KeyCode::Tab));
+
+        for c in "abc".chars() {
+            handle_key(&mut app, key(KeyCode::Char(c)));
+        }
+        // cursor at slot 0 end (3), tab jumps to slot 1 (now at 9)
+        handle_key(&mut app, key(KeyCode::Tab));
+
+        let state = app.interaction.slot_edit.as_ref().unwrap();
+        assert_eq!(state.current, 1);
+        assert_eq!(app.input.cursor, 9);
+    }
+
+    #[test]
+    fn slot_edit_enter_exits_without_submitting() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        push_test_template(&mut app, "review", "fix $1");
+        app.input.text = "@review".into();
+        app.input.cursor = app.input.text.len();
+        handle_key(&mut app, key(KeyCode::Tab));
+        for c in "bug".chars() {
+            handle_key(&mut app, key(KeyCode::Char(c)));
+        }
+
+        let event = handle_key(&mut app, key(KeyCode::Enter));
+
+        // enter inside slot mode is "done filling slots", not submit.
+        // user gets a chance to add more text or hit enter again
+        assert!(event.is_none(), "first enter must not submit");
+        assert_eq!(app.input.text, "fix bug");
+        assert_eq!(app.interaction.mode, AppMode::Normal);
+        assert!(app.interaction.slot_edit.is_none());
+    }
+
+    #[test]
+    fn slot_edit_esc_keeps_typed_content_and_exits_mode() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        push_test_template(&mut app, "review", "fix $1");
+        app.input.text = "@review".into();
+        app.input.cursor = app.input.text.len();
+        handle_key(&mut app, key(KeyCode::Tab));
+        handle_key(&mut app, key(KeyCode::Char('x')));
+
+        handle_key(&mut app, key(KeyCode::Esc));
+
+        // esc bails out of slot mode but leaves whatever was typed.
+        // the user can keep editing in normal mode without weirdness
+        assert_eq!(app.input.text, "fix x");
+        assert_eq!(app.interaction.mode, AppMode::Normal);
+        assert!(app.interaction.slot_edit.is_none());
+    }
+
+    #[test]
+    fn slot_edit_shift_tab_cycles_backwards_with_wrap() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        push_test_template(&mut app, "review", "$1 / $2 / $3");
+        app.input.text = "@review".into();
+        app.input.cursor = app.input.text.len();
+        handle_key(&mut app, key(KeyCode::Tab));
+
+        // shift+tab from slot 0 wraps to last slot
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+        );
+        assert_eq!(app.interaction.slot_edit.as_ref().unwrap().current, 2);
+    }
+
+    #[test]
+    fn slot_edit_tab_from_last_slot_wraps_to_first() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        push_test_template(&mut app, "review", "$1 / $2");
+        app.input.text = "@review".into();
+        app.input.cursor = app.input.text.len();
+        handle_key(&mut app, key(KeyCode::Tab));
+
+        // tab → slot 1 → tab → wrap back to slot 0
+        handle_key(&mut app, key(KeyCode::Tab));
+        handle_key(&mut app, key(KeyCode::Tab));
+        assert_eq!(app.interaction.slot_edit.as_ref().unwrap().current, 0);
+    }
+
+    #[test]
+    fn slot_edit_backspace_at_slot_start_is_a_noop() {
+        // protect verbatim template content: backspace at the start of
+        // the current slot must not delete the byte before it
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        push_test_template(&mut app, "review", "fix $1 now");
+        app.input.text = "@review".into();
+        app.input.cursor = app.input.text.len();
+        handle_key(&mut app, key(KeyCode::Tab));
+        let before_text = app.input.text.clone();
+
+        handle_key(&mut app, key(KeyCode::Backspace));
+
+        assert_eq!(
+            app.input.text, before_text,
+            "backspace must not eat the leading verbatim chars"
+        );
     }
 
     #[test]

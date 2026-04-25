@@ -60,6 +60,11 @@ pub enum AppMode {
     /// trigger. tab cycles, enter inserts, esc closes without touching
     /// the input
     AtPicker,
+    /// interactive slot editor for `$1`/`$2`/`$@` placeholders. opens
+    /// after a template that contains placeholders is expanded; tab
+    /// cycles between slots, enter / esc exit the mode and keep the
+    /// typed text in place
+    SlotEdit,
     /// waiting for user to confirm a tool call (y/n)
     ToolConfirm,
     /// scroll mode: j/k scroll, y copies message, esc exits
