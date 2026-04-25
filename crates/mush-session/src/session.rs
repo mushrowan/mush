@@ -40,6 +40,15 @@ pub struct Session {
     /// additional panes (empty for single-pane sessions)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub panes: Vec<PaneSession>,
+    /// system prompt sent on every request in this session.
+    /// persisted so resumed sessions reuse the exact prompt that was
+    /// cached on the provider side. when None, callers fall back to
+    /// the freshly-built prompt from AGENTS.md and friends. mutating
+    /// this mid-session would bust the prefix cache, so the only path
+    /// that updates it is `/reload` (explicit user action) or `/new`
+    /// (fresh session)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
 }
 
 impl Session {
@@ -58,6 +67,7 @@ impl Session {
             },
             conversation: ConversationState::new(),
             panes: vec![],
+            system_prompt: None,
         }
     }
 
