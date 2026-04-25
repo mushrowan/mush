@@ -17,3 +17,6 @@ codex/
 # local docs (planning, progress, reports)
 /untracked-docs/
 profile.json.gz
+
+# hooks
+.pre-commit-config.yaml
