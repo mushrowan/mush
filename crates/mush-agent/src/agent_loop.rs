@@ -590,18 +590,26 @@ pub fn agent_loop(
                         break 'outer;
                     }
 
-                    // execute all allowed tools concurrently. racing the
-                    // batch against the cancel token lets the user abort
-                    // a long-running tool: tool futures get dropped on
-                    // cancel, which triggers kill_on_drop on the bash
-                    // child processes (see mush-tools::bash)
-                    let futs = async {
-                        let joined: Vec<_> = allowed
-                            .iter()
-                            .map(|tc| execute_tool(&config.tools, tc))
-                            .collect();
-                        futures::future::join_all(joined).await
-                    };
+                    // execute all allowed tools concurrently. calls that
+                    // mutate the same file are serialised within the same
+                    // group to avoid read-modify-write races (the bug
+                    // where the last writer wins and earlier edits are
+                    // silently lost). independent groups still run in
+                    // parallel. racing the batch against the cancel token
+                    // lets the user abort a long-running tool: tool
+                    // futures get dropped on cancel, which triggers
+                    // kill_on_drop on the bash child processes (see
+                    // mush-tools::bash)
+                    let allowed_calls: Vec<ToolCall> =
+                        allowed.iter().map(|&tc| tc.clone()).collect();
+                    let tools_ref = &config.tools;
+                    let futs = crate::tool_grouping::execute_grouped(
+                        allowed_calls,
+                        |tc: &ToolCall| {
+                            crate::tool_grouping::file_path_key(tc.name.as_str(), &tc.arguments)
+                        },
+                        move |tc: ToolCall| async move { execute_tool(tools_ref, &tc).await },
+                    );
                     let results = match config.cancel.as_ref() {
                         Some(token) => tokio::select! {
                             r = futs => r,

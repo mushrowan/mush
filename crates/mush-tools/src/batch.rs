@@ -8,9 +8,8 @@
 //! sequentially in the order they appear to avoid silent conflicts.
 //! all other calls run in parallel.
 
-use std::collections::HashMap;
-
 use mush_agent::tool::{AgentTool, OutputLimit, ToolRegistry, ToolResult, parse_tool_args};
+use mush_agent::tool_grouping;
 use mush_agent::truncation;
 use mush_ai::types::ToolResultContentPart;
 use serde::Deserialize;
@@ -68,21 +67,6 @@ impl BatchTool {
     }
 }
 
-// tools whose file operations must be serialised per-path
-const FILE_MUTATING: &[&str] = &["edit", "write"];
-
-/// extract the file path from parameters for tools that mutate files
-fn file_path_key<'a>(tool_name: &str, params: &'a serde_json::Value) -> Option<&'a str> {
-    if FILE_MUTATING
-        .iter()
-        .any(|t| tool_name.eq_ignore_ascii_case(t))
-    {
-        params.get("path").and_then(|v| v.as_str())
-    } else {
-        None
-    }
-}
-
 type CallResult = (
     usize,
     String,
@@ -115,30 +99,6 @@ async fn run_call(i: usize, call: BatchCall, tools: &ToolRegistry) -> CallResult
     let limit = tool.output_limit();
     let result = tool.execute(call.parameters).await;
     (i, call.tool, Some(limit), Ok(result))
-}
-
-/// partition calls into groups: same-path file-mutating calls share a group
-/// (executed sequentially), everything else gets its own singleton group
-/// (executed in parallel with all other groups)
-fn group_by_path(calls: Vec<BatchCall>) -> Vec<Vec<(usize, BatchCall)>> {
-    let mut groups: Vec<Vec<(usize, BatchCall)>> = Vec::new();
-    let mut path_to_group: HashMap<String, usize> = HashMap::new();
-
-    for (i, call) in calls.into_iter().enumerate() {
-        if let Some(path) = file_path_key(&call.tool, &call.parameters) {
-            if let Some(&group_idx) = path_to_group.get(path) {
-                groups[group_idx].push((i, call));
-            } else {
-                let idx = groups.len();
-                path_to_group.insert(path.to_owned(), idx);
-                groups.push(vec![(i, call)]);
-            }
-        } else {
-            groups.push(vec![(i, call)]);
-        }
-    }
-
-    groups
 }
 
 #[async_trait::async_trait]
@@ -240,17 +200,18 @@ impl AgentTool for BatchTool {
         } else {
             // parallel mode: same-path file-mutating calls share a group
             // (executed sequentially), everything else gets its own group
-            // (executed in parallel with all other groups)
-            let groups = group_by_path(params.tool_calls);
-            let group_futures = groups.into_iter().map(|group| async {
-                let mut results = Vec::with_capacity(group.len());
-                for (i, call) in group {
-                    results.push(run_call(i, call, &self.tools).await);
-                }
-                results
-            });
-            let all_groups = futures::future::join_all(group_futures).await;
-            all_groups.into_iter().flatten().collect()
+            // (executed in parallel with all other groups). uses the
+            // shared mush_agent::tool_grouping helper so the agent loop
+            // and the batch tool apply identical serialisation rules
+            let calls: Vec<(usize, BatchCall)> =
+                params.tool_calls.into_iter().enumerate().collect();
+            let tools = &self.tools;
+            tool_grouping::execute_grouped(
+                calls,
+                |(_, call)| tool_grouping::file_path_key(&call.tool, &call.parameters),
+                move |(i, call)| async move { run_call(i, call, tools).await },
+            )
+            .await
         };
         results.sort_by_key(|(i, _, _, _)| *i);
 
@@ -798,6 +759,78 @@ mod tests {
             log,
             vec!["a".to_string(), "b".to_string(), "c".to_string()],
             "sequential should observe submission order: {log:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn same_file_edits_applied_in_order_with_different_path_syntax() {
+        // when the model emits the same file with different syntactic
+        // forms (e.g. "test.txt" and "./test.txt") the batch tool should
+        // still detect the conflict and serialise the calls. without
+        // path normalisation the two strings would key separate groups
+        // and race
+        struct SlowEdit {
+            dir: std::path::PathBuf,
+        }
+
+        #[async_trait::async_trait]
+        impl AgentTool for SlowEdit {
+            fn name(&self) -> &str {
+                "edit"
+            }
+            fn label(&self) -> &str {
+                "edit"
+            }
+            fn description(&self) -> &str {
+                "slow edit"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn execute(&self, params: serde_json::Value) -> ToolResult {
+                let raw = params["path"].as_str().unwrap();
+                let stripped = raw.strip_prefix("./").unwrap_or(raw);
+                let path = self.dir.join(stripped);
+                let old = params["oldText"].as_str().unwrap();
+                let new = params["newText"].as_str().unwrap();
+                let content = std::fs::read_to_string(&path).unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                let replaced = content.replacen(old, new, 1);
+                std::fs::write(&path, &replaced).unwrap();
+                ToolResult::text(format!("edited {}", path.display()))
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        std::fs::write(&path, "aaa\nbbb\n").unwrap();
+
+        let tool = BatchTool::new(ToolRegistry::from_boxed(vec![Box::new(SlowEdit {
+            dir: dir.path().to_path_buf(),
+        })]));
+
+        let result = tool
+            .execute(serde_json::json!({
+                "tool_calls": [
+                    {"tool": "edit", "parameters": {"path": "test.txt", "oldText": "aaa", "newText": "AAA"}},
+                    {"tool": "edit", "parameters": {"path": "./test.txt", "oldText": "bbb", "newText": "BBB"}},
+                ]
+            }))
+            .await;
+
+        let text = match &result.content[0] {
+            ToolResultContentPart::Text(t) => &t.text,
+            _ => panic!("expected text"),
+        };
+        assert!(
+            text.contains("2/2 succeeded"),
+            "edits should both succeed: {text}"
+        );
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            content, "AAA\nBBB\n",
+            "both edits should be reflected even though the paths differ syntactically"
         );
     }
 
