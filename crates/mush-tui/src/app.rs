@@ -215,6 +215,25 @@ impl App {
         }
     }
 
+    /// reset the scroll anchor on a real terminal resize.
+    ///
+    /// the baseline anchors viewport position to a content line plus a
+    /// snapshot of the viewport height, so streaming-time line growth
+    /// and small status-bar wraps don't shift the user's view. but a
+    /// real terminal resize is a much larger change: the new vis
+    /// makes the cached baseline_vis stale, and the negative
+    /// compensation that ensues clamps `effective_offset` to 0,
+    /// swallowing the first N keypresses worth of scrolling. clearing
+    /// the baseline lets the next render re-pin against the new
+    /// dimensions, so subsequent k/j presses move the viewport
+    /// immediately. status-bar height jitter (vis ±1 between frames
+    /// from cache countdown text width changing, etc) is unaffected
+    /// because it doesn't go through this path
+    pub fn notify_resize(&mut self) {
+        self.render_state.scroll_baseline.set(0);
+        self.render_state.scroll_baseline_vis.set(0);
+    }
+
     /// whether the unread flash indicator is in the "on" phase
     /// cycles at ~1hz (30 ticks on, 30 off at ~60fps)
     pub fn unread_flash_on(&self) -> bool {

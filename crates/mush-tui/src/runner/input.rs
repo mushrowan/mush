@@ -196,8 +196,13 @@ pub(super) async fn handle_streaming_terminal_events(
             }
             Event::Resize(w, h) => {
                 // invalidate the size cache so ratatui's autoresize
-                // picks up the new dimensions on the next frame
+                // picks up the new dimensions on the next frame, and
+                // reset every pane's scroll baseline so post-resize
+                // k/j presses don't get swallowed by stale baseline_vis
                 deps.size_cache.invalidate();
+                for pane in pane_mgr.panes_mut() {
+                    pane.app.notify_resize();
+                }
                 tracing::debug!(
                     phase = "streaming",
                     width = w,
@@ -352,6 +357,9 @@ pub(super) async fn handle_idle_terminal_events(
             }
             Event::Resize(w, h) => {
                 deps.size_cache.invalidate();
+                for pane in pane_mgr.panes_mut() {
+                    pane.app.notify_resize();
+                }
                 tracing::debug!(phase = "idle", width = w, height = h, "terminal resized");
             }
             event => trace_dropped_event(event, "idle"),
