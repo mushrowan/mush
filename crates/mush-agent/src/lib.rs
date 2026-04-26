@@ -6,6 +6,7 @@ pub mod ipc;
 pub mod response_cache;
 pub mod tasks;
 pub mod tool;
+pub mod tool_grouping;
 pub mod truncation;
 
 pub use agent_loop::*;
