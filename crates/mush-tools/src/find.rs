@@ -119,9 +119,19 @@ async fn run_fd(
         Err(e) => return ToolResult::error(format!("failed to run fd: {e}")),
     };
 
-    if !output.status.success() && output.status.code() != Some(1) {
+    // fd exits 0 for both success-with-matches and success-with-no-matches.
+    // any non-zero exit (1 = generic error, 2 = arg parsing error) is a
+    // real failure and must surface so the agent can correct its inputs
+    // rather than misread a silent "no files found"
+    if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return ToolResult::error(format!("fd error: {stderr}"));
+        let detail = stderr.trim();
+        let detail = if detail.is_empty() {
+            format!("exit status {}", output.status)
+        } else {
+            detail.to_string()
+        };
+        return ToolResult::error(format!("fd error: {detail}"));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -152,6 +162,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn find_substring_pattern_matches_filename() {
+        // pattern "zx" should find "zx.py" via substring/regex match
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("zx.py"), "").unwrap();
+        std::fs::write(dir.path().join("normal.txt"), "").unwrap();
+
+        let result = run_fd(dir.path(), "zx", dir.path(), None).await;
+        let text = crate::util::extract_text(&result);
+        assert!(
+            text.contains("zx.py"),
+            "pattern 'zx' must match 'zx.py' (got: {text})"
+        );
+        assert!(!text.contains("normal.txt"));
+    }
+
+    #[tokio::test]
     async fn find_no_results() {
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
@@ -159,5 +185,39 @@ mod tests {
         let result = run_fd(dir.path(), r".*\.py$", dir.path(), None).await;
         let text = crate::util::extract_text(&result);
         assert_eq!(text, "no files found");
+    }
+
+    #[tokio::test]
+    async fn find_invalid_regex_returns_error_not_silent() {
+        // an invalid regex pattern should surface as a clear error so the
+        // agent can correct the pattern. previously this was silenced as
+        // "no files found" because we mistakenly treated fd exit code 1
+        // as a no-results signal (it is actually a generic-error signal;
+        // fd uses exit 0 for both success-with-matches and success-with-
+        // no-matches)
+        let dir = tempfile::TempDir::new().unwrap();
+        let result = run_fd(dir.path(), "[", dir.path(), None).await;
+        assert!(
+            result.outcome.is_error(),
+            "invalid regex must produce a tool error",
+        );
+        let text = crate::util::extract_text(&result);
+        assert!(
+            text.contains("regex"),
+            "error should mention the regex parse failure: {text}",
+        );
+    }
+
+    #[tokio::test]
+    async fn find_nonexistent_search_path_returns_error() {
+        // fd reports "search path is not a directory" via exit code 1.
+        // we must surface this rather than silently claim no matches
+        let cwd = tempfile::TempDir::new().unwrap();
+        let bogus = cwd.path().join("does-not-exist");
+        let result = run_fd(cwd.path(), "anything", &bogus, None).await;
+        assert!(
+            result.outcome.is_error(),
+            "nonexistent path must produce a tool error",
+        );
     }
 }
