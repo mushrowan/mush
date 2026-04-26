@@ -264,6 +264,13 @@ pub struct RenderState {
     /// accumulated errors whenever count_estimated_lines disagreed
     /// with markdown-rendered line count)
     pub scroll_baseline: Cell<usize>,
+    /// viewport height at the moment the baseline was captured. when
+    /// the message area shrinks/grows between frames (status bar
+    /// wrapping to 2 lines as cache countdown text changes width, scroll
+    /// position indicator appearing, etc) `vis` jitters by 1 and the
+    /// viewport would shift unless we add `(baseline_vis - vis)` into
+    /// the compensation. paired with `scroll_baseline`, reset together
+    pub scroll_baseline_vis: Cell<u16>,
     /// scroll compensation (in lines) exposed for the status bar
     /// and tests. derived post-render as `total_content_lines -
     /// scroll_baseline` while scrolled up, otherwise 0. signed so
@@ -293,6 +300,7 @@ impl RenderState {
             content_hash_cache: RefCell::new(Vec::new()),
             prev_content_lines: Cell::new(0),
             scroll_baseline: Cell::new(0),
+            scroll_baseline_vis: Cell::new(0),
             scroll_compensation: Cell::new(0),
             status_bar_cache: RefCell::new(None),
         }

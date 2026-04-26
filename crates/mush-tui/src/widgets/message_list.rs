@@ -26,28 +26,37 @@ pub(crate) const MESSAGE_INDENT_LEFT: usize = 1;
 pub(crate) const MESSAGE_INDENT_RIGHT: usize = 1;
 
 /// capture or clear the scroll baseline based on the current scroll_offset.
-/// returns the baseline to use for this frame's compensation math
-fn update_scroll_baseline(app: &App) -> usize {
-    let baseline = match (app.scroll_offset, app.render_state.scroll_baseline.get()) {
-        (0, _) => 0,
-        // first frame scrolled up: pin to prev actual
-        (_, 0) => app.render_state.prev_content_lines.get(),
-        (_, current) => current,
+/// returns the baseline (line count, viewport height) to use for this
+/// frame's compensation math. baseline_vis pins the viewport height at
+/// the moment of scroll-up so subsequent vis jitter (status bar wrapping
+/// during streaming, etc) doesn't shift the user's content position
+fn update_scroll_baseline(app: &App, current_vis: u16) -> (usize, u16) {
+    let stored = app.render_state.scroll_baseline.get();
+    let stored_vis = app.render_state.scroll_baseline_vis.get();
+    let (baseline, baseline_vis) = match (app.scroll_offset, stored) {
+        (0, _) => (0, 0),
+        // first frame scrolled up: pin to prev actual + current vis
+        (_, 0) => (app.render_state.prev_content_lines.get(), current_vis),
+        (_, current) => (current, stored_vis),
     };
     app.render_state.scroll_baseline.set(baseline);
-    baseline
+    app.render_state.scroll_baseline_vis.set(baseline_vis);
+    (baseline, baseline_vis)
 }
 
 /// signed compensation in lines to keep scroll_from_top pinned at the
-/// baseline as content grows or shrinks. `total` is the candidate total
-/// line count (estimate during preview, actual for the final scroll).
-/// returns 0 when no baseline is set (i.e. user is at the bottom or
-/// the first render hasn't captured a baseline yet)
-fn scroll_compensation(baseline: usize, total: usize) -> isize {
+/// baseline as content grows or shrinks AND the viewport height jitters.
+/// `total` is the candidate total line count (estimate during preview,
+/// actual for the final scroll). `vis` is the current visible area
+/// height. returns 0 when no baseline is set (i.e. user is at the bottom
+/// or the first render hasn't captured a baseline yet)
+fn scroll_compensation(baseline: usize, baseline_vis: u16, total: usize, vis: u16) -> isize {
     if baseline == 0 {
         0
     } else {
-        total as isize - baseline as isize
+        // (total - baseline) anchors against content growth;
+        // (baseline_vis - vis) anchors against viewport-height jitter
+        (total as isize - baseline as isize) + (baseline_vis as isize - vis as isize)
     }
 }
 
@@ -210,8 +219,9 @@ impl Widget for MessageList<'_> {
         // estimate/actual divergence (code fences, headings, elided `**`
         // markers) into effective_offset and the viewport drifted by that
         // error each frame: the shake.
-        let baseline = update_scroll_baseline(self.app);
-        let preview_compensation = scroll_compensation(baseline, total_estimate);
+        let (baseline, baseline_vis) = update_scroll_baseline(self.app, area.height);
+        let preview_compensation =
+            scroll_compensation(baseline, baseline_vis, total_estimate, area.height);
         let effective_offset =
             clamped_effective_offset(self.app.scroll_offset, preview_compensation);
 
@@ -426,7 +436,7 @@ impl Widget for MessageList<'_> {
         // scroll by construction), but the final scroll must reflect actual
         // line counts so buffer writes land at the right rows
         let total_lines_usize = total_lines as usize;
-        let compensation = scroll_compensation(baseline, total_lines_usize);
+        let compensation = scroll_compensation(baseline, baseline_vis, total_lines_usize, visible);
         let effective_offset_final = clamped_effective_offset(self.app.scroll_offset, compensation);
         let effective_offset_u16 = effective_offset_final.min(u16::MAX as usize) as u16;
         let scroll = max_scroll.saturating_sub(effective_offset_u16);
@@ -3874,6 +3884,46 @@ mod tests {
     }
 
     #[test]
+    fn scroll_stays_stable_when_viewport_height_jitters() {
+        // regression: when the status bar wraps between 1 and 2 lines
+        // (cache countdown text changing width, scroll-position indicator
+        // appearing, etc), the message area's `vis` shrinks/grows by 1.
+        // the existing baseline anchor only compensates for total-line
+        // changes, not viewport-height changes, so the viewport jumps.
+        // simulate this by rendering at alternating heights
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        for i in 0..30 {
+            app.messages.push(DisplayMessage::new(
+                MessageRole::Assistant,
+                format!("message {i} stuff"),
+            ));
+        }
+        render_app(&app, 60, 20);
+        app.scroll_offset = 15;
+        render_app(&app, 60, 20);
+        let anchor = app.render_state.render_scroll.get();
+
+        // simulate status bar growing 1 line (message area shrinks 1)
+        render_app(&app, 60, 19);
+        let after_shrink = app.render_state.render_scroll.get();
+
+        // simulate status bar shrinking back (message area grows back)
+        render_app(&app, 60, 20);
+        let after_regrow = app.render_state.render_scroll.get();
+
+        assert_eq!(
+            anchor, after_shrink,
+            "viewport must not shift when vis shrinks by 1 \
+             (anchor={anchor}, after_shrink={after_shrink})"
+        );
+        assert_eq!(
+            anchor, after_regrow,
+            "viewport must return to baseline after vis grows back \
+             (anchor={anchor}, after_regrow={after_regrow})"
+        );
+    }
+
+    #[test]
     fn scroll_stays_stable_while_streaming_typewriter_reveals_text() {
         // regression: while scrolled up during streaming, the viewport drifts
         // each frame because compensation is computed from *estimated* total
@@ -3928,6 +3978,146 @@ mod tests {
             min, max,
             "render_scroll drifted during streaming (anchor={scroll_anchor}, \
              min={min}, max={max}): {scrolls:?}"
+        );
+    }
+
+    #[test]
+    fn scroll_stays_stable_when_streaming_thinking_then_text() {
+        // regression: when a thinking block streams first and then the
+        // main text starts, the streaming layout adds new lines (the
+        // thinking section block + separator) which can shift the viewport
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        for i in 0..30 {
+            app.messages.push(DisplayMessage::new(
+                MessageRole::Assistant,
+                format!("message {i} with content"),
+            ));
+        }
+        render_app(&app, 60, 20);
+        app.scroll_offset = 15;
+        render_app(&app, 60, 20);
+        let anchor = app.render_state.render_scroll.get();
+
+        let mut scrolls = vec![anchor];
+        app.start_streaming();
+        // expand thinking so it's visible, not collapsed
+        app.thinking_display = crate::app::ThinkingDisplay::Expanded;
+
+        // stream thinking deltas
+        for chunk in ["thinking ", "about ", "things\n", "and more\n"] {
+            app.push_thinking_delta(chunk);
+            for _ in 0..6 {
+                app.tick();
+                render_app(&app, 60, 20);
+                scrolls.push(app.render_state.render_scroll.get());
+            }
+        }
+
+        // now main text starts streaming
+        for chunk in ["here ", "is the answer\n", "with details\n"] {
+            app.push_text_delta(chunk);
+            for _ in 0..6 {
+                app.tick();
+                render_app(&app, 60, 20);
+                scrolls.push(app.render_state.render_scroll.get());
+            }
+        }
+
+        let min = *scrolls.iter().min().unwrap();
+        let max = *scrolls.iter().max().unwrap();
+        assert_eq!(
+            min, max,
+            "viewport drifted during thinking->text transition \
+             (anchor={anchor}, min={min}, max={max}): {scrolls:?}"
+        );
+    }
+
+    #[test]
+    fn scroll_stays_stable_when_streaming_starts_from_empty() {
+        // regression: when streaming begins, the "working" spinner line
+        // appears, then disappears as the first text chunk arrives. the
+        // working line is 1 line, the first chunk may also be 1 line, so
+        // the transition should net zero. but if the line counts differ
+        // by 1 between estimate and actual, the viewport shifts
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        for i in 0..30 {
+            app.messages.push(DisplayMessage::new(
+                MessageRole::Assistant,
+                format!("message {i} body content"),
+            ));
+        }
+        render_app(&app, 60, 20);
+        app.scroll_offset = 15;
+        render_app(&app, 60, 20);
+        let anchor = app.render_state.render_scroll.get();
+
+        let mut scrolls = vec![anchor];
+
+        // streaming starts: render with empty stream (working spinner visible)
+        app.start_streaming();
+        for _ in 0..4 {
+            app.tick();
+            render_app(&app, 60, 20);
+            scrolls.push(app.render_state.render_scroll.get());
+        }
+
+        // first text arrives
+        app.push_text_delta("first ");
+        for _ in 0..4 {
+            app.tick();
+            render_app(&app, 60, 20);
+            scrolls.push(app.render_state.render_scroll.get());
+        }
+
+        let min = *scrolls.iter().min().unwrap();
+        let max = *scrolls.iter().max().unwrap();
+        assert_eq!(
+            min, max,
+            "viewport drifted at streaming start (anchor={anchor}, \
+             min={min}, max={max}): {scrolls:?}"
+        );
+    }
+
+    #[test]
+    fn scroll_stays_stable_across_throbber_ticks_only() {
+        // regression: each tick advances the spinner state. spinner is
+        // a single-cell glyph on an existing line, so total line count
+        // shouldn't change. verify the throbber alone doesn't cause
+        // viewport drift
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        for i in 0..30 {
+            app.messages.push(DisplayMessage::new(
+                MessageRole::Assistant,
+                format!("message {i} stuff"),
+            ));
+        }
+        render_app(&app, 60, 20);
+        app.scroll_offset = 15;
+        render_app(&app, 60, 20);
+        let anchor = app.render_state.render_scroll.get();
+
+        // streaming with stable content. drive ticks but no new deltas
+        app.start_streaming();
+        app.push_text_delta("stable text\nthat doesnt change\n");
+        // let the typewriter fully reveal
+        for _ in 0..200 {
+            app.tick();
+        }
+        render_app(&app, 60, 20);
+
+        let mut scrolls = vec![app.render_state.render_scroll.get()];
+        for _ in 0..30 {
+            app.tick();
+            render_app(&app, 60, 20);
+            scrolls.push(app.render_state.render_scroll.get());
+        }
+
+        let min = *scrolls.iter().min().unwrap();
+        let max = *scrolls.iter().max().unwrap();
+        assert_eq!(
+            min, max,
+            "throbber-only ticks shouldn't move the viewport \
+             (anchor={anchor}, min={min}, max={max})"
         );
     }
 
