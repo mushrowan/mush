@@ -307,6 +307,24 @@ pub async fn login(provider_id: Option<String>) -> Result<()> {
 
     eprintln!("logging in to {}...\n", provider.name());
 
+    let creds = if provider_id == "openai-codex" {
+        login_codex_with_local_server().await?
+    } else {
+        login_via_paste(provider.as_ref()).await?
+    };
+
+    let mut store =
+        oauth::load_credentials().map_err(|e| eyre!("failed to load credentials: {e}"))?;
+    store.providers.insert(provider_id, creds);
+    oauth::save_credentials(&store).map_err(|e| eyre!("failed to save credentials: {e}"))?;
+
+    eprintln!("\n\x1b[32m✓ logged in to {}\x1b[0m", provider.name());
+    Ok(())
+}
+
+async fn login_via_paste(
+    provider: &dyn mush_ai::oauth::OAuthProvider,
+) -> Result<mush_ai::oauth::OAuthCredentials> {
     let (prompt, pkce) = provider
         .begin_login()
         .map_err(|e| eyre!("failed to start oauth login: {e}"))?;
@@ -321,18 +339,27 @@ pub async fn login(provider_id: Option<String>) -> Result<()> {
         return Err(eyre!("no code provided"));
     }
 
-    let creds = provider
+    provider
         .exchange_code(input, &pkce)
         .await
-        .map_err(|e| eyre!("login failed: {e}"))?;
+        .map_err(|e| eyre!("login failed: {e}"))
+}
 
-    let mut store =
-        oauth::load_credentials().map_err(|e| eyre!("failed to load credentials: {e}"))?;
-    store.providers.insert(provider_id, creds);
-    oauth::save_credentials(&store).map_err(|e| eyre!("failed to save credentials: {e}"))?;
+async fn login_codex_with_local_server() -> Result<mush_ai::oauth::OAuthCredentials> {
+    use mush_ai::oauth::openai_codex::CodexLoginSession;
 
-    eprintln!("\n\x1b[32m✓ logged in to {}\x1b[0m", provider.name());
-    Ok(())
+    let session = CodexLoginSession::start()
+        .await
+        .map_err(|e| eyre!("failed to start codex login server: {e}"))?;
+
+    eprintln!("open this URL in your browser:\n");
+    eprintln!("  {}\n", session.auth_url);
+    eprintln!("waiting for the browser callback...");
+
+    session
+        .await_credentials()
+        .await
+        .map_err(|e| eyre!("login failed: {e}"))
 }
 
 pub fn logout(provider_id: Option<String>) -> Result<()> {

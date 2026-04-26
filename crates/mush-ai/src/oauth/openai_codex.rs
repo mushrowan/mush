@@ -7,6 +7,7 @@ use serde::Deserialize;
 use super::{
     AuthPrompt, OAuthCredentials, OAuthError, OAuthProvider, PkceChallenge, generate_pkce,
 };
+use crate::oauth::openai_codex_server::CodexCallbackServer;
 
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
@@ -61,18 +62,21 @@ impl OAuthProvider for OpenaiCodexOAuth {
 }
 
 fn build_auth_url(pkce: &PkceChallenge) -> String {
+    build_auth_url_with_redirect(pkce, REDIRECT_URI, pkce.verifier.as_str())
+}
+
+fn build_auth_url_with_redirect(pkce: &PkceChallenge, redirect_uri: &str, state: &str) -> String {
     let params = [
         ("response_type", "code"),
         ("client_id", CLIENT_ID),
-        ("redirect_uri", REDIRECT_URI),
+        ("redirect_uri", redirect_uri),
         ("scope", SCOPE),
         ("code_challenge", pkce.challenge.as_str()),
         ("code_challenge_method", "S256"),
         ("id_token_add_organizations", "true"),
         ("codex_cli_simplified_flow", "true"),
         ("originator", "mush"),
-        // keep state equal to verifier so we can validate paste input
-        ("state", pkce.verifier.as_str()),
+        ("state", state),
     ];
 
     let query: String = params
@@ -98,12 +102,20 @@ async fn exchange_code_impl(input: &str, verifier: &str) -> Result<OAuthCredenti
         ));
     }
 
+    exchange_code_with_redirect(&code, verifier, REDIRECT_URI).await
+}
+
+async fn exchange_code_with_redirect(
+    code: &str,
+    verifier: &str,
+    redirect_uri: &str,
+) -> Result<OAuthCredentials, OAuthError> {
     let body = [
         ("grant_type", "authorization_code"),
         ("client_id", CLIENT_ID),
-        ("code", code.as_str()),
+        ("code", code),
         ("code_verifier", verifier),
-        ("redirect_uri", REDIRECT_URI),
+        ("redirect_uri", redirect_uri),
     ]
     .iter()
     .map(|(k, v)| format!("{k}={}", urlencoding::encode(v)))
@@ -275,6 +287,57 @@ fn timestamp_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+/// in-progress codex login: holds the local callback server and the
+/// auth url to show the user. call [`Self::await_credentials`] to wait
+/// for the browser callback and complete the token exchange.
+pub struct CodexLoginSession {
+    pub auth_url: String,
+    server: CodexCallbackServer,
+}
+
+impl CodexLoginSession {
+    /// bind the local callback server and prepare the auth url
+    pub async fn start() -> Result<Self, OAuthError> {
+        let pkce = generate_pkce()?;
+        let state = pkce.verifier.clone();
+        let server = CodexCallbackServer::bind(pkce, state).await?;
+        let redirect_uri = server.redirect_uri();
+        let auth_url = build_auth_url_with_redirect(server.pkce(), &redirect_uri, server.state());
+        Ok(Self { auth_url, server })
+    }
+
+    /// wait for the browser callback, exchange the code for tokens
+    pub async fn await_credentials(self) -> Result<OAuthCredentials, OAuthError> {
+        let redirect_uri = self.server.redirect_uri();
+        let verifier = self.server.pkce().verifier.clone();
+        let (params, writer) = self.server.await_callback().await?;
+
+        if let Some(error) = params.error {
+            let detail = params
+                .error_description
+                .map(|d| format!("{error}: {d}"))
+                .unwrap_or(error);
+            let _ = writer.write_error(&detail).await;
+            return Err(OAuthError::TokenExchange(detail));
+        }
+
+        let code = params
+            .code
+            .ok_or_else(|| OAuthError::TokenExchange("oauth callback missing code".into()))?;
+
+        match exchange_code_with_redirect(&code, &verifier, &redirect_uri).await {
+            Ok(creds) => {
+                let _ = writer.write_success().await;
+                Ok(creds)
+            }
+            Err(err) => {
+                let _ = writer.write_error(&err.to_string()).await;
+                Err(err)
+            }
+        }
+    }
 }
 
 #[cfg(test)]

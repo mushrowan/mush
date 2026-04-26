@@ -6,6 +6,7 @@
 
 pub mod anthropic;
 pub mod openai_codex;
+pub mod openai_codex_server;
 mod pkce;
 mod store;
 pub mod usage;
