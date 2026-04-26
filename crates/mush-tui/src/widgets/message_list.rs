@@ -3884,6 +3884,95 @@ mod tests {
     }
 
     #[test]
+    fn scrolling_continues_to_work_after_terminal_resize_grows_viewport() {
+        // regression: when the user is scrolled up and the terminal is
+        // resized so the message-list area grows by more than the
+        // current scroll_offset, the existing baseline_vis pin makes
+        // compensation negative. effective_offset clamps to 0 and the
+        // first N presses of k (or j) appear to do nothing because
+        // scroll_from_top stays at max_scroll. only after enough k
+        // presses to overcome the negative compensation does the view
+        // start moving. that's the "scrolling stopped working until you
+        // resize back" symptom rowan reported. the fix is to reset the
+        // scroll baseline on a real resize so the math doesn't carry
+        // stale baseline_vis into the new dimensions
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        for i in 0..30 {
+            app.messages.push(DisplayMessage::new(
+                MessageRole::Assistant,
+                format!("message {i} body content"),
+            ));
+        }
+        // initial render at one size, scroll up a little
+        render_app(&app, 60, 20);
+        app.scroll_offset = 3;
+        render_app(&app, 60, 20);
+        let scroll_before = app.render_state.render_scroll.get();
+        assert!(scroll_before > 0, "precondition: scrolled up");
+
+        // simulate a real resize that grows the viewport by more than
+        // the current scroll_offset
+        app.notify_resize();
+        render_app(&app, 60, 28);
+        let scroll_after_resize = app.render_state.render_scroll.get();
+
+        // press k once: scroll should move by scroll_lines, not be
+        // swallowed by stale baseline_vis compensation
+        app.scroll_offset = app.scroll_offset.saturating_add(app.scroll_lines);
+        render_app(&app, 60, 28);
+        let scroll_after_k = app.render_state.render_scroll.get();
+
+        assert_ne!(
+            scroll_after_resize, scroll_after_k,
+            "single k press after resize must change scroll position \
+             (post-resize scroll={scroll_after_resize}, after k={scroll_after_k}). \
+             when this fails the user has to press k repeatedly with no \
+             visible feedback before scrolling resumes"
+        );
+        assert!(
+            scroll_after_k < scroll_after_resize,
+            "k should scroll up (decrease scroll_from_top): \
+             {scroll_after_resize} -> {scroll_after_k}"
+        );
+    }
+
+    #[test]
+    fn scrolling_without_resize_notification_is_swallowed_by_stale_baseline() {
+        // counterpart to the test above: this confirms the bug exists
+        // without `notify_resize`. when the runner forgets to call
+        // `app.notify_resize()` on a terminal resize, the cached
+        // `baseline_vis` carries forward and absorbs the user's
+        // keypresses. if this test ever stops failing the bug got fixed
+        // some other way and the test (or the fix) needs to evolve
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        for i in 0..30 {
+            app.messages.push(DisplayMessage::new(
+                MessageRole::Assistant,
+                format!("message {i} body content"),
+            ));
+        }
+        render_app(&app, 60, 20);
+        app.scroll_offset = 3;
+        render_app(&app, 60, 20);
+
+        // resize WITHOUT notifying app: simulates the un-fixed runner
+        render_app(&app, 60, 28);
+        let scroll_after_resize = app.render_state.render_scroll.get();
+
+        // press k once (scroll_lines is typically 3, less than the +8
+        // vis change so compensation is more negative than the press)
+        app.scroll_offset = app.scroll_offset.saturating_add(app.scroll_lines);
+        render_app(&app, 60, 28);
+        let scroll_after_k = app.render_state.render_scroll.get();
+
+        assert_eq!(
+            scroll_after_resize, scroll_after_k,
+            "without notify_resize, the first k press is swallowed: \
+             {scroll_after_resize} -> {scroll_after_k}"
+        );
+    }
+
+    #[test]
     fn scroll_stays_stable_when_viewport_height_jitters() {
         // regression: when the status bar wraps between 1 and 2 lines
         // (cache countdown text changing width, scroll-position indicator
