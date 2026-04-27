@@ -29,7 +29,14 @@ pub(crate) const MESSAGE_INDENT_RIGHT: usize = 1;
 /// returns the baseline (line count, viewport height) to use for this
 /// frame's compensation math. baseline_vis pins the viewport height at
 /// the moment of scroll-up so subsequent vis jitter (status bar wrapping
-/// during streaming, etc) doesn't shift the user's content position
+/// during streaming, etc) doesn't shift the user's content position.
+///
+/// re-pin when current_vis grows past the stored_vis: a grown viewport
+/// would otherwise produce negative compensation that absorbs k/j
+/// keypresses (effective_offset clamps to 0). this fires when a tool
+/// panel disappears, the status bar unwraps, or the terminal grows
+/// without going through notify_resize. shrinking vis still pins to
+/// the original baseline_vis so 1-line status-bar jitter is invisible
 fn update_scroll_baseline(app: &App, current_vis: u16) -> (usize, u16) {
     let stored = app.render_state.scroll_baseline.get();
     let stored_vis = app.render_state.scroll_baseline_vis.get();
@@ -37,6 +44,11 @@ fn update_scroll_baseline(app: &App, current_vis: u16) -> (usize, u16) {
         (0, _) => (0, 0),
         // first frame scrolled up: pin to prev actual + current vis
         (_, 0) => (app.render_state.prev_content_lines.get(), current_vis),
+        // viewport grew past what was captured: re-pin so compensation
+        // doesn't go negative and absorb scroll keypresses
+        (_, _) if current_vis > stored_vis => {
+            (app.render_state.prev_content_lines.get(), current_vis)
+        }
         (_, current) => (current, stored_vis),
     };
     app.render_state.scroll_baseline.set(baseline);
@@ -3938,12 +3950,17 @@ mod tests {
 
     #[test]
     fn scrolling_without_resize_notification_is_swallowed_by_stale_baseline() {
-        // counterpart to the test above: this confirms the bug exists
-        // without `notify_resize`. when the runner forgets to call
-        // `app.notify_resize()` on a terminal resize, the cached
-        // `baseline_vis` carries forward and absorbs the user's
-        // keypresses. if this test ever stops failing the bug got fixed
-        // some other way and the test (or the fix) needs to evolve
+        // when the message-list area grows (e.g. because a tool panel
+        // disappeared, or the status bar unwrapped) without going through
+        // notify_resize, the cached baseline_vis is now smaller than the
+        // current vis. compensation goes negative and absorbs the user's
+        // first N k/j keypresses. previously the only callsite for
+        // notify_resize was the terminal Event::Resize handler; the same
+        // family of stale-baseline bugs also fires on tool-panel resize.
+        // the fix re-pins the baseline at render time when current_vis
+        // grows past stored_vis, since a grown viewport means the pin's
+        // implicit "viewport shrank from baseline" assumption is no
+        // longer true
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         for i in 0..30 {
             app.messages.push(DisplayMessage::new(
@@ -3955,20 +3972,80 @@ mod tests {
         app.scroll_offset = 3;
         render_app(&app, 60, 20);
 
-        // resize WITHOUT notifying app: simulates the un-fixed runner
+        // simulate the message-list area growing by 8 lines (tool panel
+        // disappeared, or similar) without notify_resize. with the fix,
+        // baseline gets re-pinned and the next keypress moves the view
         render_app(&app, 60, 28);
-        let scroll_after_resize = app.render_state.render_scroll.get();
+        let scroll_after_grow = app.render_state.render_scroll.get();
 
-        // press k once (scroll_lines is typically 3, less than the +8
-        // vis change so compensation is more negative than the press)
         app.scroll_offset = app.scroll_offset.saturating_add(app.scroll_lines);
         render_app(&app, 60, 28);
         let scroll_after_k = app.render_state.render_scroll.get();
 
-        assert_eq!(
-            scroll_after_resize, scroll_after_k,
-            "without notify_resize, the first k press is swallowed: \
-             {scroll_after_resize} -> {scroll_after_k}"
+        assert_ne!(
+            scroll_after_grow, scroll_after_k,
+            "first k press after vis grows must move the viewport \
+             (post-grow={scroll_after_grow}, after_k={scroll_after_k}). \
+             when this fails the user has to press k repeatedly with no \
+             visible feedback before scrolling resumes - the same family \
+             of bug as the resize fix but triggered by tool-panel changes"
+        );
+        assert!(
+            scroll_after_k < scroll_after_grow,
+            "k should scroll up (decrease scroll_from_top): \
+             {scroll_after_grow} -> {scroll_after_k}"
+        );
+    }
+
+    #[test]
+    fn j_key_responds_immediately_after_vis_grows() {
+        // bug report: "k works to go up, but sometimes j doesn't work
+        // to go down" in scroll mode. when vis grew without notify_resize
+        // (tool panel disappeared, etc), compensation went negative and
+        // the user was effectively stuck at scroll_offset 0 even though
+        // the displayed view appeared scrolled up. j (saturating_sub)
+        // was a no-op because effective_offset stayed clamped at 0,
+        // while k (saturating_add) appeared "weak" but eventually
+        // overcame the clamp.
+        //
+        // pick scroll_offset small enough that scroll_offset +
+        // compensation < 0, so without the fix j would be a no-op
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        for i in 0..30 {
+            app.messages.push(DisplayMessage::new(
+                MessageRole::Assistant,
+                format!("message {i} body content"),
+            ));
+        }
+        render_app(&app, 60, 20);
+        app.scroll_offset = 5;
+        render_app(&app, 60, 20);
+        let scroll_before_grow = app.render_state.render_scroll.get();
+
+        // vis grows by 8 (tool panel disappeared, etc). without the fix
+        // compensation = (20 - 28) = -8 and effective_offset clamps to
+        // max(0, 5 - 8) = 0, so the view jumps to the bottom and the
+        // next j becomes a no-op
+        render_app(&app, 60, 28);
+        let scroll_before_j = app.render_state.render_scroll.get();
+
+        // press j: scroll_offset goes 5 → 2
+        app.scroll_offset = app.scroll_offset.saturating_sub(app.scroll_lines);
+        render_app(&app, 60, 28);
+        let scroll_after_j = app.render_state.render_scroll.get();
+
+        assert_ne!(
+            scroll_before_j, scroll_after_j,
+            "j press after vis grows must move the viewport \
+             (before_j={scroll_before_j}, after_j={scroll_after_j}). \
+             when this assertion fails, j is silently no-op'ing because \
+             effective_offset clamped to 0. baseline still respected \
+             before_grow={scroll_before_grow}"
+        );
+        assert!(
+            scroll_after_j > scroll_before_j,
+            "j should scroll down (increase scroll_from_top): \
+             {scroll_before_j} -> {scroll_after_j}"
         );
     }
 
