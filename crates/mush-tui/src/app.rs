@@ -253,6 +253,37 @@ impl App {
                 .any(|t| t.status == ToolCallStatus::Running)
     }
 
+    /// short label describing what the agent is currently doing, suitable
+    /// for the status bar. returns `None` when idle. tool execution wins
+    /// over streaming because tool calls are concrete activity even when
+    /// the assistant message is still flagged active during the gap
+    /// between message_end and the next turn_start
+    pub fn activity_label(&self) -> Option<String> {
+        let running: Vec<&str> = self
+            .active_tools
+            .iter()
+            .filter(|t| t.status == ToolCallStatus::Running)
+            .map(|t| t.name.as_str())
+            .collect();
+        if !running.is_empty() {
+            let first = running[0];
+            let all_same = running.iter().all(|n| *n == first);
+            return Some(if all_same {
+                format!("using {first}…")
+            } else {
+                format!("using {} tools…", running.len())
+            });
+        }
+        if self.stream.active {
+            return Some(if self.stream.text.is_empty() {
+                "thinking…".into()
+            } else {
+                "outputting…".into()
+            });
+        }
+        None
+    }
+
     /// add a user message to the display
     pub fn push_user_message(&mut self, text: impl Into<String>) {
         self.messages
@@ -2086,6 +2117,109 @@ batch: 1/2 succeeded, 1 failed";
             format!("{initial:?}"),
             "throbber should advance during tool execution"
         );
+    }
+
+    #[test]
+    fn activity_label_none_when_idle() {
+        let app = App::new("test".into(), TokenCount::new(200_000));
+        assert_eq!(app.activity_label(), None);
+    }
+
+    #[test]
+    fn activity_label_thinking_when_streaming_with_no_text() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.start_streaming();
+        assert_eq!(app.activity_label().as_deref(), Some("thinking…"));
+    }
+
+    #[test]
+    fn activity_label_outputting_when_streaming_text() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.start_streaming();
+        app.push_text_delta("hello");
+        assert_eq!(app.activity_label().as_deref(), Some("outputting…"));
+    }
+
+    #[test]
+    fn activity_label_uses_tool_name_when_one_running() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.active_tools
+            .push(crate::display_types::ActiveToolState {
+                tool_call_id: "t1".into(),
+                name: "bash".into(),
+                summary: String::new(),
+                live_output: None,
+                status: ToolCallStatus::Running,
+                output: None,
+            });
+        assert_eq!(app.activity_label().as_deref(), Some("using bash…"));
+    }
+
+    #[test]
+    fn activity_label_collapses_distinct_parallel_tools_to_count() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        for (i, name) in ["bash", "read", "edit"].iter().enumerate() {
+            app.active_tools
+                .push(crate::display_types::ActiveToolState {
+                    tool_call_id: format!("t{i}").into(),
+                    name: (*name).into(),
+                    summary: String::new(),
+                    live_output: None,
+                    status: ToolCallStatus::Running,
+                    output: None,
+                });
+        }
+        assert_eq!(app.activity_label().as_deref(), Some("using 3 tools…"));
+    }
+
+    #[test]
+    fn activity_label_keeps_tool_name_when_all_same_tool() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        for i in 0..3 {
+            app.active_tools
+                .push(crate::display_types::ActiveToolState {
+                    tool_call_id: format!("t{i}").into(),
+                    name: "read".into(),
+                    summary: String::new(),
+                    live_output: None,
+                    status: ToolCallStatus::Running,
+                    output: None,
+                });
+        }
+        assert_eq!(app.activity_label().as_deref(), Some("using read…"));
+    }
+
+    #[test]
+    fn activity_label_ignores_completed_tools() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.active_tools
+            .push(crate::display_types::ActiveToolState {
+                tool_call_id: "t1".into(),
+                name: "bash".into(),
+                summary: String::new(),
+                live_output: None,
+                status: ToolCallStatus::Done,
+                output: None,
+            });
+        assert_eq!(app.activity_label(), None);
+    }
+
+    #[test]
+    fn activity_label_prefers_tool_over_streaming() {
+        // when both apply, "using tool" wins since it's the more concrete
+        // signal and stream.active can persist across tool execution gaps
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.start_streaming();
+        app.active_tools
+            .push(crate::display_types::ActiveToolState {
+                tool_call_id: "t1".into(),
+                name: "edit".into(),
+                summary: String::new(),
+                live_output: None,
+                status: ToolCallStatus::Running,
+                output: None,
+            });
+        assert_eq!(app.activity_label().as_deref(), Some("using edit…"));
     }
 
     #[test]
