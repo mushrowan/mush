@@ -223,12 +223,19 @@ fn left_spans(app: &App, width: u16) -> Vec<Span<'static>> {
         }
     }
 
-    if app.interaction.status_bar.show_status_messages
-        && let Some(ref status) = app.status
-        && status != "config reloaded"
-    {
-        spans.push(sep.clone());
-        spans.push(Span::styled(status.clone(), dim));
+    if app.interaction.status_bar.show_status_messages {
+        // activity label takes priority over ephemeral hints during a
+        // turn so the status reflects what the agent is actually doing.
+        // when idle, the ephemeral status (if any) shows in its place
+        if let Some(label) = app.activity_label() {
+            spans.push(sep.clone());
+            spans.push(Span::styled(label, dim));
+        } else if let Some(ref status) = app.status
+            && status != "config reloaded"
+        {
+            spans.push(sep.clone());
+            spans.push(Span::styled(status.clone(), dim));
+        }
     }
 
     // scroll mode indicator
@@ -467,6 +474,53 @@ mod tests {
         let buf = render_status(&app, 120, 1);
         let content = buffer_to_string(&buf);
         assert!(!content.contains("config reloaded"));
+    }
+
+    #[test]
+    fn status_bar_shows_activity_verb_when_streaming() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.start_streaming();
+        app.push_text_delta("hi");
+        let buf = render_status(&app, 120, 1);
+        let content = buffer_to_string(&buf);
+        assert!(
+            content.contains("outputting…"),
+            "expected 'outputting…' in status: {content}"
+        );
+    }
+
+    #[test]
+    fn status_bar_shows_using_tool_when_running() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.active_tools
+            .push(crate::display_types::ActiveToolState {
+                tool_call_id: "t1".into(),
+                name: "bash".into(),
+                summary: String::new(),
+                live_output: None,
+                status: crate::display_types::ToolCallStatus::Running,
+                output: None,
+            });
+        let buf = render_status(&app, 120, 1);
+        let content = buffer_to_string(&buf);
+        assert!(
+            content.contains("using bash…"),
+            "expected 'using bash…' in status: {content}"
+        );
+    }
+
+    #[test]
+    fn status_bar_activity_verb_overrides_status_message() {
+        // when both an ephemeral status hint and an activity are present,
+        // the activity wins because it's the more relevant signal during
+        // a turn
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.status = Some("press ctrl+c again to exit".into());
+        app.start_streaming();
+        let buf = render_status(&app, 120, 1);
+        let content = buffer_to_string(&buf);
+        assert!(content.contains("thinking…"));
+        assert!(!content.contains("press ctrl+c again to exit"));
     }
 
     #[test]
