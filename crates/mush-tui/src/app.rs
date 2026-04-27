@@ -150,6 +150,9 @@ pub struct App {
     pub scroll_lines: u16,
     /// keybind map: action → key combination(s)
     pub keymap: crate::keybinds::KeyMap,
+    /// armed state for ctrl+c quit confirmation. set on first ctrl+c
+    /// when the prompt is empty and idle, cleared by any other key
+    pub confirm_quit_pending: bool,
 }
 
 /// state captured when /login starts an oauth flow, consumed when the user
@@ -201,6 +204,7 @@ impl App {
             theme: crate::theme::Theme::default(),
             scroll_lines: DEFAULT_SCROLL_LINES,
             keymap: crate::keybinds::KeyMap::default(),
+            confirm_quit_pending: false,
         }
     }
 
