@@ -69,12 +69,39 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     }
 
     // 2. global bindings
-    match (key.modifiers, key.code) {
-        (KeyModifiers::CONTROL, KeyCode::Char('c')) => return Some(AppEvent::Quit),
-        // ctrl+v works in both idle and streaming so the user can stage
-        // images for mid-turn steering without aborting the stream
-        (KeyModifiers::CONTROL, KeyCode::Char('v')) => return Some(AppEvent::PasteImage),
-        _ => {}
+    //
+    // ctrl+c semantics:
+    //   non-empty input → clear input + images
+    //   empty input + busy → abort the turn (no confirm)
+    //   empty input + idle, not armed → arm + status hint
+    //   empty input + idle, armed → quit
+    // any other key resets the armed flag so a stray earlier ctrl+c
+    // can't quit later
+    let is_ctrl_c = key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('c');
+    if is_ctrl_c {
+        if !app.input.text.is_empty() || !app.input.images.is_empty() {
+            app.input.take_text();
+            app.input.take_images();
+            app.confirm_quit_pending = false;
+            return None;
+        }
+        if app.is_busy() {
+            app.confirm_quit_pending = false;
+            return Some(AppEvent::Abort);
+        }
+        if app.confirm_quit_pending {
+            return Some(AppEvent::Quit);
+        }
+        app.confirm_quit_pending = true;
+        app.status = Some("press ctrl+c again to exit".into());
+        return None;
+    }
+    app.confirm_quit_pending = false;
+
+    // ctrl+v works in both idle and streaming so the user can stage
+    // images for mid-turn steering without aborting the stream
+    if let (KeyModifiers::CONTROL, KeyCode::Char('v')) = (key.modifiers, key.code) {
+        return Some(AppEvent::PasteImage);
     }
     // scroll / cancel cascade: esc (or ctrl+[) first jumps to bottom if
     // scrolled up, only aborts once already anchored there. this applies
@@ -1263,10 +1290,73 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_quits() {
+    fn ctrl_c_with_empty_input_arms_quit_confirm() {
+        // first ctrl+c on an empty idle prompt arms a confirmation rather
+        // than quitting outright. status bar gets the hint
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         let event = handle_key(&mut app, ctrl(KeyCode::Char('c')));
+        assert!(event.is_none());
+        assert!(app.confirm_quit_pending);
+        assert_eq!(app.status.as_deref(), Some("press ctrl+c again to exit"));
+    }
+
+    #[test]
+    fn ctrl_c_twice_quits() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        let _ = handle_key(&mut app, ctrl(KeyCode::Char('c')));
+        let event = handle_key(&mut app, ctrl(KeyCode::Char('c')));
         assert!(matches!(event, Some(AppEvent::Quit)));
+    }
+
+    #[test]
+    fn ctrl_c_with_text_clears_input_without_quitting() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.input.text = "draft prompt".into();
+        app.input.cursor = app.input.text.len();
+        let event = handle_key(&mut app, ctrl(KeyCode::Char('c')));
+        assert!(event.is_none());
+        assert!(app.input.text.is_empty());
+        assert_eq!(app.input.cursor, 0);
+        assert!(!app.confirm_quit_pending);
+    }
+
+    #[test]
+    fn ctrl_c_clear_then_ctrl_c_arms_quit() {
+        // after clearing input, the prompt is empty so the next ctrl+c
+        // should arm the confirm (not quit immediately)
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.input.text = "stuff".into();
+        app.input.cursor = 5;
+        let _ = handle_key(&mut app, ctrl(KeyCode::Char('c')));
+        let event = handle_key(&mut app, ctrl(KeyCode::Char('c')));
+        assert!(event.is_none());
+        assert!(app.confirm_quit_pending);
+    }
+
+    #[test]
+    fn any_other_key_resets_quit_confirm() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        let _ = handle_key(&mut app, ctrl(KeyCode::Char('c')));
+        assert!(app.confirm_quit_pending);
+        // typing 'a' should reset the armed flag so the next ctrl+c
+        // re-arms instead of quitting
+        let _ = handle_key(&mut app, key(KeyCode::Char('a')));
+        assert!(!app.confirm_quit_pending);
+        let event = handle_key(&mut app, ctrl(KeyCode::Char('c')));
+        // input is "a" now, so ctrl+c clears it
+        assert!(event.is_none());
+        assert!(app.input.text.is_empty());
+    }
+
+    #[test]
+    fn ctrl_c_when_busy_aborts_without_confirm() {
+        // ctrl+c during a stream should abort the turn (UNIX SIGINT-ish),
+        // not quit the program
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.stream.active = true;
+        let event = handle_key(&mut app, ctrl(KeyCode::Char('c')));
+        assert!(matches!(event, Some(AppEvent::Abort)));
+        assert!(!app.confirm_quit_pending);
     }
 
     #[test]
