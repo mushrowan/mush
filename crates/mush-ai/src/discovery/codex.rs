@@ -283,12 +283,15 @@ pub struct ReasoningLevelPreset {
     pub description: String,
 }
 
-/// extract the typed extras view from a discovered entry. returns `None`
-/// when the entry was cached before raw-preservation landed (or the raw
-/// blob is otherwise missing) so callers can fall back gracefully.
+/// extract the typed extras view from a raw upstream entry. returns
+/// `None` when no raw blob is supplied (the entry was cached before
+/// raw-preservation landed) or when the JSON doesn't deserialise.
+///
+/// callers typically pass `entry.raw.as_ref()` for cache entries or
+/// `merged.raw.as_ref()` for entries from the merge step.
 #[must_use]
-pub fn extras(entry: &super::cache::DiscoveredEntry) -> Option<CodexModelExtras> {
-    let raw = entry.raw.as_ref()?;
+pub fn extras(raw: Option<&serde_json::Value>) -> Option<CodexModelExtras> {
+    let raw = raw?;
     let parsed: CodexExtrasWire = serde_json::from_value(raw.clone()).ok()?;
     Some(CodexModelExtras {
         description: parsed.description.filter(|s| !s.is_empty()),
@@ -457,18 +460,6 @@ mod tests {
         );
     }
 
-    fn entry_from(raw: serde_json::Value) -> crate::discovery::cache::DiscoveredEntry {
-        crate::discovery::cache::DiscoveredEntry {
-            last_seen_at: SystemTime::UNIX_EPOCH,
-            model: parse_codex_models(&serde_json::json!({"models": [raw.clone()]}).to_string())
-                .unwrap()
-                .pop()
-                .unwrap()
-                .model,
-            raw: Some(raw),
-        }
-    }
-
     #[test]
     fn extras_extracts_codex_specific_fields_from_raw() {
         let raw = serde_json::json!({
@@ -486,9 +477,8 @@ mod tests {
             "visibility": "default",
             "additional_speed_tiers": ["fast"]
         });
-        let entry = entry_from(raw);
 
-        let extras = extras(&entry).expect("entry has raw payload");
+        let extras = extras(Some(&raw)).expect("raw payload parses");
         assert_eq!(extras.description.as_deref(), Some("Top-tier reasoning"));
         assert_eq!(extras.default_reasoning_level.as_deref(), Some("medium"));
         assert_eq!(extras.supported_reasoning_levels.len(), 3);
@@ -501,19 +491,14 @@ mod tests {
 
     #[test]
     fn extras_returns_none_when_raw_missing() {
-        let entry = crate::discovery::cache::DiscoveredEntry {
-            last_seen_at: SystemTime::UNIX_EPOCH,
-            model: parse_codex_models(FIXTURE).unwrap().pop().unwrap().model,
-            raw: None,
-        };
-        assert!(extras(&entry).is_none());
+        assert!(extras(None).is_none());
     }
 
     #[test]
     fn extras_tolerates_missing_fields() {
         // bare-minimum entry with only `slug` — every optional field stays None / default
-        let entry = entry_from(serde_json::json!({ "slug": "tiny" }));
-        let extras = extras(&entry).unwrap();
+        let raw = serde_json::json!({ "slug": "tiny" });
+        let extras = extras(Some(&raw)).unwrap();
         assert!(extras.description.is_none());
         assert!(extras.default_reasoning_level.is_none());
         assert!(extras.supported_reasoning_levels.is_empty());

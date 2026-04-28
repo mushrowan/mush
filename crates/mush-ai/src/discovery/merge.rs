@@ -41,6 +41,10 @@ pub enum ModelSource {
 pub struct MergedModel {
     pub model: Model,
     pub source: ModelSource,
+    /// raw upstream JSON for discovered entries; `None` for static-only
+    /// models. consumers reach for this through per-provider typed
+    /// accessors (e.g. [`crate::discovery::codex::extras`])
+    pub raw: Option<serde_json::Value>,
 }
 
 /// merge a static catalogue with a discovery cache.
@@ -59,6 +63,7 @@ pub fn merge(static_models: Vec<Model>, cache: &DiscoveryCache) -> Vec<MergedMod
             MergedModel {
                 model,
                 source: ModelSource::Static,
+                raw: None,
             },
         );
     }
@@ -85,6 +90,7 @@ pub fn merge(static_models: Vec<Model>, cache: &DiscoveryCache) -> Vec<MergedMod
                 } else {
                     ModelSource::Discovered
                 },
+                raw: entry.raw.clone(),
             },
         );
     }

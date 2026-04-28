@@ -20,6 +20,12 @@ pub struct ModelCompletion {
     /// fetch for its provider — likely deprecated. picker renders a
     /// `[stale]` marker so the user can spot dropped entries.
     pub stale: bool,
+    /// optional human-readable blurb (codex returns these per model).
+    /// rendered after the display name to help users tell similar slugs apart.
+    pub description: Option<String>,
+    /// codex-style speed tier hints (`fast`, …). rendered as `[tier]` badges
+    /// so the user can spot snappy models at a glance.
+    pub speed_tiers: Vec<String>,
 }
 
 /// pending delete confirmation in the model picker. armed by ctrl+d (one
@@ -161,6 +167,8 @@ mod confirm_delete_tests {
             name: id.into(),
             provider: provider.into(),
             stale: false,
+            description: None,
+            speed_tiers: Vec::new(),
         }
     }
 
@@ -170,6 +178,8 @@ mod confirm_delete_tests {
             name: id.into(),
             provider: provider.into(),
             stale: true,
+            description: None,
+            speed_tiers: Vec::new(),
         }
     }
 
@@ -277,4 +287,34 @@ pub(crate) fn filter_model_matches(
         .into_iter()
         .map(|i| model_completions[i].clone())
         .collect()
+}
+
+/// build a [`ModelCompletion`] from a merged catalogue entry, pulling
+/// codex-only fields (description, speed tiers) through the codex extras
+/// accessor. callers feed `mush_ai::discovery::merged_catalogue()` rows
+/// straight in.
+#[must_use]
+pub fn model_completion_from_merged(entry: &mush_ai::discovery::MergedModel) -> ModelCompletion {
+    let stale = matches!(
+        entry.source,
+        mush_ai::discovery::ModelSource::DiscoveredStale
+    );
+    let extras = if matches!(&entry.model.provider, mush_ai::types::Provider::Custom(name) if name == "openai-codex")
+    {
+        mush_ai::discovery::codex::extras(entry.raw.as_ref())
+    } else {
+        None
+    };
+    let (description, speed_tiers) = match extras {
+        Some(extras) => (extras.description, extras.additional_speed_tiers),
+        None => (None, Vec::new()),
+    };
+    ModelCompletion {
+        id: entry.model.id.to_string(),
+        name: entry.model.name.clone(),
+        provider: entry.model.provider.to_string(),
+        stale,
+        description,
+        speed_tiers,
+    }
 }

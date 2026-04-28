@@ -1181,19 +1181,11 @@ fn apply_delete_confirm(confirm: &crate::slash_menu::DeleteConfirm) -> usize {
 /// reapply the current filter. clamps the selected index so it stays
 /// valid when the deleted row vanishes.
 fn refresh_model_picker_after_delete(app: &mut App) {
-    use crate::slash_menu::{ModelCompletion, filter_model_matches};
+    use crate::slash_menu::{filter_model_matches, model_completion_from_merged};
 
-    let new_completions: Vec<ModelCompletion> = mush_ai::discovery::merged_catalogue()
-        .into_iter()
-        .map(|entry| ModelCompletion {
-            id: entry.model.id.to_string(),
-            name: entry.model.name.clone(),
-            provider: entry.model.provider.to_string(),
-            stale: matches!(
-                entry.source,
-                mush_ai::discovery::ModelSource::DiscoveredStale
-            ),
-        })
+    let new_completions: Vec<_> = mush_ai::discovery::merged_catalogue()
+        .iter()
+        .map(model_completion_from_merged)
         .collect();
     app.completion.completions = new_completions.iter().map(|m| m.id.clone()).collect();
     app.completion.model_completions = new_completions;
@@ -2456,12 +2448,16 @@ mod tests {
                 name: "Claude Opus".into(),
                 provider: "anthropic".into(),
                 stale: false,
+                description: None,
+                speed_tiers: Vec::new(),
             },
             crate::app::ModelCompletion {
                 id: "gpt-5".into(),
                 name: "GPT-5".into(),
                 provider: "anthropic".into(),
                 stale: false,
+                description: None,
+                speed_tiers: Vec::new(),
             },
         ];
         app.open_model_picker();
@@ -2487,18 +2483,24 @@ mod tests {
                 name: "Claude Opus".into(),
                 provider: "anthropic".into(),
                 stale: false,
+                description: None,
+                speed_tiers: Vec::new(),
             },
             crate::app::ModelCompletion {
                 id: "gpt-5".into(),
                 name: "GPT-5".into(),
                 provider: "anthropic".into(),
                 stale: false,
+                description: None,
+                speed_tiers: Vec::new(),
             },
             crate::app::ModelCompletion {
                 id: "gemini".into(),
                 name: "Gemini".into(),
                 provider: "anthropic".into(),
                 stale: false,
+                description: None,
+                speed_tiers: Vec::new(),
             },
         ];
         app.completion.favourite_models = vec!["claude-opus".into()];
@@ -2530,6 +2532,8 @@ mod tests {
             name: "Claude Opus".into(),
             provider: "anthropic".into(),
             stale: false,
+            description: None,
+            speed_tiers: Vec::new(),
         }];
         assert!(app.completion.favourite_models.is_empty());
         app.open_model_picker();
@@ -2558,6 +2562,8 @@ mod tests {
             name: "Claude Opus".into(),
             provider: "anthropic".into(),
             stale: false,
+            description: None,
+            speed_tiers: Vec::new(),
         }];
         app.completion.favourite_models = Vec::new();
         app.completion.favourites_locked = false;
@@ -2587,6 +2593,8 @@ mod tests {
             name: "Claude Opus".into(),
             provider: "anthropic".into(),
             stale: false,
+            description: None,
+            speed_tiers: Vec::new(),
         }];
         app.completion.favourite_models = vec!["claude-opus".into()];
         app.completion.favourites_locked = true;
@@ -2627,12 +2635,16 @@ mod tests {
                 name: "Alive".into(),
                 provider: "anthropic".into(),
                 stale: false,
+                description: None,
+                speed_tiers: Vec::new(),
             },
             crate::app::ModelCompletion {
                 id: "removed".into(),
                 name: "Removed".into(),
                 provider: "anthropic".into(),
                 stale: true,
+                description: None,
+                speed_tiers: Vec::new(),
             },
         ];
         app.open_model_picker();
@@ -2668,12 +2680,16 @@ mod tests {
                 name: "A".into(),
                 provider: "anthropic".into(),
                 stale: true,
+                description: None,
+                speed_tiers: Vec::new(),
             },
             crate::app::ModelCompletion {
                 id: "stale-b".into(),
                 name: "B".into(),
                 provider: "openrouter".into(),
                 stale: true,
+                description: None,
+                speed_tiers: Vec::new(),
             },
         ];
         app.open_model_picker();
@@ -2798,12 +2814,16 @@ mod tests {
                 name: "Claude Opus 4.7".into(),
                 provider: "anthropic".into(),
                 stale: false,
+                description: None,
+                speed_tiers: Vec::new(),
             },
             crate::app::ModelCompletion {
                 id: "claude-sonnet-4-20250514".into(),
                 name: "Claude Sonnet 4".into(),
                 provider: "anthropic".into(),
                 stale: false,
+                description: None,
+                speed_tiers: Vec::new(),
             },
         ];
         app.input.text = "/model claude".into();
@@ -2829,12 +2849,16 @@ mod tests {
                 name: "Claude Opus 4.7".into(),
                 provider: "anthropic".into(),
                 stale: false,
+                description: None,
+                speed_tiers: Vec::new(),
             },
             crate::app::ModelCompletion {
                 id: "claude-sonnet-4-20250514".into(),
                 name: "Claude Sonnet 4".into(),
                 provider: "anthropic".into(),
                 stale: false,
+                description: None,
+                speed_tiers: Vec::new(),
             },
         ];
         app.input.text = "/model claude".into();
@@ -2864,12 +2888,16 @@ mod tests {
                 name: "Claude Opus 4.7".into(),
                 provider: "anthropic".into(),
                 stale: false,
+                description: None,
+                speed_tiers: Vec::new(),
             },
             crate::app::ModelCompletion {
                 id: "claude-sonnet-4-20250514".into(),
                 name: "Claude Sonnet 4".into(),
                 provider: "anthropic".into(),
                 stale: false,
+                description: None,
+                speed_tiers: Vec::new(),
             },
         ];
         app.input.text = "/model claude-".into();
@@ -2903,12 +2931,16 @@ mod tests {
                 name: "Claude Opus 4.7".into(),
                 provider: "anthropic".into(),
                 stale: false,
+                description: None,
+                speed_tiers: Vec::new(),
             },
             crate::app::ModelCompletion {
                 id: "gpt-5".into(),
                 name: "GPT 5".into(),
                 provider: "anthropic".into(),
                 stale: false,
+                description: None,
+                speed_tiers: Vec::new(),
             },
         ];
         app.input.text = "/model ".into();
@@ -2940,18 +2972,24 @@ mod tests {
                 name: "Claude Opus 4.7".into(),
                 provider: "anthropic".into(),
                 stale: false,
+                description: None,
+                speed_tiers: Vec::new(),
             },
             crate::app::ModelCompletion {
                 id: "claude-sonnet-4-6".into(),
                 name: "Claude Sonnet 4.6".into(),
                 provider: "anthropic".into(),
                 stale: false,
+                description: None,
+                speed_tiers: Vec::new(),
             },
             crate::app::ModelCompletion {
                 id: "gpt-5".into(),
                 name: "GPT 5".into(),
                 provider: "anthropic".into(),
                 stale: false,
+                description: None,
+                speed_tiers: Vec::new(),
             },
         ];
         app.input.text = "/model claude-".into();
