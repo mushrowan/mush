@@ -63,6 +63,12 @@ pub struct Model {
     pub cost: ModelCost,
     pub context_window: TokenCount,
     pub max_output_tokens: TokenCount,
+    /// when set, the provider should request anthropic's adaptive
+    /// thinking mode instead of fixed-budget thinking. only meaningful
+    /// when [`reasoning`] is true. older anthropic models and
+    /// non-anthropic models leave this `false`
+    #[serde(default)]
+    pub supports_adaptive_thinking: bool,
 }
 
 impl Model {
