@@ -36,6 +36,10 @@ pub(super) struct InputDeps<'a> {
     pub lifecycle_hooks: &'a mush_agent::LifecycleHooks,
     pub cwd: &'a Path,
     pub pending_prompt: &'a mut Option<String>,
+    pub pending_compactions: &'a mut std::collections::HashMap<
+        crate::pane::PaneId,
+        tokio::task::JoinHandle<crate::slash::CompactionTaskResult>,
+    >,
     pub delegation_queue: &'a crate::delegate::DelegationQueue,
     pub image_picker: &'a Option<ratatui_image::picker::Picker>,
     /// handle to the Terminal backend's size cache so resize events
@@ -245,6 +249,20 @@ pub(super) async fn handle_idle_terminal_events(
                 } else {
                     match app_event {
                         AppEvent::UserSubmit { text } => {
+                            // a backgrounded compaction is going to call
+                            // `conversation.replace_messages(...)` on
+                            // completion, which would clobber any user
+                            // message appended while it's running. queue
+                            // the input as a status hint and bail
+                            let pane_id = pane_mgr.focused().id;
+                            if deps.pending_compactions.contains_key(&pane_id) {
+                                let app = &mut pane_mgr.focused_mut().app;
+                                app.input.text = text;
+                                app.input.cursor = app.input.text.len();
+                                app.status =
+                                    Some("wait for compaction to finish before sending".into());
+                                continue;
+                            }
                             let expanded = slash::expand_template(&text);
                             let pane = pane_mgr.focused_mut();
                             if pane.label.is_none() && pane.conversation.is_empty() {
@@ -300,6 +318,7 @@ pub(super) async fn handle_idle_terminal_events(
                                     lifecycle_hooks: deps.lifecycle_hooks,
                                     cwd: deps.cwd,
                                     pending_prompt: deps.pending_prompt,
+                                    pending_compactions: deps.pending_compactions,
                                 },
                             )
                             .await;
@@ -332,6 +351,7 @@ pub(super) async fn handle_idle_terminal_events(
                                     lifecycle_hooks: deps.lifecycle_hooks,
                                     cwd: deps.cwd,
                                     pending_prompt: deps.pending_prompt,
+                                    pending_compactions: deps.pending_compactions,
                                 },
                             )
                             .await;

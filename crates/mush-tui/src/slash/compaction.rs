@@ -432,4 +432,45 @@ mod tests {
             app.scroll_offset
         );
     }
+
+    /// /compact must NOT block the calling task: the LLM call has to
+    /// run on a background `tokio::spawn` so the runner's input loop
+    /// can keep redrawing the "compacting…" status. this test proves
+    /// the primitives compose: `start_compaction` returns a JoinHandle
+    /// that, when awaited and fed to `apply_compaction_result`,
+    /// produces the same end-state as the synchronous `handle_compact`
+    /// wrapper. that lets the runner spawn the task, return to the
+    /// event loop, and finalise on a future iteration without losing
+    /// any of the post-compaction invariants.
+    #[tokio::test]
+    async fn start_and_apply_match_handle_compact_endstate() {
+        let mut msgs = Vec::new();
+        for i in 0..12 {
+            msgs.push(user_msg(&format!("question {i}")));
+            msgs.push(assistant_msg(&format!("answer {i}"), 1_000));
+        }
+        let conversation = ConversationState::from_messages(msgs.clone());
+
+        let mut app = App::new(test_model().id, TokenCount::new(200_000));
+        let model = test_model();
+        let options = StreamOptions::default();
+        let registry = ApiRegistry::new();
+
+        let task = start_compaction(conversation.context(), model, options, registry, None, None);
+        let result = task.await.expect("compaction task panicked");
+
+        let mut conv = conversation;
+        apply_compaction_result(&mut app, &mut conv, result, true);
+
+        // same invariants the synchronous path tests assert
+        assert!(app.stats.prev_usage().is_none());
+        assert!(app.scroll_offset > 0, "scroll should be at top");
+        let summary_present = app.messages.iter().any(|m| {
+            m.role == crate::app::MessageRole::System && m.content.contains("compacted summary")
+        });
+        assert!(
+            summary_present,
+            "compaction summary missing from app.messages"
+        );
+    }
 }
