@@ -2925,6 +2925,54 @@ mod tests {
     }
 
     #[test]
+    fn slash_menu_filter_change_snaps_selection_to_top_hit() {
+        // typing a filter char must move the selection back to row 0 so the
+        // user lands on the highest-scored match, not on whatever row their
+        // previous selected index happens to alias to
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.completion.slash_commands = vec![crate::app::SlashCommand {
+            name: "model".into(),
+            description: "show or switch model".into(),
+        }];
+        app.completion.model_completions = vec![
+            crate::app::ModelCompletion {
+                id: "claude-opus-4-7".into(),
+                name: "Claude Opus 4.7".into(),
+                provider: "anthropic".into(),
+                stale: false,
+            },
+            crate::app::ModelCompletion {
+                id: "claude-sonnet-4-6".into(),
+                name: "Claude Sonnet 4.6".into(),
+                provider: "anthropic".into(),
+                stale: false,
+            },
+            crate::app::ModelCompletion {
+                id: "gpt-5".into(),
+                name: "GPT 5".into(),
+                provider: "anthropic".into(),
+                stale: false,
+            },
+        ];
+        app.input.text = "/model claude-".into();
+        app.input.cursor = app.input.text.len();
+
+        handle_key(&mut app, key(KeyCode::Tab));
+        // navigate down to the second match, then type a filter char.
+        // selection should snap back to the top of the freshly-filtered list
+        handle_key(&mut app, ctrl(KeyCode::Char('j')));
+        let menu = app.completion.slash_menu.as_ref().unwrap();
+        assert_eq!(menu.selected, 1, "precondition: selected moved to row 1");
+
+        handle_key(&mut app, key(KeyCode::Char('o')));
+        let menu = app.completion.slash_menu.as_ref().unwrap();
+        assert_eq!(
+            menu.selected, 0,
+            "filter change should snap selection back to the top-scoring row"
+        );
+    }
+
+    #[test]
     fn input_reinsert_while_streaming_keeps_cursor_visible() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.stream.active = true;

@@ -745,9 +745,10 @@ impl App {
                 menu.model_mode = true;
                 menu.model_matches = filter_model_matches(&self.completion.model_completions, rest);
                 menu.matches.clear();
-                menu.selected = menu
-                    .selected
-                    .min(menu.model_matches.len().saturating_sub(1));
+                // a new filter ranking starts from row 0 (the highest score),
+                // so any held selection is reset rather than clamped.
+                // explicit j/k navigation moves it from there.
+                menu.selected = 0;
 
                 if menu.model_matches.is_empty() {
                     self.close_slash_menu();
@@ -758,7 +759,7 @@ impl App {
             menu.model_mode = false;
             menu.matches = filter_command_matches(&self.completion.slash_commands, prefix);
             menu.model_matches.clear();
-            menu.selected = menu.selected.min(menu.matches.len().saturating_sub(1));
+            menu.selected = 0;
 
             if menu.matches.is_empty() {
                 self.close_slash_menu();
