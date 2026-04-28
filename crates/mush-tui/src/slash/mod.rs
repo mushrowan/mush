@@ -40,6 +40,10 @@ pub enum SlashAction {
     New,
     Model {
         model_id: Option<String>,
+        /// `true` when the user passed `/model --all` to opt into seeing
+        /// codex entries marked `internal` / `experimental`. ignored when
+        /// a `model_id` is supplied (the flag only affects the picker)
+        show_all: bool,
     },
     Sessions,
     Resume {
@@ -152,9 +156,22 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
         "help" => Ok(SlashAction::Help),
         "keys" => Ok(SlashAction::Keys),
         "new" => Ok(SlashAction::New),
-        "model" => Ok(SlashAction::Model {
-            model_id: (!args.is_empty()).then(|| args.to_string()),
-        }),
+        "model" => {
+            // `--all` is the only flag we currently parse for the picker.
+            // when supplied, no model id follows. anything else routes to
+            // `model_id` so users keep the freedom to type slugs directly
+            if args == "--all" {
+                Ok(SlashAction::Model {
+                    model_id: None,
+                    show_all: true,
+                })
+            } else {
+                Ok(SlashAction::Model {
+                    model_id: (!args.is_empty()).then(|| args.to_string()),
+                    show_all: false,
+                })
+            }
+        }
         "sessions" => Ok(SlashAction::Sessions),
         "resume" if args.is_empty() => Ok(SlashAction::Resume { session_id: None }),
         "resume" => Ok(SlashAction::Resume {
@@ -270,6 +287,21 @@ mod tests {
             parse("/model claude-sonnet").unwrap(),
             SlashAction::Model {
                 model_id: Some("claude-sonnet".into()),
+                show_all: false,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_model_all_flag_opens_picker_with_hidden_visible() {
+        // /model --all is the opt-in for showing internal/experimental codex
+        // entries that the default picker filters out. parse it as a flag
+        // distinct from a model id named "--all"
+        assert_eq!(
+            parse("/model --all").unwrap(),
+            SlashAction::Model {
+                model_id: None,
+                show_all: true,
             }
         );
     }

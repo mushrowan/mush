@@ -29,7 +29,9 @@ pub fn handle(
             help.push_str("  /help          - show this message\n");
             help.push_str("  /keys          - show keyboard shortcuts\n");
             help.push_str("  /new           - save session, start fresh\n");
-            help.push_str("  /model [id]    - show or switch model\n");
+            help.push_str(
+                "  /model [id]    - show or switch model (--all to reveal hidden codex entries)\n",
+            );
             help.push_str("  /sessions      - browse and resume sessions\n");
             help.push_str("  /resume [id]   - resume session (most recent in cwd if no id)\n");
             help.push_str("  /reload        - rebuild AGENTS.md and templates without restart\n");
@@ -222,9 +224,14 @@ pub fn handle(
             }
             None
         }
-        SlashAction::Model { model_id: None } => {
+        SlashAction::Model {
+            model_id: None,
+            show_all,
+        } => {
             if app.completion.model_completions.is_empty() {
                 app.push_system_message(format!("model: {}", app.model_id));
+            } else if *show_all {
+                app.open_model_picker_all();
             } else {
                 app.open_model_picker();
             }
@@ -232,6 +239,7 @@ pub fn handle(
         }
         SlashAction::Model {
             model_id: Some(model_id),
+            show_all: _,
         } => {
             handle_model_switch(app, tui_config, thinking_prefs, model_id);
             None

@@ -1195,7 +1195,11 @@ fn refresh_model_picker_after_delete(app: &mut App) {
     {
         let prefix = app.input.text.trim_start_matches('/');
         let after = prefix.strip_prefix("model").unwrap_or(prefix).trim_start();
-        menu.model_matches = filter_model_matches(&app.completion.model_completions, after);
+        let prepared = crate::slash_menu::prepare_picker_models(
+            &app.completion.model_completions,
+            menu.show_all,
+        );
+        menu.model_matches = filter_model_matches(&prepared, after);
         menu.selected = menu
             .selected
             .min(menu.model_matches.len().saturating_sub(1));
@@ -2450,6 +2454,8 @@ mod tests {
                 stale: false,
                 description: None,
                 speed_tiers: Vec::new(),
+                priority: 0,
+                visibility: None,
             },
             crate::app::ModelCompletion {
                 id: "gpt-5".into(),
@@ -2458,6 +2464,8 @@ mod tests {
                 stale: false,
                 description: None,
                 speed_tiers: Vec::new(),
+                priority: 0,
+                visibility: None,
             },
         ];
         app.open_model_picker();
@@ -2485,6 +2493,8 @@ mod tests {
                 stale: false,
                 description: None,
                 speed_tiers: Vec::new(),
+                priority: 0,
+                visibility: None,
             },
             crate::app::ModelCompletion {
                 id: "gpt-5".into(),
@@ -2493,6 +2503,8 @@ mod tests {
                 stale: false,
                 description: None,
                 speed_tiers: Vec::new(),
+                priority: 0,
+                visibility: None,
             },
             crate::app::ModelCompletion {
                 id: "gemini".into(),
@@ -2501,6 +2513,8 @@ mod tests {
                 stale: false,
                 description: None,
                 speed_tiers: Vec::new(),
+                priority: 0,
+                visibility: None,
             },
         ];
         app.completion.favourite_models = vec!["claude-opus".into()];
@@ -2534,6 +2548,8 @@ mod tests {
             stale: false,
             description: None,
             speed_tiers: Vec::new(),
+            priority: 0,
+            visibility: None,
         }];
         assert!(app.completion.favourite_models.is_empty());
         app.open_model_picker();
@@ -2564,6 +2580,8 @@ mod tests {
             stale: false,
             description: None,
             speed_tiers: Vec::new(),
+            priority: 0,
+            visibility: None,
         }];
         app.completion.favourite_models = Vec::new();
         app.completion.favourites_locked = false;
@@ -2595,6 +2613,8 @@ mod tests {
             stale: false,
             description: None,
             speed_tiers: Vec::new(),
+            priority: 0,
+            visibility: None,
         }];
         app.completion.favourite_models = vec!["claude-opus".into()];
         app.completion.favourites_locked = true;
@@ -2637,6 +2657,8 @@ mod tests {
                 stale: false,
                 description: None,
                 speed_tiers: Vec::new(),
+                priority: 0,
+                visibility: None,
             },
             crate::app::ModelCompletion {
                 id: "removed".into(),
@@ -2645,6 +2667,8 @@ mod tests {
                 stale: true,
                 description: None,
                 speed_tiers: Vec::new(),
+                priority: 0,
+                visibility: None,
             },
         ];
         app.open_model_picker();
@@ -2682,6 +2706,8 @@ mod tests {
                 stale: true,
                 description: None,
                 speed_tiers: Vec::new(),
+                priority: 0,
+                visibility: None,
             },
             crate::app::ModelCompletion {
                 id: "stale-b".into(),
@@ -2690,6 +2716,8 @@ mod tests {
                 stale: true,
                 description: None,
                 speed_tiers: Vec::new(),
+                priority: 0,
+                visibility: None,
             },
         ];
         app.open_model_picker();
@@ -2816,6 +2844,8 @@ mod tests {
                 stale: false,
                 description: None,
                 speed_tiers: Vec::new(),
+                priority: 0,
+                visibility: None,
             },
             crate::app::ModelCompletion {
                 id: "claude-sonnet-4-20250514".into(),
@@ -2824,6 +2854,8 @@ mod tests {
                 stale: false,
                 description: None,
                 speed_tiers: Vec::new(),
+                priority: 0,
+                visibility: None,
             },
         ];
         app.input.text = "/model claude".into();
@@ -2851,6 +2883,8 @@ mod tests {
                 stale: false,
                 description: None,
                 speed_tiers: Vec::new(),
+                priority: 0,
+                visibility: None,
             },
             crate::app::ModelCompletion {
                 id: "claude-sonnet-4-20250514".into(),
@@ -2859,6 +2893,8 @@ mod tests {
                 stale: false,
                 description: None,
                 speed_tiers: Vec::new(),
+                priority: 0,
+                visibility: None,
             },
         ];
         app.input.text = "/model claude".into();
@@ -2890,6 +2926,8 @@ mod tests {
                 stale: false,
                 description: None,
                 speed_tiers: Vec::new(),
+                priority: 0,
+                visibility: None,
             },
             crate::app::ModelCompletion {
                 id: "claude-sonnet-4-20250514".into(),
@@ -2898,6 +2936,8 @@ mod tests {
                 stale: false,
                 description: None,
                 speed_tiers: Vec::new(),
+                priority: 0,
+                visibility: None,
             },
         ];
         app.input.text = "/model claude-".into();
@@ -2933,6 +2973,8 @@ mod tests {
                 stale: false,
                 description: None,
                 speed_tiers: Vec::new(),
+                priority: 0,
+                visibility: None,
             },
             crate::app::ModelCompletion {
                 id: "gpt-5".into(),
@@ -2941,6 +2983,8 @@ mod tests {
                 stale: false,
                 description: None,
                 speed_tiers: Vec::new(),
+                priority: 0,
+                visibility: None,
             },
         ];
         app.input.text = "/model ".into();
@@ -2974,6 +3018,8 @@ mod tests {
                 stale: false,
                 description: None,
                 speed_tiers: Vec::new(),
+                priority: 0,
+                visibility: None,
             },
             crate::app::ModelCompletion {
                 id: "claude-sonnet-4-6".into(),
@@ -2982,6 +3028,8 @@ mod tests {
                 stale: false,
                 description: None,
                 speed_tiers: Vec::new(),
+                priority: 0,
+                visibility: None,
             },
             crate::app::ModelCompletion {
                 id: "gpt-5".into(),
@@ -2990,6 +3038,8 @@ mod tests {
                 stale: false,
                 description: None,
                 speed_tiers: Vec::new(),
+                priority: 0,
+                visibility: None,
             },
         ];
         app.input.text = "/model claude-".into();
