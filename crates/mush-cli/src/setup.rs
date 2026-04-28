@@ -894,13 +894,14 @@ pub fn config_api_key(cfg: &config::Config, provider: &Provider) -> Option<ApiKe
 }
 
 /// resolve the thinking level from CLI flags, saved per-dir+model prefs,
-/// and the config-file fallback.
+/// the model's own default, and the config-file fallback.
 ///
 /// precedence (highest first):
 /// 1. `--think` CLI flag → `High`
 /// 2. saved preference for this `cwd + model.id`
-/// 3. `cfg.thinking` (global config default)
-/// 4. nothing → `None`
+/// 3. `model.default_thinking_level` (codex's recommended starting level)
+/// 4. `cfg.thinking` (global config default)
+/// 5. nothing → `None`
 pub fn resolve_thinking(
     cli_thinking: bool,
     model: &Model,
@@ -913,6 +914,7 @@ pub fn resolve_thinking(
     }
     thinking_prefs
         .get(cwd, model.id.as_ref())
+        .or(model.default_thinking_level)
         .or(cfg.thinking)
         .map(ThinkingLevel::normalize_visible)
 }
@@ -1273,5 +1275,74 @@ mod tests {
         let cfg: config::Config = toml::from_str("").unwrap();
 
         assert_eq!(default_model_id(&cfg, dir.path()), "claude-opus-4-7");
+    }
+
+    fn dummy_model_with_default(level: Option<ThinkingLevel>) -> Model {
+        let mut m = mush_ai::models::all_models_with_user()
+            .into_iter()
+            .next()
+            .unwrap();
+        m.default_thinking_level = level;
+        m
+    }
+
+    #[test]
+    fn resolve_thinking_prefers_per_dir_override_over_model_default() {
+        // user said "i want medium for this project"; that wins over the
+        // model's curated recommendation
+        let dir = tempfile::tempdir().unwrap();
+        let mut prefs = mush_tui::ThinkingPrefs::default();
+        let model = dummy_model_with_default(Some(ThinkingLevel::High));
+        prefs.set(
+            dir.path().to_path_buf(),
+            model.id.to_string(),
+            ThinkingLevel::Medium,
+        );
+        let cfg: config::Config = toml::from_str("").unwrap();
+        assert_eq!(
+            resolve_thinking(false, &model, &prefs, dir.path(), &cfg),
+            Some(ThinkingLevel::Medium)
+        );
+    }
+
+    #[test]
+    fn resolve_thinking_falls_back_to_model_default_when_no_override() {
+        // codex hints `medium`; with no per-dir override and no config
+        // setting, the model's default applies
+        let dir = tempfile::tempdir().unwrap();
+        let prefs = mush_tui::ThinkingPrefs::default();
+        let model = dummy_model_with_default(Some(ThinkingLevel::Medium));
+        let cfg: config::Config = toml::from_str("").unwrap();
+        assert_eq!(
+            resolve_thinking(false, &model, &prefs, dir.path(), &cfg),
+            Some(ThinkingLevel::Medium)
+        );
+    }
+
+    #[test]
+    fn resolve_thinking_model_default_outranks_config_thinking() {
+        // a model-specific default is more targeted than the global
+        // config default, so it should win when both are set
+        let dir = tempfile::tempdir().unwrap();
+        let prefs = mush_tui::ThinkingPrefs::default();
+        let model = dummy_model_with_default(Some(ThinkingLevel::High));
+        let cfg: config::Config = toml::from_str("thinking = \"low\"").unwrap();
+        assert_eq!(
+            resolve_thinking(false, &model, &prefs, dir.path(), &cfg),
+            Some(ThinkingLevel::High)
+        );
+    }
+
+    #[test]
+    fn resolve_thinking_falls_through_to_config_when_no_model_default() {
+        // uncurated model with no default; cfg.thinking takes over
+        let dir = tempfile::tempdir().unwrap();
+        let prefs = mush_tui::ThinkingPrefs::default();
+        let model = dummy_model_with_default(None);
+        let cfg: config::Config = toml::from_str("thinking = \"low\"").unwrap();
+        assert_eq!(
+            resolve_thinking(false, &model, &prefs, dir.path(), &cfg),
+            Some(ThinkingLevel::Low)
+        );
     }
 }
