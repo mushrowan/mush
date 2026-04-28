@@ -13,10 +13,12 @@ use std::time::Duration;
 
 use super::anthropic::AnthropicDiscovery;
 use super::cache::{DiscoveryCache, cache_path};
+use super::codex::CodexDiscovery;
 use super::openai::OpenAiDiscovery;
 use super::openrouter::OpenRouterDiscovery;
 use super::{DiscoveryError, DiscoveryReport, ModelDiscovery};
 use crate::env;
+use crate::oauth::get_openai_codex_oauth_token;
 use crate::types::{ApiKey, Provider};
 
 /// per-provider outcome of one discovery run.
@@ -153,6 +155,23 @@ pub async fn run_all_available(client: reqwest::Client) -> DiscoveryRunSummary {
     results.push(
         run_one(openai_provider, openai_key, |key| {
             let d = OpenAiDiscovery::new(client.clone(), "", key);
+            async move { d.fetch().await }
+        })
+        .await,
+    );
+
+    // openai-codex (chatgpt subscription) - oauth token + chatgpt account id
+    let codex_provider = Provider::Custom("openai-codex".into());
+    let codex_token = match get_openai_codex_oauth_token().await {
+        Ok(token) => token.and_then(ApiKey::new),
+        Err(e) => {
+            tracing::debug!(error = %e, "failed to read codex oauth token; skipping codex discovery");
+            None
+        }
+    };
+    results.push(
+        run_one(codex_provider, codex_token, |key| {
+            let d = CodexDiscovery::new(client.clone(), "", key, None, env!("CARGO_PKG_VERSION"));
             async move { d.fetch().await }
         })
         .await,

@@ -9,6 +9,7 @@
 
 pub mod anthropic;
 pub mod cache;
+pub mod codex;
 pub mod merge;
 pub mod openai;
 pub mod openrouter;
