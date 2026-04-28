@@ -189,7 +189,7 @@ fn entry_to_model(entry: CodexModelEntry) -> Model {
 }
 
 /// extract the `chatgpt_account_id` claim from a chatgpt-issued JWT.
-/// duplicated from [`crate::providers::openai_responses`] to keep the
+/// duplicated from `crate::providers::openai_responses` to keep the
 /// discovery module self-contained; consolidate if a third caller appears.
 fn extract_account_id(token: &str) -> Option<String> {
     use base64::Engine;
@@ -240,6 +240,98 @@ struct CodexModelEntry {
 struct CodexReasoningPreset {
     #[serde(default)]
     effort: String,
+}
+
+/// option-C payoff: typed view onto codex's enriched fields, parsed
+/// lazily from `DiscoveredEntry::raw`. mush's [`Model`] only carries
+/// the cross-cutting fields; everything codex-specific lives here so
+/// consumers can opt in field-by-field without bloating the core type.
+///
+/// fields mirror codex's `ModelInfo` for the slice mush actually
+/// consumes today (description, reasoning levels, priority, visibility)
+/// plus an `additional_speed_tiers` hook for picker badges. unknown
+/// upstream fields stay in `raw` for future code paths.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CodexModelExtras {
+    /// human-readable blurb codex pairs with each model
+    pub description: Option<String>,
+    /// codex's recommended starting reasoning level for this model.
+    /// kept as a string (not mush's `ThinkingLevel` enum) so unknown
+    /// upstream values don't break parsing
+    pub default_reasoning_level: Option<String>,
+    /// every reasoning level the model accepts. ordering matches the
+    /// upstream array, which codex authors curate from cheapest to
+    /// most expensive
+    pub supported_reasoning_levels: Vec<ReasoningLevelPreset>,
+    /// whether the model emits a reasoning-summary block alongside its
+    /// final answer (mush could expose this in the thinking ui)
+    pub supports_reasoning_summaries: bool,
+    /// codex's intra-catalogue priority (higher = preferred). picker
+    /// could honour this for "default" sort order
+    pub priority: i32,
+    /// `default`, `internal`, `experimental`, …  picker can hide
+    /// non-`default` entries unless the user opts in
+    pub visibility: Option<String>,
+    /// `fast`, … – picker badge candidates
+    pub additional_speed_tiers: Vec<String>,
+}
+
+/// one row of `CodexModelExtras::supported_reasoning_levels`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ReasoningLevelPreset {
+    pub effort: String,
+    pub description: String,
+}
+
+/// extract the typed extras view from a discovered entry. returns `None`
+/// when the entry was cached before raw-preservation landed (or the raw
+/// blob is otherwise missing) so callers can fall back gracefully.
+#[must_use]
+pub fn extras(entry: &super::cache::DiscoveredEntry) -> Option<CodexModelExtras> {
+    let raw = entry.raw.as_ref()?;
+    let parsed: CodexExtrasWire = serde_json::from_value(raw.clone()).ok()?;
+    Some(CodexModelExtras {
+        description: parsed.description.filter(|s| !s.is_empty()),
+        default_reasoning_level: parsed.default_reasoning_level.filter(|s| !s.is_empty()),
+        supported_reasoning_levels: parsed
+            .supported_reasoning_levels
+            .into_iter()
+            .map(|p| ReasoningLevelPreset {
+                effort: p.effort,
+                description: p.description,
+            })
+            .collect(),
+        supports_reasoning_summaries: parsed.supports_reasoning_summaries,
+        priority: parsed.priority,
+        visibility: parsed.visibility.filter(|s| !s.is_empty()),
+        additional_speed_tiers: parsed.additional_speed_tiers,
+    })
+}
+
+#[derive(Deserialize, Debug, Default)]
+struct CodexExtrasWire {
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    default_reasoning_level: Option<String>,
+    #[serde(default)]
+    supported_reasoning_levels: Vec<CodexExtrasReasoningPreset>,
+    #[serde(default)]
+    supports_reasoning_summaries: bool,
+    #[serde(default)]
+    priority: i32,
+    #[serde(default)]
+    visibility: Option<String>,
+    #[serde(default)]
+    additional_speed_tiers: Vec<String>,
+}
+
+#[derive(Deserialize, Debug, Default)]
+struct CodexExtrasReasoningPreset {
+    #[serde(default)]
+    effort: String,
+    #[serde(default)]
+    description: String,
 }
 
 #[cfg(test)]
@@ -363,5 +455,69 @@ mod tests {
             models[0].raw.as_ref().unwrap()["experimental_supported_tools"][0],
             "new-tool"
         );
+    }
+
+    fn entry_from(raw: serde_json::Value) -> crate::discovery::cache::DiscoveredEntry {
+        crate::discovery::cache::DiscoveredEntry {
+            last_seen_at: SystemTime::UNIX_EPOCH,
+            model: parse_codex_models(&serde_json::json!({"models": [raw.clone()]}).to_string())
+                .unwrap()
+                .pop()
+                .unwrap()
+                .model,
+            raw: Some(raw),
+        }
+    }
+
+    #[test]
+    fn extras_extracts_codex_specific_fields_from_raw() {
+        let raw = serde_json::json!({
+            "slug": "gpt-5.4",
+            "display_name": "GPT-5.4",
+            "description": "Top-tier reasoning",
+            "default_reasoning_level": "medium",
+            "supported_reasoning_levels": [
+                {"effort": "minimal", "description": "fast"},
+                {"effort": "medium",  "description": "default"},
+                {"effort": "high",    "description": "deep"}
+            ],
+            "supports_reasoning_summaries": true,
+            "priority": 100,
+            "visibility": "default",
+            "additional_speed_tiers": ["fast"]
+        });
+        let entry = entry_from(raw);
+
+        let extras = extras(&entry).expect("entry has raw payload");
+        assert_eq!(extras.description.as_deref(), Some("Top-tier reasoning"));
+        assert_eq!(extras.default_reasoning_level.as_deref(), Some("medium"));
+        assert_eq!(extras.supported_reasoning_levels.len(), 3);
+        assert_eq!(extras.supported_reasoning_levels[0].effort, "minimal");
+        assert!(extras.supports_reasoning_summaries);
+        assert_eq!(extras.priority, 100);
+        assert_eq!(extras.visibility.as_deref(), Some("default"));
+        assert_eq!(extras.additional_speed_tiers, vec!["fast".to_string()]);
+    }
+
+    #[test]
+    fn extras_returns_none_when_raw_missing() {
+        let entry = crate::discovery::cache::DiscoveredEntry {
+            last_seen_at: SystemTime::UNIX_EPOCH,
+            model: parse_codex_models(FIXTURE).unwrap().pop().unwrap().model,
+            raw: None,
+        };
+        assert!(extras(&entry).is_none());
+    }
+
+    #[test]
+    fn extras_tolerates_missing_fields() {
+        // bare-minimum entry with only `slug` — every optional field stays None / default
+        let entry = entry_from(serde_json::json!({ "slug": "tiny" }));
+        let extras = extras(&entry).unwrap();
+        assert!(extras.description.is_none());
+        assert!(extras.default_reasoning_level.is_none());
+        assert!(extras.supported_reasoning_levels.is_empty());
+        assert!(!extras.supports_reasoning_summaries);
+        assert_eq!(extras.priority, 0);
     }
 }
