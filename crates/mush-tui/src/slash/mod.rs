@@ -107,6 +107,10 @@ pub enum SlashAction {
     /// rebuilds the system prompt and slash menu, busting the provider
     /// prefix cache as a side effect (intentional and explicit)
     Reload,
+    /// refresh the discovered-models cache by hitting `/v1/models` for
+    /// every provider with credentials configured. surfaces newly
+    /// released models in the static-catalogue + discovery merge.
+    RefreshModels,
     Quit,
     Other {
         name: String,
@@ -211,6 +215,7 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
         "task" | "tasks" => parse_task_subcommand(args),
         "debug" => Ok(SlashAction::Debug),
         "reload" => Ok(SlashAction::Reload),
+        "refresh-models" | "models-refresh" => Ok(SlashAction::RefreshModels),
         "quit" | "exit" | "q" => Ok(SlashAction::Quit),
         other => Ok(SlashAction::Other {
             name: other.to_string(),
@@ -376,5 +381,19 @@ mod tests {
         // without restarting mush. opt-in because it does bust the
         // provider-side prefix cache by changing the system prompt
         assert_eq!(parse("/reload").unwrap(), SlashAction::Reload);
+    }
+
+    #[test]
+    fn parse_refresh_models_command() {
+        // /refresh-models triggers an on-demand discovery fetch for every
+        // provider with creds, updating ~/.local/share/mush/discovered-models.json
+        assert_eq!(
+            parse("/refresh-models").unwrap(),
+            SlashAction::RefreshModels
+        );
+        assert_eq!(
+            parse("/models-refresh").unwrap(),
+            SlashAction::RefreshModels
+        );
     }
 }

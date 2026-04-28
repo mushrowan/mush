@@ -643,6 +643,22 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         },
     };
 
+    // fire-and-forget background discovery refresh on startup. silently
+    // populates ~/.local/share/mush/discovered-models.json so the next
+    // launch sees newly released models without waiting for `/refresh-models`.
+    {
+        let client = tui_config.http_client.clone().unwrap_or_default();
+        tokio::spawn(async move {
+            let summary = mush_ai::discovery::refresh_and_save(client).await;
+            tracing::info!(
+                target: "mush::discovery",
+                models = summary.total_models(),
+                "{}",
+                summary.one_line()
+            );
+        });
+    }
+
     mush_tui::run_tui(tui_config, &setup.tools, &setup.registry)
         .await
         .map_err(|e| eyre!("TUI error: {e}"))?;
