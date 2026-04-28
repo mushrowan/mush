@@ -508,6 +508,14 @@ async fn auto_fork_compact(
             .pane_mut(pane_id)
             .expect("pane exists after compact");
         crate::conversation_display::rebuild_display(&mut pane.app, &pane.conversation.context());
+        // mirror the manual /compact path: clear the live stats state
+        // so the next real call doesn't trip a false ContextDecrease
+        // anomaly. unlike the manual case we don't scroll_to_top
+        // because the user is mid-stream and reading recent output;
+        // surprising the viewport with a jump would be jarring
+        pane.app
+            .stats
+            .reset_live_state(mush_ai::types::TokenCount::new(tokens_after as u64));
         pane.app.status = Some(format!(
             "auto-fork-compacted: {before} → {after} messages, ~{tokens_before} → ~{tokens_after} tokens (original preserved)",
         ));
