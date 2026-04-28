@@ -9,7 +9,7 @@ use notify::RecommendedWatcher;
 
 use crate::app::{self, App};
 use crate::pane::{Pane, PaneId, PaneManager};
-use crate::slash_menu::{ModelCompletion, SlashCommand};
+use crate::slash_menu::SlashCommand;
 
 const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("help", "show available commands"),
@@ -285,17 +285,10 @@ fn build_initial_app(tui_config: &TuiConfig, cwd: &Path) -> App {
     }
 
     for entry in mush_ai::discovery::merged_catalogue() {
-        let stale = matches!(
-            entry.source,
-            mush_ai::discovery::ModelSource::DiscoveredStale
-        );
         app.completion.completions.push(entry.model.id.to_string());
-        app.completion.model_completions.push(ModelCompletion {
-            id: entry.model.id.to_string(),
-            name: entry.model.name.clone(),
-            provider: entry.model.provider.to_string(),
-            stale,
-        });
+        app.completion
+            .model_completions
+            .push(crate::slash_menu::model_completion_from_merged(&entry));
     }
 
     app.completion.favourite_models = tui_config.favourite_models.clone();

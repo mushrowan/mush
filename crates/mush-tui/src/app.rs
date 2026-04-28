@@ -2776,12 +2776,16 @@ batch: 1/2 succeeded, 1 failed";
                 name: "Claude Opus".into(),
                 provider: "anthropic".into(),
                 stale: false,
+                description: None,
+                speed_tiers: Vec::new(),
             },
             ModelCompletion {
                 id: "gpt-5".into(),
                 name: "GPT-5".into(),
                 provider: "anthropic".into(),
                 stale: false,
+                description: None,
+                speed_tiers: Vec::new(),
             },
         ];
         app.open_model_picker();

@@ -70,18 +70,40 @@ pub fn render(frame: &mut Frame, menu: &SlashMenuState, input_area: Rect, theme:
             };
 
             let id_text = format!("/model {}", model.id);
+            let speed_badge: String = model
+                .speed_tiers
+                .iter()
+                .map(|t| format!(" [{t}]"))
+                .collect();
             let stale_marker = if model.stale { " [stale]" } else { "" };
             let pad = 34usize.saturating_sub(
-                id_text.len() + prefix.len() + fav_marker.len() + stale_marker.len(),
+                id_text.len()
+                    + prefix.len()
+                    + fav_marker.len()
+                    + speed_badge.len()
+                    + stale_marker.len(),
             );
+
+            // suffix shown on the right side: display name optionally
+            // followed by " - description" when the upstream provided one
+            let mut display = model.name.clone();
+            if let Some(desc) = model.description.as_deref().filter(|s| !s.is_empty()) {
+                if display.is_empty() {
+                    display = desc.to_string();
+                } else {
+                    display.push_str(" - ");
+                    display.push_str(desc);
+                }
+            }
 
             lines.push(Line::from(vec![
                 Span::styled(prefix, id_style),
                 Span::styled(fav_marker, theme.menu_description),
                 Span::styled(id_text, id_style),
+                Span::styled(speed_badge, theme.menu_description),
                 Span::styled(stale_marker, theme.menu_description),
                 Span::raw(" ".repeat(pad)),
-                Span::styled(&model.name, theme.menu_description),
+                Span::styled(display, theme.menu_description),
             ]));
         }
     } else {
@@ -157,12 +179,16 @@ mod tests {
                     name: "Claude Opus".into(),
                     provider: "anthropic".into(),
                     stale: false,
+                    description: None,
+                    speed_tiers: Vec::new(),
                 },
                 ModelCompletion {
                     id: "gpt-5".into(),
                     name: "GPT 5".into(),
                     provider: "anthropic".into(),
                     stale: false,
+                    description: None,
+                    speed_tiers: Vec::new(),
                 },
             ],
             vec!["claude-opus".into()],
@@ -195,6 +221,8 @@ mod tests {
                 name: "Claude Opus".into(),
                 provider: "anthropic".into(),
                 stale: false,
+                description: None,
+                speed_tiers: Vec::new(),
             }],
             Vec::new(),
             true,
@@ -220,12 +248,16 @@ mod tests {
                     name: "Fresh".into(),
                     provider: "anthropic".into(),
                     stale: false,
+                    description: None,
+                    speed_tiers: Vec::new(),
                 },
                 ModelCompletion {
                     id: "removed-model".into(),
                     name: "Removed".into(),
                     provider: "anthropic".into(),
                     stale: true,
+                    description: None,
+                    speed_tiers: Vec::new(),
                 },
             ],
             Vec::new(),
@@ -249,6 +281,59 @@ mod tests {
         assert!(
             !fresh_row.contains("[stale]"),
             "fresh row must not render [stale] marker; got: {fresh_row:?}"
+        );
+    }
+
+    #[test]
+    fn codex_description_appears_after_name_in_row() {
+        // codex's enriched /models endpoint provides a per-model blurb. the
+        // picker shows it after the model's display name to help the user
+        // distinguish models with similar slugs
+        let menu = SlashMenuState::for_models_with_favourites(
+            vec![ModelCompletion {
+                id: "gpt-5.4".into(),
+                name: "GPT-5.4".into(),
+                provider: "openai-codex".into(),
+                stale: false,
+                description: Some("Top-tier reasoning model".into()),
+                speed_tiers: Vec::new(),
+            }],
+            Vec::new(),
+            false,
+        );
+        let buf = render_menu(&menu, 80, 8);
+        let content = buffer_to_string(&buf);
+        assert!(
+            content.contains("GPT-5.4"),
+            "row must show the display name: {content:?}"
+        );
+        assert!(
+            content.contains("Top-tier reasoning model"),
+            "row must show the codex description after the name: {content:?}"
+        );
+    }
+
+    #[test]
+    fn fast_speed_tier_renders_as_badge() {
+        // codex tags fast-path models with a `fast` speed tier; the picker
+        // surfaces it as a `[fast]` badge so the user can spot snappy models
+        let menu = SlashMenuState::for_models_with_favourites(
+            vec![ModelCompletion {
+                id: "gpt-5.4-fast".into(),
+                name: "GPT-5.4".into(),
+                provider: "openai-codex".into(),
+                stale: false,
+                description: None,
+                speed_tiers: vec!["fast".into()],
+            }],
+            Vec::new(),
+            false,
+        );
+        let buf = render_menu(&menu, 80, 8);
+        let content = buffer_to_string(&buf);
+        assert!(
+            content.contains("[fast]"),
+            "row must render a [fast] badge for fast-tier models: {content:?}"
         );
     }
 }

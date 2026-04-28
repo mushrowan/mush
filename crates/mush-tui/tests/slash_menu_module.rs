@@ -16,6 +16,8 @@ fn slash_menu_module_exposes_completion_state() {
         name: "Claude Sonnet".into(),
         provider: "anthropic".into(),
         stale: false,
+        description: None,
+        speed_tiers: Vec::new(),
     }];
     let model_menu = SlashMenuState::for_models(models);
     assert!(model_menu.model_mode);
