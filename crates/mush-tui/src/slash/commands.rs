@@ -600,6 +600,7 @@ fn handle_model_switch(
         };
         let level = thinking_prefs
             .get(&tui_config.cwd, id)
+            .or(new_model.default_thinking_level)
             .unwrap_or(ThinkingLevel::Off);
         app.thinking_level = level;
         // record the switch under the canonical cwd so resuming the
