@@ -12,6 +12,11 @@ pub struct SlashCommand {
 pub struct ModelCompletion {
     pub id: String,
     pub name: String,
+    /// the model is in the discovery cache but absent from the latest
+    /// fetch for its provider — likely deprecated. picker renders a
+    /// `[stale]` marker so the user can spot dropped entries.
+    #[allow(dead_code)] // populated by runtime; consumed by the picker widget
+    pub stale: bool,
 }
 
 /// state for the slash command completion menu
