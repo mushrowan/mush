@@ -353,6 +353,7 @@ fn replay_initial_messages(app: &mut App, initial_messages: &[Message]) -> Conve
     }
 
     crate::conversation_display::rebuild_display(app, initial_messages);
+    crate::conversation_display::accumulate_session_stats(app, initial_messages);
     app.status = Some(format!(
         "resumed session ({} messages)",
         initial_messages.len()
