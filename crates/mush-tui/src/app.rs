@@ -713,7 +713,12 @@ impl App {
         let prefix = self.input.text.as_str();
 
         if let Some(rest) = prefix.strip_prefix("/model ") {
-            let model_matches = filter_model_matches(&self.completion.model_completions, rest);
+            // typing `/model ...` opens the picker with the default visibility
+            // filter; users opt into the full catalogue via `/model --all`
+            // submitted as a parsed action, not via the live filter
+            let prepared =
+                crate::slash_menu::prepare_picker_models(&self.completion.model_completions, false);
+            let model_matches = filter_model_matches(&prepared, rest);
             if model_matches.is_empty() {
                 return;
             }
@@ -743,7 +748,11 @@ impl App {
 
             if let Some(rest) = prefix.strip_prefix("/model ") {
                 menu.model_mode = true;
-                menu.model_matches = filter_model_matches(&self.completion.model_completions, rest);
+                let prepared = crate::slash_menu::prepare_picker_models(
+                    &self.completion.model_completions,
+                    menu.show_all,
+                );
+                menu.model_matches = filter_model_matches(&prepared, rest);
                 menu.matches.clear();
                 // a new filter ranking starts from row 0 (the highest score),
                 // so any held selection is reset rather than clamped.
@@ -774,20 +783,35 @@ impl App {
     }
 
     /// open the model picker: a model-mode slash menu seeded with every
-    /// available model, no filter. fired by `/model` with no arg or any
-    /// keybind that wants to pop the picker directly
+    /// available model except entries codex marks as hidden (internal,
+    /// experimental). fired by `/model` with no arg or any keybind that
+    /// wants to pop the picker directly. for the opt-in show-everything
+    /// view, see [`Self::open_model_picker_all`].
     pub fn open_model_picker(&mut self) {
-        let model_matches = self.completion.model_completions.clone();
+        self.open_model_picker_inner(false);
+    }
+
+    /// open the model picker with codex's hidden entries (`internal`,
+    /// `experimental`) included. routed from `/model --all`.
+    pub fn open_model_picker_all(&mut self) {
+        self.open_model_picker_inner(true);
+    }
+
+    fn open_model_picker_inner(&mut self, show_all: bool) {
+        let model_matches =
+            crate::slash_menu::prepare_picker_models(&self.completion.model_completions, show_all);
         if model_matches.is_empty() {
             return;
         }
         self.input.text = "/model ".into();
         self.input.cursor = self.input.text.len();
-        self.completion.slash_menu = Some(SlashMenuState::for_models_with_favourites(
+        let mut state = SlashMenuState::for_models_with_favourites(
             model_matches,
             self.completion.favourite_models.clone(),
             self.completion.favourites_locked,
-        ));
+        );
+        state.show_all = show_all;
+        self.completion.slash_menu = Some(state);
         self.interaction.mode = AppMode::SlashComplete;
     }
 
@@ -2778,6 +2802,8 @@ batch: 1/2 succeeded, 1 failed";
                 stale: false,
                 description: None,
                 speed_tiers: Vec::new(),
+                priority: 0,
+                visibility: None,
             },
             ModelCompletion {
                 id: "gpt-5".into(),
@@ -2786,6 +2812,8 @@ batch: 1/2 succeeded, 1 failed";
                 stale: false,
                 description: None,
                 speed_tiers: Vec::new(),
+                priority: 0,
+                visibility: None,
             },
         ];
         app.open_model_picker();
@@ -2807,5 +2835,73 @@ batch: 1/2 succeeded, 1 failed";
         app.open_model_picker();
         assert!(app.completion.slash_menu.is_none());
         assert_eq!(app.interaction.mode, AppMode::Normal);
+    }
+
+    #[test]
+    fn open_model_picker_hides_internal_codex_entries_by_default() {
+        // codex marks some upstream entries as `internal` or `experimental`;
+        // the default picker only shows production-ready models so users don't
+        // wade through every snapshot
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.completion.model_completions = vec![
+            ModelCompletion {
+                id: "gpt-5.4".into(),
+                name: "GPT-5.4".into(),
+                provider: "openai-codex".into(),
+                stale: false,
+                description: None,
+                speed_tiers: Vec::new(),
+                priority: 0,
+                visibility: Some("default".into()),
+            },
+            ModelCompletion {
+                id: "internal-snapshot".into(),
+                name: "Internal".into(),
+                provider: "openai-codex".into(),
+                stale: false,
+                description: None,
+                speed_tiers: Vec::new(),
+                priority: 99,
+                visibility: Some("internal".into()),
+            },
+        ];
+        app.open_model_picker();
+        let menu = app.completion.slash_menu.as_ref().unwrap();
+        let ids: Vec<&str> = menu.model_matches.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["gpt-5.4"]);
+    }
+
+    #[test]
+    fn open_model_picker_with_show_all_reveals_hidden_codex_entries() {
+        // /model --all routes to open_model_picker_all so internal entries
+        // surface alongside production ones, sorted by priority desc
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.completion.model_completions = vec![
+            ModelCompletion {
+                id: "gpt-5.4".into(),
+                name: "GPT-5.4".into(),
+                provider: "openai-codex".into(),
+                stale: false,
+                description: None,
+                speed_tiers: Vec::new(),
+                priority: 1,
+                visibility: Some("default".into()),
+            },
+            ModelCompletion {
+                id: "internal-snapshot".into(),
+                name: "Internal".into(),
+                provider: "openai-codex".into(),
+                stale: false,
+                description: None,
+                speed_tiers: Vec::new(),
+                priority: 99,
+                visibility: Some("internal".into()),
+            },
+        ];
+        app.open_model_picker_all();
+        let menu = app.completion.slash_menu.as_ref().unwrap();
+        let ids: Vec<&str> = menu.model_matches.iter().map(|m| m.id.as_str()).collect();
+        // priority 99 first, then priority 1
+        assert_eq!(ids, vec!["internal-snapshot", "gpt-5.4"]);
     }
 }

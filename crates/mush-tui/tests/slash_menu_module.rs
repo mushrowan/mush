@@ -18,6 +18,8 @@ fn slash_menu_module_exposes_completion_state() {
         stale: false,
         description: None,
         speed_tiers: Vec::new(),
+        priority: 0,
+        visibility: None,
     }];
     let model_menu = SlashMenuState::for_models(models);
     assert!(model_menu.model_mode);

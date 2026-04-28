@@ -322,6 +322,7 @@ pub(super) async fn handle_idle_terminal_events(
                                 pane_mgr,
                                 crate::slash::SlashAction::Model {
                                     model_id: Some(model_id),
+                                    show_all: false,
                                 },
                                 SlashEnv {
                                     tui_config: deps.tui_config,
