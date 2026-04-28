@@ -128,6 +128,10 @@ pub struct StreamOptions {
     pub cache_retention: Option<CacheRetention>,
     /// anthropic oauth beta flags. `None` falls back to `AnthropicBetas::default()`
     pub anthropic_betas: Option<AnthropicBetas>,
+    /// when true, ignore the model's `supports_adaptive_thinking` flag
+    /// and use fixed-budget thinking. lets users opt out of adaptive
+    /// for cost predictability or A/B comparisons. default: false
+    pub force_budget_thinking: bool,
 }
 
 /// anthropic beta flags enabled via the `anthropic-beta` header on oauth

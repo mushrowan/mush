@@ -311,7 +311,7 @@ struct CacheControl {
     scope: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 #[serde(untagged)]
 enum ThinkingConfig {
     Enabled {
@@ -422,7 +422,7 @@ fn build_request_body(
 
     let thinking = match options.thinking {
         Some(level) if level != ThinkingLevel::Off && model.reasoning => {
-            if model.supports_adaptive_thinking {
+            if model.supports_adaptive_thinking && !options.force_budget_thinking {
                 Some(ThinkingConfig::Adaptive {
                     config_type: "adaptive".into(),
                     display: "summarized".into(),
@@ -1823,6 +1823,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn force_budget_overrides_adaptive_capability() {
+        // even on adaptive-capable models, force_budget_thinking on
+        // StreamOptions should produce ThinkingConfig::Enabled instead
+        // of Adaptive. lets users opt out of adaptive for cost
+        // predictability or A/B comparison
+        let model = Model {
+            id: "claude-opus-4-7".into(),
+            name: "Claude Opus 4.7".into(),
+            reasoning: true,
+            supports_adaptive_thinking: true,
+            ..test_model()
+        };
+        let options = StreamOptions {
+            thinking: Some(ThinkingLevel::High),
+            force_budget_thinking: true,
+            ..Default::default()
+        };
+
+        let body = build_request_body(&model, &None, &[], &[], &options, false);
+        assert!(
+            matches!(body.thinking, Some(ThinkingConfig::Enabled { .. })),
+            "force_budget should produce Enabled, got {:?}",
+            body.thinking
+        );
+    }
     #[test]
     fn opus_4_7_uses_adaptive_thinking_with_xhigh_effort() {
         let model = Model {
