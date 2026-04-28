@@ -38,7 +38,9 @@ use std::time::SystemTime;
 use serde::Deserialize;
 
 use super::{DiscoveredModel, DiscoveryError, DiscoveryReport, ModelDiscovery};
-use crate::types::{Api, ApiKey, InputModality, Model, ModelCost, Provider, TokenCount};
+use crate::types::{
+    Api, ApiKey, InputModality, Model, ModelCost, Provider, ThinkingLevel, TokenCount,
+};
 
 const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const DEFAULT_CONTEXT_WINDOW: u64 = 200_000;
@@ -162,6 +164,22 @@ fn entry_to_model(entry: CodexModelEntry) -> Model {
         .iter()
         .any(|preset| !preset.effort.eq_ignore_ascii_case("none"));
 
+    // map codex's `supported_reasoning_levels` to our enum, dropping the
+    // synthetic `none` entry (the cycler treats an empty supported set
+    // as "no reasoning" rather than walking through Off explicitly) and
+    // any unknown values upstream might add later
+    let supported_thinking_levels = entry
+        .supported_reasoning_levels
+        .iter()
+        .filter(|p| !p.effort.eq_ignore_ascii_case("none"))
+        .filter_map(|p| ThinkingLevel::from_codex_str(&p.effort))
+        .collect();
+
+    let default_thinking_level = entry
+        .default_reasoning_level
+        .as_deref()
+        .and_then(ThinkingLevel::from_codex_str);
+
     let display = entry
         .display_name
         .filter(|s| !s.is_empty())
@@ -185,6 +203,8 @@ fn entry_to_model(entry: CodexModelEntry) -> Model {
         context_window: TokenCount::new(context),
         max_output_tokens: TokenCount::new(max_output),
         supports_adaptive_thinking: false,
+        supported_thinking_levels,
+        default_thinking_level,
     }
 }
 
@@ -234,6 +254,8 @@ struct CodexModelEntry {
     input_modalities: Vec<String>,
     #[serde(default)]
     supported_reasoning_levels: Vec<CodexReasoningPreset>,
+    #[serde(default)]
+    default_reasoning_level: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -388,6 +410,47 @@ mod tests {
         assert_eq!(gpt54.max_output_tokens, TokenCount::new(128_000));
         assert!(gpt54.reasoning);
         assert!(gpt54.input.contains(&InputModality::Image));
+    }
+
+    #[test]
+    fn supported_thinking_levels_propagate_from_codex_extras() {
+        // codex's `supported_reasoning_levels` array drives the cycler's
+        // available choices. order matters (cheap → expensive) so the
+        // cycler walks the upstream-curated progression
+        let models = parse_codex_models(FIXTURE).unwrap();
+        let gpt54 = &models[0].model;
+        assert_eq!(
+            gpt54.supported_thinking_levels,
+            vec![
+                ThinkingLevel::Minimal,
+                ThinkingLevel::Low,
+                ThinkingLevel::Medium,
+                ThinkingLevel::High,
+            ]
+        );
+    }
+
+    #[test]
+    fn default_thinking_level_propagates_from_codex_extras() {
+        // when codex hints at a starting level, mush should respect it
+        // when switching to that model (one-shot, the user's per-cwd
+        // override still wins on subsequent runs)
+        let models = parse_codex_models(FIXTURE).unwrap();
+        let gpt54 = &models[0].model;
+        assert_eq!(gpt54.default_thinking_level, Some(ThinkingLevel::Medium));
+    }
+
+    #[test]
+    fn legacy_codex_entry_with_only_none_level_has_empty_supported_levels() {
+        // a `none`-only entry isn't reasoning-capable; the cycler can't
+        // walk over it so we leave the supported set empty
+        let models = parse_codex_models(FIXTURE).unwrap();
+        let legacy = models
+            .iter()
+            .find(|m| m.model.id.as_str() == "gpt-3.5-legacy")
+            .unwrap();
+        assert!(legacy.model.supported_thinking_levels.is_empty());
+        assert!(legacy.model.default_thinking_level.is_none());
     }
 
     #[test]

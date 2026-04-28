@@ -153,6 +153,8 @@ fn entry_to_model(entry: AnthropicModelEntry) -> Model {
         context_window: TokenCount::new(entry.max_input_tokens.unwrap_or(DEFAULT_CONTEXT_WINDOW)),
         max_output_tokens: TokenCount::new(entry.max_tokens.unwrap_or(DEFAULT_MAX_OUTPUT)),
         supports_adaptive_thinking,
+        supported_thinking_levels: Vec::new(),
+        default_thinking_level: None,
     }
 }
 
