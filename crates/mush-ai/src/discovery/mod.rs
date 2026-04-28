@@ -8,6 +8,7 @@
 //! pure-function parsers (`parse_*`) so we don't need a live network.
 
 pub mod anthropic;
+pub mod openrouter;
 
 use std::time::SystemTime;
 
