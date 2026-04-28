@@ -147,6 +147,19 @@ impl DiscoveryCache {
         provider.models.retain(|e| e.model.id.as_str() != model_id);
         provider.models.len() != len_before
     }
+
+    /// remove every stale entry from every provider. returns how many
+    /// entries were dropped.
+    pub fn remove_all_stale(&mut self) -> usize {
+        let mut removed = 0;
+        for (_, provider) in self.providers.iter_mut() {
+            let cutoff = provider.fetched_at;
+            let before = provider.models.len();
+            provider.models.retain(|e| e.last_seen_at >= cutoff);
+            removed += before - provider.models.len();
+        }
+        removed
+    }
 }
 
 /// path to the cache file inside the mush data dir.
@@ -306,6 +319,76 @@ mod tests {
         let pc = cache.providers.get("anthropic").unwrap();
         assert_eq!(pc.models.len(), 1);
         assert_eq!(pc.models[0].model.id.as_str(), "b");
+    }
+
+    #[test]
+    fn remove_all_stale_keeps_fresh_drops_stale_returns_count() {
+        let t1 = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        let t2 = SystemTime::UNIX_EPOCH + Duration::from_secs(200);
+
+        let mut cache = DiscoveryCache::default();
+        cache.apply_report(DiscoveryReport {
+            provider: Provider::Anthropic,
+            fetched_at: t1,
+            models: vec![
+                make_model("a", "A"),
+                make_model("b", "B"),
+                make_model("c", "C"),
+            ],
+        });
+        // second fetch only returns A; B and C are stale
+        cache.apply_report(DiscoveryReport {
+            provider: Provider::Anthropic,
+            fetched_at: t2,
+            models: vec![make_model("a", "A")],
+        });
+
+        let removed = cache.remove_all_stale();
+        assert_eq!(removed, 2);
+
+        let pc = cache.providers.get("anthropic").unwrap();
+        assert_eq!(pc.models.len(), 1);
+        assert_eq!(pc.models[0].model.id.as_str(), "a");
+    }
+
+    #[test]
+    fn remove_all_stale_returns_zero_when_nothing_stale() {
+        let t = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        let mut cache = DiscoveryCache::default();
+        cache.apply_report(DiscoveryReport {
+            provider: Provider::Anthropic,
+            fetched_at: t,
+            models: vec![make_model("a", "A")],
+        });
+        assert_eq!(cache.remove_all_stale(), 0);
+    }
+
+    #[test]
+    fn remove_all_stale_works_across_providers() {
+        let t1 = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        let t2 = SystemTime::UNIX_EPOCH + Duration::from_secs(200);
+        let mut cache = DiscoveryCache::default();
+        cache.apply_report(DiscoveryReport {
+            provider: Provider::Anthropic,
+            fetched_at: t1,
+            models: vec![make_model("a-old", "A")],
+        });
+        cache.apply_report(DiscoveryReport {
+            provider: Provider::Anthropic,
+            fetched_at: t2,
+            models: vec![],
+        });
+        cache.apply_report(DiscoveryReport {
+            provider: Provider::OpenRouter,
+            fetched_at: t1,
+            models: vec![make_model("b-old", "B")],
+        });
+        cache.apply_report(DiscoveryReport {
+            provider: Provider::OpenRouter,
+            fetched_at: t2,
+            models: vec![],
+        });
+        assert_eq!(cache.remove_all_stale(), 2);
     }
 
     #[test]

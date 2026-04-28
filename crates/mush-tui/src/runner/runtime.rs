@@ -293,6 +293,7 @@ fn build_initial_app(tui_config: &TuiConfig, cwd: &Path) -> App {
         app.completion.model_completions.push(ModelCompletion {
             id: entry.model.id.to_string(),
             name: entry.model.name.clone(),
+            provider: entry.model.provider.to_string(),
             stale,
         });
     }

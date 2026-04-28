@@ -12,11 +12,25 @@ pub struct SlashCommand {
 pub struct ModelCompletion {
     pub id: String,
     pub name: String,
+    /// provider key (`Provider::to_string()` of the source) — used by the
+    /// picker's delete-stale flow to tell `DiscoveryCache::remove_model`
+    /// which provider's sub-cache to mutate
+    pub provider: String,
     /// the model is in the discovery cache but absent from the latest
     /// fetch for its provider — likely deprecated. picker renders a
     /// `[stale]` marker so the user can spot dropped entries.
-    #[allow(dead_code)] // populated by runtime; consumed by the picker widget
     pub stale: bool,
+}
+
+/// pending delete confirmation in the model picker. armed by ctrl+d (one
+/// row) or ctrl+shift+d (every stale row), confirmed with `y`, cancelled
+/// with `n`/`esc`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeleteConfirm {
+    /// delete one specific model from a single provider sub-cache
+    Single { provider: String, id: String },
+    /// delete every stale entry across every provider
+    AllStale,
 }
 
 /// state for the slash command completion menu
@@ -39,6 +53,10 @@ pub struct SlashMenuState {
     /// toast shown at the bottom of the popup (e.g. locked notice). cleared
     /// on next keystroke
     pub toast: Option<String>,
+    /// active delete-stale confirmation. when `Some`, the picker is
+    /// rendering the toast prompt and `y`/`n`/`esc` keys drive the flow
+    /// instead of normal navigation
+    pub confirm_delete: Option<DeleteConfirm>,
 }
 
 impl SlashMenuState {
@@ -52,6 +70,7 @@ impl SlashMenuState {
             favourite_models: Vec::new(),
             favourites_locked: false,
             toast: None,
+            confirm_delete: None,
         }
     }
 
@@ -77,6 +96,7 @@ impl SlashMenuState {
             favourite_models,
             favourites_locked,
             toast: None,
+            confirm_delete: None,
         }
     }
 
@@ -84,6 +104,134 @@ impl SlashMenuState {
     #[must_use]
     pub fn is_favourite(&self, model_id: &str) -> bool {
         self.favourite_models.iter().any(|f| f == model_id)
+    }
+
+    /// arm a single-model delete confirmation. returns false (no-op) when
+    /// the supplied row isn't actually stale, so callers can blindly try.
+    pub fn arm_delete_selected(&mut self) -> bool {
+        if !self.model_mode {
+            return false;
+        }
+        let Some(model) = self.model_matches.get(self.selected) else {
+            return false;
+        };
+        if !model.stale {
+            return false;
+        }
+        let display = format!("{} ({})", model.id, model.provider);
+        self.confirm_delete = Some(DeleteConfirm::Single {
+            provider: model.provider.clone(),
+            id: model.id.clone(),
+        });
+        self.toast = Some(format!("delete {display}? y/n"));
+        true
+    }
+
+    /// arm a delete-all-stale confirmation. returns the count of stale
+    /// rows the prompt will affect, or zero when there's nothing to
+    /// delete (in which case no prompt is shown).
+    pub fn arm_delete_all_stale(&mut self) -> usize {
+        if !self.model_mode {
+            return 0;
+        }
+        let stale_count = self.model_matches.iter().filter(|m| m.stale).count();
+        if stale_count == 0 {
+            self.toast = Some("no stale models to delete".into());
+            return 0;
+        }
+        self.confirm_delete = Some(DeleteConfirm::AllStale);
+        self.toast = Some(format!("delete all {stale_count} stale model(s)? y/n"));
+        stale_count
+    }
+
+    /// clear any pending delete prompt and its toast.
+    pub fn cancel_delete(&mut self) {
+        self.confirm_delete = None;
+        self.toast = None;
+    }
+}
+
+#[cfg(test)]
+mod confirm_delete_tests {
+    use super::*;
+
+    fn fresh(id: &str, provider: &str) -> ModelCompletion {
+        ModelCompletion {
+            id: id.into(),
+            name: id.into(),
+            provider: provider.into(),
+            stale: false,
+        }
+    }
+
+    fn stale(id: &str, provider: &str) -> ModelCompletion {
+        ModelCompletion {
+            id: id.into(),
+            name: id.into(),
+            provider: provider.into(),
+            stale: true,
+        }
+    }
+
+    #[test]
+    fn arm_delete_selected_succeeds_only_for_stale_rows() {
+        let mut menu =
+            SlashMenuState::for_models(vec![fresh("a", "anthropic"), stale("b", "anthropic")]);
+        // selected is 0 (fresh) → no-op
+        assert!(!menu.arm_delete_selected());
+        assert!(menu.confirm_delete.is_none());
+
+        // bump to the stale row
+        menu.selected = 1;
+        assert!(menu.arm_delete_selected());
+        assert_eq!(
+            menu.confirm_delete,
+            Some(DeleteConfirm::Single {
+                provider: "anthropic".into(),
+                id: "b".into()
+            })
+        );
+        assert!(menu.toast.as_deref().unwrap().contains("delete b"));
+    }
+
+    #[test]
+    fn arm_delete_all_stale_returns_count_and_arms() {
+        let mut menu = SlashMenuState::for_models(vec![
+            fresh("a", "anthropic"),
+            stale("b", "anthropic"),
+            stale("c", "openrouter"),
+        ]);
+        let n = menu.arm_delete_all_stale();
+        assert_eq!(n, 2);
+        assert_eq!(menu.confirm_delete, Some(DeleteConfirm::AllStale));
+        assert!(menu.toast.as_deref().unwrap().contains("delete all 2"));
+    }
+
+    #[test]
+    fn arm_delete_all_stale_when_none_returns_zero_and_toasts() {
+        let mut menu =
+            SlashMenuState::for_models(vec![fresh("a", "anthropic"), fresh("b", "anthropic")]);
+        let n = menu.arm_delete_all_stale();
+        assert_eq!(n, 0);
+        assert!(menu.confirm_delete.is_none());
+        assert!(menu.toast.as_deref().unwrap().contains("no stale"));
+    }
+
+    #[test]
+    fn cancel_delete_clears_state() {
+        let mut menu = SlashMenuState::for_models(vec![stale("b", "anthropic")]);
+        menu.arm_delete_selected();
+        menu.cancel_delete();
+        assert!(menu.confirm_delete.is_none());
+        assert!(menu.toast.is_none());
+    }
+
+    #[test]
+    fn arm_methods_no_op_when_not_in_model_mode() {
+        let mut menu = SlashMenuState::for_commands(Vec::new());
+        assert!(!menu.arm_delete_selected());
+        assert_eq!(menu.arm_delete_all_stale(), 0);
+        assert!(menu.confirm_delete.is_none());
     }
 }
 
