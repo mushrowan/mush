@@ -8,6 +8,7 @@
 //! pure-function parsers (`parse_*`) so we don't need a live network.
 
 pub mod anthropic;
+pub mod openai;
 pub mod openrouter;
 
 use std::time::SystemTime;
@@ -52,4 +53,29 @@ pub trait ModelDiscovery: Send + Sync {
     fn fetch(
         &self,
     ) -> impl std::future::Future<Output = Result<DiscoveryReport, DiscoveryError>> + Send;
+}
+
+/// shared `send + classify + read body` step used by every provider's `fetch`.
+///
+/// returns the response body text on 2xx, an [`DiscoveryError::Auth`] on
+/// 401/403, and [`DiscoveryError::Upstream`] for anything else non-2xx.
+pub(crate) async fn execute_request(
+    request: reqwest::RequestBuilder,
+) -> Result<String, DiscoveryError> {
+    let resp = request.send().await?;
+    let status = resp.status();
+    let body = resp.text().await?;
+    if status.is_success() {
+        return Ok(body);
+    }
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return Err(DiscoveryError::Auth {
+            status: status.as_u16(),
+            body,
+        });
+    }
+    Err(DiscoveryError::Upstream {
+        status: status.as_u16(),
+        body,
+    })
 }
