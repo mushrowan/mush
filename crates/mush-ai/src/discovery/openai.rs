@@ -25,7 +25,7 @@ use std::time::SystemTime;
 
 use serde::Deserialize;
 
-use super::{DiscoveryError, DiscoveryReport, ModelDiscovery};
+use super::{DiscoveredModel, DiscoveryError, DiscoveryReport, ModelDiscovery};
 use crate::types::{Api, ApiKey, InputModality, Model, ModelCost, Provider, TokenCount};
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
@@ -78,18 +78,30 @@ impl ModelDiscovery for OpenAiDiscovery {
     }
 }
 
-/// parse the raw response body into [`Model`] entries, filtering to
+/// parse the raw response body into [`DiscoveredModel`] entries, filtering to
 /// chat-capable models. embeddings, image, audio, and moderation models
 /// are dropped because they're not usable from a coding-assistant TUI.
-pub fn parse_openai_models(body: &str) -> Result<Vec<Model>, DiscoveryError> {
+pub fn parse_openai_models(body: &str) -> Result<Vec<DiscoveredModel>, DiscoveryError> {
     let response: OpenAiModelsResponse =
         serde_json::from_str(body).map_err(|e| DiscoveryError::Malformed(e.to_string()))?;
-    Ok(response
+    response
         .data
         .into_iter()
-        .filter(|e| is_chat_capable(&e.id))
-        .map(entry_to_model)
-        .collect())
+        .filter(|raw| {
+            raw.get("id")
+                .and_then(|v| v.as_str())
+                .map(is_chat_capable)
+                .unwrap_or(false)
+        })
+        .map(|raw| {
+            let entry: OpenAiModelEntry = serde_json::from_value(raw.clone())
+                .map_err(|e| DiscoveryError::Malformed(e.to_string()))?;
+            Ok(DiscoveredModel {
+                model: entry_to_model(entry),
+                raw: Some(raw),
+            })
+        })
+        .collect()
 }
 
 /// chat-capable model id heuristic.
@@ -143,7 +155,7 @@ fn entry_to_model(entry: OpenAiModelEntry) -> Model {
 
 #[derive(Deserialize, Debug)]
 struct OpenAiModelsResponse {
-    data: Vec<OpenAiModelEntry>,
+    data: Vec<serde_json::Value>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -178,7 +190,7 @@ mod tests {
     #[test]
     fn filters_to_chat_capable_models() {
         let models = parse_openai_models(FIXTURE).unwrap();
-        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        let ids: Vec<&str> = models.iter().map(|m| m.model.id.as_str()).collect();
         assert!(ids.contains(&"gpt-5"));
         assert!(ids.contains(&"gpt-5-mini"));
         assert!(ids.contains(&"gpt-4o"));
@@ -190,7 +202,7 @@ mod tests {
     #[test]
     fn excludes_embeddings_and_audio_and_image_models() {
         let models = parse_openai_models(FIXTURE).unwrap();
-        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        let ids: Vec<&str> = models.iter().map(|m| m.model.id.as_str()).collect();
         assert!(!ids.contains(&"text-embedding-3-large"));
         assert!(!ids.contains(&"dall-e-3"));
         assert!(!ids.contains(&"whisper-1"));
@@ -202,8 +214,10 @@ mod tests {
     #[test]
     fn o_series_and_codex_models_marked_reasoning() {
         let models = parse_openai_models(FIXTURE).unwrap();
-        let by_id: std::collections::HashMap<_, _> =
-            models.iter().map(|m| (m.id.as_str(), m)).collect();
+        let by_id: std::collections::HashMap<_, _> = models
+            .iter()
+            .map(|m| (m.model.id.as_str(), &m.model))
+            .collect();
         assert!(by_id["o3"].reasoning);
         assert!(by_id["o4-mini"].reasoning);
         assert!(by_id["codex-mini-latest"].reasoning);
@@ -215,8 +229,10 @@ mod tests {
         // which knows gpt-5 reasons. discovery on its own can't tell from
         // an id alone whether plain `gpt-5` reasons - so we stay conservative
         let models = parse_openai_models(FIXTURE).unwrap();
-        let by_id: std::collections::HashMap<_, _> =
-            models.iter().map(|m| (m.id.as_str(), m)).collect();
+        let by_id: std::collections::HashMap<_, _> = models
+            .iter()
+            .map(|m| (m.model.id.as_str(), &m.model))
+            .collect();
         assert!(!by_id["gpt-5"].reasoning);
         assert!(!by_id["gpt-4o"].reasoning);
     }
@@ -231,8 +247,20 @@ mod tests {
     fn provider_id_is_custom_openai() {
         let models = parse_openai_models(FIXTURE).unwrap();
         for m in &models {
-            assert_eq!(m.provider, Provider::Custom("openai".into()));
-            assert_eq!(m.api, Api::OpenaiResponses);
+            assert_eq!(m.model.provider, Provider::Custom("openai".into()));
+            assert_eq!(m.model.api, Api::OpenaiResponses);
         }
+    }
+
+    #[test]
+    fn parser_preserves_raw_entry_json() {
+        let models = parse_openai_models(FIXTURE).unwrap();
+        let gpt5 = models
+            .iter()
+            .find(|m| m.model.id.as_str() == "gpt-5")
+            .unwrap();
+        let raw = gpt5.raw.as_ref().expect("raw must be populated");
+        assert_eq!(raw["id"], "gpt-5");
+        assert_eq!(raw["owned_by"], "openai");
     }
 }

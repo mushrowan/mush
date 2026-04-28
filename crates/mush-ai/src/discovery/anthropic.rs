@@ -36,7 +36,7 @@ use std::time::SystemTime;
 
 use serde::Deserialize;
 
-use super::{DiscoveryError, DiscoveryReport, ModelDiscovery};
+use super::{DiscoveredModel, DiscoveryError, DiscoveryReport, ModelDiscovery};
 use crate::types::{Api, ApiKey, InputModality, Model, ModelCost, Provider, TokenCount};
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -96,13 +96,26 @@ impl ModelDiscovery for AnthropicDiscovery {
     }
 }
 
-/// parse the raw response body into [`Model`] entries.
+/// parse the raw response body into [`DiscoveredModel`] entries.
 ///
 /// pure function, no I/O — the entry point used by tests and by [`AnthropicDiscovery::fetch`].
-pub fn parse_anthropic_models(body: &str) -> Result<Vec<Model>, DiscoveryError> {
+/// each entry's verbatim JSON is preserved on `DiscoveredModel::raw` so future code can
+/// access fields we don't promote to [`Model`] (e.g. `capabilities.pdf_input`).
+pub fn parse_anthropic_models(body: &str) -> Result<Vec<DiscoveredModel>, DiscoveryError> {
     let response: AnthropicModelsResponse =
         serde_json::from_str(body).map_err(|e| DiscoveryError::Malformed(e.to_string()))?;
-    Ok(response.data.into_iter().map(entry_to_model).collect())
+    response
+        .data
+        .into_iter()
+        .map(|raw| {
+            let entry: AnthropicModelEntry = serde_json::from_value(raw.clone())
+                .map_err(|e| DiscoveryError::Malformed(e.to_string()))?;
+            Ok(DiscoveredModel {
+                model: entry_to_model(entry),
+                raw: Some(raw),
+            })
+        })
+        .collect()
 }
 
 fn entry_to_model(entry: AnthropicModelEntry) -> Model {
@@ -145,7 +158,7 @@ fn entry_to_model(entry: AnthropicModelEntry) -> Model {
 
 #[derive(Deserialize, Debug)]
 struct AnthropicModelsResponse {
-    data: Vec<AnthropicModelEntry>,
+    data: Vec<serde_json::Value>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -234,7 +247,7 @@ mod tests {
         let models = parse_anthropic_models(FULL_FIXTURE).unwrap();
         assert_eq!(models.len(), 2);
 
-        let opus = &models[0];
+        let opus = &models[0].model;
         assert_eq!(opus.id.as_str(), "claude-opus-4-7");
         assert_eq!(opus.name, "Claude Opus 4.7");
         assert_eq!(opus.api, Api::AnthropicMessages);
@@ -251,9 +264,9 @@ mod tests {
         let models = parse_anthropic_models(FULL_FIXTURE).unwrap();
         let haiku = models
             .iter()
-            .find(|m| m.id.as_str() == "claude-haiku-old")
+            .find(|m| m.model.id.as_str() == "claude-haiku-old")
             .unwrap();
-        assert_eq!(haiku.name, "claude-haiku-old");
+        assert_eq!(haiku.model.name, "claude-haiku-old");
     }
 
     #[test]
@@ -261,16 +274,19 @@ mod tests {
         let models = parse_anthropic_models(FULL_FIXTURE).unwrap();
         let haiku = models
             .iter()
-            .find(|m| m.id.as_str() == "claude-haiku-old")
+            .find(|m| m.model.id.as_str() == "claude-haiku-old")
             .unwrap();
-        assert!(!haiku.reasoning);
-        assert!(!haiku.supports_adaptive_thinking);
-        assert_eq!(haiku.input, vec![InputModality::Text]);
+        assert!(!haiku.model.reasoning);
+        assert!(!haiku.model.supports_adaptive_thinking);
+        assert_eq!(haiku.model.input, vec![InputModality::Text]);
         assert_eq!(
-            haiku.context_window,
+            haiku.model.context_window,
             TokenCount::new(DEFAULT_CONTEXT_WINDOW)
         );
-        assert_eq!(haiku.max_output_tokens, TokenCount::new(DEFAULT_MAX_OUTPUT));
+        assert_eq!(
+            haiku.model.max_output_tokens,
+            TokenCount::new(DEFAULT_MAX_OUTPUT)
+        );
     }
 
     #[test]
@@ -278,10 +294,10 @@ mod tests {
         // anthropic doesn't return pricing in /v1/models; static merge fills it later
         let models = parse_anthropic_models(FULL_FIXTURE).unwrap();
         for m in &models {
-            assert_eq!(m.cost.input, 0.0);
-            assert_eq!(m.cost.output, 0.0);
-            assert_eq!(m.cost.cache_read, 0.0);
-            assert_eq!(m.cost.cache_write, 0.0);
+            assert_eq!(m.model.cost.input, 0.0);
+            assert_eq!(m.model.cost.output, 0.0);
+            assert_eq!(m.model.cost.cache_read, 0.0);
+            assert_eq!(m.model.cost.cache_write, 0.0);
         }
     }
 
@@ -304,7 +320,7 @@ mod tests {
         }"#;
         let models = parse_anthropic_models(body).unwrap();
         assert_eq!(models.len(), 1);
-        assert_eq!(models[0].id.as_str(), "claude-test");
+        assert_eq!(models[0].model.id.as_str(), "claude-test");
     }
 
     #[test]
@@ -322,7 +338,31 @@ mod tests {
           "has_more": false
         }"#;
         let models = parse_anthropic_models(body).unwrap();
-        assert!(models[0].reasoning);
-        assert!(!models[0].supports_adaptive_thinking);
+        assert!(models[0].model.reasoning);
+        assert!(!models[0].model.supports_adaptive_thinking);
+    }
+
+    #[test]
+    fn parser_preserves_raw_entry_json() {
+        // option C: every discovered model carries the raw upstream JSON
+        // so future code can extract richer per-provider fields without
+        // a cache migration. anthropic's `capabilities.pdf_input` is the
+        // canary case here - we don't promote it to Model, but it's
+        // round-tripped intact.
+        let body = r#"{
+          "data": [{
+            "id": "claude-test",
+            "display_name": "Test",
+            "capabilities": {
+              "pdf_input": {"supported": true},
+              "thinking": {"types": {"adaptive": {"supported": true}}}
+            }
+          }],
+          "has_more": false
+        }"#;
+        let models = parse_anthropic_models(body).unwrap();
+        let raw = models[0].raw.as_ref().expect("raw must be populated");
+        assert_eq!(raw["id"], "claude-test");
+        assert_eq!(raw["capabilities"]["pdf_input"]["supported"], true);
     }
 }

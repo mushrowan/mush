@@ -38,7 +38,7 @@ use std::time::SystemTime;
 
 use serde::Deserialize;
 
-use super::{DiscoveryError, DiscoveryReport, ModelDiscovery};
+use super::{DiscoveredModel, DiscoveryError, DiscoveryReport, ModelDiscovery};
 use crate::types::{Api, ApiKey, InputModality, Model, ModelCost, Provider, TokenCount};
 
 const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
@@ -97,11 +97,22 @@ impl ModelDiscovery for OpenRouterDiscovery {
     }
 }
 
-/// parse the raw response body into [`Model`] entries.
-pub fn parse_openrouter_models(body: &str) -> Result<Vec<Model>, DiscoveryError> {
+/// parse the raw response body into [`DiscoveredModel`] entries.
+pub fn parse_openrouter_models(body: &str) -> Result<Vec<DiscoveredModel>, DiscoveryError> {
     let response: OpenRouterModelsResponse =
         serde_json::from_str(body).map_err(|e| DiscoveryError::Malformed(e.to_string()))?;
-    Ok(response.data.into_iter().map(entry_to_model).collect())
+    response
+        .data
+        .into_iter()
+        .map(|raw| {
+            let entry: OpenRouterModelEntry = serde_json::from_value(raw.clone())
+                .map_err(|e| DiscoveryError::Malformed(e.to_string()))?;
+            Ok(DiscoveredModel {
+                model: entry_to_model(entry),
+                raw: Some(raw),
+            })
+        })
+        .collect()
 }
 
 fn entry_to_model(entry: OpenRouterModelEntry) -> Model {
@@ -171,7 +182,7 @@ fn pricing_to_cost(pricing: OpenRouterPricing) -> ModelCost {
 
 #[derive(Deserialize, Debug)]
 struct OpenRouterModelsResponse {
-    data: Vec<OpenRouterModelEntry>,
+    data: Vec<serde_json::Value>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -264,7 +275,7 @@ mod tests {
         let models = parse_openrouter_models(FIXTURE).unwrap();
         assert_eq!(models.len(), 2);
 
-        let sonnet = &models[0];
+        let sonnet = &models[0].model;
         assert_eq!(sonnet.id.as_str(), "anthropic/claude-sonnet-4");
         assert_eq!(sonnet.name, "Anthropic: Claude Sonnet 4");
         assert_eq!(sonnet.api, Api::OpenaiCompletions);
@@ -278,7 +289,7 @@ mod tests {
     #[test]
     fn pricing_converted_to_per_million_tokens() {
         let models = parse_openrouter_models(FIXTURE).unwrap();
-        let sonnet = &models[0];
+        let sonnet = &models[0].model;
         // 0.000003 dollars-per-token = 3.0 dollars-per-million
         assert!((sonnet.cost.input - 3.0).abs() < 0.001);
         assert!((sonnet.cost.output - 15.0).abs() < 0.001);
@@ -291,10 +302,10 @@ mod tests {
         let models = parse_openrouter_models(FIXTURE).unwrap();
         let auto = models
             .iter()
-            .find(|m| m.id.as_str() == "openrouter/auto")
+            .find(|m| m.model.id.as_str() == "openrouter/auto")
             .unwrap();
-        assert_eq!(auto.cost.input, 0.0);
-        assert_eq!(auto.cost.output, 0.0);
+        assert_eq!(auto.model.cost.input, 0.0);
+        assert_eq!(auto.model.cost.output, 0.0);
     }
 
     #[test]
@@ -302,9 +313,9 @@ mod tests {
         let models = parse_openrouter_models(FIXTURE).unwrap();
         let auto = models
             .iter()
-            .find(|m| m.id.as_str() == "openrouter/auto")
+            .find(|m| m.model.id.as_str() == "openrouter/auto")
             .unwrap();
-        assert_eq!(auto.name, "openrouter/auto");
+        assert_eq!(auto.model.name, "openrouter/auto");
     }
 
     #[test]
@@ -312,21 +323,21 @@ mod tests {
         let models = parse_openrouter_models(FIXTURE).unwrap();
         let auto = models
             .iter()
-            .find(|m| m.id.as_str() == "openrouter/auto")
+            .find(|m| m.model.id.as_str() == "openrouter/auto")
             .unwrap();
-        assert!(!auto.input.contains(&InputModality::Image));
+        assert!(!auto.model.input.contains(&InputModality::Image));
     }
 
     #[test]
     fn reasoning_supported_parameter_marks_model_reasoning() {
         let models = parse_openrouter_models(FIXTURE).unwrap();
-        let sonnet = &models[0];
+        let sonnet = &models[0].model;
         let auto = models
             .iter()
-            .find(|m| m.id.as_str() == "openrouter/auto")
+            .find(|m| m.model.id.as_str() == "openrouter/auto")
             .unwrap();
         assert!(sonnet.reasoning);
-        assert!(!auto.reasoning);
+        assert!(!auto.model.reasoning);
     }
 
     #[test]
@@ -338,8 +349,18 @@ mod tests {
           }]
         }"#;
         let models = parse_openrouter_models(body).unwrap();
-        assert_eq!(models[0].cost.input, 0.0);
-        assert!((models[0].cost.output - 1_000_000.0).abs() < 0.001);
+        assert_eq!(models[0].model.cost.input, 0.0);
+        assert!((models[0].model.cost.output - 1_000_000.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn parser_preserves_raw_entry_json() {
+        // pricing is in the raw blob too; consumers can re-derive
+        // anything they want without going back to the upstream
+        let models = parse_openrouter_models(FIXTURE).unwrap();
+        let raw = models[0].raw.as_ref().expect("raw must be populated");
+        assert_eq!(raw["id"], "anthropic/claude-sonnet-4");
+        assert_eq!(raw["pricing"]["prompt"], "0.000003");
     }
 
     #[test]

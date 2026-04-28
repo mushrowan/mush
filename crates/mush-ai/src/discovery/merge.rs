@@ -186,7 +186,7 @@ mod tests {
         cache.apply_report(DiscoveryReport {
             provider: Provider::Anthropic,
             fetched_at: SystemTime::UNIX_EPOCH + Duration::from_secs(100),
-            models: vec![discovered_a],
+            models: vec![discovered_a.into()],
         });
 
         let merged = merge(vec![static_a], &cache);
@@ -207,7 +207,7 @@ mod tests {
         cache.apply_report(DiscoveryReport {
             provider: Provider::Anthropic,
             fetched_at: SystemTime::UNIX_EPOCH,
-            models: vec![discovered_a],
+            models: vec![discovered_a.into()],
         });
 
         let merged = merge(vec![static_a], &cache);
@@ -241,7 +241,7 @@ mod tests {
         cache.apply_report(DiscoveryReport {
             provider: Provider::Anthropic,
             fetched_at: SystemTime::UNIX_EPOCH,
-            models: vec![discovered_a],
+            models: vec![discovered_a.into()],
         });
 
         let merged = merge(vec![static_a], &cache);
@@ -257,7 +257,7 @@ mod tests {
             c.apply_report(DiscoveryReport {
                 provider: Provider::Anthropic,
                 fetched_at: SystemTime::UNIX_EPOCH,
-                models: vec![anthropic_model("brand-new", "Brand New", 0.0)],
+                models: vec![anthropic_model("brand-new", "Brand New", 0.0).into()],
             });
             c
         };
@@ -278,14 +278,14 @@ mod tests {
             provider: Provider::Anthropic,
             fetched_at: t1,
             models: vec![
-                anthropic_model("a", "A", 0.0),
-                anthropic_model("b", "B", 0.0),
+                anthropic_model("a", "A", 0.0).into(),
+                anthropic_model("b", "B", 0.0).into(),
             ],
         });
         cache.apply_report(DiscoveryReport {
             provider: Provider::Anthropic,
             fetched_at: t2,
-            models: vec![anthropic_model("a", "A", 0.0)],
+            models: vec![anthropic_model("a", "A", 0.0).into()],
         });
 
         let merged = merge(vec![], &cache);
@@ -308,7 +308,7 @@ mod tests {
         cache.apply_report(DiscoveryReport {
             provider: Provider::Anthropic,
             fetched_at: SystemTime::UNIX_EPOCH,
-            models: vec![anthropic_model("a", "A", 0.0)],
+            models: vec![anthropic_model("a", "A", 0.0).into()],
         });
 
         let merged = merge(vec![groq], &cache);
