@@ -29,9 +29,6 @@ pub enum HintMode {
     None,
 }
 
-/// callback to persist last selected model id
-pub type LastModelSaver = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
-
 /// callback to persist the imperative favourites list. only called when
 /// favourites aren't locked by config.toml
 pub type FavouriteModelsSaver = std::sync::Arc<dyn Fn(&[String]) + Send + Sync>;
@@ -106,8 +103,11 @@ pub struct TuiConfig {
     pub thinking_prefs: super::ThinkingPrefs,
     /// callback to save thinking prefs when they change
     pub save_thinking_prefs: Option<super::ThinkingPrefsSaver>,
-    /// callback to persist last selected model id
-    pub save_last_model: Option<LastModelSaver>,
+    /// per-directory record of the most recently used model. drives
+    /// the "resume the same model in this project next time" flow
+    pub last_models: super::LastModels,
+    /// callback to save last-models map when it changes
+    pub save_last_models: Option<super::LastModelsSaver>,
     /// callback to auto-save session after each agent turn
     pub save_session: Option<SessionSaver>,
     /// callback to update session title (called with LLM-generated title)

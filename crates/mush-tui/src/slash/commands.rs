@@ -596,8 +596,12 @@ fn handle_model_switch(
             .get(&tui_config.cwd, id)
             .unwrap_or(ThinkingLevel::Off);
         app.thinking_level = level;
-        if let Some(ref save_last_model) = tui_config.save_last_model {
-            save_last_model(id);
+        // record the switch under the canonical cwd so resuming the
+        // same project picks up where we left off
+        let cwd = tui_config.cwd.clone();
+        tui_config.last_models.set(cwd, id.to_string());
+        if let Some(ref save_last_models) = tui_config.save_last_models {
+            save_last_models(&tui_config.last_models);
         }
         let thinking_str = format!("{level:?}").to_lowercase();
         app.push_system_message(format!("switched to {id} (thinking: {thinking_str})"));

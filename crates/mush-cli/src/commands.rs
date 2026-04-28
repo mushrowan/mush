@@ -158,7 +158,8 @@ pub fn status(terminal_overrides: mush_tui::TerminalPolicyOverrides) -> Result<(
     }
 
     // model
-    let model_id = default_model_id(&cfg);
+    let cwd = mush_tui::canonical_dir(&std::env::current_dir().unwrap_or_default());
+    let model_id = default_model_id(&cfg, &cwd);
     println!("  model:  {model_id}");
 
     // thinking

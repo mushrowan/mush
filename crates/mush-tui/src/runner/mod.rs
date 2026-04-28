@@ -10,6 +10,7 @@ mod commands;
 mod config;
 mod diag;
 mod input;
+mod last_model;
 mod looping;
 mod panes;
 mod render;
@@ -23,10 +24,11 @@ use mush_ai::registry::ApiRegistry;
 
 use self::caching_backend::CachingBackend;
 pub use self::config::{
-    HintMode, LastModelSaver, PaneSnapshot, PromptEnricher, ReloadCallback, ReloadedContext,
-    SessionSaver, SessionSnapshot, TitleUpdater, TuiConfig,
+    HintMode, PaneSnapshot, PromptEnricher, ReloadCallback, ReloadedContext, SessionSaver,
+    SessionSnapshot, TitleUpdater, TuiConfig,
 };
 use self::input::LoopAction;
+pub use self::last_model::{LastModels, LastModelsSaver};
 use self::looping::run_loop_iteration;
 use self::render::draw_panes;
 use self::runtime::RunnerRuntime;

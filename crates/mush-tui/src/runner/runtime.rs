@@ -314,6 +314,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use crate::runner::LastModels;
     use mush_ai::types::{
         Api, AssistantContentPart, AssistantMessage, Provider, StopReason, StreamOptions,
         TextContent, Timestamp, TokenCount, Usage, UserContent, UserMessage,
@@ -345,7 +346,8 @@ mod tests {
             provider_api_keys: HashMap::new(),
             thinking_prefs: ThinkingPrefs::default(),
             save_thinking_prefs: None,
-            save_last_model: None,
+            last_models: LastModels::default(),
+            save_last_models: None,
             save_session: None,
             update_title: None,
             confirm_tools: false,

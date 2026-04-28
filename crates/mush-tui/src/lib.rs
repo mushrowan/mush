@@ -40,9 +40,9 @@ pub use app_state::StatusBarConfig;
 pub use file_tracker::IsolationMode;
 pub use keybinds::{Action as KeybindAction, KeyMap, KeysConfig};
 pub use runner::{
-    HintMode, LastModelSaver, PaneSnapshot, PromptEnricher, ReloadCallback, ReloadedContext,
-    SessionSaver, SessionSnapshot, ThinkingPrefs, ThinkingPrefsSaver, TuiConfig, canonical_dir,
-    run_tui,
+    HintMode, LastModels, LastModelsSaver, PaneSnapshot, PromptEnricher, ReloadCallback,
+    ReloadedContext, SessionSaver, SessionSnapshot, ThinkingPrefs, ThinkingPrefsSaver, TuiConfig,
+    canonical_dir, run_tui,
 };
 pub use terminal_policy::{
     IMAGE_PROBE_ENV, ImageProbeMode, KEYBOARD_ENHANCEMENT_ENV, KeyboardEnhancementMode,
