@@ -212,7 +212,12 @@ pub fn handle(
             match store.load(&id) {
                 Ok(session) => {
                     *conversation = session.conversation;
-                    rebuild_display(app, &conversation.context());
+                    let messages = conversation.context();
+                    rebuild_display(app, &messages);
+                    // /resume loads a different session from disk: stats
+                    // need to be reconstructed from the persisted history
+                    app.stats.reset();
+                    crate::conversation_display::accumulate_session_stats(app, &messages);
                     tui_config.session_id = id;
                     if let Some(prompt) = session.system_prompt {
                         tui_config.system_prompt = Some(prompt);
@@ -557,7 +562,7 @@ fn handle_branch(app: &mut App, conversation: &mut ConversationState, n: usize) 
         } else {
             conversation.reset_leaf();
         }
-        rebuild_display(app, &conversation.context());
+        rebuild_display_and_clear_live_stats(app, conversation);
         app.status = Some(format!("branched before: {preview}"));
     }
 }
@@ -868,15 +873,26 @@ fn handle_undo(app: &mut App, conversation: &mut ConversationState) {
         None => app.push_system_message("nothing to undo"),
         Some(None) => {
             conversation.reset_leaf();
-            rebuild_display(app, &conversation.context());
+            rebuild_display_and_clear_live_stats(app, conversation);
             app.status = Some("undid last turn".into());
         }
         Some(Some(pid)) => {
             conversation.branch(&pid);
-            rebuild_display(app, &conversation.context());
+            rebuild_display_and_clear_live_stats(app, conversation);
             app.status = Some("undid last turn".into());
         }
     }
+}
+
+/// shared helper: rebuild the display for a freshly rewritten
+/// conversation and clear the live token stats so the next live call
+/// doesn't trip a false `ContextDecrease` anomaly. used by /branch
+/// and /undo (any in-session rewrite that's not a compaction)
+fn rebuild_display_and_clear_live_stats(app: &mut App, conversation: &ConversationState) {
+    let messages = conversation.context();
+    rebuild_display(app, &messages);
+    let estimate = mush_session::compact::estimate_tokens(&messages);
+    app.stats.reset_live_state(TokenCount::new(estimate as u64));
 }
 
 fn try_template(app: &mut App, name: &str, args: &str) -> Option<String> {

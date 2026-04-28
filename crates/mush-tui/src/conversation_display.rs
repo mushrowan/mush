@@ -47,7 +47,7 @@ fn extract_user_images(user: &mush_ai::types::UserMessage) -> Vec<Vec<u8>> {
 }
 
 pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
-    app.clear_messages();
+    app.clear_display();
 
     let mut tool_call_positions = HashMap::<ToolCallId, (usize, usize)>::new();
     // (tool_call_id, msg_idx, first_tc_idx, sub_call_count)
@@ -140,7 +140,6 @@ pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
                         assistant.text().trim_start_matches('\n'),
                     )
                 });
-                app.stats.update(&assistant.usage, None);
             }
             Message::ToolResult(result) => {
                 // check if this is a batch result
@@ -154,6 +153,24 @@ pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
                     apply_tool_result(app, &tool_call_positions, result);
                 }
             }
+        }
+    }
+}
+
+/// reconstruct cumulative session stats by walking historical assistant
+/// messages and summing their recorded usage. used when loading a
+/// session from disk (initial resume or `/resume`) so the user sees
+/// "this session has cost $X.XX so far" instead of zero. NOT used for
+/// in-session rebuilds (/compact, /branch, /undo) where the live stats
+/// already track everything that's been spent and should not be reset.
+///
+/// also sets `prev_usage` to the most recent historical assistant's
+/// usage so the next live call's anomaly detector has a meaningful
+/// baseline to diff against.
+pub fn accumulate_session_stats(app: &mut App, conversation: &[Message]) {
+    for message in conversation {
+        if let Message::Assistant(assistant) = message {
+            app.stats.update(&assistant.usage, None);
         }
     }
 }
@@ -356,7 +373,52 @@ mod tests {
             app.messages[1].tool_calls[0].output_preview.as_deref(),
             Some("fn main() {}")
         );
-        assert_eq!(app.stats.total_tokens, TokenCount::new(15));
+    }
+
+    /// rebuild_display is a display-only primitive: it must never
+    /// mutate `app.stats`. previously it walked every assistant
+    /// message and called `app.stats.update(usage, None)` which (a)
+    /// double-counted live usage when run in-session for /compact,
+    /// /branch, /undo and (b) polluted `prev_usage` with a
+    /// historical assistant's value, causing false ContextDecrease
+    /// cache anomalies on the next live call. session-resume paths
+    /// that *do* want totals reconstructed call
+    /// `accumulate_session_stats` explicitly.
+    #[test]
+    fn rebuild_display_does_not_mutate_stats() {
+        let mut app = app();
+        // pretend a previous live call already updated stats
+        let live_usage = mush_ai::types::Usage {
+            input_tokens: mush_ai::types::TokenCount::new(500),
+            output_tokens: mush_ai::types::TokenCount::new(50),
+            cache_read_tokens: mush_ai::types::TokenCount::ZERO,
+            cache_write_tokens: mush_ai::types::TokenCount::ZERO,
+        };
+        app.stats.update(&live_usage, None);
+        let totals_before = app.stats.total_tokens;
+        let prev_before = app.stats.prev_usage().copied();
+        let context_before = app.stats.context_tokens;
+
+        let conversation = vec![
+            user_message("hello"),
+            assistant_with_tool("call_1"),
+            tool_result("call_1", ToolOutcome::Success, "fn main() {}"),
+        ];
+        rebuild_display(&mut app, &conversation);
+
+        assert_eq!(
+            app.stats.total_tokens, totals_before,
+            "rebuild_display must not change cumulative totals"
+        );
+        assert_eq!(
+            app.stats.prev_usage().copied(),
+            prev_before,
+            "rebuild_display must not touch prev_usage"
+        );
+        assert_eq!(
+            app.stats.context_tokens, context_before,
+            "rebuild_display must not touch context_tokens"
+        );
     }
 
     #[test]

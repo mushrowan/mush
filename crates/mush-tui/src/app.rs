@@ -1031,13 +1031,23 @@ impl App {
         candidate.filter(|s| !s.is_empty())
     }
 
-    /// clear all messages (for /clear command)
-    pub fn clear_messages(&mut self) {
+    /// clear display state without touching stats (for rebuild_display).
+    /// the conversation might be getting rewritten in-place (compact,
+    /// branch, undo) where the cumulative session totals are still
+    /// correct; only the rendered list of messages and scroll position
+    /// need to reset.
+    pub(crate) fn clear_display(&mut self) {
         self.messages.clear();
         self.stream = StreamingState::new();
         self.scroll_offset = 0;
-        self.stats.reset();
         self.input.images.clear();
+    }
+
+    /// clear all messages AND reset cumulative stats (for /clear, /new).
+    /// use `clear_display` if stats should be preserved
+    pub fn clear_messages(&mut self) {
+        self.clear_display();
+        self.stats.reset();
     }
 
     /// push a system message to the display
