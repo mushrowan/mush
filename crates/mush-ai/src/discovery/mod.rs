@@ -31,7 +31,29 @@ use crate::types::{Model, Provider};
 pub struct DiscoveryReport {
     pub provider: Provider,
     pub fetched_at: SystemTime,
-    pub models: Vec<Model>,
+    pub models: Vec<DiscoveredModel>,
+}
+
+/// a model returned by a provider's `/v1/models` endpoint, paired
+/// with the verbatim upstream JSON it was parsed from.
+///
+/// the parsed [`Model`] has the cross-cutting fields mush cares about
+/// (id, name, context, cost, reasoning, …). `raw` keeps the original
+/// entry so providers with richer schemas (codex) can expose typed
+/// extras lazily without bloating [`Model`] or migrating the cache.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DiscoveredModel {
+    pub model: Model,
+    /// verbatim upstream entry. `None` only for fixtures or providers
+    /// that don't carry per-model metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw: Option<serde_json::Value>,
+}
+
+impl From<Model> for DiscoveredModel {
+    fn from(model: Model) -> Self {
+        Self { model, raw: None }
+    }
 }
 
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]

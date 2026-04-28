@@ -51,6 +51,9 @@ pub struct DiscoveredEntry {
     /// last time this exact model id was returned by a successful fetch
     pub last_seen_at: SystemTime,
     pub model: Model,
+    /// verbatim upstream entry; see [`super::DiscoveredModel::raw`]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw: Option<serde_json::Value>,
 }
 
 impl DiscoveryCache {
@@ -95,13 +98,19 @@ impl DiscoveryCache {
         provider.fetched_at = report.fetched_at;
 
         for fresh in report.models {
-            if let Some(existing) = provider.models.iter_mut().find(|e| e.model.id == fresh.id) {
+            if let Some(existing) = provider
+                .models
+                .iter_mut()
+                .find(|e| e.model.id == fresh.model.id)
+            {
                 existing.last_seen_at = report.fetched_at;
-                existing.model = fresh;
+                existing.model = fresh.model;
+                existing.raw = fresh.raw;
             } else {
                 provider.models.push(DiscoveredEntry {
                     last_seen_at: report.fetched_at,
-                    model: fresh,
+                    model: fresh.model,
+                    raw: fresh.raw,
                 });
             }
         }
@@ -168,8 +177,7 @@ mod tests {
 
     use super::*;
     use crate::types::{Api, InputModality, Model, ModelCost, Provider, TokenCount};
-
-    fn make_model(id: &str, name: &str) -> Model {
+    fn make_model(id: &str, name: &str) -> super::super::DiscoveredModel {
         Model {
             id: id.into(),
             name: name.into(),
@@ -188,6 +196,7 @@ mod tests {
             max_output_tokens: TokenCount::new(64_000),
             supports_adaptive_thinking: false,
         }
+        .into()
     }
 
     #[test]

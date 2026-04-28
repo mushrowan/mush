@@ -272,7 +272,7 @@ mod tests {
         let success_report = DiscoveryReport {
             provider: Provider::Anthropic,
             fetched_at: SystemTime::UNIX_EPOCH,
-            models: vec![sample_model("claude-x")],
+            models: vec![sample_model("claude-x").into()],
         };
         let summary = DiscoveryRunSummary {
             results: vec![
