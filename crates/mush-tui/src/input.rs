@@ -1661,6 +1661,41 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_t_walks_only_curated_levels_when_supplied() {
+        // codex models advertise a curated `supported_thinking_levels` set.
+        // the cycler must walk those exactly (skipping Off when the model
+        // is reasoning-only) instead of the legacy hardcoded progression
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.supported_thinking_levels = vec![
+            ThinkingLevel::Low,
+            ThinkingLevel::Medium,
+            ThinkingLevel::High,
+        ];
+        app.thinking_level = ThinkingLevel::Low;
+
+        handle_key(&mut app, ctrl(KeyCode::Char('t')));
+        assert_eq!(app.thinking_level, ThinkingLevel::Medium);
+        handle_key(&mut app, ctrl(KeyCode::Char('t')));
+        assert_eq!(app.thinking_level, ThinkingLevel::High);
+        // wrap around to the first curated entry, not Off
+        handle_key(&mut app, ctrl(KeyCode::Char('t')));
+        assert_eq!(app.thinking_level, ThinkingLevel::Low);
+    }
+
+    #[test]
+    fn ctrl_t_resets_to_first_curated_level_when_current_not_supported() {
+        // switching to a codex model from Xhigh on a generic one should
+        // land us on the model's first supported level, not stall on the
+        // unsupported one
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.supported_thinking_levels = vec![ThinkingLevel::Medium, ThinkingLevel::High];
+        app.thinking_level = ThinkingLevel::Xhigh; // not in the curated set
+
+        handle_key(&mut app, ctrl(KeyCode::Char('t')));
+        assert_eq!(app.thinking_level, ThinkingLevel::Medium);
+    }
+
+    #[test]
     fn ctrl_o_toggles_thinking_expanded() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.start_streaming();
