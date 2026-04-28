@@ -536,8 +536,9 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         save_thinking_prefs: Some(std::sync::Arc::new(|prefs| {
             config::save_thinking_prefs(prefs);
         })),
-        save_last_model: Some(std::sync::Arc::new(|model_id| {
-            config::save_last_model(model_id);
+        last_models: config::load_last_models(),
+        save_last_models: Some(std::sync::Arc::new(|models| {
+            config::save_last_models(models);
         })),
         save_session: if cli.no_session {
             None

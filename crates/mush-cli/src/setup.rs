@@ -64,7 +64,12 @@ impl AppSetup {
             t.phase("config");
         }
 
-        let model_id = args.model.unwrap_or_else(|| default_model_id(&cfg));
+        // canonicalise so the same project resolves to the same directory
+        // key across symlinks and relative paths. falls through to the raw
+        // cwd on filesystems that refuse the lookup
+        let cwd = mush_tui::canonical_dir(&std::env::current_dir()?);
+
+        let model_id = args.model.unwrap_or_else(|| default_model_id(&cfg, &cwd));
         let model = models::find_model_by_id(&model_id).ok_or_else(|| {
             eyre!(
                 "unknown model: {model_id}\n\navailable models:\n{}",
@@ -86,11 +91,6 @@ impl AppSetup {
         if let Some(t) = &mut timer {
             t.phase("model + http");
         }
-
-        // canonicalise so the same project resolves to the same directory
-        // key across symlinks and relative paths. falls through to the raw
-        // cwd on filesystems that refuse the lookup
-        let cwd = mush_tui::canonical_dir(&std::env::current_dir()?);
 
         let mut tools =
             init_builtin_tools(&model, &cwd, args.output_sink, args.no_tools, &http_client);
@@ -954,16 +954,17 @@ pub fn oauth_account_id(provider_id: &str) -> Option<String> {
     })
 }
 
-/// pick the default model based on available auth
-pub fn default_model_id(cfg: &config::Config) -> String {
+/// pick the default model based on per-cwd memory then available auth
+pub fn default_model_id(cfg: &config::Config, cwd: &std::path::Path) -> String {
     if let Some(model) = &cfg.model {
         return model.clone();
     }
 
-    if let Some(model) = config::load_last_model()
-        && models::find_model_by_id(&model).is_some()
+    let last_models = config::load_last_models();
+    if let Some(model) = last_models.get(cwd)
+        && models::find_model_by_id(model).is_some()
     {
-        return model;
+        return model.to_string();
     }
 
     let oauth_store = mush_ai::oauth::load_credentials().unwrap_or_default();
@@ -1254,7 +1255,7 @@ mod tests {
 
         let cfg: config::Config = toml::from_str("").unwrap();
 
-        assert_eq!(default_model_id(&cfg), "claude-opus-4-7");
+        assert_eq!(default_model_id(&cfg, dir.path()), "claude-opus-4-7");
     }
 
     #[test]
@@ -1271,6 +1272,6 @@ mod tests {
 
         let cfg: config::Config = toml::from_str("").unwrap();
 
-        assert_eq!(default_model_id(&cfg), "claude-opus-4-7");
+        assert_eq!(default_model_id(&cfg, dir.path()), "claude-opus-4-7");
     }
 }
