@@ -1120,6 +1120,8 @@ mod tests {
             context_window: TokenCount::new(200_000),
             max_output_tokens: TokenCount::new(32768),
             supports_adaptive_thinking: false,
+            supported_thinking_levels: Vec::new(),
+            default_thinking_level: None,
         };
 
         assert_eq!(
@@ -1147,6 +1149,8 @@ mod tests {
             context_window: TokenCount::new(200_000),
             max_output_tokens: TokenCount::new(32768),
             supports_adaptive_thinking: false,
+            supported_thinking_levels: Vec::new(),
+            default_thinking_level: None,
         };
 
         assert_eq!(
@@ -1222,6 +1226,8 @@ mod tests {
             context_window: TokenCount::new(200_000),
             max_output_tokens: TokenCount::new(32768),
             supports_adaptive_thinking: false,
+            supported_thinking_levels: Vec::new(),
+            default_thinking_level: None,
         };
 
         let options = StreamOptions {
@@ -1440,6 +1446,8 @@ mod tests {
             context_window: TokenCount::new(200_000),
             max_output_tokens: TokenCount::new(32768),
             supports_adaptive_thinking: false,
+            supported_thinking_levels: Vec::new(),
+            default_thinking_level: None,
         }
     }
 
@@ -1486,6 +1494,8 @@ mod tests {
             context_window: TokenCount::new(200_000),
             max_output_tokens: TokenCount::new(32768),
             supports_adaptive_thinking: false,
+            supported_thinking_levels: Vec::new(),
+            default_thinking_level: None,
         };
         let prompt = Some("you are a coding assistant".into());
         let options = StreamOptions::default();
@@ -1516,6 +1526,8 @@ mod tests {
             context_window: TokenCount::new(1_050_000),
             max_output_tokens: TokenCount::new(128_000),
             supports_adaptive_thinking: false,
+            supported_thinking_levels: Vec::new(),
+            default_thinking_level: None,
         };
         let options = StreamOptions {
             thinking: Some(ThinkingLevel::Xhigh),

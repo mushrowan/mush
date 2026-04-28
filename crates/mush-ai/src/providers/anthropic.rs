@@ -1804,6 +1804,8 @@ mod tests {
             name: "Claude Opus 4.6".into(),
             reasoning: true,
             supports_adaptive_thinking: true,
+            supported_thinking_levels: Vec::new(),
+            default_thinking_level: None,
             ..test_model()
         };
         let options = StreamOptions {
@@ -1834,6 +1836,8 @@ mod tests {
             name: "Claude Opus 4.7".into(),
             reasoning: true,
             supports_adaptive_thinking: true,
+            supported_thinking_levels: Vec::new(),
+            default_thinking_level: None,
             ..test_model()
         };
         let options = StreamOptions {
@@ -1856,6 +1860,8 @@ mod tests {
             name: "Claude Opus 4.7".into(),
             reasoning: true,
             supports_adaptive_thinking: true,
+            supported_thinking_levels: Vec::new(),
+            default_thinking_level: None,
             ..test_model()
         };
         let options = StreamOptions {
@@ -2435,6 +2441,8 @@ mod tests {
             context_window: TokenCount::new(200_000),
             max_output_tokens: TokenCount::new(16384),
             supports_adaptive_thinking: false,
+            supported_thinking_levels: Vec::new(),
+            default_thinking_level: None,
         }
     }
 

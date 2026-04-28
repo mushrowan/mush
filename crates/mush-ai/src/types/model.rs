@@ -69,6 +69,20 @@ pub struct Model {
     /// non-anthropic models leave this `false`
     #[serde(default)]
     pub supports_adaptive_thinking: bool,
+    /// the ordered set of thinking levels this model accepts (cheap →
+    /// expensive). drives the `ctrl+t` cycler so users can only land
+    /// on levels the model actually supports.
+    ///
+    /// empty = the cycler falls back to the legacy hardcoded walk
+    /// (Off → Low → Medium → High → Xhigh) since we haven't curated
+    /// a list for this model yet
+    #[serde(default)]
+    pub supported_thinking_levels: Vec<ThinkingLevel>,
+    /// the model's recommended starting level. applied on the first
+    /// switch to this model when the user has no per-cwd override.
+    /// `None` means "fall back to config / Off"
+    #[serde(default)]
+    pub default_thinking_level: Option<ThinkingLevel>,
 }
 
 impl Model {
@@ -110,6 +124,22 @@ impl ThinkingLevel {
         match self {
             Self::Minimal => Self::Low,
             other => other,
+        }
+    }
+
+    /// map a codex `effort` string to the corresponding [`ThinkingLevel`].
+    /// returns `None` for unknown values so callers can drop them on the
+    /// floor without bricking on an upstream rename.
+    #[must_use]
+    pub fn from_codex_str(effort: &str) -> Option<Self> {
+        match effort {
+            "off" | "none" => Some(Self::Off),
+            "minimal" => Some(Self::Minimal),
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            "xhigh" | "max" => Some(Self::Xhigh),
+            _ => None,
         }
     }
 }
@@ -244,5 +274,34 @@ mod tests {
             ThinkingLevel::Low
         );
         assert_eq!(ThinkingLevel::High.normalize_visible(), ThinkingLevel::High);
+    }
+
+    #[test]
+    fn thinking_level_from_codex_str_maps_known_efforts() {
+        // codex effort strings are lowercase short tokens. unknown values
+        // return None so callers can drop them on the floor without
+        // bricking on an upstream rename
+        assert_eq!(
+            ThinkingLevel::from_codex_str("minimal"),
+            Some(ThinkingLevel::Minimal)
+        );
+        assert_eq!(
+            ThinkingLevel::from_codex_str("low"),
+            Some(ThinkingLevel::Low)
+        );
+        assert_eq!(
+            ThinkingLevel::from_codex_str("medium"),
+            Some(ThinkingLevel::Medium)
+        );
+        assert_eq!(
+            ThinkingLevel::from_codex_str("high"),
+            Some(ThinkingLevel::High)
+        );
+        assert_eq!(
+            ThinkingLevel::from_codex_str("none"),
+            Some(ThinkingLevel::Off)
+        );
+        // unknown variant: drop instead of guess
+        assert_eq!(ThinkingLevel::from_codex_str("turbocharged"), None);
     }
 }

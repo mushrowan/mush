@@ -58,6 +58,8 @@ pub fn anthropic_models() -> Vec<Model> {
             context_window: TokenCount::new(1_000_000),
             max_output_tokens: TokenCount::new(128_000),
             supports_adaptive_thinking: true,
+            supported_thinking_levels: Vec::new(),
+            default_thinking_level: None,
         },
         Model {
             id: "claude-opus-4-6".into(),
@@ -76,6 +78,8 @@ pub fn anthropic_models() -> Vec<Model> {
             context_window: TokenCount::new(1_000_000),
             max_output_tokens: TokenCount::new(128_000),
             supports_adaptive_thinking: true,
+            supported_thinking_levels: Vec::new(),
+            default_thinking_level: None,
         },
         Model {
             id: "claude-opus-4-5".into(),
@@ -94,6 +98,8 @@ pub fn anthropic_models() -> Vec<Model> {
             context_window: TokenCount::new(200_000),
             max_output_tokens: TokenCount::new(64_000),
             supports_adaptive_thinking: false,
+            supported_thinking_levels: Vec::new(),
+            default_thinking_level: None,
         },
         Model {
             id: "claude-sonnet-4-6".into(),
@@ -112,6 +118,8 @@ pub fn anthropic_models() -> Vec<Model> {
             context_window: TokenCount::new(1_000_000),
             max_output_tokens: TokenCount::new(64_000),
             supports_adaptive_thinking: true,
+            supported_thinking_levels: Vec::new(),
+            default_thinking_level: None,
         },
         Model {
             id: "claude-haiku-4-5".into(),
@@ -130,6 +138,8 @@ pub fn anthropic_models() -> Vec<Model> {
             context_window: TokenCount::new(200_000),
             max_output_tokens: TokenCount::new(64_000),
             supports_adaptive_thinking: false,
+            supported_thinking_levels: Vec::new(),
+            default_thinking_level: None,
         },
         Model {
             id: "claude-sonnet-4-20250514".into(),
@@ -148,6 +158,8 @@ pub fn anthropic_models() -> Vec<Model> {
             context_window: TokenCount::new(200_000),
             max_output_tokens: TokenCount::new(64_000),
             supports_adaptive_thinking: false,
+            supported_thinking_levels: Vec::new(),
+            default_thinking_level: None,
         },
         Model {
             id: "claude-opus-4-20250514".into(),
@@ -166,6 +178,8 @@ pub fn anthropic_models() -> Vec<Model> {
             context_window: TokenCount::new(200_000),
             max_output_tokens: TokenCount::new(32768),
             supports_adaptive_thinking: false,
+            supported_thinking_levels: Vec::new(),
+            default_thinking_level: None,
         },
     ]
 }
@@ -191,6 +205,8 @@ pub fn openrouter_models() -> Vec<Model> {
             context_window: TokenCount::new(200_000),
             max_output_tokens: TokenCount::new(16384),
             supports_adaptive_thinking: false,
+            supported_thinking_levels: Vec::new(),
+            default_thinking_level: None,
         },
         Model {
             id: "anthropic/claude-opus-4".into(),
@@ -209,6 +225,8 @@ pub fn openrouter_models() -> Vec<Model> {
             context_window: TokenCount::new(200_000),
             max_output_tokens: TokenCount::new(32768),
             supports_adaptive_thinking: false,
+            supported_thinking_levels: Vec::new(),
+            default_thinking_level: None,
         },
         Model {
             id: "google/gemini-2.5-pro".into(),
@@ -227,6 +245,8 @@ pub fn openrouter_models() -> Vec<Model> {
             context_window: TokenCount::new(1_048_576),
             max_output_tokens: TokenCount::new(65536),
             supports_adaptive_thinking: false,
+            supported_thinking_levels: Vec::new(),
+            default_thinking_level: None,
         },
         Model {
             id: "google/gemini-2.5-flash".into(),
@@ -245,6 +265,8 @@ pub fn openrouter_models() -> Vec<Model> {
             context_window: TokenCount::new(1_048_576),
             max_output_tokens: TokenCount::new(65536),
             supports_adaptive_thinking: false,
+            supported_thinking_levels: Vec::new(),
+            default_thinking_level: None,
         },
     ]
 }
@@ -269,6 +291,8 @@ pub fn openai_models() -> Vec<Model> {
         context_window: TokenCount::new(400_000),
         max_output_tokens: TokenCount::new(128_000),
         supports_adaptive_thinking: false,
+        supported_thinking_levels: Vec::new(),
+        default_thinking_level: None,
     }]
 }
 
@@ -293,6 +317,8 @@ pub fn openai_codex_models() -> Vec<Model> {
             context_window: TokenCount::new(1_050_000),
             max_output_tokens: TokenCount::new(128_000),
             supports_adaptive_thinking: false,
+            supported_thinking_levels: Vec::new(),
+            default_thinking_level: None,
         },
         Model {
             id: "gpt-5.3-codex".into(),
@@ -311,6 +337,8 @@ pub fn openai_codex_models() -> Vec<Model> {
             context_window: TokenCount::new(400_000),
             max_output_tokens: TokenCount::new(128_000),
             supports_adaptive_thinking: false,
+            supported_thinking_levels: Vec::new(),
+            default_thinking_level: None,
         },
         Model {
             id: "gpt-5.2-codex".into(),
@@ -329,6 +357,8 @@ pub fn openai_codex_models() -> Vec<Model> {
             context_window: TokenCount::new(400_000),
             max_output_tokens: TokenCount::new(128_000),
             supports_adaptive_thinking: false,
+            supported_thinking_levels: Vec::new(),
+            default_thinking_level: None,
         },
     ]
 }
@@ -374,6 +404,8 @@ impl OaiModel {
             context_window: TokenCount::new(self.context as u64),
             max_output_tokens: TokenCount::new(self.max_output as u64),
             supports_adaptive_thinking: false,
+            supported_thinking_levels: Vec::new(),
+            default_thinking_level: None,
         }
     }
 }
@@ -1238,6 +1270,8 @@ mod tests {
             context_window: TokenCount::new(100_000),
             max_output_tokens: TokenCount::new(4096),
             supports_adaptive_thinking: false,
+            supported_thinking_levels: Vec::new(),
+            default_thinking_level: None,
         }];
 
         let user = vec![Model {
@@ -1257,6 +1291,8 @@ mod tests {
             context_window: TokenCount::new(200_000),
             max_output_tokens: TokenCount::new(8192),
             supports_adaptive_thinking: false,
+            supported_thinking_levels: Vec::new(),
+            default_thinking_level: None,
         }];
 
         for um in user {
@@ -1294,6 +1330,8 @@ mod tests {
             context_window: TokenCount::new(128_000),
             max_output_tokens: TokenCount::new(4096),
             supports_adaptive_thinking: false,
+            supported_thinking_levels: Vec::new(),
+            default_thinking_level: None,
         }];
 
         for um in user {
@@ -1339,6 +1377,8 @@ mod tests {
             context_window: TokenCount::new(128_000),
             max_output_tokens: TokenCount::new(4096),
             supports_adaptive_thinking: false,
+            supported_thinking_levels: Vec::new(),
+            default_thinking_level: None,
         }];
         std::fs::write(&path, serde_json::to_string(&models).unwrap()).unwrap();
 
@@ -1373,6 +1413,8 @@ mod tests {
             context_window: TokenCount::new(128_000),
             max_output_tokens: TokenCount::new(4096),
             supports_adaptive_thinking: false,
+            supported_thinking_levels: Vec::new(),
+            default_thinking_level: None,
         }];
         std::fs::write(&path, serde_json::to_string(&first).unwrap()).unwrap();
         assert_eq!(find_model_by_id("custom/test").unwrap().name, "First");
