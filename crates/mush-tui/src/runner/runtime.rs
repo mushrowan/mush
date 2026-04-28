@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
-use mush_ai::models;
+use super::{ThinkingPrefsSaver, TuiConfig};
 use mush_ai::types::{Message, ThinkingLevel};
 use mush_session::ConversationState;
 use notify::RecommendedWatcher;
@@ -10,8 +10,6 @@ use notify::RecommendedWatcher;
 use crate::app::{self, App};
 use crate::pane::{Pane, PaneId, PaneManager};
 use crate::slash_menu::{ModelCompletion, SlashCommand};
-
-use super::{ThinkingPrefsSaver, TuiConfig};
 
 const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("help", "show available commands"),
@@ -286,11 +284,16 @@ fn build_initial_app(tui_config: &TuiConfig, cwd: &Path) -> App {
         app.completion.templates.push(template);
     }
 
-    for model in models::all_models_with_user() {
-        app.completion.completions.push(model.id.to_string());
+    for entry in mush_ai::discovery::merged_catalogue() {
+        let stale = matches!(
+            entry.source,
+            mush_ai::discovery::ModelSource::DiscoveredStale
+        );
+        app.completion.completions.push(entry.model.id.to_string());
         app.completion.model_completions.push(ModelCompletion {
-            id: model.id.to_string(),
-            name: model.name.clone(),
+            id: entry.model.id.to_string(),
+            name: entry.model.name.clone(),
+            stale,
         });
     }
 
@@ -322,7 +325,7 @@ mod tests {
     };
 
     fn test_model() -> mush_ai::types::Model {
-        models::all_models_with_user()
+        mush_ai::models::all_models_with_user()
             .into_iter()
             .next()
             .expect("expected at least one model")

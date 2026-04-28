@@ -70,12 +70,16 @@ pub fn render(frame: &mut Frame, menu: &SlashMenuState, input_area: Rect, theme:
             };
 
             let id_text = format!("/model {}", model.id);
-            let pad = 34usize.saturating_sub(id_text.len() + prefix.len() + fav_marker.len());
+            let stale_marker = if model.stale { " [stale]" } else { "" };
+            let pad = 34usize.saturating_sub(
+                id_text.len() + prefix.len() + fav_marker.len() + stale_marker.len(),
+            );
 
             lines.push(Line::from(vec![
                 Span::styled(prefix, id_style),
                 Span::styled(fav_marker, theme.menu_description),
                 Span::styled(id_text, id_style),
+                Span::styled(stale_marker, theme.menu_description),
                 Span::raw(" ".repeat(pad)),
                 Span::styled(&model.name, theme.menu_description),
             ]));
@@ -151,10 +155,12 @@ mod tests {
                 ModelCompletion {
                     id: "claude-opus".into(),
                     name: "Claude Opus".into(),
+                    stale: false,
                 },
                 ModelCompletion {
                     id: "gpt-5".into(),
                     name: "GPT 5".into(),
+                    stale: false,
                 },
             ],
             vec!["claude-opus".into()],
@@ -185,6 +191,7 @@ mod tests {
             vec![ModelCompletion {
                 id: "claude-opus".into(),
                 name: "Claude Opus".into(),
+                stale: false,
             }],
             Vec::new(),
             true,
@@ -195,6 +202,48 @@ mod tests {
         assert!(
             content.contains("favourites locked"),
             "toast text should appear in the popup: {content:?}"
+        );
+    }
+
+    #[test]
+    fn stale_model_row_shows_stale_marker() {
+        // a model that was discovered in a previous fetch but is no longer
+        // returned by the upstream gets a `[stale]` suffix in the picker
+        // so the user can spot deprecated/removed models at a glance
+        let menu = SlashMenuState::for_models_with_favourites(
+            vec![
+                ModelCompletion {
+                    id: "fresh-model".into(),
+                    name: "Fresh".into(),
+                    stale: false,
+                },
+                ModelCompletion {
+                    id: "removed-model".into(),
+                    name: "Removed".into(),
+                    stale: true,
+                },
+            ],
+            Vec::new(),
+            false,
+        );
+        let buf = render_menu(&menu, 80, 8);
+        let content = buffer_to_string(&buf);
+        let lines: Vec<&str> = content.lines().collect();
+        let stale_row = lines
+            .iter()
+            .find(|l| l.contains("removed-model"))
+            .unwrap_or(&"");
+        let fresh_row = lines
+            .iter()
+            .find(|l| l.contains("fresh-model"))
+            .unwrap_or(&"");
+        assert!(
+            stale_row.contains("[stale]"),
+            "stale row must render [stale] marker; got: {stale_row:?}"
+        );
+        assert!(
+            !fresh_row.contains("[stale]"),
+            "fresh row must not render [stale] marker; got: {fresh_row:?}"
         );
     }
 }

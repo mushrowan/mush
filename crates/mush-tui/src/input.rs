@@ -2335,10 +2335,12 @@ mod tests {
             crate::app::ModelCompletion {
                 id: "claude-opus".into(),
                 name: "Claude Opus".into(),
+                stale: false,
             },
             crate::app::ModelCompletion {
                 id: "gpt-5".into(),
                 name: "GPT-5".into(),
+                stale: false,
             },
         ];
         app.open_model_picker();
@@ -2362,14 +2364,17 @@ mod tests {
             crate::app::ModelCompletion {
                 id: "claude-opus".into(),
                 name: "Claude Opus".into(),
+                stale: false,
             },
             crate::app::ModelCompletion {
                 id: "gpt-5".into(),
                 name: "GPT-5".into(),
+                stale: false,
             },
             crate::app::ModelCompletion {
                 id: "gemini".into(),
                 name: "Gemini".into(),
+                stale: false,
             },
         ];
         app.completion.favourite_models = vec!["claude-opus".into()];
@@ -2399,6 +2404,7 @@ mod tests {
         app.completion.model_completions = vec![crate::app::ModelCompletion {
             id: "claude-opus".into(),
             name: "Claude Opus".into(),
+            stale: false,
         }];
         assert!(app.completion.favourite_models.is_empty());
         app.open_model_picker();
@@ -2425,6 +2431,7 @@ mod tests {
         app.completion.model_completions = vec![crate::app::ModelCompletion {
             id: "claude-opus".into(),
             name: "Claude Opus".into(),
+            stale: false,
         }];
         app.completion.favourite_models = Vec::new();
         app.completion.favourites_locked = false;
@@ -2452,6 +2459,7 @@ mod tests {
         app.completion.model_completions = vec![crate::app::ModelCompletion {
             id: "claude-opus".into(),
             name: "Claude Opus".into(),
+            stale: false,
         }];
         app.completion.favourite_models = vec!["claude-opus".into()];
         app.completion.favourites_locked = true;
@@ -2575,10 +2583,12 @@ mod tests {
             crate::app::ModelCompletion {
                 id: "claude-opus-4-7".into(),
                 name: "Claude Opus 4.7".into(),
+                stale: false,
             },
             crate::app::ModelCompletion {
                 id: "claude-sonnet-4-20250514".into(),
                 name: "Claude Sonnet 4".into(),
+                stale: false,
             },
         ];
         app.input.text = "/model claude".into();
@@ -2602,10 +2612,12 @@ mod tests {
             crate::app::ModelCompletion {
                 id: "claude-opus-4-7".into(),
                 name: "Claude Opus 4.7".into(),
+                stale: false,
             },
             crate::app::ModelCompletion {
                 id: "claude-sonnet-4-20250514".into(),
                 name: "Claude Sonnet 4".into(),
+                stale: false,
             },
         ];
         app.input.text = "/model claude".into();
@@ -2633,10 +2645,12 @@ mod tests {
             crate::app::ModelCompletion {
                 id: "claude-opus-4-7".into(),
                 name: "Claude Opus 4.7".into(),
+                stale: false,
             },
             crate::app::ModelCompletion {
                 id: "claude-sonnet-4-20250514".into(),
                 name: "Claude Sonnet 4".into(),
+                stale: false,
             },
         ];
         app.input.text = "/model claude-".into();
@@ -2668,10 +2682,12 @@ mod tests {
             crate::app::ModelCompletion {
                 id: "claude-opus-4-7".into(),
                 name: "Claude Opus 4.7".into(),
+                stale: false,
             },
             crate::app::ModelCompletion {
                 id: "gpt-5".into(),
                 name: "GPT 5".into(),
+                stale: false,
             },
         ];
         app.input.text = "/model ".into();

@@ -2773,10 +2773,12 @@ batch: 1/2 succeeded, 1 failed";
             ModelCompletion {
                 id: "claude-opus".into(),
                 name: "Claude Opus".into(),
+                stale: false,
             },
             ModelCompletion {
                 id: "gpt-5".into(),
                 name: "GPT-5".into(),
+                stale: false,
             },
         ];
         app.open_model_picker();
