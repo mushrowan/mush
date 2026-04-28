@@ -335,6 +335,19 @@ impl TokenStats {
         *self = Self::new(window);
     }
 
+    /// drop the "recent live call" state without touching cumulative
+    /// session totals. used after operations that rewrite the
+    /// conversation (compaction, fork-compaction) where there is no
+    /// real previous call to compare the next one against, and the
+    /// effective context size is now `context_tokens` rather than the
+    /// last assistant's recorded usage. this prevents the next live
+    /// call from tripping a false `ContextDecrease` cache anomaly.
+    pub fn reset_live_state(&mut self, context_tokens: TokenCount) {
+        self.prev_usage = None;
+        self.prev_call_config = None;
+        self.context_tokens = context_tokens;
+    }
+
     /// snapshot of previous usage for diagnostic dumps
     #[must_use]
     pub fn prev_usage(&self) -> Option<&Usage> {
