@@ -840,6 +840,7 @@ mod tests {
             },
             context_window: TokenCount::new(200_000),
             max_output_tokens: TokenCount::new(8192),
+            supports_adaptive_thinking: false,
         }
     }
 

@@ -57,6 +57,7 @@ pub fn anthropic_models() -> Vec<Model> {
             },
             context_window: TokenCount::new(1_000_000),
             max_output_tokens: TokenCount::new(128_000),
+            supports_adaptive_thinking: true,
         },
         Model {
             id: "claude-opus-4-6".into(),
@@ -74,6 +75,7 @@ pub fn anthropic_models() -> Vec<Model> {
             },
             context_window: TokenCount::new(1_000_000),
             max_output_tokens: TokenCount::new(128_000),
+            supports_adaptive_thinking: true,
         },
         Model {
             id: "claude-opus-4-5".into(),
@@ -91,6 +93,7 @@ pub fn anthropic_models() -> Vec<Model> {
             },
             context_window: TokenCount::new(200_000),
             max_output_tokens: TokenCount::new(64_000),
+            supports_adaptive_thinking: false,
         },
         Model {
             id: "claude-sonnet-4-6".into(),
@@ -108,6 +111,7 @@ pub fn anthropic_models() -> Vec<Model> {
             },
             context_window: TokenCount::new(1_000_000),
             max_output_tokens: TokenCount::new(64_000),
+            supports_adaptive_thinking: true,
         },
         Model {
             id: "claude-haiku-4-5".into(),
@@ -125,6 +129,7 @@ pub fn anthropic_models() -> Vec<Model> {
             },
             context_window: TokenCount::new(200_000),
             max_output_tokens: TokenCount::new(64_000),
+            supports_adaptive_thinking: false,
         },
         Model {
             id: "claude-sonnet-4-20250514".into(),
@@ -142,6 +147,7 @@ pub fn anthropic_models() -> Vec<Model> {
             },
             context_window: TokenCount::new(200_000),
             max_output_tokens: TokenCount::new(64_000),
+            supports_adaptive_thinking: false,
         },
         Model {
             id: "claude-opus-4-20250514".into(),
@@ -159,6 +165,7 @@ pub fn anthropic_models() -> Vec<Model> {
             },
             context_window: TokenCount::new(200_000),
             max_output_tokens: TokenCount::new(32768),
+            supports_adaptive_thinking: false,
         },
     ]
 }
@@ -183,6 +190,7 @@ pub fn openrouter_models() -> Vec<Model> {
             },
             context_window: TokenCount::new(200_000),
             max_output_tokens: TokenCount::new(16384),
+            supports_adaptive_thinking: false,
         },
         Model {
             id: "anthropic/claude-opus-4".into(),
@@ -200,6 +208,7 @@ pub fn openrouter_models() -> Vec<Model> {
             },
             context_window: TokenCount::new(200_000),
             max_output_tokens: TokenCount::new(32768),
+            supports_adaptive_thinking: false,
         },
         Model {
             id: "google/gemini-2.5-pro".into(),
@@ -217,6 +226,7 @@ pub fn openrouter_models() -> Vec<Model> {
             },
             context_window: TokenCount::new(1_048_576),
             max_output_tokens: TokenCount::new(65536),
+            supports_adaptive_thinking: false,
         },
         Model {
             id: "google/gemini-2.5-flash".into(),
@@ -234,6 +244,7 @@ pub fn openrouter_models() -> Vec<Model> {
             },
             context_window: TokenCount::new(1_048_576),
             max_output_tokens: TokenCount::new(65536),
+            supports_adaptive_thinking: false,
         },
     ]
 }
@@ -257,6 +268,7 @@ pub fn openai_models() -> Vec<Model> {
         },
         context_window: TokenCount::new(400_000),
         max_output_tokens: TokenCount::new(128_000),
+        supports_adaptive_thinking: false,
     }]
 }
 
@@ -280,6 +292,7 @@ pub fn openai_codex_models() -> Vec<Model> {
             },
             context_window: TokenCount::new(1_050_000),
             max_output_tokens: TokenCount::new(128_000),
+            supports_adaptive_thinking: false,
         },
         Model {
             id: "gpt-5.3-codex".into(),
@@ -297,6 +310,7 @@ pub fn openai_codex_models() -> Vec<Model> {
             },
             context_window: TokenCount::new(400_000),
             max_output_tokens: TokenCount::new(128_000),
+            supports_adaptive_thinking: false,
         },
         Model {
             id: "gpt-5.2-codex".into(),
@@ -314,6 +328,7 @@ pub fn openai_codex_models() -> Vec<Model> {
             },
             context_window: TokenCount::new(400_000),
             max_output_tokens: TokenCount::new(128_000),
+            supports_adaptive_thinking: false,
         },
     ]
 }
@@ -358,6 +373,7 @@ impl OaiModel {
             },
             context_window: TokenCount::new(self.context as u64),
             max_output_tokens: TokenCount::new(self.max_output as u64),
+            supports_adaptive_thinking: false,
         }
     }
 }
@@ -975,6 +991,36 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_4_6_and_4_7_models_advertise_adaptive_thinking() {
+        // claude opus 4.6, opus 4.7, and sonnet 4.6 use anthropic's
+        // adaptive thinking. older claude models use enabled+budget mode.
+        // capability lives on Model rather than a hardcoded id sniff so
+        // new releases can opt in by tweaking the catalogue
+        let models = anthropic_models();
+        let by_id: std::collections::HashMap<_, _> =
+            models.iter().map(|m| (m.id.as_str(), m)).collect();
+        for id in ["claude-opus-4-6", "claude-opus-4-7", "claude-sonnet-4-6"] {
+            let model = by_id
+                .get(id)
+                .unwrap_or_else(|| panic!("missing model: {id}"));
+            assert!(
+                model.supports_adaptive_thinking,
+                "{id} should advertise adaptive thinking"
+            );
+        }
+        // older models stay on budget mode
+        for id in ["claude-opus-4-5", "claude-haiku-4-5"] {
+            let model = by_id
+                .get(id)
+                .unwrap_or_else(|| panic!("missing model: {id}"));
+            assert!(
+                !model.supports_adaptive_thinking,
+                "{id} should not advertise adaptive thinking"
+            );
+        }
+    }
+
+    #[test]
     fn openrouter_models_exist() {
         let models = openrouter_models();
         assert!(!models.is_empty());
@@ -1191,6 +1237,7 @@ mod tests {
             },
             context_window: TokenCount::new(100_000),
             max_output_tokens: TokenCount::new(4096),
+            supports_adaptive_thinking: false,
         }];
 
         let user = vec![Model {
@@ -1209,6 +1256,7 @@ mod tests {
             },
             context_window: TokenCount::new(200_000),
             max_output_tokens: TokenCount::new(8192),
+            supports_adaptive_thinking: false,
         }];
 
         for um in user {
@@ -1245,6 +1293,7 @@ mod tests {
             },
             context_window: TokenCount::new(128_000),
             max_output_tokens: TokenCount::new(4096),
+            supports_adaptive_thinking: false,
         }];
 
         for um in user {
@@ -1289,6 +1338,7 @@ mod tests {
             },
             context_window: TokenCount::new(128_000),
             max_output_tokens: TokenCount::new(4096),
+            supports_adaptive_thinking: false,
         }];
         std::fs::write(&path, serde_json::to_string(&models).unwrap()).unwrap();
 
@@ -1322,6 +1372,7 @@ mod tests {
             },
             context_window: TokenCount::new(128_000),
             max_output_tokens: TokenCount::new(4096),
+            supports_adaptive_thinking: false,
         }];
         std::fs::write(&path, serde_json::to_string(&first).unwrap()).unwrap();
         assert_eq!(find_model_by_id("custom/test").unwrap().name, "First");

@@ -1119,6 +1119,7 @@ mod tests {
             },
             context_window: TokenCount::new(200_000),
             max_output_tokens: TokenCount::new(32768),
+            supports_adaptive_thinking: false,
         };
 
         assert_eq!(
@@ -1145,6 +1146,7 @@ mod tests {
             },
             context_window: TokenCount::new(200_000),
             max_output_tokens: TokenCount::new(32768),
+            supports_adaptive_thinking: false,
         };
 
         assert_eq!(
@@ -1219,6 +1221,7 @@ mod tests {
             },
             context_window: TokenCount::new(200_000),
             max_output_tokens: TokenCount::new(32768),
+            supports_adaptive_thinking: false,
         };
 
         let options = StreamOptions {
@@ -1436,6 +1439,7 @@ mod tests {
             },
             context_window: TokenCount::new(200_000),
             max_output_tokens: TokenCount::new(32768),
+            supports_adaptive_thinking: false,
         }
     }
 
@@ -1481,6 +1485,7 @@ mod tests {
             },
             context_window: TokenCount::new(200_000),
             max_output_tokens: TokenCount::new(32768),
+            supports_adaptive_thinking: false,
         };
         let prompt = Some("you are a coding assistant".into());
         let options = StreamOptions::default();
@@ -1510,6 +1515,7 @@ mod tests {
             },
             context_window: TokenCount::new(1_050_000),
             max_output_tokens: TokenCount::new(128_000),
+            supports_adaptive_thinking: false,
         };
         let options = StreamOptions {
             thinking: Some(ThinkingLevel::Xhigh),

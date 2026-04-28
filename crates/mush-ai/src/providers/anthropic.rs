@@ -422,7 +422,7 @@ fn build_request_body(
 
     let thinking = match options.thinking {
         Some(level) if level != ThinkingLevel::Off && model.reasoning => {
-            if supports_adaptive_thinking(&model.id) {
+            if model.supports_adaptive_thinking {
                 Some(ThinkingConfig::Adaptive {
                     config_type: "adaptive".into(),
                     display: "summarized".into(),
@@ -500,18 +500,10 @@ fn anthropic_cache_control(
     })
 }
 
-/// Claude 4.6+ Opus models and Sonnet 4.6 use adaptive thinking. Older Claude
-/// 4 models still use enabled+budget thinking. Keep this narrow until
-/// reasoning capabilities move into model metadata instead of living here.
-fn supports_adaptive_thinking(model_id: &str) -> bool {
-    model_id.contains("opus-4-7")
-        || model_id.contains("opus-4.7")
-        || model_id.contains("opus-4-6")
-        || model_id.contains("opus-4.6")
-        || model_id.contains("sonnet-4-6")
-        || model_id.contains("sonnet-4.6")
-}
-
+/// `anthropic_effort` maps the user-visible thinking level to anthropic's
+/// `effort` field (low/medium/high/xhigh/max). xhigh is opus-4-7 only;
+/// 4-6 maps it to "max" because it lacks "xhigh". keep this narrow until
+/// the per-level support moves into model metadata too.
 fn anthropic_effort(model_id: &str, level: ThinkingLevel) -> Option<&'static str> {
     match (model_id, level) {
         (_, ThinkingLevel::Off) => None,
@@ -1811,6 +1803,7 @@ mod tests {
             id: "claude-opus-4-6".into(),
             name: "Claude Opus 4.6".into(),
             reasoning: true,
+            supports_adaptive_thinking: true,
             ..test_model()
         };
         let options = StreamOptions {
@@ -1836,6 +1829,7 @@ mod tests {
             id: "claude-opus-4-7".into(),
             name: "Claude Opus 4.7".into(),
             reasoning: true,
+            supports_adaptive_thinking: true,
             ..test_model()
         };
         let options = StreamOptions {
@@ -2414,6 +2408,7 @@ mod tests {
             },
             context_window: TokenCount::new(200_000),
             max_output_tokens: TokenCount::new(16384),
+            supports_adaptive_thinking: false,
         }
     }
 

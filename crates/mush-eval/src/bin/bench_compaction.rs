@@ -408,6 +408,7 @@ fn parse_args() -> BenchConfig {
         },
         context_window: TokenCount::new(400_000),
         max_output_tokens: TokenCount::new(4096),
+        supports_adaptive_thinking: false,
     };
 
     let options = StreamOptions {
