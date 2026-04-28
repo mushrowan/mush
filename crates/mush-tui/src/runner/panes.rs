@@ -512,7 +512,7 @@ mod tests {
             hint_mode: crate::runner::HintMode::Message,
             config_path: None,
             provider_api_keys: std::collections::HashMap::new(),
-            thinking_prefs: std::collections::HashMap::new(),
+            thinking_prefs: super::super::ThinkingPrefs::default(),
             save_thinking_prefs: None,
             save_last_model: None,
             save_session: None,

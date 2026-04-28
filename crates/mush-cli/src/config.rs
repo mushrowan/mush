@@ -501,28 +501,36 @@ fn try_load_persisted_settings(
     }
 }
 
-// -- per-model thinking level persistence --
+// -- per-directory + per-model thinking level persistence --
 
 fn thinking_prefs_path() -> PathBuf {
     mush_session::data_dir().join("thinking.json")
 }
 
-pub fn load_thinking_prefs() -> HashMap<String, ThinkingLevel> {
+/// load the on-disk thinking prefs, prune entries pointing at directories
+/// that no longer exist, and return an empty map on any I/O or parse
+/// failure (the file is best-effort persistence, not authoritative).
+///
+/// the pre-`thinking-prefs-by-dir` flat shape (`{model_id: level}`) is a
+/// different schema and will fail to parse here. that's intentional:
+/// migration was deemed not worth the complexity, so the user just gets
+/// fresh defaults and the file rewrites itself on the next save.
+pub fn load_thinking_prefs() -> mush_tui::ThinkingPrefs {
     let path = thinking_prefs_path();
     if !path.exists() {
-        return HashMap::new();
+        return mush_tui::ThinkingPrefs::default();
     }
-    match std::fs::read_to_string(&path) {
-        Ok(content) => serde_json::from_str::<HashMap<String, ThinkingLevel>>(&content)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(model, level)| (model, level.normalize_visible()))
-            .collect(),
-        Err(_) => HashMap::new(),
-    }
+    let mut prefs = match std::fs::read_to_string(&path) {
+        Ok(content) => {
+            serde_json::from_str::<mush_tui::ThinkingPrefs>(&content).unwrap_or_default()
+        }
+        Err(_) => mush_tui::ThinkingPrefs::default(),
+    };
+    prefs.prune_missing_dirs();
+    prefs
 }
 
-pub fn save_thinking_prefs(prefs: &HashMap<String, ThinkingLevel>) {
+pub fn save_thinking_prefs(prefs: &mush_tui::ThinkingPrefs) {
     let path = thinking_prefs_path();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -906,21 +914,6 @@ enabled = false
         assert!(config.mcp.contains_key("git"));
         assert!(config.mcp.contains_key("remote-api"));
         assert!(!config.mcp["remote-api"].enabled);
-    }
-
-    #[test]
-    fn thinking_prefs_round_trip() {
-        let json = r#"{"claude-opus-4-7":"high","claude-sonnet-4-20250514":"medium"}"#;
-        let prefs: HashMap<String, ThinkingLevel> = serde_json::from_str(json).unwrap();
-        assert_eq!(prefs.get("claude-opus-4-7"), Some(&ThinkingLevel::High));
-        assert_eq!(
-            prefs.get("claude-sonnet-4-20250514"),
-            Some(&ThinkingLevel::Medium)
-        );
-        // round-trip
-        let serialised = serde_json::to_string(&prefs).unwrap();
-        let prefs2: HashMap<String, ThinkingLevel> = serde_json::from_str(&serialised).unwrap();
-        assert_eq!(prefs, prefs2);
     }
 
     #[test]

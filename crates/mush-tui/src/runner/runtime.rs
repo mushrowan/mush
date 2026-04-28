@@ -1,8 +1,7 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
-use super::{ThinkingPrefsSaver, TuiConfig};
+use super::{ThinkingPrefs, ThinkingPrefsSaver, TuiConfig};
 use mush_ai::types::{Message, ThinkingLevel};
 use mush_session::ConversationState;
 use notify::RecommendedWatcher;
@@ -64,7 +63,7 @@ const USAGE_POLL_TICK: std::time::Duration = std::time::Duration::from_secs(60);
 pub(super) struct RunnerRuntime {
     pub cwd: PathBuf,
     pub pane_mgr: PaneManager,
-    pub thinking_prefs: HashMap<String, ThinkingLevel>,
+    pub thinking_prefs: ThinkingPrefs,
     pub thinking_saver: Option<ThinkingPrefsSaver>,
     pub lifecycle_hooks: mush_agent::LifecycleHooks,
     pub pending_prompt: Option<String>,
@@ -312,6 +311,8 @@ fn replay_initial_messages(app: &mut App, initial_messages: &[Message]) -> Conve
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
     use mush_ai::types::{
         Api, AssistantContentPart, AssistantMessage, Provider, StopReason, StreamOptions,
@@ -342,7 +343,7 @@ mod tests {
             hint_mode: crate::runner::HintMode::Message,
             config_path: None,
             provider_api_keys: HashMap::new(),
-            thinking_prefs: HashMap::new(),
+            thinking_prefs: ThinkingPrefs::default(),
             save_thinking_prefs: None,
             save_last_model: None,
             save_session: None,

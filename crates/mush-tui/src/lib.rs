@@ -41,7 +41,8 @@ pub use file_tracker::IsolationMode;
 pub use keybinds::{Action as KeybindAction, KeyMap, KeysConfig};
 pub use runner::{
     HintMode, LastModelSaver, PaneSnapshot, PromptEnricher, ReloadCallback, ReloadedContext,
-    SessionSaver, SessionSnapshot, ThinkingPrefsSaver, TuiConfig, run_tui,
+    SessionSaver, SessionSnapshot, ThinkingPrefs, ThinkingPrefsSaver, TuiConfig, canonical_dir,
+    run_tui,
 };
 pub use terminal_policy::{
     IMAGE_PROBE_ENV, ImageProbeMode, KEYBOARD_ENHANCEMENT_ENV, KeyboardEnhancementMode,

@@ -10,7 +10,7 @@ use mush_session::ConversationState;
 
 use crate::TuiConfig;
 use crate::app::App;
-use crate::runner::HintMode;
+use crate::runner::{HintMode, ThinkingPrefs};
 use crate::text::truncate_with_ellipsis;
 
 use super::SlashAction;
@@ -20,7 +20,7 @@ pub fn handle(
     app: &mut App,
     conversation: &mut ConversationState,
     tui_config: &mut TuiConfig,
-    thinking_prefs: &std::collections::HashMap<String, ThinkingLevel>,
+    thinking_prefs: &ThinkingPrefs,
     action: &SlashAction,
 ) -> Option<String> {
     match action {
@@ -565,7 +565,7 @@ fn handle_branch(app: &mut App, conversation: &mut ConversationState, n: usize) 
 fn handle_model_switch(
     app: &mut App,
     tui_config: &mut TuiConfig,
-    thinking_prefs: &std::collections::HashMap<String, ThinkingLevel>,
+    thinking_prefs: &ThinkingPrefs,
     args: &str,
 ) {
     let raw = args.trim();
@@ -593,10 +593,8 @@ fn handle_model_switch(
             0
         };
         let level = thinking_prefs
-            .get(id)
-            .copied()
-            .unwrap_or(ThinkingLevel::Off)
-            .normalize_visible();
+            .get(&tui_config.cwd, id)
+            .unwrap_or(ThinkingLevel::Off);
         app.thinking_level = level;
         if let Some(ref save_last_model) = tui_config.save_last_model {
             save_last_model(id);

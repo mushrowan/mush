@@ -1,4 +1,4 @@
-use mush_ai::types::{Message, Model, StreamOptions, ThinkingLevel};
+use mush_ai::types::{Message, Model, StreamOptions};
 use mush_session::ConversationState;
 
 /// callback that returns a relevance hint for a user message.
@@ -28,10 +28,6 @@ pub enum HintMode {
     /// no hint (all skills still loaded in system prompt)
     None,
 }
-
-/// callback to persist per-model thinking level
-pub type ThinkingPrefsSaver =
-    std::sync::Arc<dyn Fn(&std::collections::HashMap<String, ThinkingLevel>) + Send + Sync>;
 
 /// callback to persist last selected model id
 pub type LastModelSaver = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
@@ -105,10 +101,11 @@ pub struct TuiConfig {
     pub config_path: Option<std::path::PathBuf>,
     /// per-provider api keys from config
     pub provider_api_keys: std::collections::HashMap<String, mush_ai::ApiKey>,
-    /// per-model thinking level prefs (loaded from disk at startup)
-    pub thinking_prefs: std::collections::HashMap<String, ThinkingLevel>,
+    /// per-directory + per-model thinking level prefs (loaded from disk
+    /// at startup, mutated as users cycle levels at runtime)
+    pub thinking_prefs: super::ThinkingPrefs,
     /// callback to save thinking prefs when they change
-    pub save_thinking_prefs: Option<ThinkingPrefsSaver>,
+    pub save_thinking_prefs: Option<super::ThinkingPrefsSaver>,
     /// callback to persist last selected model id
     pub save_last_model: Option<LastModelSaver>,
     /// callback to auto-save session after each agent turn

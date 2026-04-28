@@ -16,6 +16,7 @@ mod render;
 mod runtime;
 mod streams;
 mod terminal;
+mod thinking_prefs;
 
 use mush_agent::tool::ToolRegistry;
 use mush_ai::registry::ApiRegistry;
@@ -23,7 +24,7 @@ use mush_ai::registry::ApiRegistry;
 use self::caching_backend::CachingBackend;
 pub use self::config::{
     HintMode, LastModelSaver, PaneSnapshot, PromptEnricher, ReloadCallback, ReloadedContext,
-    SessionSaver, SessionSnapshot, ThinkingPrefsSaver, TitleUpdater, TuiConfig,
+    SessionSaver, SessionSnapshot, TitleUpdater, TuiConfig,
 };
 use self::input::LoopAction;
 use self::looping::run_loop_iteration;
@@ -36,6 +37,7 @@ use self::terminal::{
     TerminalStateGuard, cleanup, enter_tui_terminal, install_panic_cleanup_hook,
     probe_image_picker, restore_terminal_state,
 };
+pub use self::thinking_prefs::{ThinkingPrefs, ThinkingPrefsSaver, canonical_dir};
 
 use self::diag::verify_terminal_restored;
 
