@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use mush_ai::types::{
-    ImageContent, ImageMimeType, TextContent, ToolOutcome, ToolResultContentPart,
+    Api, ImageContent, ImageMimeType, TextContent, ToolOutcome, ToolResultContentPart,
 };
 use serde::de::DeserializeOwned;
 
@@ -79,6 +79,15 @@ pub trait AgentTool: Send + Sync {
 
     /// json schema for the parameters
     fn parameters_schema(&self) -> serde_json::Value;
+
+    /// per-provider schema override. defaults to [`parameters_schema`].
+    /// override when the underlying model is RL'd on a specific tool
+    /// signature for one provider (e.g. claude code's read tool exposes
+    /// only `file_path` / `offset` / `limit`, so anthropic-bound calls
+    /// should mirror that)
+    fn parameters_schema_for(&self, _api: Api) -> serde_json::Value {
+        self.parameters_schema()
+    }
 
     /// execute the tool with the given arguments
     async fn execute(&self, args: serde_json::Value) -> ToolResult;
