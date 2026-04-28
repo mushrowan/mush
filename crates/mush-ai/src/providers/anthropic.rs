@@ -641,26 +641,36 @@ impl MessageVisitor for AnthropicVisitor {
                         "type": "redacted_thinking",
                         "data": data,
                     })),
+                    // anthropic's interleaved thinking emits a signature
+                    // that must be sent back verbatim across turns to
+                    // keep conversation state valid. adaptive thinking
+                    // sometimes emits only signature_delta with empty
+                    // thinking text (claude code's traffic shows the
+                    // same shape), so we preserve the block whenever a
+                    // signature exists, even with empty text.
+                    //
+                    // text-only thinking with no signature is an aborted
+                    // stream artefact: anthropic rejects thinking blocks
+                    // without signatures, so fall back to a text block
+                    // that still carries the user-visible reasoning.
+                    //
+                    // truly empty (no text, no signature) blocks carry
+                    // no information and get dropped
                     ThinkingContent::Thinking {
                         thinking,
                         signature,
-                    } => {
-                        if thinking.is_empty() {
-                            None
-                        } else if let Some(sig) = signature {
-                            Some(serde_json::json!({
-                                "type": "thinking",
-                                "thinking": thinking,
-                                "signature": sig,
-                            }))
-                        } else {
-                            // no signature (eg aborted stream), send as text
-                            Some(serde_json::json!({
-                                "type": "text",
-                                "text": thinking,
-                            }))
-                        }
-                    }
+                    } => match (thinking.is_empty(), signature) {
+                        (true, None) => None,
+                        (_, Some(sig)) => Some(serde_json::json!({
+                            "type": "thinking",
+                            "thinking": thinking,
+                            "signature": sig,
+                        })),
+                        (false, None) => Some(serde_json::json!({
+                            "type": "text",
+                            "text": thinking,
+                        })),
+                    },
                 },
                 AssistantContentPart::ToolCall(tc) => {
                     let name = if is_oauth {
@@ -1484,6 +1494,96 @@ mod tests {
         assert_eq!(converted[1].content[0]["type"], "tool_result");
         assert_eq!(converted[1].content[0]["tool_use_id"], "tc_1");
         assert_eq!(converted[1].content[0]["is_error"], true);
+    }
+
+    #[test]
+    fn empty_thinking_with_signature_preserves_block() {
+        // adaptive thinking emits only signature_delta with no thinking_delta:
+        // the block ends up with empty text but a non-empty signature.
+        // claude code's traffic shows {type: "thinking", thinking: "", signature}
+        // is sent back to anthropic verbatim. dropping the block (or its
+        // signature) violates the conversation invariant for interleaved
+        // thinking and the next turn sees a tool_use with no preceding
+        // thinking, which is when claude says "the thinking is cut off"
+        let messages = vec![Message::Assistant(AssistantMessage {
+            content: vec![
+                AssistantContentPart::Thinking(ThinkingContent::Thinking {
+                    thinking: String::new(),
+                    signature: Some("sig_abc123".into()),
+                }),
+                AssistantContentPart::ToolCall(ToolCall {
+                    id: "tc_1".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({"path": "foo.rs"}),
+                }),
+            ],
+            model: "test".into(),
+            provider: Provider::Custom("test".into()),
+            api: Api::AnthropicMessages,
+            usage: Usage::default(),
+            stop_reason: StopReason::ToolUse,
+            error_message: None,
+            timestamp_ms: Timestamp::zero(),
+        })];
+
+        let converted = convert_messages(&messages, false, None, ToolResultTrimming::SlidingWindow);
+        let blocks = converted[0].content.as_array().unwrap();
+        assert_eq!(blocks.len(), 2, "thinking block should be preserved");
+        assert_eq!(blocks[0]["type"], "thinking");
+        assert_eq!(blocks[0]["thinking"], "");
+        assert_eq!(blocks[0]["signature"], "sig_abc123");
+        assert_eq!(blocks[1]["type"], "tool_use");
+    }
+
+    #[test]
+    fn empty_thinking_without_signature_is_dropped() {
+        // genuinely empty thinking blocks (no text, no signature) carry
+        // no information for anthropic and should be dropped to avoid
+        // sending malformed `{type: thinking, thinking: ""}` blocks
+        let messages = vec![Message::Assistant(AssistantMessage {
+            content: vec![
+                AssistantContentPart::Thinking(ThinkingContent::Thinking {
+                    thinking: String::new(),
+                    signature: None,
+                }),
+                AssistantContentPart::Text(TextContent { text: "hi".into() }),
+            ],
+            model: "test".into(),
+            provider: Provider::Custom("test".into()),
+            api: Api::AnthropicMessages,
+            usage: Usage::default(),
+            stop_reason: StopReason::Stop,
+            error_message: None,
+            timestamp_ms: Timestamp::zero(),
+        })];
+
+        let converted = convert_messages(&messages, false, None, ToolResultTrimming::SlidingWindow);
+        let blocks = converted[0].content.as_array().unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "text");
+    }
+
+    #[test]
+    fn thinking_with_text_and_signature_preserves_both() {
+        let messages = vec![Message::Assistant(AssistantMessage {
+            content: vec![AssistantContentPart::Thinking(ThinkingContent::Thinking {
+                thinking: "let me think about this".into(),
+                signature: Some("sig_xyz".into()),
+            })],
+            model: "test".into(),
+            provider: Provider::Custom("test".into()),
+            api: Api::AnthropicMessages,
+            usage: Usage::default(),
+            stop_reason: StopReason::Stop,
+            error_message: None,
+            timestamp_ms: Timestamp::zero(),
+        })];
+
+        let converted = convert_messages(&messages, false, None, ToolResultTrimming::SlidingWindow);
+        let blocks = converted[0].content.as_array().unwrap();
+        assert_eq!(blocks[0]["type"], "thinking");
+        assert_eq!(blocks[0]["thinking"], "let me think about this");
+        assert_eq!(blocks[0]["signature"], "sig_xyz");
     }
 
     #[test]
