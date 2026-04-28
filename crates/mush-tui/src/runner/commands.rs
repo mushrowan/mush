@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::Path;
 
 use mush_ai::models;
@@ -9,12 +8,12 @@ use crate::file_tracker::FileTracker;
 use crate::pane::PaneManager;
 use crate::slash::{self, SlashAction};
 
-use super::TuiConfig;
 use super::panes::close_focused_pane;
+use super::{ThinkingPrefs, TuiConfig};
 
 pub(super) struct SlashEnv<'a> {
     pub tui_config: &'a mut TuiConfig,
-    pub thinking_prefs: &'a HashMap<String, ThinkingLevel>,
+    pub thinking_prefs: &'a ThinkingPrefs,
     pub registry: &'a ApiRegistry,
     pub message_bus: &'a crate::messaging::MessageBus,
     pub file_tracker: &'a FileTracker,
@@ -403,12 +402,13 @@ fn apply_reloaded_templates(pane_mgr: &mut PaneManager, templates: &[mush_ext::P
 }
 
 pub(super) fn save_thinking_pref(
-    prefs: &mut HashMap<String, ThinkingLevel>,
+    prefs: &mut ThinkingPrefs,
     saver: &Option<super::ThinkingPrefsSaver>,
+    cwd: &Path,
     model_id: &str,
     level: ThinkingLevel,
 ) {
-    prefs.insert(model_id.to_string(), level.normalize_visible());
+    prefs.set(cwd.to_path_buf(), model_id.to_string(), level);
     if let Some(saver) = saver {
         saver(prefs);
     }

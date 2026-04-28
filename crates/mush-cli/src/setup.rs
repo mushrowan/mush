@@ -22,7 +22,7 @@ pub struct AppSetup {
     pub cwd: std::path::PathBuf,
     pub system_prompt: String,
     pub options: StreamOptions,
-    pub thinking_prefs: std::collections::HashMap<String, ThinkingLevel>,
+    pub thinking_prefs: mush_tui::ThinkingPrefs,
     pub tools: mush_agent::tool::ToolRegistry,
     pub debug_cache: bool,
     pub max_turns: usize,
@@ -87,7 +87,10 @@ impl AppSetup {
             t.phase("model + http");
         }
 
-        let cwd = std::env::current_dir()?;
+        // canonicalise so the same project resolves to the same directory
+        // key across symlinks and relative paths. falls through to the raw
+        // cwd on filesystems that refuse the lookup
+        let cwd = mush_tui::canonical_dir(&std::env::current_dir()?);
 
         let mut tools =
             init_builtin_tools(&model, &cwd, args.output_sink, args.no_tools, &http_client);
@@ -121,7 +124,7 @@ impl AppSetup {
         }
 
         let thinking_prefs = config::load_thinking_prefs();
-        let thinking_level = resolve_thinking(args.thinking, &model, &thinking_prefs, &cfg);
+        let thinking_level = resolve_thinking(args.thinking, &model, &thinking_prefs, &cwd, &cfg);
         let mut options = StreamOptions {
             thinking: thinking_level,
             max_tokens: args.max_tokens.or(cfg.max_tokens).map(TokenCount::new),
@@ -890,19 +893,26 @@ pub fn config_api_key(cfg: &config::Config, provider: &Provider) -> Option<ApiKe
     }
 }
 
-/// resolve the thinking level from CLI flags, saved prefs, and config
+/// resolve the thinking level from CLI flags, saved per-dir+model prefs,
+/// and the config-file fallback.
+///
+/// precedence (highest first):
+/// 1. `--think` CLI flag → `High`
+/// 2. saved preference for this `cwd + model.id`
+/// 3. `cfg.thinking` (global config default)
+/// 4. nothing → `None`
 pub fn resolve_thinking(
     cli_thinking: bool,
     model: &Model,
-    thinking_prefs: &std::collections::HashMap<String, ThinkingLevel>,
+    thinking_prefs: &mush_tui::ThinkingPrefs,
+    cwd: &std::path::Path,
     cfg: &config::Config,
 ) -> Option<ThinkingLevel> {
     if cli_thinking {
         return Some(ThinkingLevel::High);
     }
     thinking_prefs
-        .get(model.id.as_ref())
-        .copied()
+        .get(cwd, model.id.as_ref())
         .or(cfg.thinking)
         .map(ThinkingLevel::normalize_visible)
 }

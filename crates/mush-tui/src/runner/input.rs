@@ -1,10 +1,8 @@
-use std::collections::HashMap;
 use std::io;
 use std::path::Path;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use mush_ai::registry::ApiRegistry;
-use mush_ai::types::ThinkingLevel;
 
 use crate::app::{self, App, AppEvent};
 use crate::input::handle_key;
@@ -17,7 +15,7 @@ use super::streams::{
     StreamState, abort_focused_stream, answer_confirmation, edit_last_queued_steering,
     submit_streaming_input,
 };
-use super::{ThinkingPrefsSaver, TuiConfig};
+use super::{ThinkingPrefs, ThinkingPrefsSaver, TuiConfig};
 use crate::slash;
 
 pub(super) enum LoopAction {
@@ -30,7 +28,7 @@ pub(super) enum LoopAction {
 
 pub(super) struct InputDeps<'a> {
     pub tui_config: &'a mut TuiConfig,
-    pub thinking_prefs: &'a mut HashMap<String, ThinkingLevel>,
+    pub thinking_prefs: &'a mut ThinkingPrefs,
     pub thinking_saver: &'a Option<ThinkingPrefsSaver>,
     pub registry: &'a ApiRegistry,
     pub message_bus: &'a crate::messaging::MessageBus,
@@ -97,6 +95,7 @@ async fn handle_common_app_event(
             save_thinking_pref(
                 deps.thinking_prefs,
                 deps.thinking_saver,
+                deps.cwd,
                 &app.model_id,
                 app.thinking_level,
             );
