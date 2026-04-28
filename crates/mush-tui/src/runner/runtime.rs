@@ -9,7 +9,7 @@ use notify::RecommendedWatcher;
 
 use crate::app::{self, App};
 use crate::pane::{Pane, PaneId, PaneManager};
-use crate::slash::CompactionTaskResult;
+use crate::slash::PendingCompaction;
 use crate::slash_menu::SlashCommand;
 
 const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
@@ -73,7 +73,7 @@ pub(super) struct RunnerRuntime {
     /// and /fork-compact so the LLM call doesn't block the input loop;
     /// `poll_pending_compactions` finalises them on subsequent
     /// iterations. one per pane (panes are independent contexts).
-    pub pending_compactions: HashMap<PaneId, tokio::task::JoinHandle<CompactionTaskResult>>,
+    pub pending_compactions: HashMap<PaneId, PendingCompaction>,
     pub usage_poller: Option<mush_ai::oauth::usage::UsagePoller>,
     last_usage_poll: std::time::Instant,
     _config_watcher: Option<RecommendedWatcher>,
@@ -185,16 +185,16 @@ impl RunnerRuntime {
         let finished: Vec<PaneId> = self
             .pending_compactions
             .iter()
-            .filter_map(|(id, task)| task.is_finished().then_some(*id))
+            .filter_map(|(id, pending)| pending.task.is_finished().then_some(*id))
             .collect();
         if finished.is_empty() {
             return false;
         }
         for pane_id in finished {
-            let Some(task) = self.pending_compactions.remove(&pane_id) else {
+            let Some(pending) = self.pending_compactions.remove(&pane_id) else {
                 continue;
             };
-            let result = match task.await {
+            let result = match pending.task.await {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::warn!(error = %e, "compaction task panicked");
@@ -211,6 +211,7 @@ impl RunnerRuntime {
                 &mut pane.app,
                 &mut pane.conversation,
                 result,
+                pending.kind,
                 true,
             );
         }

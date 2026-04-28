@@ -27,6 +27,25 @@ pub struct CompactionTaskResult {
     pub before_count: usize,
 }
 
+/// which compaction flavour produced a `CompactionTaskResult`. drives
+/// only the post-task status formatting; the apply path is otherwise
+/// identical for both kinds
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionKind {
+    /// `/compact` - rewrites the active branch in place
+    Compact,
+    /// `/fork-compact` - branched the tree before compacting; the
+    /// original is still navigable via `/tree`
+    ForkCompact,
+}
+
+/// a backgrounded compaction the runtime is still waiting on. the
+/// kind disambiguates the status text shown when the task lands
+pub struct PendingCompaction {
+    pub task: tokio::task::JoinHandle<CompactionTaskResult>,
+    pub kind: CompactionKind,
+}
+
 /// spawn the LLM compaction on a background task and return its handle.
 /// the spawned future owns all its inputs (model, options, registry,
 /// hooks, cwd are cloned/converted to owned forms) so the calling code
@@ -66,11 +85,14 @@ pub fn start_compaction(
 /// the display, reset the "recent live call" token stats so the next
 /// real call doesn't trip a false ContextDecrease anomaly, optionally
 /// scroll to the top so the user sees the new summary, and update the
-/// status bar.
+/// status bar. `kind` controls only the status text, since the
+/// underlying state mutation is identical for /compact and
+/// /fork-compact.
 pub fn apply_compaction_result(
     app: &mut App,
     conversation: &mut ConversationState,
     result: CompactionTaskResult,
+    kind: CompactionKind,
     scroll_to_summary: bool,
 ) {
     conversation.replace_messages(result.messages);
@@ -81,14 +103,23 @@ pub fn apply_compaction_result(
     if scroll_to_summary {
         app.scroll_to_top();
     }
-    app.status = Some(format!(
-        "compacted: {} → {} messages, ~{} → ~{} tokens ({} summarised)",
-        result.before_count,
-        after.len(),
-        result.tokens_before,
-        result.tokens_after,
-        result.summarised_count,
-    ));
+    app.status = Some(match kind {
+        CompactionKind::Compact => format!(
+            "compacted: {} → {} messages, ~{} → ~{} tokens ({} summarised)",
+            result.before_count,
+            after.len(),
+            result.tokens_before,
+            result.tokens_after,
+            result.summarised_count,
+        ),
+        CompactionKind::ForkCompact => format!(
+            "fork-compacted: {} → {} messages, ~{} → ~{} tokens (original preserved, /tree to navigate)",
+            result.before_count,
+            after.len(),
+            result.tokens_before,
+            result.tokens_after,
+        ),
+    });
 }
 
 /// run LLM compaction on the conversation synchronously. kept as a thin
@@ -124,7 +155,7 @@ pub async fn handle_compact(
         app.push_system_message("compaction task failed");
         return;
     };
-    apply_compaction_result(app, conversation, result, true);
+    apply_compaction_result(app, conversation, result, CompactionKind::Compact, true);
 }
 
 /// fork the session tree then compact the new branch
@@ -460,7 +491,7 @@ mod tests {
         let result = task.await.expect("compaction task panicked");
 
         let mut conv = conversation;
-        apply_compaction_result(&mut app, &mut conv, result, true);
+        apply_compaction_result(&mut app, &mut conv, result, CompactionKind::Compact, true);
 
         // same invariants the synchronous path tests assert
         assert!(app.stats.prev_usage().is_none());
@@ -471,6 +502,51 @@ mod tests {
         assert!(
             summary_present,
             "compaction summary missing from app.messages"
+        );
+    }
+
+    /// `CompactionKind::ForkCompact` must format status text that hints
+    /// at the preserved original branch. without this, /fork-compact
+    /// would just look like /compact in the status bar and the user
+    /// would have no clue they could `/tree` back to the pre-compact
+    /// state.
+    #[tokio::test]
+    async fn apply_compaction_result_formats_fork_status() {
+        let mut msgs = Vec::new();
+        for i in 0..12 {
+            msgs.push(user_msg(&format!("q {i}")));
+            msgs.push(assistant_msg(&format!("a {i}"), 100));
+        }
+        let mut conversation = ConversationState::from_messages(msgs.clone());
+        let mut app = App::new(test_model().id, TokenCount::new(200_000));
+        let registry = ApiRegistry::new();
+
+        let task = start_compaction(
+            conversation.context(),
+            test_model(),
+            StreamOptions::default(),
+            registry,
+            None,
+            None,
+        );
+        let result = task.await.expect("compaction task panicked");
+
+        apply_compaction_result(
+            &mut app,
+            &mut conversation,
+            result,
+            CompactionKind::ForkCompact,
+            true,
+        );
+
+        let status = app.status.as_deref().unwrap_or_default();
+        assert!(
+            status.starts_with("fork-compacted:"),
+            "expected fork-specific status prefix, got: {status:?}"
+        );
+        assert!(
+            status.contains("/tree"),
+            "fork status should hint at /tree navigation, got: {status:?}"
         );
     }
 }

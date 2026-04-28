@@ -20,10 +20,8 @@ pub(super) struct SlashEnv<'a> {
     pub lifecycle_hooks: &'a mush_agent::LifecycleHooks,
     pub cwd: &'a Path,
     pub pending_prompt: &'a mut Option<String>,
-    pub pending_compactions: &'a mut std::collections::HashMap<
-        crate::pane::PaneId,
-        tokio::task::JoinHandle<crate::slash::CompactionTaskResult>,
-    >,
+    pub pending_compactions:
+        &'a mut std::collections::HashMap<crate::pane::PaneId, crate::slash::PendingCompaction>,
 }
 
 pub(super) async fn handle_slash_action(
@@ -79,7 +77,10 @@ pub(super) async fn handle_slash_action(
                             Some(lifecycle_hooks.clone()),
                             Some(cwd.to_path_buf()),
                         );
-                        slot.insert(task);
+                        slot.insert(slash::PendingCompaction {
+                            task,
+                            kind: slash::CompactionKind::Compact,
+                        });
                         state_changed = true;
                     }
                 }
@@ -87,27 +88,57 @@ pub(super) async fn handle_slash_action(
         }
         SlashAction::ForkCompact => {
             let pane = pane_mgr.focused_mut();
-            let (app, conversation, _) = pane.fields_mut();
-            let (compact_model, compact_options) = tui_config
-                .compaction_model
-                .as_ref()
-                .map(|(m, o)| (m.clone(), o.clone()))
-                .unwrap_or_else(|| {
-                    let m = models::find_model_by_id(app.model_id.as_str())
-                        .unwrap_or_else(|| tui_config.model.clone());
-                    (m, tui_config.options.clone())
-                });
-            slash::handle_fork_compact(
-                app,
-                conversation,
-                &compact_model,
-                &compact_options,
-                registry,
-                Some(lifecycle_hooks),
-                Some(cwd),
-            )
-            .await;
-            state_changed = true;
+            let pane_id = pane.id;
+            let before = pane.conversation.context_len();
+            if before <= slash::MIN_MESSAGES_FOR_COMPACTION {
+                pane.app
+                    .push_system_message("conversation too short to fork-compact");
+            } else {
+                use std::collections::hash_map::Entry;
+                match pending_compactions.entry(pane_id) {
+                    Entry::Occupied(_) => {
+                        pane.app
+                            .push_system_message("compaction already in progress on this pane");
+                    }
+                    Entry::Vacant(slot) => {
+                        // sync: fork the tree at the current leaf so the
+                        // original branch is preserved (`/tree` to navigate).
+                        // bail if there's no leaf to branch from
+                        let Some(leaf_id) = pane.conversation.leaf_id().cloned() else {
+                            pane.app.push_system_message("no conversation to fork");
+                            return false;
+                        };
+                        let messages = pane.conversation.context();
+                        pane.conversation.branch_with_summary(
+                            &leaf_id,
+                            format!("forked from branch with {before} messages for compaction"),
+                        );
+                        let (compact_model, compact_options) = tui_config
+                            .compaction_model
+                            .as_ref()
+                            .map(|(m, o)| (m.clone(), o.clone()))
+                            .unwrap_or_else(|| {
+                                let m = models::find_model_by_id(pane.app.model_id.as_str())
+                                    .unwrap_or_else(|| tui_config.model.clone());
+                                (m, tui_config.options.clone())
+                            });
+                        pane.app.status = Some("fork-compacting in background…".into());
+                        let task = slash::start_compaction(
+                            messages,
+                            compact_model,
+                            compact_options,
+                            registry.clone(),
+                            Some(lifecycle_hooks.clone()),
+                            Some(cwd.to_path_buf()),
+                        );
+                        slot.insert(slash::PendingCompaction {
+                            task,
+                            kind: slash::CompactionKind::ForkCompact,
+                        });
+                        state_changed = true;
+                    }
+                }
+            }
         }
         SlashAction::Export { path } => {
             let pane = pane_mgr.focused_mut();
