@@ -849,6 +849,16 @@ impl App {
         self.navigation.has_unread = false;
     }
 
+    /// jump to the top of the conversation. used after a manual /compact
+    /// so the freshly generated summary (pushed at index 0) is the first
+    /// thing the user sees, instead of leaving them at the bottom looking
+    /// at the same kept messages they had before. setting `u16::MAX` is
+    /// safe because the renderer clamps `scroll_offset` to
+    /// `total_lines - visible_lines` at draw time
+    pub fn scroll_to_top(&mut self) {
+        self.scroll_offset = u16::MAX;
+    }
+
     /// whether visual selection mode is active (v in scroll mode)
     pub fn has_selection(&self) -> bool {
         self.navigation.selection_anchor.is_some() && self.navigation.selected_message.is_some()
