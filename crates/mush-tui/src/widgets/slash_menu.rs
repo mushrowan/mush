@@ -155,11 +155,13 @@ mod tests {
                 ModelCompletion {
                     id: "claude-opus".into(),
                     name: "Claude Opus".into(),
+                    provider: "anthropic".into(),
                     stale: false,
                 },
                 ModelCompletion {
                     id: "gpt-5".into(),
                     name: "GPT 5".into(),
+                    provider: "anthropic".into(),
                     stale: false,
                 },
             ],
@@ -191,6 +193,7 @@ mod tests {
             vec![ModelCompletion {
                 id: "claude-opus".into(),
                 name: "Claude Opus".into(),
+                provider: "anthropic".into(),
                 stale: false,
             }],
             Vec::new(),
@@ -215,11 +218,13 @@ mod tests {
                 ModelCompletion {
                     id: "fresh-model".into(),
                     name: "Fresh".into(),
+                    provider: "anthropic".into(),
                     stale: false,
                 },
                 ModelCompletion {
                     id: "removed-model".into(),
                     name: "Removed".into(),
+                    provider: "anthropic".into(),
                     stale: true,
                 },
             ],

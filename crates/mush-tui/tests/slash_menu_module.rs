@@ -14,6 +14,7 @@ fn slash_menu_module_exposes_completion_state() {
     let models = vec![ModelCompletion {
         id: "claude-sonnet".into(),
         name: "Claude Sonnet".into(),
+        provider: "anthropic".into(),
         stale: false,
     }];
     let model_menu = SlashMenuState::for_models(models);

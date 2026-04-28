@@ -2773,11 +2773,13 @@ batch: 1/2 succeeded, 1 failed";
             ModelCompletion {
                 id: "claude-opus".into(),
                 name: "Claude Opus".into(),
+                provider: "anthropic".into(),
                 stale: false,
             },
             ModelCompletion {
                 id: "gpt-5".into(),
                 name: "GPT-5".into(),
+                provider: "anthropic".into(),
                 stale: false,
             },
         ];

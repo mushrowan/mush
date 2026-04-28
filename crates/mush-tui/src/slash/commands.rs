@@ -106,7 +106,12 @@ pub fn handle(
             keys.push_str("  ctrl+shift+enter - fork into new pane\n");
             keys.push_str("  ctrl+tab         - next pane\n");
             keys.push_str("  ctrl+shift+tab   - previous pane\n");
-            keys.push_str("  alt+1..9         - focus pane by number");
+            keys.push_str("  alt+1..9         - focus pane by number\n");
+            keys.push_str("\nmodel picker:\n");
+            keys.push_str("  ctrl+f         - toggle favourite on highlighted model\n");
+            keys.push_str("  ctrl+d         - delete highlighted stale model (with confirm)\n");
+            keys.push_str("  ctrl+shift+d   - delete every stale model (with confirm)\n");
+            keys.push_str("  y / n          - confirm / cancel a delete prompt");
             app.push_system_message(keys);
             None
         }
