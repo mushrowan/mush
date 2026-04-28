@@ -575,9 +575,15 @@ fn handle_model_switch(
         .get(raw)
         .map(|s| s.as_str())
         .unwrap_or(raw);
-    if let Some(new_model) = models::find_model_by_id(id) {
+    // consult the merged catalogue so codex-discovered models surface
+    // alongside the static catalogue (otherwise codex slugs would
+    // bounce off as "unknown model")
+    let merged = mush_ai::discovery::find_merged_model_by_id(id);
+    if let Some(ref merged) = merged {
+        let new_model = &merged.model;
         app.model_id = id.into();
         app.stats.context_window = new_model.context_window;
+        app.supported_thinking_levels = new_model.supported_thinking_levels.clone();
         app.cache.ttl_secs = if tui_config.cache_timer {
             let is_oauth = tui_config
                 .options

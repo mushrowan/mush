@@ -298,6 +298,7 @@ pub(super) fn process_delegations(
             if let Some(model) = mush_ai::models::find_model_by_id(&model_id) {
                 new_app.model_id = model.id.clone();
                 new_app.stats.context_window = model.context_window;
+                new_app.supported_thinking_levels = model.supported_thinking_levels.clone();
             } else {
                 // unknown model, set id anyway (will fail at stream time with a clear error)
                 new_app.model_id = model_id.into();

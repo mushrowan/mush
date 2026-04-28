@@ -90,6 +90,29 @@ pub enum ScrollUnit {
     Block,
 }
 
+/// pick the next thinking level. when `supported` is non-empty, walks
+/// the curated list (cheap → expensive) wrapping around. when empty,
+/// falls back to the legacy hardcoded cycle so uncurated models still
+/// respond to ctrl+t. unknown / out-of-list current levels reset to
+/// the first supported entry instead of stalling
+#[must_use]
+pub fn next_thinking_level(current: ThinkingLevel, supported: &[ThinkingLevel]) -> ThinkingLevel {
+    if supported.is_empty() {
+        return match current.normalize_visible() {
+            ThinkingLevel::Off => ThinkingLevel::Low,
+            ThinkingLevel::Low => ThinkingLevel::Medium,
+            ThinkingLevel::Medium => ThinkingLevel::High,
+            ThinkingLevel::High => ThinkingLevel::Xhigh,
+            ThinkingLevel::Xhigh | ThinkingLevel::Minimal => ThinkingLevel::Off,
+        };
+    }
+    let normalised = current.normalize_visible();
+    match supported.iter().position(|&l| l == normalised) {
+        Some(i) => supported[(i + 1) % supported.len()],
+        None => supported[0],
+    }
+}
+
 /// the main app state
 pub struct App {
     /// conversation messages for display
@@ -116,6 +139,10 @@ pub struct App {
     tick_count: u8,
     /// current thinking level
     pub thinking_level: ThinkingLevel,
+    /// the active model's curated thinking levels (drives the cycler).
+    /// empty when the model hasn't been curated; the cycler then falls
+    /// back to the legacy hardcoded walk
+    pub supported_thinking_levels: Vec<ThinkingLevel>,
     /// how to display thinking text
     pub thinking_display: ThinkingDisplay,
     /// modal and prompt-related state
@@ -179,6 +206,7 @@ impl App {
             throbber_state: ThrobberState::default(),
             tick_count: 0,
             thinking_level: ThinkingLevel::Off,
+            supported_thinking_levels: Vec::new(),
             thinking_display: ThinkingDisplay::default(),
             interaction: InteractionState::default(),
             completion: CompletionState::default(),
@@ -1020,16 +1048,13 @@ impl App {
         }
     }
 
-    /// cycle to the next thinking level
+    /// cycle to the next thinking level. when the active model advertises
+    /// a curated `supported_thinking_levels` list, walk it (cheap →
+    /// expensive, wrapping around). otherwise fall back to the legacy
+    /// hardcoded cycle so uncurated models still respond to ctrl+t
     pub fn cycle_thinking_level(&mut self) {
-        self.thinking_level = match self.thinking_level {
-            ThinkingLevel::Off => ThinkingLevel::Low,
-            ThinkingLevel::Minimal => ThinkingLevel::Low,
-            ThinkingLevel::Low => ThinkingLevel::Medium,
-            ThinkingLevel::Medium => ThinkingLevel::High,
-            ThinkingLevel::High => ThinkingLevel::Xhigh,
-            ThinkingLevel::Xhigh => ThinkingLevel::Off,
-        };
+        self.thinking_level =
+            next_thinking_level(self.thinking_level, &self.supported_thinking_levels);
     }
 
     /// open the session picker with the given sessions

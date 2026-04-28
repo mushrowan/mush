@@ -237,6 +237,7 @@ fn build_initial_app(tui_config: &TuiConfig, cwd: &Path) -> App {
         .thinking
         .unwrap_or(ThinkingLevel::Off)
         .normalize_visible();
+    app.supported_thinking_levels = tui_config.model.supported_thinking_levels.clone();
     app.thinking_display = tui_config.thinking_display;
     app.interaction.show_cost = tui_config.show_cost;
     app.interaction.show_usage_lines = tui_config.show_usage_lines;
