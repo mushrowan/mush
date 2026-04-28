@@ -3,6 +3,8 @@
 //! split out from commands.rs due to the async complexity
 //! and distinct concerns (LLM calls, hook execution)
 
+use std::path::PathBuf;
+
 use mush_ai::registry::ApiRegistry;
 use mush_ai::types::*;
 use mush_session::ConversationState;
@@ -12,9 +14,87 @@ use crate::app::App;
 use super::commands::rebuild_display;
 
 /// minimum messages before compaction is worthwhile
-const MIN_MESSAGES_FOR_COMPACTION: usize = 4;
+pub const MIN_MESSAGES_FOR_COMPACTION: usize = 4;
 
-/// run LLM compaction on the conversation
+/// owned result of a backgrounded compaction task. carries every value
+/// the synchronous finisher needs so the LLM call can run on a
+/// `tokio::spawn` task without borrowing from app/conversation/runtime.
+pub struct CompactionTaskResult {
+    pub messages: Vec<Message>,
+    pub tokens_before: usize,
+    pub tokens_after: usize,
+    pub summarised_count: usize,
+    pub before_count: usize,
+}
+
+/// spawn the LLM compaction on a background task and return its handle.
+/// the spawned future owns all its inputs (model, options, registry,
+/// hooks, cwd are cloned/converted to owned forms) so the calling code
+/// can return to the event loop while the LLM call runs. callers poll
+/// the handle from the main loop and use [`apply_compaction_result`]
+/// to finalise once the task completes.
+pub fn start_compaction(
+    messages: Vec<Message>,
+    model: Model,
+    options: StreamOptions,
+    registry: ApiRegistry,
+    lifecycle_hooks: Option<mush_agent::LifecycleHooks>,
+    cwd: Option<PathBuf>,
+) -> tokio::task::JoinHandle<CompactionTaskResult> {
+    let before_count = messages.len();
+    tokio::spawn(async move {
+        let (compacted, tokens_before, tokens_after, summarised_count) = run_compaction(
+            messages,
+            &model,
+            &options,
+            &registry,
+            lifecycle_hooks.as_ref(),
+            cwd.as_deref(),
+        )
+        .await;
+        CompactionTaskResult {
+            messages: compacted,
+            tokens_before,
+            tokens_after,
+            summarised_count,
+            before_count,
+        }
+    })
+}
+
+/// finalise a compaction task: swap the conversation messages, rebuild
+/// the display, reset the "recent live call" token stats so the next
+/// real call doesn't trip a false ContextDecrease anomaly, optionally
+/// scroll to the top so the user sees the new summary, and update the
+/// status bar.
+pub fn apply_compaction_result(
+    app: &mut App,
+    conversation: &mut ConversationState,
+    result: CompactionTaskResult,
+    scroll_to_summary: bool,
+) {
+    conversation.replace_messages(result.messages);
+    let after = conversation.context();
+    rebuild_display(app, &after);
+    app.stats
+        .reset_live_state(TokenCount::new(result.tokens_after as u64));
+    if scroll_to_summary {
+        app.scroll_to_top();
+    }
+    app.status = Some(format!(
+        "compacted: {} → {} messages, ~{} → ~{} tokens ({} summarised)",
+        result.before_count,
+        after.len(),
+        result.tokens_before,
+        result.tokens_after,
+        result.summarised_count,
+    ));
+}
+
+/// run LLM compaction on the conversation synchronously. kept as a thin
+/// wrapper over [`start_compaction`] + [`apply_compaction_result`] so
+/// existing tests and any synchronous callers (e.g. legacy paths,
+/// integration tests) keep working unchanged.
 pub async fn handle_compact(
     app: &mut App,
     conversation: &mut ConversationState,
@@ -32,26 +112,19 @@ pub async fn handle_compact(
     }
 
     app.status = Some("compacting…".into());
-    let (compacted_messages, tokens_before, tokens_after, summarised_count) =
-        run_compaction(messages, model, options, registry, lifecycle_hooks, cwd).await;
-
-    conversation.replace_messages(compacted_messages);
-    let after = conversation.context();
-    rebuild_display(app, &after);
-    // rebuild_display walks the surviving assistants and accumulates
-    // their historical usage into app.stats. wipe the resulting
-    // "live" fields so the token counter shows the real post-compact
-    // size and the next call doesn't trip a false ContextDecrease.
-    app.stats
-        .reset_live_state(TokenCount::new(tokens_after as u64));
-    // the compaction summary is at the top of the rebuilt view; jump
-    // there so the user actually sees the new summary instead of
-    // staying at the bottom amid the same kept messages
-    app.scroll_to_top();
-    app.status = Some(format!(
-        "compacted: {before} → {} messages, ~{tokens_before} → ~{tokens_after} tokens ({summarised_count} summarised)",
-        after.len(),
-    ));
+    let task = start_compaction(
+        messages,
+        model.clone(),
+        options.clone(),
+        registry.clone(),
+        lifecycle_hooks.cloned(),
+        cwd.map(std::path::Path::to_path_buf),
+    );
+    let Ok(result) = task.await else {
+        app.push_system_message("compaction task failed");
+        return;
+    };
+    apply_compaction_result(app, conversation, result, true);
 }
 
 /// fork the session tree then compact the new branch
