@@ -738,6 +738,11 @@
       },
       "type": "array"
     },
+    "force_budget_thinking": {
+      "default": false,
+      "description": "override anthropic adaptive thinking with fixed-budget mode for\nadaptive-capable models. default: false (use adaptive when the\nmodel supports it)",
+      "type": "boolean"
+    },
     "hint_mode": {
       "$ref": "#/$defs/HintMode",
       "default": "message"

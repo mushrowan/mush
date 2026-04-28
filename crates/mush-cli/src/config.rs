@@ -64,6 +64,11 @@ pub struct Config {
     pub log_filter: Option<String>,
     /// how to display thinking text (hidden, collapse, expanded)
     pub thinking_display: mush_tui::ThinkingDisplay,
+    /// override anthropic adaptive thinking with fixed-budget mode for
+    /// adaptive-capable models. default: false (use adaptive when the
+    /// model supports it)
+    #[serde(default)]
+    pub force_budget_thinking: bool,
     /// automatically compact conversation when approaching context limit (off by default)
     #[serde(default)]
     pub auto_compact: bool,
@@ -148,6 +153,7 @@ impl Default for Config {
             hint_mode: HintMode::default(),
             log_filter: None,
             thinking_display: mush_tui::ThinkingDisplay::default(),
+            force_budget_thinking: false,
             auto_compact: false,
             auto_fork_compact: false,
             confirm_tools: false,
