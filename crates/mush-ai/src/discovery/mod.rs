@@ -8,8 +8,15 @@
 //! pure-function parsers (`parse_*`) so we don't need a live network.
 
 pub mod anthropic;
+pub mod cache;
+pub mod merge;
 pub mod openai;
 pub mod openrouter;
+
+pub use cache::{DiscoveredEntry, DiscoveryCache, ProviderCache, cache_path};
+pub use merge::{
+    MergedModel, ModelSource, find_merged_model_by_id, merge, merged_catalogue, merged_models,
+};
 
 use std::time::SystemTime;
 
