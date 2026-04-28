@@ -36,10 +36,8 @@ pub(super) struct InputDeps<'a> {
     pub lifecycle_hooks: &'a mush_agent::LifecycleHooks,
     pub cwd: &'a Path,
     pub pending_prompt: &'a mut Option<String>,
-    pub pending_compactions: &'a mut std::collections::HashMap<
-        crate::pane::PaneId,
-        tokio::task::JoinHandle<crate::slash::CompactionTaskResult>,
-    >,
+    pub pending_compactions:
+        &'a mut std::collections::HashMap<crate::pane::PaneId, crate::slash::PendingCompaction>,
     pub delegation_queue: &'a crate::delegate::DelegationQueue,
     pub image_picker: &'a Option<ratatui_image::picker::Picker>,
     /// handle to the Terminal backend's size cache so resize events
