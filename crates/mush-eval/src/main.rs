@@ -100,6 +100,7 @@ impl Backend {
             },
             context_window: TokenCount::new(128_000),
             max_output_tokens: TokenCount::new(MAX_TOKENS),
+            supports_adaptive_thinking: false,
         }
     }
 }
