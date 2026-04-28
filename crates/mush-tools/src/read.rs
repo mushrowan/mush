@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
+use mush_ai::types::Api;
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -49,6 +50,7 @@ impl ReadOutput {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReadArgs {
+    #[serde(alias = "file_path")]
     path: String,
     offset: Option<usize>,
     limit: Option<usize>,
@@ -279,6 +281,36 @@ impl AgentTool for ReadTool {
         })
     }
 
+    fn parameters_schema_for(&self, api: Api) -> serde_json::Value {
+        match api {
+            // mirror claude code's read tool exactly: file_path + offset
+            // + limit only. claude models are RL'd on this signature, so
+            // exposing the full canonical schema (start_line, end_line,
+            // around_line, etc) just confuses them. the canonical handler
+            // accepts `file_path` via serde alias so internal logic stays
+            // unchanged
+            Api::AnthropicMessages => serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "path to the file to read (relative or absolute)"
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "line number to start reading from (1-indexed)"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "maximum number of lines to read"
+                    }
+                },
+                "required": ["file_path"]
+            }),
+            _ => self.parameters_schema(),
+        }
+    }
+
     fn output_limit(&self) -> mush_agent::tool::OutputLimit {
         mush_agent::tool::OutputLimit::Head
     }
@@ -477,10 +509,78 @@ fn read_image(path: &Path) -> ToolResult {
 mod tests {
     use super::*;
     use crate::util::extract_text;
+    use mush_ai::types::Api;
     use std::fs;
 
     fn temp_dir() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()
+    }
+
+    #[test]
+    fn anthropic_schema_matches_claude_code_signature() {
+        // claude code's read tool exposes only file_path / offset / limit.
+        // serving the same minimal schema to anthropic-bound calls keeps
+        // claude models from tripping over the extra fields they aren't
+        // RL'd on
+        let tool = ReadTool::new(Arc::from(Path::new("/tmp")));
+        let schema = tool.parameters_schema_for(Api::AnthropicMessages);
+        let props = schema
+            .get("properties")
+            .and_then(|p| p.as_object())
+            .unwrap();
+        let keys: Vec<&str> = props.keys().map(|s| s.as_str()).collect();
+        let mut sorted = keys.clone();
+        sorted.sort();
+        assert_eq!(sorted, vec!["file_path", "limit", "offset"]);
+        let required = schema.get("required").and_then(|r| r.as_array()).unwrap();
+        assert_eq!(required.len(), 1);
+        assert_eq!(required[0].as_str(), Some("file_path"));
+    }
+
+    #[test]
+    fn non_anthropic_schema_keeps_full_signature() {
+        let tool = ReadTool::new(Arc::from(Path::new("/tmp")));
+        let schema = tool.parameters_schema_for(Api::OpenaiCompletions);
+        let props = schema
+            .get("properties")
+            .and_then(|p| p.as_object())
+            .unwrap();
+        // full schema retains start_line / end_line / around_line etc
+        assert!(props.contains_key("path"));
+        assert!(props.contains_key("start_line"));
+        assert!(props.contains_key("around_line"));
+    }
+
+    #[test]
+    fn parameters_schema_for_defaults_to_canonical() {
+        // the trait default returns parameters_schema(); other tools that
+        // don't override the per-provider hook get the same schema
+        let tool = ReadTool::new(Arc::from(Path::new("/tmp")));
+        // openai responses also takes the canonical schema for now
+        let schema = tool.parameters_schema_for(Api::OpenaiResponses);
+        let props = schema
+            .get("properties")
+            .and_then(|p| p.as_object())
+            .unwrap();
+        assert!(props.contains_key("path"));
+    }
+
+    #[tokio::test]
+    async fn execute_accepts_file_path_alias() {
+        // claude (via anthropic schema) calls with `file_path`; the
+        // canonical handler still uses `path`. serde alias means both
+        // names round-trip to the same field
+        let dir = temp_dir();
+        let file = dir.path().join("alias.txt");
+        fs::write(&file, "hello\nworld").unwrap();
+        let tool = ReadTool::new(Arc::from(dir.path()));
+        let result = tool
+            .execute(serde_json::json!({ "file_path": "alias.txt" }))
+            .await;
+        assert!(result.outcome.is_success(), "expected success: {result:?}");
+        let text = extract_text(&result);
+        assert!(text.contains("hello"));
+        assert!(text.contains("world"));
     }
 
     #[test]

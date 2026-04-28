@@ -341,12 +341,14 @@ pub fn agent_loop(
                     }
                 };
 
-                // build LLM context
+                // build LLM context. tools get the per-provider schema
+                // for the model we're about to call, so providers see the
+                // exact tool signature their model is RL'd on
                 let tool_defs: Vec<ToolDefinition> = config.tools.iter()
                     .map(|t| ToolDefinition {
                         name: t.name().to_string(),
                         description: t.description().to_string(),
-                        parameters: t.parameters_schema(),
+                        parameters: t.parameters_schema_for(config.model.api),
                     }).collect();
 
                 // compose system prompt from static base + dynamic suffix
