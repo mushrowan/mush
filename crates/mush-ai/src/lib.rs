@@ -1,3 +1,4 @@
+pub mod discovery;
 pub mod env;
 pub mod models;
 pub mod oauth;
