@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
@@ -8,6 +9,7 @@ use notify::RecommendedWatcher;
 
 use crate::app::{self, App};
 use crate::pane::{Pane, PaneId, PaneManager};
+use crate::slash::CompactionTaskResult;
 use crate::slash_menu::SlashCommand;
 
 const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
@@ -67,6 +69,11 @@ pub(super) struct RunnerRuntime {
     pub thinking_saver: Option<ThinkingPrefsSaver>,
     pub lifecycle_hooks: mush_agent::LifecycleHooks,
     pub pending_prompt: Option<String>,
+    /// background compaction tasks keyed by pane. spawned by /compact
+    /// and /fork-compact so the LLM call doesn't block the input loop;
+    /// `poll_pending_compactions` finalises them on subsequent
+    /// iterations. one per pane (panes are independent contexts).
+    pub pending_compactions: HashMap<PaneId, tokio::task::JoinHandle<CompactionTaskResult>>,
     pub usage_poller: Option<mush_ai::oauth::usage::UsagePoller>,
     last_usage_poll: std::time::Instant,
     _config_watcher: Option<RecommendedWatcher>,
@@ -130,6 +137,7 @@ impl RunnerRuntime {
                 thinking_saver: tui_config.save_thinking_prefs.clone(),
                 lifecycle_hooks: tui_config.lifecycle_hooks.clone(),
                 pending_prompt: None,
+                pending_compactions: HashMap::new(),
                 usage_poller,
                 last_usage_poll: std::time::Instant::now() - USAGE_POLL_TICK,
                 _config_watcher,
@@ -166,6 +174,47 @@ impl RunnerRuntime {
                 pane.app.tick();
             }
         }
+    }
+
+    /// finalise any background compaction tasks whose LLM call has
+    /// returned. called once per main-loop iteration; returns `true` if
+    /// at least one task completed (so the caller can force a redraw).
+    /// tasks for panes that were closed during the compaction are
+    /// silently dropped.
+    pub(super) async fn poll_pending_compactions(&mut self) -> bool {
+        let finished: Vec<PaneId> = self
+            .pending_compactions
+            .iter()
+            .filter_map(|(id, task)| task.is_finished().then_some(*id))
+            .collect();
+        if finished.is_empty() {
+            return false;
+        }
+        for pane_id in finished {
+            let Some(task) = self.pending_compactions.remove(&pane_id) else {
+                continue;
+            };
+            let result = match task.await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(error = %e, "compaction task panicked");
+                    if let Some(pane) = self.pane_mgr.pane_mut(pane_id) {
+                        pane.app.push_system_message("compaction failed");
+                    }
+                    continue;
+                }
+            };
+            let Some(pane) = self.pane_mgr.pane_mut(pane_id) else {
+                continue;
+            };
+            crate::slash::apply_compaction_result(
+                &mut pane.app,
+                &mut pane.conversation,
+                result,
+                true,
+            );
+        }
+        true
     }
 
     pub(super) fn notify_cache_state(&mut self, enabled: bool) {

@@ -20,6 +20,10 @@ pub(super) struct SlashEnv<'a> {
     pub lifecycle_hooks: &'a mush_agent::LifecycleHooks,
     pub cwd: &'a Path,
     pub pending_prompt: &'a mut Option<String>,
+    pub pending_compactions: &'a mut std::collections::HashMap<
+        crate::pane::PaneId,
+        tokio::task::JoinHandle<crate::slash::CompactionTaskResult>,
+    >,
 }
 
 pub(super) async fn handle_slash_action(
@@ -36,33 +40,50 @@ pub(super) async fn handle_slash_action(
         lifecycle_hooks,
         cwd,
         pending_prompt,
+        pending_compactions,
     } = env;
     let mut state_changed = false;
 
     match action {
         SlashAction::Compact => {
             let pane = pane_mgr.focused_mut();
-            let (app, conversation, _) = pane.fields_mut();
-            let (compact_model, compact_options) = tui_config
-                .compaction_model
-                .as_ref()
-                .map(|(m, o)| (m.clone(), o.clone()))
-                .unwrap_or_else(|| {
-                    let m = models::find_model_by_id(app.model_id.as_str())
-                        .unwrap_or_else(|| tui_config.model.clone());
-                    (m, tui_config.options.clone())
-                });
-            slash::handle_compact(
-                app,
-                conversation,
-                &compact_model,
-                &compact_options,
-                registry,
-                Some(lifecycle_hooks),
-                Some(cwd),
-            )
-            .await;
-            state_changed = true;
+            let pane_id = pane.id;
+            let messages = pane.conversation.context();
+            let before = messages.len();
+            if before <= slash::MIN_MESSAGES_FOR_COMPACTION {
+                pane.app
+                    .push_system_message("conversation too short to compact");
+            } else {
+                use std::collections::hash_map::Entry;
+                match pending_compactions.entry(pane_id) {
+                    Entry::Occupied(_) => {
+                        pane.app
+                            .push_system_message("compaction already in progress on this pane");
+                    }
+                    Entry::Vacant(slot) => {
+                        let (compact_model, compact_options) = tui_config
+                            .compaction_model
+                            .as_ref()
+                            .map(|(m, o)| (m.clone(), o.clone()))
+                            .unwrap_or_else(|| {
+                                let m = models::find_model_by_id(pane.app.model_id.as_str())
+                                    .unwrap_or_else(|| tui_config.model.clone());
+                                (m, tui_config.options.clone())
+                            });
+                        pane.app.status = Some("compacting in background…".into());
+                        let task = slash::start_compaction(
+                            messages,
+                            compact_model,
+                            compact_options,
+                            registry.clone(),
+                            Some(lifecycle_hooks.clone()),
+                            Some(cwd.to_path_buf()),
+                        );
+                        slot.insert(task);
+                        state_changed = true;
+                    }
+                }
+            }
         }
         SlashAction::ForkCompact => {
             let pane = pane_mgr.focused_mut();

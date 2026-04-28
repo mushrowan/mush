@@ -66,6 +66,7 @@ fn input_parts<'a>(
         lifecycle_hooks,
         cwd,
         pending_prompt,
+        pending_compactions,
         ..
     } = runtime;
     (
@@ -80,6 +81,7 @@ fn input_parts<'a>(
             lifecycle_hooks,
             cwd,
             pending_prompt,
+            pending_compactions,
             delegation_queue: &services.delegation_queue,
             image_picker,
             size_cache,

@@ -174,8 +174,14 @@ pub async fn run_tui(
         runtime.tick_streaming_panes();
         runtime.notify_cache_state(tui_config.cache_timer);
 
+        // finalise any background compaction tasks whose LLM call returned
+        // since the last iteration; if any did, force a redraw so the new
+        // summary, status, and token counter all show up immediately
+        let compaction_finished = runtime.poll_pending_compactions().await;
+
         // redraw on state changes, or every ~1s so timers tick
         let should_draw = matches!(action, LoopAction::Redraw)
+            || compaction_finished
             || last_draw.elapsed() >= std::time::Duration::from_secs(1);
         if should_draw {
             runtime.poll_usage().await;
