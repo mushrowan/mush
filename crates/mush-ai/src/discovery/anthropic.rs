@@ -86,23 +86,7 @@ impl ModelDiscovery for AnthropicDiscovery {
             req = req.header("x-api-key", key);
         }
 
-        let resp = req.send().await?;
-        let status = resp.status();
-        let body = resp.text().await?;
-
-        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            return Err(DiscoveryError::Auth {
-                status: status.as_u16(),
-                body,
-            });
-        }
-        if !status.is_success() {
-            return Err(DiscoveryError::Upstream {
-                status: status.as_u16(),
-                body,
-            });
-        }
-
+        let body = super::execute_request(req).await?;
         let models = parse_anthropic_models(&body)?;
         Ok(DiscoveryReport {
             provider: Provider::Anthropic,
