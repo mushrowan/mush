@@ -284,6 +284,17 @@ pub(super) async fn handle_slash_action(
                 },
             ));
         }
+        SlashAction::RefreshModels => {
+            let client = tui_config.http_client.clone().unwrap_or_default();
+            pane_mgr.focused_mut().app.status = Some("refreshing models…".into());
+            let summary = mush_ai::discovery::refresh_and_save(client).await;
+            let line = summary.one_line();
+            pane_mgr
+                .focused_mut()
+                .app
+                .push_system_message(format!("model discovery: {line}"));
+            pane_mgr.focused_mut().app.status = None;
+        }
         SlashAction::Close => {
             close_focused_pane(pane_mgr, None, message_bus, file_tracker, cwd).await;
         }

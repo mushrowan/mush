@@ -12,10 +12,14 @@ pub mod cache;
 pub mod merge;
 pub mod openai;
 pub mod openrouter;
+pub mod orchestrate;
 
 pub use cache::{DiscoveredEntry, DiscoveryCache, ProviderCache, cache_path};
 pub use merge::{
     MergedModel, ModelSource, find_merged_model_by_id, merge, merged_catalogue, merged_models,
+};
+pub use orchestrate::{
+    DiscoveryOutcome, DiscoveryRunResult, DiscoveryRunSummary, refresh_and_save, run_all_available,
 };
 
 use std::time::SystemTime;

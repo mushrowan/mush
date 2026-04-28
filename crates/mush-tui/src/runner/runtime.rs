@@ -48,6 +48,7 @@ const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("merge", "merge forked pane's work back"),
     ("debug", "dump internal state (for bug reports)"),
     ("reload", "rebuild AGENTS.md, prompt templates, and skills"),
+    ("refresh-models", "refresh discovered model catalogue"),
     ("quit", "exit mush"),
 ];
 
