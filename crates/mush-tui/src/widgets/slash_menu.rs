@@ -1,6 +1,8 @@
 //! slash command completion menu widget
 //!
-//! renders a popup above the input box showing matching commands with descriptions
+//! renders a popup above the input box showing matching slash commands
+//! with their descriptions. model selection lives on a separate centred
+//! overlay (see [`crate::widgets::model_picker`])
 
 use crate::slash_menu::SlashMenuState;
 use crate::theme::Theme;
@@ -12,16 +14,10 @@ use ratatui::widgets::{Block, Borders, Clear, Padding};
 
 /// render the slash menu as a popup above the input area
 pub fn render(frame: &mut Frame, menu: &SlashMenuState, input_area: Rect, theme: &Theme) {
-    let item_count = if menu.model_mode {
-        menu.model_matches.len()
-    } else {
-        menu.matches.len()
-    };
-    let toast_rows = usize::from(menu.toast.is_some());
+    let item_count = menu.matches.len();
     let max_visible = 12.min(item_count);
-    // popup sits above the input box. +2 for borders, +1 more when a
-    // toast needs its own line
-    let height = (max_visible + toast_rows + 2) as u16;
+    // popup sits above the input box, +2 rows for the borders
+    let height = (max_visible + 2) as u16;
     let width = input_area.width.min(80);
     let x = input_area.x;
     let y = input_area.y.saturating_sub(height);
@@ -45,93 +41,25 @@ pub fn render(frame: &mut Frame, menu: &SlashMenuState, input_area: Rect, theme:
     };
 
     let mut lines: Vec<Line<'_>> = Vec::new();
-    if menu.model_mode {
-        for (i, model) in menu
-            .model_matches
-            .iter()
-            .enumerate()
-            .skip(scroll)
-            .take(visible)
-        {
-            let is_selected = i == menu.selected;
+    for (i, cmd) in menu.matches.iter().enumerate().skip(scroll).take(visible) {
+        let is_selected = i == menu.selected;
 
-            let id_style = if is_selected {
-                theme.picker_selected.add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            let prefix = if is_selected { "▸ " } else { "  " };
-            // two-char slot so favourited and non-favourited rows stay
-            // vertically aligned
-            let fav_marker = if menu.is_favourite(&model.id) {
-                "★ "
-            } else {
-                "  "
-            };
+        let name_style = if is_selected {
+            theme.picker_selected.add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        let prefix = if is_selected { "▸ " } else { "  " };
 
-            let id_text = format!("/model {}", model.id);
-            let speed_badge: String = model
-                .speed_tiers
-                .iter()
-                .map(|t| format!(" [{t}]"))
-                .collect();
-            let stale_marker = if model.stale { " [stale]" } else { "" };
-            let pad = 34usize.saturating_sub(
-                id_text.len()
-                    + prefix.len()
-                    + fav_marker.len()
-                    + speed_badge.len()
-                    + stale_marker.len(),
-            );
+        let name_text = format!("/{}", cmd.name);
+        let pad = 16usize.saturating_sub(name_text.len() + prefix.len());
 
-            // suffix shown on the right side: display name optionally
-            // followed by " - description" when the upstream provided one
-            let mut display = model.name.clone();
-            if let Some(desc) = model.description.as_deref().filter(|s| !s.is_empty()) {
-                if display.is_empty() {
-                    display = desc.to_string();
-                } else {
-                    display.push_str(" - ");
-                    display.push_str(desc);
-                }
-            }
-
-            lines.push(Line::from(vec![
-                Span::styled(prefix, id_style),
-                Span::styled(fav_marker, theme.menu_description),
-                Span::styled(id_text, id_style),
-                Span::styled(speed_badge, theme.menu_description),
-                Span::styled(stale_marker, theme.menu_description),
-                Span::raw(" ".repeat(pad)),
-                Span::styled(display, theme.menu_description),
-            ]));
-        }
-    } else {
-        for (i, cmd) in menu.matches.iter().enumerate().skip(scroll).take(visible) {
-            let is_selected = i == menu.selected;
-
-            let name_style = if is_selected {
-                theme.picker_selected.add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            let prefix = if is_selected { "▸ " } else { "  " };
-
-            let name_text = format!("/{}", cmd.name);
-            let pad = 16usize.saturating_sub(name_text.len() + prefix.len());
-
-            lines.push(Line::from(vec![
-                Span::styled(prefix, name_style),
-                Span::styled(name_text, name_style),
-                Span::raw(" ".repeat(pad)),
-                Span::styled(&cmd.description, theme.menu_description),
-            ]));
-        }
-    }
-
-    // toast line at the bottom if present (takes the last visible slot)
-    if let Some(toast) = menu.toast.as_deref() {
-        lines.push(Line::from(Span::styled(toast, theme.menu_description)));
+        lines.push(Line::from(vec![
+            Span::styled(prefix, name_style),
+            Span::styled(name_text, name_style),
+            Span::raw(" ".repeat(pad)),
+            Span::styled(&cmd.description, theme.menu_description),
+        ]));
     }
 
     let text = ratatui::text::Text::from(lines);
@@ -140,7 +68,7 @@ pub fn render(frame: &mut Frame, menu: &SlashMenuState, input_area: Rect, theme:
 
 #[cfg(test)]
 mod tests {
-    use crate::slash_menu::{ModelCompletion, SlashMenuState};
+    use crate::slash_menu::{SlashCommand, SlashMenuState};
     use crate::theme::Theme;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -171,183 +99,40 @@ mod tests {
     }
 
     #[test]
-    fn model_row_shows_star_for_favourite() {
-        let menu = SlashMenuState::for_models_with_favourites(
-            vec![
-                ModelCompletion {
-                    id: "claude-opus".into(),
-                    name: "Claude Opus".into(),
-                    provider: "anthropic".into(),
-                    stale: false,
-                    description: None,
-                    speed_tiers: Vec::new(),
-                    priority: 0,
-                    visibility: None,
-                },
-                ModelCompletion {
-                    id: "gpt-5".into(),
-                    name: "GPT 5".into(),
-                    provider: "anthropic".into(),
-                    stale: false,
-                    description: None,
-                    speed_tiers: Vec::new(),
-                    priority: 0,
-                    visibility: None,
-                },
-            ],
-            vec!["claude-opus".into()],
-            false,
-        );
-        let buf = render_menu(&menu, 60, 8);
+    fn command_row_shows_name_and_description() {
+        let menu = SlashMenuState::for_commands(vec![SlashCommand {
+            name: "help".into(),
+            description: "show help".into(),
+        }]);
+        let buf = render_menu(&menu, 60, 6);
         let content = buffer_to_string(&buf);
-        // first row (selected + favourite) must show the star
-        let lines: Vec<&str> = content.lines().collect();
-        let fav_row = lines
-            .iter()
-            .find(|l| l.contains("claude-opus"))
-            .unwrap_or(&"");
-        let nonfav_row = lines.iter().find(|l| l.contains("gpt-5")).unwrap_or(&"");
-        assert!(
-            fav_row.contains("★"),
-            "favourited row should render a ★ marker; got: {fav_row:?}"
-        );
-        assert!(
-            !nonfav_row.contains("★"),
-            "non-favourite row must not render ★; got: {nonfav_row:?}"
-        );
+        assert!(content.contains("/help"), "row must show /help");
+        assert!(content.contains("show help"), "row must show description");
     }
 
     #[test]
-    fn locked_menu_renders_toast_when_set() {
-        let mut menu = SlashMenuState::for_models_with_favourites(
-            vec![ModelCompletion {
-                id: "claude-opus".into(),
-                name: "Claude Opus".into(),
-                provider: "anthropic".into(),
-                stale: false,
-                description: None,
-                speed_tiers: Vec::new(),
-                priority: 0,
-                visibility: None,
-            }],
-            Vec::new(),
-            true,
-        );
-        menu.toast = Some("favourites locked by config.toml".into());
-        let buf = render_menu(&menu, 60, 8);
-        let content = buffer_to_string(&buf);
-        assert!(
-            content.contains("favourites locked"),
-            "toast text should appear in the popup: {content:?}"
-        );
-    }
-
-    #[test]
-    fn stale_model_row_shows_stale_marker() {
-        // a model that was discovered in a previous fetch but is no longer
-        // returned by the upstream gets a `[stale]` suffix in the picker
-        // so the user can spot deprecated/removed models at a glance
-        let menu = SlashMenuState::for_models_with_favourites(
-            vec![
-                ModelCompletion {
-                    id: "fresh-model".into(),
-                    name: "Fresh".into(),
-                    provider: "anthropic".into(),
-                    stale: false,
-                    description: None,
-                    speed_tiers: Vec::new(),
-                    priority: 0,
-                    visibility: None,
-                },
-                ModelCompletion {
-                    id: "removed-model".into(),
-                    name: "Removed".into(),
-                    provider: "anthropic".into(),
-                    stale: true,
-                    description: None,
-                    speed_tiers: Vec::new(),
-                    priority: 0,
-                    visibility: None,
-                },
-            ],
-            Vec::new(),
-            false,
-        );
-        let buf = render_menu(&menu, 80, 8);
+    fn selected_row_renders_caret_marker() {
+        let menu = SlashMenuState::for_commands(vec![
+            SlashCommand {
+                name: "help".into(),
+                description: "show help".into(),
+            },
+            SlashCommand {
+                name: "model".into(),
+                description: "open model picker".into(),
+            },
+        ]);
+        let buf = render_menu(&menu, 60, 6);
         let content = buffer_to_string(&buf);
         let lines: Vec<&str> = content.lines().collect();
-        let stale_row = lines
+        let selected_row = lines
             .iter()
-            .find(|l| l.contains("removed-model"))
-            .unwrap_or(&"");
-        let fresh_row = lines
-            .iter()
-            .find(|l| l.contains("fresh-model"))
-            .unwrap_or(&"");
+            .find(|l| l.contains("/help"))
+            .copied()
+            .unwrap_or("");
         assert!(
-            stale_row.contains("[stale]"),
-            "stale row must render [stale] marker; got: {stale_row:?}"
-        );
-        assert!(
-            !fresh_row.contains("[stale]"),
-            "fresh row must not render [stale] marker; got: {fresh_row:?}"
-        );
-    }
-
-    #[test]
-    fn codex_description_appears_after_name_in_row() {
-        // codex's enriched /models endpoint provides a per-model blurb. the
-        // picker shows it after the model's display name to help the user
-        // distinguish models with similar slugs
-        let menu = SlashMenuState::for_models_with_favourites(
-            vec![ModelCompletion {
-                id: "gpt-5.4".into(),
-                name: "GPT-5.4".into(),
-                provider: "openai-codex".into(),
-                stale: false,
-                description: Some("Top-tier reasoning model".into()),
-                speed_tiers: Vec::new(),
-                priority: 0,
-                visibility: None,
-            }],
-            Vec::new(),
-            false,
-        );
-        let buf = render_menu(&menu, 80, 8);
-        let content = buffer_to_string(&buf);
-        assert!(
-            content.contains("GPT-5.4"),
-            "row must show the display name: {content:?}"
-        );
-        assert!(
-            content.contains("Top-tier reasoning model"),
-            "row must show the codex description after the name: {content:?}"
-        );
-    }
-
-    #[test]
-    fn fast_speed_tier_renders_as_badge() {
-        // codex tags fast-path models with a `fast` speed tier; the picker
-        // surfaces it as a `[fast]` badge so the user can spot snappy models
-        let menu = SlashMenuState::for_models_with_favourites(
-            vec![ModelCompletion {
-                id: "gpt-5.4-fast".into(),
-                name: "GPT-5.4".into(),
-                provider: "openai-codex".into(),
-                stale: false,
-                description: None,
-                speed_tiers: vec!["fast".into()],
-                priority: 0,
-                visibility: None,
-            }],
-            Vec::new(),
-            false,
-        );
-        let buf = render_menu(&menu, 80, 8);
-        let content = buffer_to_string(&buf);
-        assert!(
-            content.contains("[fast]"),
-            "row must render a [fast] badge for fast-tier models: {content:?}"
+            selected_row.contains('▸'),
+            "selected row should show ▸, got: {selected_row:?}"
         );
     }
 }

@@ -991,58 +991,27 @@ fn copy_via_shell(text: &str) -> bool {
 }
 
 fn handle_slash_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
-    // when a delete confirmation is armed, y/n/esc drive the flow
-    // and other keys are ignored (so users don't accidentally
-    // continue typing into the filter while a destructive prompt is up)
-    if app
-        .completion
-        .slash_menu
-        .as_ref()
-        .is_some_and(|m| m.confirm_delete.is_some())
-    {
-        return handle_delete_confirm_key(app, key);
-    }
-
     match (key.modifiers, key.code) {
         (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('c' | '[')) => {
             app.close_slash_menu();
             None
         }
-        // enter accepts the highlighted entry and closes the menu
+        // enter accepts the highlighted command and closes the menu
         (_, KeyCode::Enter) => {
-            let event = if let Some(ref menu) = app.completion.slash_menu {
-                if menu.model_mode {
-                    menu.model_matches
-                        .get(menu.selected)
-                        .map(|model| AppEvent::ModelSelected {
-                            model_id: model.id.clone(),
-                        })
-                } else if let Some(cmd) = menu.matches.get(menu.selected) {
-                    app.input.text = format!("/{}", cmd.name);
-                    app.input.cursor = app.input.text.len();
-                    app.input.ensure_cursor_visible();
-                    None
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
+            if let Some(ref menu) = app.completion.slash_menu
+                && let Some(cmd) = menu.matches.get(menu.selected)
+            {
+                app.input.text = format!("/{}", cmd.name);
+                app.input.cursor = app.input.text.len();
+                app.input.ensure_cursor_visible();
+            }
             app.close_slash_menu();
-            event
+            None
         }
-        // tab: in command mode cycle selection forward, in model mode
-        // toggle between all / favourites-only
+        // tab cycles selection forward
         (_, KeyCode::Tab) => {
-            let favourites_only = app
-                .completion
-                .slash_menu
-                .as_ref()
-                .is_some_and(|m| m.model_mode);
-            if favourites_only {
-                toggle_model_favourites_view(app);
-            } else if let Some(ref mut menu) = app.completion.slash_menu {
-                let len = menu_len(menu);
+            if let Some(ref mut menu) = app.completion.slash_menu {
+                let len = menu.matches.len();
                 if len > 0 {
                     menu.selected = (menu.selected + 1) % len;
                 }
@@ -1052,34 +1021,10 @@ fn handle_slash_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         // shift+backtab cycles backward with wrap
         (KeyModifiers::SHIFT, KeyCode::BackTab) | (_, KeyCode::BackTab) => {
             if let Some(ref mut menu) = app.completion.slash_menu {
-                let len = menu_len(menu);
+                let len = menu.matches.len();
                 if len > 0 {
                     menu.selected = (menu.selected + len - 1) % len;
                 }
-            }
-            None
-        }
-        // ctrl+f toggles favourite on the selected model (model mode only).
-        // rejected with a toast when favourites are locked by config
-        (KeyModifiers::CONTROL, KeyCode::Char('f')) => toggle_selected_favourite(app),
-        // ctrl+shift+d (or ctrl+shift+D, depending on the terminal): arm delete-all-stale.
-        // checked before the plain ctrl+d arm because shift-modifier events
-        // are a strict superset and must take precedence
-        (m, KeyCode::Char('d' | 'D'))
-            if m.contains(KeyModifiers::CONTROL) && m.contains(KeyModifiers::SHIFT) =>
-        {
-            if let Some(menu) = app.completion.slash_menu.as_mut() {
-                menu.arm_delete_all_stale();
-            }
-            None
-        }
-        // ctrl+d arms a delete-confirm for the highlighted row when it's stale
-        (KeyModifiers::CONTROL, KeyCode::Char('d')) => {
-            if let Some(menu) = app.completion.slash_menu.as_mut()
-                && !menu.arm_delete_selected()
-            {
-                // not stale (or not model mode) — leave a brief toast
-                menu.toast = Some("only stale rows can be deleted (ctrl+d)".into());
             }
             None
         }
@@ -1092,7 +1037,7 @@ fn handle_slash_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         }
         (_, KeyCode::Down) | (KeyModifiers::CONTROL, KeyCode::Char('j')) => {
             if let Some(ref mut menu) = app.completion.slash_menu {
-                let len = menu_len(menu);
+                let len = menu.matches.len();
                 if menu.selected + 1 < len {
                     menu.selected += 1;
                 }
@@ -1119,47 +1064,6 @@ fn handle_slash_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     }
 }
 
-fn menu_len(menu: &crate::slash_menu::SlashMenuState) -> usize {
-    if menu.model_mode {
-        menu.model_matches.len()
-    } else {
-        menu.matches.len()
-    }
-}
-
-/// drive the y/n/esc keys when a delete confirmation is armed in the
-/// model picker. y persists the deletion to the on-disk discovery cache
-/// and refreshes the picker; anything else cancels.
-fn handle_delete_confirm_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
-    let confirm = app
-        .completion
-        .slash_menu
-        .as_ref()
-        .and_then(|m| m.confirm_delete.clone())?;
-
-    match (key.modifiers, key.code) {
-        (_, KeyCode::Char('y' | 'Y')) => {
-            let removed = apply_delete_confirm(&confirm);
-            if let Some(menu) = app.completion.slash_menu.as_mut() {
-                menu.confirm_delete = None;
-                menu.toast = Some(match removed {
-                    0 => "delete failed: model not found in cache".into(),
-                    1 => "deleted 1 model".into(),
-                    n => format!("deleted {n} models"),
-                });
-            }
-            refresh_model_picker_after_delete(app);
-            None
-        }
-        _ => {
-            if let Some(menu) = app.completion.slash_menu.as_mut() {
-                menu.cancel_delete();
-            }
-            None
-        }
-    }
-}
-
 /// load the on-disk discovery cache, apply the confirmed deletion, save.
 /// returns the number of entries removed (0 when the target is missing).
 fn apply_delete_confirm(confirm: &crate::slash_menu::DeleteConfirm) -> usize {
@@ -1178,35 +1082,6 @@ fn apply_delete_confirm(confirm: &crate::slash_menu::DeleteConfirm) -> usize {
         tracing::warn!(error = %e, "failed to persist discovery cache after delete");
     }
     removed
-}
-
-/// rebuild the model completion list from the freshly-mutated cache and
-/// reapply the current filter. clamps the selected index so it stays
-/// valid when the deleted row vanishes.
-fn refresh_model_picker_after_delete(app: &mut App) {
-    use crate::slash_menu::{filter_model_matches, model_completion_from_merged};
-
-    let new_completions: Vec<_> = mush_ai::discovery::merged_catalogue()
-        .iter()
-        .map(model_completion_from_merged)
-        .collect();
-    app.completion.completions = new_completions.iter().map(|m| m.id.clone()).collect();
-    app.completion.model_completions = new_completions;
-
-    if let Some(menu) = app.completion.slash_menu.as_mut()
-        && menu.model_mode
-    {
-        let prefix = app.input.text.trim_start_matches('/');
-        let after = prefix.strip_prefix("model").unwrap_or(prefix).trim_start();
-        let prepared = crate::slash_menu::prepare_picker_models(
-            &app.completion.model_completions,
-            menu.show_all,
-        );
-        menu.model_matches = filter_model_matches(&prepared, after);
-        menu.selected = menu
-            .selected
-            .min(menu.model_matches.len().saturating_sub(1));
-    }
 }
 
 /// cycle to the next (direction=+1) or previous (direction=-1) favourite
@@ -1237,79 +1112,6 @@ fn cycle_favourite_model(app: &mut App, direction: isize) -> Option<AppEvent> {
 }
 
 /// toggle favourite status on the currently-selected model row. returns
-/// `AppEvent::PersistFavourites` when the list actually changed so the
-/// runner can save to disk. no-op + toast when locked
-fn toggle_selected_favourite(app: &mut App) -> Option<AppEvent> {
-    let menu = app.completion.slash_menu.as_mut()?;
-    if !menu.model_mode {
-        return None;
-    }
-    if menu.favourites_locked {
-        menu.toast = Some("favourites are locked by config.toml".to_string());
-        return None;
-    }
-    let model = menu.model_matches.get(menu.selected)?;
-    let id = model.id.clone();
-    if let Some(pos) = app
-        .completion
-        .favourite_models
-        .iter()
-        .position(|f| f == &id)
-    {
-        app.completion.favourite_models.remove(pos);
-    } else {
-        app.completion.favourite_models.push(id);
-    }
-    // keep the menu's copy in sync so the star marker updates immediately
-    if let Some(ref mut menu) = app.completion.slash_menu {
-        menu.favourite_models = app.completion.favourite_models.clone();
-    }
-    Some(AppEvent::PersistFavourites)
-}
-
-/// toggle the model picker between all-models and favourites-only views.
-/// swaps `menu.model_matches` to the subset of `model_completions` that are
-/// favourited (or back to all). leaves the picker open. when favourites are
-/// empty, sets a "no favourites yet" toast and stays in the all view
-fn toggle_model_favourites_view(app: &mut App) {
-    let Some(ref mut menu) = app.completion.slash_menu else {
-        return;
-    };
-    if !menu.model_mode {
-        return;
-    }
-    // a favourites-only view is one where every visible row is a favourite
-    // AND the count is smaller than the all-models set. flip by comparing
-    // current matches to the full list: if any non-favourite is visible, we
-    // were in "all" → switch to favourites
-    let has_non_favourite = menu
-        .model_matches
-        .iter()
-        .any(|m| !menu.favourite_models.contains(&m.id));
-    if has_non_favourite {
-        // currently showing all. switch to favourites-only
-        if menu.favourite_models.is_empty() {
-            menu.toast = Some("no favourites yet, ★ some with ctrl+f".to_string());
-            return;
-        }
-        let favs: Vec<_> = app
-            .completion
-            .model_completions
-            .iter()
-            .filter(|m| menu.favourite_models.contains(&m.id))
-            .cloned()
-            .collect();
-        menu.model_matches = favs;
-        menu.selected = 0;
-        menu.toast = Some("showing favourites only".to_string());
-    } else {
-        // currently favourites-only (or empty). switch back to all
-        menu.model_matches = app.completion.model_completions.clone();
-        menu.selected = 0;
-        menu.toast = None;
-    }
-}
-
 /// ctrl+[ is byte 0x1B, indistinguishable from ESC on terminals without
 /// kitty's DISAMBIGUATE_ESCAPE_CODES. on terminals with it, crossterm reports
 /// ctrl+[ as (CONTROL, Char('[')). this helper treats them equivalently so
@@ -2569,7 +2371,6 @@ mod tests {
         assert_eq!(app.interaction.mode, AppMode::SlashComplete);
         assert!(app.completion.slash_menu.is_some());
         let menu = app.completion.slash_menu.as_ref().unwrap();
-        assert!(!menu.model_mode);
         assert_eq!(menu.matches.len(), 2);
         assert_eq!(menu.selected, 0);
     }
@@ -2673,198 +2474,6 @@ mod tests {
         assert_eq!(app.input.text, "/login-complete");
     }
 
-    #[test]
-    fn model_picker_enter_emits_model_selected() {
-        let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.completion.model_completions = vec![
-            crate::app::ModelCompletion {
-                id: "claude-opus".into(),
-                name: "Claude Opus".into(),
-                provider: "anthropic".into(),
-                stale: false,
-                description: None,
-                speed_tiers: Vec::new(),
-                priority: 0,
-                visibility: None,
-            },
-            crate::app::ModelCompletion {
-                id: "gpt-5".into(),
-                name: "GPT-5".into(),
-                provider: "anthropic".into(),
-                stale: false,
-                description: None,
-                speed_tiers: Vec::new(),
-                priority: 0,
-                visibility: None,
-            },
-        ];
-        app.open_model_picker();
-
-        // select the second model
-        handle_key(&mut app, ctrl(KeyCode::Char('j')));
-
-        let event = handle_key(&mut app, key(KeyCode::Enter));
-        assert!(
-            matches!(event, Some(AppEvent::ModelSelected { ref model_id }) if model_id == "gpt-5"),
-            "expected ModelSelected{{ gpt-5 }}, got {event:?}"
-        );
-        assert!(app.completion.slash_menu.is_none());
-        assert_eq!(app.interaction.mode, AppMode::Normal);
-    }
-
-    #[test]
-    fn model_picker_tab_toggles_favourites_only_view() {
-        let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.completion.model_completions = vec![
-            crate::app::ModelCompletion {
-                id: "claude-opus".into(),
-                name: "Claude Opus".into(),
-                provider: "anthropic".into(),
-                stale: false,
-                description: None,
-                speed_tiers: Vec::new(),
-                priority: 0,
-                visibility: None,
-            },
-            crate::app::ModelCompletion {
-                id: "gpt-5".into(),
-                name: "GPT-5".into(),
-                provider: "anthropic".into(),
-                stale: false,
-                description: None,
-                speed_tiers: Vec::new(),
-                priority: 0,
-                visibility: None,
-            },
-            crate::app::ModelCompletion {
-                id: "gemini".into(),
-                name: "Gemini".into(),
-                provider: "anthropic".into(),
-                stale: false,
-                description: None,
-                speed_tiers: Vec::new(),
-                priority: 0,
-                visibility: None,
-            },
-        ];
-        app.completion.favourite_models = vec!["claude-opus".into()];
-        app.open_model_picker();
-        let menu = app.completion.slash_menu.as_ref().unwrap();
-        assert_eq!(menu.model_matches.len(), 3, "all 3 visible by default");
-
-        // tab toggles to favourites-only
-        handle_key(&mut app, key(KeyCode::Tab));
-        let menu = app.completion.slash_menu.as_ref().unwrap();
-        assert_eq!(
-            menu.model_matches.len(),
-            1,
-            "favourites-only view should restrict to 1 model"
-        );
-        assert_eq!(menu.model_matches[0].id, "claude-opus");
-
-        // tab again toggles back to all
-        handle_key(&mut app, key(KeyCode::Tab));
-        let menu = app.completion.slash_menu.as_ref().unwrap();
-        assert_eq!(menu.model_matches.len(), 3, "all models visible again");
-    }
-
-    #[test]
-    fn model_picker_tab_toasts_when_no_favourites() {
-        let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.completion.model_completions = vec![crate::app::ModelCompletion {
-            id: "claude-opus".into(),
-            name: "Claude Opus".into(),
-            provider: "anthropic".into(),
-            stale: false,
-            description: None,
-            speed_tiers: Vec::new(),
-            priority: 0,
-            visibility: None,
-        }];
-        assert!(app.completion.favourite_models.is_empty());
-        app.open_model_picker();
-
-        handle_key(&mut app, key(KeyCode::Tab));
-        let menu = app.completion.slash_menu.as_ref().unwrap();
-        assert_eq!(
-            menu.model_matches.len(),
-            1,
-            "no favourites means the all-view must stay"
-        );
-        assert!(
-            menu.toast
-                .as_deref()
-                .is_some_and(|t| t.contains("no favourites")),
-            "expected a 'no favourites' toast, got {:?}",
-            menu.toast
-        );
-    }
-
-    #[test]
-    fn model_picker_ctrl_f_toggles_favourite_when_unlocked() {
-        let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.completion.model_completions = vec![crate::app::ModelCompletion {
-            id: "claude-opus".into(),
-            name: "Claude Opus".into(),
-            provider: "anthropic".into(),
-            stale: false,
-            description: None,
-            speed_tiers: Vec::new(),
-            priority: 0,
-            visibility: None,
-        }];
-        app.completion.favourite_models = Vec::new();
-        app.completion.favourites_locked = false;
-        app.open_model_picker();
-
-        // add to favourites
-        let event = handle_key(&mut app, ctrl(KeyCode::Char('f')));
-        assert!(
-            matches!(event, Some(AppEvent::PersistFavourites)),
-            "expected PersistFavourites event, got {event:?}"
-        );
-        assert_eq!(app.completion.favourite_models, vec!["claude-opus"]);
-        let menu = app.completion.slash_menu.as_ref().unwrap();
-        assert!(menu.is_favourite("claude-opus"));
-
-        // toggle off
-        let event = handle_key(&mut app, ctrl(KeyCode::Char('f')));
-        assert!(matches!(event, Some(AppEvent::PersistFavourites)));
-        assert!(app.completion.favourite_models.is_empty());
-    }
-
-    #[test]
-    fn model_picker_ctrl_f_toasts_when_locked() {
-        let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.completion.model_completions = vec![crate::app::ModelCompletion {
-            id: "claude-opus".into(),
-            name: "Claude Opus".into(),
-            provider: "anthropic".into(),
-            stale: false,
-            description: None,
-            speed_tiers: Vec::new(),
-            priority: 0,
-            visibility: None,
-        }];
-        app.completion.favourite_models = vec!["claude-opus".into()];
-        app.completion.favourites_locked = true;
-        app.open_model_picker();
-
-        let event = handle_key(&mut app, ctrl(KeyCode::Char('f')));
-        assert!(
-            event.is_none(),
-            "locked ctrl+f must not emit a persist event, got {event:?}"
-        );
-        // list unchanged
-        assert_eq!(app.completion.favourite_models, vec!["claude-opus"]);
-        let menu = app.completion.slash_menu.as_ref().unwrap();
-        assert!(
-            menu.toast.as_deref().is_some_and(|t| t.contains("locked")),
-            "expected locked toast, got {:?}",
-            menu.toast
-        );
-    }
-
     fn ctrl_shift(code: KeyCode) -> KeyEvent {
         KeyEvent {
             code,
@@ -2872,99 +2481,6 @@ mod tests {
             kind: KeyEventKind::Press,
             state: KeyEventState::NONE,
         }
-    }
-
-    #[test]
-    fn model_picker_ctrl_d_arms_confirm_only_for_stale_rows() {
-        // ctrl+d on a fresh row toasts a hint; ctrl+d on a stale row arms
-        // a delete confirmation that y/n then resolves
-        let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.completion.model_completions = vec![
-            crate::app::ModelCompletion {
-                id: "alive".into(),
-                name: "Alive".into(),
-                provider: "anthropic".into(),
-                stale: false,
-                description: None,
-                speed_tiers: Vec::new(),
-                priority: 0,
-                visibility: None,
-            },
-            crate::app::ModelCompletion {
-                id: "removed".into(),
-                name: "Removed".into(),
-                provider: "anthropic".into(),
-                stale: true,
-                description: None,
-                speed_tiers: Vec::new(),
-                priority: 0,
-                visibility: None,
-            },
-        ];
-        app.open_model_picker();
-
-        // selected is 0 (fresh) — ctrl+d should toast and not arm
-        handle_key(&mut app, ctrl(KeyCode::Char('d')));
-        let menu = app.completion.slash_menu.as_ref().unwrap();
-        assert!(menu.confirm_delete.is_none());
-        assert!(menu.toast.as_deref().unwrap().contains("only stale"));
-
-        // move selection to the stale row
-        handle_key(&mut app, ctrl(KeyCode::Char('j')));
-        handle_key(&mut app, ctrl(KeyCode::Char('d')));
-        let menu = app.completion.slash_menu.as_ref().unwrap();
-        assert!(matches!(
-            menu.confirm_delete,
-            Some(crate::slash_menu::DeleteConfirm::Single { .. })
-        ));
-
-        // n cancels the confirm without mutating state
-        handle_key(&mut app, key(KeyCode::Char('n')));
-        let menu = app.completion.slash_menu.as_ref().unwrap();
-        assert!(menu.confirm_delete.is_none());
-        assert!(menu.toast.is_none());
-    }
-
-    #[test]
-    fn model_picker_ctrl_shift_d_arms_delete_all_stale() {
-        let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.completion.model_completions = vec![
-            crate::app::ModelCompletion {
-                id: "stale-a".into(),
-                name: "A".into(),
-                provider: "anthropic".into(),
-                stale: true,
-                description: None,
-                speed_tiers: Vec::new(),
-                priority: 0,
-                visibility: None,
-            },
-            crate::app::ModelCompletion {
-                id: "stale-b".into(),
-                name: "B".into(),
-                provider: "openrouter".into(),
-                stale: true,
-                description: None,
-                speed_tiers: Vec::new(),
-                priority: 0,
-                visibility: None,
-            },
-        ];
-        app.open_model_picker();
-
-        handle_key(&mut app, ctrl_shift(KeyCode::Char('d')));
-        let menu = app.completion.slash_menu.as_ref().unwrap();
-        assert_eq!(
-            menu.confirm_delete,
-            Some(crate::slash_menu::DeleteConfirm::AllStale)
-        );
-        assert!(menu.toast.as_deref().unwrap().contains("delete all 2"));
-
-        // esc cancels
-        handle_key(&mut app, key(KeyCode::Esc));
-        // esc closes the slash menu entirely (existing behaviour) so any
-        // assertion here would just be reading a None menu — sufficient
-        // that the cancel ran without panicking
     }
 
     #[test]
@@ -3057,237 +2573,6 @@ mod tests {
         let menu = app.completion.slash_menu.as_ref().unwrap();
         assert_eq!(menu.matches.len(), 1);
         assert_eq!(menu.matches[0].name, "help");
-    }
-
-    #[test]
-    fn slash_menu_opens_for_model_subcommand() {
-        let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.completion.slash_commands = vec![crate::app::SlashCommand {
-            name: "model".into(),
-            description: "show or switch model".into(),
-        }];
-        app.completion.model_completions = vec![
-            crate::app::ModelCompletion {
-                id: "claude-opus-4-7".into(),
-                name: "Claude Opus 4.7".into(),
-                provider: "anthropic".into(),
-                stale: false,
-                description: None,
-                speed_tiers: Vec::new(),
-                priority: 0,
-                visibility: None,
-            },
-            crate::app::ModelCompletion {
-                id: "claude-sonnet-4-20250514".into(),
-                name: "Claude Sonnet 4".into(),
-                provider: "anthropic".into(),
-                stale: false,
-                description: None,
-                speed_tiers: Vec::new(),
-                priority: 0,
-                visibility: None,
-            },
-        ];
-        app.input.text = "/model claude".into();
-        app.input.cursor = app.input.text.len();
-
-        handle_key(&mut app, key(KeyCode::Tab));
-
-        let menu = app.completion.slash_menu.as_ref().unwrap();
-        assert!(menu.model_mode);
-        assert_eq!(menu.model_matches.len(), 2);
-    }
-
-    #[test]
-    fn slash_menu_selects_model_completion() {
-        let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.completion.slash_commands = vec![crate::app::SlashCommand {
-            name: "model".into(),
-            description: "show or switch model".into(),
-        }];
-        app.completion.model_completions = vec![
-            crate::app::ModelCompletion {
-                id: "claude-opus-4-7".into(),
-                name: "Claude Opus 4.7".into(),
-                provider: "anthropic".into(),
-                stale: false,
-                description: None,
-                speed_tiers: Vec::new(),
-                priority: 0,
-                visibility: None,
-            },
-            crate::app::ModelCompletion {
-                id: "claude-sonnet-4-20250514".into(),
-                name: "Claude Sonnet 4".into(),
-                provider: "anthropic".into(),
-                stale: false,
-                description: None,
-                speed_tiers: Vec::new(),
-                priority: 0,
-                visibility: None,
-            },
-        ];
-        app.input.text = "/model claude".into();
-        app.input.cursor = app.input.text.len();
-
-        handle_key(&mut app, key(KeyCode::Tab));
-        handle_key(&mut app, ctrl(KeyCode::Char('j')));
-        let event = handle_key(&mut app, key(KeyCode::Enter));
-
-        assert!(
-            matches!(event, Some(AppEvent::ModelSelected { ref model_id }) if model_id == "claude-sonnet-4-20250514"),
-            "enter in model picker must emit ModelSelected directly, not just rewrite input text; got {event:?}"
-        );
-        assert!(app.completion.slash_menu.is_none());
-    }
-
-    #[test]
-    fn slash_menu_typing_filters_model_matches() {
-        let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.completion.slash_commands = vec![crate::app::SlashCommand {
-            name: "model".into(),
-            description: "show or switch model".into(),
-        }];
-        app.completion.model_completions = vec![
-            crate::app::ModelCompletion {
-                id: "claude-opus-4-7".into(),
-                name: "Claude Opus 4.7".into(),
-                provider: "anthropic".into(),
-                stale: false,
-                description: None,
-                speed_tiers: Vec::new(),
-                priority: 0,
-                visibility: None,
-            },
-            crate::app::ModelCompletion {
-                id: "claude-sonnet-4-20250514".into(),
-                name: "Claude Sonnet 4".into(),
-                provider: "anthropic".into(),
-                stale: false,
-                description: None,
-                speed_tiers: Vec::new(),
-                priority: 0,
-                visibility: None,
-            },
-        ];
-        app.input.text = "/model claude-".into();
-        app.input.cursor = app.input.text.len();
-
-        handle_key(&mut app, key(KeyCode::Tab));
-        // type 'opu' - fuzzy-distinct between opus and sonnet
-        handle_key(&mut app, key(KeyCode::Char('o')));
-        handle_key(&mut app, key(KeyCode::Char('p')));
-        handle_key(&mut app, key(KeyCode::Char('u')));
-
-        let menu = app.completion.slash_menu.as_ref().unwrap();
-        assert!(menu.model_mode);
-        // opus ranks first; sonnet may or may not match with a low score
-        // depending on fuzzy tolerance, so just assert the top hit
-        assert_eq!(menu.model_matches[0].id, "claude-opus-4-7");
-    }
-
-    #[test]
-    fn slash_menu_model_filter_is_fuzzy_subsequence() {
-        // demonstrate the fuzzy upgrade: "clop" isn't a substring of any
-        // model id but subsequence-matches "claude-opus"
-        let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.completion.slash_commands = vec![crate::app::SlashCommand {
-            name: "model".into(),
-            description: "show or switch model".into(),
-        }];
-        app.completion.model_completions = vec![
-            crate::app::ModelCompletion {
-                id: "claude-opus-4-7".into(),
-                name: "Claude Opus 4.7".into(),
-                provider: "anthropic".into(),
-                stale: false,
-                description: None,
-                speed_tiers: Vec::new(),
-                priority: 0,
-                visibility: None,
-            },
-            crate::app::ModelCompletion {
-                id: "gpt-5".into(),
-                name: "GPT 5".into(),
-                provider: "anthropic".into(),
-                stale: false,
-                description: None,
-                speed_tiers: Vec::new(),
-                priority: 0,
-                visibility: None,
-            },
-        ];
-        app.input.text = "/model ".into();
-        app.input.cursor = app.input.text.len();
-
-        handle_key(&mut app, key(KeyCode::Tab));
-        for c in "clop".chars() {
-            handle_key(&mut app, key(KeyCode::Char(c)));
-        }
-
-        let menu = app.completion.slash_menu.as_ref().unwrap();
-        assert_eq!(menu.model_matches.len(), 1);
-        assert_eq!(menu.model_matches[0].id, "claude-opus-4-7");
-    }
-
-    #[test]
-    fn slash_menu_filter_change_snaps_selection_to_top_hit() {
-        // typing a filter char must move the selection back to row 0 so the
-        // user lands on the highest-scored match, not on whatever row their
-        // previous selected index happens to alias to
-        let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.completion.slash_commands = vec![crate::app::SlashCommand {
-            name: "model".into(),
-            description: "show or switch model".into(),
-        }];
-        app.completion.model_completions = vec![
-            crate::app::ModelCompletion {
-                id: "claude-opus-4-7".into(),
-                name: "Claude Opus 4.7".into(),
-                provider: "anthropic".into(),
-                stale: false,
-                description: None,
-                speed_tiers: Vec::new(),
-                priority: 0,
-                visibility: None,
-            },
-            crate::app::ModelCompletion {
-                id: "claude-sonnet-4-6".into(),
-                name: "Claude Sonnet 4.6".into(),
-                provider: "anthropic".into(),
-                stale: false,
-                description: None,
-                speed_tiers: Vec::new(),
-                priority: 0,
-                visibility: None,
-            },
-            crate::app::ModelCompletion {
-                id: "gpt-5".into(),
-                name: "GPT 5".into(),
-                provider: "anthropic".into(),
-                stale: false,
-                description: None,
-                speed_tiers: Vec::new(),
-                priority: 0,
-                visibility: None,
-            },
-        ];
-        app.input.text = "/model claude-".into();
-        app.input.cursor = app.input.text.len();
-
-        handle_key(&mut app, key(KeyCode::Tab));
-        // navigate down to the second match, then type a filter char.
-        // selection should snap back to the top of the freshly-filtered list
-        handle_key(&mut app, ctrl(KeyCode::Char('j')));
-        let menu = app.completion.slash_menu.as_ref().unwrap();
-        assert_eq!(menu.selected, 1, "precondition: selected moved to row 1");
-
-        handle_key(&mut app, key(KeyCode::Char('o')));
-        let menu = app.completion.slash_menu.as_ref().unwrap();
-        assert_eq!(
-            menu.selected, 0,
-            "filter change should snap selection back to the top-scoring row"
-        );
     }
 
     #[test]
@@ -3957,6 +3242,104 @@ mod tests {
                 .contains("locked"),
             "should toast about lock"
         );
+    }
+
+    /// build an app whose model catalogue contains one fresh row and
+    /// one stale row in that order, so tests can exercise ctrl+d and
+    /// ctrl+shift+d
+    fn app_with_one_stale_row() -> App {
+        use crate::slash_menu::ModelCompletion;
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.completion.model_completions = vec![
+            ModelCompletion {
+                id: "alive".into(),
+                name: "Alive".into(),
+                provider: "anthropic".into(),
+                stale: false,
+                description: None,
+                speed_tiers: Vec::new(),
+                priority: 0,
+                visibility: None,
+            },
+            ModelCompletion {
+                id: "removed".into(),
+                name: "Removed".into(),
+                provider: "anthropic".into(),
+                stale: true,
+                description: None,
+                speed_tiers: Vec::new(),
+                priority: 0,
+                visibility: None,
+            },
+        ];
+        app
+    }
+
+    #[test]
+    fn model_picker_overlay_ctrl_d_arms_confirm_only_for_stale_rows() {
+        // ctrl+d on a fresh row toasts a hint instead of arming a
+        // delete; on a stale row it arms a Single confirmation that
+        // n then cancels without mutating state
+        let mut app = app_with_one_stale_row();
+        app.open_model_picker_overlay();
+
+        // selected is 0 (fresh) — ctrl+d should toast and not arm
+        handle_key(&mut app, ctrl(KeyCode::Char('d')));
+        let picker = app.interaction.model_picker.as_ref().unwrap();
+        assert!(picker.confirm_delete.is_none());
+        assert!(picker.toast.as_deref().unwrap().contains("only stale"));
+
+        // move selection to the stale row
+        handle_key(&mut app, ctrl(KeyCode::Char('j')));
+        handle_key(&mut app, ctrl(KeyCode::Char('d')));
+        let picker = app.interaction.model_picker.as_ref().unwrap();
+        assert!(matches!(
+            picker.confirm_delete,
+            Some(crate::slash_menu::DeleteConfirm::Single { .. })
+        ));
+
+        // n cancels the confirm without mutating state
+        handle_key(&mut app, key(KeyCode::Char('n')));
+        let picker = app.interaction.model_picker.as_ref().unwrap();
+        assert!(picker.confirm_delete.is_none());
+        assert!(picker.toast.is_none());
+    }
+
+    #[test]
+    fn model_picker_overlay_ctrl_shift_d_arms_delete_all_stale() {
+        use crate::slash_menu::ModelCompletion;
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.completion.model_completions = vec![
+            ModelCompletion {
+                id: "stale-a".into(),
+                name: "A".into(),
+                provider: "anthropic".into(),
+                stale: true,
+                description: None,
+                speed_tiers: Vec::new(),
+                priority: 0,
+                visibility: None,
+            },
+            ModelCompletion {
+                id: "stale-b".into(),
+                name: "B".into(),
+                provider: "openrouter".into(),
+                stale: true,
+                description: None,
+                speed_tiers: Vec::new(),
+                priority: 0,
+                visibility: None,
+            },
+        ];
+        app.open_model_picker_overlay();
+
+        handle_key(&mut app, ctrl_shift(KeyCode::Char('d')));
+        let picker = app.interaction.model_picker.as_ref().unwrap();
+        assert_eq!(
+            picker.confirm_delete,
+            Some(crate::slash_menu::DeleteConfirm::AllStale)
+        );
+        assert!(picker.toast.as_deref().unwrap().contains("delete all 2"));
     }
 
     #[test]
