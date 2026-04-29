@@ -894,14 +894,18 @@ pub fn config_api_key(cfg: &config::Config, provider: &Provider) -> Option<ApiKe
 }
 
 /// resolve the thinking level from CLI flags, saved per-dir+model prefs,
-/// the model's own default, and the config-file fallback.
+/// the per-model fallback, the model's own default, and the config-file
+/// fallback.
 ///
 /// precedence (highest first):
 /// 1. `--think` CLI flag → `High`
 /// 2. saved preference for this `cwd + model.id`
-/// 3. `model.default_thinking_level` (codex's recommended starting level)
-/// 4. `cfg.thinking` (global config default)
-/// 5. nothing → `None`
+/// 3. saved preference for `model.id` in any other directory (most
+///    recent). lets a model the user has touched elsewhere carry their
+///    last pick instead of snapping back to upstream defaults
+/// 4. `model.default_thinking_level` (codex's recommended starting level)
+/// 5. `cfg.thinking` (global config default)
+/// 6. nothing → `None`
 pub fn resolve_thinking(
     cli_thinking: bool,
     model: &Model,
@@ -914,6 +918,7 @@ pub fn resolve_thinking(
     }
     thinking_prefs
         .get(cwd, model.id.as_ref())
+        .or_else(|| thinking_prefs.last_for_model(model.id.as_ref()))
         .or(model.default_thinking_level)
         .or(cfg.thinking)
         .map(ThinkingLevel::normalize_visible)
@@ -1343,6 +1348,31 @@ mod tests {
         assert_eq!(
             resolve_thinking(false, &model, &prefs, dir.path(), &cfg),
             Some(ThinkingLevel::Low)
+        );
+    }
+
+    #[test]
+    fn resolve_thinking_falls_back_to_per_model_pref_from_other_dir() {
+        // user picked Medium for this model in a different project; when
+        // they switch back into a fresh dir without a per-dir entry, the
+        // per-model fallback should hand back Medium instead of the
+        // upstream default
+        let other_dir = tempfile::tempdir().unwrap();
+        let active_dir = tempfile::tempdir().unwrap();
+        let mut prefs = mush_tui::ThinkingPrefs::default();
+        let model = dummy_model_with_default(Some(ThinkingLevel::High));
+        prefs.set(
+            other_dir.path().to_path_buf(),
+            model.id.to_string(),
+            ThinkingLevel::Medium,
+        );
+        let cfg: config::Config = toml::from_str("").unwrap();
+        // active_dir has no per-dir entry but the per-model fallback
+        // returns Medium from the other dir's pick
+        assert_eq!(
+            resolve_thinking(false, &model, &prefs, active_dir.path(), &cfg),
+            Some(ThinkingLevel::Medium),
+            "per-model fallback should outrank model.default_thinking_level"
         );
     }
 }

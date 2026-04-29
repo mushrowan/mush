@@ -611,6 +611,7 @@ fn handle_model_switch(
         };
         let level = thinking_prefs
             .get(&tui_config.cwd, id)
+            .or_else(|| thinking_prefs.last_for_model(id))
             .or(new_model.default_thinking_level)
             .unwrap_or(ThinkingLevel::Off);
         app.thinking_level = level;
