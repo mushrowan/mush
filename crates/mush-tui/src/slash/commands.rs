@@ -242,9 +242,9 @@ pub fn handle(
             if app.completion.model_completions.is_empty() {
                 app.push_system_message(format!("model: {}", app.model_id));
             } else if *show_all {
-                app.open_model_picker_all();
+                app.open_model_picker_overlay_all();
             } else {
-                app.open_model_picker();
+                app.open_model_picker_overlay();
             }
             None
         }

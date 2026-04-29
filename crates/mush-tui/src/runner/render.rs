@@ -164,6 +164,9 @@ pub(super) fn draw_panes(
         if let Some(ref picker) = focused_app.interaction.session_picker {
             widgets::session_picker::render(frame, picker, &focused_app.theme);
         }
+        if let Some(ref picker) = focused_app.interaction.model_picker {
+            widgets::model_picker::render(frame, picker, &focused_app.theme);
+        }
         if let Some(ref menu) = focused_app.settings_menu {
             widgets::settings_menu::render(frame, menu, settings, &focused_app.theme);
         }

@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::app::ScrollUnit;
 use crate::app_event::AppMode;
 use crate::display_types::{ImageRenderArea, MessageRowRange};
+use crate::model_picker::ModelPickerState;
 use crate::session_picker::SessionPickerState;
 use crate::slash_menu::{ModelCompletion, SlashCommand, SlashMenuState, TabState};
 
@@ -131,6 +132,8 @@ pub struct InteractionState {
     pub mode: AppMode,
     /// session picker state (when mode == SessionPicker)
     pub session_picker: Option<SessionPickerState>,
+    /// model picker state (when mode == ModelPicker)
+    pub model_picker: Option<ModelPickerState>,
     /// search state
     pub search: SearchState,
     /// tool confirmation prompt (shown when mode == ToolConfirm)
@@ -160,6 +163,7 @@ impl Default for InteractionState {
         Self {
             mode: AppMode::Normal,
             session_picker: None,
+            model_picker: None,
             search: SearchState::default(),
             confirm_prompt: None,
             confirm_tool_call_id: None,
