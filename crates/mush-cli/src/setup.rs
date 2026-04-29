@@ -83,6 +83,13 @@ impl AppSetup {
         )]
         let http_client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::limited(10))
+            // give the network 60s to establish a tcp + tls connection.
+            // reqwest defaults to no connect timeout, which lets stalled
+            // proxies hang the agent indefinitely. retry/backoff lives in
+            // the agent loop, so a per-attempt cap is enough here. no
+            // overall request timeout: streaming responses can take many
+            // minutes
+            .connect_timeout(std::time::Duration::from_secs(60))
             .build()
             .expect("failed to build http client");
 
