@@ -218,7 +218,13 @@ pub fn handle(
                     // need to be reconstructed from the persisted history
                     app.stats.reset();
                     crate::conversation_display::accumulate_session_stats(app, &messages);
-                    tui_config.session_id = id;
+                    tui_config.session_id = id.clone();
+                    // keep the duplicated `options.session_id` consistent so any
+                    // path that still reads it directly sees the resumed id.
+                    // the wire request goes through `tui_config.stream_options()`
+                    // which already overrides this, but staleness here is a
+                    // foot-gun for any future caller that bypasses that helper
+                    tui_config.options.session_id = Some(id);
                     if let Some(prompt) = session.system_prompt {
                         tui_config.system_prompt = Some(prompt);
                     }

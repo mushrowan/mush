@@ -306,7 +306,11 @@ pub(super) async fn handle_slash_action(
                 saver(super::streams::build_session_snapshot(pane_mgr, tui_config));
             }
             // start a new session with a fresh id
-            tui_config.session_id = mush_ai::types::SessionId::new();
+            let new_id = mush_ai::types::SessionId::new();
+            tui_config.session_id = new_id.clone();
+            // keep the duplicated `options.session_id` consistent (see
+            // /resume handler in slash/commands.rs for the rationale)
+            tui_config.options.session_id = Some(new_id);
             let pane = pane_mgr.focused_mut();
             let (app, conversation, _) = pane.fields_mut();
             app.clear_messages();

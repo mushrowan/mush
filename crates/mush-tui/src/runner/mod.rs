@@ -118,14 +118,14 @@ pub async fn run_tui(
                 config: StreamConfig {
                     default_model: tui_config.model.clone(),
                     system_prompt: tui_config.system_prompt.clone(),
-                    options: tui_config.options.clone(),
+                    options: tui_config.stream_options(),
                     max_turns: tui_config.max_turns,
                     prompt_enricher: tui_config.prompt_enricher.clone(),
                     hint_mode: tui_config.hint_mode,
                     provider_api_keys: tui_config.provider_api_keys.clone(),
                     confirm_tools: tui_config.confirm_tools,
                     auto_compact: tui_config.auto_compact,
-                    compaction_model: tui_config.compaction_model.clone(),
+                    compaction_model: tui_config.compaction_options(),
                 },
                 injections: mush_agent::AgentInjections {
                     lifecycle_hooks: tui_config.lifecycle_hooks.clone(),
