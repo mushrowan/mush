@@ -141,18 +141,11 @@ pub fn truncate(
 
     let truncated_text = match direction {
         OutputLimit::Head => {
-            let (kept, hit_bytes) = collect_head(&lines, max_lines, max_bytes);
+            let (kept, _hit_bytes) = collect_head(&lines, max_lines, max_bytes);
             let omitted = total - kept.len();
             let preview = kept.join("\n");
             let hint = actionable_hint(&saved_path);
-            if hit_bytes {
-                format!(
-                    "{preview}\n\n[…{omitted} lines truncated ({} total). {hint}]",
-                    total
-                )
-            } else {
-                format!("{preview}\n\n[…{omitted} lines truncated ({total} total). {hint}]")
-            }
+            format!("[…{omitted} lines truncated ({total} total). {hint}]\n\n{preview}")
         }
         OutputLimit::Tail => {
             let (kept, _hit_bytes) = collect_tail(&lines, max_lines, max_bytes);
@@ -171,7 +164,7 @@ pub fn truncate(
             let tail_text = tail.join("\n");
             let hint = actionable_hint(&saved_path);
             format!(
-                "{head_text}\n\n[…{omitted} lines truncated ({total} total). {hint}]\n\n{tail_text}"
+                "[…{omitted} lines truncated ({total} total). {hint}]\n\n{head_text}\n\n[…]\n\n{tail_text}"
             )
         }
     };
@@ -288,18 +281,6 @@ mod tests {
     }
 
     #[test]
-    fn head_keeps_start() {
-        let lines = make_lines(10);
-        let out = truncate(ToolResult::text(lines), 3, usize::MAX, OutputLimit::Head);
-        assert_text(&out, |t| {
-            assert!(t.contains("line 0"));
-            assert!(t.contains("line 2"));
-            assert!(!t.contains("line 9"));
-            assert!(t.contains("7 lines truncated"));
-        });
-    }
-
-    #[test]
     fn tail_keeps_end() {
         let lines = make_lines(10);
         let out = truncate(ToolResult::text(lines), 3, usize::MAX, OutputLimit::Tail);
@@ -312,26 +293,72 @@ mod tests {
     }
 
     #[test]
-    fn middle_keeps_head_and_tail() {
-        let lines = make_lines(20);
-        let out = truncate(ToolResult::text(lines), 6, usize::MAX, OutputLimit::Middle);
-        assert_text(&out, |t| {
-            assert!(t.contains("line 0"));
-            assert!(t.contains("line 2"));
-            assert!(t.contains("line 17"));
-            assert!(t.contains("line 19"));
-            assert!(!t.contains("line 10"));
-            assert!(t.contains("14 lines truncated"));
-        });
-    }
-
-    #[test]
     fn error_results_also_truncated() {
         let big = make_lines(3000);
         let out = apply(ToolResult::error(big), OutputLimit::Middle);
         assert!(out.outcome.is_error());
         assert_text(&out, |t| {
             assert!(t.contains("lines truncated"));
+        });
+    }
+
+    #[test]
+    fn hint_appears_at_top_for_all_directions() {
+        // every truncation direction must surface the recovery hint at
+        // the start of the preview. for bash (Tail) this is already the
+        // case; for Head / Middle this prevents the model from reading
+        // 2000 lines before noticing there's more available
+        let big = make_lines(5000);
+        for direction in [OutputLimit::Head, OutputLimit::Tail, OutputLimit::Middle] {
+            let out = apply(ToolResult::text(big.clone()), direction);
+            assert_text(&out, |t| {
+                assert!(
+                    t.starts_with('['),
+                    "{direction:?} should put hint at start, got prefix {:?}",
+                    &t[..t.len().min(80)]
+                );
+                assert!(
+                    t.contains("Use the Grep tool to search"),
+                    "{direction:?} top hint missing recovery action"
+                );
+                assert!(
+                    t.contains("5000 total"),
+                    "{direction:?} top hint missing total"
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn head_keeps_first_lines_after_top_hint() {
+        // after the top hint, the preview body must start at line 0
+        // (Head direction) so the model still sees the file's beginning
+        let lines = make_lines(10);
+        let out = truncate(ToolResult::text(lines), 3, usize::MAX, OutputLimit::Head);
+        assert_text(&out, |t| {
+            assert!(t.starts_with('['), "hint at top");
+            assert!(t.contains("line 0"));
+            assert!(t.contains("line 2"));
+            assert!(!t.contains("line 9"), "Head must not include the tail");
+            assert!(t.contains("7 lines truncated"));
+        });
+    }
+
+    #[test]
+    fn middle_keeps_head_and_tail_after_top_hint() {
+        // Middle direction: top hint, then head + tail of the input
+        // separated by a small gap marker so the model can see where
+        // the omission is
+        let lines = make_lines(20);
+        let out = truncate(ToolResult::text(lines), 6, usize::MAX, OutputLimit::Middle);
+        assert_text(&out, |t| {
+            assert!(t.starts_with('['), "hint at top");
+            assert!(t.contains("line 0"));
+            assert!(t.contains("line 2"));
+            assert!(t.contains("line 17"));
+            assert!(t.contains("line 19"));
+            assert!(!t.contains("line 10"), "middle must drop the middle");
+            assert!(t.contains("14 lines truncated"));
         });
     }
 

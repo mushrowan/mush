@@ -107,15 +107,19 @@ fn with_data_dir<R>(f: impl FnOnce(&Path) -> R) -> R {
 
 #[test]
 fn audit_central_head_truncation() {
-    // 5000 lines through Head truncation: preview is the first chunk,
-    // hint follows on its own paragraph, total line count shown
+    // 5000 lines through Head truncation: hint sits at the TOP of the
+    // preview so the model sees the recovery action before reading
+    // 2000 lines of output. preview body starts at line 0
     let big = make_lines(5000);
     let out = with_data_dir(|_| truncation::apply(ToolResult::text(big), OutputLimit::Head));
     let text = mask_saved_path(&extract_text(&out));
 
     // structural pins
-    assert!(text.starts_with("line 0\nline 1\n"), "preview at top");
-    assert!(text.contains("[…"), "hint marker present");
+    assert!(
+        text.starts_with('['),
+        "hint at top, got prefix {:?}",
+        &text[..text.len().min(80)]
+    );
     assert!(
         text.contains("lines truncated (5000 total)"),
         "total preserved"
@@ -127,6 +131,10 @@ fn audit_central_head_truncation() {
     assert!(
         text.contains("Full output: <DATA_DIR>/tool-output/tool_<TS>.txt"),
         "saved path present and deterministic"
+    );
+    assert!(
+        text.contains("\n\nline 0\nline 1\n"),
+        "head preview body starts at line 0"
     );
     // size sanity
     assert!(text.len() <= MAX_BYTES + 512, "preview within budget");
@@ -159,14 +167,18 @@ fn audit_central_tail_truncation() {
 
 #[test]
 fn audit_central_middle_truncation() {
-    // 5000 lines through Middle: head kept + middle dropped + tail
-    // kept. hint sits between them
+    // 5000 lines through Middle: hint at the top, then head + a `[…]`
+    // gap marker + tail. the gap marker tells the model where the
+    // omitted span lives even though the count is in the top hint
     let big = make_lines(5000);
     let out = with_data_dir(|_| truncation::apply(ToolResult::text(big), OutputLimit::Middle));
     let text = mask_saved_path(&extract_text(&out));
 
-    assert!(text.starts_with("line 0\nline 1\n"), "head kept");
-    assert!(text.ends_with("line 4999"), "tail kept");
+    assert!(
+        text.starts_with('['),
+        "hint at top, got prefix {:?}",
+        &text[..text.len().min(80)]
+    );
     assert!(
         text.contains("lines truncated (5000 total)"),
         "total preserved"
@@ -175,6 +187,12 @@ fn audit_central_middle_truncation() {
         text.contains("Full output: <DATA_DIR>/tool-output/tool_<TS>.txt"),
         "saved path present"
     );
+    assert!(text.contains("\n\nline 0\n"), "head preview kept");
+    assert!(
+        text.contains("\n\n[…]\n\n"),
+        "gap marker between head and tail"
+    );
+    assert!(text.ends_with("line 4999"), "tail preview kept");
 }
 
 // section: extreme cases
