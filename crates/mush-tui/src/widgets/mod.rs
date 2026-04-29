@@ -3,6 +3,7 @@ pub mod at_picker;
 pub mod diff;
 pub mod input_box;
 pub mod message_list;
+pub mod model_picker;
 pub mod search_popup;
 pub mod session_picker;
 pub mod settings_menu;
