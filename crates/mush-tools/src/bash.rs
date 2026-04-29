@@ -334,7 +334,12 @@ impl AgentTool for BashTool {
     fn description(&self) -> &str {
         "Execute a bash command in the current working directory. Returns stdout and stderr. \
          Output is truncated to the last 2000 lines or 50KB (whichever is hit first). \
-         If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds. \
+         If truncated, full output is saved to a temp file you can read with the Read tool \
+         (offset/limit) or search with the Grep tool. \
+         Do not pre-truncate with `| head` / `| tail` / `| grep` when reading help text or \
+         unfamiliar command output - truncation is automatic and the full output stays \
+         recoverable, but `| head` discards everything past the cut before it reaches us. \
+         Optionally provide a timeout in seconds. \
          For long-running commands (builds, test suites), set background: true to run \
          asynchronously and poll with bash_status to avoid cache busting. \
          For searching file contents, use the Grep tool instead of running grep or rg via bash. \
@@ -1066,6 +1071,22 @@ mod tests {
         use mush_agent::tool::OutputLimit;
         let tool = BashTool::new(Path::new(".").into());
         assert_eq!(tool.output_limit(), OutputLimit::Tail);
+    }
+
+    #[test]
+    fn description_warns_against_pre_truncating_output() {
+        // models tend to pipe `cmd | head` / `| tail` / `| grep` out
+        // of habit when reading help text or unfamiliar output, then
+        // miss the parts they actually needed. the harness already
+        // truncates safely with a recovery path, so the description
+        // must explicitly tell the model not to pre-truncate
+        let tool = BashTool::new(Path::new(".").into());
+        let desc = tool.description();
+        assert!(
+            desc.contains("pre-truncate") || desc.contains("pipe to head"),
+            "bash description must warn against manual head/tail/grep \
+             on unfamiliar output. got: {desc}"
+        );
     }
 
     #[tokio::test]

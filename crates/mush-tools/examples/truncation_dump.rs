@@ -38,8 +38,10 @@ fn banner(name: &str) {
 }
 
 #[tokio::main]
-async fn main() {
-    let tmp = tempfile::tempdir().unwrap();
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let tmp = tempfile::tempdir()?;
+    // SAFETY: this is a single-threaded example binary; no other
+    // threads are reading env at this point
     unsafe {
         std::env::set_var("MUSH_DATA_DIR", tmp.path());
     }
@@ -76,9 +78,9 @@ async fn main() {
     println!("(total chars: {})", text.len());
 
     banner("READ TOOL on 5000-line file");
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir()?;
     let file = dir.path().join("big.txt");
-    std::fs::write(&file, &big).unwrap();
+    std::fs::write(&file, &big)?;
     let tool = ReadTool::new(Arc::from(dir.path().to_path_buf().into_boxed_path()));
     let raw = tool
         .execute(serde_json::json!({"file_path": file.to_string_lossy()}))
@@ -111,4 +113,6 @@ async fn main() {
         text.clone()
     };
     println!("{preview}\n(total chars: {})", text.len());
+
+    Ok(())
 }
