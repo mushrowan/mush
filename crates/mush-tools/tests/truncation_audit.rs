@@ -199,8 +199,9 @@ fn audit_central_middle_truncation() {
 
 #[test]
 fn audit_central_byte_overflow_truncation() {
-    // 1 huge line that exceeds MAX_BYTES on its own. the byte-budget
-    // path must still emit the hint
+    // 1 huge line that exceeds MAX_BYTES on its own. byte-overflow must
+    // still emit the recovery hint AND a sampled head/tail of the line
+    // so the model can classify the content (base64? minified js?)
     let huge_line = "x".repeat(MAX_BYTES + 10000);
     let out =
         with_data_dir(|_| truncation::apply(ToolResult::text(huge_line), OutputLimit::Middle));
@@ -209,6 +210,14 @@ fn audit_central_byte_overflow_truncation() {
     assert!(
         text.contains("Full output: <DATA_DIR>/tool-output/tool_<TS>.txt"),
         "byte-overflow saves full output too"
+    );
+    assert!(
+        text.contains("[partial line]"),
+        "byte-overflow marks partial line"
+    );
+    assert!(
+        text.contains("xxxx"),
+        "byte-overflow includes a sample of the line content"
     );
 }
 

@@ -143,14 +143,27 @@ pub fn truncate(
         OutputLimit::Head => {
             let (kept, _hit_bytes) = collect_head(&lines, max_lines, max_bytes);
             let omitted = total - kept.len();
-            let preview = kept.join("\n");
+            let preview = if kept.is_empty() && !lines.is_empty() {
+                // first line alone exceeded max_bytes; sample its head
+                // so the model can classify the content
+                let sample = sample_line_head(lines[0], max_bytes);
+                format!("{sample}\n[partial line]")
+            } else {
+                kept.join("\n")
+            };
             let hint = actionable_hint(&saved_path);
             format!("[…{omitted} lines truncated ({total} total). {hint}]\n\n{preview}")
         }
         OutputLimit::Tail => {
             let (kept, _hit_bytes) = collect_tail(&lines, max_lines, max_bytes);
             let omitted = total - kept.len();
-            let preview = kept.join("\n");
+            let preview = if kept.is_empty() && !lines.is_empty() {
+                // last line alone exceeded max_bytes; sample its tail
+                let sample = sample_line_tail(lines[lines.len() - 1], max_bytes);
+                format!("[partial line]\n{sample}")
+            } else {
+                kept.join("\n")
+            };
             let hint = actionable_hint(&saved_path);
             format!("[{omitted} lines truncated… ({total} total). {hint}]\n\n{preview}")
         }
@@ -160,8 +173,18 @@ pub fn truncate(
             let (head, _) = collect_head(&lines, half_lines, half_bytes);
             let (tail, _) = collect_tail(&lines, half_lines, half_bytes);
             let omitted = total.saturating_sub(head.len() + tail.len());
-            let head_text = head.join("\n");
-            let tail_text = tail.join("\n");
+            let head_text = if head.is_empty() && !lines.is_empty() {
+                let sample = sample_line_head(lines[0], half_bytes);
+                format!("{sample}\n[partial line]")
+            } else {
+                head.join("\n")
+            };
+            let tail_text = if tail.is_empty() && !lines.is_empty() {
+                let sample = sample_line_tail(lines[lines.len() - 1], half_bytes);
+                format!("[partial line]\n{sample}")
+            } else {
+                tail.join("\n")
+            };
             let hint = actionable_hint(&saved_path);
             format!(
                 "[…{omitted} lines truncated ({total} total). {hint}]\n\n{head_text}\n\n[…]\n\n{tail_text}"
@@ -232,6 +255,33 @@ fn actionable_hint(saved_path: &Option<PathBuf>) -> String {
     }
 }
 
+/// take a prefix of `line` that fits in `max_bytes`, snapped to a
+/// utf-8 char boundary. used when a single line exceeds the byte
+/// budget and we still want the model to see *some* of its content
+fn sample_line_head(line: &str, max_bytes: usize) -> &str {
+    if line.len() <= max_bytes {
+        return line;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    &line[..end]
+}
+
+/// take a suffix of `line` that fits in `max_bytes`, snapped to a
+/// utf-8 char boundary
+fn sample_line_tail(line: &str, max_bytes: usize) -> &str {
+    if line.len() <= max_bytes {
+        return line;
+    }
+    let mut start = line.len() - max_bytes;
+    while start < line.len() && !line.is_char_boundary(start) {
+        start += 1;
+    }
+    &line[start..]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,6 +328,52 @@ mod tests {
         assert_text(&out, |t| {
             assert!(t.contains("lines truncated"));
         });
+    }
+
+    #[test]
+    fn byte_overflow_preview_contains_partial_line_content() {
+        // a single line longer than MAX_BYTES used to render as just the
+        // hint with an empty preview, leaving the model with no clue
+        // what kind of content it was looking at (minified js? base64?
+        // a giant error string?). the preview must now include a sample
+        // of the actual line so the model can classify it without
+        // reaching for the saved file
+        let huge = "x".repeat(MAX_BYTES + 10_000);
+        for direction in [OutputLimit::Head, OutputLimit::Tail, OutputLimit::Middle] {
+            let out = apply(ToolResult::text(huge.clone()), direction);
+            assert_text(&out, |t| {
+                let preview = t.split("\n\n").nth(1).unwrap_or("");
+                assert!(
+                    preview.contains("xx"),
+                    "{direction:?} preview should sample line content, got: {preview:?}"
+                );
+                // and the partial-line marker tells the model the line
+                // was clipped so it doesn't mistake "xxx" for the full
+                // value
+                assert!(
+                    t.contains("[partial line]") || t.contains("[…line clipped]"),
+                    "{direction:?} should mark the partial line, got: {t:?}"
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn byte_overflow_preview_respects_byte_budget() {
+        // sampling from a partial line shouldn't push the preview over
+        // MAX_BYTES (otherwise we'd defeat the truncation we're trying
+        // to apply)
+        let huge = "x".repeat(MAX_BYTES * 4);
+        for direction in [OutputLimit::Head, OutputLimit::Tail, OutputLimit::Middle] {
+            let out = apply(ToolResult::text(huge.clone()), direction);
+            assert_text(&out, |t| {
+                assert!(
+                    t.len() <= MAX_BYTES + 1024,
+                    "{direction:?} preview {} bytes exceeded budget",
+                    t.len()
+                );
+            });
+        }
     }
 
     #[test]
