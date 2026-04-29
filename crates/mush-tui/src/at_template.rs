@@ -229,7 +229,7 @@ mod tests {
     fn find_exact_matches_template_by_name() {
         let templates = vec![PromptTemplate {
             name: "review".into(),
-            description: "".into(),
+            description: None,
             content: "content".into(),
             source: mush_ext::TemplateSource::User,
             path: std::path::PathBuf::from("/tmp/review.md"),
@@ -257,7 +257,7 @@ mod tests {
     fn make_template(name: &str) -> PromptTemplate {
         PromptTemplate {
             name: name.into(),
-            description: format!("description: {name}"),
+            description: Some(format!("description: {name}")),
             content: format!("body: {name}"),
             source: mush_ext::TemplateSource::User,
             path: std::path::PathBuf::from(format!("/tmp/{name}.md")),

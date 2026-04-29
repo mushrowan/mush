@@ -10,7 +10,10 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone)]
 pub struct PromptTemplate {
     pub name: String,
-    pub description: String,
+    /// optional one-line label shown next to the name in the
+    /// slash-menu / `@`-picker. set via the yaml frontmatter
+    /// `description: ...` field. when `None`, pickers show only the name
+    pub description: Option<String>,
     pub content: String,
     pub source: TemplateSource,
     pub path: PathBuf,
@@ -43,7 +46,9 @@ pub fn substitute_args(content: &str, args: &[&str]) -> String {
     result
 }
 
-/// parse a markdown file with optional YAML frontmatter
+/// parse a markdown file as a prompt template. yaml frontmatter is
+/// stripped from the body so the model never sees it. an optional
+/// `description: ...` line in the frontmatter populates the picker label
 fn parse_template(path: &Path, source: TemplateSource) -> Option<PromptTemplate> {
     let raw = std::fs::read_to_string(path).ok()?;
     let name = path
@@ -52,48 +57,39 @@ fn parse_template(path: &Path, source: TemplateSource) -> Option<PromptTemplate>
         .unwrap_or("unnamed")
         .to_string();
 
-    let (description, content) = parse_frontmatter(&raw);
+    let (description, body) = parse_frontmatter(&raw);
 
     Some(PromptTemplate {
         name,
         description,
-        content,
+        content: body,
         source,
         path: path.to_path_buf(),
     })
 }
 
-/// extract frontmatter description and body from a markdown string
-fn parse_frontmatter(text: &str) -> (String, String) {
-    if !text.starts_with("---") {
-        // no frontmatter, use first non-empty line as description
-        let desc = text
-            .lines()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("")
-            .trim()
-            .chars()
-            .take(80)
-            .collect();
-        return (desc, text.to_string());
-    }
-
-    // find closing ---
-    let rest = &text[3..];
-    if let Some(end) = rest.find("\n---") {
-        let front = &rest[..end];
-        let body = &rest[end + 4..].trim_start();
-
-        // extract description from frontmatter (simple key: value parsing)
-        let desc = front
-            .lines()
-            .find_map(|l| l.strip_prefix("description:").map(|v| v.trim().to_string()))
-            .unwrap_or_default();
-
-        (desc, body.to_string())
-    } else {
-        (String::new(), text.to_string())
-    }
+/// split an optional `---`-delimited yaml frontmatter block off the
+/// front of `text`. returns `(description, body)` where `description`
+/// is the frontmatter's `description: ...` value when present, and
+/// `body` is the text minus the frontmatter
+fn parse_frontmatter(text: &str) -> (Option<String>, String) {
+    let Some(rest) = text.strip_prefix("---") else {
+        return (None, text.to_string());
+    };
+    let Some(end) = rest.find("\n---") else {
+        return (None, text.to_string());
+    };
+    let front = &rest[..end];
+    let body = rest[end + 4..]
+        .trim_start_matches(['\n', '\r'])
+        .trim_end()
+        .to_string();
+    let description = front
+        .lines()
+        .find_map(|l| l.strip_prefix("description:"))
+        .map(|v| v.trim().to_string())
+        .filter(|s| !s.is_empty());
+    (description, body)
 }
 
 /// discover prompt templates from user and project directories
@@ -179,23 +175,48 @@ mod tests {
     }
 
     #[test]
-    fn parse_frontmatter_with_description() {
+    fn parse_frontmatter_extracts_description() {
         let text = "---\ndescription: a helpful prompt\n---\n\ndo the thing $1";
         let (desc, body) = parse_frontmatter(text);
-        assert_eq!(desc, "a helpful prompt");
-        assert!(body.contains("do the thing"));
+        assert_eq!(desc.as_deref(), Some("a helpful prompt"));
+        assert_eq!(body, "do the thing $1");
     }
 
     #[test]
-    fn parse_frontmatter_without() {
+    fn parse_frontmatter_without_returns_none_and_full_text() {
         let text = "just some content\nmore content";
         let (desc, body) = parse_frontmatter(text);
-        assert_eq!(desc, "just some content");
+        assert!(desc.is_none());
         assert_eq!(body, text);
     }
 
     #[test]
-    fn load_template_from_disk() {
+    fn parse_frontmatter_without_description_returns_none() {
+        // frontmatter without a description: line still strips the
+        // frontmatter from the body but leaves the picker label unset
+        let text = "---\nother: value\n---\n\nactual body";
+        let (desc, body) = parse_frontmatter(text);
+        assert!(desc.is_none());
+        assert_eq!(body, "actual body");
+    }
+
+    #[test]
+    fn load_template_from_disk_without_frontmatter() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("review.md");
+        std::fs::write(&path, "review $1 for issues").unwrap();
+
+        let tmpl = parse_template(&path, TemplateSource::Project).unwrap();
+        assert_eq!(tmpl.name, "review");
+        assert_eq!(tmpl.content, "review $1 for issues");
+        assert!(
+            tmpl.description.is_none(),
+            "no frontmatter should yield no description"
+        );
+    }
+
+    #[test]
+    fn load_template_from_disk_with_frontmatter() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("review.md");
         std::fs::write(
@@ -205,9 +226,8 @@ mod tests {
         .unwrap();
 
         let tmpl = parse_template(&path, TemplateSource::Project).unwrap();
-        assert_eq!(tmpl.name, "review");
-        assert_eq!(tmpl.description, "code review");
-        assert!(tmpl.content.contains("review $1"));
+        assert_eq!(tmpl.description.as_deref(), Some("code review"));
+        assert_eq!(tmpl.content, "review $1 for issues");
     }
 
     #[test]
@@ -215,11 +235,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let prompts_dir = dir.path().join(".mush/prompts");
         std::fs::create_dir_all(&prompts_dir).unwrap();
-        std::fs::write(
-            prompts_dir.join("test.md"),
-            "---\ndescription: test prompt\n---\nhello $1",
-        )
-        .unwrap();
+        std::fs::write(prompts_dir.join("test.md"), "hello $1").unwrap();
 
         let templates = discover_templates(dir.path());
         assert_eq!(templates.len(), 1);
@@ -231,14 +247,14 @@ mod tests {
         let templates = vec![
             PromptTemplate {
                 name: "review".into(),
-                description: "review code".into(),
+                description: Some("review code".into()),
                 content: "review $1".into(),
                 source: TemplateSource::User,
                 path: PathBuf::from("/tmp/review.md"),
             },
             PromptTemplate {
                 name: "explain".into(),
-                description: "explain code".into(),
+                description: None,
                 content: "explain $1".into(),
                 source: TemplateSource::Project,
                 path: PathBuf::from("/tmp/explain.md"),

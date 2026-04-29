@@ -1962,7 +1962,7 @@ mod tests {
     fn push_test_template(app: &mut App, name: &str, content: &str) {
         app.completion.templates.push(mush_ext::PromptTemplate {
             name: name.into(),
-            description: String::new(),
+            description: None,
             content: content.into(),
             source: mush_ext::TemplateSource::User,
             path: std::path::PathBuf::from("/tmp/test.md"),
