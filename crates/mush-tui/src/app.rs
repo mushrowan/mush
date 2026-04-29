@@ -28,7 +28,7 @@ pub use crate::session_picker::{SessionPickerState, SessionScope, filtered_sessi
 pub use crate::slash_menu::{ModelCompletion, SlashCommand, SlashMenuState};
 pub use crate::streaming::StreamingState;
 
-use crate::slash_menu::{TabState, filter_command_matches, filter_model_matches};
+use crate::slash_menu::{TabState, filter_command_matches};
 
 /// tick() runs at ~60fps, divide by this to get spinner update rate (~8fps)
 const TICK_DIVISOR: u8 = 8;
@@ -739,27 +739,6 @@ impl App {
     /// open the slash command completion menu, filtering by current input
     pub fn open_slash_menu(&mut self) {
         let prefix = self.input.text.as_str();
-
-        if let Some(rest) = prefix.strip_prefix("/model ") {
-            // typing `/model ...` opens the picker with the default visibility
-            // filter; users opt into the full catalogue via `/model --all`
-            // submitted as a parsed action, not via the live filter
-            let prepared =
-                crate::slash_menu::prepare_picker_models(&self.completion.model_completions, false);
-            let model_matches = filter_model_matches(&prepared, rest);
-            if model_matches.is_empty() {
-                return;
-            }
-
-            self.completion.slash_menu = Some(SlashMenuState::for_models_with_favourites(
-                model_matches,
-                self.completion.favourite_models.clone(),
-                self.completion.favourites_locked,
-            ));
-            self.interaction.mode = AppMode::SlashComplete;
-            return;
-        }
-
         let matches = filter_command_matches(&self.completion.slash_commands, prefix);
         if matches.is_empty() {
             return;
@@ -773,29 +752,7 @@ impl App {
     pub fn update_slash_menu(&mut self) {
         if let Some(ref mut menu) = self.completion.slash_menu {
             let prefix = self.input.text.as_str();
-
-            if let Some(rest) = prefix.strip_prefix("/model ") {
-                menu.model_mode = true;
-                let prepared = crate::slash_menu::prepare_picker_models(
-                    &self.completion.model_completions,
-                    menu.show_all,
-                );
-                menu.model_matches = filter_model_matches(&prepared, rest);
-                menu.matches.clear();
-                // a new filter ranking starts from row 0 (the highest score),
-                // so any held selection is reset rather than clamped.
-                // explicit j/k navigation moves it from there.
-                menu.selected = 0;
-
-                if menu.model_matches.is_empty() {
-                    self.close_slash_menu();
-                }
-                return;
-            }
-
-            menu.model_mode = false;
             menu.matches = filter_command_matches(&self.completion.slash_commands, prefix);
-            menu.model_matches.clear();
             menu.selected = 0;
 
             if menu.matches.is_empty() {
@@ -808,39 +765,6 @@ impl App {
     pub fn close_slash_menu(&mut self) {
         self.completion.slash_menu = None;
         self.interaction.mode = AppMode::Normal;
-    }
-
-    /// open the model picker: a model-mode slash menu seeded with every
-    /// available model except entries codex marks as hidden (internal,
-    /// experimental). fired by `/model` with no arg or any keybind that
-    /// wants to pop the picker directly. for the opt-in show-everything
-    /// view, see [`Self::open_model_picker_all`].
-    pub fn open_model_picker(&mut self) {
-        self.open_model_picker_inner(false);
-    }
-
-    /// open the model picker with codex's hidden entries (`internal`,
-    /// `experimental`) included. routed from `/model --all`.
-    pub fn open_model_picker_all(&mut self) {
-        self.open_model_picker_inner(true);
-    }
-
-    fn open_model_picker_inner(&mut self, show_all: bool) {
-        let model_matches =
-            crate::slash_menu::prepare_picker_models(&self.completion.model_completions, show_all);
-        if model_matches.is_empty() {
-            return;
-        }
-        self.input.text = "/model ".into();
-        self.input.cursor = self.input.text.len();
-        let mut state = SlashMenuState::for_models_with_favourites(
-            model_matches,
-            self.completion.favourite_models.clone(),
-            self.completion.favourites_locked,
-        );
-        state.show_all = show_all;
-        self.completion.slash_menu = Some(state);
-        self.interaction.mode = AppMode::SlashComplete;
     }
 
     /// jump to bottom of conversation and clear unread indicator
@@ -2881,7 +2805,7 @@ batch: 1/2 succeeded, 1 failed";
     }
 
     #[test]
-    fn open_model_picker_populates_menu_with_all_models() {
+    fn open_model_picker_overlay_populates_state_with_models() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.completion.model_completions = vec![
             ModelCompletion {
@@ -2905,32 +2829,31 @@ batch: 1/2 succeeded, 1 failed";
                 visibility: None,
             },
         ];
-        app.open_model_picker();
-        assert_eq!(app.interaction.mode, AppMode::SlashComplete);
-        let menu = app
-            .completion
-            .slash_menu
+        app.open_model_picker_overlay();
+        assert_eq!(app.interaction.mode, AppMode::ModelPicker);
+        let picker = app
+            .interaction
+            .model_picker
             .as_ref()
-            .expect("picker should be open");
-        assert!(menu.model_mode);
-        assert_eq!(menu.model_matches.len(), 2);
-        assert_eq!(menu.selected, 0);
+            .expect("overlay should be open");
+        assert_eq!(picker.models.len(), 2);
+        assert_eq!(picker.selected, 0);
     }
 
     #[test]
-    fn open_model_picker_is_noop_without_models() {
+    fn open_model_picker_overlay_is_noop_without_models() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.completion.model_completions.clear();
-        app.open_model_picker();
-        assert!(app.completion.slash_menu.is_none());
+        app.open_model_picker_overlay();
+        assert!(app.interaction.model_picker.is_none());
         assert_eq!(app.interaction.mode, AppMode::Normal);
     }
 
     #[test]
-    fn open_model_picker_hides_internal_codex_entries_by_default() {
+    fn open_model_picker_overlay_hides_internal_codex_entries_by_default() {
         // codex marks some upstream entries as `internal` or `experimental`;
-        // the default picker only shows production-ready models so users don't
-        // wade through every snapshot
+        // the default overlay only shows production-ready models so users
+        // don't wade through every snapshot
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.completion.model_completions = vec![
             ModelCompletion {
@@ -2954,16 +2877,16 @@ batch: 1/2 succeeded, 1 failed";
                 visibility: Some("internal".into()),
             },
         ];
-        app.open_model_picker();
-        let menu = app.completion.slash_menu.as_ref().unwrap();
-        let ids: Vec<&str> = menu.model_matches.iter().map(|m| m.id.as_str()).collect();
+        app.open_model_picker_overlay();
+        let picker = app.interaction.model_picker.as_ref().unwrap();
+        let ids: Vec<&str> = picker.models.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, vec!["gpt-5.4"]);
     }
 
     #[test]
-    fn open_model_picker_with_show_all_reveals_hidden_codex_entries() {
-        // /model --all routes to open_model_picker_all so internal entries
-        // surface alongside production ones, sorted by priority desc
+    fn open_model_picker_overlay_all_reveals_hidden_codex_entries() {
+        // /model --all routes to open_model_picker_overlay_all so internal
+        // entries surface alongside production ones, sorted by priority desc
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.completion.model_completions = vec![
             ModelCompletion {
@@ -2987,10 +2910,11 @@ batch: 1/2 succeeded, 1 failed";
                 visibility: Some("internal".into()),
             },
         ];
-        app.open_model_picker_all();
-        let menu = app.completion.slash_menu.as_ref().unwrap();
-        let ids: Vec<&str> = menu.model_matches.iter().map(|m| m.id.as_str()).collect();
+        app.open_model_picker_overlay_all();
+        let picker = app.interaction.model_picker.as_ref().unwrap();
+        let ids: Vec<&str> = picker.models.iter().map(|m| m.id.as_str()).collect();
         // priority 99 first, then priority 1
         assert_eq!(ids, vec!["internal-snapshot", "gpt-5.4"]);
+        assert!(picker.show_all, "show_all flag must be set");
     }
 }
