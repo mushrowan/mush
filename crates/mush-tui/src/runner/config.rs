@@ -178,3 +178,38 @@ pub struct TuiConfig {
     /// becoming a no-op
     pub reload_context: Option<ReloadCallback>,
 }
+
+impl TuiConfig {
+    /// produce stream options for an outgoing request, overriding
+    /// `options.session_id` with the canonical top-level `session_id`.
+    ///
+    /// `session_id` is duplicated across `TuiConfig.session_id` (the
+    /// top-level field updated by /new and /resume) and the inner
+    /// `options.session_id` (set once at process startup from
+    /// `setup.options`). the inner copy is what becomes the
+    /// `x-claude-code-session-id` header on anthropic oauth, which
+    /// anthropic uses as a prompt-cache namespace. without this
+    /// override every /resume sends the stale process-startup id
+    /// instead of the loaded session's id, busting the entire prefix
+    /// cache on the first call after resume
+    #[must_use]
+    pub fn stream_options(&self) -> mush_ai::types::StreamOptions {
+        let mut options = self.options.clone();
+        options.session_id = Some(self.session_id.clone());
+        options
+    }
+
+    /// like [`Self::stream_options`] but for `compaction_model`'s
+    /// stored options. the compaction call goes to the wire under the
+    /// same session id as the active conversation
+    #[must_use]
+    pub fn compaction_options(
+        &self,
+    ) -> Option<(mush_ai::types::Model, mush_ai::types::StreamOptions)> {
+        self.compaction_model.as_ref().map(|(model, opts)| {
+            let mut options = opts.clone();
+            options.session_id = Some(self.session_id.clone());
+            (model.clone(), options)
+        })
+    }
+}

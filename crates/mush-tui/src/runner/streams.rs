@@ -1738,6 +1738,31 @@ mod tests {
     }
 
     #[test]
+    fn stream_options_uses_canonical_session_id_not_stale_options_field() {
+        // /resume and /new only update the top-level `session_id`. the
+        // wire request must derive `options.session_id` (which becomes
+        // the `x-claude-code-session-id` header on anthropic oauth)
+        // from that canonical field, not from the stale value left
+        // over in `options.session_id` at process startup. without
+        // this, every /resume sends the wrong cache key and busts the
+        // anthropic prompt cache.
+        let canonical = mush_ai::types::SessionId::from("loaded-session");
+        let stale = mush_ai::types::SessionId::from("fresh-process");
+
+        let mut config = test_tui_config();
+        config.session_id = canonical.clone();
+        config.options.session_id = Some(stale);
+
+        let options = config.stream_options();
+
+        assert_eq!(
+            options.session_id.as_ref(),
+            Some(&canonical),
+            "stream_options must override session_id with the canonical top-level value"
+        );
+    }
+
+    #[test]
     fn complete_delegation_sends_result_and_removes_pane() {
         use crate::pane::DelegationInfo;
         use mush_ai::types::*;
