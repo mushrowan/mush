@@ -372,14 +372,20 @@ pub fn agent_loop(
                 // stream the assistant response
                 tracing::debug!(turn = turn_index, model = %config.model.id, "streaming LLM response");
 
-                // retry transient errors with exponential backoff
-                const MAX_RETRIES: u32 = 3;
+                // retry transient errors with exponential backoff. count
+                // and backoff cap chosen so a typical "error decoding
+                // response body" gust gets up to 5 attempts spread over
+                // 1+2+4+8+16 = 31s of cooldown before bailing
+                const MAX_RETRIES: u32 = 5;
+                const MAX_BACKOFF_SECS: u64 = 16;
                 let mut event_stream = None;
                 let mut last_error = None;
 
                 for attempt in 0..=MAX_RETRIES {
                     if attempt > 0 {
-                        let delay = std::time::Duration::from_secs(1 << (attempt - 1));
+                        let delay = std::time::Duration::from_secs(
+                            (1u64 << (attempt - 1)).min(MAX_BACKOFF_SECS),
+                        );
                         tracing::warn!(attempt, ?delay, "retrying after transient error");
                         tokio::time::sleep(delay).await;
                     }
