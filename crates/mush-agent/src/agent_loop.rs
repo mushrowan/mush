@@ -435,6 +435,18 @@ pub fn agent_loop(
                                 partial_stop_reason = ?message.stop_reason,
                                 "LLM stream error"
                             );
+                            // preserve the partial assistant message: yield
+                            // MessageEnd before Error so the TUI can render
+                            // whatever the model managed to stream and the
+                            // session captures it. without this, "error
+                            // decoding response body" mid-paragraph drops
+                            // the entire response, including any minutes
+                            // of useful work the model produced
+                            let partial = message.clone();
+                            if !partial.content.is_empty() {
+                                yield AgentEvent::MessageEnd { message: partial.clone() };
+                                messages.push(Message::Assistant(partial));
+                            }
                             yield AgentEvent::Error { error: error_msg };
                             yield AgentEvent::AgentEnd;
                             return;
@@ -993,6 +1005,105 @@ mod tests {
         // should get AgentStart, TurnStart, Error, AgentEnd
         assert!(events.iter().any(|e| matches!(e, AgentEvent::Error { .. })));
         assert!(events.iter().any(|e| matches!(e, AgentEvent::AgentEnd)));
+    }
+
+    #[test]
+    fn stream_error_with_partial_yields_message_end_before_error() {
+        // when a stream errors mid-response with partial content (e.g.
+        // "error decoding response body" after the model already streamed
+        // a paragraph), the agent loop must yield MessageEnd with the
+        // partial content BEFORE Error so the TUI can render it and the
+        // session captures what the model said. previously the partial
+        // was logged then dropped, nuking minutes of streaming work
+        struct PartialErrorProvider;
+
+        #[async_trait::async_trait]
+        impl mush_ai::registry::ApiProvider for PartialErrorProvider {
+            fn api(&self) -> Api {
+                Api::AnthropicMessages
+            }
+            async fn stream(
+                &self,
+                model: &Model,
+                _context: &mush_ai::registry::LlmContext,
+                _options: &StreamOptions,
+            ) -> Result<mush_ai::registry::EventStream, mush_ai::registry::ProviderError>
+            {
+                let partial = AssistantMessage {
+                    content: vec![AssistantContentPart::Text(TextContent {
+                        text: "I'll start by checking the file".into(),
+                    })],
+                    model: model.id.clone(),
+                    provider: model.provider.clone(),
+                    api: model.api,
+                    usage: Usage::default(),
+                    stop_reason: StopReason::Error,
+                    error_message: Some("error decoding response body".into()),
+                    timestamp_ms: Timestamp::zero(),
+                };
+                let s = async_stream::stream! {
+                    yield StreamEvent::Start { partial: partial.clone() };
+                    yield StreamEvent::Error {
+                        reason: StopReason::Error,
+                        message: partial,
+                    };
+                };
+                Ok(Box::pin(s) as mush_ai::registry::EventStream)
+            }
+        }
+
+        let mut registry = ApiRegistry::new();
+        registry.register(Box::new(PartialErrorProvider));
+        let model = test_model();
+        let tools = ToolRegistry::new();
+        let config = AgentConfig {
+            model: model.clone(),
+            system_prompt: None,
+            tools,
+            registry: &registry,
+            options: StreamOptions::default(),
+            max_turns: DEFAULT_MAX_TURNS,
+            hooks: Box::new(NoopHooks),
+            injections: AgentInjections::default(),
+            cancel: None,
+        };
+        let user_messages = vec![Message::User(UserMessage {
+            content: UserContent::Text("do the thing".into()),
+            timestamp_ms: Timestamp::zero(),
+        })];
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let events: Vec<AgentEvent> =
+            rt.block_on(async { agent_loop(config, user_messages).collect().await });
+
+        // find the indices of MessageEnd and Error
+        let msg_end = events
+            .iter()
+            .position(|e| matches!(e, AgentEvent::MessageEnd { .. }));
+        let err = events
+            .iter()
+            .position(|e| matches!(e, AgentEvent::Error { .. }));
+        let msg_end = msg_end.expect("partial output should be preserved as MessageEnd");
+        let err = err.expect("error should still be reported");
+        assert!(
+            msg_end < err,
+            "MessageEnd must come before Error so the TUI/session sees the partial content first"
+        );
+
+        // the partial content must be preserved verbatim
+        let AgentEvent::MessageEnd { message } = &events[msg_end] else {
+            unreachable!()
+        };
+        let text = message
+            .content
+            .iter()
+            .find_map(|p| match p {
+                AssistantContentPart::Text(t) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        assert_eq!(text, "I'll start by checking the file");
+        assert_eq!(message.stop_reason, StopReason::Error);
     }
 
     #[test]
