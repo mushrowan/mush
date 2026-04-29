@@ -17,6 +17,7 @@
 //!     - `Tail`  → keep the last `MAX_LINES` / `MAX_BYTES` (bash)
 //!     - `Middle`→ keep half from the start, half from the end
 //!       (default; batch explicitly opts in)
+//!
 //!   when central truncation kicks in, the full text is dumped to
 //!   `~/.local/share/mush/tool-output/tool_<unix_ms>.txt` and a hint
 //!   is folded into the preview pointing the model at that file.
@@ -82,9 +83,7 @@ fn mask_saved_path(text: &str) -> String {
         out.push_str("Full output: <DATA_DIR>/tool-output/tool_<TS>.txt");
         rest = &rest[start + "Full output: ".len()..];
         // skip past the path: ends at first ']' or whitespace boundary
-        let end = rest
-            .find(|c: char| c == ']' || c == '\n' || c == ' ')
-            .unwrap_or(rest.len());
+        let end = rest.find([']', '\n', ' ']).unwrap_or(rest.len());
         rest = &rest[end..];
     }
     out.push_str(rest);
@@ -93,6 +92,10 @@ fn mask_saved_path(text: &str) -> String {
 
 /// run a closure with `MUSH_DATA_DIR` pinned to a tempdir so saved
 /// output goes somewhere deterministic and isolated per-test
+#[allow(
+    clippy::unwrap_used,
+    reason = "test helper, panic on tmpdir failure is fine"
+)]
 fn with_data_dir<R>(f: impl FnOnce(&Path) -> R) -> R {
     let tmp = tempfile::tempdir().unwrap();
     // SAFETY: nextest runs each test in its own process, so mutating
