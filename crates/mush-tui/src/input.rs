@@ -49,6 +49,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     if app.interaction.mode == AppMode::SessionPicker {
         return handle_picker_key(app, key);
     }
+    if app.interaction.mode == AppMode::ModelPicker {
+        return handle_model_picker_key(app, key);
+    }
     if app.interaction.mode == AppMode::SlashComplete {
         return handle_slash_menu_key(app, key);
     }
@@ -1377,6 +1380,198 @@ fn handle_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             None
         }
         _ => None,
+    }
+}
+
+/// drive the centred `/model` picker overlay. mirrors
+/// [`handle_picker_key`] for sessions but adds ctrl+f (toggle
+/// favourite), ctrl+d (arm delete-stale prompt), and a confirmation
+/// flow that intercepts y/n while a delete is armed
+fn handle_model_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
+    // intercept y/n when a delete prompt is armed
+    if app
+        .interaction
+        .model_picker
+        .as_ref()
+        .is_some_and(|p| p.confirm_delete.is_some())
+    {
+        return handle_model_picker_delete_confirm_key(app, key);
+    }
+
+    match (key.modifiers, key.code) {
+        (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('c' | '[')) => {
+            app.close_model_picker();
+            None
+        }
+        (_, KeyCode::Tab) | (_, KeyCode::BackTab) => {
+            if let Some(ref mut picker) = app.interaction.model_picker {
+                picker.toggle_tab();
+                if matches!(picker.tab, crate::model_picker::ModelPickerTab::Favourites)
+                    && picker.favourite_models.is_empty()
+                {
+                    picker.toast = Some("no favourites yet · ctrl+f to star one".into());
+                } else {
+                    picker.toast = None;
+                }
+            }
+            None
+        }
+        (_, KeyCode::Enter) => {
+            let id = app.selected_model_id()?;
+            let show_all = app
+                .interaction
+                .model_picker
+                .as_ref()
+                .map(|p| p.show_all)
+                .unwrap_or(false);
+            app.close_model_picker();
+            Some(AppEvent::SlashCommand {
+                action: crate::slash::SlashAction::Model {
+                    model_id: Some(id),
+                    show_all,
+                },
+            })
+        }
+        (_, KeyCode::Up) | (KeyModifiers::CONTROL, KeyCode::Char('k')) => {
+            if let Some(ref mut picker) = app.interaction.model_picker {
+                picker.selected = picker.selected.saturating_sub(1);
+            }
+            None
+        }
+        (_, KeyCode::Down) | (KeyModifiers::CONTROL, KeyCode::Char('j')) => {
+            if let Some(ref mut picker) = app.interaction.model_picker {
+                let filtered_len = crate::model_picker::filtered_models(picker).len();
+                if picker.selected + 1 < filtered_len {
+                    picker.selected += 1;
+                }
+            }
+            None
+        }
+        (KeyModifiers::CONTROL, KeyCode::Char('f')) => toggle_overlay_favourite(app),
+        (mods, KeyCode::Char('d'))
+            if mods.contains(KeyModifiers::CONTROL) && mods.contains(KeyModifiers::SHIFT) =>
+        {
+            if let Some(ref mut picker) = app.interaction.model_picker {
+                picker.arm_delete_all_stale();
+            }
+            None
+        }
+        (KeyModifiers::ALT, KeyCode::Char('d')) => {
+            // some terminals send alt+d for ctrl+shift+d; treat both
+            // as the "delete every stale" path
+            if let Some(ref mut picker) = app.interaction.model_picker {
+                picker.arm_delete_all_stale();
+            }
+            None
+        }
+        (KeyModifiers::CONTROL, KeyCode::Char('d')) => {
+            if let Some(ref mut picker) = app.interaction.model_picker
+                && !picker.arm_delete_selected()
+            {
+                picker.toast = Some("only stale rows can be deleted".into());
+            }
+            None
+        }
+        (_, KeyCode::Backspace) => {
+            if let Some(ref mut picker) = app.interaction.model_picker {
+                picker.filter.pop();
+                picker.selected = 0;
+            }
+            None
+        }
+        (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
+            if let Some(ref mut picker) = app.interaction.model_picker {
+                picker.filter.push(c);
+                picker.selected = 0;
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// star or un-star the highlighted model when ctrl+f is pressed in
+/// the overlay. respects `favourites_locked` (set when the user
+/// pinned favourites in config.toml). returns `PersistFavourites`
+/// when the list actually changed so the runner saves it
+fn toggle_overlay_favourite(app: &mut App) -> Option<AppEvent> {
+    let picker = app.interaction.model_picker.as_mut()?;
+    if picker.favourites_locked {
+        picker.toast = Some("favourites are locked by config.toml".into());
+        return None;
+    }
+    let id = {
+        let visible = crate::model_picker::filtered_models(picker);
+        visible.get(picker.selected)?.id.clone()
+    };
+    if let Some(pos) = app
+        .completion
+        .favourite_models
+        .iter()
+        .position(|f| f == &id)
+    {
+        app.completion.favourite_models.remove(pos);
+    } else {
+        app.completion.favourite_models.push(id);
+    }
+    if let Some(ref mut picker) = app.interaction.model_picker {
+        picker.favourite_models = app.completion.favourite_models.clone();
+    }
+    Some(AppEvent::PersistFavourites)
+}
+
+/// drive y/n/esc when a delete-stale confirmation is armed in the
+/// overlay picker. y persists the deletion to the on-disk discovery
+/// cache and refreshes the visible model list; anything else cancels
+fn handle_model_picker_delete_confirm_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
+    let confirm = app
+        .interaction
+        .model_picker
+        .as_ref()
+        .and_then(|p| p.confirm_delete.clone())?;
+
+    match (key.modifiers, key.code) {
+        (_, KeyCode::Char('y' | 'Y')) => {
+            let removed = apply_delete_confirm(&confirm);
+            if let Some(picker) = app.interaction.model_picker.as_mut() {
+                picker.confirm_delete = None;
+                picker.toast = Some(match removed {
+                    0 => "delete failed: model not found in cache".into(),
+                    1 => "deleted 1 model".into(),
+                    n => format!("deleted {n} models"),
+                });
+            }
+            refresh_model_picker_overlay_after_delete(app);
+            None
+        }
+        _ => {
+            if let Some(picker) = app.interaction.model_picker.as_mut() {
+                picker.cancel_delete();
+            }
+            None
+        }
+    }
+}
+
+/// rebuild the model picker's catalogue from the freshly-mutated
+/// discovery cache and clamp `selected` so it stays valid when the
+/// deleted row vanishes
+fn refresh_model_picker_overlay_after_delete(app: &mut App) {
+    use crate::slash_menu::model_completion_from_merged;
+    let new_completions: Vec<_> = mush_ai::discovery::merged_catalogue()
+        .iter()
+        .map(model_completion_from_merged)
+        .collect();
+    app.completion.completions = new_completions.iter().map(|m| m.id.clone()).collect();
+    app.completion.model_completions = new_completions;
+
+    if let Some(picker) = app.interaction.model_picker.as_mut() {
+        picker.models = crate::slash_menu::prepare_picker_models(
+            &app.completion.model_completions,
+            picker.show_all,
+        );
+        let visible_len = crate::model_picker::filtered_models(picker).len();
+        picker.selected = picker.selected.min(visible_len.saturating_sub(1));
     }
 }
 
@@ -3600,6 +3795,168 @@ mod tests {
         handle_key(&mut app, ctrl(KeyCode::Char('[')));
         assert_eq!(app.interaction.mode, AppMode::Normal);
         assert!(app.interaction.session_picker.is_none());
+    }
+
+    /// seed an app with two anthropic models and one openai model so
+    /// the model picker tests have a deterministic catalogue
+    fn app_with_models() -> App {
+        use crate::slash_menu::ModelCompletion;
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.completion.model_completions = vec![
+            ModelCompletion {
+                id: "claude-opus-4".into(),
+                name: "Claude Opus 4".into(),
+                provider: "anthropic".into(),
+                stale: false,
+                description: None,
+                speed_tiers: Vec::new(),
+                priority: 0,
+                visibility: None,
+            },
+            ModelCompletion {
+                id: "claude-haiku-4".into(),
+                name: "Claude Haiku 4".into(),
+                provider: "anthropic".into(),
+                stale: false,
+                description: None,
+                speed_tiers: Vec::new(),
+                priority: 0,
+                visibility: None,
+            },
+            ModelCompletion {
+                id: "gpt-5".into(),
+                name: "GPT 5".into(),
+                provider: "openai".into(),
+                stale: false,
+                description: None,
+                speed_tiers: Vec::new(),
+                priority: 0,
+                visibility: None,
+            },
+        ];
+        app
+    }
+
+    #[test]
+    fn model_picker_overlay_esc_closes() {
+        let mut app = app_with_models();
+        app.open_model_picker_overlay();
+        assert_eq!(app.interaction.mode, AppMode::ModelPicker);
+
+        handle_key(&mut app, key(KeyCode::Esc));
+        assert_eq!(app.interaction.mode, AppMode::Normal);
+        assert!(app.interaction.model_picker.is_none());
+    }
+
+    #[test]
+    fn model_picker_overlay_ctrl_j_k_navigate_visible_rows() {
+        let mut app = app_with_models();
+        app.open_model_picker_overlay();
+        assert_eq!(
+            app.interaction.model_picker.as_ref().unwrap().selected,
+            0,
+            "starts at row 0"
+        );
+
+        handle_key(&mut app, ctrl(KeyCode::Char('j')));
+        assert_eq!(app.interaction.model_picker.as_ref().unwrap().selected, 1);
+        handle_key(&mut app, ctrl(KeyCode::Char('j')));
+        assert_eq!(app.interaction.model_picker.as_ref().unwrap().selected, 2);
+        // can't go past the last row
+        handle_key(&mut app, ctrl(KeyCode::Char('j')));
+        assert_eq!(app.interaction.model_picker.as_ref().unwrap().selected, 2);
+        handle_key(&mut app, ctrl(KeyCode::Char('k')));
+        assert_eq!(app.interaction.model_picker.as_ref().unwrap().selected, 1);
+    }
+
+    #[test]
+    fn model_picker_overlay_tab_switches_tabs() {
+        let mut app = app_with_models();
+        app.completion.favourite_models = vec!["gpt-5".into()];
+        app.open_model_picker_overlay();
+        assert_eq!(
+            app.interaction.model_picker.as_ref().unwrap().tab,
+            crate::model_picker::ModelPickerTab::All
+        );
+
+        handle_key(&mut app, key(KeyCode::Tab));
+        assert_eq!(
+            app.interaction.model_picker.as_ref().unwrap().tab,
+            crate::model_picker::ModelPickerTab::Favourites
+        );
+        handle_key(&mut app, key(KeyCode::Tab));
+        assert_eq!(
+            app.interaction.model_picker.as_ref().unwrap().tab,
+            crate::model_picker::ModelPickerTab::All
+        );
+    }
+
+    #[test]
+    fn model_picker_overlay_enter_emits_model_action_and_closes() {
+        let mut app = app_with_models();
+        app.open_model_picker_overlay();
+        // navigate to the second row then press enter
+        handle_key(&mut app, ctrl(KeyCode::Char('j')));
+        let event = handle_key(&mut app, key(KeyCode::Enter));
+        match event {
+            Some(AppEvent::SlashCommand {
+                action:
+                    crate::slash::SlashAction::Model {
+                        model_id: Some(id),
+                        show_all: false,
+                    },
+            }) => assert_eq!(id.as_str(), "claude-haiku-4"),
+            other => panic!("expected SlashAction::Model, got {other:?}"),
+        }
+        assert_eq!(app.interaction.mode, AppMode::Normal);
+        assert!(app.interaction.model_picker.is_none());
+    }
+
+    #[test]
+    fn model_picker_overlay_typing_filters_visible_rows() {
+        let mut app = app_with_models();
+        app.open_model_picker_overlay();
+        for c in "openai".chars() {
+            handle_key(&mut app, key(KeyCode::Char(c)));
+        }
+        let picker = app.interaction.model_picker.as_ref().unwrap();
+        let visible = crate::model_picker::filtered_models(picker);
+        let ids: Vec<&str> = visible.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["gpt-5"]);
+    }
+
+    #[test]
+    fn model_picker_overlay_ctrl_f_toggles_favourite_when_unlocked() {
+        let mut app = app_with_models();
+        app.open_model_picker_overlay();
+        let event = handle_key(&mut app, ctrl(KeyCode::Char('f')));
+        assert!(matches!(event, Some(AppEvent::PersistFavourites)));
+        assert_eq!(app.completion.favourite_models, vec!["claude-opus-4"]);
+
+        // toggling again removes it
+        handle_key(&mut app, ctrl(KeyCode::Char('f')));
+        assert!(app.completion.favourite_models.is_empty());
+    }
+
+    #[test]
+    fn model_picker_overlay_ctrl_f_toasts_when_locked() {
+        let mut app = app_with_models();
+        app.completion.favourites_locked = true;
+        app.open_model_picker_overlay();
+        let event = handle_key(&mut app, ctrl(KeyCode::Char('f')));
+        assert!(event.is_none(), "no PersistFavourites when locked");
+        assert!(app.completion.favourite_models.is_empty());
+        assert!(
+            app.interaction
+                .model_picker
+                .as_ref()
+                .unwrap()
+                .toast
+                .as_deref()
+                .unwrap_or("")
+                .contains("locked"),
+            "should toast about lock"
+        );
     }
 
     #[test]

@@ -1108,6 +1108,50 @@ impl App {
         let filtered = filtered_sessions(picker);
         filtered.get(picker.selected).copied()
     }
+
+    /// open the centred model picker overlay. mirrors
+    /// [`Self::open_session_picker`] but for models, replacing the
+    /// old slash-menu-with-`model_mode` flow. seeds favourites and
+    /// the lock state from the user's current config so ★ markers
+    /// and ctrl+f behaviour reflect their settings.
+    pub fn open_model_picker_overlay(&mut self) {
+        self.open_model_picker_overlay_inner(false);
+    }
+
+    /// open the model picker with codex's hidden entries (`internal`,
+    /// `experimental`) included. routed from `/model --all`.
+    pub fn open_model_picker_overlay_all(&mut self) {
+        self.open_model_picker_overlay_inner(true);
+    }
+
+    fn open_model_picker_overlay_inner(&mut self, show_all: bool) {
+        let models =
+            crate::slash_menu::prepare_picker_models(&self.completion.model_completions, show_all);
+        if models.is_empty() {
+            return;
+        }
+        let state = crate::model_picker::ModelPickerState::new(
+            models,
+            self.completion.favourite_models.clone(),
+            self.completion.favourites_locked,
+            show_all,
+        );
+        self.interaction.model_picker = Some(state);
+        self.interaction.mode = AppMode::ModelPicker;
+    }
+
+    /// close the model picker overlay
+    pub fn close_model_picker(&mut self) {
+        self.interaction.model_picker = None;
+        self.interaction.mode = AppMode::Normal;
+    }
+
+    /// id of the highlighted model in the open picker, if any
+    pub fn selected_model_id(&self) -> Option<String> {
+        let picker = self.interaction.model_picker.as_ref()?;
+        let filtered = crate::model_picker::filtered_models(picker);
+        Some(filtered.get(picker.selected)?.id.clone())
+    }
 }
 
 #[cfg(test)]

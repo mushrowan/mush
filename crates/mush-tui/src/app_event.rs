@@ -54,6 +54,8 @@ pub enum AppEvent {
 pub enum AppMode {
     Normal,
     SessionPicker,
+    /// centred floating model picker (`/model` with no arg)
+    ModelPicker,
     /// slash command completion menu visible above input
     SlashComplete,
     /// `@<word>` template picker open after a tab on a partial-match
