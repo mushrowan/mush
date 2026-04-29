@@ -450,7 +450,7 @@ fn apply_reloaded_templates(pane_mgr: &mut PaneManager, templates: &[mush_ext::P
                 .slash_commands
                 .push(crate::app::SlashCommand {
                     name: template.name.clone(),
-                    description: template.description.clone(),
+                    description: template.description.clone().unwrap_or_default(),
                 });
             pane.app.completion.templates.push(template.clone());
         }
@@ -535,7 +535,7 @@ mod tests {
     fn template(name: &str, description: &str) -> mush_ext::PromptTemplate {
         mush_ext::PromptTemplate {
             name: name.into(),
-            description: description.into(),
+            description: Some(description.into()),
             content: format!("template body: {name}"),
             source: mush_ext::TemplateSource::User,
             path: std::path::PathBuf::from(format!("/tmp/{name}.md")),

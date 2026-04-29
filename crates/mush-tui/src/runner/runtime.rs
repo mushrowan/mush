@@ -329,7 +329,7 @@ fn build_initial_app(tui_config: &TuiConfig, cwd: &Path) -> App {
             .push(format!("/{}", template.name));
         app.completion.slash_commands.push(SlashCommand {
             name: template.name.clone(),
-            description: template.description.clone(),
+            description: template.description.clone().unwrap_or_default(),
         });
         app.completion.templates.push(template);
     }

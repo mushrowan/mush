@@ -118,16 +118,20 @@ self: {
 
   # -- prompt template installer ----------------------------------------
 
-  # a prompt template is either a raw markdown string (possibly with
-  # yaml frontmatter containing `description: ...`) or a structured
-  # { description, content } attrset from which we synthesise the
+  # a prompt template is either a raw markdown string (with optional
+  # yaml frontmatter `description: ...`) or a structured
+  # { description?, content } attrset from which we synthesise the
   # frontmatter. unlike skills, prompts are single flat files under
   # `~/.config/mush/prompts/<name>.md` so no `files` attribute
   promptModule = lib.types.submodule {
     options = {
       description = lib.mkOption {
-        type = lib.types.str;
-        description = "one-line description shown in the /command picker";
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = ''
+          optional one-line description shown in the slash menu and
+          `@`-picker. when null the picker shows just the name
+        '';
         example = "summarise the given jj change";
       };
 
@@ -150,6 +154,8 @@ self: {
   promptToText = _name: prompt:
     if lib.isString prompt
     then prompt
+    else if prompt.description == null
+    then prompt.content
     else ''
       ---
       description: ${prompt.description}
@@ -230,22 +236,21 @@ self: {
         default = {};
         example = lib.literalExpression ''
           {
-            # raw markdown (possibly with yaml frontmatter)
             summarise = builtins.readFile ./prompts/summarise.md;
 
-            # structured form: frontmatter is generated
-            review = {
-              description = "review code for issues";
-              content = "review $1 for issues and suggest fixes.";
-            };
+            review = '''
+              review code for issues
+              review $1 for issues and suggest fixes.
+            ''';
           }
         '';
         description = ''
           prompt templates to install in ~/.config/mush/prompts/. each
           key becomes `<name>.md` under that directory. invoked via
-          `@name<tab>` or `/name args...`. accepts either a raw markdown
-          string (with yaml frontmatter) or a { description, content } set.
-          supports `$1`, `$2`, `$@` / `$ARGUMENTS` placeholders for args
+          `@name<tab>` or `/name args...`. the first non-empty line of
+          the body doubles as the description shown in the slash menu
+          and `@`-picker. supports `$1`, `$2`, `$@` / `$ARGUMENTS`
+          placeholders for args
         '';
       };
     };

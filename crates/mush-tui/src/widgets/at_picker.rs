@@ -57,7 +57,10 @@ pub fn render(frame: &mut Frame, picker: &AtPickerState, input_area: Rect, theme
             Span::styled(prefix, name_style),
             Span::styled(name_text, name_style),
             Span::raw(" ".repeat(pad)),
-            Span::styled(template.description.as_str(), theme.menu_description),
+            Span::styled(
+                template.description.as_deref().unwrap_or(""),
+                theme.menu_description,
+            ),
         ]));
     }
 
@@ -76,7 +79,7 @@ mod tests {
     fn template(name: &str) -> PromptTemplate {
         PromptTemplate {
             name: name.into(),
-            description: format!("description: {name}"),
+            description: Some(format!("description: {name}")),
             content: format!("body: {name}"),
             source: TemplateSource::User,
             path: std::path::PathBuf::from(format!("/tmp/{name}.md")),
