@@ -287,7 +287,12 @@ fn edit_file(path: &Path, old_text: &str, new_text: &str, opts: &EditOpts) -> To
                 } else {
                     String::new()
                 };
-                ToolResult::text(format!("edited {}{count_note}\n{diff}", path.display()))
+                let mut text = format!("edited {}{count_note}\n{diff}", path.display());
+                if let Some(hint) = crate::util::gitignore_hint(path) {
+                    text.push_str("\n\n");
+                    text.push_str(&hint);
+                }
+                ToolResult::text(text)
             }
             Err(e) => ToolResult::error(format!("failed to write file: {e}")),
         };
@@ -1097,6 +1102,62 @@ mod tests {
         assert!(
             text.contains("expected 2") && text.contains("found 3"),
             "got: {text}"
+        );
+    }
+
+    /// init a git repo in a tempdir for the gitignore-hint tests.
+    /// returns None if `git` isn't available so the test passes on
+    /// minimal environments
+    fn temp_git_repo_for_edit() -> Option<tempfile::TempDir> {
+        let dir = tempfile::tempdir().ok()?;
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .arg("init")
+            .arg("-q")
+            .status()
+            .ok()?;
+        if !status.success() {
+            return None;
+        }
+        Some(dir)
+    }
+
+    #[test]
+    fn edit_success_appends_gitignore_hint_for_ignored_files() {
+        // when the model edits a file that's gitignored, the result
+        // text must call that out so the model doesn't claim it was
+        // "tracked" or "committed" in subsequent commit messages
+        let Some(dir) = temp_git_repo_for_edit() else {
+            return;
+        };
+        fs::write(dir.path().join(".gitignore"), "*.local\n").unwrap();
+        let path = dir.path().join("notes.local");
+        fs::write(&path, "old text\n").unwrap();
+
+        let result = edit_file(&path, "old text", "new text", &EditOpts::default());
+        assert!(!result.outcome.is_error(), "edit should succeed");
+        let text = extract_text(&result);
+        assert!(
+            text.contains("gitignored"),
+            "expected gitignored hint, got: {text}"
+        );
+    }
+
+    #[test]
+    fn edit_success_omits_gitignore_hint_for_tracked_files() {
+        let Some(dir) = temp_git_repo_for_edit() else {
+            return;
+        };
+        let path = dir.path().join("README.md");
+        fs::write(&path, "old\n").unwrap();
+
+        let result = edit_file(&path, "old", "new", &EditOpts::default());
+        assert!(!result.outcome.is_error());
+        let text = extract_text(&result);
+        assert!(
+            !text.contains("gitignored"),
+            "tracked file should not get gitignore hint, got: {text}"
         );
     }
 
