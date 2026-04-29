@@ -543,20 +543,16 @@ pub(super) async fn abort_focused_stream(
 
     let pane = pane_mgr.focused_mut();
     pane.app.finish_streaming(None, None);
-    let mut restored = pane.app.take_queued_messages();
-    {
-        let mut steering_queue = pane.steering_queue.lock().await;
-        for message in steering_queue.drain(..) {
-            if let Message::User(UserMessage {
-                content: UserContent::Text(text),
-                ..
-            }) = message
-                && !text.is_empty()
-            {
-                restored.push(text);
-            }
-        }
-    }
+    // queued steering messages live in two parallel structures: the
+    // display side (`app.messages` with queued=true, drained by
+    // `take_queued_messages`) and the runtime side (`steering_queue`
+    // holding the structured `Message::User` values that the agent
+    // loop consumes). they're populated 1:1 and consumed together via
+    // SteeringInjected. on abort we restore from the display side
+    // (which produces the user-visible text) and silently clear the
+    // runtime queue so it doesn't re-fire if the user resubmits
+    let restored = pane.app.take_queued_messages();
+    pane.steering_queue.lock().await.clear();
     if !restored.is_empty() {
         let text = restored.join("\n");
         pane.app.input.text = text.clone();
@@ -1957,6 +1953,65 @@ mod tests {
             "abort should drain delegations from the focused pane"
         );
         assert_eq!(remaining[0].from, PaneId::new(2));
+    }
+
+    #[tokio::test]
+    async fn abort_focused_stream_restores_queued_messages_without_duplicates() {
+        // when the user submits a message during streaming, it lands in
+        // BOTH the display-side queued messages list AND the runtime
+        // steering_queue. previously abort_focused_stream concatenated
+        // both sources into the input box, doubling each unprocessed
+        // message. this test pins that the input is restored exactly
+        // once per submitted message
+        use crate::delegate;
+
+        let pane_id = PaneId::new(1);
+        let mut pane_mgr = PaneManager::new(Pane::new(pane_id, app()));
+        let mut stream_state = StreamState::new();
+
+        let (_tx, rx) = tokio::sync::mpsc::channel(1);
+        stream_state.register_active(
+            pane_id,
+            StreamMeta {
+                steering_queue: pane_mgr.pane(pane_id).unwrap().steering_queue.clone(),
+                confirm_req_rx: rx,
+                confirm_reply: Arc::new(Mutex::new(None)),
+                model: models::all_models_with_user().into_iter().next().unwrap(),
+                context_tokens: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                cancel: tokio_util::sync::CancellationToken::new(),
+            },
+        );
+        // mark the pane as actively streaming so submit_streaming_input
+        // takes the queueing path rather than the cold-start path
+        pane_mgr.focused_mut().app.start_streaming();
+
+        submit_streaming_input(&mut pane_mgr, &stream_state, "first steer".into()).await;
+        submit_streaming_input(&mut pane_mgr, &stream_state, "second steer".into()).await;
+
+        // sanity: both queues should contain the two messages right now
+        assert_eq!(pane_mgr.focused().steering_queue.lock().await.len(), 2);
+        assert_eq!(
+            pane_mgr
+                .focused()
+                .app
+                .messages
+                .iter()
+                .filter(|m| m.queued)
+                .count(),
+            2
+        );
+
+        let queue = delegate::new_queue();
+        abort_focused_stream(&mut pane_mgr, &mut stream_state, &queue).await;
+
+        let restored_input = &pane_mgr.focused().app.input.text;
+        assert_eq!(
+            restored_input, "first steer\nsecond steer",
+            "abort must restore each queued message exactly once, got: {restored_input:?}"
+        );
+        // both queues should now be empty
+        assert!(pane_mgr.focused().steering_queue.lock().await.is_empty());
+        assert!(!pane_mgr.focused().app.messages.iter().any(|m| m.queued));
     }
 
     #[test]
