@@ -18,6 +18,7 @@ pub mod isolation;
 pub mod keybinds;
 pub mod markdown;
 pub mod messaging;
+pub mod model_picker;
 pub mod notify;
 pub mod pane;
 pub mod path_utils;
