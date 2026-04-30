@@ -11,7 +11,18 @@ use mush_session::ConversationState;
 
 use crate::app::App;
 
-use super::commands::rebuild_display;
+/// pull the freshly-generated summary text out of a compacted message
+/// list. compaction always produces a leading user message tagged with
+/// `COMPACTION_SUMMARY_PREFIX`; the body of that message is what we want
+/// to surface in the visible chat. returns `None` if no summary message
+/// is present (e.g. compaction no-op'd because the conversation was too
+/// short)
+pub fn extract_fresh_summary(messages: &[Message]) -> Option<String> {
+    messages.iter().find_map(|m| match m {
+        Message::User(u) => crate::conversation_display::extract_compaction_summary(&u.text()),
+        _ => None,
+    })
+}
 
 /// minimum messages before compaction is worthwhile
 pub const MIN_MESSAGES_FOR_COMPACTION: usize = 4;
@@ -81,43 +92,50 @@ pub fn start_compaction(
     })
 }
 
-/// finalise a compaction task: swap the conversation messages, rebuild
-/// the display, reset the "recent live call" token stats so the next
-/// real call doesn't trip a false ContextDecrease anomaly, optionally
-/// scroll to the top so the user sees the new summary, and update the
-/// status bar. `kind` controls only the status text, since the
+/// finalise a compaction task: swap the conversation messages so future
+/// API calls see the compacted context, append a "compacted summary"
+/// system banner to the visible chat (without nuking the existing
+/// scrollback), reset the "recent live call" token stats so the next
+/// real call doesn't trip a false ContextDecrease anomaly, and update
+/// the status bar. `kind` controls only the status text, since the
 /// underlying state mutation is identical for /compact and
 /// /fork-compact.
+///
+/// the previous implementation rebuilt the display from the compacted
+/// conversation, which silently wiped every pre-compact user/assistant
+/// exchange the user could see. now the LLM-facing conversation diverges
+/// from the visible scrollback at the moment of compaction: app.messages
+/// keeps everything that was there, with a single summary banner appended
+/// so the user can scroll back through the full history at any time
 pub fn apply_compaction_result(
     app: &mut App,
     conversation: &mut ConversationState,
     result: CompactionTaskResult,
     kind: CompactionKind,
-    scroll_to_summary: bool,
 ) {
+    let summary_body = extract_fresh_summary(&result.messages);
+
     conversation.replace_messages(result.messages);
-    let after = conversation.context();
-    rebuild_display(app, &after);
+    let after_count = conversation.context_len();
     app.stats
         .reset_live_state(TokenCount::new(result.tokens_after as u64));
-    if scroll_to_summary {
-        app.scroll_to_top();
+
+    if let Some(body) = summary_body {
+        app.push_system_message(crate::conversation_display::format_compaction_banner(&body));
     }
+
     app.status = Some(match kind {
         CompactionKind::Compact => format!(
             "compacted: {} → {} messages, ~{} → ~{} tokens ({} summarised)",
             result.before_count,
-            after.len(),
+            after_count,
             result.tokens_before,
             result.tokens_after,
             result.summarised_count,
         ),
         CompactionKind::ForkCompact => format!(
             "fork-compacted: {} → {} messages, ~{} → ~{} tokens (original preserved, /tree to navigate)",
-            result.before_count,
-            after.len(),
-            result.tokens_before,
-            result.tokens_after,
+            result.before_count, after_count, result.tokens_before, result.tokens_after,
         ),
     });
 }
@@ -155,7 +173,7 @@ pub async fn handle_compact(
         app.push_system_message("compaction task failed");
         return;
     };
-    apply_compaction_result(app, conversation, result, CompactionKind::Compact, true);
+    apply_compaction_result(app, conversation, result, CompactionKind::Compact);
 }
 
 /// fork the session tree then compact the new branch
@@ -163,6 +181,11 @@ pub async fn handle_compact(
 /// the original conversation is preserved in the parent branch.
 /// a summary of the old branch is injected at the fork point so
 /// the LLM knows the branch happened.
+///
+/// thin wrapper around [`fork_and_compact`] that updates the visible
+/// chat and status bar. only used by tests today; production code goes
+/// through [`start_compaction`] + [`apply_compaction_result`] via the
+/// pending-compaction queue
 pub async fn handle_fork_compact(
     app: &mut App,
     conversation: &mut ConversationState,
@@ -191,10 +214,15 @@ pub async fn handle_fork_compact(
     .await;
     match result {
         Some((after, tokens_before, tokens_after)) => {
-            rebuild_display(app, &conversation.context());
+            // append the summary to the visible chat (mirrors the
+            // /compact path; preserves the user's scrollback)
+            if let Some(body) = extract_fresh_summary(&conversation.context()) {
+                app.push_system_message(crate::conversation_display::format_compaction_banner(
+                    &body,
+                ));
+            }
             app.stats
                 .reset_live_state(TokenCount::new(tokens_after as u64));
-            app.scroll_to_top();
             app.status = Some(format!(
                 "fork-compacted: {before} → {after} messages, ~{tokens_before} → ~{tokens_after} tokens (original preserved, /tree to navigate)",
             ));
@@ -422,16 +450,16 @@ mod tests {
         );
     }
 
-    /// after a manual /compact, the user is left at the BOTTOM of the
-    /// conversation by default (rebuild_display calls clear_messages
-    /// which resets scroll_offset to 0). the compaction summary lives
-    /// at index 0 (top), so without scrolling the user sees the same
-    /// kept messages they were already looking at and concludes
-    /// nothing happened. fix: scroll the view to the top after a
-    /// manual compaction so the freshly generated summary is the
-    /// first thing visible.
+    /// after /compact the user-facing scroll position is left where it
+    /// was. the previous implementation rebuilt the display from scratch
+    /// (clearing it via `clear_messages`, which reset scroll_offset to
+    /// the bottom) and then jumped to the top so the freshly rendered
+    /// summary at index 0 was visible. now the summary is appended at
+    /// the END of the existing display, so leaving scroll alone keeps
+    /// the user where they were and the new banner is naturally below
+    /// the last message.
     #[tokio::test]
-    async fn handle_compact_scrolls_to_show_summary() {
+    async fn handle_compact_does_not_jump_to_top() {
         let mut msgs = Vec::new();
         for i in 0..12 {
             msgs.push(user_msg(&format!("question {i}")));
@@ -443,8 +471,8 @@ mod tests {
         let model = test_model();
         let options = StreamOptions::default();
 
-        // simulate the user at the bottom of the conversation
-        app.scroll_offset = 0;
+        // simulate the user reading scrolled-up history
+        app.scroll_offset = 10;
 
         handle_compact(
             &mut app,
@@ -457,9 +485,9 @@ mod tests {
         )
         .await;
 
-        assert!(
-            app.scroll_offset > 0,
-            "expected scroll to move toward the top so the summary is visible, was {}",
+        assert_eq!(
+            app.scroll_offset, 10,
+            "/compact must not move the scroll position; was {} after, expected 10",
             app.scroll_offset
         );
     }
@@ -491,11 +519,10 @@ mod tests {
         let result = task.await.expect("compaction task panicked");
 
         let mut conv = conversation;
-        apply_compaction_result(&mut app, &mut conv, result, CompactionKind::Compact, true);
+        apply_compaction_result(&mut app, &mut conv, result, CompactionKind::Compact);
 
         // same invariants the synchronous path tests assert
         assert!(app.stats.prev_usage().is_none());
-        assert!(app.scroll_offset > 0, "scroll should be at top");
         let summary_present = app.messages.iter().any(|m| {
             m.role == crate::app::MessageRole::System && m.content.contains("compacted summary")
         });
@@ -536,7 +563,6 @@ mod tests {
             &mut conversation,
             result,
             CompactionKind::ForkCompact,
-            true,
         );
 
         let status = app.status.as_deref().unwrap_or_default();
@@ -547,6 +573,76 @@ mod tests {
         assert!(
             status.contains("/tree"),
             "fork status should hint at /tree navigation, got: {status:?}"
+        );
+    }
+
+    /// /compact must NOT nuke the user's pre-compact display. the
+    /// conversation (LLM context) gets the compacted form so future
+    /// requests are smaller, but app.messages keeps every previously
+    /// rendered message and just appends a system banner with the new
+    /// compaction summary. the bug being guarded against: previously
+    /// `apply_compaction_result` called `rebuild_display` which wiped
+    /// `app.messages` and re-rendered from the compacted conversation,
+    /// so users lost their entire scrollback after every /compact.
+    #[tokio::test]
+    async fn handle_compact_preserves_existing_display_messages() {
+        let mut msgs = Vec::new();
+        for i in 0..12 {
+            msgs.push(user_msg(&format!("question {i}")));
+            msgs.push(assistant_msg(&format!("answer {i}"), 1_000));
+        }
+        let mut conversation = ConversationState::from_messages(msgs.clone());
+        let mut app = App::new(test_model().id, TokenCount::new(200_000));
+        // simulate an existing populated display, as the user would have
+        // built up while chatting before invoking /compact
+        crate::conversation_display::rebuild_display(&mut app, &msgs);
+        let display_count_before = app.messages.len();
+        assert!(
+            display_count_before > 0,
+            "test precondition: existing display should be populated"
+        );
+        let first_content_before = app.messages[0].content.clone();
+        let last_content_before = app.messages.last().unwrap().content.clone();
+
+        let registry = ApiRegistry::new();
+        let model = test_model();
+        let options = StreamOptions::default();
+
+        handle_compact(
+            &mut app,
+            &mut conversation,
+            &model,
+            &options,
+            &registry,
+            None,
+            None,
+        )
+        .await;
+
+        // pre-compact display preserved in original order
+        assert!(
+            app.messages.len() > display_count_before,
+            "expected display to grow (summary appended), \
+             before={display_count_before} after={}",
+            app.messages.len()
+        );
+        assert_eq!(
+            app.messages[0].content, first_content_before,
+            "first display message must be untouched"
+        );
+        assert_eq!(
+            app.messages[display_count_before - 1].content,
+            last_content_before,
+            "the message that used to be last must still appear before the new summary"
+        );
+
+        // last message must be the compaction summary banner
+        let last = app.messages.last().expect("at least one message");
+        assert_eq!(last.role, crate::app::MessageRole::System);
+        assert!(
+            last.content.contains("compacted summary"),
+            "expected last message to be the summary banner, got: {:?}",
+            last.content
         );
     }
 }

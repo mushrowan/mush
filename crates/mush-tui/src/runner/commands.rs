@@ -70,6 +70,11 @@ pub(super) async fn handle_slash_action(
                                 (m, tui_config.options.clone())
                             });
                         pane.app.status = Some("compacting in background…".into());
+                        // also nudge the chat itself so it's obvious
+                        // something is happening; status-bar-only feedback
+                        // is easy to miss while reading scrollback
+                        pane.app
+                            .push_system_message("compacting conversation in background…");
                         let task = slash::start_compaction(
                             messages,
                             compact_model,
@@ -126,6 +131,8 @@ pub(super) async fn handle_slash_action(
                                 (m, tui_config.options.clone())
                             });
                         pane.app.status = Some("fork-compacting in background…".into());
+                        pane.app
+                            .push_system_message("fork-compacting conversation in background…");
                         let task = slash::start_compaction(
                             messages,
                             compact_model,

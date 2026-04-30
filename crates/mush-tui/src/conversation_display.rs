@@ -16,7 +16,7 @@ use crate::batch_output::{parse_batch_output, truncate_output, truncate_output_l
 /// with `COMPACTION_SUMMARY_PREFIX` and wraps the summary in `<summary>`
 /// tags. returns `None` for non-compaction messages so the caller can fall
 /// through to the normal user-message path
-fn extract_compaction_summary(text: &str) -> Option<String> {
+pub(crate) fn extract_compaction_summary(text: &str) -> Option<String> {
     let rest = text.strip_prefix(mush_session::COMPACTION_SUMMARY_PREFIX)?;
     let rest = rest.trim_start();
     let inner = rest
@@ -24,6 +24,12 @@ fn extract_compaction_summary(text: &str) -> Option<String> {
         .and_then(|s| s.strip_suffix("</summary>"))
         .unwrap_or(rest);
     Some(inner.trim().to_string())
+}
+
+/// format a compaction summary body with the visible banner used both
+/// when rendering historical compactions and when announcing a fresh one
+pub(crate) fn format_compaction_banner(summary: &str) -> String {
+    format!("━ compacted summary ━\n\n{summary}")
 }
 
 /// decode any image parts on a user message back into raw bytes, in order.
@@ -58,7 +64,7 @@ pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
             Message::User(user) => {
                 let text = user.text();
                 if let Some(body) = extract_compaction_summary(&text) {
-                    app.push_system_message(format!("━ compacted summary ━\n\n{body}"));
+                    app.push_system_message(format_compaction_banner(&body));
                 } else {
                     let images = extract_user_images(user);
                     if images.is_empty() {
