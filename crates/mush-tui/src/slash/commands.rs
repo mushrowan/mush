@@ -906,7 +906,21 @@ fn try_template(app: &mut App, name: &str, args: &str) -> Option<String> {
     // templates are loaded at startup into `app.completion.templates`;
     // use the cache instead of re-reading disk on every `/name` invocation
     let Some(tmpl) = mush_ext::find_template(&app.completion.templates, name) else {
-        app.push_system_message(format!("unknown command: /{name}  (try /help)"));
+        // restore the typed slash command into the prompt so a user who
+        // accidentally started a real message with `/` (or hit
+        // autocomplete the wrong way) can edit the leading slash off
+        // and resubmit instead of losing the body. status bar tells
+        // them what happened
+        app.input.text = if args.is_empty() {
+            format!("/{name}")
+        } else {
+            format!("/{name} {args}")
+        };
+        app.input.cursor = app.input.text.len();
+        app.input.ensure_cursor_visible();
+        app.status = Some(format!(
+            "unknown command: /{name} (try /help, or backspace the slash to send as a message)"
+        ));
         return None;
     };
     let arg_list: Vec<&str> = if args.is_empty() {
@@ -1049,5 +1063,52 @@ mod tests {
         assert!(dump.contains("pane: 1/3"));
         assert!(dump.contains("claude-opus-4-7"));
         assert!(dump.contains("12345"));
+    }
+
+    /// when an unknown slash command runs (e.g. the user accidentally
+    /// typed `/something hello world` because they meant a real message
+    /// but autocompleted the wrong way), the typed text must be
+    /// restored to the prompt instead of being eaten. previously
+    /// `try_template` just pushed "unknown command: /foo (try /help)"
+    /// and silently discarded the user's message body, which made it
+    /// look like the entire prompt vanished into the void
+    #[test]
+    fn try_template_restores_typed_text_when_command_unknown() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        // sanity: prompt starts empty (the runner takes the text out
+        // before dispatching)
+        assert!(app.input.text.is_empty());
+
+        let result = try_template(&mut app, "asdfgh", "hello world this is my real message");
+
+        assert!(
+            result.is_none(),
+            "unknown command must not produce an expanded prompt"
+        );
+        assert_eq!(
+            app.input.text, "/asdfgh hello world this is my real message",
+            "typed text must be restored to the prompt so the user can edit \
+             the leading slash off and resubmit. got: {:?}",
+            app.input.text
+        );
+        assert_eq!(
+            app.input.cursor,
+            app.input.text.len(),
+            "cursor should be at the end of the restored text"
+        );
+    }
+
+    /// the unknown-command path is also exercised when the typed slash
+    /// command takes no args at all (`/asdfgh`). restoring just the
+    /// `/name` token keeps the user able to fix the typo.
+    #[test]
+    fn try_template_restores_bare_slash_command_with_no_args() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+
+        let result = try_template(&mut app, "asdfgh", "");
+
+        assert!(result.is_none());
+        assert_eq!(app.input.text, "/asdfgh");
+        assert_eq!(app.input.cursor, app.input.text.len());
     }
 }
