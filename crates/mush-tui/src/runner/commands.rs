@@ -1,6 +1,5 @@
 use std::path::Path;
 
-use mush_ai::models;
 use mush_ai::registry::ApiRegistry;
 use mush_ai::types::{Dollars, Message, ThinkingLevel, TokenCount};
 
@@ -64,8 +63,10 @@ pub(super) async fn handle_slash_action(
                             .as_ref()
                             .map(|(m, o)| (m.clone(), o.clone()))
                             .unwrap_or_else(|| {
-                                let m = models::find_model_by_id(pane.app.model_id.as_str())
-                                    .unwrap_or_else(|| tui_config.model.clone());
+                                let m = super::streams::resolve_runtime_model(
+                                    pane.app.model_id.as_str(),
+                                    &tui_config.model,
+                                );
                                 (m, tui_config.options.clone())
                             });
                         pane.app.status = Some("compacting in background…".into());
@@ -118,8 +119,10 @@ pub(super) async fn handle_slash_action(
                             .as_ref()
                             .map(|(m, o)| (m.clone(), o.clone()))
                             .unwrap_or_else(|| {
-                                let m = models::find_model_by_id(pane.app.model_id.as_str())
-                                    .unwrap_or_else(|| tui_config.model.clone());
+                                let m = super::streams::resolve_runtime_model(
+                                    pane.app.model_id.as_str(),
+                                    &tui_config.model,
+                                );
                                 (m, tui_config.options.clone())
                             });
                         pane.app.status = Some("fork-compacting in background…".into());

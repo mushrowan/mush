@@ -5,7 +5,6 @@ use std::sync::Arc;
 use futures::stream::SelectAll;
 use mush_agent::tool::{SharedTool, ToolRegistry};
 use mush_agent::{AgentConfig, AgentEvent, agent_loop};
-use mush_ai::models;
 use mush_ai::registry::ApiRegistry;
 use mush_ai::types::{
     ImageContent, Message, Model, StreamOptions, TextContent, ThinkingLevel, Timestamp, TokenCount,
@@ -829,11 +828,19 @@ async fn start_stream_for_prompt<'a>(
 fn pane_model(pane_mgr: &PaneManager, pane_id: PaneId, default_model: &Model) -> Model {
     pane_mgr
         .pane(pane_id)
-        .map(|pane| {
-            models::find_model_by_id(pane.app.model_id.as_str())
-                .unwrap_or_else(|| default_model.clone())
-        })
+        .map(|pane| resolve_runtime_model(pane.app.model_id.as_str(), default_model))
         .unwrap_or_else(|| default_model.clone())
+}
+
+/// resolve a model id picked at runtime (via `/model` or a delegation
+/// request) against the merged catalogue (static + user + discovered).
+///
+/// the static-only `find_model_by_id` would silently fall back to
+/// `default` for any openrouter-discovered slug, which made `/model
+/// z-ai/glm-5.1` quietly route to claude. the merged catalogue includes
+/// every discovery source, so the picked model survives the round trip.
+pub(super) fn resolve_runtime_model(id: &str, default: &Model) -> Model {
+    mush_ai::discovery::resolve_model_by_id(id).unwrap_or_else(|| default.clone())
 }
 
 fn pane_thinking_level(pane_mgr: &PaneManager, pane_id: PaneId) -> ThinkingLevel {
@@ -1231,6 +1238,7 @@ pub(crate) fn build_session_snapshot(
 mod tests {
     use super::*;
 
+    use mush_ai::models;
     use mush_ai::types::{ModelId, ToolCallId};
 
     #[test]
@@ -2058,5 +2066,90 @@ mod tests {
         // save_session_now bypasses debounce
         stream_state.save_session_now(&pane_mgr, &config);
         assert_eq!(save_count.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn pane_model_resolves_openrouter_discovered_id() {
+        // when the user picks an openrouter-discovered model via /model,
+        // pane_model must return that model at stream time. previously it
+        // looked up only the static catalogue and silently fell back to
+        // the default (claude), so glm requests went to anthropic instead
+        use mush_ai::discovery::{DiscoveryCache, DiscoveryReport, cache_path};
+        use mush_ai::types::{Api, BaseUrl, InputModality, ModelCost, Provider};
+        use std::time::SystemTime;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let saved = std::env::var("MUSH_DATA_DIR").ok();
+        // safety: nextest runs each test in its own process; env mutation
+        // is local to this run
+        unsafe { std::env::set_var("MUSH_DATA_DIR", tmp.path()) };
+
+        let glm_id = "z-ai/glm-5.1";
+        let glm_model = Model {
+            id: ModelId::from(glm_id),
+            name: "GLM 5.1".into(),
+            api: Api::OpenaiCompletions,
+            provider: Provider::OpenRouter,
+            base_url: BaseUrl::from("https://openrouter.ai/api/v1"),
+            reasoning: false,
+            input: vec![InputModality::Text],
+            cost: ModelCost {
+                input: 0.0,
+                output: 0.0,
+                cache_read: 0.0,
+                cache_write: 0.0,
+            },
+            context_window: TokenCount::new(128_000),
+            max_output_tokens: TokenCount::new(8_192),
+            supports_adaptive_thinking: false,
+            supported_thinking_levels: Vec::new(),
+            default_thinking_level: None,
+        };
+        let mut cache = DiscoveryCache::default();
+        cache.apply_report(DiscoveryReport {
+            provider: Provider::OpenRouter,
+            fetched_at: SystemTime::UNIX_EPOCH,
+            models: vec![glm_model.clone().into()],
+        });
+        cache.save(&cache_path()).unwrap();
+
+        let pane_id = PaneId::new(1);
+        let mut pane = Pane::new(pane_id, app());
+        pane.app.model_id = ModelId::from(glm_id);
+        let pane_mgr = PaneManager::new(pane);
+
+        let default = Model {
+            id: ModelId::from("claude-opus-4-7"),
+            name: "Claude (default fallback)".into(),
+            api: Api::AnthropicMessages,
+            provider: Provider::Anthropic,
+            base_url: BaseUrl::from("https://api.anthropic.com"),
+            reasoning: false,
+            input: vec![InputModality::Text],
+            cost: ModelCost {
+                input: 0.0,
+                output: 0.0,
+                cache_read: 0.0,
+                cache_write: 0.0,
+            },
+            context_window: TokenCount::new(200_000),
+            max_output_tokens: TokenCount::new(8_192),
+            supports_adaptive_thinking: false,
+            supported_thinking_levels: Vec::new(),
+            default_thinking_level: None,
+        };
+
+        let resolved = pane_model(&pane_mgr, pane_id, &default);
+
+        // restore env before asserting so a panic doesn't leak env
+        unsafe {
+            match saved {
+                Some(v) => std::env::set_var("MUSH_DATA_DIR", v),
+                None => std::env::remove_var("MUSH_DATA_DIR"),
+            }
+        }
+
+        assert_eq!(resolved.id.as_str(), glm_id);
+        assert_eq!(resolved.provider, Provider::OpenRouter);
     }
 }
