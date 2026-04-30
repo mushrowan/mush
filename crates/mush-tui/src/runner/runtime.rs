@@ -212,7 +212,6 @@ impl RunnerRuntime {
                 &mut pane.conversation,
                 result,
                 pending.kind,
-                true,
             );
         }
         true

@@ -12,8 +12,8 @@ use thiserror::Error;
 pub use commands::{expand_template, handle, handle_export, rebuild_display};
 pub use compaction::{
     CompactionKind, CompactionTaskResult, MIN_MESSAGES_FOR_COMPACTION, PendingCompaction,
-    apply_compaction_result, fork_and_compact, handle_compact, handle_fork_compact, run_compaction,
-    start_compaction,
+    apply_compaction_result, extract_fresh_summary, fork_and_compact, handle_compact,
+    handle_fork_compact, run_compaction, start_compaction,
 };
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
