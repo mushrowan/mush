@@ -142,6 +142,17 @@ pub fn find_merged_model_by_id(id: &str) -> Option<MergedModel> {
         .find(|m| m.model.id.as_str() == id)
 }
 
+/// convenience wrapper around [`find_merged_model_by_id`] that returns
+/// just the [`Model`] without provenance metadata.
+///
+/// use this when you only need the resolved model to drive a request
+/// (most runtime paths). callers that surface "discovered vs static" or
+/// stale entries should use [`find_merged_model_by_id`] directly.
+#[must_use]
+pub fn resolve_model_by_id(id: &str) -> Option<Model> {
+    find_merged_model_by_id(id).map(|m| m.model)
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, SystemTime};

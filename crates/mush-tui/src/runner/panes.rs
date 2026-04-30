@@ -292,15 +292,18 @@ pub(super) fn process_delegations(
         let new_id = pane_mgr.next_id();
         let mut new_app = app_from_parent(pane_mgr.focused(), tui_config);
 
-        // resolve model tier or direct model id
+        // resolve model tier or direct model id. consult the merged
+        // catalogue so openrouter (or any other discovered) slugs route
+        // correctly instead of silently falling back to the default
         if let Some(ref model_spec) = del.model {
             let model_id = resolve_model_tier(model_spec, &tui_config.model_tiers);
-            if let Some(model) = mush_ai::models::find_model_by_id(&model_id) {
+            if let Some(model) = mush_ai::discovery::resolve_model_by_id(&model_id) {
                 new_app.model_id = model.id.clone();
                 new_app.stats.context_window = model.context_window;
                 new_app.supported_thinking_levels = model.supported_thinking_levels.clone();
             } else {
-                // unknown model, set id anyway (will fail at stream time with a clear error)
+                // unknown model, set id anyway. the stream layer will
+                // emit a clear MissingApiKey / unknown-provider error
                 new_app.model_id = model_id.into();
             }
         }

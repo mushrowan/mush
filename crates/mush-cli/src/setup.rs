@@ -70,7 +70,7 @@ impl AppSetup {
         let cwd = mush_tui::canonical_dir(&std::env::current_dir()?);
 
         let model_id = args.model.unwrap_or_else(|| default_model_id(&cfg, &cwd));
-        let model = models::find_model_by_id(&model_id).ok_or_else(|| {
+        let model = mush_ai::discovery::resolve_model_by_id(&model_id).ok_or_else(|| {
             eyre!(
                 "unknown model: {model_id}\n\navailable models:\n{}",
                 list_models_short()
@@ -271,7 +271,7 @@ async fn init_compaction_model(
     options: &StreamOptions,
 ) -> Option<(Model, StreamOptions)> {
     let id = cfg.compaction_model.as_ref()?;
-    let m = models::find_model_by_id(id).unwrap_or_else(|| {
+    let m = mush_ai::discovery::resolve_model_by_id(id).unwrap_or_else(|| {
         eprintln!(
             "\x1b[33mwarning: unknown compaction_model '{id}', falling back to active model\x1b[0m"
         );
@@ -976,7 +976,7 @@ pub fn default_model_id(cfg: &config::Config, cwd: &std::path::Path) -> String {
 
     let last_models = config::load_last_models();
     if let Some(model) = last_models.get(cwd)
-        && models::find_model_by_id(model).is_some()
+        && mush_ai::discovery::resolve_model_by_id(model).is_some()
     {
         return model.to_string();
     }
