@@ -65,7 +65,9 @@ pub fn render(frame: &mut Frame, picker: &LoginPickerState, theme: &Theme) {
 
     // hint line. content shifts when an entry prompt is active because
     // the keybinds the user needs there are different
-    let hint = if picker.entry.is_some() {
+    let hint = if picker.validating.is_some() {
+        Line::from(Span::styled("validating, please wait…", theme.dim))
+    } else if picker.entry.is_some() {
         Line::from(vec![
             Span::styled("type", theme.selection_marker),
             Span::styled(" key · ", theme.dim),

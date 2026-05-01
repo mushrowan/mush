@@ -201,6 +201,187 @@ pub fn oauth_account_id(oauth_provider_id: &str) -> Option<String> {
     })
 }
 
+/// metadata learned by validating an api key against its provider.
+/// most fields are populated only by openrouter (which has a
+/// purpose-built `/auth/key` endpoint); anthropic / openai don't
+/// expose anything similar so a successful validation just yields
+/// the default empty record
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct KeyInfo {
+    /// human-readable key label (openrouter's `data.label`)
+    pub label: Option<String>,
+    /// dollars already spent on this key
+    pub usage: Option<f64>,
+    /// dollar spend limit, if one was set
+    pub limit: Option<f64>,
+    /// whether the key is on openrouter's free tier
+    pub free_tier: Option<bool>,
+}
+
+/// outcome of an api-key validation request. distinct from a generic
+/// http error so the picker can route a clear "key was rejected"
+/// message vs a transient network failure
+#[derive(Debug, thiserror::Error)]
+pub enum ValidationError {
+    /// the upstream returned 401/403 - the key itself is the problem
+    #[error("{provider} rejected the api key as invalid")]
+    Unauthorized { provider: String },
+    /// the request never completed (dns, tls, connection refused, ...)
+    #[error("could not reach {provider} to validate: {reason}")]
+    Network { provider: String, reason: String },
+    /// upstream returned a non-success status that wasn't 401/403.
+    /// includes a short body excerpt for diagnostics
+    #[error("unexpected response from {provider} ({status}): {body}")]
+    UnexpectedStatus {
+        provider: String,
+        status: u16,
+        body: String,
+    },
+    /// the response body wasn't shaped the way we expected
+    #[error("could not parse {0} response")]
+    Parse(String),
+    /// no validation strategy is registered for this provider
+    #[error("validation is not implemented for provider {0}")]
+    Unsupported(String),
+}
+
+/// parse openrouter's `GET /api/v1/auth/key` response into [`KeyInfo`].
+///
+/// the upstream wraps everything in a `data` object. fields are
+/// optional in practice (free-tier keys often omit `limit`), so we
+/// pass them through as `Option`s and treat empty strings as absent
+pub fn parse_openrouter_auth_key(body: &str) -> Result<KeyInfo, ValidationError> {
+    #[derive(serde::Deserialize)]
+    struct Wrapper {
+        data: Inner,
+    }
+    #[derive(serde::Deserialize)]
+    struct Inner {
+        label: Option<String>,
+        usage: Option<f64>,
+        limit: Option<f64>,
+        is_free_tier: Option<bool>,
+    }
+    let parsed: Wrapper = serde_json::from_str(body)
+        .map_err(|e| ValidationError::Parse(format!("openrouter: {e}")))?;
+    Ok(KeyInfo {
+        label: parsed.data.label.filter(|s| !s.is_empty()),
+        usage: parsed.data.usage,
+        limit: parsed.data.limit,
+        free_tier: parsed.data.is_free_tier,
+    })
+}
+
+/// validate an api key against its upstream and return whatever
+/// metadata the provider exposes. routes by `provider.id`:
+///
+/// - `openrouter`  → `GET /api/v1/auth/key` (returns label / usage / limit)
+/// - `openai-api`  → `GET /v1/models` (200 = ok)
+/// - `anthropic-api` → `GET /v1/models` with `x-api-key` (200 = ok)
+///
+/// any other id returns [`ValidationError::Unsupported`]. callers
+/// generally want to gate `store.set` on a successful validation
+pub async fn validate_api_key(
+    client: &reqwest::Client,
+    provider: &LoginProvider,
+    key: &str,
+) -> Result<KeyInfo, ValidationError> {
+    match provider.id.as_str() {
+        "openrouter" => validate_openrouter(client, key, "https://openrouter.ai").await,
+        "openai-api" => validate_openai(client, key, "https://api.openai.com").await,
+        "anthropic-api" => validate_anthropic(client, key, "https://api.anthropic.com").await,
+        other => Err(ValidationError::Unsupported(other.into())),
+    }
+}
+
+async fn validate_openrouter(
+    client: &reqwest::Client,
+    key: &str,
+    base_url: &str,
+) -> Result<KeyInfo, ValidationError> {
+    let url = format!("{base_url}/api/v1/auth/key");
+    let resp = client
+        .get(&url)
+        .bearer_auth(key)
+        .send()
+        .await
+        .map_err(|e| ValidationError::Network {
+            provider: "openrouter".into(),
+            reason: e.to_string(),
+        })?;
+    let status = resp.status();
+    if status.is_success() {
+        let body = resp.text().await.map_err(|e| ValidationError::Network {
+            provider: "openrouter".into(),
+            reason: e.to_string(),
+        })?;
+        return parse_openrouter_auth_key(&body);
+    }
+    Err(map_status("openrouter", resp).await)
+}
+
+async fn validate_openai(
+    client: &reqwest::Client,
+    key: &str,
+    base_url: &str,
+) -> Result<KeyInfo, ValidationError> {
+    let url = format!("{base_url}/v1/models");
+    let resp = client
+        .get(&url)
+        .bearer_auth(key)
+        .send()
+        .await
+        .map_err(|e| ValidationError::Network {
+            provider: "openai".into(),
+            reason: e.to_string(),
+        })?;
+    if resp.status().is_success() {
+        return Ok(KeyInfo::default());
+    }
+    Err(map_status("openai", resp).await)
+}
+
+async fn validate_anthropic(
+    client: &reqwest::Client,
+    key: &str,
+    base_url: &str,
+) -> Result<KeyInfo, ValidationError> {
+    let url = format!("{base_url}/v1/models");
+    let resp = client
+        .get(&url)
+        .header("x-api-key", key)
+        .header("anthropic-version", "2023-06-01")
+        .send()
+        .await
+        .map_err(|e| ValidationError::Network {
+            provider: "anthropic".into(),
+            reason: e.to_string(),
+        })?;
+    if resp.status().is_success() {
+        return Ok(KeyInfo::default());
+    }
+    Err(map_status("anthropic", resp).await)
+}
+
+/// turn a non-success response into a [`ValidationError`]. 401/403 are
+/// treated as "key rejected"; any other status carries the body
+/// excerpt back to the caller for display
+async fn map_status(provider: &str, resp: reqwest::Response) -> ValidationError {
+    let status = resp.status();
+    if matches!(status.as_u16(), 401 | 403) {
+        return ValidationError::Unauthorized {
+            provider: provider.into(),
+        };
+    }
+    let body = resp.text().await.unwrap_or_default();
+    let truncated = body.chars().take(200).collect::<String>();
+    ValidationError::UnexpectedStatus {
+        provider: provider.into(),
+        status: status.as_u16(),
+        body: truncated,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,5 +513,60 @@ mod tests {
         assert!(LoginSource::Stored("file").is_picker_managed());
         assert!(!LoginSource::Env("X".into()).is_picker_managed());
         assert!(!LoginSource::Config.is_picker_managed());
+    }
+
+    const OPENROUTER_FULL_RESPONSE: &str = r#"{
+      "data": {
+        "label": "mush-dev",
+        "usage": 1.234,
+        "limit": 10.0,
+        "is_free_tier": false
+      }
+    }"#;
+
+    #[test]
+    fn parse_openrouter_auth_key_extracts_label_usage_and_limit() {
+        // openrouter's /auth/key response carries useful surface that
+        // we want to show in the picker toast (label, remaining credit).
+        // exercise the happy path so future api shape changes break
+        // loudly here instead of silently dropping fields
+        let info = parse_openrouter_auth_key(OPENROUTER_FULL_RESPONSE).unwrap();
+        assert_eq!(info.label.as_deref(), Some("mush-dev"));
+        assert!((info.usage.unwrap() - 1.234).abs() < 1e-9);
+        assert!((info.limit.unwrap() - 10.0).abs() < 1e-9);
+        assert_eq!(info.free_tier, Some(false));
+    }
+
+    #[test]
+    fn parse_openrouter_auth_key_treats_empty_label_as_absent() {
+        // a key without a label comes back as an empty string. that's
+        // not informative for the picker, so drop it to None so the
+        // toast doesn't show "key '' validated"
+        let body = r#"{ "data": { "label": "" } }"#;
+        let info = parse_openrouter_auth_key(body).unwrap();
+        assert!(info.label.is_none());
+        assert!(info.usage.is_none());
+        assert!(info.limit.is_none());
+    }
+
+    #[test]
+    fn parse_openrouter_auth_key_rejects_malformed_json() {
+        let err = parse_openrouter_auth_key("not json").unwrap_err();
+        assert!(matches!(err, ValidationError::Parse(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn unauthorized_error_message_names_the_provider() {
+        // the picker shows this string verbatim, so it has to be
+        // self-explanatory when it lands in the toast
+        let err = ValidationError::Unauthorized {
+            provider: "openrouter".into(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("openrouter"), "got {msg:?}");
+        assert!(
+            msg.contains("rejected") || msg.contains("invalid"),
+            "got {msg:?}"
+        );
     }
 }

@@ -47,6 +47,19 @@ pub enum AppEvent {
     ResizePane(i16),
     /// alt+k: edit a queued steering message
     EditSteering,
+    /// validate an api key against its provider, then save on success.
+    /// emitted when the user submits the /login picker's entry prompt
+    /// with a non-empty buffer. handled async by the runner because
+    /// validation requires a network roundtrip
+    ValidateAndSaveApiKey {
+        /// `LoginEntry::id` for the row being saved
+        entry_id: String,
+        /// human-readable provider name for status / toast text
+        provider_name: String,
+        /// the typed key. ownership is moved into the runner so the
+        /// secret stops living on the picker buffer
+        key: String,
+    },
 }
 
 /// which UI mode the app is in

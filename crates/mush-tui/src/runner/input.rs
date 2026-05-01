@@ -144,8 +144,106 @@ async fn handle_common_app_event(
             pane_mgr.resize_focused(*delta);
             Some(LoopAction::Redraw)
         }
+        AppEvent::ValidateAndSaveApiKey {
+            entry_id,
+            provider_name,
+            key,
+        } => {
+            validate_and_save_api_key(
+                &mut pane_mgr.focused_mut().app,
+                entry_id,
+                provider_name,
+                key,
+            )
+            .await;
+            Some(LoopAction::Redraw)
+        }
         _ => None,
     }
+}
+
+/// async resolution of a [`AppEvent::ValidateAndSaveApiKey`]: hit the
+/// upstream `/v1/models` (or `/auth/key` for openrouter) to confirm
+/// the key is live, persist it on success, and update the picker
+/// state so the row repaints with the new source. on failure the key
+/// is dropped and the picker's entry prompt is re-armed for retry
+async fn validate_and_save_api_key(app: &mut App, entry_id: &str, provider_name: &str, key: &str) {
+    let outcome = run_validation_and_save(entry_id, key).await;
+    let Some(picker) = app.interaction.login_picker.as_mut() else {
+        return;
+    };
+    match outcome {
+        SaveOutcome::Saved(toast) => {
+            picker.finish_validation_success(toast);
+            picker.rebuild_sources();
+        }
+        SaveOutcome::Failed(reason) => {
+            picker.finish_validation_failure(entry_id, provider_name, reason);
+        }
+    }
+}
+
+/// outcome of validate-then-save. carries the user-facing message so
+/// the caller doesn't need a second branch on what to display
+enum SaveOutcome {
+    Saved(String),
+    Failed(String),
+}
+
+async fn run_validation_and_save(entry_id: &str, key: &str) -> SaveOutcome {
+    use mush_ai::login::{LoginMethod, ValidationError, get_provider, validate_api_key};
+
+    let Some(provider) = get_provider(entry_id) else {
+        return SaveOutcome::Failed(format!("provider {entry_id} no longer in catalogue"));
+    };
+    let LoginMethod::ApiKey { storage_key, .. } = provider.method.clone() else {
+        return SaveOutcome::Failed("row is not an api-key provider".into());
+    };
+
+    let client = reqwest::Client::new();
+    let info = match validate_api_key(&client, &provider, key).await {
+        Ok(info) => Some(info),
+        // no live-validation endpoint registered for this provider -
+        // fall through to a save without the sanity check rather
+        // than blocking the user
+        Err(ValidationError::Unsupported(_)) => None,
+        Err(err) => return SaveOutcome::Failed(err.to_string()),
+    };
+
+    let store = mush_ai::credentials::default_store();
+    if let Err(save_err) = store.set(&storage_key, key) {
+        let prefix = if info.is_some() {
+            "validated, but saving failed"
+        } else {
+            "failed to save api key"
+        };
+        return SaveOutcome::Failed(format!("{prefix}: {save_err}"));
+    }
+
+    SaveOutcome::Saved(format_save_toast(entry_id, store.backend(), info))
+}
+
+/// build the user-facing success toast. openrouter populates label
+/// and (usage, limit), so when present we surface them to confirm
+/// which key is live and how much budget is left
+fn format_save_toast(
+    entry_id: &str,
+    backend: &str,
+    info: Option<mush_ai::login::KeyInfo>,
+) -> String {
+    let Some(info) = info else {
+        return format!("saved api key for {entry_id} (no live-validation endpoint)");
+    };
+    let mut toast = format!("✓ saved {entry_id} api key ({backend})");
+    if let Some(label) = info.label {
+        toast.push_str(&format!(" — '{label}'"));
+    }
+    match (info.usage, info.limit) {
+        (Some(usage), Some(limit)) => toast.push_str(&format!(" — ${usage:.2}/${limit:.2} used")),
+        (Some(usage), None) => toast.push_str(&format!(" — ${usage:.2} used")),
+        _ => {}
+    }
+    toast
 }
 
 pub(super) async fn handle_streaming_terminal_events(

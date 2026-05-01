@@ -57,6 +57,12 @@ pub struct LoginPickerState {
     /// row with this id. typing builds up `entry.buffer` (rendered as
     /// `•` characters), enter saves, esc cancels
     pub entry: Option<EntryPrompt>,
+    /// when `Some`, an api key for the named row is being validated
+    /// against its provider. input is suppressed and the toast shows
+    /// progress until the runner clears it via
+    /// [`Self::finish_validation_success`] or
+    /// [`Self::finish_validation_failure`]
+    pub validating: Option<String>,
     /// snapshot of `[api_keys]` from the user's config.toml taken at
     /// picker open time. used by [`Self::rebuild_sources`] to re-detect
     /// `Config` source rows after a login/logout without re-plumbing
@@ -100,6 +106,7 @@ impl LoginPickerState {
             toast: None,
             confirm_logout: None,
             entry: None,
+            validating: None,
             config_keys,
             matcher: RefCell::new(FuzzyFilter::new()),
         }
@@ -192,6 +199,45 @@ impl LoginPickerState {
     pub fn cancel_entry(&mut self) {
         self.entry = None;
         self.toast = None;
+    }
+
+    /// move the picker into "validating" state. drops the typed buffer
+    /// (the runner has already taken its copy by now) and records the
+    /// row id so [`Self::finish_validation_success`] /
+    /// [`Self::finish_validation_failure`] can route the outcome back
+    /// to the right row even if the user has navigated away
+    pub fn begin_validation(&mut self, entry_id: &str, provider_name: &str) {
+        self.entry = None;
+        self.validating = Some(entry_id.to_string());
+        self.toast = Some(format!("validating {provider_name} api key…"));
+    }
+
+    /// finalise a successful validation: clear the validating flag and
+    /// surface the runner-provided confirmation toast (which usually
+    /// includes any extra metadata returned by the provider, e.g. the
+    /// openrouter key label and remaining credit)
+    pub fn finish_validation_success(&mut self, toast: impl Into<String>) {
+        self.validating = None;
+        self.entry = None;
+        self.toast = Some(toast.into());
+    }
+
+    /// finalise a failed validation: clear the validating flag,
+    /// re-arm the entry prompt with an empty buffer so the user can
+    /// retry, and show why the previous attempt was rejected
+    pub fn finish_validation_failure(
+        &mut self,
+        entry_id: &str,
+        provider_name: &str,
+        reason: impl Into<String>,
+    ) {
+        self.validating = None;
+        self.entry = Some(EntryPrompt {
+            entry_id: entry_id.to_string(),
+            provider_name: provider_name.to_string(),
+            buffer: String::new(),
+        });
+        self.toast = Some(reason.into());
     }
 
     /// snapshot of the row currently highlighted, after filtering
@@ -407,5 +453,70 @@ mod tests {
     fn logged_in_helper_reflects_source_presence() {
         assert!(oauth_entry("a", "A", Some(LoginSource::OAuth)).logged_in());
         assert!(!api_key_entry("a", "A", None).logged_in());
+    }
+
+    #[test]
+    fn begin_validation_clears_entry_buffer_and_records_in_flight_id() {
+        // while a validation is in flight the entered key must not
+        // linger in the picker buffer (it could leak to the next
+        // render of the prompt). recording the entry id on the picker
+        // lets the runner correlate the eventual outcome back to the
+        // right row even if focus has shifted
+        let mut picker =
+            LoginPickerState::new(vec![api_key_entry("openrouter", "OpenRouter", None)]);
+        picker.arm_entry();
+        if let Some(prompt) = picker.entry.as_mut() {
+            prompt.buffer.push_str("sk-or-v1-secret");
+        }
+        picker.begin_validation("openrouter", "OpenRouter");
+        assert!(picker.entry.is_none(), "entry prompt must be cleared");
+        assert_eq!(picker.validating.as_deref(), Some("openrouter"));
+        assert!(
+            picker.toast.as_deref().unwrap().contains("validating"),
+            "toast should mention validation, got {:?}",
+            picker.toast
+        );
+    }
+
+    #[test]
+    fn finish_validation_failure_restores_entry_prompt_for_retry() {
+        // a rejected key must put the user right back at the prompt so
+        // they can paste a corrected version without reopening the
+        // picker. the toast should explain why so it isn't a no-op
+        let mut picker =
+            LoginPickerState::new(vec![api_key_entry("openrouter", "OpenRouter", None)]);
+        picker.arm_entry();
+        picker.begin_validation("openrouter", "OpenRouter");
+        picker.finish_validation_failure("openrouter", "OpenRouter", "key was rejected");
+        assert!(picker.validating.is_none());
+        assert!(
+            picker.entry.is_some(),
+            "prompt should be re-armed for retry"
+        );
+        assert!(picker.entry.as_ref().unwrap().buffer.is_empty());
+        assert!(
+            picker.toast.as_deref().unwrap().contains("rejected"),
+            "toast should explain failure, got {:?}",
+            picker.toast
+        );
+    }
+
+    #[test]
+    fn finish_validation_success_clears_state_and_shows_confirmation() {
+        let mut picker =
+            LoginPickerState::new(vec![api_key_entry("openrouter", "OpenRouter", None)]);
+        picker.arm_entry();
+        picker.begin_validation("openrouter", "OpenRouter");
+        picker.finish_validation_success("saved api key for openrouter");
+        assert!(picker.validating.is_none());
+        assert!(
+            picker.entry.is_none(),
+            "entry prompt should not be re-armed"
+        );
+        assert!(
+            picker.toast.as_deref().unwrap().contains("saved"),
+            "toast should mention save, got {:?}",
+            picker.toast
+        );
     }
 }

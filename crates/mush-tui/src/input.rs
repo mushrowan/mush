@@ -1387,6 +1387,16 @@ fn refresh_model_picker_overlay_after_delete(app: &mut App) {
 /// logout confirmation. y while armed deletes the saved credentials
 /// in place
 fn handle_login_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
+    // suppress all input while a validation request is in flight. the
+    // runner will clear `validating` when it finishes
+    if app
+        .interaction
+        .login_picker
+        .as_ref()
+        .is_some_and(|p| p.validating.is_some())
+    {
+        return None;
+    }
     // intercept y/n while a logout confirm is armed
     if app
         .interaction
@@ -1548,8 +1558,8 @@ fn perform_logout(app: &App, entry_id: &str) -> String {
 }
 
 /// drive an api-key entry prompt. typing builds the masked buffer,
-/// backspace pops a char, enter saves to the credential store and
-/// refreshes the row, esc cancels and returns to the normal picker
+/// backspace pops a char, enter hands the buffer to the runner for
+/// async validation + save, esc cancels and returns to the picker
 fn handle_login_picker_entry_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     match (key.modifiers, key.code) {
         (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('c' | '[')) => {
@@ -1558,15 +1568,7 @@ fn handle_login_picker_entry_key(app: &mut App, key: KeyEvent) -> Option<AppEven
             }
             None
         }
-        (_, KeyCode::Enter) => {
-            let toast = perform_save_api_key(app);
-            if let Some(picker) = app.interaction.login_picker.as_mut() {
-                picker.cancel_entry();
-                picker.toast = Some(toast);
-                refresh_login_picker_logged_in(picker);
-            }
-            None
-        }
+        (_, KeyCode::Enter) => submit_login_picker_entry(app),
         (_, KeyCode::Backspace) => {
             if let Some(prompt) = app
                 .interaction
@@ -1595,47 +1597,26 @@ fn handle_login_picker_entry_key(app: &mut App, key: KeyEvent) -> Option<AppEven
     }
 }
 
-/// save the typed buffer to the credential store under the row's
-/// `storage_key`. returns the user-facing toast. only `ApiKey` rows
-/// reach this path; oauth rows route through the existing flow
-fn perform_save_api_key(app: &App) -> String {
-    use mush_ai::login::LoginMethod;
-
-    let Some(prompt) = app
-        .interaction
-        .login_picker
-        .as_ref()
-        .and_then(|p| p.entry.as_ref())
-    else {
-        return "no entry in progress".into();
-    };
-    if prompt.buffer.trim().is_empty() {
-        return "key was empty, not saved".into();
+/// snapshot the typed key, transition the picker to validating, and
+/// emit a [`AppEvent::ValidateAndSaveApiKey`] so the runner can hit
+/// the provider asynchronously. empty buffers short-circuit with a
+/// toast and no event so we never round-trip a blank key
+fn submit_login_picker_entry(app: &mut App) -> Option<AppEvent> {
+    let picker = app.interaction.login_picker.as_mut()?;
+    let prompt = picker.entry.as_ref()?;
+    let key = prompt.buffer.trim().to_string();
+    if key.is_empty() {
+        picker.toast = Some("key was empty, not saved".into());
+        return None;
     }
-
-    let Some(method) = app
-        .interaction
-        .login_picker
-        .as_ref()
-        .and_then(|p| p.entries.iter().find(|e| e.id == prompt.entry_id))
-        .map(|e| e.method.clone())
-    else {
-        return format!("row {} no longer in picker", prompt.entry_id);
-    };
-
-    let LoginMethod::ApiKey { storage_key, .. } = method else {
-        return "row is not an api-key provider".into();
-    };
-
-    let store = mush_ai::credentials::default_store();
-    match store.set(&storage_key, prompt.buffer.trim()) {
-        Ok(()) => format!(
-            "saved api key for {} ({})",
-            prompt.entry_id,
-            store.backend()
-        ),
-        Err(e) => format!("failed to save api key: {e}"),
-    }
+    let entry_id = prompt.entry_id.clone();
+    let provider_name = prompt.provider_name.clone();
+    picker.begin_validation(&entry_id, &provider_name);
+    Some(AppEvent::ValidateAndSaveApiKey {
+        entry_id,
+        provider_name,
+        key,
+    })
 }
 
 /// re-read every credential source and update the picker rows so
@@ -3953,5 +3934,63 @@ mod tests {
         let picker = app.interaction.login_picker.as_ref().unwrap();
         assert!(picker.confirm_logout.is_none());
         assert!(picker.toast.is_none());
+    }
+
+    #[test]
+    fn login_picker_entry_enter_with_filled_buffer_emits_validate_event_and_begins_validating() {
+        // saving an api key must go through provider validation first.
+        // hitting enter with a typed buffer should hand the key off to
+        // the runner via an event AND immediately switch the picker to
+        // its validating state so the user gets feedback (no silent
+        // gap, no chance to retype while a request is in flight)
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.open_login_picker(
+            vec![api_key_login_entry("openrouter", "OpenRouter", None)],
+            std::collections::HashMap::new(),
+        );
+        handle_key(&mut app, key(KeyCode::Enter));
+        for c in "sk-or-test".chars() {
+            handle_key(&mut app, key(KeyCode::Char(c)));
+        }
+        let event = handle_key(&mut app, key(KeyCode::Enter));
+        match event {
+            Some(AppEvent::ValidateAndSaveApiKey { entry_id, key, .. }) => {
+                assert_eq!(entry_id, "openrouter");
+                assert_eq!(key, "sk-or-test");
+            }
+            other => panic!("expected ValidateAndSaveApiKey, got {other:?}"),
+        }
+        let picker = app.interaction.login_picker.as_ref().unwrap();
+        assert_eq!(picker.validating.as_deref(), Some("openrouter"));
+        assert!(picker.entry.is_none());
+    }
+
+    #[test]
+    fn login_picker_keys_swallowed_while_validating() {
+        // input must not mutate the picker while a validation is in
+        // flight. otherwise typing during the (typically sub-second)
+        // network roundtrip could spuriously re-arm the entry prompt
+        // or filter the row list, and the runner's state restore
+        // would race with user input
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.open_login_picker(
+            vec![api_key_login_entry("openrouter", "OpenRouter", None)],
+            std::collections::HashMap::new(),
+        );
+        if let Some(picker) = app.interaction.login_picker.as_mut() {
+            picker.begin_validation("openrouter", "OpenRouter");
+        }
+        for k in [
+            key(KeyCode::Char('x')),
+            key(KeyCode::Enter),
+            key(KeyCode::Backspace),
+            key(KeyCode::Down),
+        ] {
+            assert!(handle_key(&mut app, k).is_none());
+        }
+        let picker = app.interaction.login_picker.as_ref().unwrap();
+        assert_eq!(picker.validating.as_deref(), Some("openrouter"));
+        assert!(picker.filter.is_empty());
+        assert!(picker.entry.is_none());
     }
 }
