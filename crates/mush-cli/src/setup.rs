@@ -931,17 +931,32 @@ pub fn resolve_thinking(
         .map(ThinkingLevel::normalize_visible)
 }
 
-/// resolve API key for a model: env > config > oauth
+/// resolve API key for a model: env > config > stored credentials > oauth
 pub async fn resolve_api_key(options: &mut StreamOptions, model: &Model, cfg: &config::Config) {
-    if options.api_key.is_none()
-        && mush_ai::env::env_api_key(&model.provider).is_none()
-        && let Some(key) = config_api_key(cfg, &model.provider)
-    {
-        options.api_key = Some(key);
+    if options.api_key.is_some() {
+        return;
     }
 
-    if options.api_key.is_none()
-        && let Some(provider_id) = oauth_provider_id(model)
+    if let Some(key) = mush_ai::env::env_api_key(&model.provider) {
+        options.api_key = Some(key);
+        return;
+    }
+
+    if let Some(key) = config_api_key(cfg, &model.provider) {
+        options.api_key = Some(key);
+        return;
+    }
+
+    // stored credential (managed by `/login` picker for api-key
+    // providers). keyed by the provider's display name to mirror the
+    // catalogue in `mush_ai::login`
+    let storage_key = model.provider.to_string();
+    if let Ok(Some(key)) = mush_ai::credentials::default_store().get(&storage_key) {
+        options.api_key = Some(key);
+        return;
+    }
+
+    if let Some(provider_id) = oauth_provider_id(model)
         && let Ok(Some(token)) = mush_ai::oauth::get_oauth_token(provider_id).await
     {
         options.api_key = ApiKey::new(token);

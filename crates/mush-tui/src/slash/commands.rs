@@ -50,7 +50,9 @@ pub fn handle(
                 "  /settings      - open runtime settings overlay (j/k, space toggles)\n",
             );
             help.push_str("  /settings show - print current settings state\n");
-            help.push_str("  /login [p]     - oauth login picker (or pass id to skip)\n");
+            help.push_str(
+                "  /login [p]     - oauth + api-key login picker (or pass id to skip)\n",
+            );
             help.push_str("  /login-complete <code> - finish the oauth flow with the code\n");
             help.push_str("  /close         - close focused pane\n");
             help.push_str("  /broadcast msg - send a message to all panes\n");
