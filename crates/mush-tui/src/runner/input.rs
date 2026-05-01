@@ -193,7 +193,7 @@ pub(super) async fn handle_streaming_terminal_events(
             }
             Event::Mouse(mouse) => handle_mouse(&mut pane_mgr.focused_mut().app, mouse),
             Event::Paste(text) => {
-                pane_mgr.focused_mut().app.input.insert_str(&text);
+                pane_mgr.focused_mut().app.handle_paste(&text);
             }
             Event::Resize(w, h) => {
                 // invalidate the size cache so ratatui's autoresize
@@ -371,7 +371,7 @@ pub(super) async fn handle_idle_terminal_events(
             }
             Event::Mouse(mouse) => handle_mouse(&mut pane_mgr.focused_mut().app, mouse),
             Event::Paste(text) => {
-                pane_mgr.focused_mut().app.input.insert_str(&text);
+                pane_mgr.focused_mut().app.handle_paste(&text);
             }
             Event::Resize(w, h) => {
                 deps.size_cache.invalidate();

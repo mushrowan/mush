@@ -1105,6 +1105,24 @@ impl App {
         let filtered = crate::login_picker::filtered_entries(picker);
         Some(filtered.get(picker.selected)?.id.clone())
     }
+
+    /// route a bracketed-paste payload to whatever input field is
+    /// currently active. without this, every paste lands in the main
+    /// prompt buffer even when an overlay (like the /login api-key
+    /// entry prompt) owns keyboard focus, leaking secrets into the
+    /// visible message box behind the overlay
+    pub fn handle_paste(&mut self, text: &str) {
+        if let Some(prompt) = self
+            .interaction
+            .login_picker
+            .as_mut()
+            .and_then(|p| p.entry.as_mut())
+        {
+            prompt.buffer.push_str(text);
+            return;
+        }
+        self.input.insert_str(text);
+    }
 }
 
 #[cfg(test)]
@@ -2980,6 +2998,59 @@ batch: 1/2 succeeded, 1 failed";
         app.close_login_picker();
         assert_eq!(app.interaction.mode, AppMode::Normal);
         assert!(app.interaction.login_picker.is_none());
+    }
+
+    fn login_entry(
+        id: &str,
+        method: mush_ai::login::LoginMethod,
+    ) -> crate::login_picker::LoginEntry {
+        crate::login_picker::LoginEntry {
+            id: id.into(),
+            name: id.into(),
+            method,
+            source: None,
+            account_id: None,
+        }
+    }
+
+    #[test]
+    fn handle_paste_routes_into_login_picker_entry_buffer() {
+        // when the /login picker has armed an api-key entry prompt,
+        // bracketed-paste text must land in the picker's buffer rather
+        // than the main prompt input. otherwise pasted keys leak into
+        // the message box visible behind the overlay
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.open_login_picker(
+            vec![login_entry(
+                "openrouter",
+                mush_ai::login::LoginMethod::ApiKey {
+                    storage_key: "openrouter".into(),
+                    env_var: "OPENROUTER_API_KEY".into(),
+                    config_key: "openrouter".into(),
+                },
+            )],
+            std::collections::HashMap::new(),
+        );
+        let picker = app.interaction.login_picker.as_mut().unwrap();
+        picker.arm_entry();
+
+        app.handle_paste("sk-or-v1-secret");
+
+        let prompt = app
+            .interaction
+            .login_picker
+            .as_ref()
+            .and_then(|p| p.entry.as_ref())
+            .expect("entry prompt still active");
+        assert_eq!(prompt.buffer, "sk-or-v1-secret");
+        assert!(app.input.text.is_empty(), "main input must stay empty");
+    }
+
+    #[test]
+    fn handle_paste_inserts_into_main_input_by_default() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.handle_paste("hello world");
+        assert_eq!(app.input.text, "hello world");
     }
 
     #[test]
