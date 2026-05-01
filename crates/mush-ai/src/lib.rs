@@ -1,6 +1,7 @@
 pub mod credentials;
 pub mod discovery;
 pub mod env;
+pub mod login;
 pub mod models;
 pub mod oauth;
 pub mod private_io;

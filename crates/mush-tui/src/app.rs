@@ -1079,10 +1079,17 @@ impl App {
 
     /// open the centred login picker overlay. mirrors
     /// [`Self::open_session_picker`] / [`Self::open_model_picker_overlay`]
-    /// but for oauth providers. caller passes the prepared list, this
-    /// just installs the state and switches mode
-    pub fn open_login_picker(&mut self, entries: Vec<crate::login_picker::LoginEntry>) {
-        self.interaction.login_picker = Some(crate::login_picker::LoginPickerState::new(entries));
+    /// but for login providers. `config_keys` is snapshotted onto the
+    /// picker so source detection still works after a login/logout
+    /// without re-plumbing the runner
+    pub fn open_login_picker(
+        &mut self,
+        entries: Vec<crate::login_picker::LoginEntry>,
+        config_keys: std::collections::HashMap<String, mush_ai::types::ApiKey>,
+    ) {
+        self.interaction.login_picker = Some(
+            crate::login_picker::LoginPickerState::with_config_keys(entries, config_keys),
+        );
         self.interaction.mode = AppMode::LoginPicker;
     }
 
@@ -1096,7 +1103,7 @@ impl App {
     pub fn selected_login_provider(&self) -> Option<String> {
         let picker = self.interaction.login_picker.as_ref()?;
         let filtered = crate::login_picker::filtered_entries(picker);
-        Some(filtered.get(picker.selected)?.provider_id.clone())
+        Some(filtered.get(picker.selected)?.id.clone())
     }
 }
 
@@ -2948,19 +2955,25 @@ batch: 1/2 succeeded, 1 failed";
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         let entries = vec![
             crate::login_picker::LoginEntry {
-                provider_id: "anthropic".into(),
-                provider_name: "Anthropic".into(),
-                logged_in: true,
+                id: "anthropic-pro-max".into(),
+                name: "Anthropic".into(),
+                method: mush_ai::login::LoginMethod::OAuth {
+                    oauth_provider_id: "anthropic".into(),
+                },
+                source: Some(mush_ai::login::LoginSource::OAuth),
                 account_id: None,
             },
             crate::login_picker::LoginEntry {
-                provider_id: "openai-codex".into(),
-                provider_name: "ChatGPT Codex".into(),
-                logged_in: false,
+                id: "openai-codex".into(),
+                name: "ChatGPT Codex".into(),
+                method: mush_ai::login::LoginMethod::OAuth {
+                    oauth_provider_id: "openai-codex".into(),
+                },
+                source: None,
                 account_id: None,
             },
         ];
-        app.open_login_picker(entries);
+        app.open_login_picker(entries, std::collections::HashMap::new());
         assert_eq!(app.interaction.mode, AppMode::LoginPicker);
         assert!(app.interaction.login_picker.is_some());
 
@@ -2975,20 +2988,29 @@ batch: 1/2 succeeded, 1 failed";
         // that reorders or hides rows still picks the visible row at
         // `selected`. mirrors selected_session / selected_model_id
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.open_login_picker(vec![
-            crate::login_picker::LoginEntry {
-                provider_id: "anthropic".into(),
-                provider_name: "Anthropic".into(),
-                logged_in: true,
-                account_id: None,
-            },
-            crate::login_picker::LoginEntry {
-                provider_id: "openai-codex".into(),
-                provider_name: "ChatGPT Codex".into(),
-                logged_in: false,
-                account_id: None,
-            },
-        ]);
+        app.open_login_picker(
+            vec![
+                crate::login_picker::LoginEntry {
+                    id: "anthropic-pro-max".into(),
+                    name: "Anthropic".into(),
+                    method: mush_ai::login::LoginMethod::OAuth {
+                        oauth_provider_id: "anthropic".into(),
+                    },
+                    source: Some(mush_ai::login::LoginSource::OAuth),
+                    account_id: None,
+                },
+                crate::login_picker::LoginEntry {
+                    id: "openai-codex".into(),
+                    name: "ChatGPT Codex".into(),
+                    method: mush_ai::login::LoginMethod::OAuth {
+                        oauth_provider_id: "openai-codex".into(),
+                    },
+                    source: None,
+                    account_id: None,
+                },
+            ],
+            std::collections::HashMap::new(),
+        );
         let picker = app.interaction.login_picker.as_mut().unwrap();
         picker.filter = "codex".into();
         picker.selected = 0;
