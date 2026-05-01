@@ -160,7 +160,7 @@ fn build_request_body(
         model: model.id.to_string(),
         messages: all_messages,
         stream: true,
-        max_completion_tokens: Some(options.max_tokens.unwrap_or(model.max_output_tokens).get()),
+        max_completion_tokens: Some(super::effective_max_output_tokens(model, options)),
         temperature: if reasoning_effort.is_none() {
             options.temperature.map(|t| t.value())
         } else {

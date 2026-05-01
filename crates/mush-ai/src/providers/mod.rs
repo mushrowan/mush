@@ -6,14 +6,36 @@ pub mod sse;
 
 use crate::registry::ApiRegistry;
 use crate::types::{
-    AssistantMessage, Message, Model, ThinkingLevel, ToolResultMessage, ToolResultTrimming,
-    TurnPivot, UserMessage, find_recent_boundary,
+    AssistantMessage, Message, Model, StreamOptions, ThinkingLevel, ToolResultMessage,
+    ToolResultTrimming, TurnPivot, UserMessage, find_recent_boundary,
 };
 
 /// max chars for tool results in older turns
 const TRIM_TOOL_OUTPUT_CHARS: usize = 1500;
 /// number of recent user messages whose tool results are kept at full size
 const RECENT_TURNS_TO_KEEP: usize = 3;
+
+/// global cap on the output budget (tokens) we ever request from a
+/// provider. some upstreams (notably openrouter for kimi-style models)
+/// advertise `max_completion_tokens` equal to the full context window,
+/// which makes any non-empty input overflow the request budget and 400.
+/// 32k matches opencode's default and is more than any single agent
+/// turn realistically produces. callers can still override per request
+/// via [`StreamOptions::max_tokens`]
+pub const MAX_OUTPUT_TOKENS_CAP: u64 = 32_000;
+
+/// resolve the output token budget to send for a request.
+///
+/// honours an explicit caller override in `options.max_tokens`,
+/// otherwise clamps the model's advertised `max_output_tokens` to
+/// [`MAX_OUTPUT_TOKENS_CAP`] so misleading provider metadata can't
+/// overflow the request. see the constant doc for context
+pub(crate) fn effective_max_output_tokens(model: &Model, options: &StreamOptions) -> u64 {
+    if let Some(explicit) = options.max_tokens {
+        return explicit.get();
+    }
+    model.max_output_tokens.get().min(MAX_OUTPUT_TOKENS_CAP)
+}
 
 /// format an error with its full source chain (e.g. "outer: middle: root cause")
 pub(crate) fn format_error_chain(err: &dyn std::error::Error) -> String {
@@ -408,5 +430,50 @@ mod tests {
         // single error with no source
         let result = super::format_error_chain(&*outer);
         assert_eq!(result, "decoding response body");
+    }
+
+    fn options_default() -> StreamOptions {
+        StreamOptions::default()
+    }
+
+    fn model_with_output(advertised: u64) -> Model {
+        Model {
+            max_output_tokens: TokenCount::new(advertised),
+            ..reasoning_model()
+        }
+    }
+
+    #[test]
+    fn effective_max_output_caps_runaway_advertised_value() {
+        // kimi-on-openrouter advertises max_completion_tokens equal to
+        // its full context window, which causes upstream 400s as soon
+        // as any input is supplied. cap to a sane global so the request
+        // always fits regardless of advertised metadata
+        let model = model_with_output(262_142);
+        let got = effective_max_output_tokens(&model, &options_default());
+        assert!(got <= MAX_OUTPUT_TOKENS_CAP, "got {got}");
+        assert_eq!(got, MAX_OUTPUT_TOKENS_CAP);
+    }
+
+    #[test]
+    fn effective_max_output_passes_through_when_under_cap() {
+        // most models advertise sensible max_output (e.g. 16k), well
+        // below the global cap. don't punish them by clamping further
+        let model = model_with_output(8_192);
+        let got = effective_max_output_tokens(&model, &options_default());
+        assert_eq!(got, 8_192);
+    }
+
+    #[test]
+    fn effective_max_output_user_override_wins_over_cap() {
+        // explicit `max_tokens` from the caller represents an informed
+        // choice, so honour it verbatim even if it exceeds the cap
+        let model = model_with_output(262_142);
+        let opts = StreamOptions {
+            max_tokens: Some(TokenCount::new(120_000)),
+            ..StreamOptions::default()
+        };
+        let got = effective_max_output_tokens(&model, &opts);
+        assert_eq!(got, 120_000);
     }
 }

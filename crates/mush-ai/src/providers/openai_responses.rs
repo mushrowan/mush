@@ -208,7 +208,7 @@ fn build_request_body(
         max_output_tokens: if is_codex {
             None
         } else {
-            Some(options.max_tokens.unwrap_or(model.max_output_tokens).get())
+            Some(super::effective_max_output_tokens(model, options))
         },
         temperature: if reasoning.is_none() {
             options.temperature.map(|t| t.value())

@@ -353,7 +353,7 @@ fn build_request_body(
     options: &StreamOptions,
     is_oauth: bool,
 ) -> RequestBody {
-    let max_tokens = options.max_tokens.unwrap_or(model.max_output_tokens);
+    let max_tokens = TokenCount::new(super::effective_max_output_tokens(model, options));
     let cache_control =
         anthropic_cache_control(model.base_url.as_str(), options.cache_retention, is_oauth);
 
