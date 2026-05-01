@@ -246,7 +246,8 @@ fn hinted_user_message(
     Some((pos, format!("{hint}\n\n{text}"), user_msg.timestamp_ms))
 }
 
-/// resolve API key and account ID for a model
+/// resolve API key and account ID for a model. mirrors the cli's
+/// `resolve_api_key`: env > config > stored credentials > oauth
 pub async fn resolve_auth_for_model(
     model: &Model,
     provider_api_keys: &std::collections::HashMap<String, mush_ai::ApiKey>,
@@ -258,6 +259,11 @@ pub async fn resolve_auth_for_model(
     let provider_name = model.provider.to_string();
     if let Some(key) = provider_api_keys.get(&provider_name) {
         return (Some(key.clone()), None);
+    }
+
+    // stored credential (managed by the `/login` picker)
+    if let Ok(Some(key)) = mush_ai::credentials::default_store().get(&provider_name) {
+        return (Some(key), None);
     }
 
     match &model.provider {
