@@ -1076,6 +1076,28 @@ impl App {
         let filtered = crate::model_picker::filtered_models(picker);
         Some(filtered.get(picker.selected)?.id.clone())
     }
+
+    /// open the centred login picker overlay. mirrors
+    /// [`Self::open_session_picker`] / [`Self::open_model_picker_overlay`]
+    /// but for oauth providers. caller passes the prepared list, this
+    /// just installs the state and switches mode
+    pub fn open_login_picker(&mut self, entries: Vec<crate::login_picker::LoginEntry>) {
+        self.interaction.login_picker = Some(crate::login_picker::LoginPickerState::new(entries));
+        self.interaction.mode = AppMode::LoginPicker;
+    }
+
+    /// close the login picker overlay
+    pub fn close_login_picker(&mut self) {
+        self.interaction.login_picker = None;
+        self.interaction.mode = AppMode::Normal;
+    }
+
+    /// provider id of the highlighted row in the open login picker, if any
+    pub fn selected_login_provider(&self) -> Option<String> {
+        let picker = self.interaction.login_picker.as_ref()?;
+        let filtered = crate::login_picker::filtered_entries(picker);
+        Some(filtered.get(picker.selected)?.provider_id.clone())
+    }
 }
 
 #[cfg(test)]
@@ -2916,5 +2938,63 @@ batch: 1/2 succeeded, 1 failed";
         // priority 99 first, then priority 1
         assert_eq!(ids, vec!["internal-snapshot", "gpt-5.4"]);
         assert!(picker.show_all, "show_all flag must be set");
+    }
+
+    #[test]
+    fn login_picker_open_close() {
+        // /login with no arg should open a centred floating picker that
+        // mirrors the model / session pickers. opening sets the mode and
+        // populates state, closing reverts to Normal and drops state
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        let entries = vec![
+            crate::login_picker::LoginEntry {
+                provider_id: "anthropic".into(),
+                provider_name: "Anthropic".into(),
+                logged_in: true,
+                account_id: None,
+            },
+            crate::login_picker::LoginEntry {
+                provider_id: "openai-codex".into(),
+                provider_name: "ChatGPT Codex".into(),
+                logged_in: false,
+                account_id: None,
+            },
+        ];
+        app.open_login_picker(entries);
+        assert_eq!(app.interaction.mode, AppMode::LoginPicker);
+        assert!(app.interaction.login_picker.is_some());
+
+        app.close_login_picker();
+        assert_eq!(app.interaction.mode, AppMode::Normal);
+        assert!(app.interaction.login_picker.is_none());
+    }
+
+    #[test]
+    fn selected_login_provider_returns_filtered_id() {
+        // selected_login_provider must follow the filter so a typed query
+        // that reorders or hides rows still picks the visible row at
+        // `selected`. mirrors selected_session / selected_model_id
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.open_login_picker(vec![
+            crate::login_picker::LoginEntry {
+                provider_id: "anthropic".into(),
+                provider_name: "Anthropic".into(),
+                logged_in: true,
+                account_id: None,
+            },
+            crate::login_picker::LoginEntry {
+                provider_id: "openai-codex".into(),
+                provider_name: "ChatGPT Codex".into(),
+                logged_in: false,
+                account_id: None,
+            },
+        ]);
+        let picker = app.interaction.login_picker.as_mut().unwrap();
+        picker.filter = "codex".into();
+        picker.selected = 0;
+        assert_eq!(
+            app.selected_login_provider().as_deref(),
+            Some("openai-codex")
+        );
     }
 }

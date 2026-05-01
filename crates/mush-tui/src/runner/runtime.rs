@@ -32,7 +32,7 @@ const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
         "settings",
         "view or modify runtime settings (anthropic betas, scope)",
     ),
-    ("login", "start an oauth login flow for a provider"),
+    ("login", "open the oauth login picker (or pass id to skip)"),
     (
         "login-complete",
         "finish oauth login with the authorization code",

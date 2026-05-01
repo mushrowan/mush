@@ -52,6 +52,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     if app.interaction.mode == AppMode::ModelPicker {
         return handle_model_picker_key(app, key);
     }
+    if app.interaction.mode == AppMode::LoginPicker {
+        return handle_login_picker_key(app, key);
+    }
     if app.interaction.mode == AppMode::SlashComplete {
         return handle_slash_menu_key(app, key);
     }
@@ -1375,6 +1378,130 @@ fn refresh_model_picker_overlay_after_delete(app: &mut App) {
         let visible_len = crate::model_picker::filtered_models(picker).len();
         picker.selected = picker.selected.min(visible_len.saturating_sub(1));
     }
+}
+
+/// drive the centred `/login` picker overlay. esc/ctrl+c closes,
+/// ctrl+j/k or arrow keys navigate, type to filter, enter on a
+/// logged-out row emits a `SlashAction::Login` event for the runner
+/// to start the oauth flow, enter on a logged-in row arms a y/n
+/// logout confirmation. y while armed deletes the saved credentials
+/// in place
+fn handle_login_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
+    // intercept y/n while a logout confirm is armed
+    if app
+        .interaction
+        .login_picker
+        .as_ref()
+        .is_some_and(|p| p.confirm_logout.is_some())
+    {
+        return handle_login_picker_logout_confirm_key(app, key);
+    }
+
+    match (key.modifiers, key.code) {
+        (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('c' | '[')) => {
+            app.close_login_picker();
+            None
+        }
+        (_, KeyCode::Enter) => {
+            // resolve the selected row to a (provider_id, logged_in)
+            // pair without holding the immutable borrow into the
+            // mutating branches below
+            let (provider_id, logged_in) = {
+                let picker = app.interaction.login_picker.as_ref()?;
+                let visible = crate::login_picker::filtered_entries(picker);
+                let entry = visible.get(picker.selected)?;
+                (entry.provider_id.clone(), entry.logged_in)
+            };
+            if logged_in {
+                if let Some(picker) = app.interaction.login_picker.as_mut() {
+                    picker.arm_logout();
+                }
+                None
+            } else {
+                app.close_login_picker();
+                Some(AppEvent::SlashCommand {
+                    action: crate::slash::SlashAction::Login {
+                        provider: Some(provider_id),
+                    },
+                })
+            }
+        }
+        (_, KeyCode::Up) | (KeyModifiers::CONTROL, KeyCode::Char('k')) => {
+            if let Some(picker) = app.interaction.login_picker.as_mut() {
+                picker.selected = picker.selected.saturating_sub(1);
+            }
+            None
+        }
+        (_, KeyCode::Down) | (KeyModifiers::CONTROL, KeyCode::Char('j')) => {
+            if let Some(picker) = app.interaction.login_picker.as_mut() {
+                let visible_len = crate::login_picker::filtered_entries(picker).len();
+                if picker.selected + 1 < visible_len {
+                    picker.selected += 1;
+                }
+            }
+            None
+        }
+        (_, KeyCode::Backspace) => {
+            if let Some(picker) = app.interaction.login_picker.as_mut() {
+                picker.filter.pop();
+                picker.selected = 0;
+            }
+            None
+        }
+        (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
+            if let Some(picker) = app.interaction.login_picker.as_mut() {
+                picker.filter.push(c);
+                picker.selected = 0;
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// drive y/n/esc when a logout confirmation is armed in the login
+/// picker. y deletes the saved credentials and refreshes the row
+/// state in place; anything else cancels the prompt
+fn handle_login_picker_logout_confirm_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
+    let provider_id = app
+        .interaction
+        .login_picker
+        .as_ref()
+        .and_then(|p| p.confirm_logout.clone())?;
+
+    match (key.modifiers, key.code) {
+        (_, KeyCode::Char('y' | 'Y')) => {
+            let toast = match mush_ai::oauth::remove_credentials(&provider_id) {
+                Ok(true) => format!("logged out of {provider_id}"),
+                Ok(false) => format!("no credentials stored for {provider_id}"),
+                Err(e) => format!("logout failed: {e}"),
+            };
+            if let Some(picker) = app.interaction.login_picker.as_mut() {
+                picker.confirm_logout = None;
+                picker.toast = Some(toast);
+                refresh_login_picker_logged_in(picker);
+            }
+            None
+        }
+        _ => {
+            if let Some(picker) = app.interaction.login_picker.as_mut() {
+                picker.cancel_logout();
+            }
+            None
+        }
+    }
+}
+
+/// re-read the credential store and update the picker's logged-in
+/// flags so the row reflects the new state
+fn refresh_login_picker_logged_in(picker: &mut crate::login_picker::LoginPickerState) {
+    let store = mush_ai::oauth::load_credentials().unwrap_or_default();
+    let present: Vec<(String, Option<String>)> = store
+        .providers
+        .iter()
+        .map(|(id, creds)| (id.clone(), creds.account_id.clone()))
+        .collect();
+    picker.refresh_logged_in(&present);
 }
 
 #[cfg(test)]
@@ -3428,5 +3555,117 @@ mod tests {
             !matches!(event, Some(AppEvent::EditSteering)),
             "Up without queued msg must not emit EditSteering: {event:?}"
         );
+    }
+
+    fn login_entry(id: &str, name: &str, logged_in: bool) -> crate::login_picker::LoginEntry {
+        crate::login_picker::LoginEntry {
+            provider_id: id.into(),
+            provider_name: name.into(),
+            logged_in,
+            account_id: None,
+        }
+    }
+
+    fn app_with_login_picker() -> App {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.open_login_picker(vec![
+            login_entry("anthropic", "Anthropic", true),
+            login_entry("openai-codex", "ChatGPT Codex", false),
+        ]);
+        app
+    }
+
+    #[test]
+    fn login_picker_esc_closes() {
+        let mut app = app_with_login_picker();
+        assert_eq!(app.interaction.mode, AppMode::LoginPicker);
+        handle_key(&mut app, key(KeyCode::Esc));
+        assert_eq!(app.interaction.mode, AppMode::Normal);
+        assert!(app.interaction.login_picker.is_none());
+    }
+
+    #[test]
+    fn login_picker_ctrl_j_k_navigate_visible_rows() {
+        let mut app = app_with_login_picker();
+        handle_key(&mut app, ctrl(KeyCode::Char('j')));
+        assert_eq!(app.interaction.login_picker.as_ref().unwrap().selected, 1);
+        // can't navigate past the last row
+        handle_key(&mut app, ctrl(KeyCode::Char('j')));
+        assert_eq!(app.interaction.login_picker.as_ref().unwrap().selected, 1);
+        handle_key(&mut app, ctrl(KeyCode::Char('k')));
+        assert_eq!(app.interaction.login_picker.as_ref().unwrap().selected, 0);
+    }
+
+    #[test]
+    fn login_picker_typing_filters_and_resets_selection() {
+        let mut app = app_with_login_picker();
+        handle_key(&mut app, ctrl(KeyCode::Char('j')));
+        assert_eq!(app.interaction.login_picker.as_ref().unwrap().selected, 1);
+
+        // typing reorders the list and pushes selection back to the top
+        for c in "codex".chars() {
+            handle_key(&mut app, key(KeyCode::Char(c)));
+        }
+        let picker = app.interaction.login_picker.as_ref().unwrap();
+        assert_eq!(picker.filter, "codex");
+        assert_eq!(picker.selected, 0);
+        assert_eq!(
+            crate::login_picker::filtered_entries(picker)
+                .iter()
+                .map(|e| e.provider_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["openai-codex"]
+        );
+    }
+
+    #[test]
+    fn login_picker_enter_on_logged_out_emits_login_action_and_closes() {
+        // pressing enter on a logged-out provider should kick the
+        // existing login flow by emitting SlashAction::Login with the
+        // selected provider id, mirroring how /model picker emits
+        // SlashAction::Model on enter
+        let mut app = app_with_login_picker();
+        // navigate to logged-out row
+        handle_key(&mut app, ctrl(KeyCode::Char('j')));
+        let event = handle_key(&mut app, key(KeyCode::Enter));
+        match event {
+            Some(AppEvent::SlashCommand {
+                action: crate::slash::SlashAction::Login { provider: Some(id) },
+            }) => assert_eq!(id, "openai-codex"),
+            other => panic!("expected SlashAction::Login, got {other:?}"),
+        }
+        assert_eq!(app.interaction.mode, AppMode::Normal);
+        assert!(app.interaction.login_picker.is_none());
+    }
+
+    #[test]
+    fn login_picker_enter_on_logged_in_arms_logout_confirm() {
+        // logged-in row gets a logout confirmation instead of a login
+        // action. picker stays open while the user confirms
+        let mut app = app_with_login_picker();
+        // logged-in row is at index 0
+        let event = handle_key(&mut app, key(KeyCode::Enter));
+        assert!(event.is_none(), "no event while confirm is pending");
+        let picker = app.interaction.login_picker.as_ref().unwrap();
+        assert_eq!(picker.confirm_logout.as_deref(), Some("anthropic"));
+        assert_eq!(app.interaction.mode, AppMode::LoginPicker);
+    }
+
+    #[test]
+    fn login_picker_n_cancels_logout_confirm() {
+        let mut app = app_with_login_picker();
+        handle_key(&mut app, key(KeyCode::Enter));
+        assert!(
+            app.interaction
+                .login_picker
+                .as_ref()
+                .unwrap()
+                .confirm_logout
+                .is_some()
+        );
+        handle_key(&mut app, key(KeyCode::Char('n')));
+        let picker = app.interaction.login_picker.as_ref().unwrap();
+        assert!(picker.confirm_logout.is_none());
+        assert!(picker.toast.is_none());
     }
 }

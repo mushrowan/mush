@@ -163,6 +163,18 @@ pub async fn force_refresh_oauth_token(provider_id: &str) -> Result<Option<Strin
     Ok(Some(token))
 }
 
+/// remove a provider's saved oauth credentials. returns whether a
+/// credential entry was actually removed (false when nothing was
+/// stored to begin with). a no-op when no credential file exists yet
+pub fn remove_credentials(provider_id: &str) -> Result<bool, OAuthError> {
+    let mut store = load_credentials()?;
+    let removed = store.providers.remove(provider_id).is_some();
+    if removed {
+        save_credentials(&store)?;
+    }
+    Ok(removed)
+}
+
 /// convenience: get anthropic oauth token
 pub async fn get_anthropic_oauth_token() -> Result<Option<String>, OAuthError> {
     get_oauth_token("anthropic").await

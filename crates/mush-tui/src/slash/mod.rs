@@ -76,7 +76,8 @@ pub enum SlashAction {
     Settings {
         args: String,
     },
-    /// start an oauth login flow for a provider (default anthropic)
+    /// start an oauth login flow for a provider, or open the centred
+    /// login picker overlay when no provider is named
     Login {
         provider: Option<String>,
     },
