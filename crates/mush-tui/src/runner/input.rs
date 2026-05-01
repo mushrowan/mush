@@ -223,9 +223,10 @@ async fn run_validation_and_save(entry_id: &str, key: &str) -> SaveOutcome {
     SaveOutcome::Saved(format_save_toast(entry_id, store.backend(), info))
 }
 
-/// build the user-facing success toast. openrouter populates label
-/// and (usage, limit), so when present we surface them to confirm
-/// which key is live and how much budget is left
+/// build the user-facing success toast. openrouter populates label,
+/// usage/limit, and is_free_tier on `/auth/key`. surface whichever of
+/// those is meaningful; suppress the "$0 used" line that fresh keys
+/// would otherwise produce
 fn format_save_toast(
     entry_id: &str,
     backend: &str,
@@ -238,12 +239,37 @@ fn format_save_toast(
     if let Some(label) = info.label {
         toast.push_str(&format!(" — '{label}'"));
     }
-    match (info.usage, info.limit) {
-        (Some(usage), Some(limit)) => toast.push_str(&format!(" — ${usage:.2}/${limit:.2} used")),
-        (Some(usage), None) => toast.push_str(&format!(" — ${usage:.2} used")),
-        _ => {}
+    if let Some(suffix) = budget_suffix(info.usage, info.limit, info.free_tier) {
+        toast.push_str(&suffix);
     }
     toast
+}
+
+/// pick the most informative budget descriptor for a key. priority:
+///
+/// 1. explicit limit + usage  → `$U/$L used`
+/// 2. nonzero usage           → `$U used`
+/// 3. free-tier flag          → `free tier`
+/// 4. nothing meaningful      → `None` so the caller skips the suffix
+fn budget_suffix(
+    usage: Option<f64>,
+    limit: Option<f64>,
+    free_tier: Option<bool>,
+) -> Option<String> {
+    if let (Some(used), Some(cap)) = (usage, limit)
+        && cap > 0.0
+    {
+        return Some(format!(" — ${used:.2}/${cap:.2} used"));
+    }
+    if let Some(used) = usage
+        && used > 0.0
+    {
+        return Some(format!(" — ${used:.2} used"));
+    }
+    if free_tier == Some(true) {
+        return Some(" — free tier".into());
+    }
+    None
 }
 
 pub(super) async fn handle_streaming_terminal_events(
@@ -556,5 +582,67 @@ mod tests {
     fn confirmation_answer_ignores_other_keys() {
         assert_eq!(confirmation_answer(KeyCode::Char('x')), None);
         assert_eq!(confirmation_answer(KeyCode::Tab), None);
+    }
+
+    fn key_info(
+        label: Option<&str>,
+        usage: Option<f64>,
+        limit: Option<f64>,
+        free_tier: Option<bool>,
+    ) -> mush_ai::login::KeyInfo {
+        mush_ai::login::KeyInfo {
+            label: label.map(str::to_string),
+            usage,
+            limit,
+            free_tier,
+        }
+    }
+
+    #[test]
+    fn format_save_toast_omits_zero_usage_when_no_limit_is_known() {
+        // a fresh openrouter key returns usage=0 and limit=null. that
+        // doesn't tell the user anything useful, so the toast should
+        // skip the "$0 used" suffix instead of polluting the message
+        let toast = format_save_toast(
+            "openrouter",
+            "keyring",
+            Some(key_info(Some("k"), Some(0.0), None, None)),
+        );
+        assert!(!toast.contains('$'), "got: {toast}");
+    }
+
+    #[test]
+    fn format_save_toast_shows_budget_when_limit_is_set() {
+        let toast = format_save_toast(
+            "openrouter",
+            "keyring",
+            Some(key_info(None, Some(1.23), Some(10.0), None)),
+        );
+        assert!(toast.contains("$1.23/$10.00"), "got: {toast}");
+    }
+
+    #[test]
+    fn format_save_toast_marks_free_tier_keys() {
+        // openrouter exposes is_free_tier; surface it instead of (or
+        // alongside) usage so users on free plans get a useful badge
+        let toast = format_save_toast(
+            "openrouter",
+            "keyring",
+            Some(key_info(None, Some(0.0), None, Some(true))),
+        );
+        assert!(
+            toast.to_lowercase().contains("free tier"),
+            "expected free tier marker, got: {toast}"
+        );
+    }
+
+    #[test]
+    fn format_save_toast_shows_used_amount_when_no_limit_but_nonzero_usage() {
+        let toast = format_save_toast(
+            "openrouter",
+            "keyring",
+            Some(key_info(None, Some(4.50), None, None)),
+        );
+        assert!(toast.contains("$4.50"), "got: {toast}");
     }
 }
