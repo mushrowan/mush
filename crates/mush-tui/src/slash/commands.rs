@@ -306,7 +306,7 @@ pub fn handle(
             None
         }
         SlashAction::Login { provider } => {
-            handle_login_start(app, provider.as_deref());
+            handle_login_start(app, tui_config, provider.as_deref());
             None
         }
         SlashAction::LoginComplete { code: _ } => {
@@ -806,18 +806,29 @@ fn apply_beta_toggle(betas: &mut mush_ai::types::AnthropicBetas, field: &str, va
 
 /// kick off an oauth login flow in-TUI. when no provider id is given,
 /// opens the centred login picker overlay so the user can pick (or log
-/// out). with an explicit id, jumps straight into the oauth handshake:
-/// get URL + PKCE, open browser, stash pending state on `app` for
-/// `/login-complete` to pick up
-fn handle_login_start(app: &mut App, provider_id_opt: Option<&str>) {
+/// out). with an explicit oauth provider id (`anthropic`, `openai-codex`)
+/// jumps straight into the oauth handshake. with a known login-row id
+/// (`openrouter`, etc) opens the picker so the user can complete the
+/// flow there
+fn handle_login_start(app: &mut App, tui_config: &TuiConfig, provider_id_opt: Option<&str>) {
     use mush_ai::oauth;
 
     let Some(provider_id) = provider_id_opt.map(str::to_string) else {
-        open_login_picker_overlay(app);
+        open_login_picker_overlay(app, tui_config);
         return;
     };
 
     let Some(provider) = oauth::get_provider(&provider_id) else {
+        // not an oauth provider id. fall back to opening the picker so
+        // the user can pick from the full catalogue (covers
+        // `/login openrouter` etc which used to fail outright)
+        if mush_ai::login::list_providers()
+            .iter()
+            .any(|p| p.id == provider_id)
+        {
+            open_login_picker_overlay(app, tui_config);
+            return;
+        }
         let available = oauth::list_providers()
             .iter()
             .map(|(id, _)| *id)
@@ -858,25 +869,54 @@ fn handle_login_start(app: &mut App, provider_id_opt: Option<&str>) {
     });
 }
 
-/// build the picker entry list by joining `oauth::list_providers()`
-/// with the on-disk credential store, then install it on `app` and
-/// switch to login picker mode
-fn open_login_picker_overlay(app: &mut App) {
-    use mush_ai::oauth;
-    let store = oauth::load_credentials().unwrap_or_default();
-    let entries: Vec<crate::login_picker::LoginEntry> = oauth::list_providers()
+/// build the picker entry list by joining `mush_ai::login::list_providers`
+/// with the user's current auth state (oauth tokens, env vars, config
+/// keys, stored api keys), then install it on `app` and switch to
+/// login picker mode
+fn open_login_picker_overlay(app: &mut App, tui_config: &TuiConfig) {
+    let entries = build_login_entries(tui_config);
+    app.open_login_picker(entries, tui_config.provider_api_keys.clone());
+}
+
+/// resolve every login provider's current source by combining the
+/// catalogue from `mush_ai::login` with the four sources mush
+/// understands. mirrors the auth resolution path so the picker shows
+/// the same view the agent will use
+pub(crate) fn build_login_entries(tui_config: &TuiConfig) -> Vec<crate::login_picker::LoginEntry> {
+    use mush_ai::login;
+
+    let oauth_store = mush_ai::oauth::load_credentials().unwrap_or_default();
+    let oauth_present: Vec<(String, Option<String>)> = oauth_store
+        .providers
+        .iter()
+        .map(|(id, c)| (id.clone(), c.account_id.clone()))
+        .collect();
+    let credential_store = mush_ai::credentials::default_store();
+    let inputs = login::SourceInputs {
+        oauth_present: &oauth_present,
+        config_keys: &tui_config.provider_api_keys,
+        credential_store: credential_store.as_ref(),
+    };
+
+    login::list_providers()
         .into_iter()
-        .map(|(id, name)| {
-            let creds = store.providers.get(id);
+        .map(|provider| {
+            let source = login::resolve_source(&provider, &inputs);
+            let account_id = match &provider.method {
+                login::LoginMethod::OAuth { oauth_provider_id } if source.is_some() => {
+                    login::oauth_account_id(oauth_provider_id)
+                }
+                _ => None,
+            };
             crate::login_picker::LoginEntry {
-                provider_id: id.to_string(),
-                provider_name: name.to_string(),
-                logged_in: creds.is_some(),
-                account_id: creds.and_then(|c| c.account_id.clone()),
+                id: provider.id,
+                name: provider.name,
+                method: provider.method,
+                source,
+                account_id,
             }
         })
-        .collect();
-    app.open_login_picker(entries);
+        .collect()
 }
 
 fn handle_undo(app: &mut App, conversation: &mut ConversationState) {

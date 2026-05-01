@@ -1396,6 +1396,16 @@ fn handle_login_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     {
         return handle_login_picker_logout_confirm_key(app, key);
     }
+    // route keystrokes into the api-key buffer while entry mode is
+    // active. esc cancels, enter saves to the credential store
+    if app
+        .interaction
+        .login_picker
+        .as_ref()
+        .is_some_and(|p| p.entry.is_some())
+    {
+        return handle_login_picker_entry_key(app, key);
+    }
 
     match (key.modifiers, key.code) {
         (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('c' | '[')) => {
@@ -1403,27 +1413,40 @@ fn handle_login_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             None
         }
         (_, KeyCode::Enter) => {
-            // resolve the selected row to a (provider_id, logged_in)
-            // pair without holding the immutable borrow into the
-            // mutating branches below
-            let (provider_id, logged_in) = {
+            // resolve the selected row's id + method without holding
+            // the immutable borrow into the mutating branches below
+            let (id, method, logged_in) = {
                 let picker = app.interaction.login_picker.as_ref()?;
                 let visible = crate::login_picker::filtered_entries(picker);
                 let entry = visible.get(picker.selected)?;
-                (entry.provider_id.clone(), entry.logged_in)
+                (entry.id.clone(), entry.method.clone(), entry.logged_in())
             };
             if logged_in {
                 if let Some(picker) = app.interaction.login_picker.as_mut() {
                     picker.arm_logout();
                 }
-                None
-            } else {
-                app.close_login_picker();
-                Some(AppEvent::SlashCommand {
-                    action: crate::slash::SlashAction::Login {
-                        provider: Some(provider_id),
-                    },
-                })
+                return None;
+            }
+            // logged-out: oauth rows kick the runner via a SlashAction
+            // (so the existing oauth handshake fires). api-key rows arm
+            // the in-picker entry prompt instead - no event, no close
+            match method {
+                mush_ai::login::LoginMethod::OAuth { oauth_provider_id } => {
+                    app.close_login_picker();
+                    Some(AppEvent::SlashCommand {
+                        action: crate::slash::SlashAction::Login {
+                            provider: Some(oauth_provider_id),
+                        },
+                    })
+                }
+                mush_ai::login::LoginMethod::ApiKey { .. } => {
+                    if let Some(picker) = app.interaction.login_picker.as_mut() {
+                        picker.arm_entry();
+                        picker.toast =
+                            Some(format!("paste {id} api key, enter saves, esc cancels"));
+                    }
+                    None
+                }
             }
         }
         (_, KeyCode::Up) | (KeyModifiers::CONTROL, KeyCode::Char('k')) => {
@@ -1460,10 +1483,11 @@ fn handle_login_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
 }
 
 /// drive y/n/esc when a logout confirmation is armed in the login
-/// picker. y deletes the saved credentials and refreshes the row
+/// picker. y deletes the saved credentials (oauth tokens or stored
+/// api key, depending on the row's method) and refreshes the row
 /// state in place; anything else cancels the prompt
 fn handle_login_picker_logout_confirm_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
-    let provider_id = app
+    let entry_id = app
         .interaction
         .login_picker
         .as_ref()
@@ -1471,11 +1495,7 @@ fn handle_login_picker_logout_confirm_key(app: &mut App, key: KeyEvent) -> Optio
 
     match (key.modifiers, key.code) {
         (_, KeyCode::Char('y' | 'Y')) => {
-            let toast = match mush_ai::oauth::remove_credentials(&provider_id) {
-                Ok(true) => format!("logged out of {provider_id}"),
-                Ok(false) => format!("no credentials stored for {provider_id}"),
-                Err(e) => format!("logout failed: {e}"),
-            };
+            let toast = perform_logout(app, &entry_id);
             if let Some(picker) = app.interaction.login_picker.as_mut() {
                 picker.confirm_logout = None;
                 picker.toast = Some(toast);
@@ -1492,16 +1512,136 @@ fn handle_login_picker_logout_confirm_key(app: &mut App, key: KeyEvent) -> Optio
     }
 }
 
-/// re-read the credential store and update the picker's logged-in
-/// flags so the row reflects the new state
+/// resolve a picker row's method back to a credential delete and run
+/// it. returns the user-facing toast describing the outcome. the row
+/// is identified by `entry_id` (matching `LoginEntry::id`)
+fn perform_logout(app: &App, entry_id: &str) -> String {
+    use mush_ai::login::LoginMethod;
+
+    let Some(method) = app
+        .interaction
+        .login_picker
+        .as_ref()
+        .and_then(|p| p.entries.iter().find(|e| e.id == entry_id))
+        .map(|e| e.method.clone())
+    else {
+        return format!("row {entry_id} no longer in picker");
+    };
+
+    match method {
+        LoginMethod::OAuth { oauth_provider_id } => {
+            match mush_ai::oauth::remove_credentials(&oauth_provider_id) {
+                Ok(true) => format!("logged out of {entry_id}"),
+                Ok(false) => format!("no credentials stored for {entry_id}"),
+                Err(e) => format!("logout failed: {e}"),
+            }
+        }
+        LoginMethod::ApiKey { storage_key, .. } => {
+            let store = mush_ai::credentials::default_store();
+            match store.remove(&storage_key) {
+                Ok(true) => format!("removed stored api key for {entry_id}"),
+                Ok(false) => format!("no stored key for {entry_id}"),
+                Err(e) => format!("logout failed: {e}"),
+            }
+        }
+    }
+}
+
+/// drive an api-key entry prompt. typing builds the masked buffer,
+/// backspace pops a char, enter saves to the credential store and
+/// refreshes the row, esc cancels and returns to the normal picker
+fn handle_login_picker_entry_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
+    match (key.modifiers, key.code) {
+        (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('c' | '[')) => {
+            if let Some(picker) = app.interaction.login_picker.as_mut() {
+                picker.cancel_entry();
+            }
+            None
+        }
+        (_, KeyCode::Enter) => {
+            let toast = perform_save_api_key(app);
+            if let Some(picker) = app.interaction.login_picker.as_mut() {
+                picker.cancel_entry();
+                picker.toast = Some(toast);
+                refresh_login_picker_logged_in(picker);
+            }
+            None
+        }
+        (_, KeyCode::Backspace) => {
+            if let Some(prompt) = app
+                .interaction
+                .login_picker
+                .as_mut()
+                .and_then(|p| p.entry.as_mut())
+            {
+                prompt.buffer.pop();
+            }
+            None
+        }
+        (mods, KeyCode::Char(c))
+            if !mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::ALT) =>
+        {
+            if let Some(prompt) = app
+                .interaction
+                .login_picker
+                .as_mut()
+                .and_then(|p| p.entry.as_mut())
+            {
+                prompt.buffer.push(c);
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// save the typed buffer to the credential store under the row's
+/// `storage_key`. returns the user-facing toast. only `ApiKey` rows
+/// reach this path; oauth rows route through the existing flow
+fn perform_save_api_key(app: &App) -> String {
+    use mush_ai::login::LoginMethod;
+
+    let Some(prompt) = app
+        .interaction
+        .login_picker
+        .as_ref()
+        .and_then(|p| p.entry.as_ref())
+    else {
+        return "no entry in progress".into();
+    };
+    if prompt.buffer.trim().is_empty() {
+        return "key was empty, not saved".into();
+    }
+
+    let Some(method) = app
+        .interaction
+        .login_picker
+        .as_ref()
+        .and_then(|p| p.entries.iter().find(|e| e.id == prompt.entry_id))
+        .map(|e| e.method.clone())
+    else {
+        return format!("row {} no longer in picker", prompt.entry_id);
+    };
+
+    let LoginMethod::ApiKey { storage_key, .. } = method else {
+        return "row is not an api-key provider".into();
+    };
+
+    let store = mush_ai::credentials::default_store();
+    match store.set(&storage_key, prompt.buffer.trim()) {
+        Ok(()) => format!(
+            "saved api key for {} ({})",
+            prompt.entry_id,
+            store.backend()
+        ),
+        Err(e) => format!("failed to save api key: {e}"),
+    }
+}
+
+/// re-read every credential source and update the picker rows so
+/// they reflect the new state after a login or logout
 fn refresh_login_picker_logged_in(picker: &mut crate::login_picker::LoginPickerState) {
-    let store = mush_ai::oauth::load_credentials().unwrap_or_default();
-    let present: Vec<(String, Option<String>)> = store
-        .providers
-        .iter()
-        .map(|(id, creds)| (id.clone(), creds.account_id.clone()))
-        .collect();
-    picker.refresh_logged_in(&present);
+    picker.rebuild_sources();
 }
 
 #[cfg(test)]
@@ -3557,21 +3697,55 @@ mod tests {
         );
     }
 
-    fn login_entry(id: &str, name: &str, logged_in: bool) -> crate::login_picker::LoginEntry {
+    fn oauth_login_entry(
+        id: &str,
+        oauth_id: &str,
+        name: &str,
+        source: Option<mush_ai::login::LoginSource>,
+    ) -> crate::login_picker::LoginEntry {
         crate::login_picker::LoginEntry {
-            provider_id: id.into(),
-            provider_name: name.into(),
-            logged_in,
+            id: id.into(),
+            name: name.into(),
+            method: mush_ai::login::LoginMethod::OAuth {
+                oauth_provider_id: oauth_id.into(),
+            },
+            source,
+            account_id: None,
+        }
+    }
+
+    fn api_key_login_entry(
+        id: &str,
+        name: &str,
+        source: Option<mush_ai::login::LoginSource>,
+    ) -> crate::login_picker::LoginEntry {
+        crate::login_picker::LoginEntry {
+            id: id.into(),
+            name: name.into(),
+            method: mush_ai::login::LoginMethod::ApiKey {
+                storage_key: id.into(),
+                env_var: format!("{}_API_KEY", id.to_uppercase().replace('-', "_")),
+                config_key: id.into(),
+            },
+            source,
             account_id: None,
         }
     }
 
     fn app_with_login_picker() -> App {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.open_login_picker(vec![
-            login_entry("anthropic", "Anthropic", true),
-            login_entry("openai-codex", "ChatGPT Codex", false),
-        ]);
+        app.open_login_picker(
+            vec![
+                oauth_login_entry(
+                    "anthropic-pro-max",
+                    "anthropic",
+                    "Anthropic",
+                    Some(mush_ai::login::LoginSource::OAuth),
+                ),
+                oauth_login_entry("openai-codex", "openai-codex", "ChatGPT Codex", None),
+            ],
+            std::collections::HashMap::new(),
+        );
         app
     }
 
@@ -3612,18 +3786,17 @@ mod tests {
         assert_eq!(
             crate::login_picker::filtered_entries(picker)
                 .iter()
-                .map(|e| e.provider_id.as_str())
+                .map(|e| e.id.as_str())
                 .collect::<Vec<_>>(),
             vec!["openai-codex"]
         );
     }
 
     #[test]
-    fn login_picker_enter_on_logged_out_emits_login_action_and_closes() {
-        // pressing enter on a logged-out provider should kick the
+    fn login_picker_enter_on_logged_out_oauth_emits_login_action_and_closes() {
+        // pressing enter on a logged-out oauth row should kick the
         // existing login flow by emitting SlashAction::Login with the
-        // selected provider id, mirroring how /model picker emits
-        // SlashAction::Model on enter
+        // oauth provider id (so the existing handler can begin_login)
         let mut app = app_with_login_picker();
         // navigate to logged-out row
         handle_key(&mut app, ctrl(KeyCode::Char('j')));
@@ -3639,6 +3812,119 @@ mod tests {
     }
 
     #[test]
+    fn login_picker_enter_on_logged_out_api_key_arms_entry_prompt() {
+        // api-key rows don't kick a slash command - they arm the
+        // in-picker key entry prompt so the user can paste their key
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.open_login_picker(
+            vec![api_key_login_entry("openrouter", "OpenRouter", None)],
+            std::collections::HashMap::new(),
+        );
+        let event = handle_key(&mut app, key(KeyCode::Enter));
+        assert!(event.is_none(), "api-key enter must not emit a slash event");
+        let picker = app.interaction.login_picker.as_ref().unwrap();
+        let prompt = picker.entry.as_ref().unwrap();
+        assert_eq!(prompt.entry_id, "openrouter");
+        assert!(prompt.buffer.is_empty());
+        assert_eq!(app.interaction.mode, AppMode::LoginPicker);
+    }
+
+    #[test]
+    fn login_picker_entry_typing_pushes_into_buffer() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.open_login_picker(
+            vec![api_key_login_entry("openrouter", "OpenRouter", None)],
+            std::collections::HashMap::new(),
+        );
+        // arm entry mode
+        handle_key(&mut app, key(KeyCode::Enter));
+        for c in "sk-or-test".chars() {
+            handle_key(&mut app, key(KeyCode::Char(c)));
+        }
+        let prompt = app
+            .interaction
+            .login_picker
+            .as_ref()
+            .unwrap()
+            .entry
+            .as_ref()
+            .unwrap();
+        assert_eq!(prompt.buffer, "sk-or-test");
+    }
+
+    #[test]
+    fn login_picker_entry_backspace_pops_char() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.open_login_picker(
+            vec![api_key_login_entry("openrouter", "OpenRouter", None)],
+            std::collections::HashMap::new(),
+        );
+        handle_key(&mut app, key(KeyCode::Enter));
+        for c in "abc".chars() {
+            handle_key(&mut app, key(KeyCode::Char(c)));
+        }
+        handle_key(&mut app, key(KeyCode::Backspace));
+        let prompt = app
+            .interaction
+            .login_picker
+            .as_ref()
+            .unwrap()
+            .entry
+            .as_ref()
+            .unwrap();
+        assert_eq!(prompt.buffer, "ab");
+    }
+
+    #[test]
+    fn login_picker_entry_esc_cancels_back_to_picker() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.open_login_picker(
+            vec![api_key_login_entry("openrouter", "OpenRouter", None)],
+            std::collections::HashMap::new(),
+        );
+        handle_key(&mut app, key(KeyCode::Enter));
+        assert!(
+            app.interaction
+                .login_picker
+                .as_ref()
+                .unwrap()
+                .entry
+                .is_some()
+        );
+        handle_key(&mut app, key(KeyCode::Esc));
+        let picker = app.interaction.login_picker.as_ref().unwrap();
+        assert!(
+            picker.entry.is_none(),
+            "esc in entry mode must cancel the prompt, not close the picker"
+        );
+        // picker itself stays open
+        assert_eq!(app.interaction.mode, AppMode::LoginPicker);
+    }
+
+    #[test]
+    fn login_picker_entry_empty_save_shows_error_toast_and_keeps_open() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.open_login_picker(
+            vec![api_key_login_entry("openrouter", "OpenRouter", None)],
+            std::collections::HashMap::new(),
+        );
+        handle_key(&mut app, key(KeyCode::Enter));
+        // press enter without typing anything - must not write an
+        // empty key and must surface a helpful toast
+        handle_key(&mut app, key(KeyCode::Enter));
+        let picker = app.interaction.login_picker.as_ref().unwrap();
+        assert!(
+            picker
+                .toast
+                .as_deref()
+                .unwrap_or_default()
+                .to_lowercase()
+                .contains("empty"),
+            "expected empty-key toast, got: {:?}",
+            picker.toast
+        );
+    }
+    #[test]
     fn login_picker_enter_on_logged_in_arms_logout_confirm() {
         // logged-in row gets a logout confirmation instead of a login
         // action. picker stays open while the user confirms
@@ -3647,7 +3933,7 @@ mod tests {
         let event = handle_key(&mut app, key(KeyCode::Enter));
         assert!(event.is_none(), "no event while confirm is pending");
         let picker = app.interaction.login_picker.as_ref().unwrap();
-        assert_eq!(picker.confirm_logout.as_deref(), Some("anthropic"));
+        assert_eq!(picker.confirm_logout.as_deref(), Some("anthropic-pro-max"));
         assert_eq!(app.interaction.mode, AppMode::LoginPicker);
     }
 

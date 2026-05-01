@@ -38,29 +38,52 @@ pub fn render(frame: &mut Frame, picker: &LoginPickerState, theme: &Theme) {
         return;
     }
 
-    // filter line
-    let filter_line = Line::from(vec![
-        Span::styled("filter: ", theme.dim),
-        Span::styled(
-            if picker.filter.is_empty() {
-                "…"
-            } else {
-                &picker.filter
-            },
-            Style::default(),
-        ),
-    ]);
-    frame.render_widget(filter_line, Rect::new(inner.x, inner.y, inner.width, 1));
+    // filter line, replaced by an api-key entry prompt while one is
+    // armed so the user types into a dedicated row instead of the
+    // (now-stale) filter
+    let prompt_line = if let Some(prompt) = picker.entry.as_ref() {
+        let mask: String = "•".repeat(prompt.buffer.chars().count());
+        let label = format!("paste key for {} » ", prompt.provider_name);
+        Line::from(vec![
+            Span::styled(label, theme.dim),
+            Span::styled(mask, Style::default()),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("filter: ", theme.dim),
+            Span::styled(
+                if picker.filter.is_empty() {
+                    "…"
+                } else {
+                    &picker.filter
+                },
+                Style::default(),
+            ),
+        ])
+    };
+    frame.render_widget(prompt_line, Rect::new(inner.x, inner.y, inner.width, 1));
 
-    // hint line
-    let hint = Line::from(vec![
-        Span::styled("ctrl+j/k", theme.selection_marker),
-        Span::styled(" nav · ", theme.dim),
-        Span::styled("enter", theme.selection_marker),
-        Span::styled(" login/logout · ", theme.dim),
-        Span::styled("esc", theme.selection_marker),
-        Span::styled(" close", theme.dim),
-    ]);
+    // hint line. content shifts when an entry prompt is active because
+    // the keybinds the user needs there are different
+    let hint = if picker.entry.is_some() {
+        Line::from(vec![
+            Span::styled("type", theme.selection_marker),
+            Span::styled(" key · ", theme.dim),
+            Span::styled("enter", theme.selection_marker),
+            Span::styled(" save · ", theme.dim),
+            Span::styled("esc", theme.selection_marker),
+            Span::styled(" cancel", theme.dim),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("ctrl+j/k", theme.selection_marker),
+            Span::styled(" nav · ", theme.dim),
+            Span::styled("enter", theme.selection_marker),
+            Span::styled(" login/logout · ", theme.dim),
+            Span::styled("esc", theme.selection_marker),
+            Span::styled(" close", theme.dim),
+        ])
+    };
     frame.render_widget(hint, Rect::new(inner.x, inner.y + 1, inner.width, 1));
 
     let toast_rows = u16::from(picker.toast.is_some());
@@ -104,21 +127,24 @@ fn render_list(frame: &mut Frame, picker: &LoginPickerState, list_area: Rect, th
             Style::default()
         };
         let prefix = if is_selected { "▸ " } else { "  " };
-        let badge = if entry.logged_in {
-            "[logged in] "
-        } else {
-            "[logged out] "
+        let logged_in = entry.logged_in();
+        // source-aware badge: shows where the credential lives so
+        // users see at a glance whether mush owns the secret or it's
+        // coming from env / config / oauth
+        let badge_text = match entry.source.as_ref() {
+            Some(source) => format!("{} ", source.badge()),
+            None => "[logged out] ".into(),
         };
-        let badge_style = if entry.logged_in {
+        let badge_style = if logged_in {
             theme.context_ok
         } else {
             theme.dim
         };
 
-        // right-side metadata: account id when present, then provider id
+        // right-side metadata: account id when present, then row id
         // (so the human name dominates the row and the slug sits with
         // diagnostic info)
-        let id_suffix = format!("  [{}]", entry.provider_id);
+        let id_suffix = format!("  [{}]", entry.id);
         let account_suffix = entry
             .account_id
             .as_deref()
@@ -127,16 +153,17 @@ fn render_list(frame: &mut Frame, picker: &LoginPickerState, list_area: Rect, th
         let right = format!("{id_suffix}{account_suffix}");
         let right_width = right.chars().count();
 
-        let name_len = entry.provider_name.chars().count();
-        let left_width = prefix.len() + badge.len() + name_len;
+        let name_len = entry.name.chars().count();
+        let badge_len = badge_text.chars().count();
+        let left_width = prefix.len() + badge_len + name_len;
         let pad = (list_area.width as usize)
             .saturating_sub(left_width + right_width)
             .max(1);
 
         lines.push(Line::from(vec![
             Span::styled(prefix, row_style),
-            Span::styled(badge, badge_style),
-            Span::styled(entry.provider_name.clone(), row_style),
+            Span::styled(badge_text, badge_style),
+            Span::styled(entry.name.clone(), row_style),
             Span::raw(" ".repeat(pad)),
             Span::styled(right, theme.menu_description),
         ]));
@@ -150,15 +177,33 @@ fn render_list(frame: &mut Frame, picker: &LoginPickerState, list_area: Rect, th
 mod tests {
     use super::*;
     use crate::login_picker::LoginEntry;
+    use mush_ai::login::{LoginMethod, LoginSource};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
 
-    fn entry(id: &str, name: &str, logged_in: bool) -> LoginEntry {
+    fn oauth_entry(id: &str, name: &str, source: Option<LoginSource>) -> LoginEntry {
         LoginEntry {
-            provider_id: id.into(),
-            provider_name: name.into(),
-            logged_in,
+            id: id.into(),
+            name: name.into(),
+            method: LoginMethod::OAuth {
+                oauth_provider_id: id.into(),
+            },
+            source,
+            account_id: None,
+        }
+    }
+
+    fn api_key_entry(id: &str, name: &str, source: Option<LoginSource>) -> LoginEntry {
+        LoginEntry {
+            id: id.into(),
+            name: name.into(),
+            method: LoginMethod::ApiKey {
+                storage_key: id.into(),
+                env_var: format!("{}_API_KEY", id.to_uppercase().replace('-', "_")),
+                config_key: id.into(),
+            },
+            source,
             account_id: None,
         }
     }
@@ -187,23 +232,36 @@ mod tests {
     }
 
     #[test]
-    fn render_shows_logged_in_and_logged_out_badges() {
+    fn render_shows_source_badge_per_row() {
+        // every row carries a source badge that names where the
+        // credential is coming from. a logged-out row says so, a
+        // logged-in oauth row tags `[oauth]`, an env-sourced row
+        // tags `[env]` and so on
         let picker = LoginPickerState::new(vec![
-            entry("anthropic", "Anthropic", true),
-            entry("openai-codex", "ChatGPT Codex", false),
+            oauth_entry("anthropic-pro-max", "Anthropic", Some(LoginSource::OAuth)),
+            api_key_entry(
+                "openrouter",
+                "OpenRouter",
+                Some(LoginSource::Env("OPENROUTER_API_KEY".into())),
+            ),
+            api_key_entry("openai-api", "OpenAI API", None),
         ]);
-        let buf = render_to_buffer(&picker, 80, 16);
+        let buf = render_to_buffer(&picker, 100, 18);
         let content = buffer_to_string(&buf);
         assert!(
-            content.contains("[logged in]"),
-            "logged-in badge missing, got: {content}"
+            content.contains("[oauth]"),
+            "oauth badge missing, got: {content}"
+        );
+        assert!(
+            content.contains("[env]"),
+            "env badge missing, got: {content}"
         );
         assert!(
             content.contains("[logged out]"),
             "logged-out badge missing, got: {content}"
         );
         assert!(
-            content.contains("Anthropic"),
+            content.contains("OpenRouter"),
             "human-readable provider name should render"
         );
     }
@@ -212,7 +270,8 @@ mod tests {
     fn render_shows_keybind_hint_line() {
         // the hint row must teach the keybinds the user needs without
         // pulling up a help screen
-        let picker = LoginPickerState::new(vec![entry("anthropic", "Anthropic", false)]);
+        let picker =
+            LoginPickerState::new(vec![oauth_entry("anthropic-pro-max", "Anthropic", None)]);
         let buf = render_to_buffer(&picker, 80, 16);
         let content = buffer_to_string(&buf);
         for needle in ["ctrl+j/k", "enter", "esc"] {
@@ -225,7 +284,11 @@ mod tests {
 
     #[test]
     fn render_shows_toast_when_present() {
-        let mut picker = LoginPickerState::new(vec![entry("anthropic", "Anthropic", true)]);
+        let mut picker = LoginPickerState::new(vec![oauth_entry(
+            "anthropic-pro-max",
+            "Anthropic",
+            Some(LoginSource::OAuth),
+        )]);
         picker.arm_logout();
         let buf = render_to_buffer(&picker, 80, 16);
         let content = buffer_to_string(&buf);
@@ -237,18 +300,54 @@ mod tests {
 
     #[test]
     fn render_shows_account_id_when_present() {
-        let mut picker = LoginPickerState::new(vec![LoginEntry {
-            provider_id: "anthropic".into(),
-            provider_name: "Anthropic".into(),
-            logged_in: true,
+        let entry = LoginEntry {
+            id: "anthropic-pro-max".into(),
+            name: "Anthropic".into(),
+            method: LoginMethod::OAuth {
+                oauth_provider_id: "anthropic".into(),
+            },
+            source: Some(LoginSource::OAuth),
             account_id: Some("acc-42".into()),
-        }]);
+        };
+        let mut picker = LoginPickerState::new(vec![entry]);
         picker.selected = 0;
         let buf = render_to_buffer(&picker, 80, 16);
         let content = buffer_to_string(&buf);
         assert!(
             content.contains("acc-42"),
             "account id should be visible on the row, got: {content}"
+        );
+    }
+
+    #[test]
+    fn render_shows_masked_entry_prompt_when_armed() {
+        // when the picker is collecting an api key, the filter row is
+        // replaced by a prompt and the typed characters render as •
+        // so onlookers can't read the secret
+        let mut picker =
+            LoginPickerState::new(vec![api_key_entry("openrouter", "OpenRouter", None)]);
+        picker.arm_entry();
+        if let Some(prompt) = picker.entry.as_mut() {
+            prompt.buffer.push_str("sk-or-v1-secret");
+        }
+        let buf = render_to_buffer(&picker, 100, 18);
+        let content = buffer_to_string(&buf);
+        assert!(
+            content.contains("paste key for OpenRouter"),
+            "prompt label should name the row, got: {content}"
+        );
+        assert!(
+            content.contains("•"),
+            "typed characters must render as bullets, got: {content}"
+        );
+        assert!(
+            !content.contains("sk-or-v1-secret"),
+            "raw secret must not leak into the buffer, got: {content}"
+        );
+        // hint shifts to entry-mode keybinds
+        assert!(
+            content.contains("save"),
+            "entry hint should mention save, got: {content}"
         );
     }
 }
