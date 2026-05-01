@@ -24,6 +24,18 @@ thiserror.workspace = true
 miette.workspace = true
 tracing.workspace = true
 tokio.workspace = true
+keyring-core.workspace = true
+
+# platform-specific keyring stores. each only compiles on its target
+# os, so the credentials module conditionally wires them in
+[target.'cfg(target_os = "linux")'.dependencies]
+linux-keyutils-keyring-store.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-native-keyring-store.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

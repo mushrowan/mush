@@ -105,6 +105,15 @@ clap = { version = "4", features = ["derive", "env"] }
 # open URLs in the user's browser (used by /login)
 open = "5"
 
+# secure credential storage. keyring-core is the platform-independent
+# api; per-platform store crates (apple-native, windows-native,
+# linux-keyutils) implement actual storage. file fallback handles
+# headless / containerised hosts where the os keychain isn't available
+keyring-core = "1"
+linux-keyutils-keyring-store = "1"
+apple-native-keyring-store = "1"
+windows-native-keyring-store = "1"
+
 # terminal
 atty = "0.2"
 
