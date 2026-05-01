@@ -3962,7 +3962,10 @@ mod tests {
         }
         let picker = app.interaction.login_picker.as_ref().unwrap();
         assert_eq!(picker.validating.as_deref(), Some("openrouter"));
-        assert!(picker.entry.is_none());
+        // entry stays alive (with empty buffer) so the popover keeps
+        // rendering across the in-flight roundtrip
+        let prompt = picker.entry.as_ref().expect("popover prompt should remain");
+        assert!(prompt.buffer.is_empty());
     }
 
     #[test]
@@ -3991,6 +3994,12 @@ mod tests {
         let picker = app.interaction.login_picker.as_ref().unwrap();
         assert_eq!(picker.validating.as_deref(), Some("openrouter"));
         assert!(picker.filter.is_empty());
-        assert!(picker.entry.is_none());
+        // entry prompt stays alive across the in-flight roundtrip so
+        // the popover renders continuously, but its buffer must stay
+        // empty (no typed key should be captured during validation)
+        assert!(
+            picker.entry.as_ref().is_some_and(|p| p.buffer.is_empty()),
+            "entry buffer must not capture keystrokes while validating"
+        );
     }
 }

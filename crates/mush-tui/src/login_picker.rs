@@ -86,6 +86,11 @@ pub struct EntryPrompt {
     pub provider_name: String,
     /// typed characters so far. rendered masked with `•`
     pub buffer: String,
+    /// when the previous attempt was rejected, the reason lives here
+    /// so the popover widget can render it directly below the input
+    /// (rather than the bottom-of-picker toast, which sits too far
+    /// from where the user is looking)
+    pub error_message: Option<String>,
 }
 
 impl LoginPickerState {
@@ -191,6 +196,7 @@ impl LoginPickerState {
             entry_id: entry.id.clone(),
             provider_name: entry.name.clone(),
             buffer: String::new(),
+            error_message: None,
         });
         self.toast = None;
         true
@@ -205,11 +211,19 @@ impl LoginPickerState {
     /// (the runner has already taken its copy by now) and records the
     /// row id so [`Self::finish_validation_success`] /
     /// [`Self::finish_validation_failure`] can route the outcome back
-    /// to the right row even if the user has navigated away
+    /// to the right row even if the user has navigated away. the entry
+    /// prompt itself stays alive (with an empty buffer) so the popover
+    /// widget keeps rendering during the in-flight request, giving
+    /// the user continuous visual feedback
     pub fn begin_validation(&mut self, entry_id: &str, provider_name: &str) {
-        self.entry = None;
+        self.entry = Some(EntryPrompt {
+            entry_id: entry_id.to_string(),
+            provider_name: provider_name.to_string(),
+            buffer: String::new(),
+            error_message: None,
+        });
         self.validating = Some(entry_id.to_string());
-        self.toast = Some(format!("validating {provider_name} api key…"));
+        self.toast = None;
     }
 
     /// finalise a successful validation: clear the validating flag and
@@ -236,8 +250,9 @@ impl LoginPickerState {
             entry_id: entry_id.to_string(),
             provider_name: provider_name.to_string(),
             buffer: String::new(),
+            error_message: Some(reason.into()),
         });
-        self.toast = Some(reason.into());
+        self.toast = None;
     }
 
     /// snapshot of the row currently highlighted, after filtering
@@ -456,12 +471,13 @@ mod tests {
     }
 
     #[test]
-    fn begin_validation_clears_entry_buffer_and_records_in_flight_id() {
+    fn begin_validation_clears_buffer_but_keeps_prompt_alive_for_popover() {
         // while a validation is in flight the entered key must not
-        // linger in the picker buffer (it could leak to the next
-        // render of the prompt). recording the entry id on the picker
-        // lets the runner correlate the eventual outcome back to the
-        // right row even if focus has shifted
+        // linger in the buffer (it could leak to the next render of
+        // the popover). but the prompt itself stays alive so the
+        // popover widget keeps rendering during the roundtrip,
+        // giving the user continuous visual feedback. the in-flight
+        // row id sits on `validating` for the runner to correlate
         let mut picker =
             LoginPickerState::new(vec![api_key_entry("openrouter", "OpenRouter", None)]);
         picker.arm_entry();
@@ -469,12 +485,16 @@ mod tests {
             prompt.buffer.push_str("sk-or-v1-secret");
         }
         picker.begin_validation("openrouter", "OpenRouter");
-        assert!(picker.entry.is_none(), "entry prompt must be cleared");
+        let prompt = picker
+            .entry
+            .as_ref()
+            .expect("prompt should remain so the popover stays visible");
+        assert!(prompt.buffer.is_empty(), "buffer must be wiped");
+        assert!(prompt.error_message.is_none());
         assert_eq!(picker.validating.as_deref(), Some("openrouter"));
         assert!(
-            picker.toast.as_deref().unwrap().contains("validating"),
-            "toast should mention validation, got {:?}",
-            picker.toast
+            picker.toast.is_none(),
+            "validating message belongs in the popover, not the bottom toast"
         );
     }
 
@@ -482,22 +502,21 @@ mod tests {
     fn finish_validation_failure_restores_entry_prompt_for_retry() {
         // a rejected key must put the user right back at the prompt so
         // they can paste a corrected version without reopening the
-        // picker. the toast should explain why so it isn't a no-op
+        // picker. the rejection lives inside the prompt itself so the
+        // popover widget can render it directly under the input box,
+        // instead of routing it through the bottom-of-picker toast
         let mut picker =
             LoginPickerState::new(vec![api_key_entry("openrouter", "OpenRouter", None)]);
         picker.arm_entry();
         picker.begin_validation("openrouter", "OpenRouter");
         picker.finish_validation_failure("openrouter", "OpenRouter", "key was rejected");
         assert!(picker.validating.is_none());
+        let prompt = picker.entry.as_ref().expect("prompt should be re-armed");
+        assert!(prompt.buffer.is_empty());
+        assert_eq!(prompt.error_message.as_deref(), Some("key was rejected"));
         assert!(
-            picker.entry.is_some(),
-            "prompt should be re-armed for retry"
-        );
-        assert!(picker.entry.as_ref().unwrap().buffer.is_empty());
-        assert!(
-            picker.toast.as_deref().unwrap().contains("rejected"),
-            "toast should explain failure, got {:?}",
-            picker.toast
+            picker.toast.is_none(),
+            "rejection lives in the prompt now, not the picker toast"
         );
     }
 

@@ -38,54 +38,32 @@ pub fn render(frame: &mut Frame, picker: &LoginPickerState, theme: &Theme) {
         return;
     }
 
-    // filter line, replaced by an api-key entry prompt while one is
-    // armed so the user types into a dedicated row instead of the
-    // (now-stale) filter
-    let prompt_line = if let Some(prompt) = picker.entry.as_ref() {
-        let mask: String = "•".repeat(prompt.buffer.chars().count());
-        let label = format!("paste key for {} » ", prompt.provider_name);
-        Line::from(vec![
-            Span::styled(label, theme.dim),
-            Span::styled(mask, Style::default()),
-        ])
-    } else {
-        Line::from(vec![
-            Span::styled("filter: ", theme.dim),
-            Span::styled(
-                if picker.filter.is_empty() {
-                    "…"
-                } else {
-                    &picker.filter
-                },
-                Style::default(),
-            ),
-        ])
-    };
+    // filter line stays put even during entry / validating - the
+    // entry input lives in the popover overlay rendered last
+    let prompt_line = Line::from(vec![
+        Span::styled("filter: ", theme.dim),
+        Span::styled(
+            if picker.filter.is_empty() {
+                "…"
+            } else {
+                &picker.filter
+            },
+            Style::default(),
+        ),
+    ]);
     frame.render_widget(prompt_line, Rect::new(inner.x, inner.y, inner.width, 1));
 
-    // hint line. content shifts when an entry prompt is active because
-    // the keybinds the user needs there are different
-    let hint = if picker.validating.is_some() {
-        Line::from(Span::styled("validating, please wait…", theme.dim))
-    } else if picker.entry.is_some() {
-        Line::from(vec![
-            Span::styled("type", theme.selection_marker),
-            Span::styled(" key · ", theme.dim),
-            Span::styled("enter", theme.selection_marker),
-            Span::styled(" save · ", theme.dim),
-            Span::styled("esc", theme.selection_marker),
-            Span::styled(" cancel", theme.dim),
-        ])
-    } else {
-        Line::from(vec![
-            Span::styled("ctrl+j/k", theme.selection_marker),
-            Span::styled(" nav · ", theme.dim),
-            Span::styled("enter", theme.selection_marker),
-            Span::styled(" login/logout · ", theme.dim),
-            Span::styled("esc", theme.selection_marker),
-            Span::styled(" close", theme.dim),
-        ])
-    };
+    // hint line - keybinds for the picker. while the entry popover is
+    // up these are inert, but the popover paints over them so it's
+    // not worth toggling state to signal that
+    let hint = Line::from(vec![
+        Span::styled("ctrl+j/k", theme.selection_marker),
+        Span::styled(" nav · ", theme.dim),
+        Span::styled("enter", theme.selection_marker),
+        Span::styled(" login/logout · ", theme.dim),
+        Span::styled("esc", theme.selection_marker),
+        Span::styled(" close", theme.dim),
+    ]);
     frame.render_widget(hint, Rect::new(inner.x, inner.y + 1, inner.width, 1));
 
     let toast_rows = u16::from(picker.toast.is_some());
@@ -100,6 +78,11 @@ pub fn render(frame: &mut Frame, picker: &LoginPickerState, theme: &Theme) {
             Rect::new(inner.x, toast_y, inner.width, 1),
         );
     }
+
+    // overlay the entry popover last so it paints on top of the
+    // picker. only renders when the picker is actually collecting a
+    // key or validating one
+    super::login_entry_popup::render(frame, picker, theme);
 }
 
 fn render_list(frame: &mut Frame, picker: &LoginPickerState, list_area: Rect, theme: &Theme) {
@@ -322,10 +305,11 @@ mod tests {
     }
 
     #[test]
-    fn render_shows_masked_entry_prompt_when_armed() {
-        // when the picker is collecting an api key, the filter row is
-        // replaced by a prompt and the typed characters render as •
-        // so onlookers can't read the secret
+    fn render_overlays_entry_popover_when_armed() {
+        // when the picker is collecting an api key, the entry popover
+        // paints on top of the picker so the input row, status, and
+        // hint live next to each other (no eye-darting between top of
+        // picker and bottom toast). typed characters render as •
         let mut picker =
             LoginPickerState::new(vec![api_key_entry("openrouter", "OpenRouter", None)]);
         picker.arm_entry();
@@ -335,8 +319,8 @@ mod tests {
         let buf = render_to_buffer(&picker, 100, 18);
         let content = buffer_to_string(&buf);
         assert!(
-            content.contains("paste key for OpenRouter"),
-            "prompt label should name the row, got: {content}"
+            content.contains("paste openrouter api key"),
+            "popover title should name the row in lowercase, got: {content}"
         );
         assert!(
             content.contains("•"),
@@ -346,10 +330,9 @@ mod tests {
             !content.contains("sk-or-v1-secret"),
             "raw secret must not leak into the buffer, got: {content}"
         );
-        // hint shifts to entry-mode keybinds
         assert!(
             content.contains("save"),
-            "entry hint should mention save, got: {content}"
+            "popover hint should mention save, got: {content}"
         );
     }
 }

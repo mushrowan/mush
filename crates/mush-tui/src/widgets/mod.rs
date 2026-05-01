@@ -2,6 +2,7 @@ pub mod ansi;
 pub mod at_picker;
 pub mod diff;
 pub mod input_box;
+pub mod login_entry_popup;
 pub mod login_picker;
 pub mod message_list;
 pub mod model_picker;
