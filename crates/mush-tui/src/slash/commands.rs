@@ -50,7 +50,7 @@ pub fn handle(
                 "  /settings      - open runtime settings overlay (j/k, space toggles)\n",
             );
             help.push_str("  /settings show - print current settings state\n");
-            help.push_str("  /login [p]     - oauth login to provider (default anthropic)\n");
+            help.push_str("  /login [p]     - oauth login picker (or pass id to skip)\n");
             help.push_str("  /login-complete <code> - finish the oauth flow with the code\n");
             help.push_str("  /close         - close focused pane\n");
             help.push_str("  /broadcast msg - send a message to all panes\n");
@@ -804,30 +804,17 @@ fn apply_beta_toggle(betas: &mut mush_ai::types::AnthropicBetas, field: &str, va
     true
 }
 
-/// kick off an oauth login flow in-TUI. synchronous portion only:
+/// kick off an oauth login flow in-TUI. when no provider id is given,
+/// opens the centred login picker overlay so the user can pick (or log
+/// out). with an explicit id, jumps straight into the oauth handshake:
 /// get URL + PKCE, open browser, stash pending state on `app` for
-/// `/login-complete` to pick up.
+/// `/login-complete` to pick up
 fn handle_login_start(app: &mut App, provider_id_opt: Option<&str>) {
     use mush_ai::oauth;
 
-    let provider_id = match provider_id_opt {
-        Some(id) => id.to_string(),
-        None => {
-            let providers = oauth::list_providers();
-            if providers.len() == 1 {
-                providers[0].0.to_string()
-            } else {
-                let list = providers
-                    .iter()
-                    .map(|(id, name)| format!("  {id} - {name}"))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                app.push_system_message(format!(
-                    "available oauth providers:\n{list}\n\nspecify one: /login <provider>"
-                ));
-                return;
-            }
-        }
+    let Some(provider_id) = provider_id_opt.map(str::to_string) else {
+        open_login_picker_overlay(app);
+        return;
     };
 
     let Some(provider) = oauth::get_provider(&provider_id) else {
@@ -869,6 +856,27 @@ fn handle_login_start(app: &mut App, provider_id_opt: Option<&str>) {
         provider_name: provider.name().to_string(),
         pkce,
     });
+}
+
+/// build the picker entry list by joining `oauth::list_providers()`
+/// with the on-disk credential store, then install it on `app` and
+/// switch to login picker mode
+fn open_login_picker_overlay(app: &mut App) {
+    use mush_ai::oauth;
+    let store = oauth::load_credentials().unwrap_or_default();
+    let entries: Vec<crate::login_picker::LoginEntry> = oauth::list_providers()
+        .into_iter()
+        .map(|(id, name)| {
+            let creds = store.providers.get(id);
+            crate::login_picker::LoginEntry {
+                provider_id: id.to_string(),
+                provider_name: name.to_string(),
+                logged_in: creds.is_some(),
+                account_id: creds.and_then(|c| c.account_id.clone()),
+            }
+        })
+        .collect();
+    app.open_login_picker(entries);
 }
 
 fn handle_undo(app: &mut App, conversation: &mut ConversationState) {

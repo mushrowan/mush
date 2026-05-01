@@ -56,6 +56,10 @@ pub enum AppMode {
     SessionPicker,
     /// centred floating model picker (`/model` with no arg)
     ModelPicker,
+    /// centred floating login picker (`/login` with no arg). lists each
+    /// oauth provider with logged-in/out badges, enter starts a login
+    /// flow or arms a logout confirm
+    LoginPicker,
     /// slash command completion menu visible above input
     SlashComplete,
     /// `@<word>` template picker open after a tab on a partial-match
