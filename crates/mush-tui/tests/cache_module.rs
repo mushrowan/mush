@@ -1,8 +1,8 @@
 use mush_ai::types::{CacheRetention, Provider, TokenCount, Usage};
 use mush_tui::cache::{
     BustReason, CACHE_COLD_DISPLAY_SECS, CACHE_WARN_SECS, CacheAnomaly, CacheBustDiagnostic,
-    CacheTimer, CallConfig, TokenStats, cache_ttl_secs, detect_cache_anomalies,
-    dump_cache_bust_diagnostic_in,
+    CacheTimer, CallConfig, ContextManagementMode, TokenStats, cache_ttl_secs,
+    detect_cache_anomalies, dump_cache_bust_diagnostic_in,
 };
 
 fn test_config(model: &str, thinking: &str, effort: Option<&str>) -> CallConfig {
@@ -10,6 +10,7 @@ fn test_config(model: &str, thinking: &str, effort: Option<&str>) -> CallConfig 
         model_id: model.into(),
         thinking_level: thinking.into(),
         effort: effort.map(Into::into),
+        context_management: ContextManagementMode::LocalMonotonic,
         messages_prefix_fingerprint: None,
     }
 }
@@ -24,6 +25,7 @@ fn test_config_with_prefix(
         model_id: model.into(),
         thinking_level: thinking.into(),
         effort: effort.map(Into::into),
+        context_management: ContextManagementMode::LocalMonotonic,
         messages_prefix_fingerprint: Some(prefix),
     }
 }

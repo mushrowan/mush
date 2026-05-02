@@ -246,10 +246,12 @@ fn apply_batch_result(
             }
         }
     }
-    // mark any remaining unmatched sub-calls as done
+    // mark any remaining unmatched sub-calls as errors so session reloads
+    // preserve the same signal as the live event path
     for i in sections.len()..count {
         if let Some(tc) = message.tool_calls.get_mut(first_tc + i) {
-            tc.status = ToolCallStatus::Done;
+            tc.status = ToolCallStatus::Error;
+            tc.output_preview = Some("missing result in batch output".into());
         }
     }
 }
@@ -458,6 +460,58 @@ mod tests {
         );
         assert_eq!(app.messages[1].role, MessageRole::User);
         assert_eq!(app.messages[1].content, "next user turn after compaction");
+    }
+
+    #[tokio::test]
+    async fn batch_rebuild_marks_unmatched_sub_calls_as_error() {
+        let mut app = app();
+        let model = test_model();
+        let conversation = vec![Message::Assistant(
+            AssistantMessage::builder()
+                .content(vec![AssistantContentPart::ToolCall(ToolCall {
+                    id: ToolCallId::from("batch_1"),
+                    name: ToolName::from("batch"),
+                    arguments: serde_json::json!({
+                        "tool_calls": [
+                            {"tool": "skill", "parameters": {"name": "jj"}},
+                            {"tool": "skill", "parameters": {"name": "rust-idioms"}},
+                            {"tool": "skill", "parameters": {"name": "rust-project"}}
+                        ]
+                    }),
+                })])
+                .model(model.id)
+                .provider(Provider::Anthropic)
+                .api(Api::AnthropicMessages)
+                .usage(Usage {
+                    input_tokens: TokenCount::new(10),
+                    output_tokens: TokenCount::new(5),
+                    cache_read_tokens: TokenCount::ZERO,
+                    cache_write_tokens: TokenCount::ZERO,
+                })
+                .stop_reason(StopReason::ToolUse)
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        ), Message::ToolResult(ToolResultMessage {
+            tool_call_id: ToolCallId::from("batch_1"),
+            tool_name: ToolName::from("batch"),
+            content: vec![ToolResultContentPart::Text(TextContent {
+                text: "--- [0] skill [ok] ---\n<skill_content name=\"jj\">ok</skill_content>\n\n--- [1] skill [ok] ---\n<skill_content name=\"rust-idioms\">ok</skill_content>\n\nbatch: 2/3 succeeded, 0 failed".into(),
+            })],
+            outcome: ToolOutcome::Success,
+            timestamp_ms: Timestamp::zero(),
+        })];
+
+        rebuild_display(&mut app, &conversation);
+
+        assert_eq!(app.messages.len(), 1);
+        assert_eq!(app.messages[0].tool_calls.len(), 3);
+        assert_eq!(app.messages[0].tool_calls[0].status, ToolCallStatus::Done);
+        assert_eq!(app.messages[0].tool_calls[1].status, ToolCallStatus::Done);
+        assert_eq!(app.messages[0].tool_calls[2].status, ToolCallStatus::Error);
+        assert_eq!(
+            app.messages[0].tool_calls[2].output_preview.as_deref(),
+            Some("missing result in batch output")
+        );
     }
 
     #[test]

@@ -2,7 +2,6 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
 use mush_ai::types::Api;
@@ -17,10 +16,6 @@ use mush_agent::truncation::{MAX_BYTES, MAX_LINES};
 const CONTENT_LINE_HEADROOM: usize = 5;
 /// per-line length cap (chars). longer lines silently truncated
 const MAX_LINE_CHARS: usize = 500;
-/// once cumulative lines read in this session cross this threshold,
-/// each subsequent read appends a hint suggesting the agent be more
-/// targeted (use grep, offset/limit, around_line, etc)
-const DEFAULT_CUMULATIVE_LINES_THRESHOLD: usize = 10_000;
 
 const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "webp"];
 
@@ -201,23 +196,11 @@ impl ReadArgs {
 
 pub struct ReadTool {
     cwd: Arc<Path>,
-    cumulative_threshold: usize,
-    cumulative_lines: Arc<AtomicUsize>,
 }
 
 impl ReadTool {
     pub fn new(cwd: Arc<Path>) -> Self {
-        Self {
-            cwd,
-            cumulative_threshold: DEFAULT_CUMULATIVE_LINES_THRESHOLD,
-            cumulative_lines: Arc::new(AtomicUsize::new(0)),
-        }
-    }
-
-    #[cfg(test)]
-    fn with_cumulative_threshold(mut self, threshold: usize) -> Self {
-        self.cumulative_threshold = threshold;
-        self
+        Self { cwd }
     }
 }
 
@@ -327,17 +310,9 @@ impl AgentTool for ReadTool {
 
         let path = resolve_path(&self.cwd, &args.path);
         let json_output = args.output.is_json();
-        let cumulative = self.cumulative_lines.clone();
-        let threshold = self.cumulative_threshold;
 
         tokio::task::spawn_blocking(move || {
-            let (mut result, lines_read) = read_file(&path, args.offset, args.limit, json_output);
-            if lines_read > 0 {
-                let prev = cumulative.fetch_add(lines_read, Ordering::Relaxed);
-                if prev + lines_read > threshold {
-                    append_cumulative_hint(&mut result, prev + lines_read, threshold);
-                }
-            }
+            let (result, _lines_read) = read_file(&path, args.offset, args.limit, json_output);
             result
         })
         .await
@@ -457,23 +432,6 @@ fn read_file(
         (ToolResult::text(json.to_string()), lines_written)
     } else {
         (ToolResult::text(result), lines_written)
-    }
-}
-
-/// append a hint to a ToolResult's first text part (if any) suggesting
-/// the agent switch to more targeted search tools
-fn append_cumulative_hint(result: &mut ToolResult, cumulative: usize, threshold: usize) {
-    use mush_ai::types::ToolResultContentPart;
-    let hint = format!(
-        "\n\n[hint: cumulative {cumulative} lines read this session (threshold {threshold}). \
-         consider using grep, find, or offset/limit/around_line for targeted reads \
-         rather than full-file scans]"
-    );
-    for part in &mut result.content {
-        if let ToolResultContentPart::Text(t) = part {
-            t.text.push_str(&hint);
-            return;
-        }
     }
 }
 
@@ -680,29 +638,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cumulative_reads_beyond_threshold_emit_warning() {
+    async fn repeated_reads_do_not_append_session_cumulative_warning() {
         let dir = temp_dir();
         let small = dir.path().join("a.txt");
         let big = dir.path().join("b.txt");
         fs::write(&small, "x\n".repeat(5)).unwrap();
         fs::write(&big, "y\n".repeat(10)).unwrap();
 
-        let tool = ReadTool::new(dir.path().into()).with_cumulative_threshold(10);
+        let tool = ReadTool::new(dir.path().into());
 
-        // first read: 5 lines, cumulative=5, below threshold, no warning
         let r1 = tool.execute(serde_json::json!({"path": "a.txt"})).await;
         let t1 = extract_text(&r1);
         assert!(
             !t1.contains("cumulative"),
-            "first read should not warn, got: {t1}"
+            "read output should not include session-wide warnings, got: {t1}"
         );
 
-        // second read: 10 more lines, cumulative=15 > 10, warning should appear
         let r2 = tool.execute(serde_json::json!({"path": "b.txt"})).await;
         let t2 = extract_text(&r2);
         assert!(
-            t2.contains("cumulative"),
-            "second read should warn about cumulative reads, got: {t2}"
+            !t2.contains("cumulative"),
+            "read output should not include session-wide warnings, got: {t2}"
         );
     }
 

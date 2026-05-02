@@ -3218,6 +3218,7 @@ dependencies = [
  "libc",
  "mush-agent",
  "mush-ai",
+ "mush-treesitter",
  "pretty_assertions",
  "reqwest 0.13.2",
  "serde",

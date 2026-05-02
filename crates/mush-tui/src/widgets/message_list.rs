@@ -14,7 +14,6 @@ use crate::app::{
     App, CodeBlock, DisplayMessage, DisplayToolCall, ImageRenderArea, MessageRole, ToolCallStatus,
 };
 use crate::app_state::CachedHeight;
-use crate::text::truncate_with_ellipsis;
 use crate::widgets::shimmer::shimmer_spans;
 
 /// horizontal padding cells reserved around message body content.
@@ -665,23 +664,15 @@ fn render_message(
     }
 
     // thinking block
-    if let Some(ref thinking) = msg.thinking {
-        if msg.thinking_expanded {
-            let cw = message_content_width(width as usize);
-            let strip = common_leading_space(thinking);
-            for text_line in thinking.lines() {
-                let body = drop_leading_spaces(text_line, strip);
-                let styled = Line::styled(body.to_string(), app.theme.thinking);
-                lines.extend(indent_line(styled, cw));
-            }
-        } else {
-            let preview = thinking.lines().next().unwrap_or("…");
-            let trimmed = truncate_with_ellipsis(preview, 60);
-            lines.push(Line::from(vec![
-                Span::styled(" 💭 ", app.theme.thinking),
-                Span::styled(trimmed, app.theme.dim),
-                Span::styled(" [ctrl+o]", app.theme.dim),
-            ]));
+    if let Some(ref thinking) = msg.thinking
+        && msg.thinking_expanded
+    {
+        let cw = message_content_width(width as usize);
+        let strip = common_leading_space(thinking);
+        for text_line in thinking.lines() {
+            let body = drop_leading_spaces(text_line, strip);
+            let styled = Line::styled(body.to_string(), app.theme.thinking);
+            lines.extend(indent_line(styled, cw));
         }
     }
 
@@ -1153,12 +1144,10 @@ fn compute_message_height(
     }
 
     // thinking
-    if let Some(ref thinking) = msg.thinking {
-        if msg.thinking_expanded {
-            h += count_estimated_lines(thinking, cw);
-        } else {
-            h += 1;
-        }
+    if let Some(ref thinking) = msg.thinking
+        && msg.thinking_expanded
+    {
+        h += count_estimated_lines(thinking, cw);
     }
 
     // content
@@ -2634,18 +2623,17 @@ mod tests {
     }
 
     #[test]
-    fn thinking_shows_collapsed() {
+    fn status_only_handles_streaming_thinking_label() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.messages.push(DisplayMessage {
-            thinking: Some(
-                "first i need to consider the question deeply and think about it".into(),
-            ),
+            thinking: Some("first i need to consider the question deeply".into()),
             ..DisplayMessage::new(MessageRole::Assistant, "the answer is 42")
         });
         let buf = render_app(&app, 60, 10);
         let content = buffer_to_string(&buf);
-        // should show the thinking emoji indicator
-        assert!(content.contains("💭"));
+        assert!(!content.contains("💭"), "got:\n{content}");
+        assert!(!content.contains("[ctrl+o]"), "got:\n{content}");
+        assert!(content.contains("the answer is 42"), "got:\n{content}");
     }
 
     #[test]

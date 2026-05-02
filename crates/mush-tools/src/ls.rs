@@ -132,7 +132,7 @@ fn list_dir(path: &Path) -> ToolResult {
         let size = meta
             .as_ref()
             .map_or_else(|| "?".to_string(), |m| format_size(m.len()));
-        lines.push(format!("{size:>8}  {name}{type_indicator}"));
+        lines.push(format!("{size}  {name}{type_indicator}"));
     }
 
     let mut output = lines.join("\n");
@@ -189,15 +189,19 @@ mod tests {
     }
 
     #[test]
-    fn list_directory() {
+    fn list_directory_keeps_sizes_aligned_without_leading_indent() {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir(dir.path().join("src")).unwrap();
         fs::write(dir.path().join("a.txt"), "hello").unwrap();
 
         let result = list_dir(dir.path());
         let text = extract_text(&result);
-        assert!(text.contains("src/"));
-        assert!(text.contains("a.txt"));
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(
+            lines.iter().all(|line| !line.starts_with(' ')),
+            "got: {text}"
+        );
+        assert!(text.contains("0B  src/"), "got: {text}");
     }
 
     #[test]

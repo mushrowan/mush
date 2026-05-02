@@ -35,8 +35,6 @@ pub struct AppSetup {
     pub tool_descriptions: Vec<(String, String)>,
     /// shared http client for all network calls
     pub http_client: reqwest::Client,
-    /// holds the watcher alive (dropped when AppSetup is dropped)
-    _repo_map_watcher: Option<mush_treesitter::RepoMapWatcher>,
 }
 
 /// CLI args needed for shared setup (avoids depending on clap struct)
@@ -153,7 +151,7 @@ impl AppSetup {
             .unwrap_or(mush_agent::DEFAULT_MAX_TURNS);
         let lifecycle_hooks = cfg.lifecycle_hooks();
 
-        let _repo_map_watcher = init_repo_map(&cfg, &cwd, args.no_tools, &mut tools);
+        init_repo_map(&cfg, &cwd, args.no_tools, &mut tools);
         if let Some(t) = &mut timer {
             t.phase("repo map");
         }
@@ -190,7 +188,6 @@ impl AppSetup {
                 lsp_diagnostics,
                 tool_descriptions,
                 http_client,
-                _repo_map_watcher,
             },
             report,
         ))
@@ -287,19 +284,16 @@ fn init_repo_map(
     cwd: &std::path::Path,
     no_tools: bool,
     tools: &mut mush_agent::tool::ToolRegistry,
-) -> Option<mush_treesitter::RepoMapWatcher> {
-    if !cfg.retrieval.repo_map {
-        return None;
+) {
+    if !cfg.retrieval.repo_map || no_tools || !mush_treesitter::is_inside_repo(cwd) {
+        return;
     }
-    let (repo_map_text, watcher) = start_repo_map_watcher(cwd, cfg.retrieval.context_budget);
-    if let Some(ref shared) = repo_map_text
-        && !no_tools
-    {
-        tools.register_shared(std::sync::Arc::new(mush_tools::repo_map::RepoMapTool::new(
-            shared.clone(),
-        )));
-    }
-    watcher
+
+    let shared =
+        mush_tools::repo_map::RepoMapShared::lazy(cwd.to_path_buf(), cfg.retrieval.context_budget);
+    tools.register_shared(std::sync::Arc::new(mush_tools::repo_map::RepoMapTool::new(
+        shared,
+    )));
 }
 
 fn init_lsp(
@@ -710,50 +704,6 @@ fn parse_language_name(name: &str) -> Option<mush_treesitter::Language> {
         "nix" => Some(mush_treesitter::Language::Nix),
         _ => None,
     }
-}
-
-/// start the repo map file watcher and return the shared map text
-///
-/// the watcher keeps the repo map up to date as files change during
-/// the session. the shared text is passed to the RepoMapTool so the
-/// agent can query it on demand.
-fn start_repo_map_watcher(
-    cwd: &std::path::Path,
-    token_budget: usize,
-) -> (
-    Option<mush_tools::repo_map::SharedMapText>,
-    Option<mush_treesitter::RepoMapWatcher>,
-) {
-    // skip repo map when not inside a VCS repo to avoid walking
-    // unbounded directory trees (e.g. running from ~)
-    if !mush_treesitter::is_inside_repo(cwd) {
-        tracing::debug!(
-            cwd = %cwd.display(),
-            "skipping repo map: not inside a git/jj repository"
-        );
-        return (None, None);
-    }
-
-    let watcher = match mush_treesitter::RepoMapWatcher::start(cwd, token_budget) {
-        Some(w) => w,
-        None => {
-            // fall back to a static one-shot map
-            let repo_map = mush_treesitter::build_repo_map(cwd);
-            if repo_map.files.is_empty() {
-                return (None, None);
-            }
-            let map_text = repo_map.format_for_tokens(token_budget);
-            if map_text.is_empty() {
-                return (None, None);
-            }
-            let shared: mush_tools::repo_map::SharedMapText =
-                std::sync::Arc::new(std::sync::RwLock::new(map_text));
-            return (Some(shared), None);
-        }
-    };
-
-    let shared = watcher.map_text().clone();
-    (Some(shared), Some(watcher))
 }
 
 /// build a prompt enricher that returns a relevance hint for the user message

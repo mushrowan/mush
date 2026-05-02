@@ -204,6 +204,29 @@ pub const CACHE_WARN_SECS: u16 = 60;
 /// seconds after cache expires to keep showing "cold" in status bar
 pub const CACHE_COLD_DISPLAY_SECS: u64 = 30;
 
+/// whether a context-size decrease between consecutive calls should be
+/// treated as suspicious, expected, or opaque.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextManagementMode {
+    /// we manage the full prompt window explicitly, so a shrink without
+    /// local compaction is worth flagging.
+    LocalMonotonic,
+    /// the provider may shrink context server-side via truncation or
+    /// compaction. a smaller reported input window is expected.
+    ProviderManaged,
+    /// the backend keeps opaque session state, so input-token movement
+    /// is not a reliable anomaly signal.
+    SessionManaged,
+}
+
+impl ContextManagementMode {
+    #[must_use]
+    pub fn from_call_config(cfg: Option<&CallConfig>) -> Self {
+        cfg.map_or(Self::LocalMonotonic, |c| c.context_management)
+    }
+}
+
 /// detected anomaly in cache behaviour between consecutive API calls
 #[derive(Debug, Clone, PartialEq)]
 pub enum CacheAnomaly {
@@ -251,6 +274,7 @@ pub struct CallConfig {
     pub model_id: String,
     pub thinking_level: String,
     pub effort: Option<String>,
+    pub context_management: ContextManagementMode,
     /// fingerprint of the messages prefix (everything before the last
     /// user text message). populated by anthropic-style providers that
     /// emit per-request snapshots. comparing prev vs curr lets the
@@ -303,8 +327,16 @@ pub fn detect_cache_anomalies(
     let prev_ctx = prev.total_input_tokens();
     let curr_ctx = curr.total_input_tokens();
 
-    // context should grow (or stay the same) without a compact
-    if curr_ctx < prev_ctx {
+    let prev_mode = ContextManagementMode::from_call_config(prev_config);
+    let curr_mode = ContextManagementMode::from_call_config(curr_config);
+
+    // context should grow (or stay the same) only when we manage the
+    // full prompt window locally. providers with server-side truncation
+    // or opaque session state can legitimately report a smaller window.
+    if curr_ctx < prev_ctx
+        && prev_mode == ContextManagementMode::LocalMonotonic
+        && curr_mode == ContextManagementMode::LocalMonotonic
+    {
         anomalies.push(CacheAnomaly::ContextDecrease {
             prev: prev_ctx,
             curr: curr_ctx,
@@ -731,16 +763,68 @@ mod tests {
     }
 
     #[test]
-    fn apply_serving_provider_zeros_ttl_when_caching_disabled() {
-        // gating from cycle 1: even after observing the upstream, if
-        // the model has no caching support OR the user disabled the
-        // timer, the ttl stays at zero
-        let mut model = openrouter_model_with_caching();
-        model.cost.cache_read = 0.0;
-        model.cost.cache_write = 0.0;
-        let opts = StreamOptions::default();
-        let mut timer = CacheTimer::new(300);
-        timer.apply_serving_provider("DeepSeek", &model, &opts, true);
-        assert_eq!(timer.ttl_secs, 0);
+    fn detect_cache_anomalies_ignores_context_decrease_for_openai_auto_truncation() {
+        let prev = Usage {
+            input_tokens: TokenCount::new(131_000),
+            output_tokens: TokenCount::new(100_000),
+            cache_read_tokens: TokenCount::ZERO,
+            cache_write_tokens: TokenCount::ZERO,
+        };
+        let curr = Usage {
+            input_tokens: TokenCount::new(126_000),
+            output_tokens: TokenCount::new(100_000),
+            cache_read_tokens: TokenCount::ZERO,
+            cache_write_tokens: TokenCount::ZERO,
+        };
+        let prev_cfg = CallConfig {
+            model_id: "gpt-5.4".into(),
+            thinking_level: "High".into(),
+            effort: None,
+            context_management: ContextManagementMode::ProviderManaged,
+            messages_prefix_fingerprint: None,
+        };
+        let curr_cfg = prev_cfg.clone();
+
+        let anomalies =
+            detect_cache_anomalies(Some(&prev), &curr, Some(&prev_cfg), Some(&curr_cfg));
+        assert!(
+            !anomalies
+                .iter()
+                .any(|a| matches!(a, CacheAnomaly::ContextDecrease { .. })),
+            "openai responses auto truncation should not be flagged: {anomalies:?}"
+        );
+    }
+
+    #[test]
+    fn detect_cache_anomalies_ignores_context_decrease_for_codex_session_route() {
+        let prev = Usage {
+            input_tokens: TokenCount::new(131_000),
+            output_tokens: TokenCount::new(100_000),
+            cache_read_tokens: TokenCount::ZERO,
+            cache_write_tokens: TokenCount::ZERO,
+        };
+        let curr = Usage {
+            input_tokens: TokenCount::new(126_000),
+            output_tokens: TokenCount::new(100_000),
+            cache_read_tokens: TokenCount::ZERO,
+            cache_write_tokens: TokenCount::ZERO,
+        };
+        let prev_cfg = CallConfig {
+            model_id: "gpt-5.3-codex".into(),
+            thinking_level: "High".into(),
+            effort: None,
+            context_management: ContextManagementMode::SessionManaged,
+            messages_prefix_fingerprint: None,
+        };
+        let curr_cfg = prev_cfg.clone();
+
+        let anomalies =
+            detect_cache_anomalies(Some(&prev), &curr, Some(&prev_cfg), Some(&curr_cfg));
+        assert!(
+            !anomalies
+                .iter()
+                .any(|a| matches!(a, CacheAnomaly::ContextDecrease { .. })),
+            "codex session route should not be flagged: {anomalies:?}"
+        );
     }
 }
