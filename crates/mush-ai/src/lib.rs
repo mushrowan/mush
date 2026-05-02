@@ -4,6 +4,7 @@ pub mod env;
 pub mod login;
 pub mod models;
 pub mod oauth;
+pub mod openrouter_coverage;
 pub mod openrouter_credits;
 pub mod openrouter_endpoints;
 pub mod openrouter_generation;
