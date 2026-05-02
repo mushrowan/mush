@@ -367,6 +367,25 @@ impl Widget for MessageList<'_> {
             ]));
         }
 
+        // backgrounded /compact run: drop a single throbber+label row
+        // so the chat shows live progress without an inline system
+        // message that would persist forever in scrollback
+        if self.app.compacting {
+            let dim = self.app.theme.dim;
+            let throbber = Throbber::default()
+                .throbber_set(BRAILLE_SIX)
+                .use_type(WhichUse::Spin);
+            let spinner_span = throbber.to_symbol_span(&self.app.throbber_state);
+            let mut spans = vec![Span::raw(" "), spinner_span.style(dim)];
+            spans.extend(shimmer_spans(
+                " compacting…",
+                &self.app.theme.shimmer,
+                self.app.shimmer_phase(),
+                dim,
+            ));
+            lines.push(Line::from(spans));
+        }
+
         // queued (steering) messages always appear at the bottom
         for (i, msg) in self.app.messages.iter().enumerate() {
             if !msg.queued {
@@ -2220,6 +2239,36 @@ mod tests {
         // should be mostly empty
         let content = buffer_to_string(&buf);
         assert!(content.trim().is_empty());
+    }
+
+    #[test]
+    fn compacting_renders_inline_busy_row_with_label() {
+        // when /compact is in flight the message list grows a single
+        // status row with the throbber + "compacting…" label, so the
+        // user sees what's happening even when the status bar is
+        // hidden or full of other text. without an active stream there
+        // would otherwise be no on-chat indication of work
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.compacting = true;
+        let buf = render_app(&app, 40, 10);
+        let content = buffer_to_string(&buf);
+        assert!(
+            content.contains("compacting"),
+            "expected 'compacting' label in chat, got:\n{content}"
+        );
+    }
+
+    #[test]
+    fn compacting_row_disappears_once_flag_cleared() {
+        // sanity: clearing the flag must remove the row so post-
+        // compaction frames don't leave a ghost spinner in scrollback
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.compacting = true;
+        let buf = render_app(&app, 40, 10);
+        assert!(buffer_to_string(&buf).contains("compacting"));
+        app.compacting = false;
+        let buf = render_app(&app, 40, 10);
+        assert!(!buffer_to_string(&buf).contains("compacting"));
     }
 
     #[test]
