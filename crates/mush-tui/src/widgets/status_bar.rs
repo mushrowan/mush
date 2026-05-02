@@ -229,7 +229,12 @@ fn left_spans(app: &App, width: u16) -> Vec<Span<'static>> {
         // when idle, the ephemeral status (if any) shows in its place
         if let Some(label) = app.activity_label() {
             spans.push(sep.clone());
-            spans.push(Span::styled(label, dim));
+            spans.extend(crate::widgets::shimmer::shimmer_spans(
+                &label,
+                &app.theme.shimmer,
+                app.shimmer_phase(),
+                dim,
+            ));
         } else if let Some(ref status) = app.status
             && status != "config reloaded"
         {

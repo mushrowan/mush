@@ -9,6 +9,7 @@ pub mod model_picker;
 pub mod search_popup;
 pub mod session_picker;
 pub mod settings_menu;
+pub mod shimmer;
 pub mod slash_menu;
 pub mod status_bar;
 pub mod tab_bar;

@@ -279,6 +279,13 @@ impl App {
         self.tick_count % UNREAD_FLASH_CYCLE < UNREAD_FLASH_ON
     }
 
+    /// phase offset for shimmer-styled labels. advances at the same
+    /// ~8fps cadence as the throbber so the wave glides in lockstep
+    /// with the spinner rather than chasing 60fps frames
+    pub fn shimmer_phase(&self) -> usize {
+        (self.tick_count / TICK_DIVISOR) as usize
+    }
+
     /// whether the agent is currently active (streaming or executing tools)
     pub fn is_busy(&self) -> bool {
         self.compacting

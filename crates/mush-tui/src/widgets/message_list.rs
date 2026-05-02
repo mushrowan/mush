@@ -15,6 +15,7 @@ use crate::app::{
 };
 use crate::app_state::CachedHeight;
 use crate::text::truncate_with_ellipsis;
+use crate::widgets::shimmer::shimmer_spans;
 
 /// horizontal padding cells reserved around message body content.
 ///
@@ -314,11 +315,14 @@ impl Widget for MessageList<'_> {
             if !self.app.stream.thinking.is_empty()
                 && self.app.thinking_display != crate::app::ThinkingDisplay::Hidden
             {
-                lines.push(Line::from(vec![
-                    Span::raw(" "),
-                    spinner_span.clone().style(dim),
-                    Span::styled(" thinking", dim),
-                ]));
+                let mut spans = vec![Span::raw(" "), spinner_span.clone().style(dim)];
+                spans.extend(shimmer_spans(
+                    " thinking",
+                    &self.app.theme.shimmer,
+                    self.app.shimmer_phase(),
+                    dim,
+                ));
+                lines.push(Line::from(spans));
                 let visible_thinking = self.app.visible_streaming_thinking();
                 let strip = common_leading_space(visible_thinking);
                 for text_line in visible_thinking.lines() {
@@ -336,11 +340,14 @@ impl Widget for MessageList<'_> {
                 }
             }
             if self.app.stream.text.is_empty() && self.app.stream.thinking.is_empty() {
-                lines.push(Line::from(vec![
-                    Span::raw(" "),
-                    spinner_span.clone().style(dim),
-                    Span::styled(" working", dim),
-                ]));
+                let mut spans = vec![Span::raw(" "), spinner_span.clone().style(dim)];
+                spans.extend(shimmer_spans(
+                    " working",
+                    &self.app.theme.shimmer,
+                    self.app.shimmer_phase(),
+                    dim,
+                ));
+                lines.push(Line::from(spans));
             }
         }
 

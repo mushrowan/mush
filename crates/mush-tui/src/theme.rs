@@ -137,6 +137,13 @@ pub struct Theme {
 
     // unread indicator flash
     pub unread: Style,
+
+    /// shimmer palette: per-char colours cycled across busy labels
+    /// (thinking…, working, compacting…) so they read as alive without
+    /// adding extra glyphs. ordered, repeated, and offset by the tick
+    /// counter to produce a smooth left-to-right wave. empty disables
+    /// the effect (callers fall back to the underlying flat style)
+    pub shimmer: Vec<Color>,
 }
 
 impl Default for Theme {
@@ -278,6 +285,16 @@ impl Theme {
                 .fg(Color::Magenta)
                 .add_modifier(Modifier::ITALIC),
             unread: Style::default().fg(Color::Yellow),
+            // calm cyan→purple→pink wave that reads against most dark
+            // terminal palettes. five steps gives a perceptible glide
+            // without flickering across very short labels
+            shimmer: vec![
+                Color::Indexed(51),
+                Color::Indexed(45),
+                Color::Indexed(99),
+                Color::Indexed(135),
+                Color::Indexed(207),
+            ],
         }
     }
 
@@ -385,6 +402,15 @@ impl Theme {
                 .fg(Color::Magenta)
                 .add_modifier(Modifier::ITALIC),
             unread: Style::default().fg(Color::Yellow),
+            // light theme: deeper saturations so the wave still reads
+            // against a bright background. same 5-step gradient as dark
+            shimmer: vec![
+                Color::Indexed(31),
+                Color::Indexed(25),
+                Color::Indexed(61),
+                Color::Indexed(97),
+                Color::Indexed(162),
+            ],
         }
     }
 
