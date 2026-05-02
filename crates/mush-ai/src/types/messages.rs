@@ -66,13 +66,17 @@ impl UserMessage {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, bon::Builder)]
+#[builder(on(String, into))]
 pub struct AssistantMessage {
+    #[builder(default)]
     pub content: Vec<AssistantContentPart>,
     pub model: ModelId,
     pub provider: Provider,
     pub api: Api,
+    #[builder(default)]
     pub usage: Usage,
+    #[builder(default = StopReason::Stop)]
     pub stop_reason: StopReason,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
@@ -317,17 +321,14 @@ mod tests {
     }
 
     fn assistant() -> Message {
-        Message::Assistant(AssistantMessage {
-            content: vec![],
-            model: ModelId::from("test"),
-            provider: Provider::Anthropic,
-            api: Api::AnthropicMessages,
-            usage: Usage::default(),
-            stop_reason: StopReason::Stop,
-            error_message: None,
-            timestamp_ms: Timestamp::zero(),
-            generation_id: None,
-        })
+        Message::Assistant(
+            AssistantMessage::builder()
+                .model(ModelId::from("test"))
+                .provider(Provider::Anthropic)
+                .api(Api::AnthropicMessages)
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )
     }
 
     fn tool_result() -> Message {

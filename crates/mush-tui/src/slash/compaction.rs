@@ -318,8 +318,8 @@ mod tests {
     use super::*;
     use crate::app::App;
     use mush_ai::types::{
-        Api, AssistantContentPart, AssistantMessage, Provider, StopReason, TextContent, Timestamp,
-        TokenCount, Usage, UserContent, UserMessage,
+        Api, AssistantContentPart, AssistantMessage, Provider, TextContent, Timestamp, TokenCount,
+        Usage, UserContent, UserMessage,
     };
 
     fn test_model() -> Model {
@@ -337,24 +337,23 @@ mod tests {
     }
 
     fn assistant_msg(text: &str, input_tokens: u64) -> Message {
-        Message::Assistant(AssistantMessage {
-            content: vec![AssistantContentPart::Text(TextContent {
-                text: text.into(),
-            })],
-            model: test_model().id,
-            provider: Provider::Anthropic,
-            api: Api::AnthropicMessages,
-            usage: Usage {
-                input_tokens: TokenCount::new(input_tokens),
-                output_tokens: TokenCount::new(20),
-                cache_read_tokens: TokenCount::ZERO,
-                cache_write_tokens: TokenCount::ZERO,
-            },
-            stop_reason: StopReason::Stop,
-            error_message: None,
-            timestamp_ms: Timestamp::zero(),
-            generation_id: None,
-        })
+        Message::Assistant(
+            AssistantMessage::builder()
+                .content(vec![AssistantContentPart::Text(TextContent {
+                    text: text.into(),
+                })])
+                .model(test_model().id)
+                .provider(Provider::Anthropic)
+                .api(Api::AnthropicMessages)
+                .usage(Usage {
+                    input_tokens: TokenCount::new(input_tokens),
+                    output_tokens: TokenCount::new(20),
+                    cache_read_tokens: TokenCount::ZERO,
+                    cache_write_tokens: TokenCount::ZERO,
+                })
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )
     }
 
     /// /compact must leave app.stats in a "no recent live call" state:

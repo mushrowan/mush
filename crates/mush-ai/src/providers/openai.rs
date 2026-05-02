@@ -598,17 +598,12 @@ fn map_stop_reason(reason: &str) -> StopReason {
 #[doc(hidden)]
 pub fn benchmark_tool_call_deltas(chunk_count: usize, arg_bytes: usize) -> usize {
     let (_, fragments) = super::bench_support::tool_call_json_fragments(chunk_count, arg_bytes);
-    let mut output = AssistantMessage {
-        content: vec![],
-        model: "bench".into(),
-        provider: Provider::Custom("bench".into()),
-        api: Api::OpenaiCompletions,
-        usage: Usage::default(),
-        stop_reason: StopReason::Stop,
-        error_message: None,
-        timestamp_ms: Timestamp::zero(),
-        generation_id: None,
-    };
+    let mut output = AssistantMessage::builder()
+        .model("bench".into())
+        .provider(Provider::Custom("bench".into()))
+        .api(Api::OpenaiCompletions)
+        .timestamp_ms(Timestamp::zero())
+        .build();
     let mut current = None;
 
     for (index, fragment) in fragments.into_iter().enumerate() {
@@ -723,21 +718,20 @@ mod tests {
     fn convert_tool_result_in_messages() {
         let model = test_model();
         let messages = vec![
-            Message::Assistant(AssistantMessage {
-                content: vec![AssistantContentPart::ToolCall(ToolCall {
-                    id: "tc_1".into(),
-                    name: "read".into(),
-                    arguments: serde_json::json!({"path": "foo.rs"}),
-                })],
-                model: "test".into(),
-                provider: Provider::Custom("test".into()),
-                api: Api::OpenaiCompletions,
-                usage: Usage::default(),
-                stop_reason: StopReason::ToolUse,
-                error_message: None,
-                timestamp_ms: Timestamp::zero(),
-                generation_id: None,
-            }),
+            Message::Assistant(
+                AssistantMessage::builder()
+                    .content(vec![AssistantContentPart::ToolCall(ToolCall {
+                        id: "tc_1".into(),
+                        name: "read".into(),
+                        arguments: serde_json::json!({"path": "foo.rs"}),
+                    })])
+                    .model("test".into())
+                    .provider(Provider::Custom("test".into()))
+                    .api(Api::OpenaiCompletions)
+                    .stop_reason(StopReason::ToolUse)
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            ),
             Message::ToolResult(ToolResultMessage {
                 tool_call_id: "tc_1".into(),
                 tool_name: "read".into(),
@@ -991,16 +985,11 @@ mod tests {
     }
 
     fn test_output() -> AssistantMessage {
-        AssistantMessage {
-            content: vec![],
-            model: "test".into(),
-            provider: Provider::Custom("test".into()),
-            api: Api::OpenaiCompletions,
-            usage: Usage::default(),
-            stop_reason: StopReason::Stop,
-            error_message: None,
-            timestamp_ms: Timestamp::zero(),
-            generation_id: None,
-        }
+        AssistantMessage::builder()
+            .model("test".into())
+            .provider(Provider::Custom("test".into()))
+            .api(Api::OpenaiCompletions)
+            .timestamp_ms(Timestamp::zero())
+            .build()
     }
 }

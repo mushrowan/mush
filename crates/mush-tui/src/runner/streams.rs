@@ -1841,21 +1841,17 @@ mod tests {
         });
         // add an assistant message so there's a result to send back
         let model = models::all_models_with_user().into_iter().next().unwrap();
-        del_pane
-            .conversation
-            .append_message(Message::Assistant(AssistantMessage {
-                content: vec![AssistantContentPart::Text(TextContent {
+        del_pane.conversation.append_message(Message::Assistant(
+            AssistantMessage::builder()
+                .content(vec![AssistantContentPart::Text(TextContent {
                     text: "found 3 issues in main.rs".into(),
-                })],
-                model: model.id,
-                provider: Provider::Anthropic,
-                api: Api::AnthropicMessages,
-                usage: Usage::default(),
-                stop_reason: StopReason::Stop,
-                error_message: None,
-                timestamp_ms: Timestamp::zero(),
-                generation_id: None,
-            }));
+                })])
+                .model(model.id)
+                .provider(Provider::Anthropic)
+                .api(Api::AnthropicMessages)
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        ));
         pane_mgr.add_pane(del_pane);
 
         let tui_config = test_tui_config();

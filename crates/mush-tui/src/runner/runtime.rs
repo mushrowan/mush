@@ -395,8 +395,8 @@ mod tests {
     use super::*;
     use crate::runner::LastModels;
     use mush_ai::types::{
-        Api, AssistantContentPart, AssistantMessage, Provider, StopReason, StreamOptions,
-        TextContent, Timestamp, TokenCount, Usage, UserContent, UserMessage,
+        Api, AssistantContentPart, AssistantMessage, Provider, StreamOptions, TextContent,
+        Timestamp, TokenCount, Usage, UserContent, UserMessage,
     };
 
     fn test_model() -> mush_ai::types::Model {
@@ -472,24 +472,23 @@ mod tests {
 
     fn assistant_message(text: &str) -> Message {
         let model = test_model();
-        Message::Assistant(AssistantMessage {
-            content: vec![AssistantContentPart::Text(TextContent {
-                text: text.into(),
-            })],
-            model: model.id,
-            provider: Provider::Anthropic,
-            api: Api::AnthropicMessages,
-            usage: Usage {
-                input_tokens: TokenCount::new(10),
-                output_tokens: TokenCount::new(5),
-                cache_read_tokens: TokenCount::ZERO,
-                cache_write_tokens: TokenCount::ZERO,
-            },
-            stop_reason: StopReason::Stop,
-            error_message: None,
-            timestamp_ms: Timestamp::zero(),
-            generation_id: None,
-        })
+        Message::Assistant(
+            AssistantMessage::builder()
+                .content(vec![AssistantContentPart::Text(TextContent {
+                    text: text.into(),
+                })])
+                .model(model.id)
+                .provider(Provider::Anthropic)
+                .api(Api::AnthropicMessages)
+                .usage(Usage {
+                    input_tokens: TokenCount::new(10),
+                    output_tokens: TokenCount::new(5),
+                    cache_read_tokens: TokenCount::ZERO,
+                    cache_write_tokens: TokenCount::ZERO,
+                })
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )
     }
 
     #[test]

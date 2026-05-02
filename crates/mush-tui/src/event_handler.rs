@@ -870,17 +870,14 @@ mod tests {
         let model = mush_ai::models::all_models().first().unwrap().clone();
 
         // errored assistant message: stop_reason=Error, zero usage
-        let errored = AssistantMessage {
-            content: vec![],
-            model: model.id.clone(),
-            provider: model.provider.clone(),
-            api: model.api,
-            usage: Usage::default(),
-            stop_reason: StopReason::Error,
-            error_message: Some("Overloaded".into()),
-            timestamp_ms: Timestamp::now(),
-            generation_id: None,
-        };
+        let errored = AssistantMessage::builder()
+            .model(model.id.clone())
+            .provider(model.provider.clone())
+            .api(model.api)
+            .stop_reason(StopReason::Error)
+            .error_message("Overloaded")
+            .timestamp_ms(Timestamp::now())
+            .build();
         let mut ctx = EventCtx {
             app: &mut app,
             conversation: &mut conversation,

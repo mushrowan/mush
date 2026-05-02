@@ -128,19 +128,17 @@ mod tests {
     }
 
     fn assistant_msg(text: &str) -> Message {
-        Message::Assistant(AssistantMessage {
-            content: vec![AssistantContentPart::Text(TextContent {
-                text: text.into(),
-            })],
-            model: "test".into(),
-            provider: Provider::Anthropic,
-            api: Api::AnthropicMessages,
-            usage: Usage::default(),
-            stop_reason: StopReason::Stop,
-            error_message: None,
-            timestamp_ms: Timestamp::zero(),
-            generation_id: None,
-        })
+        Message::Assistant(
+            AssistantMessage::builder()
+                .content(vec![AssistantContentPart::Text(TextContent {
+                    text: text.into(),
+                })])
+                .model("test".into())
+                .provider(Provider::Anthropic)
+                .api(Api::AnthropicMessages)
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )
     }
 
     #[test]

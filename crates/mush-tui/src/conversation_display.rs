@@ -320,31 +320,31 @@ mod tests {
 
     fn assistant_with_tool(tool_call_id: &str) -> Message {
         let model = test_model();
-        Message::Assistant(AssistantMessage {
-            content: vec![
-                AssistantContentPart::Text(TextContent {
-                    text: "i will read that".into(),
-                }),
-                AssistantContentPart::ToolCall(ToolCall {
-                    id: ToolCallId::from(tool_call_id),
-                    name: ToolName::from("read"),
-                    arguments: serde_json::json!({ "path": "src/main.rs" }),
-                }),
-            ],
-            model: model.id,
-            provider: Provider::Anthropic,
-            api: Api::AnthropicMessages,
-            usage: Usage {
-                input_tokens: TokenCount::new(10),
-                output_tokens: TokenCount::new(5),
-                cache_read_tokens: TokenCount::ZERO,
-                cache_write_tokens: TokenCount::ZERO,
-            },
-            stop_reason: StopReason::ToolUse,
-            error_message: None,
-            timestamp_ms: Timestamp::zero(),
-            generation_id: None,
-        })
+        Message::Assistant(
+            AssistantMessage::builder()
+                .content(vec![
+                    AssistantContentPart::Text(TextContent {
+                        text: "i will read that".into(),
+                    }),
+                    AssistantContentPart::ToolCall(ToolCall {
+                        id: ToolCallId::from(tool_call_id),
+                        name: ToolName::from("read"),
+                        arguments: serde_json::json!({ "path": "src/main.rs" }),
+                    }),
+                ])
+                .model(model.id)
+                .provider(Provider::Anthropic)
+                .api(Api::AnthropicMessages)
+                .usage(Usage {
+                    input_tokens: TokenCount::new(10),
+                    output_tokens: TokenCount::new(5),
+                    cache_read_tokens: TokenCount::ZERO,
+                    cache_write_tokens: TokenCount::ZERO,
+                })
+                .stop_reason(StopReason::ToolUse)
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )
     }
 
     fn tool_result(tool_call_id: &str, outcome: ToolOutcome, text: &str) -> Message {

@@ -1027,17 +1027,12 @@ fn map_response_status(status: &str) -> StopReason {
 pub fn benchmark_tool_call_deltas(chunk_count: usize, arg_bytes: usize) -> usize {
     let (full_json, fragments) =
         super::bench_support::tool_call_json_fragments(chunk_count, arg_bytes);
-    let mut output = AssistantMessage {
-        content: vec![],
-        model: "bench".into(),
-        provider: Provider::Custom("bench".into()),
-        api: Api::OpenaiResponses,
-        usage: Usage::default(),
-        stop_reason: StopReason::Stop,
-        error_message: None,
-        timestamp_ms: Timestamp::zero(),
-        generation_id: None,
-    };
+    let mut output = AssistantMessage::builder()
+        .model("bench".into())
+        .provider(Provider::Custom("bench".into()))
+        .api(Api::OpenaiResponses)
+        .timestamp_ms(Timestamp::zero())
+        .build();
     let mut active = ActiveBlocks::new();
 
     let first = fragments
@@ -1251,17 +1246,12 @@ mod tests {
 
     #[test]
     fn tool_call_args_materialise_at_block_end() {
-        let mut output = AssistantMessage {
-            content: vec![],
-            model: "test".into(),
-            provider: Provider::Custom("test".into()),
-            api: Api::OpenaiResponses,
-            usage: Usage::default(),
-            stop_reason: StopReason::Stop,
-            error_message: None,
-            timestamp_ms: Timestamp::zero(),
-            generation_id: None,
-        };
+        let mut output = AssistantMessage::builder()
+            .model("test".into())
+            .provider(Provider::Custom("test".into()))
+            .api(Api::OpenaiResponses)
+            .timestamp_ms(Timestamp::zero())
+            .build();
         let mut active = ActiveBlocks::new();
 
         let added = serde_json::json!({
@@ -1375,8 +1365,8 @@ mod tests {
 
     #[test]
     fn finish_all_blocks_keeps_content_order_with_sparse_indexes() {
-        let mut output = AssistantMessage {
-            content: vec![
+        let mut output = AssistantMessage::builder()
+            .content(vec![
                 AssistantContentPart::Thinking(ThinkingContent::Thinking {
                     thinking: String::new(),
                     signature: None,
@@ -1384,16 +1374,12 @@ mod tests {
                 AssistantContentPart::Text(TextContent {
                     text: String::new(),
                 }),
-            ],
-            model: "test".into(),
-            provider: Provider::Custom("test".into()),
-            api: Api::OpenaiResponses,
-            usage: Usage::default(),
-            stop_reason: StopReason::Stop,
-            error_message: None,
-            timestamp_ms: Timestamp::zero(),
-            generation_id: None,
-        };
+            ])
+            .model("test".into())
+            .provider(Provider::Custom("test".into()))
+            .api(Api::OpenaiResponses)
+            .timestamp_ms(Timestamp::zero())
+            .build();
         let mut active = ActiveBlocks::new();
         active.insert(
             42,

@@ -73,40 +73,36 @@ fn user_msg(text: &str) -> Message {
 }
 
 fn assistant_msg(text: &str) -> Message {
-    Message::Assistant(AssistantMessage {
-        content: vec![AssistantContentPart::Text(TextContent {
-            text: text.into(),
-        })],
-        model: "bench".into(),
-        provider: Provider::Custom("bench".into()),
-        api: Api::OpenaiCompletions,
-        usage: Usage::default(),
-        stop_reason: StopReason::Stop,
-        error_message: None,
-        timestamp_ms: Timestamp::zero(),
-        generation_id: None,
-    })
+    Message::Assistant(
+        AssistantMessage::builder()
+            .content(vec![AssistantContentPart::Text(TextContent {
+                text: text.into(),
+            })])
+            .model("bench".into())
+            .provider(Provider::Custom("bench".into()))
+            .api(Api::OpenaiCompletions)
+            .timestamp_ms(Timestamp::zero())
+            .build(),
+    )
 }
 
 fn assistant_with_tool(text: &str, tool_name: &str, args: &str) -> Message {
-    Message::Assistant(AssistantMessage {
-        content: vec![
-            AssistantContentPart::Text(TextContent { text: text.into() }),
-            AssistantContentPart::ToolCall(ToolCall {
-                id: ToolCallId::from(format!("tc_{tool_name}")),
-                name: ToolName::from(tool_name),
-                arguments: serde_json::from_str(args).unwrap_or_default(),
-            }),
-        ],
-        model: "bench".into(),
-        provider: Provider::Custom("bench".into()),
-        api: Api::OpenaiCompletions,
-        usage: Usage::default(),
-        stop_reason: StopReason::Stop,
-        error_message: None,
-        timestamp_ms: Timestamp::zero(),
-        generation_id: None,
-    })
+    Message::Assistant(
+        AssistantMessage::builder()
+            .content(vec![
+                AssistantContentPart::Text(TextContent { text: text.into() }),
+                AssistantContentPart::ToolCall(ToolCall {
+                    id: ToolCallId::from(format!("tc_{tool_name}")),
+                    name: ToolName::from(tool_name),
+                    arguments: serde_json::from_str(args).unwrap_or_default(),
+                }),
+            ])
+            .model("bench".into())
+            .provider(Provider::Custom("bench".into()))
+            .api(Api::OpenaiCompletions)
+            .timestamp_ms(Timestamp::zero())
+            .build(),
+    )
 }
 
 fn tool_result(tool_name: &str, output: &str, error: bool) -> Message {

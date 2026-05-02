@@ -71,6 +71,8 @@ derive_more = { version = "2.1", features = [
   "as_ref",
   "into",
 ] }
+# compile-time-checked builders for structs with many optional fields
+bon = "3.9"
 
 # logging
 tracing = "0.1"

@@ -324,17 +324,14 @@ mod tests {
             })
         }
         fn a() -> Message {
-            Message::Assistant(AssistantMessage {
-                content: vec![],
-                model: "x".into(),
-                provider: Provider::Custom("x".into()),
-                api: Api::OpenaiCompletions,
-                usage: Usage::default(),
-                stop_reason: StopReason::Stop,
-                error_message: None,
-                timestamp_ms: Timestamp::now(),
-                generation_id: None,
-            })
+            Message::Assistant(
+                AssistantMessage::builder()
+                    .model("x".into())
+                    .provider(Provider::Custom("x".into()))
+                    .api(Api::OpenaiCompletions)
+                    .timestamp_ms(Timestamp::now())
+                    .build(),
+            )
         }
         fn tr(id: &str) -> Message {
             Message::ToolResult(ToolResultMessage {

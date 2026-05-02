@@ -1246,17 +1246,12 @@ fn map_stop_reason(reason: &str) -> StopReason {
 #[doc(hidden)]
 pub fn benchmark_tool_call_deltas(chunk_count: usize, arg_bytes: usize) -> usize {
     let (_, fragments) = super::bench_support::tool_call_json_fragments(chunk_count, arg_bytes);
-    let mut output = AssistantMessage {
-        content: vec![],
-        model: "bench".into(),
-        provider: Provider::Custom("bench".into()),
-        api: Api::AnthropicMessages,
-        usage: Usage::default(),
-        stop_reason: StopReason::Stop,
-        error_message: None,
-        timestamp_ms: Timestamp::zero(),
-        generation_id: None,
-    };
+    let mut output = AssistantMessage::builder()
+        .model("bench".into())
+        .provider(Provider::Custom("bench".into()))
+        .api(Api::AnthropicMessages)
+        .timestamp_ms(Timestamp::zero())
+        .build();
     let mut blocks = Vec::new();
 
     let _ = process_sse_event(
@@ -1414,21 +1409,20 @@ mod tests {
     #[test]
     fn convert_tool_result_message() {
         let messages = vec![
-            Message::Assistant(AssistantMessage {
-                content: vec![AssistantContentPart::ToolCall(ToolCall {
-                    id: "tc_123".into(),
-                    name: "read".into(),
-                    arguments: serde_json::json!({"path": "foo.rs"}),
-                })],
-                model: "test".into(),
-                provider: Provider::Custom("test".into()),
-                api: Api::AnthropicMessages,
-                usage: Usage::default(),
-                stop_reason: StopReason::ToolUse,
-                error_message: None,
-                timestamp_ms: Timestamp::zero(),
-                generation_id: None,
-            }),
+            Message::Assistant(
+                AssistantMessage::builder()
+                    .content(vec![AssistantContentPart::ToolCall(ToolCall {
+                        id: "tc_123".into(),
+                        name: "read".into(),
+                        arguments: serde_json::json!({"path": "foo.rs"}),
+                    })])
+                    .model("test".into())
+                    .provider(Provider::Custom("test".into()))
+                    .api(Api::AnthropicMessages)
+                    .stop_reason(StopReason::ToolUse)
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            ),
             Message::ToolResult(ToolResultMessage {
                 tool_call_id: "tc_123".into(),
                 tool_name: "read".into(),
@@ -1452,26 +1446,25 @@ mod tests {
 
     #[test]
     fn convert_assistant_with_tool_call() {
-        let messages = vec![Message::Assistant(AssistantMessage {
-            content: vec![
-                AssistantContentPart::Text(TextContent {
-                    text: "let me read that".into(),
-                }),
-                AssistantContentPart::ToolCall(ToolCall {
-                    id: "tc_1".into(),
-                    name: "read".into(),
-                    arguments: serde_json::json!({"path": "foo.rs"}),
-                }),
-            ],
-            model: "test".into(),
-            provider: Provider::Custom("test".into()),
-            api: Api::AnthropicMessages,
-            usage: Usage::default(),
-            stop_reason: StopReason::ToolUse,
-            error_message: None,
-            timestamp_ms: Timestamp::zero(),
-            generation_id: None,
-        })];
+        let messages = vec![Message::Assistant(
+            AssistantMessage::builder()
+                .content(vec![
+                    AssistantContentPart::Text(TextContent {
+                        text: "let me read that".into(),
+                    }),
+                    AssistantContentPart::ToolCall(ToolCall {
+                        id: "tc_1".into(),
+                        name: "read".into(),
+                        arguments: serde_json::json!({"path": "foo.rs"}),
+                    }),
+                ])
+                .model("test".into())
+                .provider(Provider::Custom("test".into()))
+                .api(Api::AnthropicMessages)
+                .stop_reason(StopReason::ToolUse)
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )];
 
         let converted = convert_messages(&messages, false, None, ToolResultTrimming::SlidingWindow);
         // assistant + synthetic tool_result for the orphaned tool_use
@@ -1500,27 +1493,26 @@ mod tests {
         // signature) violates the conversation invariant for interleaved
         // thinking and the next turn sees a tool_use with no preceding
         // thinking, which is when claude says "the thinking is cut off"
-        let messages = vec![Message::Assistant(AssistantMessage {
-            content: vec![
-                AssistantContentPart::Thinking(ThinkingContent::Thinking {
-                    thinking: String::new(),
-                    signature: Some("sig_abc123".into()),
-                }),
-                AssistantContentPart::ToolCall(ToolCall {
-                    id: "tc_1".into(),
-                    name: "read".into(),
-                    arguments: serde_json::json!({"path": "foo.rs"}),
-                }),
-            ],
-            model: "test".into(),
-            provider: Provider::Custom("test".into()),
-            api: Api::AnthropicMessages,
-            usage: Usage::default(),
-            stop_reason: StopReason::ToolUse,
-            error_message: None,
-            timestamp_ms: Timestamp::zero(),
-            generation_id: None,
-        })];
+        let messages = vec![Message::Assistant(
+            AssistantMessage::builder()
+                .content(vec![
+                    AssistantContentPart::Thinking(ThinkingContent::Thinking {
+                        thinking: String::new(),
+                        signature: Some("sig_abc123".into()),
+                    }),
+                    AssistantContentPart::ToolCall(ToolCall {
+                        id: "tc_1".into(),
+                        name: "read".into(),
+                        arguments: serde_json::json!({"path": "foo.rs"}),
+                    }),
+                ])
+                .model("test".into())
+                .provider(Provider::Custom("test".into()))
+                .api(Api::AnthropicMessages)
+                .stop_reason(StopReason::ToolUse)
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )];
 
         let converted = convert_messages(&messages, false, None, ToolResultTrimming::SlidingWindow);
         let blocks = converted[0].content.as_array().unwrap();
@@ -1536,23 +1528,21 @@ mod tests {
         // genuinely empty thinking blocks (no text, no signature) carry
         // no information for anthropic and should be dropped to avoid
         // sending malformed `{type: thinking, thinking: ""}` blocks
-        let messages = vec![Message::Assistant(AssistantMessage {
-            content: vec![
-                AssistantContentPart::Thinking(ThinkingContent::Thinking {
-                    thinking: String::new(),
-                    signature: None,
-                }),
-                AssistantContentPart::Text(TextContent { text: "hi".into() }),
-            ],
-            model: "test".into(),
-            provider: Provider::Custom("test".into()),
-            api: Api::AnthropicMessages,
-            usage: Usage::default(),
-            stop_reason: StopReason::Stop,
-            error_message: None,
-            timestamp_ms: Timestamp::zero(),
-            generation_id: None,
-        })];
+        let messages = vec![Message::Assistant(
+            AssistantMessage::builder()
+                .content(vec![
+                    AssistantContentPart::Thinking(ThinkingContent::Thinking {
+                        thinking: String::new(),
+                        signature: None,
+                    }),
+                    AssistantContentPart::Text(TextContent { text: "hi".into() }),
+                ])
+                .model("test".into())
+                .provider(Provider::Custom("test".into()))
+                .api(Api::AnthropicMessages)
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )];
 
         let converted = convert_messages(&messages, false, None, ToolResultTrimming::SlidingWindow);
         let blocks = converted[0].content.as_array().unwrap();
@@ -1562,20 +1552,20 @@ mod tests {
 
     #[test]
     fn thinking_with_text_and_signature_preserves_both() {
-        let messages = vec![Message::Assistant(AssistantMessage {
-            content: vec![AssistantContentPart::Thinking(ThinkingContent::Thinking {
-                thinking: "let me think about this".into(),
-                signature: Some("sig_xyz".into()),
-            })],
-            model: "test".into(),
-            provider: Provider::Custom("test".into()),
-            api: Api::AnthropicMessages,
-            usage: Usage::default(),
-            stop_reason: StopReason::Stop,
-            error_message: None,
-            timestamp_ms: Timestamp::zero(),
-            generation_id: None,
-        })];
+        let messages = vec![Message::Assistant(
+            AssistantMessage::builder()
+                .content(vec![AssistantContentPart::Thinking(
+                    ThinkingContent::Thinking {
+                        thinking: "let me think about this".into(),
+                        signature: Some("sig_xyz".into()),
+                    },
+                )])
+                .model("test".into())
+                .provider(Provider::Custom("test".into()))
+                .api(Api::AnthropicMessages)
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )];
 
         let converted = convert_messages(&messages, false, None, ToolResultTrimming::SlidingWindow);
         let blocks = converted[0].content.as_array().unwrap();
@@ -1587,21 +1577,20 @@ mod tests {
     #[test]
     fn tool_use_with_matching_result_no_synthetic() {
         let messages = vec![
-            Message::Assistant(AssistantMessage {
-                content: vec![AssistantContentPart::ToolCall(ToolCall {
-                    id: "tc_1".into(),
-                    name: "bash".into(),
-                    arguments: serde_json::json!({"command": "echo hi"}),
-                })],
-                model: "test".into(),
-                provider: Provider::Custom("test".into()),
-                api: Api::AnthropicMessages,
-                usage: Usage::default(),
-                stop_reason: StopReason::ToolUse,
-                error_message: None,
-                timestamp_ms: Timestamp::zero(),
-                generation_id: None,
-            }),
+            Message::Assistant(
+                AssistantMessage::builder()
+                    .content(vec![AssistantContentPart::ToolCall(ToolCall {
+                        id: "tc_1".into(),
+                        name: "bash".into(),
+                        arguments: serde_json::json!({"command": "echo hi"}),
+                    })])
+                    .model("test".into())
+                    .provider(Provider::Custom("test".into()))
+                    .api(Api::AnthropicMessages)
+                    .stop_reason(StopReason::ToolUse)
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            ),
             Message::ToolResult(ToolResultMessage {
                 tool_call_id: "tc_1".into(),
                 tool_name: "bash".into(),
@@ -1627,21 +1616,20 @@ mod tests {
     fn orphaned_tool_use_gets_synthetic_result() {
         // assistant with tool_use followed by a user message (steering) - no tool_result
         let messages = vec![
-            Message::Assistant(AssistantMessage {
-                content: vec![AssistantContentPart::ToolCall(ToolCall {
-                    id: "tc_orphan".into(),
-                    name: "bash".into(),
-                    arguments: serde_json::json!({"command": "rm -rf /"}),
-                })],
-                model: "test".into(),
-                provider: Provider::Custom("test".into()),
-                api: Api::AnthropicMessages,
-                usage: Usage::default(),
-                stop_reason: StopReason::ToolUse,
-                error_message: None,
-                timestamp_ms: Timestamp::zero(),
-                generation_id: None,
-            }),
+            Message::Assistant(
+                AssistantMessage::builder()
+                    .content(vec![AssistantContentPart::ToolCall(ToolCall {
+                        id: "tc_orphan".into(),
+                        name: "bash".into(),
+                        arguments: serde_json::json!({"command": "rm -rf /"}),
+                    })])
+                    .model("test".into())
+                    .provider(Provider::Custom("test".into()))
+                    .api(Api::AnthropicMessages)
+                    .stop_reason(StopReason::ToolUse)
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            ),
             Message::User(UserMessage {
                 content: UserContent::Text("stop! undo that".into()),
                 timestamp_ms: Timestamp::zero(),
@@ -1675,21 +1663,20 @@ mod tests {
                 timestamp_ms: Timestamp::zero(),
             }),
             // kept assistant with tool_use A
-            Message::Assistant(AssistantMessage {
-                content: vec![AssistantContentPart::ToolCall(ToolCall {
-                    id: "tc_A".into(),
-                    name: "read".into(),
-                    arguments: serde_json::json!({"path": "foo.rs"}),
-                })],
-                model: "test".into(),
-                provider: Provider::Custom("test".into()),
-                api: Api::AnthropicMessages,
-                usage: Usage::default(),
-                stop_reason: StopReason::ToolUse,
-                error_message: None,
-                timestamp_ms: Timestamp::zero(),
-                generation_id: None,
-            }),
+            Message::Assistant(
+                AssistantMessage::builder()
+                    .content(vec![AssistantContentPart::ToolCall(ToolCall {
+                        id: "tc_A".into(),
+                        name: "read".into(),
+                        arguments: serde_json::json!({"path": "foo.rs"}),
+                    })])
+                    .model("test".into())
+                    .provider(Provider::Custom("test".into()))
+                    .api(Api::AnthropicMessages)
+                    .stop_reason(StopReason::ToolUse)
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            ),
             // orphaned tool_result: references tc_GONE which was compacted away
             Message::ToolResult(ToolResultMessage {
                 tool_call_id: "tc_GONE".into(),
@@ -1728,19 +1715,17 @@ mod tests {
         // when ALL tool_results after an assistant are orphaned, the entire
         // message group should be stripped (not just individual blocks)
         let messages = vec![
-            Message::Assistant(AssistantMessage {
-                content: vec![AssistantContentPart::Text(TextContent {
-                    text: "done".into(),
-                })],
-                model: "test".into(),
-                provider: Provider::Custom("test".into()),
-                api: Api::AnthropicMessages,
-                usage: Usage::default(),
-                stop_reason: StopReason::Stop,
-                error_message: None,
-                timestamp_ms: Timestamp::zero(),
-                generation_id: None,
-            }),
+            Message::Assistant(
+                AssistantMessage::builder()
+                    .content(vec![AssistantContentPart::Text(TextContent {
+                        text: "done".into(),
+                    })])
+                    .model("test".into())
+                    .provider(Provider::Custom("test".into()))
+                    .api(Api::AnthropicMessages)
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            ),
             // orphaned: the preceding assistant has no tool_uses
             Message::ToolResult(ToolResultMessage {
                 tool_call_id: "tc_stale".into(),
@@ -2347,21 +2332,20 @@ mod tests {
                 content: UserContent::Text("do the thing".into()),
                 timestamp_ms: Timestamp::zero(),
             }),
-            Message::Assistant(AssistantMessage {
-                content: vec![AssistantContentPart::ToolCall(ToolCall {
-                    id: "tc_1".into(),
-                    name: "bash".into(),
-                    arguments: serde_json::json!({"command": "echo hi"}),
-                })],
-                model: "test".into(),
-                provider: Provider::Custom("test".into()),
-                api: Api::AnthropicMessages,
-                usage: Usage::default(),
-                stop_reason: StopReason::ToolUse,
-                error_message: None,
-                timestamp_ms: Timestamp::zero(),
-                generation_id: None,
-            }),
+            Message::Assistant(
+                AssistantMessage::builder()
+                    .content(vec![AssistantContentPart::ToolCall(ToolCall {
+                        id: "tc_1".into(),
+                        name: "bash".into(),
+                        arguments: serde_json::json!({"command": "echo hi"}),
+                    })])
+                    .model("test".into())
+                    .provider(Provider::Custom("test".into()))
+                    .api(Api::AnthropicMessages)
+                    .stop_reason(StopReason::ToolUse)
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            ),
             Message::ToolResult(ToolResultMessage {
                 tool_call_id: "tc_1".into(),
                 tool_name: "bash".into(),
@@ -2468,21 +2452,20 @@ mod tests {
                 content: UserContent::Text("read foo.rs".into()),
                 timestamp_ms: Timestamp::zero(),
             }),
-            Message::Assistant(AssistantMessage {
-                content: vec![AssistantContentPart::ToolCall(ToolCall {
-                    id: "tc_old".into(),
-                    name: "read".into(),
-                    arguments: serde_json::json!({"path": "foo.rs"}),
-                })],
-                model: "test".into(),
-                provider: Provider::Anthropic,
-                api: Api::AnthropicMessages,
-                usage: Usage::default(),
-                stop_reason: StopReason::ToolUse,
-                error_message: None,
-                timestamp_ms: Timestamp::zero(),
-                generation_id: None,
-            }),
+            Message::Assistant(
+                AssistantMessage::builder()
+                    .content(vec![AssistantContentPart::ToolCall(ToolCall {
+                        id: "tc_old".into(),
+                        name: "read".into(),
+                        arguments: serde_json::json!({"path": "foo.rs"}),
+                    })])
+                    .model("test".into())
+                    .provider(Provider::Anthropic)
+                    .api(Api::AnthropicMessages)
+                    .stop_reason(StopReason::ToolUse)
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            ),
             Message::ToolResult(ToolResultMessage {
                 tool_call_id: "tc_old".into(),
                 tool_name: "read".into(),
@@ -2559,16 +2542,11 @@ mod tests {
     }
 
     fn test_output() -> AssistantMessage {
-        AssistantMessage {
-            content: vec![],
-            model: "test".into(),
-            provider: Provider::Custom("test".into()),
-            api: Api::AnthropicMessages,
-            usage: Usage::default(),
-            stop_reason: StopReason::Stop,
-            error_message: None,
-            timestamp_ms: Timestamp::zero(),
-            generation_id: None,
-        }
+        AssistantMessage::builder()
+            .model("test".into())
+            .provider(Provider::Custom("test".into()))
+            .api(Api::AnthropicMessages)
+            .timestamp_ms(Timestamp::zero())
+            .build()
     }
 }

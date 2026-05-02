@@ -163,17 +163,12 @@ pub fn run_sse_stream(
 ) -> EventStream {
     let label = processor.label();
     let event_stream = async_stream::stream! {
-        let mut output = AssistantMessage {
-            content: vec![],
-            model: model_id.clone(),
-            provider: provider_name.clone(),
-            api,
-            usage: Usage::default(),
-            stop_reason: StopReason::Stop,
-            error_message: None,
-            timestamp_ms: Timestamp::now(),
-            generation_id: None,
-        };
+        let mut output = AssistantMessage::builder()
+            .model(model_id.clone())
+            .provider(provider_name.clone())
+            .api(api)
+            .timestamp_ms(Timestamp::now())
+            .build();
 
         let mut parser = SseParser::new();
         let mut raw_capture: Vec<u8> = Vec::new();

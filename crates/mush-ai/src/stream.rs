@@ -54,17 +54,12 @@ mod tests {
     #[test]
     fn stream_event_variants_are_constructable() {
         // just verifying the types compile and can be instantiated
-        let msg = AssistantMessage {
-            content: vec![],
-            model: "test".into(),
-            provider: Provider::Custom("test".into()),
-            api: Api::AnthropicMessages,
-            usage: Usage::default(),
-            stop_reason: StopReason::Stop,
-            error_message: None,
-            timestamp_ms: Timestamp::zero(),
-            generation_id: None,
-        };
+        let msg = AssistantMessage::builder()
+            .model("test".into())
+            .provider(Provider::Custom("test".into()))
+            .api(Api::AnthropicMessages)
+            .timestamp_ms(Timestamp::zero())
+            .build();
 
         let _start = StreamEvent::Start {
             partial: msg.clone(),

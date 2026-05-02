@@ -1035,19 +1035,17 @@ mod tests {
                 _options: &StreamOptions,
             ) -> Result<mush_ai::registry::EventStream, mush_ai::registry::ProviderError>
             {
-                let partial = AssistantMessage {
-                    content: vec![AssistantContentPart::Text(TextContent {
+                let partial = AssistantMessage::builder()
+                    .content(vec![AssistantContentPart::Text(TextContent {
                         text: "I'll start by checking the file".into(),
-                    })],
-                    model: model.id.clone(),
-                    provider: model.provider.clone(),
-                    api: model.api,
-                    usage: Usage::default(),
-                    stop_reason: StopReason::Error,
-                    error_message: Some("error decoding response body".into()),
-                    timestamp_ms: Timestamp::zero(),
-                    generation_id: None,
-                };
+                    })])
+                    .model(model.id.clone())
+                    .provider(model.provider.clone())
+                    .api(model.api)
+                    .stop_reason(StopReason::Error)
+                    .error_message("error decoding response body")
+                    .timestamp_ms(Timestamp::zero())
+                    .build();
                 let s = async_stream::stream! {
                     yield StreamEvent::Start { partial: partial.clone() };
                     yield StreamEvent::Error {
@@ -1182,8 +1180,8 @@ mod tests {
             ) -> Result<mush_ai::registry::EventStream, mush_ai::registry::ProviderError>
             {
                 let call = self.calls.fetch_add(1, Ordering::SeqCst);
-                let msg = AssistantMessage {
-                    content: if call == 0 {
+                let msg = AssistantMessage::builder()
+                    .content(if call == 0 {
                         vec![AssistantContentPart::Text(TextContent {
                             text: "first".into(),
                         })]
@@ -1193,20 +1191,17 @@ mod tests {
                             name: "counter".into(),
                             arguments: serde_json::json!({}),
                         })]
-                    },
-                    model: model.id.clone(),
-                    provider: model.provider.clone(),
-                    api: model.api,
-                    usage: Usage::default(),
-                    stop_reason: if call == 0 {
+                    })
+                    .model(model.id.clone())
+                    .provider(model.provider.clone())
+                    .api(model.api)
+                    .stop_reason(if call == 0 {
                         StopReason::Stop
                     } else {
                         StopReason::ToolUse
-                    },
-                    error_message: None,
-                    timestamp_ms: Timestamp::zero(),
-                    generation_id: None,
-                };
+                    })
+                    .timestamp_ms(Timestamp::zero())
+                    .build();
 
                 let s = async_stream::stream! {
                     yield StreamEvent::Start {
