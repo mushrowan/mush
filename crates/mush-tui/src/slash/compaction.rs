@@ -113,6 +113,7 @@ pub fn apply_compaction_result(
     result: CompactionTaskResult,
     kind: CompactionKind,
 ) {
+    app.compacting = false;
     let summary_body = extract_fresh_summary(&result.messages);
 
     conversation.replace_messages(result.messages);

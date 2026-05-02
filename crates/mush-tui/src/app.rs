@@ -180,6 +180,12 @@ pub struct App {
     /// armed state for ctrl+c quit confirmation. set on first ctrl+c
     /// when the prompt is empty and idle, cleared by any other key
     pub confirm_quit_pending: bool,
+    /// true while a /compact or /fork-compact LLM call is running on
+    /// a background task. drives the spinner + activity label so the
+    /// user sees compaction as a discrete busy state and routes new
+    /// submits into the queued-message bubble instead of clobbering
+    /// the input buffer
+    pub compacting: bool,
 }
 
 /// state captured when /login starts an oauth flow, consumed when the user
@@ -233,6 +239,7 @@ impl App {
             scroll_lines: DEFAULT_SCROLL_LINES,
             keymap: crate::keybinds::KeyMap::default(),
             confirm_quit_pending: false,
+            compacting: false,
         }
     }
 
@@ -274,7 +281,8 @@ impl App {
 
     /// whether the agent is currently active (streaming or executing tools)
     pub fn is_busy(&self) -> bool {
-        self.stream.active
+        self.compacting
+            || self.stream.active
             || self
                 .active_tools
                 .iter()
@@ -287,6 +295,9 @@ impl App {
     /// the assistant message is still flagged active during the gap
     /// between message_end and the next turn_start
     pub fn activity_label(&self) -> Option<String> {
+        if self.compacting {
+            return Some("compacting…".into());
+        }
         let running: Vec<&str> = self
             .active_tools
             .iter()
@@ -2287,6 +2298,41 @@ batch: 1/2 succeeded, 1 failed";
                 output: None,
             });
         assert_eq!(app.activity_label(), None);
+    }
+
+    #[test]
+    fn compacting_makes_app_busy_with_label() {
+        // a backgrounded /compact run is real work, so is_busy() must
+        // include it (drives the throbber tick) and activity_label()
+        // must surface it for the chat + status bar
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        assert!(!app.is_busy());
+        assert_eq!(app.activity_label(), None);
+
+        app.compacting = true;
+        assert!(app.is_busy());
+        assert_eq!(app.activity_label().as_deref(), Some("compacting…"));
+    }
+
+    #[test]
+    fn compacting_label_takes_precedence_over_streaming_and_tools() {
+        // compaction is a discrete, exclusive operation. if a user
+        // somehow ends up with both flags set the label should still
+        // read "compacting…" so the UI doesn't lie about what's
+        // happening
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.start_streaming();
+        app.active_tools
+            .push(crate::display_types::ActiveToolState {
+                tool_call_id: "t1".into(),
+                name: "edit".into(),
+                summary: String::new(),
+                live_output: None,
+                status: ToolCallStatus::Running,
+                output: None,
+            });
+        app.compacting = true;
+        assert_eq!(app.activity_label().as_deref(), Some("compacting…"));
     }
 
     #[test]

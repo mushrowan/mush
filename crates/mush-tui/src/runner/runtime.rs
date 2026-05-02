@@ -199,6 +199,7 @@ impl RunnerRuntime {
                 Err(e) => {
                     tracing::warn!(error = %e, "compaction task panicked");
                     if let Some(pane) = self.pane_mgr.pane_mut(pane_id) {
+                        pane.app.compacting = false;
                         pane.app.push_system_message("compaction failed");
                     }
                     continue;
