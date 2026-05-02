@@ -285,16 +285,21 @@ impl Theme {
                 .fg(Color::Magenta)
                 .add_modifier(Modifier::ITALIC),
             unread: Style::default().fg(Color::Yellow),
-            // calm cyan→purple→pink wave that reads against most dark
-            // terminal palettes. five steps gives a perceptible glide
-            // without flickering across very short labels
-            shimmer: vec![
-                Color::Indexed(51),
-                Color::Indexed(45),
-                Color::Indexed(99),
-                Color::Indexed(135),
-                Color::Indexed(207),
-            ],
+            // calm cyan→sky→purple→magenta→pink wave that reads against
+            // most dark terminal palettes. five perceptual key stops
+            // expanded by interpolation into 25 RGB stops so adjacent
+            // chars (and frames) drift smoothly through the gradient
+            // rather than snapping between distant hues
+            shimmer: crate::widgets::shimmer::interpolate_palette(
+                &[
+                    Color::Rgb(95, 255, 255), // pale cyan
+                    Color::Rgb(0, 175, 255),  // sky blue
+                    Color::Rgb(135, 95, 255), // light purple
+                    Color::Rgb(215, 95, 215), // pink-magenta
+                    Color::Rgb(255, 95, 175), // hot pink
+                ],
+                4,
+            ),
         }
     }
 
@@ -403,14 +408,19 @@ impl Theme {
                 .add_modifier(Modifier::ITALIC),
             unread: Style::default().fg(Color::Yellow),
             // light theme: deeper saturations so the wave still reads
-            // against a bright background. same 5-step gradient as dark
-            shimmer: vec![
-                Color::Indexed(31),
-                Color::Indexed(25),
-                Color::Indexed(61),
-                Color::Indexed(97),
-                Color::Indexed(162),
-            ],
+            // against a bright background. same key-stop sweep as dark
+            // but shifted toward darker hues, then expanded by
+            // interpolation into 25 stops for a smooth gradient
+            shimmer: crate::widgets::shimmer::interpolate_palette(
+                &[
+                    Color::Rgb(0, 135, 175),  // teal
+                    Color::Rgb(0, 95, 175),   // ocean blue
+                    Color::Rgb(95, 95, 175),  // slate purple
+                    Color::Rgb(135, 95, 175), // muted purple
+                    Color::Rgb(215, 0, 135),  // bright pink
+                ],
+                4,
+            ),
         }
     }
 
