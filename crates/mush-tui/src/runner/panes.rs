@@ -153,6 +153,7 @@ pub(super) async fn fork_pane(
         &tui_config.model,
         &tui_config.options,
         tui_config.cache_timer,
+        None,
     );
 
     let mut new_pane = crate::pane::Pane::with_conversation(new_id, new_app, conversation);

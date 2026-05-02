@@ -595,10 +595,14 @@ fn handle_model_switch(
         app.model_id = id.into();
         app.stats.context_window = new_model.context_window;
         app.supported_thinking_levels = new_model.supported_thinking_levels.clone();
+        // model switch invalidates any learned serving provider since
+        // the new model id may route to a different upstream entirely
+        app.cache.last_serving_provider = None;
         app.cache.ttl_secs = crate::app::resolve_cache_ttl_secs(
             new_model,
             &tui_config.options,
             tui_config.cache_timer,
+            None,
         );
         let level = thinking_prefs
             .get(&tui_config.cwd, id)

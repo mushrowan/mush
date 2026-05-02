@@ -336,6 +336,7 @@ fn build_initial_app(tui_config: &TuiConfig, cwd: &Path) -> App {
         &tui_config.model,
         &tui_config.options,
         tui_config.cache_timer,
+        None,
     );
 
     app.completion.completions = BUILTIN_SLASH_COMMANDS

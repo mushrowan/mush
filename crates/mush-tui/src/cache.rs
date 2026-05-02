@@ -33,15 +33,29 @@ pub fn cache_ttl_secs(
 /// resolve the cache timer's TTL for a given model and stream options.
 /// returns 0 (timer disabled) when the user opted out, the model has no
 /// upstream caching, or the provider/retention combo evaluates to none.
-/// otherwise returns the provider-specific TTL, accounting for oauth
+///
+/// when `last_serving_provider` is set (learned from openrouter's
+/// `/generation` reconciliation) and matches a known serving provider,
+/// its specific TTL takes precedence over the `model.provider` default.
+/// unknown serving providers fall through to the provider default
+/// rather than guess
 #[must_use]
 pub fn resolve_cache_ttl_secs(
     model: &Model,
     options: &StreamOptions,
     cache_timer_enabled: bool,
+    last_serving_provider: Option<&str>,
 ) -> u16 {
     if !cache_timer_enabled || !model.supports_caching() {
         return 0;
+    }
+    if let Some(name) = last_serving_provider
+        && let Some(behaviour) = crate::serving_provider::serving_provider_cache(name)
+    {
+        return match behaviour.mode {
+            crate::serving_provider::CacheMode::None => 0,
+            _ => behaviour.ttl_secs,
+        };
     }
     let is_oauth = options.api_key.as_ref().is_some_and(|k| k.is_oauth_token());
     cache_ttl_secs(&model.provider, options.cache_retention.as_ref(), is_oauth)
@@ -58,6 +72,12 @@ pub struct CacheTimer {
     pub warn_sent: bool,
     /// whether we already sent a "cache expired" notification
     pub expired_sent: bool,
+    /// upstream provider that served the most recent turn, learned
+    /// from openrouter's `/generation` reconciliation. when set,
+    /// `ttl_secs` reflects this provider's known cache behaviour.
+    /// `None` until the first turn lands or for direct (non-openrouter)
+    /// routes where the provider is implicitly the model's `provider`
+    pub last_serving_provider: Option<String>,
 }
 
 impl CacheTimer {
@@ -68,6 +88,7 @@ impl CacheTimer {
             last_active: None,
             warn_sent: false,
             expired_sent: false,
+            last_serving_provider: None,
         }
     }
 
@@ -508,5 +529,82 @@ fn cache_bust_dir() -> std::path::PathBuf {
         std::path::PathBuf::from(home).join(".local/state/mush/cache-busts")
     } else {
         std::path::PathBuf::from(".mush/cache-busts")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mush_ai::types::{
+        Api, BaseUrl, InputModality, ModelCost, ModelId, Provider, StreamOptions, TokenCount,
+    };
+
+    fn openrouter_model_with_caching() -> Model {
+        Model {
+            id: ModelId::from("anthropic/claude-sonnet-4.5"),
+            name: "test".into(),
+            api: Api::AnthropicMessages,
+            provider: Provider::OpenRouter,
+            base_url: BaseUrl::from("https://openrouter.ai/api/v1"),
+            reasoning: false,
+            input: vec![InputModality::Text],
+            cost: ModelCost {
+                input: 3.0,
+                output: 15.0,
+                cache_read: 0.3,
+                cache_write: 3.75,
+            },
+            context_window: TokenCount::new(200_000),
+            max_output_tokens: TokenCount::new(8_192),
+            supports_adaptive_thinking: false,
+            supported_thinking_levels: vec![],
+            default_thinking_level: None,
+        }
+    }
+
+    #[test]
+    fn resolve_uses_serving_provider_ttl_when_known() {
+        // openrouter routes have ambiguous default TTL because the
+        // upstream provider varies. once /generation tells us which
+        // provider actually served the turn, the timer should reflect
+        // that provider's known cache behaviour
+        let model = openrouter_model_with_caching();
+        let opts = StreamOptions::default();
+
+        // first turn: nothing learned yet, fall back to provider default
+        let baseline = resolve_cache_ttl_secs(&model, &opts, true, None);
+        assert_eq!(baseline, 300);
+
+        // after observing deepseek as the serving provider, the timer
+        // should display the long deepseek TTL
+        let with_deepseek = resolve_cache_ttl_secs(&model, &opts, true, Some("DeepSeek"));
+        assert_eq!(with_deepseek, 3600);
+
+        // openai-served turn: the medium TTL
+        let with_openai = resolve_cache_ttl_secs(&model, &opts, true, Some("OpenAI"));
+        assert_eq!(with_openai, 600);
+    }
+
+    #[test]
+    fn resolve_falls_back_when_serving_provider_unknown() {
+        // long-tail providers (together, fireworks, deepinfra, ...) we
+        // haven't characterised should not poison the timer; fall back
+        // to the model.provider default rather than guessing
+        let model = openrouter_model_with_caching();
+        let opts = StreamOptions::default();
+        let ttl = resolve_cache_ttl_secs(&model, &opts, true, Some("Together"));
+        assert_eq!(ttl, 300);
+    }
+
+    #[test]
+    fn resolve_returns_zero_when_caching_off_regardless_of_serving_provider() {
+        // gating from cycle 1: a model without caching support never
+        // shows a timer even if a serving provider is known
+        let mut model = openrouter_model_with_caching();
+        model.cost.cache_read = 0.0;
+        model.cost.cache_write = 0.0;
+        let opts = StreamOptions::default();
+        let ttl = resolve_cache_ttl_secs(&model, &opts, true, Some("DeepSeek"));
+        assert_eq!(ttl, 0);
     }
 }
