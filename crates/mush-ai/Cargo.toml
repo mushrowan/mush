@@ -25,6 +25,13 @@ miette.workspace = true
 tracing.workspace = true
 tokio.workspace = true
 keyring-core.workspace = true
+# openrouter sdk: typed wrappers for openrouter's auth/keys (PKCE
+# exchange) and /generation cost-reconciliation endpoints. note this
+# pulls a parallel reqwest 0.12 / thiserror 1 tree alongside our 0.13/2
+# workspace versions; tolerated only because the surface we use is
+# narrow (two free functions). the streaming path stays on our own
+# providers/openai.rs implementation
+openrouter-rs = "0.9"
 
 # platform-specific keyring stores. each only compiles on its target
 # os, so the credentials module conditionally wires them in

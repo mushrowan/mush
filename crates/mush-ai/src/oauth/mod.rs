@@ -7,6 +7,7 @@
 pub mod anthropic;
 pub mod openai_codex;
 pub mod openai_codex_server;
+pub mod openrouter;
 mod pkce;
 mod store;
 pub mod usage;
@@ -84,6 +85,7 @@ fn builtin_providers() -> Vec<Box<dyn OAuthProvider>> {
     vec![
         Box::new(anthropic::AnthropicOAuth),
         Box::new(openai_codex::OpenaiCodexOAuth),
+        Box::new(openrouter::OpenRouterOAuth),
     ]
 }
 
@@ -97,6 +99,7 @@ pub fn list_providers() -> Vec<(&'static str, &'static str)> {
     vec![
         ("anthropic", "Anthropic (Claude Pro/Max)"),
         ("openai-codex", "ChatGPT Plus/Pro (Codex subscription)"),
+        ("openrouter", "OpenRouter (web sign-in)"),
     ]
 }
 
@@ -204,5 +207,23 @@ mod tests {
     fn get_provider_resolves_openai_codex() {
         let provider = get_provider("openai-codex");
         assert!(provider.is_some());
+    }
+
+    #[test]
+    fn list_providers_includes_openrouter() {
+        // openrouter joins the oauth catalogue once openrouter-sdk is
+        // wired in. the provider id matches the storage key in the
+        // credential store so /login can route consistently
+        let providers = list_providers();
+        assert!(providers.iter().any(|(id, _)| *id == "openrouter"));
+    }
+
+    #[test]
+    fn get_provider_resolves_openrouter() {
+        let provider = get_provider("openrouter");
+        assert!(provider.is_some(), "openrouter oauth provider missing");
+        let provider = provider.unwrap();
+        assert_eq!(provider.id(), "openrouter");
+        assert!(provider.name().to_lowercase().contains("openrouter"));
     }
 }
