@@ -123,6 +123,13 @@ pub fn list_providers() -> Vec<LoginProvider> {
             },
         },
         LoginProvider {
+            id: "openrouter-web".into(),
+            name: "OpenRouter (web sign-in)".into(),
+            method: LoginMethod::OAuth {
+                oauth_provider_id: "openrouter".into(),
+            },
+        },
+        LoginProvider {
             id: "openrouter".into(),
             name: "OpenRouter".into(),
             method: LoginMethod::ApiKey {
@@ -410,6 +417,7 @@ mod tests {
                 "anthropic-api",
                 "openai-codex",
                 "openai-api",
+                "openrouter-web",
                 "openrouter",
             ]
         );
@@ -421,6 +429,10 @@ mod tests {
         assert!(matches!(pro_max.method, LoginMethod::OAuth { .. }));
         let openrouter = provider("openrouter");
         assert!(matches!(openrouter.method, LoginMethod::ApiKey { .. }));
+        let openrouter_web = provider("openrouter-web");
+        assert!(
+            matches!(openrouter_web.method, LoginMethod::OAuth { ref oauth_provider_id } if oauth_provider_id == "openrouter")
+        );
     }
 
     #[test]

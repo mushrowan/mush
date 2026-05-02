@@ -308,10 +308,10 @@ pub async fn login(provider_id: Option<String>) -> Result<()> {
 
     eprintln!("logging in to {}...\n", provider.name());
 
-    let creds = if provider_id == "openai-codex" {
-        login_codex_with_local_server().await?
-    } else {
-        login_via_paste(provider.as_ref()).await?
+    let creds = match provider_id.as_str() {
+        "openai-codex" => login_codex_with_local_server().await?,
+        "openrouter" => login_openrouter_with_local_server().await?,
+        _ => login_via_paste(provider.as_ref()).await?,
     };
 
     let mut store =
@@ -352,6 +352,23 @@ async fn login_codex_with_local_server() -> Result<mush_ai::oauth::OAuthCredenti
     let session = CodexLoginSession::start()
         .await
         .map_err(|e| eyre!("failed to start codex login server: {e}"))?;
+
+    eprintln!("open this URL in your browser:\n");
+    eprintln!("  {}\n", session.auth_url);
+    eprintln!("waiting for the browser callback...");
+
+    session
+        .await_credentials()
+        .await
+        .map_err(|e| eyre!("login failed: {e}"))
+}
+
+async fn login_openrouter_with_local_server() -> Result<mush_ai::oauth::OAuthCredentials> {
+    use mush_ai::oauth::openrouter::OpenRouterLoginSession;
+
+    let session = OpenRouterLoginSession::start()
+        .await
+        .map_err(|e| eyre!("failed to start openrouter login server: {e}"))?;
 
     eprintln!("open this URL in your browser:\n");
     eprintln!("  {}\n", session.auth_url);
