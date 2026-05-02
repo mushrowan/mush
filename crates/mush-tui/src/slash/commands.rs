@@ -44,6 +44,7 @@ pub fn handle(
             help.push_str("  /undo          - revert last turn\n");
             help.push_str("  /search [text] - search conversation (or ctrl+f)\n");
             help.push_str("  /cost          - show session cost\n");
+            help.push_str("  /credits       - show openrouter credit balance\n");
             help.push_str("  /logs [n]      - show last n log entries (default 50)\n");
             help.push_str("  /injection     - toggle prompt injection preview\n");
             help.push_str(
@@ -264,6 +265,11 @@ pub fn handle(
         SlashAction::Cost => {
             app.interaction.show_cost = !app.interaction.show_cost;
             show_cost(app);
+            None
+        }
+        SlashAction::Credits => {
+            // async fetch is handled in runner/commands.rs after this
+            // returns. acknowledge here so the slash menu closes
             None
         }
         SlashAction::Logs { count } => {

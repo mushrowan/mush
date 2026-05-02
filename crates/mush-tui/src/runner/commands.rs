@@ -157,6 +157,9 @@ pub(super) async fn handle_slash_action(
             let pane = pane_mgr.focused_mut();
             complete_login(&mut pane.app, code).await;
         }
+        SlashAction::Credits => {
+            handle_credits(pane_mgr.focused_mut(), tui_config).await;
+        }
         SlashAction::Broadcast { message } => {
             if !pane_mgr.is_multi_pane() {
                 pane_mgr
@@ -526,6 +529,46 @@ pub(super) async fn complete_login(app: &mut crate::app::App, code: String) {
             app.push_system_message(format!("oauth login failed: {e}"));
             // restore pending state so user can try a different code
             app.pending_oauth = Some(pending);
+        }
+    }
+}
+
+/// resolve openrouter credentials and fetch the account's credit
+/// balance. on failure (no key, network error, etc.) push a
+/// diagnostic system message rather than panicking; the user can
+/// retry without losing chat state
+async fn handle_credits(pane: &mut crate::pane::Pane, tui_config: &TuiConfig) {
+    use mush_ai::types::Provider;
+
+    // /credits is openrouter-specific; signal cleanly when invoked
+    // on a different provider so the user knows why nothing happened
+    let openrouter_model = mush_ai::types::Model {
+        provider: Provider::OpenRouter,
+        ..tui_config.model.clone()
+    };
+    let (key, _) = crate::event_handler::resolve_auth_for_model(
+        &openrouter_model,
+        &tui_config.provider_api_keys,
+    )
+    .await;
+    let Some(key) = key else {
+        pane.app
+            .push_system_message("/credits: no openrouter api key on file. /login first");
+        return;
+    };
+
+    match mush_ai::openrouter_credits::fetch_credits(key.expose()).await {
+        Ok(balance) => {
+            pane.app.push_system_message(format!(
+                "openrouter credits: {} remaining ({} purchased, {} used)",
+                balance.remaining(),
+                balance.total_credits,
+                balance.total_usage,
+            ));
+        }
+        Err(err) => {
+            pane.app
+                .push_system_message(format!("/credits lookup failed: {err}"));
         }
     }
 }

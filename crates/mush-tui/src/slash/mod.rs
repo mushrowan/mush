@@ -68,6 +68,10 @@ pub enum SlashAction {
         query: String,
     },
     Cost,
+    /// fetch and display the authenticated openrouter account's
+    /// remaining credit balance + lifetime usage. async; rendered as
+    /// a system message in the focused pane
+    Credits,
     Logs {
         count: usize,
     },
@@ -198,6 +202,7 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
             query: args.to_string(),
         }),
         "cost" => Ok(SlashAction::Cost),
+        "credits" => Ok(SlashAction::Credits),
         "card" => Ok(SlashAction::Card),
         "logs" if args.is_empty() => Ok(SlashAction::Logs { count: 50 }),
         "logs" => args
