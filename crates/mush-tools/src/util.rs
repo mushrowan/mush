@@ -1,7 +1,7 @@
 //! shared helpers for built-in tools
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 /// resolve a user-provided path against the tool's working directory
 pub fn resolve_path(cwd: &Path, path_str: &str) -> PathBuf {
@@ -21,7 +21,12 @@ pub fn resolve_path(cwd: &Path, path_str: &str) -> PathBuf {
 ///
 /// shells out to `git check-ignore --quiet -- <path>`; if git isn't
 /// available or `path` isn't inside a git working tree the hint is
-/// silently skipped (`None`)
+/// silently skipped (`None`).
+///
+/// stdio is fully detached (`Stdio::null()` for in/out/err) because we
+/// run inside a TUI that owns the terminal: an inherited stderr would
+/// leak git's `fatal: Stopping at filesystem boundary...` message into
+/// the status bar when the edited file lives outside any working tree
 pub fn gitignore_hint(path: &Path) -> Option<String> {
     let parent = path.parent()?;
     let status = Command::new("git")
@@ -31,6 +36,9 @@ pub fn gitignore_hint(path: &Path) -> Option<String> {
         .arg("--quiet")
         .arg("--")
         .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .ok()?;
     // exit 0 = ignored, 1 = not ignored, 128 = not a repo / other error
