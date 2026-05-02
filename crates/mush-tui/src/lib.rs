@@ -24,6 +24,7 @@ pub mod notify;
 pub mod pane;
 pub mod path_utils;
 pub mod runner;
+pub mod serving_provider;
 pub mod session_picker;
 pub mod settings;
 pub mod shared_state;
