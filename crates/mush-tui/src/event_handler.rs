@@ -879,6 +879,7 @@ mod tests {
             stop_reason: StopReason::Error,
             error_message: Some("Overloaded".into()),
             timestamp_ms: Timestamp::now(),
+            generation_id: None,
         };
         let mut ctx = EventCtx {
             app: &mut app,

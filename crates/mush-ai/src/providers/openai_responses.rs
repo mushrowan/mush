@@ -1036,6 +1036,7 @@ pub fn benchmark_tool_call_deltas(chunk_count: usize, arg_bytes: usize) -> usize
         stop_reason: StopReason::Stop,
         error_message: None,
         timestamp_ms: Timestamp::zero(),
+        generation_id: None,
     };
     let mut active = ActiveBlocks::new();
 
@@ -1259,6 +1260,7 @@ mod tests {
             stop_reason: StopReason::Stop,
             error_message: None,
             timestamp_ms: Timestamp::zero(),
+            generation_id: None,
         };
         let mut active = ActiveBlocks::new();
 
@@ -1390,6 +1392,7 @@ mod tests {
             stop_reason: StopReason::Stop,
             error_message: None,
             timestamp_ms: Timestamp::zero(),
+            generation_id: None,
         };
         let mut active = ActiveBlocks::new();
         active.insert(

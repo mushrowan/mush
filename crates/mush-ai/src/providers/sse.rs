@@ -172,6 +172,7 @@ pub fn run_sse_stream(
             stop_reason: StopReason::Stop,
             error_message: None,
             timestamp_ms: Timestamp::now(),
+            generation_id: None,
         };
 
         let mut parser = SseParser::new();

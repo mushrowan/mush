@@ -84,6 +84,7 @@ fn assistant_msg(text: &str) -> Message {
         stop_reason: StopReason::Stop,
         error_message: None,
         timestamp_ms: Timestamp::zero(),
+        generation_id: None,
     })
 }
 
@@ -104,6 +105,7 @@ fn assistant_with_tool(text: &str, tool_name: &str, args: &str) -> Message {
         stop_reason: StopReason::Stop,
         error_message: None,
         timestamp_ms: Timestamp::zero(),
+        generation_id: None,
     })
 }
 

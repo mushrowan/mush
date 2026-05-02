@@ -278,6 +278,8 @@ impl super::MessageVisitor for OpenaiVisitor<'_> {
 #[derive(Debug, Deserialize)]
 struct ChunkResponse {
     #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
     choices: Vec<ChunkChoice>,
     #[serde(default)]
     usage: Option<ChunkUsage>,
@@ -382,6 +384,14 @@ fn process_chunk(
     current: &mut Option<StreamBlock>,
 ) -> Vec<StreamEvent> {
     let mut events = Vec::new();
+
+    // capture the openrouter generation id once. some chunks emit it,
+    // some don't; sticky-set it the first time we see one
+    if output.generation_id.is_none()
+        && let Some(id) = chunk.id
+    {
+        output.generation_id = Some(id);
+    }
 
     // handle usage
     if let Some(usage) = chunk.usage {
@@ -597,11 +607,13 @@ pub fn benchmark_tool_call_deltas(chunk_count: usize, arg_bytes: usize) -> usize
         stop_reason: StopReason::Stop,
         error_message: None,
         timestamp_ms: Timestamp::zero(),
+        generation_id: None,
     };
     let mut current = None;
 
     for (index, fragment) in fragments.into_iter().enumerate() {
         let chunk = ChunkResponse {
+            id: None,
             choices: vec![ChunkChoice {
                 delta: ChunkDelta {
                     tool_calls: Some(vec![ChunkToolCall {
@@ -724,6 +736,7 @@ mod tests {
                 stop_reason: StopReason::ToolUse,
                 error_message: None,
                 timestamp_ms: Timestamp::zero(),
+                generation_id: None,
             }),
             Message::ToolResult(ToolResultMessage {
                 tool_call_id: "tc_1".into(),
@@ -750,6 +763,7 @@ mod tests {
         let mut current = None;
 
         let chunk = ChunkResponse {
+            id: None,
             choices: vec![ChunkChoice {
                 delta: ChunkDelta {
                     content: Some("hello".into()),
@@ -774,6 +788,7 @@ mod tests {
 
         // reasoning chunk
         let chunk = ChunkResponse {
+            id: None,
             choices: vec![ChunkChoice {
                 delta: ChunkDelta {
                     reasoning_content: Some("thinking...".into()),
@@ -788,6 +803,7 @@ mod tests {
 
         // then text
         let chunk = ChunkResponse {
+            id: None,
             choices: vec![ChunkChoice {
                 delta: ChunkDelta {
                     content: Some("answer".into()),
@@ -819,6 +835,7 @@ mod tests {
 
         // tool call start
         let chunk = ChunkResponse {
+            id: None,
             choices: vec![ChunkChoice {
                 delta: ChunkDelta {
                     tool_calls: Some(vec![ChunkToolCall {
@@ -843,6 +860,7 @@ mod tests {
 
         // tool call arg continuation
         let chunk = ChunkResponse {
+            id: None,
             choices: vec![ChunkChoice {
                 delta: ChunkDelta {
                     tool_calls: Some(vec![ChunkToolCall {
@@ -883,11 +901,53 @@ mod tests {
     }
 
     #[test]
+    fn process_chunk_captures_top_level_id_for_generation_lookup() {
+        // openrouter (and any openai-compatible streamer) emits a
+        // top-level `id` on every chunk. that id is what feeds the
+        // /generation cost reconciliation lookup. capture it once and
+        // store it on the AssistantMessage so the post-stream handler
+        // can fire the lookup after the turn lands
+        let mut output = test_output();
+        let mut current = None;
+
+        let chunk: ChunkResponse = serde_json::from_value(serde_json::json!({
+            "id": "gen-abc123",
+            "choices": [{"delta": {"content": "hi"}}]
+        }))
+        .expect("chunk parses");
+        process_chunk(chunk, &mut output, &mut current);
+        assert_eq!(output.generation_id.as_deref(), Some("gen-abc123"));
+    }
+
+    #[test]
+    fn process_chunk_id_is_sticky_across_chunks() {
+        // openrouter sometimes emits a chunk without `id` mid-stream.
+        // once captured the id should not be cleared by a subsequent
+        // chunk that lacks one
+        let mut output = test_output();
+        let mut current = None;
+
+        let with_id: ChunkResponse = serde_json::from_value(serde_json::json!({
+            "id": "gen-keep-me",
+            "choices": [{"delta": {"content": "a"}}]
+        }))
+        .unwrap();
+        process_chunk(with_id, &mut output, &mut current);
+        let without_id: ChunkResponse = serde_json::from_value(serde_json::json!({
+            "choices": [{"delta": {"content": "b"}}]
+        }))
+        .unwrap();
+        process_chunk(without_id, &mut output, &mut current);
+        assert_eq!(output.generation_id.as_deref(), Some("gen-keep-me"));
+    }
+
+    #[test]
     fn process_usage_chunk() {
         let mut output = test_output();
         let mut current = None;
 
         let chunk = ChunkResponse {
+            id: None,
             choices: vec![],
             usage: Some(ChunkUsage {
                 prompt_tokens: 150,
@@ -940,6 +1000,7 @@ mod tests {
             stop_reason: StopReason::Stop,
             error_message: None,
             timestamp_ms: Timestamp::zero(),
+            generation_id: None,
         }
     }
 }

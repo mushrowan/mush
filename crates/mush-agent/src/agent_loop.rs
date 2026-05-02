@@ -1046,6 +1046,7 @@ mod tests {
                     stop_reason: StopReason::Error,
                     error_message: Some("error decoding response body".into()),
                     timestamp_ms: Timestamp::zero(),
+                    generation_id: None,
                 };
                 let s = async_stream::stream! {
                     yield StreamEvent::Start { partial: partial.clone() };
@@ -1204,6 +1205,7 @@ mod tests {
                     },
                     error_message: None,
                     timestamp_ms: Timestamp::zero(),
+                    generation_id: None,
                 };
 
                 let s = async_stream::stream! {

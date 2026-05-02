@@ -333,6 +333,7 @@ mod tests {
                 stop_reason: StopReason::Stop,
                 error_message: None,
                 timestamp_ms: Timestamp::now(),
+                generation_id: None,
             })
         }
         fn tr(id: &str) -> Message {

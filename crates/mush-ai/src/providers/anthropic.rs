@@ -1255,6 +1255,7 @@ pub fn benchmark_tool_call_deltas(chunk_count: usize, arg_bytes: usize) -> usize
         stop_reason: StopReason::Stop,
         error_message: None,
         timestamp_ms: Timestamp::zero(),
+        generation_id: None,
     };
     let mut blocks = Vec::new();
 
@@ -1426,6 +1427,7 @@ mod tests {
                 stop_reason: StopReason::ToolUse,
                 error_message: None,
                 timestamp_ms: Timestamp::zero(),
+                generation_id: None,
             }),
             Message::ToolResult(ToolResultMessage {
                 tool_call_id: "tc_123".into(),
@@ -1468,6 +1470,7 @@ mod tests {
             stop_reason: StopReason::ToolUse,
             error_message: None,
             timestamp_ms: Timestamp::zero(),
+            generation_id: None,
         })];
 
         let converted = convert_messages(&messages, false, None, ToolResultTrimming::SlidingWindow);
@@ -1516,6 +1519,7 @@ mod tests {
             stop_reason: StopReason::ToolUse,
             error_message: None,
             timestamp_ms: Timestamp::zero(),
+            generation_id: None,
         })];
 
         let converted = convert_messages(&messages, false, None, ToolResultTrimming::SlidingWindow);
@@ -1547,6 +1551,7 @@ mod tests {
             stop_reason: StopReason::Stop,
             error_message: None,
             timestamp_ms: Timestamp::zero(),
+            generation_id: None,
         })];
 
         let converted = convert_messages(&messages, false, None, ToolResultTrimming::SlidingWindow);
@@ -1569,6 +1574,7 @@ mod tests {
             stop_reason: StopReason::Stop,
             error_message: None,
             timestamp_ms: Timestamp::zero(),
+            generation_id: None,
         })];
 
         let converted = convert_messages(&messages, false, None, ToolResultTrimming::SlidingWindow);
@@ -1594,6 +1600,7 @@ mod tests {
                 stop_reason: StopReason::ToolUse,
                 error_message: None,
                 timestamp_ms: Timestamp::zero(),
+                generation_id: None,
             }),
             Message::ToolResult(ToolResultMessage {
                 tool_call_id: "tc_1".into(),
@@ -1633,6 +1640,7 @@ mod tests {
                 stop_reason: StopReason::ToolUse,
                 error_message: None,
                 timestamp_ms: Timestamp::zero(),
+                generation_id: None,
             }),
             Message::User(UserMessage {
                 content: UserContent::Text("stop! undo that".into()),
@@ -1680,6 +1688,7 @@ mod tests {
                 stop_reason: StopReason::ToolUse,
                 error_message: None,
                 timestamp_ms: Timestamp::zero(),
+                generation_id: None,
             }),
             // orphaned tool_result: references tc_GONE which was compacted away
             Message::ToolResult(ToolResultMessage {
@@ -1730,6 +1739,7 @@ mod tests {
                 stop_reason: StopReason::Stop,
                 error_message: None,
                 timestamp_ms: Timestamp::zero(),
+                generation_id: None,
             }),
             // orphaned: the preceding assistant has no tool_uses
             Message::ToolResult(ToolResultMessage {
@@ -2289,6 +2299,7 @@ mod tests {
                 content: vec![AssistantContentPart::Text(TextContent {
                     text: "hi there".into(),
                 })],
+                generation_id: None,
                 ..test_output()
             }),
             Message::User(UserMessage {
@@ -2349,6 +2360,7 @@ mod tests {
                 stop_reason: StopReason::ToolUse,
                 error_message: None,
                 timestamp_ms: Timestamp::zero(),
+                generation_id: None,
             }),
             Message::ToolResult(ToolResultMessage {
                 tool_call_id: "tc_1".into(),
@@ -2469,6 +2481,7 @@ mod tests {
                 stop_reason: StopReason::ToolUse,
                 error_message: None,
                 timestamp_ms: Timestamp::zero(),
+                generation_id: None,
             }),
             Message::ToolResult(ToolResultMessage {
                 tool_call_id: "tc_old".into(),
@@ -2555,6 +2568,7 @@ mod tests {
             stop_reason: StopReason::Stop,
             error_message: None,
             timestamp_ms: Timestamp::zero(),
+            generation_id: None,
         }
     }
 }

@@ -77,6 +77,13 @@ pub struct AssistantMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
     pub timestamp_ms: Timestamp,
+    /// upstream identifier for this generation, used for openrouter's
+    /// /generation cost reconciliation lookup. populated by streaming
+    /// providers that surface an id (openai-compatible, openrouter).
+    /// `None` for streams that don't expose one (anthropic native).
+    /// stays `None` on persisted/replayed messages from older sessions
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_id: Option<String>,
 }
 
 impl AssistantMessage {
@@ -319,6 +326,7 @@ mod tests {
             stop_reason: StopReason::Stop,
             error_message: None,
             timestamp_ms: Timestamp::zero(),
+            generation_id: None,
         })
     }
 
