@@ -37,17 +37,21 @@ pub fn cache_ttl_secs(
 ///
 /// the returned name is fed back into [`serving_provider_cache`] for
 /// per-provider TTL/mode lookup, so the format must match what the
-/// canonicaliser there expects (case-insensitive, punctuation-insensitive)
+/// canonicaliser there expects (case-insensitive, punctuation-insensitive).
+/// first-party providers return a `Cow::Borrowed(&'static str)` to avoid
+/// allocating; `Provider::Custom` clones its id once
 #[must_use]
-pub fn direct_route_serving_provider(provider: &Provider) -> Option<String> {
+pub fn direct_route_serving_provider(
+    provider: &Provider,
+) -> Option<std::borrow::Cow<'static, str>> {
     match provider {
-        Provider::Anthropic => Some("Anthropic".into()),
+        Provider::Anthropic => Some(std::borrow::Cow::Borrowed("Anthropic")),
         // openrouter routes are multiplexed; the upstream varies per
         // turn and is only knowable after /generation reconciliation
         Provider::OpenRouter => None,
         // custom provider ids ("openai", "groq", "deepseek", ...)
         // already match the lookup table's canonical form
-        Provider::Custom(id) => Some(id.clone()),
+        Provider::Custom(id) => Some(std::borrow::Cow::Owned(id.clone())),
     }
 }
 
@@ -73,10 +77,7 @@ pub fn resolve_cache_ttl_secs(
     if let Some(name) = last_serving_provider
         && let Some(behaviour) = crate::serving_provider::serving_provider_cache(name)
     {
-        return match behaviour.mode {
-            crate::serving_provider::CacheMode::None => 0,
-            _ => behaviour.ttl_secs,
-        };
+        return behaviour.ttl_secs;
     }
     let is_oauth = options.api_key.as_ref().is_some_and(|k| k.is_oauth_token());
     cache_ttl_secs(&model.provider, options.cache_retention.as_ref(), is_oauth)
@@ -157,13 +158,8 @@ impl CacheTimer {
         options: &StreamOptions,
         cache_timer_enabled: bool,
     ) {
-        self.last_serving_provider = direct_route_serving_provider(&model.provider);
-        self.ttl_secs = resolve_cache_ttl_secs(
-            model,
-            options,
-            cache_timer_enabled,
-            self.last_serving_provider.as_deref(),
-        );
+        let initial = direct_route_serving_provider(&model.provider).map(Into::into);
+        self.set_serving_provider(initial, model, options, cache_timer_enabled);
     }
 
     /// record a serving provider observed via openrouter's /generation
@@ -174,12 +170,25 @@ impl CacheTimer {
     /// back to a different provider mid-conversation
     pub fn apply_serving_provider(
         &mut self,
-        name: String,
+        name: impl Into<String>,
         model: &Model,
         options: &StreamOptions,
         cache_timer_enabled: bool,
     ) {
-        self.last_serving_provider = Some(name);
+        self.set_serving_provider(Some(name.into()), model, options, cache_timer_enabled);
+    }
+
+    /// shared body of [`Self::seed_for_model`] and
+    /// [`Self::apply_serving_provider`]: store the (optional) observed
+    /// provider name and recompute `ttl_secs` for the current model
+    fn set_serving_provider(
+        &mut self,
+        name: Option<String>,
+        model: &Model,
+        options: &StreamOptions,
+        cache_timer_enabled: bool,
+    ) {
+        self.last_serving_provider = name;
         self.ttl_secs = resolve_cache_ttl_secs(
             model,
             options,
@@ -712,11 +721,11 @@ mod tests {
         let opts = StreamOptions::default();
         let mut timer = CacheTimer::new(300);
         // observed deepseek as the upstream → 1h TTL
-        timer.apply_serving_provider("DeepSeek".into(), &model, &opts, true);
+        timer.apply_serving_provider("DeepSeek", &model, &opts, true);
         assert_eq!(timer.last_serving_provider.as_deref(), Some("DeepSeek"));
         assert_eq!(timer.ttl_secs, 3600);
         // a later turn might land on openai (sticky routing breaks)
-        timer.apply_serving_provider("OpenAI".into(), &model, &opts, true);
+        timer.apply_serving_provider("OpenAI", &model, &opts, true);
         assert_eq!(timer.last_serving_provider.as_deref(), Some("OpenAI"));
         assert_eq!(timer.ttl_secs, 600);
     }
@@ -731,7 +740,7 @@ mod tests {
         model.cost.cache_write = 0.0;
         let opts = StreamOptions::default();
         let mut timer = CacheTimer::new(300);
-        timer.apply_serving_provider("DeepSeek".into(), &model, &opts, true);
+        timer.apply_serving_provider("DeepSeek", &model, &opts, true);
         assert_eq!(timer.ttl_secs, 0);
     }
 }

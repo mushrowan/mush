@@ -14,8 +14,6 @@
 /// how a serving provider exposes prompt caching to clients
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CacheMode {
-    /// no caching available
-    None,
     /// the provider caches automatically; clients don't opt in
     Implicit,
     /// the client must mark `cache_control` breakpoints to enable caching
