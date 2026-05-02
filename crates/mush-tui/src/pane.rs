@@ -39,6 +39,12 @@ pub struct Pane {
     pub image_protos: HashMap<(usize, usize), ratatui_image::protocol::StatefulProtocol>,
     pub pending_prompt: Option<String>,
     pub steering_queue: Arc<Mutex<Vec<Message>>>,
+    /// inputs the user submitted while a /compact (or /fork-compact)
+    /// task was running. each entry is `(text, image_bytes)` mirroring
+    /// what UserSubmit would normally have done. drained by the
+    /// runtime once compaction lands so they replay as a fresh turn
+    /// instead of getting silently dropped or clobbering the input box
+    pub pending_compaction_inputs: Vec<(String, Vec<Vec<u8>>)>,
     /// inbox for messages from sibling panes
     pub inbox: Option<tokio::sync::mpsc::UnboundedReceiver<crate::messaging::InterPaneMessage>>,
     /// user-facing label (auto-generated or manual)
@@ -67,6 +73,7 @@ impl Pane {
             image_protos: HashMap::new(),
             pending_prompt: None,
             steering_queue: Arc::new(Mutex::new(Vec::new())),
+            pending_compaction_inputs: Vec::new(),
             inbox: None,
             label: None,
             title_generated: false,
@@ -87,6 +94,7 @@ impl Pane {
             image_protos: HashMap::new(),
             pending_prompt: None,
             steering_queue: Arc::new(Mutex::new(Vec::new())),
+            pending_compaction_inputs: Vec::new(),
             inbox: None,
             label: None,
             title_generated: false,
@@ -96,6 +104,32 @@ impl Pane {
             isolation: None,
             delegation: None,
         }
+    }
+
+    /// stash a user submit while a /compact run is in flight.
+    /// records the (text, images) for later replay, surfaces a
+    /// queued (dimmed) bubble in the chat so the user sees it didn't
+    /// vanish, and clears the input buffer so they can keep typing
+    pub fn queue_input_during_compaction(&mut self, text: String, images: Vec<Vec<u8>>) {
+        if images.is_empty() {
+            self.app.push_queued_message(text.clone());
+        } else {
+            self.app
+                .push_queued_message_with_images(text.clone(), images.clone());
+        }
+        self.pending_compaction_inputs.push((text, images));
+        self.app.input.text.clear();
+        self.app.input.cursor = 0;
+    }
+
+    /// drain everything queued during the just-finished compaction.
+    /// also clears the queued bubbles from the display so the runtime
+    /// can render them as real (non-queued) user messages without
+    /// duplicates
+    pub fn drain_compaction_inputs(&mut self) -> Vec<(String, Vec<Vec<u8>>)> {
+        let drained = std::mem::take(&mut self.pending_compaction_inputs);
+        let _ = self.app.take_queued_messages();
+        drained
     }
 
     /// mutable references to all major fields at once,
@@ -741,5 +775,51 @@ mod tests {
         }];
         pane.ensure_image_protocols(&picker, &render_areas);
         assert!(pane.image_protos.is_empty(), "no bytes -> no proto created");
+    }
+
+    #[test]
+    fn queue_input_during_compaction_records_text_and_shows_queued_bubble() {
+        // text submitted while a /compact is running should appear as a
+        // queued (dimmed) bubble in the chat AND be remembered in the
+        // backlog so the runtime can replay it once compaction lands.
+        // the input box must be cleared so the user can start typing
+        // their next thought without manually erasing
+        let mut pane = test_pane(1);
+        pane.app.input.text = "hello".into();
+        pane.app.input.cursor = 5;
+        pane.queue_input_during_compaction("hello".into(), vec![]);
+
+        assert_eq!(pane.pending_compaction_inputs.len(), 1);
+        assert_eq!(pane.pending_compaction_inputs[0].0, "hello");
+        assert!(pane.app.has_queued_messages());
+        assert!(
+            pane.app.input.text.is_empty(),
+            "input buffer should clear after queuing"
+        );
+        assert_eq!(pane.app.input.cursor, 0);
+    }
+
+    #[test]
+    fn drain_compaction_inputs_returns_entries_and_clears_state() {
+        // post-compaction the runtime needs every queued submit (text +
+        // images) to fire a fresh turn from. drain must hand them back
+        // and remove the queued bubbles from the display so they
+        // aren't shown twice
+        let mut pane = test_pane(1);
+        pane.queue_input_during_compaction("first".into(), vec![]);
+        pane.queue_input_during_compaction("second".into(), vec![vec![0u8, 1, 2]]);
+        assert!(pane.app.has_queued_messages());
+
+        let drained = pane.drain_compaction_inputs();
+
+        assert_eq!(drained.len(), 2);
+        assert_eq!(drained[0].0, "first");
+        assert_eq!(drained[1].0, "second");
+        assert_eq!(drained[1].1, vec![vec![0u8, 1, 2]]);
+        assert!(pane.pending_compaction_inputs.is_empty());
+        assert!(
+            !pane.app.has_queued_messages(),
+            "queued bubbles should be cleared after drain"
+        );
     }
 }

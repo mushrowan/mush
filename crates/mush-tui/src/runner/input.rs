@@ -375,14 +375,21 @@ pub(super) async fn handle_idle_terminal_events(
                             // `conversation.replace_messages(...)` on
                             // completion, which would clobber any user
                             // message appended while it's running. queue
-                            // the input as a status hint and bail
+                            // the text (and any pending images) so the
+                            // runtime can replay them as a fresh turn
+                            // once compaction lands; the input box
+                            // clears so the user can keep typing
                             let pane_id = pane_mgr.focused().id;
                             if deps.pending_compactions.contains_key(&pane_id) {
-                                let app = &mut pane_mgr.focused_mut().app;
-                                app.input.text = text;
-                                app.input.cursor = app.input.text.len();
-                                app.status =
-                                    Some("wait for compaction to finish before sending".into());
+                                let pane = pane_mgr.focused_mut();
+                                let images: Vec<Vec<u8>> = pane
+                                    .app
+                                    .input
+                                    .take_images()
+                                    .into_iter()
+                                    .map(|img| img.data)
+                                    .collect();
+                                pane.queue_input_during_compaction(text, images);
                                 continue;
                             }
                             let expanded = slash::expand_template(&text);

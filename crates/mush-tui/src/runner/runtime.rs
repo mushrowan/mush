@@ -214,6 +214,11 @@ impl RunnerRuntime {
                 result,
                 pending.kind,
             );
+            // replay anything the user submitted while compaction
+            // was running. multiple submits collapse into one combined
+            // user turn so the agent sees a coherent prompt rather
+            // than firing N back-to-back turns
+            replay_compaction_inputs(pane);
         }
         true
     }
@@ -262,6 +267,37 @@ impl RunnerRuntime {
             }
         }
     }
+}
+
+/// take any inputs queued during compaction and turn them into a
+/// fresh user turn. multiple queued submits collapse to one combined
+/// message (texts joined with blank lines, images concatenated in
+/// order) so the agent sees one coherent prompt instead of being
+/// pinged repeatedly. no-op when nothing was queued.
+fn replay_compaction_inputs(pane: &mut Pane) {
+    let drained = pane.drain_compaction_inputs();
+    if drained.is_empty() {
+        return;
+    }
+    let mut texts: Vec<String> = Vec::with_capacity(drained.len());
+    let mut images: Vec<Vec<u8>> = Vec::new();
+    for (text, imgs) in drained {
+        texts.push(text);
+        images.extend(imgs);
+    }
+    let combined = texts.join("\n\n");
+    if images.is_empty() {
+        pane.app.push_user_message(combined.clone());
+    } else {
+        pane.app
+            .push_user_message_with_images(combined.clone(), images);
+    }
+    pane.app.active_tools.clear();
+    pane.app.start_streaming();
+    // take_pending_prompts drains every pane's slot, so setting just
+    // this pane's slot is enough; no need to thread the focused
+    // override through here
+    pane.pending_prompt = Some(combined);
 }
 
 fn watch_config(
@@ -505,5 +541,49 @@ mod tests {
         assert_eq!(app.messages.len(), 2);
         assert!(app.stats.total_tokens > TokenCount::ZERO);
         assert_eq!(app.status.as_deref(), Some("resumed session (2 messages)"));
+    }
+
+    #[test]
+    fn replay_compaction_inputs_collapses_into_single_streaming_turn() {
+        // post-compaction the runtime turns every queued submit into a
+        // fresh user turn. multiple texts join with a blank-line gap,
+        // queued bubbles disappear, streaming starts, and pending_prompt
+        // gets the combined string so the runner picks it up next loop
+        let app = App::new("test".into(), TokenCount::new(200_000));
+        let mut pane = Pane::new(PaneId::new(1), app);
+        pane.queue_input_during_compaction("first thought".into(), vec![]);
+        pane.queue_input_during_compaction("second thought".into(), vec![]);
+
+        replay_compaction_inputs(&mut pane);
+
+        assert!(pane.pending_compaction_inputs.is_empty());
+        assert!(!pane.app.has_queued_messages());
+        assert!(pane.app.stream.active, "should kick off a new stream");
+        assert_eq!(
+            pane.pending_prompt.as_deref(),
+            Some("first thought\n\nsecond thought")
+        );
+        // the combined prompt should have been pushed as a real (non-
+        // queued) user message so it lands in conversation history
+        assert!(
+            pane.app
+                .messages
+                .iter()
+                .any(|m| !m.queued && m.content.contains("first thought"))
+        );
+    }
+
+    #[test]
+    fn replay_compaction_inputs_is_noop_when_nothing_queued() {
+        // common case: user waited out compaction without typing.
+        // nothing should fire, nothing should change
+        let app = App::new("test".into(), TokenCount::new(200_000));
+        let mut pane = Pane::new(PaneId::new(1), app);
+
+        replay_compaction_inputs(&mut pane);
+
+        assert!(pane.pending_prompt.is_none());
+        assert!(!pane.app.stream.active);
+        assert!(pane.app.messages.is_empty());
     }
 }
