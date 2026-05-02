@@ -165,6 +165,28 @@ impl CacheTimer {
             self.last_serving_provider.as_deref(),
         );
     }
+
+    /// record a serving provider observed via openrouter's /generation
+    /// reconciliation and recompute `ttl_secs` so subsequent warmth
+    /// countdown ticks reflect the right upstream's cache behaviour.
+    /// safe to call repeatedly across turns; sticky routing means the
+    /// value usually stays stable but will swap if openrouter falls
+    /// back to a different provider mid-conversation
+    pub fn apply_serving_provider(
+        &mut self,
+        name: String,
+        model: &Model,
+        options: &StreamOptions,
+        cache_timer_enabled: bool,
+    ) {
+        self.last_serving_provider = Some(name);
+        self.ttl_secs = resolve_cache_ttl_secs(
+            model,
+            options,
+            cache_timer_enabled,
+            self.last_serving_provider.as_deref(),
+        );
+    }
 }
 
 /// seconds before cache expiry to trigger a warning notification
@@ -678,5 +700,38 @@ mod tests {
         // of the providers serving that model. don't seed; wait for
         // /generation to tell us who actually served the turn
         assert!(direct_route_serving_provider(&Provider::OpenRouter).is_none());
+    }
+
+    #[test]
+    fn apply_serving_provider_updates_state_and_recomputes_ttl() {
+        // /generation reconciliation tells us the upstream that served
+        // this turn. apply_serving_provider records it and recomputes
+        // ttl so the warmth countdown reflects the right provider's
+        // cache semantics for subsequent ticks
+        let model = openrouter_model_with_caching();
+        let opts = StreamOptions::default();
+        let mut timer = CacheTimer::new(300);
+        // observed deepseek as the upstream → 1h TTL
+        timer.apply_serving_provider("DeepSeek".into(), &model, &opts, true);
+        assert_eq!(timer.last_serving_provider.as_deref(), Some("DeepSeek"));
+        assert_eq!(timer.ttl_secs, 3600);
+        // a later turn might land on openai (sticky routing breaks)
+        timer.apply_serving_provider("OpenAI".into(), &model, &opts, true);
+        assert_eq!(timer.last_serving_provider.as_deref(), Some("OpenAI"));
+        assert_eq!(timer.ttl_secs, 600);
+    }
+
+    #[test]
+    fn apply_serving_provider_zeros_ttl_when_caching_disabled() {
+        // gating from cycle 1: even after observing the upstream, if
+        // the model has no caching support OR the user disabled the
+        // timer, the ttl stays at zero
+        let mut model = openrouter_model_with_caching();
+        model.cost.cache_read = 0.0;
+        model.cost.cache_write = 0.0;
+        let opts = StreamOptions::default();
+        let mut timer = CacheTimer::new(300);
+        timer.apply_serving_provider("DeepSeek".into(), &model, &opts, true);
+        assert_eq!(timer.ttl_secs, 0);
     }
 }

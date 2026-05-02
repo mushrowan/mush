@@ -7,8 +7,8 @@ use mush_agent::tool::{SharedTool, ToolRegistry};
 use mush_agent::{AgentConfig, AgentEvent, agent_loop};
 use mush_ai::registry::ApiRegistry;
 use mush_ai::types::{
-    ImageContent, Message, Model, StreamOptions, TextContent, ThinkingLevel, Timestamp, TokenCount,
-    ToolCallId, UserContent, UserContentPart, UserMessage,
+    ImageContent, Message, Model, Provider, StreamOptions, TextContent, ThinkingLevel, Timestamp,
+    TokenCount, ToolCallId, UserContent, UserContentPart, UserMessage,
 };
 use tokio::sync::Mutex;
 
@@ -374,6 +374,20 @@ pub(super) async fn handle_agent_event_side_effects(
         );
     }
 
+    // openrouter routes carry a generation id we use to learn the
+    // upstream that actually served the turn. update the cache timer
+    // so subsequent warmth countdowns use the right TTL
+    if let AgentEvent::MessageEnd { message } = event
+        && message.provider == Provider::OpenRouter
+        && let Some(gen_id) = message.generation_id.clone()
+    {
+        let model = stream_state
+            .meta(pane_id)
+            .map(|m| m.model.clone())
+            .unwrap_or_else(|| tui_config.model.clone());
+        reconcile_openrouter_generation(pane_mgr, pane_id, gen_id, &model, tui_config).await;
+    }
+
     track_file_conflicts(pane_mgr, pane_id, event, file_tracker);
 
     // incremental save after meaningful state changes (debounced)
@@ -386,6 +400,48 @@ pub(super) async fn handle_agent_event_side_effects(
 
     if matches!(event, AgentEvent::AgentEnd) {
         handle_agent_end(pane_mgr, stream_state, pane_id, tui_config, registry).await;
+    }
+}
+
+/// fetch openrouter's `/generation` record for the just-completed
+/// turn and apply its `provider_name` to the pane's cache timer. on
+/// any failure (no api key, network error, missing field) we log and
+/// drop the result rather than block the user. apply_serving_provider
+/// then recomputes ttl_secs from the cycle 2.1 per-provider table
+async fn reconcile_openrouter_generation(
+    pane_mgr: &mut PaneManager,
+    pane_id: PaneId,
+    gen_id: String,
+    model: &Model,
+    tui_config: &TuiConfig,
+) {
+    let (key, _) =
+        crate::event_handler::resolve_auth_for_model(model, &tui_config.provider_api_keys).await;
+    let Some(key) = key else {
+        tracing::debug!("openrouter /generation lookup skipped: no api key");
+        return;
+    };
+
+    let cost =
+        match mush_ai::openrouter_generation::fetch_generation_cost(key.expose(), gen_id).await {
+            Ok(c) => c,
+            Err(err) => {
+                tracing::debug!(error = %err, "openrouter /generation lookup failed");
+                return;
+            }
+        };
+
+    let Some(provider_name) = cost.provider_name else {
+        return;
+    };
+
+    if let Some(pane) = pane_mgr.pane_mut(pane_id) {
+        pane.app.cache.apply_serving_provider(
+            provider_name,
+            model,
+            &tui_config.options,
+            tui_config.cache_timer,
+        );
     }
 }
 
