@@ -160,6 +160,9 @@ pub(super) async fn handle_slash_action(
         SlashAction::Credits => {
             handle_credits(pane_mgr.focused_mut(), tui_config).await;
         }
+        SlashAction::Endpoints { model_id } => {
+            handle_endpoints(pane_mgr.focused_mut(), tui_config, model_id.as_deref()).await;
+        }
         SlashAction::Broadcast { message } => {
             if !pane_mgr.is_multi_pane() {
                 pane_mgr
@@ -569,6 +572,62 @@ async fn handle_credits(pane: &mut crate::pane::Pane, tui_config: &TuiConfig) {
         Err(err) => {
             pane.app
                 .push_system_message(format!("/credits lookup failed: {err}"));
+        }
+    }
+}
+
+/// resolve openrouter credentials and fetch the per-provider endpoint
+/// list for a model. defaults to the pane's current model id when no
+/// argument is supplied. on failure pushes a diagnostic system message
+/// instead of panicking; this is a read-only inspection command
+async fn handle_endpoints(
+    pane: &mut crate::pane::Pane,
+    tui_config: &TuiConfig,
+    explicit_model_id: Option<&str>,
+) {
+    use mush_ai::types::Provider;
+
+    let openrouter_model = mush_ai::types::Model {
+        provider: Provider::OpenRouter,
+        ..tui_config.model.clone()
+    };
+    let (key, _) = crate::event_handler::resolve_auth_for_model(
+        &openrouter_model,
+        &tui_config.provider_api_keys,
+    )
+    .await;
+    let Some(key) = key else {
+        pane.app
+            .push_system_message("/endpoints: no openrouter api key on file. /login first");
+        return;
+    };
+
+    let model_id = explicit_model_id
+        .map(str::to_owned)
+        .unwrap_or_else(|| pane.app.model_id.to_string());
+
+    match mush_ai::openrouter_endpoints::fetch_endpoints(key.expose(), &model_id).await {
+        Ok(endpoints) => {
+            let mut report = format!("endpoints for {}:", endpoints.id);
+            for ep in &endpoints.endpoints {
+                let cache_badge = if ep.supports_cache_control {
+                    " [cache_control]"
+                } else {
+                    ""
+                };
+                report.push_str(&format!(
+                    "\n  · {} (ctx {}){}",
+                    ep.provider_name, ep.context_length, cache_badge
+                ));
+            }
+            if let Some(unique) = endpoints.unique_caching_provider() {
+                report.push_str(&format!("\n→ sole caching provider: {unique}"));
+            }
+            pane.app.push_system_message(report);
+        }
+        Err(err) => {
+            pane.app
+                .push_system_message(format!("/endpoints lookup failed: {err}"));
         }
     }
 }

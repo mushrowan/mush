@@ -45,6 +45,9 @@ pub fn handle(
             help.push_str("  /search [text] - search conversation (or ctrl+f)\n");
             help.push_str("  /cost          - show session cost\n");
             help.push_str("  /credits       - show openrouter credit balance\n");
+            help.push_str(
+                "  /endpoints [id] - list openrouter providers + cache support for a model\n",
+            );
             help.push_str("  /logs [n]      - show last n log entries (default 50)\n");
             help.push_str("  /injection     - toggle prompt injection preview\n");
             help.push_str(
@@ -270,6 +273,10 @@ pub fn handle(
         SlashAction::Credits => {
             // async fetch is handled in runner/commands.rs after this
             // returns. acknowledge here so the slash menu closes
+            None
+        }
+        SlashAction::Endpoints { .. } => {
+            // async fetch handled in runner/commands.rs after this returns
             None
         }
         SlashAction::Logs { count } => {

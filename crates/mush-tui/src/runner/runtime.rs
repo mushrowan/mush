@@ -27,6 +27,7 @@ const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("search", "search conversation"),
     ("cost", "show session cost"),
     ("credits", "show openrouter credit balance"),
+    ("endpoints", "show openrouter providers serving a model"),
     ("logs", "show recent log entries"),
     ("injection", "toggle prompt injection preview"),
     (

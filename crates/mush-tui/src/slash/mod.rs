@@ -72,6 +72,14 @@ pub enum SlashAction {
     /// remaining credit balance + lifetime usage. async; rendered as
     /// a system message in the focused pane
     Credits,
+    /// fetch and display the list of upstream providers serving a
+    /// model on openrouter, plus which of them accept `cache_control`.
+    /// async; rendered as a system message in the focused pane. arg
+    /// is the model id (`author/slug` form); empty defaults to the
+    /// pane's current model
+    Endpoints {
+        model_id: Option<String>,
+    },
     Logs {
         count: usize,
     },
@@ -203,6 +211,9 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
         }),
         "cost" => Ok(SlashAction::Cost),
         "credits" => Ok(SlashAction::Credits),
+        "endpoints" => Ok(SlashAction::Endpoints {
+            model_id: (!args.is_empty()).then(|| args.to_string()),
+        }),
         "card" => Ok(SlashAction::Card),
         "logs" if args.is_empty() => Ok(SlashAction::Logs { count: 50 }),
         "logs" => args
