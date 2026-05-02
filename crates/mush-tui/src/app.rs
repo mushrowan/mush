@@ -17,7 +17,7 @@ pub use crate::batch_output::{
 pub use crate::cache::{
     BustReason, CACHE_COLD_DISPLAY_SECS, CACHE_WARN_SECS, CacheAnomaly, CacheBustDiagnostic,
     CacheTimer, CallConfig, TokenStats, cache_ttl_secs, detect_cache_anomalies,
-    dump_cache_bust_diagnostic, resolve_cache_ttl_secs,
+    direct_route_serving_provider, dump_cache_bust_diagnostic, resolve_cache_ttl_secs,
 };
 pub use crate::display_types::{
     ActiveToolState, CodeBlock, DisplayMessage, DisplayToolCall, ImageRenderArea, MessageRole,

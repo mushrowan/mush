@@ -7,7 +7,7 @@ use mush_ai::types::{Message, ThinkingLevel};
 use mush_session::ConversationState;
 use notify::RecommendedWatcher;
 
-use crate::app::{self, App};
+use crate::app::App;
 use crate::pane::{Pane, PaneId, PaneManager};
 use crate::slash::PendingCompaction;
 use crate::slash_menu::SlashCommand;
@@ -332,11 +332,10 @@ fn build_initial_app(tui_config: &TuiConfig, cwd: &Path) -> App {
     app.keymap = tui_config.keymap.clone();
     app.theme = tui_config.theme.clone();
     app.scroll_lines = tui_config.scroll_lines;
-    app.cache.ttl_secs = app::resolve_cache_ttl_secs(
+    app.cache.seed_for_model(
         &tui_config.model,
         &tui_config.options,
         tui_config.cache_timer,
-        None,
     );
 
     app.completion.completions = BUILTIN_SLASH_COMMANDS
@@ -532,6 +531,34 @@ mod tests {
         config.model.cost.cache_write = 0.0;
         let app = build_initial_app(&config, Path::new("."));
         assert_eq!(app.cache.ttl_secs, 0);
+    }
+
+    #[test]
+    fn build_initial_app_seeds_serving_provider_for_direct_routes() {
+        // direct routes know their serving provider up-front so the
+        // cache timer should reflect the correct per-provider TTL
+        // immediately. an openai model on the direct openai route
+        // should get the openai-specific TTL (10m), not the default
+        let mut config = test_config();
+        config.model.provider = Provider::Custom("openai".into());
+        config.model.cost.cache_read = 1.25;
+        config.model.cost.cache_write = 0.0;
+        let app = build_initial_app(&config, Path::new("."));
+        assert_eq!(app.cache.last_serving_provider.as_deref(), Some("openai"));
+        assert_eq!(app.cache.ttl_secs, 600);
+    }
+
+    #[test]
+    fn build_initial_app_does_not_seed_serving_provider_for_openrouter() {
+        // openrouter routes start unknown until /generation reconciles
+        let mut config = test_config();
+        config.model.provider = Provider::OpenRouter;
+        config.model.cost.cache_read = 0.3;
+        config.model.cost.cache_write = 3.75;
+        let app = build_initial_app(&config, Path::new("."));
+        assert!(app.cache.last_serving_provider.is_none());
+        // openrouter default fallback (300s) since no learned provider
+        assert_eq!(app.cache.ttl_secs, 300);
     }
 
     #[test]

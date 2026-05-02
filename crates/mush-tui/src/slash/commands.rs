@@ -597,13 +597,8 @@ fn handle_model_switch(
         app.supported_thinking_levels = new_model.supported_thinking_levels.clone();
         // model switch invalidates any learned serving provider since
         // the new model id may route to a different upstream entirely
-        app.cache.last_serving_provider = None;
-        app.cache.ttl_secs = crate::app::resolve_cache_ttl_secs(
-            new_model,
-            &tui_config.options,
-            tui_config.cache_timer,
-            None,
-        );
+        app.cache
+            .seed_for_model(new_model, &tui_config.options, tui_config.cache_timer);
         let level = thinking_prefs
             .get(&tui_config.cwd, id)
             .or_else(|| thinking_prefs.last_for_model(id))

@@ -30,6 +30,27 @@ pub fn cache_ttl_secs(
     }
 }
 
+/// the upstream serving provider for a *direct* route, when known
+/// from `model.provider` alone. returns `None` for openrouter and
+/// other multiplexer-style providers where the upstream is ambiguous
+/// without a per-turn signal (`/generation` reconciliation).
+///
+/// the returned name is fed back into [`serving_provider_cache`] for
+/// per-provider TTL/mode lookup, so the format must match what the
+/// canonicaliser there expects (case-insensitive, punctuation-insensitive)
+#[must_use]
+pub fn direct_route_serving_provider(provider: &Provider) -> Option<String> {
+    match provider {
+        Provider::Anthropic => Some("Anthropic".into()),
+        // openrouter routes are multiplexed; the upstream varies per
+        // turn and is only knowable after /generation reconciliation
+        Provider::OpenRouter => None,
+        // custom provider ids ("openai", "groq", "deepseek", ...)
+        // already match the lookup table's canonical form
+        Provider::Custom(id) => Some(id.clone()),
+    }
+}
+
 /// resolve the cache timer's TTL for a given model and stream options.
 /// returns 0 (timer disabled) when the user opted out, the model has no
 /// upstream caching, or the provider/retention combo evaluates to none.
@@ -123,6 +144,26 @@ impl CacheTimer {
     #[must_use]
     pub fn elapsed_secs(&self) -> Option<u64> {
         self.last_active.map(|t| t.elapsed().as_secs())
+    }
+
+    /// reset the timer's learned serving-provider state and recompute
+    /// `ttl_secs` for a freshly loaded model. used at startup, on new
+    /// pane creation, and after a model switch. seeds direct routes
+    /// (e.g. `Provider::Anthropic`) immediately and leaves openrouter
+    /// routes unseeded until /generation reconciles
+    pub fn seed_for_model(
+        &mut self,
+        model: &Model,
+        options: &StreamOptions,
+        cache_timer_enabled: bool,
+    ) {
+        self.last_serving_provider = direct_route_serving_provider(&model.provider);
+        self.ttl_secs = resolve_cache_ttl_secs(
+            model,
+            options,
+            cache_timer_enabled,
+            self.last_serving_provider.as_deref(),
+        );
     }
 }
 
@@ -606,5 +647,36 @@ mod tests {
         let opts = StreamOptions::default();
         let ttl = resolve_cache_ttl_secs(&model, &opts, true, Some("DeepSeek"));
         assert_eq!(ttl, 0);
+    }
+
+    #[test]
+    fn direct_route_serving_provider_named_per_first_party_provider() {
+        // direct routes know their serving provider up-front: it's the
+        // same as model.provider. seeding lets the timer apply the
+        // correct per-provider TTL immediately, without waiting for
+        // /generation reconciliation
+        assert_eq!(
+            direct_route_serving_provider(&Provider::Anthropic).as_deref(),
+            Some("Anthropic")
+        );
+        // custom providers carry their own id string ("openai", "groq",
+        // "deepseek", ...) which canonicalises to the same key the
+        // lookup uses. pass it through verbatim
+        assert_eq!(
+            direct_route_serving_provider(&Provider::Custom("openai".into())).as_deref(),
+            Some("openai")
+        );
+        assert_eq!(
+            direct_route_serving_provider(&Provider::Custom("deepseek".into())).as_deref(),
+            Some("deepseek")
+        );
+    }
+
+    #[test]
+    fn direct_route_serving_provider_is_none_for_openrouter() {
+        // openrouter routes are ambiguous: the upstream could be any
+        // of the providers serving that model. don't seed; wait for
+        // /generation to tell us who actually served the turn
+        assert!(direct_route_serving_provider(&Provider::OpenRouter).is_none());
     }
 }

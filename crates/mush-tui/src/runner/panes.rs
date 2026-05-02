@@ -149,11 +149,10 @@ pub(super) async fn fork_pane(
     new_app.interaction.show_token_counters = tui_config.show_token_counters;
     new_app.interaction.status_bar = tui_config.status_bar_config.clone();
     new_app.keymap = tui_config.keymap.clone();
-    new_app.cache.ttl_secs = crate::app::resolve_cache_ttl_secs(
+    new_app.cache.seed_for_model(
         &tui_config.model,
         &tui_config.options,
         tui_config.cache_timer,
-        None,
     );
 
     let mut new_pane = crate::pane::Pane::with_conversation(new_id, new_app, conversation);
