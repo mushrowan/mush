@@ -65,7 +65,17 @@
 
         craneLib = (inputs.crane.mkLib pkgs).overrideToolchain rustToolchain;
 
-        src = craneLib.cleanCargoSource ./.;
+        # crane's default filter strips non-rust files. include the
+        # `tests/fixtures/` paths so integration tests can `include_str!`
+        # vendored JSON fixtures (e.g. the openrouter openapi spec used
+        # by the drift test)
+        src = pkgs.lib.cleanSourceWith {
+          src = ./.;
+          name = "source";
+          filter = path: type:
+            (builtins.match ".*tests/fixtures/.*" path != null)
+            || (craneLib.filterCargoSources path type);
+        };
 
         craneOutputs = import ./nix/package.nix {
           inherit craneLib pkgs src;

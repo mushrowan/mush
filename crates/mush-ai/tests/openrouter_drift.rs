@@ -147,3 +147,89 @@ async fn endpoints_response_matches_manifest() {
         );
     }
 }
+
+/// vendored copy of openrouter's OpenAPI document, used as the
+/// canonical reference the live spec is diffed against. refresh with
+/// `curl -s https://openrouter.ai/openapi.json > crates/mush-ai/tests/fixtures/openrouter-openapi.json`
+const VENDORED_OPENAPI: &str = include_str!("fixtures/openrouter-openapi.json");
+
+#[tokio::test]
+#[ignore = "hits openrouter; run with --run-ignored=only"]
+async fn vendored_openapi_matches_live() {
+    use std::collections::BTreeSet;
+
+    // openapi.json is unauthenticated and contains the canonical
+    // schema for every endpoint, including ones we don't currently
+    // wrap. diffing the vendored copy against the live spec catches
+    // drift at the spec level — earlier than waiting for live
+    // responses to start carrying new fields. when this fires:
+    //
+    //   curl -s https://openrouter.ai/openapi.json \
+    //     > crates/mush-ai/tests/fixtures/openrouter-openapi.json
+    //
+    // then review the diff to decide whether mush-side changes are
+    // needed (manifest updates, wrapper additions, type changes)
+    let live_text = reqwest::get("https://openrouter.ai/openapi.json")
+        .await
+        .expect("openapi fetch failed")
+        .text()
+        .await
+        .expect("openapi body read failed");
+
+    let live: serde_json::Value = serde_json::from_str(&live_text).expect("live openapi parses");
+    let vendored: serde_json::Value =
+        serde_json::from_str(VENDORED_OPENAPI).expect("vendored openapi parses");
+
+    if live == vendored {
+        return;
+    }
+
+    // produce a useful diff summary instead of dumping a 1MB blob
+    let live_paths: BTreeSet<&str> = live["paths"]
+        .as_object()
+        .map(|m| m.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    let vendored_paths: BTreeSet<&str> = vendored["paths"]
+        .as_object()
+        .map(|m| m.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    let added_paths: Vec<&&str> = live_paths.difference(&vendored_paths).collect();
+    let removed_paths: Vec<&&str> = vendored_paths.difference(&live_paths).collect();
+
+    let live_schemas: BTreeSet<&str> = live["components"]["schemas"]
+        .as_object()
+        .map(|m| m.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    let vendored_schemas: BTreeSet<&str> = vendored["components"]["schemas"]
+        .as_object()
+        .map(|m| m.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    let added_schemas: Vec<&&str> = live_schemas.difference(&vendored_schemas).collect();
+    let removed_schemas: Vec<&&str> = vendored_schemas.difference(&live_schemas).collect();
+
+    let mut report = String::from("openrouter spec drift detected");
+    if !added_paths.is_empty() {
+        report.push_str(&format!("\n  new paths:        {added_paths:?}"));
+    }
+    if !removed_paths.is_empty() {
+        report.push_str(&format!("\n  removed paths:    {removed_paths:?}"));
+    }
+    if !added_schemas.is_empty() {
+        report.push_str(&format!("\n  new schemas:      {added_schemas:?}"));
+    }
+    if !removed_schemas.is_empty() {
+        report.push_str(&format!("\n  removed schemas:  {removed_schemas:?}"));
+    }
+    if added_paths.is_empty()
+        && removed_paths.is_empty()
+        && added_schemas.is_empty()
+        && removed_schemas.is_empty()
+    {
+        report.push_str("\n  (no path/schema additions or removals; field-level changes within existing schemas)");
+    }
+    report.push_str(
+        "\n  refresh: curl -s https://openrouter.ai/openapi.json \\
+        > crates/mush-ai/tests/fixtures/openrouter-openapi.json",
+    );
+    panic!("{report}");
+}
