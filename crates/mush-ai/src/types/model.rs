@@ -93,6 +93,16 @@ impl Model {
         id.contains("gpt-") && !id.contains("oss") && !id.contains("gpt-4")
     }
 
+    /// whether this model has prompt caching available, inferred from
+    /// pricing. any non-zero cache_read or cache_write rate means the
+    /// upstream provider charges for (and therefore offers) a cached
+    /// path. used by the TUI to decide whether to surface the cache
+    /// warmth timer at all
+    #[must_use]
+    pub fn supports_caching(&self) -> bool {
+        self.cost.cache_read > 0.0 || self.cost.cache_write > 0.0
+    }
+
     /// whether this model handles parallel tool calls natively (no batch tool needed).
     /// OpenAI responses API and reasoning models support this
     pub fn supports_native_parallel_calls(&self) -> bool {
@@ -303,5 +313,43 @@ mod tests {
         );
         // unknown variant: drop instead of guess
         assert_eq!(ThinkingLevel::from_codex_str("turbocharged"), None);
+    }
+
+    fn model_with_cost(cache_read: f64, cache_write: f64) -> Model {
+        Model {
+            id: ModelId::from("test/model"),
+            name: "test".into(),
+            api: Api::AnthropicMessages,
+            provider: Provider::Anthropic,
+            base_url: BaseUrl::from("https://example.invalid"),
+            reasoning: false,
+            input: vec![InputModality::Text],
+            cost: ModelCost {
+                input: 1.0,
+                output: 2.0,
+                cache_read,
+                cache_write,
+            },
+            context_window: TokenCount::new(200_000),
+            max_output_tokens: TokenCount::new(8_192),
+            supports_adaptive_thinking: false,
+            supported_thinking_levels: vec![],
+            default_thinking_level: None,
+        }
+    }
+
+    #[test]
+    fn supports_caching_is_true_when_either_cache_rate_is_nonzero() {
+        // anthropic-style models price both directions
+        assert!(model_with_cost(0.3, 3.75).supports_caching());
+        // openrouter sometimes only reports input_cache_read
+        assert!(model_with_cost(0.1, 0.0).supports_caching());
+        // a write-only price is unusual but still implies caching exists
+        assert!(model_with_cost(0.0, 0.5).supports_caching());
+    }
+
+    #[test]
+    fn supports_caching_is_false_when_neither_rate_is_priced() {
+        assert!(!model_with_cost(0.0, 0.0).supports_caching());
     }
 }

@@ -30,6 +30,23 @@ pub fn cache_ttl_secs(
     }
 }
 
+/// resolve the cache timer's TTL for a given model and stream options.
+/// returns 0 (timer disabled) when the user opted out, the model has no
+/// upstream caching, or the provider/retention combo evaluates to none.
+/// otherwise returns the provider-specific TTL, accounting for oauth
+#[must_use]
+pub fn resolve_cache_ttl_secs(
+    model: &Model,
+    options: &StreamOptions,
+    cache_timer_enabled: bool,
+) -> u16 {
+    if !cache_timer_enabled || !model.supports_caching() {
+        return 0;
+    }
+    let is_oauth = options.api_key.as_ref().is_some_and(|k| k.is_oauth_token());
+    cache_ttl_secs(&model.provider, options.cache_retention.as_ref(), is_oauth)
+}
+
 /// tracks prompt cache warmth with countdown and notification flags
 #[derive(Debug, Clone)]
 pub struct CacheTimer {
