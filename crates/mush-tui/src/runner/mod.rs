@@ -22,7 +22,7 @@ mod thinking_prefs;
 use mush_agent::tool::ToolRegistry;
 use mush_ai::registry::ApiRegistry;
 
-use self::caching_backend::CachingBackend;
+use self::caching_backend::{CachingBackend, spawn_sigwinch_listener};
 pub use self::config::{
     HintMode, PaneSnapshot, PromptEnricher, ReloadCallback, ReloadedContext, SessionSaver,
     SessionSnapshot, TitleUpdater, TuiConfig,
@@ -76,6 +76,11 @@ pub async fn run_tui(
 
     let backend = CachingBackend::new(CrosstermBackend::new(io::stdout()));
     let size_cache = backend.cache_handle();
+    // listen for SIGWINCH off the main event loop so a fast-streaming
+    // burst can't starve `Event::Resize` processing and leave the size
+    // cache stale. flips `resize_pending` on the shared state; the
+    // backend's `size()` / `window_size()` consume it on the next call
+    let sigwinch_task = spawn_sigwinch_listener(size_cache.resize_pending_flag());
     let mut terminal = Terminal::new(backend)?;
     // alt screen may inherit content from the main screen buffer on some
     // terminals (esp. after pre-tui eprintln output like the startup report).
@@ -196,6 +201,7 @@ pub async fn run_tui(
     }
 
     cleanup(&mut terminal)?;
+    sigwinch_task.abort();
     terminal_guard.disarm();
     verify_terminal_restored(vec!["exit path: run_tui clean return".into()]);
     Ok(())

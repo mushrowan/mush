@@ -10,16 +10,62 @@
 //! [`CachingBackend`] forwards every call to its inner backend except
 //! `size()` and `window_size()`, which are memoised. actual terminal
 //! resizes invalidate the cache via the handle returned by
-//! [`CachingBackend::cache_handle`] (called from the `Event::Resize`
-//! branch of the event loop).
+//! [`CachingBackend::cache_handle`]. there are two invalidation paths:
+//!
+//! 1. the `Event::Resize` arm of the main event loop calls
+//!    [`CachedSizeState::invalidate`] directly. this is enough when the
+//!    loop drains terminal events promptly.
+//! 2. a sigwinch-driven async task flips an `Arc<AtomicBool>` obtained
+//!    via [`CachedSizeState::resize_pending_flag`]. `size()` /
+//!    `window_size()` consume the flag at the top of every call, so a
+//!    real os-level resize can never be hidden by a streaming burst
+//!    starving the event loop's resize-event processing.
 
 use std::cell::Cell;
 use std::ops::Range;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use ratatui::backend::{Backend, ClearType, WindowSize};
 use ratatui::buffer::Cell as BufferCell;
 use ratatui::layout::{Position, Size};
+
+/// spawn a background task that flips `flag` to true on every
+/// `SIGWINCH`. wired into [`CachingBackend`] so a real os-level resize
+/// can never be hidden by a streaming burst starving the event loop's
+/// `Event::Resize` processing.
+///
+/// the returned [`tokio::task::JoinHandle`] should be aborted at
+/// shutdown so the listener doesn't outlive `run_tui`. on non-unix
+/// platforms the task is a no-op (no SIGWINCH equivalent); cache
+/// freshness then relies entirely on `Event::Resize` draining via the
+/// main event loop.
+#[cfg(unix)]
+pub(super) fn spawn_sigwinch_listener(flag: Arc<AtomicBool>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut signal =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change()) {
+                Ok(sig) => sig,
+                Err(error) => {
+                    tracing::warn!(
+                        ?error,
+                        "failed to install sigwinch listener; size cache will only \
+                     refresh via Event::Resize draining"
+                    );
+                    return;
+                }
+            };
+        while signal.recv().await.is_some() {
+            flag.store(true, Ordering::Release);
+        }
+    })
+}
+
+#[cfg(not(unix))]
+pub(super) fn spawn_sigwinch_listener(_flag: Arc<AtomicBool>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async {})
+}
 
 /// shared cache slot for [`CachingBackend`].
 ///
@@ -30,6 +76,12 @@ use ratatui::layout::{Position, Size};
 pub struct CachedSizeState {
     size: Cell<Option<Size>>,
     window_size: Cell<Option<WindowSize>>,
+    /// flipped to true by the sigwinch listener task (or any other
+    /// off-thread observer) when the os reports a terminal resize.
+    /// consumed at the top of `size()` / `window_size()` so a stale
+    /// cache can never outlive a real resize even if `Event::Resize`
+    /// is still queued
+    resize_pending: Arc<AtomicBool>,
 }
 
 impl CachedSizeState {
@@ -39,6 +91,21 @@ impl CachedSizeState {
     pub fn invalidate(&self) {
         self.size.set(None);
         self.window_size.set(None);
+    }
+
+    /// shareable handle to the resize-pending flag. callers that
+    /// observe os-level resize signals (e.g. sigwinch) can flip this
+    /// from any thread/task and the next backend size query will
+    /// refresh
+    pub fn resize_pending_flag(&self) -> Arc<AtomicBool> {
+        self.resize_pending.clone()
+    }
+
+    /// atomically clear and return whether a resize was pending. on
+    /// `true`, callers should treat both cached values as stale and
+    /// refetch
+    fn consume_resize_pending(&self) -> bool {
+        self.resize_pending.swap(false, Ordering::AcqRel)
     }
 }
 
@@ -102,6 +169,15 @@ impl<B: Backend> Backend for CachingBackend<B> {
     }
 
     fn size(&self) -> Result<Size, Self::Error> {
+        if self.state.consume_resize_pending() {
+            // os reported a resize since the last query; bypass both
+            // caches so a follow-up window_size() in the same frame
+            // also refreshes
+            let s = self.inner.size()?;
+            self.state.size.set(Some(s));
+            self.state.window_size.set(None);
+            return Ok(s);
+        }
         if let Some(s) = self.state.size.get() {
             return Ok(s);
         }
@@ -111,6 +187,12 @@ impl<B: Backend> Backend for CachingBackend<B> {
     }
 
     fn window_size(&mut self) -> Result<WindowSize, Self::Error> {
+        if self.state.consume_resize_pending() {
+            let s = self.inner.window_size()?;
+            self.state.window_size.set(Some(s));
+            self.state.size.set(Some(s.columns_rows));
+            return Ok(s);
+        }
         if let Some(s) = self.state.window_size.get() {
             return Ok(s);
         }
@@ -276,6 +358,48 @@ mod tests {
             backend.inner.size_calls.get(),
             0,
             "size() should hit the cache populated by window_size()"
+        );
+    }
+
+    #[test]
+    fn mark_resize_pending_forces_size_refresh() {
+        let inner = CountingBackend::new(80, 25);
+        let backend = CachingBackend::new(inner);
+        let flag = backend.cache_handle().resize_pending_flag();
+
+        let _ = backend.size().unwrap();
+        let _ = backend.size().unwrap();
+        assert_eq!(backend.inner.size_calls.get(), 1);
+
+        flag.store(true, Ordering::Release);
+        let _ = backend.size().unwrap();
+        assert_eq!(
+            backend.inner.size_calls.get(),
+            2,
+            "flipping the resize_pending flag should force the next size() to refetch"
+        );
+
+        // subsequent calls come back from cache until the next flip
+        let _ = backend.size().unwrap();
+        assert_eq!(backend.inner.size_calls.get(), 2);
+    }
+
+    #[test]
+    fn mark_resize_pending_forces_window_size_refresh() {
+        let inner = CountingBackend::new(80, 25);
+        let mut backend = CachingBackend::new(inner);
+        let flag = backend.cache_handle().resize_pending_flag();
+
+        let _ = backend.window_size().unwrap();
+        let _ = backend.window_size().unwrap();
+        assert_eq!(backend.inner.window_calls.get(), 1);
+
+        flag.store(true, Ordering::Release);
+        let _ = backend.window_size().unwrap();
+        assert_eq!(
+            backend.inner.window_calls.get(),
+            2,
+            "flipping the resize_pending flag should force window_size() to refetch"
         );
     }
 }
