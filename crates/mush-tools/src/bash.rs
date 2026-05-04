@@ -433,6 +433,7 @@ impl BashTool {
             stdout: String::new(),
             stderr: String::new(),
             started: std::time::Instant::now(),
+            finished: None,
             cwd: self.cwd.clone(),
         };
 
@@ -485,7 +486,9 @@ async fn run_background_command(
         Ok(c) => c,
         Err(e) => {
             let mut state = handle.write().await;
-            state.status = crate::background::JobStatus::Failed(format!("failed to spawn: {e}"));
+            state.finish(crate::background::JobStatus::Failed(format!(
+                "failed to spawn: {e}"
+            )));
             return;
         }
     };
@@ -511,7 +514,9 @@ async fn run_background_command(
             let mut state = handle.write().await;
             state.stdout = stdout;
             state.stderr = stderr;
-            state.status = crate::background::JobStatus::Failed(format!("command failed: {e}"));
+            state.finish(crate::background::JobStatus::Failed(format!(
+                "command failed: {e}"
+            )));
             return;
         }
         Err(_) => {
@@ -532,12 +537,13 @@ async fn run_background_command(
             let mut state = handle.write().await;
             state.stdout = stdout;
             state.stderr = stderr;
-            state.status = match reaped {
+            let status = match reaped {
                 Some(status) => crate::background::JobStatus::Done {
                     exit_code: status.code().unwrap_or(-1),
                 },
                 None => crate::background::JobStatus::TimedOut,
             };
+            state.finish(status);
             return;
         }
     };
@@ -550,7 +556,7 @@ async fn run_background_command(
     let mut state = handle.write().await;
     state.stdout = stdout;
     state.stderr = stderr;
-    state.status = crate::background::JobStatus::Done { exit_code };
+    state.finish(crate::background::JobStatus::Done { exit_code });
 }
 
 async fn run_command(

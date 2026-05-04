@@ -125,7 +125,11 @@ fn format_job_result(state: &crate::background::JobState) -> ToolResult {
         JobStatus::Running => unreachable!("called format_job_result on running job"),
     };
 
-    let elapsed = state.started.elapsed().as_secs();
+    // use the stable run-time duration recorded at finish time. polling
+    // a long-since-finished job must not show a duration that climbs
+    // with wall-clock; that masked `Status: timed_out` once and made
+    // the agent loop on bash_status thinking the job was still running
+    let elapsed = state.run_duration().as_secs();
     let preamble =
         format!("Exit code: {exit_code}\nStatus: {status_str}\nDuration: {elapsed}s\n\n");
 
@@ -144,7 +148,7 @@ fn format_job_result(state: &crate::background::JobState) -> ToolResult {
 }
 
 fn format_running_status(state: &crate::background::JobState) -> ToolResult {
-    let elapsed = state.started.elapsed().as_secs();
+    let elapsed = state.run_duration().as_secs();
     let stdout_lines = state.stdout.lines().count();
     let stderr_lines = state.stderr.lines().count();
 
@@ -190,6 +194,7 @@ mod tests {
                 stdout: "hello\n".into(),
                 stderr: String::new(),
                 started: std::time::Instant::now(),
+                finished: Some(std::time::Instant::now()),
                 cwd: std::sync::Arc::from(std::path::Path::new(".")),
             })
             .await;
@@ -219,6 +224,7 @@ mod tests {
                 stdout: "partial output\n".into(),
                 stderr: String::new(),
                 started: std::time::Instant::now(),
+                finished: None,
                 cwd: std::sync::Arc::from(std::path::Path::new(".")),
             })
             .await;
@@ -247,6 +253,7 @@ mod tests {
                 stdout: String::new(),
                 stderr: String::new(),
                 started: std::time::Instant::now(),
+                finished: None,
                 cwd: std::sync::Arc::from(std::path::Path::new(".")),
             })
             .await;
@@ -256,5 +263,45 @@ mod tests {
             .execute(serde_json::json!({"job_id": "bg_0", "timeout": 0}))
             .await;
         assert!(result.outcome.is_error());
+    }
+
+    #[tokio::test]
+    async fn duration_reports_run_time_not_wall_clock_since_start() {
+        // a job that started 200s ago and finished after running for
+        // 30s should report "Duration: 30s" no matter when it's polled,
+        // not the 200s elapsed since `started`. losing this invariant
+        // masks `Status: timed_out` behind a duration that keeps
+        // climbing on every poll, making it look like the job is still
+        // running
+        let registry = make_registry();
+        let now = std::time::Instant::now();
+        let started = now - std::time::Duration::from_secs(200);
+        let finished = started + std::time::Duration::from_secs(30);
+        registry
+            .insert(crate::background::JobState {
+                id: "bg_0".into(),
+                command: "nix flake check".into(),
+                status: JobStatus::TimedOut,
+                stdout: String::new(),
+                stderr: String::new(),
+                started,
+                finished: Some(finished),
+                cwd: std::sync::Arc::from(std::path::Path::new(".")),
+            })
+            .await;
+
+        let tool = BashStatusTool::new(registry);
+        let result = tool
+            .execute(serde_json::json!({"job_id": "bg_0", "timeout": 0}))
+            .await;
+        let text = extract_text(&result);
+        assert!(
+            text.contains("Duration: 30s"),
+            "should report run-time duration (30s), not wall-clock since start: {text}"
+        );
+        assert!(
+            !text.contains("Duration: 200s"),
+            "must not report wall-clock since start: {text}"
+        );
     }
 }

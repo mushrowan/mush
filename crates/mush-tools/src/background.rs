@@ -39,7 +39,37 @@ pub struct JobState {
     pub stdout: String,
     pub stderr: String,
     pub started: Instant,
+    /// instant the status transitioned out of `Running`. `None` while
+    /// the job is still running. used to report a stable run-time
+    /// duration on subsequent polls instead of wall-clock-since-start
+    pub finished: Option<Instant>,
     pub cwd: Arc<Path>,
+}
+
+impl JobState {
+    /// transition the job out of `Running`, recording the finish
+    /// instant so duration reporting stays stable across later polls.
+    /// callers should always go through this rather than mutating
+    /// `status` directly so the invariant `status != Running =>
+    /// finished.is_some()` cannot drift
+    pub fn finish(&mut self, status: JobStatus) {
+        debug_assert!(
+            !status.is_running(),
+            "JobState::finish called with Running status"
+        );
+        self.status = status;
+        self.finished = Some(Instant::now());
+    }
+
+    /// time the job spent running. for finished jobs this is the gap
+    /// between `started` and `finished`; for in-flight jobs it's
+    /// wall-clock from `started` until now
+    pub fn run_duration(&self) -> std::time::Duration {
+        match self.finished {
+            Some(finished) => finished.duration_since(self.started),
+            None => self.started.elapsed(),
+        }
+    }
 }
 
 /// registry of active background jobs
@@ -167,6 +197,7 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             started: Instant::now(),
+            finished: None,
             cwd: Arc::from(Path::new(".")),
         }
     }
@@ -227,7 +258,10 @@ mod tests {
         let handle = reg.insert(make_job("bg_0", "echo done")).await;
 
         // mark it complete
-        handle.write().await.status = JobStatus::Done { exit_code: 0 };
+        handle
+            .write()
+            .await
+            .finish(JobStatus::Done { exit_code: 0 });
 
         // should now allow a new job without concurrent flag
         assert!(reg.check_can_start(false).await.is_ok());
@@ -259,7 +293,7 @@ mod tests {
         reg.insert(make_job("bg_1", "cmd2")).await;
         assert_eq!(reg.running_count().await, 2);
 
-        h1.write().await.status = JobStatus::Done { exit_code: 0 };
+        h1.write().await.finish(JobStatus::Done { exit_code: 0 });
         assert_eq!(reg.running_count().await, 1);
     }
 
@@ -268,7 +302,7 @@ mod tests {
         let reg = BackgroundJobRegistry::new();
         reg.insert(make_job("bg_0", "cmd1")).await;
         let h = reg.insert(make_job("bg_1", "cmd2")).await;
-        h.write().await.status = JobStatus::Done { exit_code: 0 };
+        h.write().await.finish(JobStatus::Done { exit_code: 0 });
 
         let list = reg.list().await;
         assert_eq!(list.len(), 2);
