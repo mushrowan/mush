@@ -5,6 +5,7 @@ pub mod bash_status;
 pub mod batch;
 pub mod edit;
 pub mod find;
+pub mod forbidden_chars;
 pub mod glob;
 pub mod grep;
 pub mod ls;
