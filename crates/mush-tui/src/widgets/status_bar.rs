@@ -66,6 +66,67 @@ fn usage_bar_width(total_width: u16) -> usize {
     }
 }
 
+/// builder that enforces consistent inter-section padding for
+/// the status bar's left side.
+///
+/// usage:
+///
+/// - `push_section(content)` starts a new logical section, prefixing
+///   ` │ ` between it and the previous section (no-op for the first
+///   section)
+/// - `push_inline(span)` appends a span to the current section
+///   without inserting a divider, used for items like ` ↑45k` and
+///   ` $1.23` that visually belong with the preceding info
+///
+/// the divider style is pinned to `theme.input_border` so the pipe
+/// tees cleanly into the input box's bottom border instead of looking
+/// like a stray bright glyph.
+struct StatusSpansBuilder {
+    spans: Vec<Span<'static>>,
+    sep: Span<'static>,
+    has_content: bool,
+}
+
+impl StatusSpansBuilder {
+    fn new(theme: &crate::theme::Theme) -> Self {
+        Self {
+            // leading 1-col pad mirrors the trailing pad on the cwd
+            // side so the whole bar has symmetric edge padding
+            spans: vec![Span::styled(" ", theme.dim)],
+            sep: Span::styled(" │ ", theme.input_border),
+            has_content: false,
+        }
+    }
+
+    /// start a new section. inserts ` │ ` if any prior section pushed
+    /// content, otherwise no-op
+    fn section_break(&mut self) {
+        if self.has_content {
+            self.spans.push(self.sep.clone());
+        }
+    }
+
+    /// push a single span as part of the current section. callers
+    /// should call `section_break()` before the first span of a new
+    /// section; subsequent spans within the same section just call
+    /// `push_inline`
+    fn push_inline(&mut self, span: Span<'static>) {
+        self.spans.push(span);
+        self.has_content = true;
+    }
+
+    /// extend with multiple spans within the current section
+    fn extend_inline(&mut self, spans: impl IntoIterator<Item = Span<'static>>) {
+        for span in spans {
+            self.push_inline(span);
+        }
+    }
+
+    fn into_spans(self) -> Vec<Span<'static>> {
+        self.spans
+    }
+}
+
 /// build the left-side info spans
 fn left_spans(app: &App, width: u16) -> Vec<Span<'static>> {
     #[cfg(test)]
@@ -82,27 +143,27 @@ fn left_spans(app: &App, width: u16) -> Vec<Span<'static>> {
         ThinkingLevel::Minimal => unreachable!(),
     };
 
-    let mut spans = vec![Span::styled(" ", dim)];
+    let mut b = StatusSpansBuilder::new(&app.theme);
 
-    // pane indicator when multi-pane
+    // first section: pane indicator (if multi-pane) + model. these
+    // sit together with no divider between them so the indicator
+    // reads as a prefix on the model name
     if app.interaction.status_bar.show_pane_indicator
         && let Some((pane_idx, pane_count)) = app.pane_info
     {
-        spans.push(Span::styled(
+        b.push_inline(Span::styled(
             format!("[{pane_idx}/{pane_count}] "),
             app.theme.status_model,
         ));
     }
-
-    let sep = Span::styled(" │ ", dim);
-
-    spans.push(Span::styled(
+    b.push_inline(Span::styled(
         app.model_id.abbreviated(),
         app.theme.status_model,
     ));
+
     if app.interaction.status_bar.show_thinking {
-        spans.push(sep.clone());
-        spans.push(Span::styled(
+        b.section_break();
+        b.push_inline(Span::styled(
             format!("thinking: {thinking_label}"),
             if app.thinking_level == ThinkingLevel::Off {
                 dim
@@ -112,27 +173,29 @@ fn left_spans(app: &App, width: u16) -> Vec<Span<'static>> {
         ));
     }
 
+    // token counters: inline within the previous section so they
+    // visually attach to the model/thinking info
     if app.interaction.show_token_counters {
         if app.stats.input_tokens > TokenCount::ZERO {
-            spans.push(Span::styled(
+            b.push_inline(Span::styled(
                 format!(" ↑{}", format_tokens(app.stats.input_tokens)),
                 dim,
             ));
         }
         if app.stats.output_tokens > TokenCount::ZERO {
-            spans.push(Span::styled(
+            b.push_inline(Span::styled(
                 format!(" ↓{}", format_tokens(app.stats.output_tokens)),
                 dim,
             ));
         }
         if app.stats.cache_read_tokens > TokenCount::ZERO {
-            spans.push(Span::styled(
+            b.push_inline(Span::styled(
                 format!(" R{}", format_tokens(app.stats.cache_read_tokens)),
                 dim,
             ));
         }
         if app.stats.cache_write_tokens > TokenCount::ZERO {
-            spans.push(Span::styled(
+            b.push_inline(Span::styled(
                 format!(" W{}", format_tokens(app.stats.cache_write_tokens)),
                 dim,
             ));
@@ -183,15 +246,16 @@ fn left_spans(app: &App, width: u16) -> Vec<Span<'static>> {
             _ => String::new(),
         };
 
-        spans.push(sep.clone());
-        spans.push(Span::styled(
+        b.section_break();
+        b.push_inline(Span::styled(
             format!("{ctx}/{window}{cache_suffix}"),
             ctx_style,
         ));
     }
 
     if app.interaction.show_cost && app.stats.total_cost > Dollars::ZERO {
-        spans.push(Span::styled(format!(" {}", app.stats.total_cost), dim));
+        // cost stays inline with the previous section for compactness
+        b.push_inline(Span::styled(format!(" {}", app.stats.total_cost), dim));
     }
 
     // oauth usage bars
@@ -201,25 +265,25 @@ fn left_spans(app: &App, width: u16) -> Vec<Span<'static>> {
         let bar_w = usage_bar_width(width);
         if let Some(ref w) = usage.five_hour {
             let pace = w.pace(mush_ai::oauth::usage::OAuthUsage::FIVE_HOUR);
-            spans.push(sep.clone());
-            spans.push(Span::styled("5h ", dim));
-            spans.extend(super::usage_bar::render_usage_bar_width(
+            b.section_break();
+            b.push_inline(Span::styled("5h ", dim));
+            b.extend_inline(super::usage_bar::render_usage_bar_width(
                 w.utilization,
                 pace,
                 bar_w,
             ));
-            spans.push(Span::styled(format!(" {}%", w.utilization as u32), dim));
+            b.push_inline(Span::styled(format!(" {}%", w.utilization as u32), dim));
         }
         if let Some(ref w) = usage.seven_day {
             let pace = w.pace(mush_ai::oauth::usage::OAuthUsage::SEVEN_DAY);
-            spans.push(sep.clone());
-            spans.push(Span::styled("7d ", dim));
-            spans.extend(super::usage_bar::render_usage_bar_width(
+            b.section_break();
+            b.push_inline(Span::styled("7d ", dim));
+            b.extend_inline(super::usage_bar::render_usage_bar_width(
                 w.utilization,
                 pace,
                 bar_w,
             ));
-            spans.push(Span::styled(format!(" {}%", w.utilization as u32), dim));
+            b.push_inline(Span::styled(format!(" {}%", w.utilization as u32), dim));
         }
     }
 
@@ -228,8 +292,8 @@ fn left_spans(app: &App, width: u16) -> Vec<Span<'static>> {
         // turn so the status reflects what the agent is actually doing.
         // when idle, the ephemeral status (if any) shows in its place
         if let Some(label) = app.activity_label() {
-            spans.push(sep.clone());
-            spans.extend(crate::widgets::shimmer::shimmer_spans(
+            b.section_break();
+            b.extend_inline(crate::widgets::shimmer::shimmer_spans(
                 &label,
                 &app.theme.shimmer,
                 app.shimmer_phase(),
@@ -238,8 +302,8 @@ fn left_spans(app: &App, width: u16) -> Vec<Span<'static>> {
         } else if let Some(ref status) = app.status
             && status != "config reloaded"
         {
-            spans.push(sep.clone());
-            spans.push(Span::styled(status.clone(), dim));
+            b.section_break();
+            b.push_inline(Span::styled(status.clone(), dim));
         }
     }
 
@@ -249,14 +313,15 @@ fn left_spans(app: &App, width: u16) -> Vec<Span<'static>> {
             crate::app::ScrollUnit::Block => "blocks",
             crate::app::ScrollUnit::Message => "messages",
         };
-        spans.push(sep.clone());
-        spans.push(Span::styled(
+        b.section_break();
+        b.push_inline(Span::styled(
             format!("scroll: {unit_label} (b)"),
             app.theme.scroll_indicator,
         ));
     }
 
-    // scroll position indicator (only when scrolled away from bottom)
+    // scroll position indicator (only when scrolled away from bottom).
+    // stays inline with the scroll mode section
     if app.interaction.status_bar.show_scroll_position && app.scroll_offset > 0 {
         let total = app.render_state.total_content_lines.get();
         let visible = app.render_state.visible_area_height.get();
@@ -265,7 +330,7 @@ fn left_spans(app: &App, width: u16) -> Vec<Span<'static>> {
             // scroll_offset is lines from bottom, convert to percentage from top
             let from_top = max_scroll.saturating_sub(app.scroll_offset);
             let pct = (from_top as f64 / max_scroll as f64 * 100.0) as u16;
-            spans.push(Span::styled(format!(" {pct}%"), app.theme.scroll_indicator));
+            b.push_inline(Span::styled(format!(" {pct}%"), app.theme.scroll_indicator));
         }
     }
 
@@ -273,11 +338,11 @@ fn left_spans(app: &App, width: u16) -> Vec<Span<'static>> {
     if app.interaction.status_bar.show_background_alerts
         && let Some(ref alert) = app.background_alert
     {
-        spans.push(sep.clone());
-        spans.push(Span::styled(alert.clone(), app.theme.alert));
+        b.section_break();
+        b.push_inline(Span::styled(alert.clone(), app.theme.alert));
     }
 
-    spans
+    b.into_spans()
 }
 
 /// ensure `app.render_state.status_bar_cache` is populated for `width`.
@@ -699,6 +764,40 @@ mod tests {
         assert!(
             content.contains("thinking:"),
             "missing thinking: label: {content}"
+        );
+    }
+
+    #[test]
+    fn status_bar_dividers_use_input_border_style() {
+        // the `│` divider between segments should match the prompt-box
+        // border colour so they tee into the input box border cleanly
+        // (vs. the dimmer `theme.dim` style which renders a noticeably
+        // brighter pipe than the surrounding box border in some
+        // terminals)
+        let mut app = App::new("test-model".into(), TokenCount::new(200_000));
+        app.interaction.status_bar.show_thinking = true; // ensure at least one divider
+        let buf = render_status(&app, 120, 1);
+
+        let mut found = None;
+        for x in 0..buf.area.width {
+            let cell = &buf[(x, 0)];
+            if cell.symbol() == "│" {
+                found = Some((x, cell.style()));
+                break;
+            }
+        }
+
+        let (x, style) = found.expect("expected a `│` divider somewhere on the status bar");
+        let expected = app.theme.input_border;
+        assert_eq!(
+            style.fg, expected.fg,
+            "divider at col {x} fg should match theme.input_border, got {:?} expected {:?}",
+            style.fg, expected.fg
+        );
+        assert_eq!(
+            style.add_modifier, expected.add_modifier,
+            "divider at col {x} modifiers should match theme.input_border, got {:?} expected {:?}",
+            style.add_modifier, expected.add_modifier
         );
     }
 
