@@ -3772,6 +3772,65 @@ mod tests {
         );
     }
 
+    /// repro for the "j doesn't go down after resize during streaming"
+    /// bug: after a resize while scrolled up, the next render's stale
+    /// `prev_content_lines` (computed under the OLD wrap width) becomes
+    /// the baseline. if the new width produces a smaller line count,
+    /// `compensation = total_new - baseline_old` is negative and big
+    /// enough to clamp `effective_offset` to 0 - locking the viewport
+    /// at max_scroll regardless of how many `j` presses arrive.
+    ///
+    /// fix invariant: after a resize, pressing `j` from the same
+    /// scroll_offset must produce a strictly larger `render_scroll`
+    /// (= viewport moved down) than not pressing it.
+    #[test]
+    fn j_still_scrolls_down_after_resize_during_scroll() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        // long message bodies so wrap width genuinely changes total
+        // line count: a 200-char paragraph wraps to ~10 lines at width
+        // 20 vs ~3 lines at width 80
+        for i in 0..40 {
+            app.messages.push(DisplayMessage::new(
+                MessageRole::Assistant,
+                format!("message {i} ").repeat(20),
+            ));
+        }
+
+        // scroll up at the narrow width so prev_content_lines captures
+        // a large total (lots of wrap)
+        app.scroll_offset = 30;
+        render_app(&app, 30, 20);
+        // settle: a second render so the baseline moves out of the
+        // first-frame capture branch
+        render_app(&app, 30, 20);
+
+        // simulate the resize handler: notify_resize fires before the
+        // first post-resize render
+        app.notify_resize();
+
+        // first post-resize render at a much wider width
+        render_app(&app, 120, 20);
+        let render_scroll_after_resize = app.render_state.render_scroll.get();
+
+        // press j: scroll_offset decreases
+        let prev_offset = app.scroll_offset;
+        app.scroll_offset = app.scroll_offset.saturating_sub(app.scroll_lines);
+        assert!(
+            app.scroll_offset < prev_offset,
+            "j should reduce scroll_offset; if equal, scroll_lines is 0 - check test setup"
+        );
+
+        // re-render: viewport must move DOWN, i.e. render_scroll
+        // (= max_scroll - effective_offset) must increase
+        render_app(&app, 120, 20);
+        let render_scroll_after_j = app.render_state.render_scroll.get();
+        assert!(
+            render_scroll_after_j > render_scroll_after_resize,
+            "j must move the viewport down after a resize, but render_scroll \
+             went from {render_scroll_after_resize} to {render_scroll_after_j}"
+        );
+    }
+
     #[test]
     fn scroll_position_stable_when_content_fluctuates() {
         // bug: while scrolled up during streaming, the message log "shakes"

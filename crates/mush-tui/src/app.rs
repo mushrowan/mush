@@ -278,10 +278,22 @@ impl App {
     /// dimensions, so subsequent k/j presses move the viewport
     /// immediately. status-bar height jitter (vis ±1 between frames
     /// from cache countdown text width changing, etc) is unaffected
-    /// because it doesn't go through this path
+    /// because it doesn't go through this path.
+    ///
+    /// `prev_content_lines` is also cleared because it gets fed into
+    /// the next baseline capture (in `update_scroll_baseline`'s
+    /// `(_, 0)` arm). without this reset the post-resize baseline
+    /// would anchor against a line count computed under the OLD wrap
+    /// width, producing a wrong (often negative) compensation that
+    /// clamps `effective_offset` to 0 and locks the viewport at
+    /// max_scroll - the "j stops scrolling down after a resize"
+    /// symptom. one frame of zero-compensation rendering follows the
+    /// resize while the new total propagates, then anchoring resumes
+    /// correctly
     pub fn notify_resize(&mut self) {
         self.render_state.scroll_baseline.set(0);
         self.render_state.scroll_baseline_vis.set(0);
+        self.render_state.prev_content_lines.set(0);
     }
 
     /// whether the unread flash indicator is in the "on" phase
