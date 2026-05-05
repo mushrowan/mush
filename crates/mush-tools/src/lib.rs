@@ -45,7 +45,7 @@ pub fn supports_native_parallel_calls(model_id: &str) -> bool {
 
 /// create the full set of built-in tools for a given working directory
 pub fn builtin_tools(cwd: Arc<Path>, http_client: reqwest::Client) -> ToolRegistry {
-    let mut tools = builtin_tools_with_options(cwd, None, false, http_client);
+    let mut tools = builtin_tools_with_options(cwd, None, false, http_client, Default::default());
     add_batch_tool(&mut tools);
     tools
 }
@@ -56,13 +56,18 @@ pub fn builtin_tools_with_sink(
     output_sink: Option<bash::OutputSink>,
     http_client: reqwest::Client,
 ) -> ToolRegistry {
-    let mut tools = builtin_tools_with_options(cwd, output_sink, false, http_client);
+    let mut tools =
+        builtin_tools_with_options(cwd, output_sink, false, http_client, Default::default());
     add_batch_tool(&mut tools);
     tools
 }
 
 /// create built-in tools with all options.
 /// when `use_patch` is true, apply_patch replaces edit + write (for GPT models).
+///
+/// `forbidden_chars` is wired into `write` and `edit` so configured
+/// characters are rejected from file content unless the model passes
+/// `allow_forbidden_chars: true` on the call.
 ///
 /// does NOT include the batch tool. call `add_batch_tool` after registering
 /// all additional tools (skill, MCP, LSP) so batch can access them all.
@@ -71,6 +76,7 @@ pub fn builtin_tools_with_options(
     output_sink: Option<bash::OutputSink>,
     use_patch: bool,
     http_client: reqwest::Client,
+    forbidden_chars: forbidden_chars::ForbiddenChars,
 ) -> ToolRegistry {
     let bg_registry = background::BackgroundJobRegistry::new();
 
@@ -99,8 +105,12 @@ pub fn builtin_tools_with_options(
     if use_patch {
         tools.push(Arc::new(apply_patch::ApplyPatchTool::new(cwd)));
     } else {
-        tools.push(Arc::new(write::WriteTool::new(cwd.clone())));
-        tools.push(Arc::new(edit::EditTool::new(cwd)));
+        tools.push(Arc::new(
+            write::WriteTool::new(cwd.clone()).with_forbidden_chars(forbidden_chars.clone()),
+        ));
+        tools.push(Arc::new(
+            edit::EditTool::new(cwd).with_forbidden_chars(forbidden_chars),
+        ));
     }
 
     ToolRegistry::from_shared(tools)

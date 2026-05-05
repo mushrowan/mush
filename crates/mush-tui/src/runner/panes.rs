@@ -180,6 +180,7 @@ pub(super) async fn fork_pane(
                         sink,
                         use_patch,
                         pane_http,
+                        tui_config.forbidden_chars.clone(),
                     );
                     if !skip_batch {
                         mush_tools::add_batch_tool(&mut pane_tools);
@@ -544,6 +545,7 @@ mod tests {
             save_favourite_models: None,
             keymap: crate::keybinds::KeyMap::default(),
             reload_context: None,
+            forbidden_chars: Default::default(),
         };
 
         process_delegations(&mut pane_mgr, &tui_config, &bus, &queue);

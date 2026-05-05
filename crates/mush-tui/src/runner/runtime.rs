@@ -462,6 +462,7 @@ mod tests {
             save_favourite_models: None,
             keymap: crate::keybinds::KeyMap::default(),
             reload_context: None,
+            forbidden_chars: Default::default(),
         }
     }
 

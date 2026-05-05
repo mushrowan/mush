@@ -177,6 +177,11 @@ pub struct TuiConfig {
     /// `None` means /reload reports "not supported" rather than silently
     /// becoming a no-op
     pub reload_context: Option<ReloadCallback>,
+    /// validator applied to file content produced by `write` and `edit`.
+    /// rejects content containing any of the configured chars unless
+    /// the model passes `allow_forbidden_chars: true` on the call.
+    /// empty by default (no enforcement)
+    pub forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars,
 }
 
 impl TuiConfig {

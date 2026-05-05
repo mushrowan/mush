@@ -738,6 +738,16 @@
       },
       "type": "array"
     },
+    "forbidden_chars": {
+      "default": [],
+      "description": "characters that are forbidden in file edits/writes. tools that\nproduce text output (`write`, `edit`) reject content containing\nany of these characters. each entry must be exactly one char\n(Unicode scalar). the model can pass `allow_forbidden_chars:\ntrue` on a single call to bypass when the forbidden char is\ngenuinely required (verbatim quoting, etc).\n\nexample:\n```toml\nforbidden_chars = [\"—\", \"–\", \";\"]\n```",
+      "items": {
+        "maxLength": 1,
+        "minLength": 1,
+        "type": "string"
+      },
+      "type": "array"
+    },
     "force_budget_thinking": {
       "default": false,
       "description": "override anthropic adaptive thinking with fixed-budget mode for\nadaptive-capable models. default: false (use adaptive when the\nmodel supports it)",

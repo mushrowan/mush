@@ -97,8 +97,14 @@ impl AppSetup {
             t.phase("model + http");
         }
 
-        let mut tools =
-            init_builtin_tools(&model, &cwd, args.output_sink, args.no_tools, &http_client);
+        let mut tools = init_builtin_tools(
+            &model,
+            &cwd,
+            args.output_sink,
+            args.no_tools,
+            &http_client,
+            mush_tools::forbidden_chars::ForbiddenChars::new(cfg.forbidden_chars.iter().copied()),
+        );
         if let Some(t) = &mut timer {
             t.phase("builtin tools");
         }
@@ -200,6 +206,7 @@ fn init_builtin_tools(
     output_sink: Option<mush_tools::bash::OutputSink>,
     no_tools: bool,
     http_client: &reqwest::Client,
+    forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars,
 ) -> mush_agent::tool::ToolRegistry {
     if no_tools {
         return mush_agent::tool::ToolRegistry::new();
@@ -209,6 +216,7 @@ fn init_builtin_tools(
         output_sink,
         model.uses_patch_tool(),
         http_client.clone(),
+        forbidden_chars,
     )
 }
 
@@ -1345,6 +1353,33 @@ mod tests {
             resolve_thinking(false, &model, &prefs, active_dir.path(), &cfg),
             Some(ThinkingLevel::Medium),
             "per-model fallback should outrank model.default_thinking_level"
+        );
+    }
+
+    #[test]
+    fn forbidden_chars_parses_from_toml() {
+        // each entry must be exactly one char (Unicode scalar), serde
+        // accepts a single-char string into a `char`. multi-char
+        // strings should fail to parse rather than silently truncate
+        let cfg: config::Config = toml::from_str(r#"forbidden_chars = ["—", ";", "–"]"#).unwrap();
+        assert_eq!(cfg.forbidden_chars, vec!['—', ';', '–']);
+    }
+
+    #[test]
+    fn forbidden_chars_defaults_to_empty() {
+        let cfg: config::Config = toml::from_str("").unwrap();
+        assert!(cfg.forbidden_chars.is_empty());
+    }
+
+    #[test]
+    fn forbidden_chars_rejects_multi_char_strings() {
+        // safety: a model couldn't sensibly comply with a "forbidden
+        // string" of length > 1 via the per-char validator, so reject
+        // the config rather than silently misbehave
+        let result: Result<config::Config, _> = toml::from_str(r#"forbidden_chars = ["nope"]"#);
+        assert!(
+            result.is_err(),
+            "multi-char string should fail to parse as char"
         );
     }
 }

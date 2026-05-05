@@ -130,6 +130,19 @@ pub struct Config {
     /// configurable keybinds: action → key combination(s)
     #[serde(default)]
     pub keys: mush_tui::KeysConfig,
+    /// characters that are forbidden in file edits/writes. tools that
+    /// produce text output (`write`, `edit`) reject content containing
+    /// any of these characters. each entry must be exactly one char
+    /// (Unicode scalar). the model can pass `allow_forbidden_chars:
+    /// true` on a single call to bypass when the forbidden char is
+    /// genuinely required (verbatim quoting, etc).
+    ///
+    /// example:
+    /// ```toml
+    /// forbidden_chars = ["—", "–", ";"]
+    /// ```
+    #[serde(default)]
+    pub forbidden_chars: Vec<char>,
 }
 
 fn default_scroll_lines() -> u16 {
@@ -177,6 +190,7 @@ impl Default for Config {
             settings: Settings::default(),
             scroll_lines: default_scroll_lines(),
             keys: mush_tui::KeysConfig::default(),
+            forbidden_chars: Vec::new(),
         }
     }
 }

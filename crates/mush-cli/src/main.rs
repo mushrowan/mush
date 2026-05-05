@@ -642,6 +642,9 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
                 },
             ))
         },
+        forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars::new(
+            setup.cfg.forbidden_chars.iter().copied(),
+        ),
     };
 
     // fire-and-forget background discovery refresh on startup. silently
