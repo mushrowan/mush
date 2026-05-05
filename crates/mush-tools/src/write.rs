@@ -13,34 +13,15 @@ use crate::util::resolve_path;
 struct WriteArgs {
     path: String,
     content: String,
-    /// per-call escape hatch when the configured `forbidden_chars`
-    /// would otherwise block the write. defaults to false.
-    #[serde(default)]
-    allow_forbidden_chars: bool,
 }
 
 pub struct WriteTool {
     cwd: Arc<Path>,
-    forbidden_chars: crate::forbidden_chars::ForbiddenChars,
 }
 
 impl WriteTool {
     pub fn new(cwd: Arc<Path>) -> Self {
-        Self {
-            cwd,
-            forbidden_chars: crate::forbidden_chars::ForbiddenChars::empty(),
-        }
-    }
-
-    /// install a forbidden-chars validator. content containing any of
-    /// the configured chars will be rejected unless the model passes
-    /// `allow_forbidden_chars: true` on the call
-    pub fn with_forbidden_chars(
-        mut self,
-        forbidden_chars: crate::forbidden_chars::ForbiddenChars,
-    ) -> Self {
-        self.forbidden_chars = forbidden_chars;
-        self
+        Self { cwd }
     }
 }
 
@@ -58,7 +39,7 @@ impl AgentTool for WriteTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        let mut schema = serde_json::json!({
+        serde_json::json!({
             "type": "object",
             "properties": {
                 "path": {
@@ -71,20 +52,7 @@ impl AgentTool for WriteTool {
                 }
             },
             "required": ["path", "content"]
-        });
-        // only advertise the override knob when the validator is
-        // actually configured. keeps schemas minimal for the common
-        // case (no forbidden chars set)
-        if !self.forbidden_chars.is_empty() {
-            schema["properties"]["allow_forbidden_chars"] = serde_json::json!({
-                "type": "boolean",
-                "description": "bypass the configured forbidden_chars guard for this call. \
-                                defaults to false. only set when the forbidden char is genuinely \
-                                required (e.g. quoting a verbatim source) - prefer fixing the \
-                                content first"
-            });
-        }
-        schema
+        })
     }
 
     async fn execute(&self, args: serde_json::Value) -> ToolResult {
@@ -92,12 +60,6 @@ impl AgentTool for WriteTool {
             Ok(args) => args,
             Err(error) => return error,
         };
-
-        if !args.allow_forbidden_chars
-            && let Err(err) = self.forbidden_chars.check(&args.content)
-        {
-            return ToolResult::error(err.to_string());
-        }
 
         let path = resolve_path(&self.cwd, &args.path);
         let content = args.content;
@@ -128,16 +90,7 @@ fn write_file(path: &Path, content: &str) -> ToolResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::forbidden_chars::ForbiddenChars;
-    use crate::util::extract_text;
     use std::fs;
-
-    fn write_args(path: &Path, content: &str) -> serde_json::Value {
-        serde_json::json!({
-            "path": path.to_str().unwrap(),
-            "content": content,
-        })
-    }
 
     #[test]
     fn write_new_file() {
@@ -168,79 +121,5 @@ mod tests {
         let result = write_file(&path, "new content");
         assert!(result.outcome.is_success());
         assert_eq!(fs::read_to_string(&path).unwrap(), "new content");
-    }
-
-    #[tokio::test]
-    async fn write_rejects_forbidden_chars_by_default() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("blocked.txt");
-        let tool =
-            WriteTool::new(Arc::from(dir.path())).with_forbidden_chars(ForbiddenChars::new(['—']));
-
-        let result = tool.execute(write_args(&path, "no — allowed")).await;
-        assert!(
-            !result.outcome.is_success(),
-            "write should fail when content contains forbidden char"
-        );
-        let msg = extract_text(&result);
-        assert!(
-            msg.contains("'—'") && msg.contains("allow_forbidden_chars"),
-            "error should name char and bypass flag: {msg}"
-        );
-        assert!(
-            !path.exists(),
-            "file should not be created when validation fails"
-        );
-    }
-
-    #[tokio::test]
-    async fn write_passes_when_no_forbidden_chars_present() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("ok.txt");
-        let tool =
-            WriteTool::new(Arc::from(dir.path())).with_forbidden_chars(ForbiddenChars::new(['—']));
-
-        let result = tool.execute(write_args(&path, "plain hyphen-minus")).await;
-        assert!(result.outcome.is_success(), "write should succeed");
-        assert_eq!(fs::read_to_string(&path).unwrap(), "plain hyphen-minus");
-    }
-
-    #[tokio::test]
-    async fn write_allow_forbidden_chars_bypasses_guard() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("override.txt");
-        let tool =
-            WriteTool::new(Arc::from(dir.path())).with_forbidden_chars(ForbiddenChars::new(['—']));
-
-        let mut args = write_args(&path, "with — em dash");
-        args["allow_forbidden_chars"] = serde_json::Value::Bool(true);
-        let result = tool.execute(args).await;
-        assert!(
-            result.outcome.is_success(),
-            "explicit allow_forbidden_chars should bypass validator: {:?}",
-            extract_text(&result)
-        );
-        assert_eq!(fs::read_to_string(&path).unwrap(), "with — em dash");
-    }
-
-    #[test]
-    fn write_schema_omits_allow_forbidden_chars_when_validator_empty() {
-        let tool = WriteTool::new(Arc::from(std::env::temp_dir().as_path()));
-        let schema = tool.parameters_schema();
-        assert!(
-            schema["properties"]["allow_forbidden_chars"].is_null(),
-            "schema should not advertise allow_forbidden_chars when no chars are configured"
-        );
-    }
-
-    #[test]
-    fn write_schema_advertises_allow_forbidden_chars_when_configured() {
-        let tool = WriteTool::new(Arc::from(std::env::temp_dir().as_path()))
-            .with_forbidden_chars(ForbiddenChars::new(['—']));
-        let schema = tool.parameters_schema();
-        assert_eq!(
-            schema["properties"]["allow_forbidden_chars"]["type"], "boolean",
-            "schema should advertise allow_forbidden_chars when validator is configured"
-        );
     }
 }

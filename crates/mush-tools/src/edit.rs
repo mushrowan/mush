@@ -23,10 +23,6 @@ struct EditArgs {
     expected_matches: Option<usize>,
     start_line: Option<usize>,
     end_line: Option<usize>,
-    /// per-call escape hatch when the configured `forbidden_chars`
-    /// would otherwise block the edit. defaults to false.
-    #[serde(default)]
-    allow_forbidden_chars: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -66,26 +62,11 @@ impl EditArgs {
 
 pub struct EditTool {
     cwd: Arc<Path>,
-    forbidden_chars: crate::forbidden_chars::ForbiddenChars,
 }
 
 impl EditTool {
     pub fn new(cwd: Arc<Path>) -> Self {
-        Self {
-            cwd,
-            forbidden_chars: crate::forbidden_chars::ForbiddenChars::empty(),
-        }
-    }
-
-    /// install a forbidden-chars validator. `newText` containing any
-    /// of the configured chars will be rejected unless the model
-    /// passes `allow_forbidden_chars: true` on the call
-    pub fn with_forbidden_chars(
-        mut self,
-        forbidden_chars: crate::forbidden_chars::ForbiddenChars,
-    ) -> Self {
-        self.forbidden_chars = forbidden_chars;
-        self
+        Self { cwd }
     }
 }
 
@@ -105,7 +86,7 @@ impl AgentTool for EditTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        let mut schema = serde_json::json!({
+        serde_json::json!({
             "type": "object",
             "properties": {
                 "path": {
@@ -134,20 +115,7 @@ impl AgentTool for EditTool {
                 }
             },
             "required": ["path", "oldText", "newText"]
-        });
-        // only advertise the override knob when the validator is
-        // actually configured, so schemas stay minimal in the common
-        // case (no forbidden chars set)
-        if !self.forbidden_chars.is_empty() {
-            schema["properties"]["allow_forbidden_chars"] = serde_json::json!({
-                "type": "boolean",
-                "description": "bypass the configured forbidden_chars guard for this call. \
-                                defaults to false. only set when the forbidden char is genuinely \
-                                required (e.g. quoting a verbatim source) - prefer fixing the \
-                                content first"
-            });
-        }
-        schema
+        })
     }
 
     async fn execute(&self, args: serde_json::Value) -> ToolResult {
@@ -155,12 +123,6 @@ impl AgentTool for EditTool {
             Ok(args) => args,
             Err(error) => return error,
         };
-
-        if !args.allow_forbidden_chars
-            && let Err(err) = self.forbidden_chars.check(&args.new_text)
-        {
-            return ToolResult::error(err.to_string());
-        }
 
         let (path, old_text, new_text, opts) = match args.into_opts() {
             Ok(args) => args,
@@ -643,107 +605,8 @@ fn format_edit_diff(old_text: &str, new_text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::forbidden_chars::ForbiddenChars;
     use crate::util::extract_text;
     use std::fs;
-
-    fn edit_args(path: &Path, old_text: &str, new_text: &str) -> serde_json::Value {
-        serde_json::json!({
-            "path": path.to_str().unwrap(),
-            "oldText": old_text,
-            "newText": new_text,
-        })
-    }
-
-    #[tokio::test]
-    async fn edit_rejects_forbidden_chars_in_new_text() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("file.rs");
-        fs::write(&path, "let x = 1;\n").unwrap();
-        let tool =
-            EditTool::new(Arc::from(dir.path())).with_forbidden_chars(ForbiddenChars::new(['—']));
-
-        let result = tool
-            .execute(edit_args(&path, "let x = 1;", "let x = 1; — comment"))
-            .await;
-        assert!(
-            !result.outcome.is_success(),
-            "edit should fail when newText contains forbidden char"
-        );
-        let msg = extract_text(&result);
-        assert!(
-            msg.contains("'—'") && msg.contains("allow_forbidden_chars"),
-            "error should name char and bypass flag: {msg}"
-        );
-        assert_eq!(
-            fs::read_to_string(&path).unwrap(),
-            "let x = 1;\n",
-            "file content must remain unchanged after rejected edit"
-        );
-    }
-
-    #[tokio::test]
-    async fn edit_passes_when_new_text_is_clean() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("file.rs");
-        fs::write(&path, "let x = 1;\n").unwrap();
-        let tool =
-            EditTool::new(Arc::from(dir.path())).with_forbidden_chars(ForbiddenChars::new(['—']));
-
-        let result = tool
-            .execute(edit_args(&path, "let x = 1;", "let x = 2;"))
-            .await;
-        assert!(
-            result.outcome.is_success(),
-            "edit should succeed: {}",
-            extract_text(&result)
-        );
-        assert!(fs::read_to_string(&path).unwrap().contains("let x = 2;"));
-    }
-
-    #[tokio::test]
-    async fn edit_allow_forbidden_chars_bypasses_guard() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("file.rs");
-        fs::write(&path, "let x = 1;\n").unwrap();
-        let tool =
-            EditTool::new(Arc::from(dir.path())).with_forbidden_chars(ForbiddenChars::new(['—']));
-
-        let mut args = edit_args(&path, "let x = 1;", "let x = 1; // —");
-        args["allow_forbidden_chars"] = serde_json::Value::Bool(true);
-        let result = tool.execute(args).await;
-        assert!(
-            result.outcome.is_success(),
-            "explicit allow_forbidden_chars should bypass: {}",
-            extract_text(&result)
-        );
-        assert!(fs::read_to_string(&path).unwrap().contains("—"));
-    }
-
-    #[tokio::test]
-    async fn edit_does_not_check_old_text_for_forbidden_chars() {
-        // matching against existing forbidden content must still work,
-        // otherwise the model can never clean up files containing the
-        // forbidden chars in the first place
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("file.txt");
-        fs::write(&path, "old — content\n").unwrap();
-        let tool =
-            EditTool::new(Arc::from(dir.path())).with_forbidden_chars(ForbiddenChars::new(['—']));
-
-        let result = tool
-            .execute(edit_args(&path, "old — content", "old - content"))
-            .await;
-        assert!(
-            result.outcome.is_success(),
-            "edit should succeed even when oldText contains forbidden char: {}",
-            extract_text(&result)
-        );
-        assert!(
-            !fs::read_to_string(&path).unwrap().contains('—'),
-            "edit should have removed the forbidden char"
-        );
-    }
 
     #[test]
     fn edit_replaces_exact_match() {
@@ -1379,7 +1242,6 @@ mod tests {
             expected_matches: None,
             start_line: None,
             end_line: Some(5),
-            allow_forbidden_chars: false,
         }
         .into_opts();
 
