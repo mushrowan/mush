@@ -11,7 +11,7 @@ use throbber_widgets_tui::{BRAILLE_SIX, Throbber, WhichUse};
 use mush_ai::types::TokenCount;
 
 use crate::app::{
-    App, CodeBlock, DisplayMessage, DisplayToolCall, ImageRenderArea, MessageRole, ToolCallStatus,
+    App, Block, DisplayMessage, DisplayToolCall, ImageRenderArea, MessageRole, ToolCallStatus,
 };
 use crate::app_state::CachedHeight;
 use crate::widgets::shimmer::shimmer_spans;
@@ -189,7 +189,7 @@ impl Widget for MessageList<'_> {
         let in_scroll_mode = self.app.interaction.mode == crate::app::AppMode::Scroll;
         let selection_range = self.app.selection_range();
         // compute once, not per-message (was O(N²) in block scroll mode)
-        let all_blocks = self.app.code_blocks();
+        let all_blocks = self.app.blocks();
 
         // virtual scrolling: estimate per-message heights and determine
         // which messages overlap the viewport so we can skip expensive
@@ -634,7 +634,7 @@ fn render_message(
     image_placeholders: &mut Vec<ImagePlaceholder>,
     deferred: &mut Vec<DeferredCacheRender>,
     width: u16,
-    all_blocks: &[CodeBlock],
+    all_blocks: &[Block],
 ) {
     // user and assistant messages have no label line.
     // user messages are distinguished by a subtle background.
@@ -710,7 +710,7 @@ fn render_message(
 
         let content_width = message_content_width(width as usize);
         let highlight_range =
-            highlight_block.and_then(|b| code_block_line_ranges(&msg.content).get(b).copied());
+            highlight_block.and_then(|b| block_line_ranges(&msg.content).get(b).copied());
 
         if highlight_range.is_none() {
             // fast path: serve cached indented lines for stable messages
@@ -2053,31 +2053,59 @@ fn diff_line_style(line: &str, theme: &Theme) -> Style {
     }
 }
 
-/// compute rendered-line ranges for each fenced code block in source
-/// returns (start, end) where start is inclusive, end is exclusive
-fn code_block_line_ranges(source: &str) -> Vec<(usize, usize)> {
+/// compute rendered-line ranges for each selectable block in a
+/// message body, in the same order as [`App::blocks`] yields them
+/// for that message. paragraphs and fenced bodies both produce
+/// ranges. fence marker lines are consumed (not rendered) just as
+/// they are by the markdown renderer, so paragraph ranges that
+/// border a fence don't include the fence line.
+fn block_line_ranges(source: &str) -> Vec<(usize, usize)> {
     let mut ranges = Vec::new();
-    let mut in_block = false;
-    let mut rendered_idx = 0;
-    let mut block_start = 0;
+    let mut in_fence = false;
+    let mut rendered_idx = 0usize;
+    let mut fence_start = 0usize;
+    let mut para_start: Option<usize> = None;
 
     for line in source.lines() {
         if line.starts_with("```") {
-            if in_block {
-                ranges.push((block_start, rendered_idx));
-                in_block = false;
+            if in_fence {
+                // closing fence: emit fence range
+                ranges.push((fence_start, rendered_idx));
+                in_fence = false;
             } else {
-                block_start = rendered_idx;
-                in_block = true;
+                // opening fence: flush any open paragraph first
+                if let Some(start) = para_start.take() {
+                    ranges.push((start, rendered_idx));
+                }
+                fence_start = rendered_idx;
+                in_fence = true;
             }
             // fence markers are consumed, not rendered
             continue;
         }
+
+        if in_fence {
+            rendered_idx += 1;
+            continue;
+        }
+
+        if line.trim().is_empty() {
+            // paragraph boundary
+            if let Some(start) = para_start.take() {
+                ranges.push((start, rendered_idx));
+            }
+        } else if para_start.is_none() {
+            para_start = Some(rendered_idx);
+        }
         rendered_idx += 1;
     }
 
-    if in_block && rendered_idx > block_start {
-        ranges.push((block_start, rendered_idx));
+    // tail flushes
+    if let Some(start) = para_start {
+        ranges.push((start, rendered_idx));
+    }
+    if in_fence && rendered_idx > fence_start {
+        ranges.push((fence_start, rendered_idx));
     }
 
     ranges
@@ -3006,7 +3034,8 @@ mod tests {
         // enter scroll mode with block selected
         app.interaction.mode = crate::app::AppMode::Scroll;
         app.navigation.scroll_unit = crate::app::ScrollUnit::Block;
-        app.navigation.selected_block = Some(0); // first block (bash)
+        // block 0 is the "here:" paragraph; block 1 is the bash fence body
+        app.navigation.selected_block = Some(1);
 
         let buf = render_app(&app, 60, 20);
 

@@ -21,8 +21,8 @@ pub use crate::cache::{
     resolve_cache_ttl_secs,
 };
 pub use crate::display_types::{
-    ActiveToolState, CodeBlock, DisplayMessage, DisplayToolCall, ImageRenderArea, MessageRole,
-    MessageRowRange, ToolCallStatus,
+    ActiveToolState, Block, BlockKind, CodeBlock, DisplayMessage, DisplayToolCall, ImageRenderArea,
+    MessageRole, MessageRowRange, ToolCallStatus,
 };
 pub use crate::input_buffer::{IMAGE_PLACEHOLDER, InputBuffer, PendingImage};
 pub use crate::session_picker::{SessionPickerState, SessionScope, filtered_sessions};
@@ -933,6 +933,85 @@ impl App {
                     msg_idx,
                     content: lines.join("\n"),
                     lang: lang.take(),
+                });
+            }
+        }
+        blocks
+    }
+
+    /// extract every selectable block across all conversation messages.
+    ///
+    /// a "block" is one of:
+    /// - a paragraph: a contiguous run of non-blank lines outside of
+    ///   any fenced code section, joined with newlines
+    /// - the body of a fenced ``` block (without the fence markers)
+    ///
+    /// blocks are returned in document order across messages. used by
+    /// scroll-mode block navigation (j/k cycles through these) and the
+    /// y-yank action (copies the selected block's content).
+    pub fn blocks(&self) -> Vec<Block> {
+        let mut blocks = Vec::new();
+        for (msg_idx, msg) in self.messages.iter().enumerate() {
+            let mut in_fence = false;
+            let mut fence_lang: Option<String> = None;
+            let mut fence_lines: Vec<&str> = Vec::new();
+            let mut para_lines: Vec<&str> = Vec::new();
+
+            let flush_paragraph = |para_lines: &mut Vec<&str>, blocks: &mut Vec<Block>| {
+                if !para_lines.is_empty() {
+                    blocks.push(Block {
+                        msg_idx,
+                        content: para_lines.join("\n"),
+                        kind: BlockKind::Paragraph,
+                    });
+                    para_lines.clear();
+                }
+            };
+
+            for raw_line in msg.content.lines() {
+                if raw_line.starts_with("```") {
+                    if in_fence {
+                        // closing fence: emit fence body
+                        blocks.push(Block {
+                            msg_idx,
+                            content: fence_lines.join("\n"),
+                            kind: BlockKind::Fenced {
+                                lang: fence_lang.take(),
+                            },
+                        });
+                        fence_lines.clear();
+                        in_fence = false;
+                    } else {
+                        // opening fence: flush any pending paragraph first
+                        flush_paragraph(&mut para_lines, &mut blocks);
+                        let tag = raw_line.trim_start_matches('`').trim();
+                        fence_lang = if tag.is_empty() {
+                            None
+                        } else {
+                            Some(tag.to_string())
+                        };
+                        in_fence = true;
+                    }
+                    continue;
+                }
+
+                if in_fence {
+                    fence_lines.push(raw_line);
+                } else if raw_line.trim().is_empty() {
+                    // blank line: paragraph boundary
+                    flush_paragraph(&mut para_lines, &mut blocks);
+                } else {
+                    para_lines.push(raw_line);
+                }
+            }
+
+            // tail flushes: any pending paragraph + any unclosed fence
+            flush_paragraph(&mut para_lines, &mut blocks);
+            if in_fence && !fence_lines.is_empty() {
+                blocks.push(Block {
+                    msg_idx,
+                    content: fence_lines.join("\n"),
+                    kind: BlockKind::Fenced { lang: fence_lang },
                 });
             }
         }
@@ -2485,6 +2564,111 @@ batch: 1/2 succeeded, 1 failed";
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].content, "fn main() {}");
         assert_eq!(blocks[0].lang.as_deref(), Some("rust"));
+    }
+
+    #[test]
+    fn blocks_treats_each_paragraph_and_fence_body_as_its_own_block() {
+        // user-stated mental model: every paragraph (run of non-blank
+        // lines separated by blank lines) is a block, and the *body*
+        // of every fenced ``` block is a block. example layout:
+        //
+        //     this is a block
+        //
+        //     this is another block
+        //
+        //     this is a block
+        //     ```bash
+        //     this here is also a block
+        //     ```
+        //     this is also a block
+        //
+        // → 5 blocks total
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.messages.push(DisplayMessage::new(
+            MessageRole::Assistant,
+            "this is a block\n\nthis is another block\n\nthis is a block\n\
+             ```bash\nthis here is also a block\n```\nthis is also a block",
+        ));
+
+        let blocks = app.blocks();
+        assert_eq!(blocks.len(), 5, "expected 5 blocks, got {blocks:#?}");
+
+        assert_eq!(blocks[0].content, "this is a block");
+        assert!(matches!(blocks[0].kind, BlockKind::Paragraph));
+        assert_eq!(blocks[1].content, "this is another block");
+        assert!(matches!(blocks[1].kind, BlockKind::Paragraph));
+        assert_eq!(blocks[2].content, "this is a block");
+        assert!(matches!(blocks[2].kind, BlockKind::Paragraph));
+        assert_eq!(blocks[3].content, "this here is also a block");
+        assert!(matches!(
+            blocks[3].kind,
+            BlockKind::Fenced { ref lang } if lang.as_deref() == Some("bash")
+        ));
+        assert_eq!(blocks[4].content, "this is also a block");
+        assert!(matches!(blocks[4].kind, BlockKind::Paragraph));
+    }
+
+    #[test]
+    fn blocks_skips_empty_messages() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.messages
+            .push(DisplayMessage::new(MessageRole::Assistant, ""));
+        app.messages
+            .push(DisplayMessage::new(MessageRole::User, "   \n  \n"));
+        assert!(app.blocks().is_empty());
+    }
+
+    #[test]
+    fn blocks_includes_user_message_paragraphs() {
+        // y-yank in scroll mode should be able to copy a paragraph
+        // out of the user's own message just as readily as out of an
+        // assistant reply
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.messages.push(DisplayMessage::new(
+            MessageRole::User,
+            "first user line\n\nsecond user line",
+        ));
+        let blocks = app.blocks();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].content, "first user line");
+        assert_eq!(blocks[1].content, "second user line");
+        for b in &blocks {
+            assert_eq!(b.msg_idx, 0);
+        }
+    }
+
+    #[test]
+    fn blocks_paragraph_collapses_multi_line_runs() {
+        // a "paragraph" is a contiguous run of non-blank lines (no
+        // blank line separating them), joined with newlines so the
+        // copied content preserves the original line breaks
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.messages.push(DisplayMessage::new(
+            MessageRole::Assistant,
+            "line one\nline two\nline three\n\nnew paragraph",
+        ));
+        let blocks = app.blocks();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].content, "line one\nline two\nline three");
+        assert_eq!(blocks[1].content, "new paragraph");
+    }
+
+    #[test]
+    fn blocks_records_msg_idx_per_block() {
+        // selection state stores an index into blocks(); the renderer
+        // uses block.msg_idx to figure out which message to highlight
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.messages
+            .push(DisplayMessage::new(MessageRole::Assistant, "alpha"));
+        app.messages
+            .push(DisplayMessage::new(MessageRole::User, "bravo"));
+        app.messages
+            .push(DisplayMessage::new(MessageRole::Assistant, "charlie"));
+        let blocks = app.blocks();
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[0].msg_idx, 0);
+        assert_eq!(blocks[1].msg_idx, 1);
+        assert_eq!(blocks[2].msg_idx, 2);
     }
 
     #[test]

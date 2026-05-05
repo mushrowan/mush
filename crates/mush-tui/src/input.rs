@@ -304,7 +304,7 @@ fn handle_idle_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         }
         // initialise block selection when entering in block mode
         if app.navigation.scroll_unit == crate::app::ScrollUnit::Block {
-            let blocks = app.code_blocks();
+            let blocks = app.blocks();
             app.navigation.selected_block = if blocks.is_empty() {
                 None
             } else {
@@ -785,7 +785,7 @@ fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             app.navigation.scroll_unit = match app.navigation.scroll_unit {
                 ScrollUnit::Message => {
                     // switching to block mode, initialise selection
-                    let blocks = app.code_blocks();
+                    let blocks = app.blocks();
                     app.navigation.selected_block = if blocks.is_empty() {
                         None
                     } else {
@@ -810,8 +810,8 @@ fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         (_, KeyCode::Char('j')) | (_, KeyCode::Down) => {
             let scroll_lines = app.scroll_lines;
             if app.navigation.scroll_unit == ScrollUnit::Block {
-                // move to next code block
-                let blocks = app.code_blocks();
+                // move to next block (paragraph or fence body)
+                let blocks = app.blocks();
                 if let Some(sel) = app.navigation.selected_block
                     && sel + 1 < blocks.len()
                 {
@@ -840,8 +840,8 @@ fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         (_, KeyCode::Char('k')) | (_, KeyCode::Up) => {
             let scroll_lines = app.scroll_lines;
             if app.navigation.scroll_unit == ScrollUnit::Block {
-                // move to previous code block
-                let blocks = app.code_blocks();
+                // move to previous block (paragraph or fence body)
+                let blocks = app.blocks();
                 if let Some(sel) = app.navigation.selected_block {
                     let new_sel = sel.saturating_sub(1);
                     app.navigation.selected_block = Some(new_sel);
@@ -863,7 +863,7 @@ fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         (_, KeyCode::Char('G')) => {
             app.scroll_to_bottom();
             if app.navigation.scroll_unit == ScrollUnit::Block {
-                let blocks = app.code_blocks();
+                let blocks = app.blocks();
                 app.navigation.selected_block = if blocks.is_empty() {
                     None
                 } else {
@@ -877,24 +877,26 @@ fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         (_, KeyCode::Char('g')) => {
             app.scroll_offset = u16::MAX;
             if app.navigation.scroll_unit == ScrollUnit::Block {
-                let blocks = app.code_blocks();
+                let blocks = app.blocks();
                 app.navigation.selected_block = if blocks.is_empty() { None } else { Some(0) };
             }
             app.navigation.selected_message = Some(0);
         }
         (_, KeyCode::Char('y')) => {
             if app.navigation.scroll_unit == ScrollUnit::Block {
-                // copy selected code block
-                let blocks = app.code_blocks();
+                // copy selected block (paragraph or code-fence body)
+                let blocks = app.blocks();
                 if let Some(sel) = app.navigation.selected_block
                     && let Some(block) = blocks.get(sel)
                 {
                     if copy_to_clipboard(&block.content) {
-                        let label = block
-                            .lang
-                            .as_deref()
-                            .map(|l| format!("{l} block"))
-                            .unwrap_or_else(|| "code block".into());
+                        let label = match &block.kind {
+                            crate::app::BlockKind::Paragraph => "paragraph".to_string(),
+                            crate::app::BlockKind::Fenced { lang } => lang
+                                .as_deref()
+                                .map(|l| format!("{l} block"))
+                                .unwrap_or_else(|| "code block".into()),
+                        };
                         app.status = Some(format!(
                             "copied {label} ({} chars)",
                             block.content.chars().count()
@@ -3120,21 +3122,30 @@ mod tests {
     }
 
     #[test]
-    fn scroll_mode_block_jk_navigates_code_blocks() {
+    fn scroll_mode_block_jk_navigates_paragraphs_and_code_blocks() {
         use crate::app::ScrollUnit;
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.start_streaming();
         app.push_text_delta("here:\n```bash\nrm -rf mything\n```\nand:\n```python\nprint(42)\n```");
         app.finish_streaming(None, None);
 
+        // four selectable blocks now: "here:" para, bash fence, "and:"
+        // para, python fence
+        let blocks = app.blocks();
+        assert_eq!(blocks.len(), 4, "expected 4 blocks, got {blocks:#?}");
+
         // enter scroll mode (default: Block)
         handle_key(&mut app, ctrl(KeyCode::Char('s')));
         assert_eq!(app.navigation.scroll_unit, ScrollUnit::Block);
 
         // should start on the last block
-        assert_eq!(app.navigation.selected_block, Some(1));
+        assert_eq!(app.navigation.selected_block, Some(3));
 
-        // k moves to previous block
+        // k walks back through every block in document order
+        handle_key(&mut app, key(KeyCode::Char('k')));
+        assert_eq!(app.navigation.selected_block, Some(2));
+        handle_key(&mut app, key(KeyCode::Char('k')));
+        assert_eq!(app.navigation.selected_block, Some(1));
         handle_key(&mut app, key(KeyCode::Char('k')));
         assert_eq!(app.navigation.selected_block, Some(0));
 
@@ -3142,13 +3153,17 @@ mod tests {
         handle_key(&mut app, key(KeyCode::Char('k')));
         assert_eq!(app.navigation.selected_block, Some(0));
 
-        // j moves forward
+        // j walks forward through every block
         handle_key(&mut app, key(KeyCode::Char('j')));
         assert_eq!(app.navigation.selected_block, Some(1));
+        handle_key(&mut app, key(KeyCode::Char('j')));
+        assert_eq!(app.navigation.selected_block, Some(2));
+        handle_key(&mut app, key(KeyCode::Char('j')));
+        assert_eq!(app.navigation.selected_block, Some(3));
 
         // j at end stays at last
         handle_key(&mut app, key(KeyCode::Char('j')));
-        assert_eq!(app.navigation.selected_block, Some(1));
+        assert_eq!(app.navigation.selected_block, Some(3));
     }
 
     /// install cached heights for tall messages so viewport intersection

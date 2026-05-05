@@ -14,6 +14,32 @@ pub struct CodeBlock {
     pub lang: Option<String>,
 }
 
+/// what kind of selectable block this is in scroll mode
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlockKind {
+    /// a paragraph: a run of non-blank lines from a message body,
+    /// separated from neighbours by blank lines
+    Paragraph,
+    /// the body of a fenced ``` ``` block, with the optional
+    /// language tag from the opening fence
+    Fenced { lang: Option<String> },
+}
+
+/// a unit of selectable content for scroll-mode block navigation.
+/// blocks include both prose paragraphs and fenced code-block bodies,
+/// so j/k cycles through them and y copies the selected one's
+/// content (without fence markers, without leading/trailing blank
+/// lines).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Block {
+    /// index into app.messages
+    pub msg_idx: usize,
+    /// content with any fence markers stripped
+    pub content: String,
+    /// classification of this block
+    pub kind: BlockKind,
+}
+
 /// a displayable message block in the conversation
 #[derive(Debug, Clone)]
 pub struct DisplayMessage {
