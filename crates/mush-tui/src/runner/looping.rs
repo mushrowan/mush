@@ -121,6 +121,21 @@ async fn handle_streaming_iteration(
                     _ => break,
                 }
             }
+
+            // also drain any queued terminal events here so a resize
+            // arriving during a streaming burst gets its side-effects
+            // processed promptly (size cache invalidation, scroll
+            // baseline reset). without this the tick arm starves while
+            // agent events keep winning the select, and Event::Resize
+            // sits unprocessed for the duration of the burst. the
+            // SIGWINCH-driven cache flag covers ratatui's autoresize
+            // independently, but other resize side-effects still need
+            // the queued event to be drained
+            let (pane_mgr, mut deps) = input_parts(runtime, services, tui_config, registry, image_picker, size_cache);
+            let action = handle_streaming_terminal_events(pane_mgr, stream_state, &mut deps).await?;
+            if matches!(action, LoopAction::Quit) {
+                return Ok(LoopAction::Quit);
+            }
         }
         _ = tick => {
             poll_confirmation_prompt(&mut runtime.pane_mgr, stream_state).await;

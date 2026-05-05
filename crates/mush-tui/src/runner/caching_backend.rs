@@ -107,6 +107,21 @@ impl CachedSizeState {
     fn consume_resize_pending(&self) -> bool {
         self.resize_pending.swap(false, Ordering::AcqRel)
     }
+
+    /// test helper: whether either cache slot currently holds a value.
+    /// used to assert that resize handlers actually invalidate the
+    /// cache without exposing the cells themselves
+    #[cfg(test)]
+    pub(crate) fn has_cached_size(&self) -> bool {
+        self.size.get().is_some() || self.window_size.get().is_some()
+    }
+
+    /// test helper: pre-populate the size cache so a follow-up
+    /// `invalidate()` has something observable to clear
+    #[cfg(test)]
+    pub(crate) fn set_size_for_test(&self, size: Size) {
+        self.size.set(Some(size));
+    }
 }
 
 /// wrapper around a ratatui [`Backend`] that memoises `size()` and
