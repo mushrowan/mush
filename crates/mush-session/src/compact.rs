@@ -243,6 +243,36 @@ pub fn build_compaction_prompt(messages: &[Message]) -> String {
     parts.join("\n")
 }
 
+/// build the full LLM prompt body for compaction.
+///
+/// emits two sections: a `<conversation>` block holding the messages
+/// to summarise, and (when non-empty) a `<recent_state>` block holding
+/// the kept-recent messages purely as context. the prompt instructs
+/// the LLM to summarise only the first section, using the second to
+/// understand current state - this prevents recently-completed tasks
+/// from being labelled "in progress" in the summary just because the
+/// summariser didn't see their resolution.
+pub fn build_compaction_request(old: &[Message], recent: &[Message]) -> String {
+    let conversation_dump = build_compaction_prompt(old);
+    if recent.is_empty() {
+        return format!(
+            "<conversation>\n{conversation_dump}\n</conversation>\n\n\
+             {SUMMARISATION_INSTRUCTIONS}"
+        );
+    }
+    let recent_dump = build_compaction_prompt(recent);
+    format!(
+        "<conversation>\n{conversation_dump}\n</conversation>\n\n\
+         <recent_state>\n{recent_dump}\n</recent_state>\n\n\
+         The <recent_state> section is provided as context only - it shows the most \
+         recent messages in the live conversation, which are kept verbatim after the \
+         compaction summary. Do not summarise the <recent_state> section. Use it only \
+         to understand the current state so you don't mark recently-completed tasks \
+         as in-progress in the summary.\n\n\
+         {SUMMARISATION_INSTRUCTIONS}"
+    )
+}
+
 /// compact messages by replacing older ones with a pre-built summary.
 /// keeps the most recent `keep_recent` messages intact.
 pub fn compact_with_summary(
@@ -448,16 +478,17 @@ pub async fn llm_compact(
 
     let split_at = messages.len() - keep;
     let old_messages = &messages[..split_at];
+    let recent_messages = &messages[split_at..];
 
-    // build the prompt for the LLM
-    let conversation_dump = build_compaction_prompt(old_messages);
+    // build the prompt for the LLM. recent kept messages are passed
+    // as context-only so the summariser knows the current state and
+    // doesn't mislabel recently-completed tasks as in-progress
+    let request_body = build_compaction_request(old_messages, recent_messages);
 
     let context = LlmContext {
         system_prompt: Some(COMPACTION_PROMPT.to_string()),
         messages: vec![Message::User(UserMessage {
-            content: UserContent::Text(format!(
-                "<conversation>\n{conversation_dump}\n</conversation>\n\n{SUMMARISATION_INSTRUCTIONS}"
-            )),
+            content: UserContent::Text(request_body),
             timestamp_ms: Timestamp::now(),
         })],
         tools: vec![],
@@ -586,6 +617,95 @@ mod tests {
         let prompt = build_compaction_prompt(&msgs);
         assert!(prompt.contains("..."));
         assert!(!prompt.is_empty());
+    }
+
+    #[test]
+    fn build_request_includes_old_section_with_messages_to_summarise() {
+        let old = vec![
+            user_msg("kick off task A"),
+            assistant_msg("working on task A"),
+        ];
+        let recent: Vec<Message> = vec![];
+        let request = build_compaction_request(&old, &recent);
+        assert!(
+            request.contains("<conversation>"),
+            "request should mark old messages with the summarisation tag: {request}"
+        );
+        assert!(
+            request.contains("kick off task A"),
+            "old messages should be included for summarisation: {request}"
+        );
+    }
+
+    #[test]
+    fn build_request_marks_recent_messages_as_context_only() {
+        // the headline fix: recent kept messages must be included in
+        // the prompt so the summariser knows what state the conversation
+        // is in, and labelled as context-only so the summariser doesn't
+        // include them in the summary itself
+        let old = vec![
+            user_msg("start task"),
+            assistant_msg("calling tool to do task"),
+        ];
+        let recent = vec![
+            assistant_msg("task done, here's the result"),
+            user_msg("great, what's next?"),
+        ];
+        let request = build_compaction_request(&old, &recent);
+
+        assert!(
+            request.contains("task done"),
+            "recent messages must appear in the prompt: {request}"
+        );
+        assert!(
+            request.to_lowercase().contains("context"),
+            "prompt must label the recent section as context: {request}"
+        );
+        // explicit guidance that recent is NOT to be summarised. the
+        // exact phrasing can flex, but the intent must be discoverable
+        let lower = request.to_lowercase();
+        assert!(
+            lower.contains("do not summarise")
+                || lower.contains("do not include")
+                || lower.contains("not to summarise")
+                || lower.contains("not in the summary")
+                || lower.contains("only summarise"),
+            "prompt must instruct the LLM not to summarise the recent section: {request}"
+        );
+    }
+
+    #[test]
+    fn build_request_omits_recent_section_when_empty() {
+        // when there are no recent messages (e.g. compacting an entire
+        // history), don't emit a context-only section at all so the
+        // prompt stays minimal and the LLM doesn't see an empty wrapper
+        let old = vec![user_msg("just one message")];
+        let request = build_compaction_request(&old, &[]);
+        let lower = request.to_lowercase();
+        assert!(
+            !lower.contains("recent_state") && !lower.contains("recent state"),
+            "no recent → no recent section: {request}"
+        );
+    }
+
+    #[test]
+    fn build_request_does_not_double_count_recent_in_old_section() {
+        // sanity: old and recent must be disjoint in the rendered
+        // output. we observe by ensuring a recent-only marker doesn't
+        // appear inside the <conversation> block (a regression where
+        // the function accidentally appended recent to old would fail
+        // this)
+        let old = vec![user_msg("OLD_MARKER")];
+        let recent = vec![user_msg("RECENT_MARKER")];
+        let request = build_compaction_request(&old, &recent);
+
+        let conv_start = request.find("<conversation>").expect("has open tag");
+        let conv_end = request.find("</conversation>").expect("has close tag");
+        let conversation_section = &request[conv_start..conv_end];
+        assert!(
+            !conversation_section.contains("RECENT_MARKER"),
+            "recent must not leak into the conversation section: {conversation_section}"
+        );
     }
 
     #[test]
