@@ -27,6 +27,12 @@ pub struct RequestFingerprint {
     /// excluding it surfaces upstream drift)
     pub messages_prefix: u64,
     pub last_user: u64,
+    /// hash of everything that follows the last user-text message in
+    /// the array, typically the trailing tool_use/tool_result chain
+    /// from the latest assistant turn. captured separately so the
+    /// fingerprint stays a faithful witness to the full wire body
+    /// even when the cache breakpoint sits exactly on `last_user`
+    pub messages_tail: u64,
 }
 
 impl RequestFingerprint {
@@ -36,12 +42,13 @@ impl RequestFingerprint {
     /// `messages_json` is expected to be a top-level json array
     #[must_use]
     pub fn from_json_sections(system_json: &str, tools_json: &str, messages_json: &str) -> Self {
-        let (prefix_json, last_user_json) = split_last_user(messages_json);
+        let (prefix_json, last_user_json, tail_json) = split_last_user(messages_json);
         Self {
             system: hash_str(system_json),
             tools: hash_str(tools_json),
             messages_prefix: hash_str(&prefix_json),
             last_user: hash_str(&last_user_json),
+            messages_tail: hash_str(&tail_json),
         }
     }
 }
@@ -52,15 +59,18 @@ fn hash_str(s: &str) -> u64 {
     h.finish()
 }
 
-/// return (prefix_json, last_user_json) where the last user message
-/// (identified by `role: "user"` and not containing a `tool_result`
-/// block) is split out. falls back to (all, "") if the input doesn't
-/// parse or has no user message
-fn split_last_user(messages_json: &str) -> (String, String) {
+/// return (`prefix_json`, `last_user_json`, `tail_json`) where the
+/// last user message (identified by `role: "user"` and not containing
+/// a `tool_result` block) is split out. `tail_json` is the slice that
+/// follows the last-user message, typically the trailing tool turn
+/// from the most recent assistant response. falls back to
+/// (`all`, `""`, `""`) if the input doesn't parse or has no user
+/// message
+fn split_last_user(messages_json: &str) -> (String, String, String) {
     let Ok(serde_json::Value::Array(arr)) =
         serde_json::from_str::<serde_json::Value>(messages_json)
     else {
-        return (messages_json.to_string(), String::new());
+        return (messages_json.to_string(), String::new(), String::new());
     };
 
     // find the last message with role=user that is NOT a tool_result
@@ -87,12 +97,14 @@ fn split_last_user(messages_json: &str) -> (String, String) {
         Some(idx) => {
             let prefix: Vec<_> = arr[..idx].to_vec();
             let last = &arr[idx];
+            let tail: Vec<_> = arr[idx + 1..].to_vec();
             (
                 serde_json::to_string(&prefix).unwrap_or_default(),
                 serde_json::to_string(last).unwrap_or_default(),
+                serde_json::to_string(&tail).unwrap_or_default(),
             )
         }
-        None => (messages_json.to_string(), String::new()),
+        None => (messages_json.to_string(), String::new(), String::new()),
     }
 }
 
@@ -315,6 +327,36 @@ mod tests {
         assert_ne!(
             a.messages_prefix, b.messages_prefix,
             "prefix grew (a turned from last-user into prefix)"
+        );
+    }
+
+    #[test]
+    fn fingerprint_detects_drift_after_last_user_message() {
+        // tool_use/tool_result chains added after the last user-text
+        // message must not be invisible to the fingerprint. cache-bust
+        // diagnostics rely on hash equality implying byte equality of
+        // the wire prefix, so anything appended after `last_user` has
+        // to feed a hash too. before this fix, the splitter dropped
+        // arr[last_user_idx + 1..] entirely and two requests with
+        // identical prefix+last_user but different trailing tool
+        // turns produced matching fingerprints
+        let sys = r#"[]"#;
+        let tools = r#"[]"#;
+        let base = r#"{"role":"user","content":[{"type":"text","text":"u"}]}"#;
+        let extra_a = r#"{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"read","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[]}]}"#;
+        let extra_b = r#"{"role":"assistant","content":[{"type":"tool_use","id":"t2","name":"write","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","content":[]}]}"#;
+        let msgs_a = format!("[{base},{extra_a}]");
+        let msgs_b = format!("[{base},{extra_b}]");
+        let fp_a = RequestFingerprint::from_json_sections(sys, tools, &msgs_a);
+        let fp_b = RequestFingerprint::from_json_sections(sys, tools, &msgs_b);
+        assert_eq!(fp_a.last_user, fp_b.last_user, "last_user is identical");
+        assert_eq!(
+            fp_a.messages_prefix, fp_b.messages_prefix,
+            "messages_prefix is identical"
+        );
+        assert_ne!(
+            fp_a.messages_tail, fp_b.messages_tail,
+            "messages_tail must change when trailing turns differ"
         );
     }
 
