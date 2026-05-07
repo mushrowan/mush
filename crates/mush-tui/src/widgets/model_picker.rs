@@ -6,6 +6,7 @@
 
 use crate::model_picker::{ModelPickerState, ModelPickerTab, filtered_models};
 use crate::theme::Theme;
+use crate::widgets::popup_layout::{PopupSize, centred_popup};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -14,15 +15,17 @@ use ratatui::widgets::{Block, Borders, Clear, Padding};
 
 /// render the model picker as a centred overlay
 pub fn render(frame: &mut Frame, picker: &ModelPickerState, theme: &Theme) {
-    let area = frame.area();
-
-    // 80% width, 60% height. clamp so we don't render a giant box on
-    // huge terminals or a useless one on tiny ones
-    let width = (area.width * 80 / 100).clamp(40, 100);
-    let height = (area.height * 60 / 100).clamp(10, 30);
-    let x = (area.width.saturating_sub(width)) / 2;
-    let y = (area.height.saturating_sub(height)) / 2;
-    let popup = Rect::new(x, y, width, height);
+    let popup = centred_popup(
+        frame.area(),
+        PopupSize {
+            width_pct: 80,
+            height_pct: 60,
+            width_min: 40,
+            width_max: 100,
+            height_min: 10,
+            height_max: 30,
+        },
+    );
 
     frame.render_widget(Clear, popup);
 

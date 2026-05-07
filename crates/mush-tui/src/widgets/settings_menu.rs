@@ -14,6 +14,7 @@ use ratatui::widgets::{
 
 use crate::settings::{MenuItemKind, ScopedSettings, SettingsMenuState};
 use crate::theme::Theme;
+use crate::widgets::popup_layout::{PopupSize, centred_popup};
 
 /// render the settings overlay centred on the frame
 pub fn render(
@@ -22,14 +23,17 @@ pub fn render(
     settings: &ScopedSettings,
     theme: &Theme,
 ) {
-    let area = frame.area();
-
-    // centre the overlay, 80% width, 70% height (capped)
-    let width = (area.width * 80 / 100).clamp(50, 90);
-    let height = (area.height * 70 / 100).clamp(14, 20);
-    let x = (area.width.saturating_sub(width)) / 2;
-    let y = (area.height.saturating_sub(height)) / 2;
-    let popup = Rect::new(x, y, width, height);
+    let popup = centred_popup(
+        frame.area(),
+        PopupSize {
+            width_pct: 80,
+            height_pct: 70,
+            width_min: 50,
+            width_max: 90,
+            height_min: 14,
+            height_max: 20,
+        },
+    );
 
     frame.render_widget(Clear, popup);
 

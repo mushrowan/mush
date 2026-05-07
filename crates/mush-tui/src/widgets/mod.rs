@@ -6,6 +6,7 @@ pub mod login_entry_popup;
 pub mod login_picker;
 pub mod message_list;
 pub mod model_picker;
+pub mod popup_layout;
 pub mod search_popup;
 pub mod session_picker;
 pub mod settings_menu;

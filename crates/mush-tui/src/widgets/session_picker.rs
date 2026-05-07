@@ -3,6 +3,7 @@
 use crate::path_utils::shorten_path;
 use crate::session_picker::{SessionPickerState, SessionScope, filtered_sessions};
 use crate::theme::Theme;
+use crate::widgets::popup_layout::{PopupSize, centred_popup};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -11,14 +12,17 @@ use ratatui::widgets::{Block, Borders, Clear, Padding};
 
 /// render the session picker as a centred overlay
 pub fn render(frame: &mut Frame, picker: &SessionPickerState, theme: &Theme) {
-    let area = frame.area();
-
-    // centre the picker, 80% width, 60% height
-    let width = (area.width * 80 / 100).clamp(40, 100);
-    let height = (area.height * 60 / 100).clamp(10, 30);
-    let x = (area.width.saturating_sub(width)) / 2;
-    let y = (area.height.saturating_sub(height)) / 2;
-    let popup = Rect::new(x, y, width, height);
+    let popup = centred_popup(
+        frame.area(),
+        PopupSize {
+            width_pct: 80,
+            height_pct: 60,
+            width_min: 40,
+            width_max: 100,
+            height_min: 10,
+            height_max: 30,
+        },
+    );
 
     // clear the area behind the popup
     frame.render_widget(Clear, popup);

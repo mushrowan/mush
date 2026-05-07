@@ -6,6 +6,7 @@
 
 use crate::login_picker::{LoginPickerState, filtered_entries};
 use crate::theme::Theme;
+use crate::widgets::popup_layout::{PopupSize, centred_popup};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -14,15 +15,17 @@ use ratatui::widgets::{Block, Borders, Clear, Padding};
 
 /// render the login picker as a centred overlay
 pub fn render(frame: &mut Frame, picker: &LoginPickerState, theme: &Theme) {
-    let area = frame.area();
-
-    // 80% width, 60% height. clamp so the popup stays sensible on tiny
-    // and giant terminals alike
-    let width = (area.width * 80 / 100).clamp(40, 100);
-    let height = (area.height * 60 / 100).clamp(10, 30);
-    let x = (area.width.saturating_sub(width)) / 2;
-    let y = (area.height.saturating_sub(height)) / 2;
-    let popup = Rect::new(x, y, width, height);
+    let popup = centred_popup(
+        frame.area(),
+        PopupSize {
+            width_pct: 80,
+            height_pct: 60,
+            width_min: 40,
+            width_max: 100,
+            height_min: 10,
+            height_max: 30,
+        },
+    );
 
     frame.render_widget(Clear, popup);
 
@@ -214,6 +217,27 @@ mod tests {
             s.push('\n');
         }
         s
+    }
+
+    #[test]
+    fn render_does_not_panic_on_terminal_narrower_than_min_popup_width() {
+        // the popup width clamp had a 40-col floor with no buffer cap.
+        // on a 39-col terminal that produced a 40-wide popup whose
+        // right border landed at x=39, one past the buffer's last
+        // valid index (0..=38). ratatui's `Buffer::index_of` panicked
+        // with "index outside of buffer". the popup must always fit
+        // inside the available area, never overflow it
+        let picker = LoginPickerState::new(vec![oauth_entry(
+            "anthropic-pro-max",
+            "Anthropic",
+            Some(LoginSource::OAuth),
+        )]);
+        // 39 cols was the exact width that triggered the user-reported
+        // panic. cover a couple of nearby narrow widths too so the
+        // off-by-one doesn't reappear with a tweaked clamp
+        for width in [10u16, 20, 30, 39, 40] {
+            let _ = render_to_buffer(&picker, width, 26);
+        }
     }
 
     #[test]
