@@ -305,6 +305,13 @@ struct ChunkDelta {
 
 #[derive(Debug, Deserialize)]
 struct ChunkToolCall {
+    /// openai's per-call index. parallel tool calls share a single
+    /// `tool_calls` array but each delta carries its own `index` so the
+    /// receiver can route partial-args chunks to the right call. mush
+    /// keys an in-flight `ToolBlock` by this value, falling back to 0
+    /// for providers that omit it on single-call streams
+    #[serde(default)]
+    index: Option<u64>,
     #[serde(default)]
     id: Option<String>,
     #[serde(default)]
@@ -337,8 +344,27 @@ struct PromptTokenDetails {
 
 use super::StreamBlock;
 
+/// in-flight tool call from openai chat completions. parallel calls each
+/// keep their own buffer so interleaved deltas (different `index`es in
+/// the same chunk or split across chunks) route to the right call.
+/// `id` and `name` aren't tracked here because they're already on the
+/// corresponding `AssistantContentPart::ToolCall` in `output.content`
+/// (recorded at start) so they don't need duplicating
+#[derive(Debug)]
+struct ToolBlock {
+    /// openai's `tool_calls[].index` for this call. used to disambiguate
+    /// parallel calls when their deltas interleave
+    openai_index: u64,
+    /// position of the corresponding `AssistantContentPart::ToolCall`
+    /// inside `output.content`. recorded at start so deltas can address
+    /// the right entry without re-scanning
+    content_index: usize,
+    args_buf: String,
+}
+
 struct OpenAiCompletionsProcessor {
     current: Option<StreamBlock>,
+    tool_blocks: Vec<ToolBlock>,
 }
 
 impl super::sse::SseProcessor for OpenAiCompletionsProcessor {
@@ -352,7 +378,7 @@ impl super::sse::SseProcessor for OpenAiCompletionsProcessor {
         }
         match serde_json::from_str::<ChunkResponse>(&raw.data) {
             Ok(chunk) => {
-                let events = process_chunk(chunk, output, &mut self.current);
+                let events = process_chunk(chunk, output, &mut self.current, &mut self.tool_blocks);
                 super::sse::ProcessResult::Events(events)
             }
             Err(_) => super::sse::ProcessResult::Skip,
@@ -360,7 +386,8 @@ impl super::sse::SseProcessor for OpenAiCompletionsProcessor {
     }
 
     fn finish(&mut self, output: &mut AssistantMessage) {
-        finish_block(&mut self.current, output);
+        self.current = None;
+        finish_tool_blocks_silent(&mut self.tool_blocks, output);
     }
 
     fn label(&self) -> &'static str {
@@ -374,7 +401,10 @@ fn parse_sse_stream(
     provider_name: Provider,
     api: Api,
 ) -> EventStream {
-    let processor = OpenAiCompletionsProcessor { current: None };
+    let processor = OpenAiCompletionsProcessor {
+        current: None,
+        tool_blocks: Vec::new(),
+    };
     super::sse::run_sse_stream(response, model_id, provider_name, api, processor)
 }
 
@@ -382,6 +412,7 @@ fn process_chunk(
     chunk: ChunkResponse,
     output: &mut AssistantMessage,
     current: &mut Option<StreamBlock>,
+    tool_blocks: &mut Vec<ToolBlock>,
 ) -> Vec<StreamEvent> {
     let mut events = Vec::new();
 
@@ -487,42 +518,56 @@ fn process_chunk(
         }
     }
 
-    // handle tool calls
+    // handle tool calls. parallel calls each get their own ToolBlock
+    // keyed by openai's `tool_calls[].index`. text/thinking is finished
+    // before the first tool block opens because chat completions never
+    // re-opens text after tool calls
     if let Some(tool_calls) = choice.delta.tool_calls {
+        if matches!(
+            current,
+            Some(StreamBlock::Text { .. } | StreamBlock::Thinking { .. })
+        ) {
+            finish_block_events(current, output, &mut events);
+        }
         for tc in tool_calls {
-            let new_tool = tc.id.is_some();
-            if new_tool {
-                finish_block_events(current, output, &mut events);
-                let id = tc.id.unwrap_or_default();
-                let name = tc
-                    .function
-                    .as_ref()
-                    .and_then(|f| f.name.clone())
-                    .unwrap_or_default();
-                let content_index = output.content.len();
-                *current = Some(StreamBlock::ToolCall {
-                    id: id.clone(),
-                    name: name.clone(),
-                    args_buf: String::new(),
-                });
-                output
-                    .content
-                    .push(AssistantContentPart::ToolCall(ToolCall {
-                        id: ToolCallId::from(id),
-                        name: ToolName::from(name),
-                        arguments: serde_json::Value::Object(Default::default()),
-                    }));
-                events.push(StreamEvent::ToolCallStart { content_index });
-            }
+            let openai_idx = tc.index.unwrap_or(0);
+            let block_pos = match tool_blocks
+                .iter()
+                .position(|b| b.openai_index == openai_idx)
+            {
+                Some(pos) => pos,
+                None => {
+                    let id = tc.id.clone().unwrap_or_default();
+                    let name = tc
+                        .function
+                        .as_ref()
+                        .and_then(|f| f.name.clone())
+                        .unwrap_or_default();
+                    let content_index = output.content.len();
+                    output
+                        .content
+                        .push(AssistantContentPart::ToolCall(ToolCall {
+                            id: ToolCallId::from(id),
+                            name: ToolName::from(name),
+                            arguments: serde_json::Value::Object(Default::default()),
+                        }));
+                    events.push(StreamEvent::ToolCallStart { content_index });
+                    tool_blocks.push(ToolBlock {
+                        openai_index: openai_idx,
+                        content_index,
+                        args_buf: String::new(),
+                    });
+                    tool_blocks.len() - 1
+                }
+            };
 
             if let Some(func) = tc.function
                 && let Some(args) = func.arguments
-                && let Some(StreamBlock::ToolCall { args_buf, .. }) = current.as_mut()
             {
-                args_buf.push_str(&args);
-                let idx = output.content.len().saturating_sub(1);
+                tool_blocks[block_pos].args_buf.push_str(&args);
+                let content_index = tool_blocks[block_pos].content_index;
                 events.push(StreamEvent::ToolCallDelta {
-                    content_index: idx,
+                    content_index,
                     delta: args,
                 });
             }
@@ -571,14 +616,16 @@ fn finish_block_events(
     Some(content_index)
 }
 
-/// finish the current block without producing events (for stream end)
-fn finish_block(current: &mut Option<StreamBlock>, output: &mut AssistantMessage) {
-    if let Some(block) = current.take()
-        && let StreamBlock::ToolCall { args_buf, .. } = &block
-    {
-        let idx = output.content.len().saturating_sub(1);
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(args_buf)
-            && let Some(AssistantContentPart::ToolCall(tc)) = output.content.get_mut(idx)
+/// flush all in-flight parallel tool calls without emitting events.
+/// called from the SSE processor's `finish` hook so the final
+/// `AssistantMessage` carries fully-parsed args even when the stream
+/// ends mid-call (or when openai never sends a terminal marker per
+/// tool, which it doesn't on chat completions)
+fn finish_tool_blocks_silent(tool_blocks: &mut Vec<ToolBlock>, output: &mut AssistantMessage) {
+    for block in tool_blocks.drain(..) {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&block.args_buf)
+            && let Some(AssistantContentPart::ToolCall(tc)) =
+                output.content.get_mut(block.content_index)
         {
             tc.arguments = parsed;
         }
@@ -605,6 +652,7 @@ pub fn benchmark_tool_call_deltas(chunk_count: usize, arg_bytes: usize) -> usize
         .timestamp_ms(Timestamp::zero())
         .build();
     let mut current = None;
+    let mut tool_blocks = Vec::new();
 
     for (index, fragment) in fragments.into_iter().enumerate() {
         let chunk = ChunkResponse {
@@ -612,6 +660,7 @@ pub fn benchmark_tool_call_deltas(chunk_count: usize, arg_bytes: usize) -> usize
             choices: vec![ChunkChoice {
                 delta: ChunkDelta {
                     tool_calls: Some(vec![ChunkToolCall {
+                        index: Some(0),
                         id: (index == 0).then(|| "tc_1".into()),
                         function: Some(ChunkToolFunction {
                             name: (index == 0).then(|| "read".into()),
@@ -624,11 +673,10 @@ pub fn benchmark_tool_call_deltas(chunk_count: usize, arg_bytes: usize) -> usize
             }],
             usage: None,
         };
-        let _ = process_chunk(chunk, &mut output, &mut current);
+        let _ = process_chunk(chunk, &mut output, &mut current, &mut tool_blocks);
     }
 
-    let mut sink = Vec::new();
-    let _ = finish_block_events(&mut current, &mut output, &mut sink);
+    finish_tool_blocks_silent(&mut tool_blocks, &mut output);
 
     match output.content.first() {
         Some(AssistantContentPart::ToolCall(tc)) => tc
@@ -755,6 +803,7 @@ mod tests {
     fn process_text_chunk() {
         let mut output = test_output();
         let mut current = None;
+        let mut tool_blocks = Vec::new();
 
         let chunk = ChunkResponse {
             id: None,
@@ -768,7 +817,7 @@ mod tests {
             usage: None,
         };
 
-        let events = process_chunk(chunk, &mut output, &mut current);
+        let events = process_chunk(chunk, &mut output, &mut current, &mut tool_blocks);
         assert!(events.len() >= 2); // TextStart + TextDelta
         assert!(matches!(events[0], StreamEvent::TextStart { .. }));
         assert!(matches!(events[1], StreamEvent::TextDelta { .. }));
@@ -779,6 +828,7 @@ mod tests {
     fn process_reasoning_then_text() {
         let mut output = test_output();
         let mut current = None;
+        let mut tool_blocks = Vec::new();
 
         // reasoning chunk
         let chunk = ChunkResponse {
@@ -792,7 +842,7 @@ mod tests {
             }],
             usage: None,
         };
-        process_chunk(chunk, &mut output, &mut current);
+        process_chunk(chunk, &mut output, &mut current, &mut tool_blocks);
         assert!(matches!(current, Some(StreamBlock::Thinking { .. })));
 
         // then text
@@ -807,7 +857,7 @@ mod tests {
             }],
             usage: None,
         };
-        let events = process_chunk(chunk, &mut output, &mut current);
+        let events = process_chunk(chunk, &mut output, &mut current, &mut tool_blocks);
         // should have ThinkingEnd, TextStart, TextDelta
         assert!(
             events
@@ -826,6 +876,7 @@ mod tests {
     fn process_tool_call_chunk() {
         let mut output = test_output();
         let mut current = None;
+        let mut tool_blocks = Vec::new();
 
         // tool call start
         let chunk = ChunkResponse {
@@ -833,6 +884,7 @@ mod tests {
             choices: vec![ChunkChoice {
                 delta: ChunkDelta {
                     tool_calls: Some(vec![ChunkToolCall {
+                        index: Some(0),
                         id: Some("tc_1".into()),
                         function: Some(ChunkToolFunction {
                             name: Some("read".into()),
@@ -845,7 +897,7 @@ mod tests {
             }],
             usage: None,
         };
-        let events = process_chunk(chunk, &mut output, &mut current);
+        let events = process_chunk(chunk, &mut output, &mut current, &mut tool_blocks);
         assert!(
             events
                 .iter()
@@ -858,6 +910,7 @@ mod tests {
             choices: vec![ChunkChoice {
                 delta: ChunkDelta {
                     tool_calls: Some(vec![ChunkToolCall {
+                        index: Some(0),
                         id: None,
                         function: Some(ChunkToolFunction {
                             name: None,
@@ -870,8 +923,10 @@ mod tests {
             }],
             usage: None,
         };
-        process_chunk(chunk, &mut output, &mut current);
+        process_chunk(chunk, &mut output, &mut current, &mut tool_blocks);
 
+        // mid-stream the args are still partial JSON, so the recorded
+        // arguments stay at the empty-object default
         match &output.content[0] {
             AssistantContentPart::ToolCall(tc) => {
                 assert_eq!(tc.arguments, serde_json::json!({}));
@@ -879,19 +934,97 @@ mod tests {
             other => panic!("expected tool call, got {other:?}"),
         }
 
-        // finish
-        let mut events = Vec::new();
-        finish_block_events(&mut current, &mut output, &mut events);
+        // finish: drains tool_blocks and parses the buffered JSON onto
+        // the existing ToolCall part
+        finish_tool_blocks_silent(&mut tool_blocks, &mut output);
 
-        match &events[0] {
-            StreamEvent::ToolCallEnd {
-                name, arguments, ..
-            } => {
-                assert_eq!(name, "read");
-                assert_eq!(arguments["path"], "foo.rs");
+        match &output.content[0] {
+            AssistantContentPart::ToolCall(tc) => {
+                assert_eq!(tc.name.as_str(), "read");
+                assert_eq!(tc.arguments["path"], "foo.rs");
             }
-            other => panic!("expected ToolCallEnd, got {other:?}"),
+            other => panic!("expected tool call, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parallel_tool_calls_with_interleaved_deltas_keep_args_separate() {
+        // openai chat completions streams parallel tool calls keyed by
+        // `tool_calls[].index`. for parallel calls the per-tool deltas
+        // can interleave, so each delta must be routed to the tool
+        // identified by its `index`, not appended to "the latest tool"
+        // tracked in a single slot. without index-aware routing, args
+        // for tool 0 leak into tool 1 (or vice versa) and one of the
+        // tools is silently dropped/emptied
+        let mut output = test_output();
+        let mut current = None;
+        let mut tool_blocks = Vec::new();
+
+        // tool 0 starts (id + name, empty args)
+        let chunk: ChunkResponse = serde_json::from_value(serde_json::json!({
+            "choices": [{"delta": {"tool_calls": [
+                {"index": 0, "id": "call_a", "function": {"name": "WebSearch", "arguments": ""}}
+            ]}}]
+        }))
+        .unwrap();
+        process_chunk(chunk, &mut output, &mut current, &mut tool_blocks);
+
+        // tool 1 starts (id + name, empty args)
+        let chunk: ChunkResponse = serde_json::from_value(serde_json::json!({
+            "choices": [{"delta": {"tool_calls": [
+                {"index": 1, "id": "call_b", "function": {"name": "WebSearch", "arguments": ""}}
+            ]}}]
+        }))
+        .unwrap();
+        process_chunk(chunk, &mut output, &mut current, &mut tool_blocks);
+
+        // tool 0 receives a partial-args delta (interleaved with tool 1)
+        let chunk: ChunkResponse = serde_json::from_value(serde_json::json!({
+            "choices": [{"delta": {"tool_calls": [
+                {"index": 0, "function": {"arguments": "{\"q\":\"foo\"}"}}
+            ]}}]
+        }))
+        .unwrap();
+        process_chunk(chunk, &mut output, &mut current, &mut tool_blocks);
+
+        // tool 1 receives its partial-args delta
+        let chunk: ChunkResponse = serde_json::from_value(serde_json::json!({
+            "choices": [{"delta": {"tool_calls": [
+                {"index": 1, "function": {"arguments": "{\"q\":\"bar\"}"}}
+            ]}}]
+        }))
+        .unwrap();
+        process_chunk(chunk, &mut output, &mut current, &mut tool_blocks);
+
+        finish_tool_blocks_silent(&mut tool_blocks, &mut output);
+
+        assert_eq!(
+            output.content.len(),
+            2,
+            "both parallel tool calls should land as separate ToolCall parts"
+        );
+
+        let tool_a = match &output.content[0] {
+            AssistantContentPart::ToolCall(tc) => tc,
+            other => panic!("expected ToolCall at index 0, got {other:?}"),
+        };
+        assert_eq!(tool_a.id.as_str(), "call_a");
+        assert_eq!(
+            tool_a.arguments["q"], "foo",
+            "tool 0 args should reflect its own delta, got {:?}",
+            tool_a.arguments
+        );
+
+        let tool_b = match &output.content[1] {
+            AssistantContentPart::ToolCall(tc) => tc,
+            other => panic!("expected ToolCall at index 1, got {other:?}"),
+        };
+        assert_eq!(tool_b.id.as_str(), "call_b");
+        assert_eq!(
+            tool_b.arguments["q"], "bar",
+            "tool 1 args should reflect its own delta, got {:?}",
+            tool_b.arguments
+        );
     }
 
     #[test]
@@ -903,13 +1036,14 @@ mod tests {
         // can fire the lookup after the turn lands
         let mut output = test_output();
         let mut current = None;
+        let mut tool_blocks = Vec::new();
 
         let chunk: ChunkResponse = serde_json::from_value(serde_json::json!({
             "id": "gen-abc123",
             "choices": [{"delta": {"content": "hi"}}]
         }))
         .expect("chunk parses");
-        process_chunk(chunk, &mut output, &mut current);
+        process_chunk(chunk, &mut output, &mut current, &mut tool_blocks);
         assert_eq!(output.generation_id.as_deref(), Some("gen-abc123"));
     }
 
@@ -920,18 +1054,19 @@ mod tests {
         // chunk that lacks one
         let mut output = test_output();
         let mut current = None;
+        let mut tool_blocks = Vec::new();
 
         let with_id: ChunkResponse = serde_json::from_value(serde_json::json!({
             "id": "gen-keep-me",
             "choices": [{"delta": {"content": "a"}}]
         }))
         .unwrap();
-        process_chunk(with_id, &mut output, &mut current);
+        process_chunk(with_id, &mut output, &mut current, &mut tool_blocks);
         let without_id: ChunkResponse = serde_json::from_value(serde_json::json!({
             "choices": [{"delta": {"content": "b"}}]
         }))
         .unwrap();
-        process_chunk(without_id, &mut output, &mut current);
+        process_chunk(without_id, &mut output, &mut current, &mut tool_blocks);
         assert_eq!(output.generation_id.as_deref(), Some("gen-keep-me"));
     }
 
@@ -939,6 +1074,7 @@ mod tests {
     fn process_usage_chunk() {
         let mut output = test_output();
         let mut current = None;
+        let mut tool_blocks = Vec::new();
 
         let chunk = ChunkResponse {
             id: None,
@@ -950,7 +1086,7 @@ mod tests {
             }),
         };
 
-        process_chunk(chunk, &mut output, &mut current);
+        process_chunk(chunk, &mut output, &mut current, &mut tool_blocks);
         assert_eq!(output.usage.input_tokens, TokenCount::new(50)); // 150 - 100 cached
         assert_eq!(output.usage.output_tokens, TokenCount::new(50));
         assert_eq!(output.usage.cache_read_tokens, TokenCount::new(100));
