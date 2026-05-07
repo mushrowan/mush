@@ -78,6 +78,32 @@ impl ProviderError {
     }
 }
 
+/// whether an `AssistantMessage::error_message` from a stream that ended
+/// with `StopReason::Error` (no http error, but the provider surfaced a
+/// transient failure mid-stream) is worth retrying. covers anthropic's
+/// `overloaded_error` SSE event, openai's `rate_limit_exceeded`, and
+/// the generic upstream-overload patterns providers use when the
+/// connection accepted (200) before the failure surfaced. matched
+/// case-insensitively as a substring scan because each provider
+/// formats the surfaced message slightly differently
+#[must_use]
+pub fn is_retryable_stream_error_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    [
+        "overloaded",
+        "rate_limit",
+        "rate limit",
+        "internal_server_error",
+        "internal server error",
+        "service_unavailable",
+        "service unavailable",
+        "timeout",
+        "temporarily unavailable",
+    ]
+    .iter()
+    .any(|pat| lower.contains(pat))
+}
+
 /// context passed to providers for each LLM call
 pub struct LlmContext {
     pub system_prompt: Option<String>,
@@ -293,5 +319,39 @@ mod tests {
     fn not_retryable_other() {
         let err = ProviderError::Other("some error".into());
         assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn retryable_stream_error_messages() {
+        // anthropic mid-stream overloaded error
+        assert!(is_retryable_stream_error_message("Overloaded"));
+        // openai-style snake_case
+        assert!(is_retryable_stream_error_message(
+            "rate_limit_exceeded: please slow down"
+        ));
+        // human-readable rate limit
+        assert!(is_retryable_stream_error_message("rate limit reached"));
+        // 5xx surfaced as text
+        assert!(is_retryable_stream_error_message(
+            "internal_server_error from upstream"
+        ));
+        assert!(is_retryable_stream_error_message("Service Unavailable"));
+        assert!(is_retryable_stream_error_message("Request timeout"));
+        // case-insensitive
+        assert!(is_retryable_stream_error_message("OVERLOADED"));
+    }
+
+    #[test]
+    fn non_retryable_stream_error_messages() {
+        assert!(!is_retryable_stream_error_message(
+            "invalid_request_error: missing field"
+        ));
+        assert!(!is_retryable_stream_error_message(
+            "authentication_error: bad key"
+        ));
+        assert!(!is_retryable_stream_error_message(
+            "permission_denied for this model"
+        ));
+        assert!(!is_retryable_stream_error_message(""));
     }
 }

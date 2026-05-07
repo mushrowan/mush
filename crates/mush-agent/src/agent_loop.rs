@@ -375,13 +375,21 @@ pub fn agent_loop(
                 // retry transient errors with exponential backoff. count
                 // and backoff cap chosen so a typical "error decoding
                 // response body" gust gets up to 5 attempts spread over
-                // 1+2+4+8+16 = 31s of cooldown before bailing
+                // 1+2+4+8+16 = 31s of cooldown before bailing. the loop
+                // also covers consume-phase transient errors (anthropic
+                // 200 OK + mid-stream `overloaded_error` SSE event):
+                // when the stream ends with `StopReason::Error`, no
+                // content was emitted, and the error message looks
+                // transient, retry the whole call. yielded events from
+                // a failed attempt (MessageStart, Start, Done) are
+                // harmless because nothing in the consumer commits state
+                // on them when no deltas/tool calls were streamed
                 const MAX_RETRIES: u32 = 5;
                 const MAX_BACKOFF_SECS: u64 = 16;
-                let mut event_stream = None;
-                let mut last_error = None;
+                let mut final_message: Option<AssistantMessage> = None;
+                let mut last_error: Option<String> = None;
 
-                for attempt in 0..=MAX_RETRIES {
+                'attempt: for attempt in 0..=MAX_RETRIES {
                     if attempt > 0 {
                         let delay = std::time::Duration::from_secs(
                             (1u64 << (attempt - 1)).min(MAX_BACKOFF_SECS),
@@ -390,80 +398,104 @@ pub fn agent_loop(
                         tokio::time::sleep(delay).await;
                     }
 
-                    match config.registry.stream(
+                    let mut event_stream = match config.registry.stream(
                         &config.model, &context, &config.options,
                     ).await {
-                        Ok(stream) => {
-                            event_stream = Some(stream);
-                            break;
-                        }
+                        Ok(stream) => stream,
                         Err(e) if e.is_retryable() && attempt < MAX_RETRIES => {
                             tracing::warn!(error = %e, "retryable request error");
                             last_error = Some(format!("request failed: {e}"));
+                            continue 'attempt;
                         }
                         Err(e) => {
                             last_error = Some(format!("request failed: {e}"));
-                            break;
+                            break 'attempt;
                         }
-                    }
-                }
+                    };
 
-                let mut event_stream = match event_stream {
-                    Some(s) => s,
-                    None => {
-                        yield AgentEvent::Error {
-                            error: last_error.unwrap_or_else(|| "unknown stream error".into()),
-                        };
-                        break;
-                    }
-                };
+                    let mut local_final: Option<AssistantMessage> = None;
+                    let mut started = false;
+                    let mut had_content = false;
 
-                let mut final_message: Option<AssistantMessage> = None;
-                let mut started = false;
-
-                while let Some(event) = event_stream.next().await {
-                    match &event {
-                        StreamEvent::Start { partial } if !started => {
-                            yield AgentEvent::MessageStart { message: partial.clone() };
-                            started = true;
-                        }
-                        StreamEvent::Done { message, .. } => {
-                            final_message = Some(message.clone());
-                        }
-                        StreamEvent::Error { message, .. } => {
-                            let error_msg = message.error_message.clone().unwrap_or_else(|| "unknown error".into());
-                            tracing::error!(
-                                error = %error_msg,
-                                model = %config.model.id,
-                                provider = %config.model.provider,
-                                api = ?config.model.api,
-                                partial_content_parts = message.content.len(),
-                                partial_stop_reason = ?message.stop_reason,
-                                "LLM stream error"
-                            );
-                            // preserve the partial assistant message: yield
-                            // MessageEnd before Error so the TUI can render
-                            // whatever the model managed to stream and the
-                            // session captures it. without this, "error
-                            // decoding response body" mid-paragraph drops
-                            // the entire response, including any minutes
-                            // of useful work the model produced
-                            let partial = message.clone();
-                            if !partial.content.is_empty() {
-                                yield AgentEvent::MessageEnd { message: partial.clone() };
-                                messages.push(Message::Assistant(partial));
+                    while let Some(event) = event_stream.next().await {
+                        match &event {
+                            StreamEvent::Start { partial } if !started => {
+                                yield AgentEvent::MessageStart { message: partial.clone() };
+                                started = true;
                             }
-                            yield AgentEvent::Error { error: error_msg };
-                            yield AgentEvent::AgentEnd;
-                            return;
+                            StreamEvent::Done { message, .. } => {
+                                local_final = Some(message.clone());
+                            }
+                            StreamEvent::TextDelta { delta, .. }
+                            | StreamEvent::ThinkingDelta { delta, .. }
+                                if !delta.is_empty() =>
+                            {
+                                had_content = true;
+                            }
+                            StreamEvent::ToolCallStart { .. }
+                            | StreamEvent::ToolCallDelta { .. } => {
+                                had_content = true;
+                            }
+                            StreamEvent::Error { message, .. } => {
+                                let error_msg = message.error_message.clone().unwrap_or_else(|| "unknown error".into());
+                                tracing::error!(
+                                    error = %error_msg,
+                                    model = %config.model.id,
+                                    provider = %config.model.provider,
+                                    api = ?config.model.api,
+                                    partial_content_parts = message.content.len(),
+                                    partial_stop_reason = ?message.stop_reason,
+                                    "LLM stream error"
+                                );
+                                // preserve the partial assistant message: yield
+                                // MessageEnd before Error so the TUI can render
+                                // whatever the model managed to stream and the
+                                // session captures it. without this, "error
+                                // decoding response body" mid-paragraph drops
+                                // the entire response, including any minutes
+                                // of useful work the model produced
+                                let partial = message.clone();
+                                if !partial.content.is_empty() {
+                                    yield AgentEvent::MessageEnd { message: partial.clone() };
+                                    messages.push(Message::Assistant(partial));
+                                }
+                                yield AgentEvent::Error { error: error_msg };
+                                yield AgentEvent::AgentEnd;
+                                return;
+                            }
+                            _ => {}
                         }
-                        _ => {}
+                        yield AgentEvent::StreamEvent { event };
                     }
-                    yield AgentEvent::StreamEvent { event };
+
+                    // retry consume-phase failures: stream completed with
+                    // an error, no content was yielded, and the message
+                    // matches a known transient pattern (anthropic
+                    // overloaded, rate limit, upstream 5xx surfaced as
+                    // SSE error event, ...)
+                    if let Some(msg) = &local_final
+                        && msg.stop_reason == StopReason::Error
+                        && !had_content
+                        && let Some(err_msg) = msg.error_message.as_deref()
+                        && mush_ai::registry::is_retryable_stream_error_message(err_msg)
+                        && attempt < MAX_RETRIES
+                    {
+                        tracing::warn!(
+                            error = %err_msg,
+                            "retryable stream error from provider, scheduling retry"
+                        );
+                        last_error = Some(format!("stream error: {err_msg}"));
+                        continue 'attempt;
+                    }
+
+                    final_message = local_final;
+                    break 'attempt;
                 }
 
                 let Some(assistant_msg) = final_message else {
-                    yield AgentEvent::Error { error: "stream ended without a final message".into() };
+                    let error = last_error
+                        .unwrap_or_else(|| "stream ended without a final message".into());
+                    yield AgentEvent::Error { error };
                     yield AgentEvent::AgentEnd;
                     return;
                 };
@@ -1350,6 +1382,128 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, AgentEvent::TurnStart { .. })),
             "cancelled agent should not start any turns"
+        );
+    }
+
+    #[test]
+    fn overloaded_stream_error_triggers_retry_with_eventual_success() {
+        // when the underlying provider yields an SSE stream that ends in
+        // `StopReason::Error` with a transient error message ("Overloaded",
+        // "rate_limit", etc) and no streamed content, the agent loop must
+        // retry the whole stream call. anthropic in particular returns
+        // overloaded as either a 529 (already retried at the http layer)
+        // or as a mid-stream `error` event with `error.type =
+        // overloaded_error` (until now NOT retried). this test scripts
+        // the second case: first call yields the error stream, second
+        // call yields a successful stream
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct OverloadOnceProvider {
+            calls: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl mush_ai::registry::ApiProvider for OverloadOnceProvider {
+            fn api(&self) -> Api {
+                Api::AnthropicMessages
+            }
+
+            async fn stream(
+                &self,
+                model: &Model,
+                _context: &mush_ai::registry::LlmContext,
+                _options: &StreamOptions,
+            ) -> Result<mush_ai::registry::EventStream, mush_ai::registry::ProviderError>
+            {
+                let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                let msg = if call == 0 {
+                    AssistantMessage::builder()
+                        .content(Vec::new())
+                        .model(model.id.clone())
+                        .provider(model.provider.clone())
+                        .api(model.api)
+                        .stop_reason(StopReason::Error)
+                        .error_message("Overloaded".to_string())
+                        .timestamp_ms(Timestamp::zero())
+                        .build()
+                } else {
+                    AssistantMessage::builder()
+                        .content(vec![AssistantContentPart::Text(TextContent {
+                            text: "hello after retry".into(),
+                        })])
+                        .model(model.id.clone())
+                        .provider(model.provider.clone())
+                        .api(model.api)
+                        .stop_reason(StopReason::Stop)
+                        .timestamp_ms(Timestamp::zero())
+                        .build()
+                };
+
+                let s = async_stream::stream! {
+                    yield StreamEvent::Start { partial: msg.clone() };
+                    yield StreamEvent::Done { reason: msg.stop_reason, message: msg };
+                };
+                Ok(Box::pin(s) as mush_ai::registry::EventStream)
+            }
+        }
+
+        let mut registry = ApiRegistry::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        registry.register(Box::new(OverloadOnceProvider {
+            calls: calls.clone(),
+        }));
+
+        let model = test_model();
+        let tools = ToolRegistry::new();
+        let config = AgentConfig {
+            model: model.clone(),
+            system_prompt: None,
+            tools,
+            registry: &registry,
+            options: StreamOptions::default(),
+            max_turns: 1,
+            hooks: Box::new(NoopHooks),
+            injections: AgentInjections::default(),
+            cancel: None,
+        };
+
+        let messages = vec![Message::User(UserMessage {
+            content: UserContent::Text("hi".into()),
+            timestamp_ms: Timestamp::zero(),
+        })];
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let events: Vec<AgentEvent> =
+            rt.block_on(async { agent_loop(config, messages).collect().await });
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "provider should be called twice: first overloaded, second succeeds"
+        );
+
+        // the user-visible final assistant message should be the
+        // successful retry, not the overloaded shell
+        let last_message_end = events
+            .iter()
+            .rev()
+            .find_map(|e| match e {
+                AgentEvent::MessageEnd { message } => Some(message),
+                _ => None,
+            })
+            .expect("expected at least one MessageEnd");
+        assert_eq!(last_message_end.stop_reason, StopReason::Stop);
+        assert_eq!(last_message_end.text(), "hello after retry");
+
+        // no Error event should leak when the retry succeeded
+        let error_count = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::Error { .. }))
+            .count();
+        assert_eq!(
+            error_count, 0,
+            "no AgentEvent::Error should be emitted when retry succeeds"
         );
     }
 }
