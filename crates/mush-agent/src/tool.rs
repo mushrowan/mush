@@ -209,6 +209,17 @@ impl ToolRegistry {
         }
     }
 
+    /// remove a tool by name. returns the removed tool, or `None` if no
+    /// tool with that name was registered. preserves the relative order
+    /// of remaining tools so subsequent `iter()` calls don't gain a
+    /// surprising reshuffle
+    pub fn remove(&mut self, name: &str) -> Option<SharedTool> {
+        let key = ToolKey::new(name);
+        let removed = self.tools.remove(&key)?;
+        self.order.retain(|k| k != &key);
+        Some(removed)
+    }
+
     #[must_use]
     pub fn with_shared(&self, tools: impl IntoIterator<Item = SharedTool>) -> Self {
         let mut merged = self.clone();

@@ -77,6 +77,11 @@ pub(super) struct StreamConfig {
     pub auto_compact: bool,
     /// separate model + options for compaction (None = use active model)
     pub compaction_model: Option<(Model, StreamOptions)>,
+    /// forbidden-character set used to wrap the file-mutating tools.
+    /// kept here so `align_for_model` can rebuild the right tool set
+    /// (apply_patch ↔ edit + write) when the active model changes
+    /// mid-session
+    pub forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars,
 }
 
 pub(super) struct StreamDeps<'a> {
@@ -848,6 +853,24 @@ async fn start_stream_for_prompt<'a>(
     }
     tool_registry.extend_shared(extra_tools);
 
+    // align the model-dependent tools (apply_patch ↔ edit + write,
+    // batch) to the active model. without this, switching models
+    // mid-session leaves the original toolset in place: starting on
+    // gpt and switching to claude would leave claude with apply_patch
+    // and no edit tool. effective cwd respects worktree-pane overrides
+    // so the rebuilt tools target the right tree
+    let effective_cwd = pane_mgr
+        .pane(pane_id)
+        .and_then(|p| p.cwd_override.clone())
+        .or_else(|| deps.injections.cwd.clone())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    mush_tools::align_for_model(
+        &mut tool_registry,
+        &model,
+        std::sync::Arc::from(effective_cwd),
+        deps.config.forbidden_chars.clone(),
+    );
+
     let cancel = tokio_util::sync::CancellationToken::new();
 
     let stream_gen = stream_state.register_active(
@@ -1315,6 +1338,7 @@ mod tests {
             confirm_tools: false,
             auto_compact: false,
             compaction_model: None,
+            forbidden_chars: Default::default(),
         };
         assert_eq!(config.max_turns, 32);
         assert!(!config.confirm_tools);

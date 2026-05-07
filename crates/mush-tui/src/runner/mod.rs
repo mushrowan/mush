@@ -131,6 +131,7 @@ pub async fn run_tui(
                     confirm_tools: tui_config.confirm_tools,
                     auto_compact: tui_config.auto_compact,
                     compaction_model: tui_config.compaction_options(),
+                    forbidden_chars: tui_config.forbidden_chars.clone(),
                 },
                 injections: mush_agent::AgentInjections {
                     lifecycle_hooks: tui_config.lifecycle_hooks.clone(),
