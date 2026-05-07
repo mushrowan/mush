@@ -54,6 +54,104 @@ pub fn gitignore_hint(path: &Path) -> Option<String> {
 
 const MAX_RESULTS: usize = 200;
 
+/// outcome of [`clean_regex_pattern`]: the pattern (possibly cleaned)
+/// plus an optional human-readable note when we changed something.
+/// the note is meant to be surfaced back to the agent so it can adjust
+/// future calls rather than silently relying on us to fix its inputs
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CleanedPattern {
+    pub pattern: String,
+    pub note: Option<String>,
+}
+
+/// strip a single trailing unmatched `"` from a regex pattern.
+///
+/// agents (especially across grep / find / glob) emit json values like
+/// `"pattern": "mise\""` where the value contains a literal trailing
+/// `"` that was never opened. fd / rg run the pattern as-is, find no
+/// matches (filenames don't contain `"`), and the agent misreads the
+/// empty result as "the file doesn't exist" rather than "my pattern was
+/// buggy". observed at ~22% of grep calls and ~11% of find calls in
+/// real session traces.
+///
+/// the strip rule is deliberately conservative: only remove the
+/// trailing `"` when it's unescaped AND no other unescaped `"` exists
+/// in the pattern. that catches `mise"`, `Caddyfile"`,
+/// `accounts.email|aerc"` while leaving `\"foo\"`, `"foo"`, and
+/// `[\"x\"]` (intentional `"`-matchers) alone.
+///
+/// returns the original pattern unchanged when the rule doesn't apply
+#[must_use]
+pub fn clean_regex_pattern(input: &str) -> CleanedPattern {
+    match strip_trailing_unmatched_quote(input) {
+        Some(stripped) => CleanedPattern {
+            pattern: stripped.to_string(),
+            note: Some(format!(
+                "note: stripped a trailing unmatched `\"` from your pattern (was `{input}`, used `{stripped}`). regex patterns don't need quote-wrapping; pass the bare regex next time"
+            )),
+        },
+        None => CleanedPattern {
+            pattern: input.to_string(),
+            note: None,
+        },
+    }
+}
+
+/// see [`clean_regex_pattern`]: returns `Some(stripped)` when the
+/// trailing `"` should be removed, `None` otherwise
+fn strip_trailing_unmatched_quote(pattern: &str) -> Option<&str> {
+    let trimmed = pattern.strip_suffix('"')?;
+
+    // the trailing `"` is escaped if preceded by an odd number of
+    // backslashes. e.g. `\"` is escaped (1 backslash), `\\"` is not
+    // (2 backslashes mean a literal `\` then a literal `"`)
+    let trailing_backslashes = trimmed.chars().rev().take_while(|&c| c == '\\').count();
+    if trailing_backslashes % 2 == 1 {
+        return None;
+    }
+
+    // bail if any other unescaped `"` appears in the pattern: that
+    // suggests the agent actually means to match a literal `"` somewhere,
+    // and we shouldn't second-guess it
+    let mut backslash_run = 0usize;
+    for c in trimmed.chars() {
+        match c {
+            '\\' => backslash_run += 1,
+            '"' if backslash_run.is_multiple_of(2) => return None,
+            _ => backslash_run = 0,
+        }
+    }
+
+    Some(trimmed)
+}
+
+/// inject an optional note as the prefix of `result`'s first text
+/// content. used by tools that sanitise input (see
+/// [`clean_regex_pattern`]) to surface the change to the agent. if
+/// the result has no text content yet, a new text block is prepended
+pub fn inject_note(
+    mut result: mush_agent::tool::ToolResult,
+    note: Option<String>,
+) -> mush_agent::tool::ToolResult {
+    let Some(note) = note else { return result };
+
+    use mush_ai::types::{TextContent, ToolResultContentPart};
+    if let Some(first_text) = result
+        .content
+        .iter_mut()
+        .find_map(|p| matches!(p, ToolResultContentPart::Text(_)).then_some(p))
+    {
+        if let ToolResultContentPart::Text(t) = first_text {
+            t.text = format!("{note}\n\n{}", t.text);
+        }
+    } else {
+        result
+            .content
+            .insert(0, ToolResultContentPart::Text(TextContent { text: note }));
+    }
+    result
+}
+
 /// truncate line-based output to MAX_RESULTS, appending a count summary
 pub fn truncate_lines(lines: &[&str], noun: &str) -> String {
     if lines.is_empty() {
@@ -177,5 +275,81 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("loose.txt"), "x").unwrap();
         assert!(gitignore_hint(&dir.path().join("loose.txt")).is_none());
+    }
+
+    // section: clean_regex_pattern
+
+    #[test]
+    fn clean_regex_strips_lone_trailing_quote() {
+        // the canonical agent bug: `mise"` should become `mise` so fd/rg
+        // can find files named `mise` instead of searching for the
+        // literal sequence `mise"` (which never matches a real filename)
+        let cleaned = clean_regex_pattern("mise\"");
+        assert_eq!(cleaned.pattern, "mise");
+        let note = cleaned.note.expect("expected a note about the strip");
+        assert!(note.contains("mise\""), "note should quote the original");
+        assert!(note.contains("mise"), "note should quote the cleaned form");
+    }
+
+    #[test]
+    fn clean_regex_strips_trailing_quote_in_alternation() {
+        // larger real example from session traces. the trailing `"` is
+        // unmatched and there are no other unescaped quotes
+        let cleaned = clean_regex_pattern("^(mise|Justfile)\"");
+        assert_eq!(cleaned.pattern, "^(mise|Justfile)");
+        assert!(cleaned.note.is_some());
+    }
+
+    #[test]
+    fn clean_regex_leaves_escaped_trailing_quote_alone() {
+        // `\"` is an escaped quote; agent meant to match a literal `"`.
+        // touching this would change the regex semantics
+        let cleaned = clean_regex_pattern("foo\\\"");
+        assert_eq!(cleaned.pattern, "foo\\\"");
+        assert!(cleaned.note.is_none());
+    }
+
+    #[test]
+    fn clean_regex_leaves_balanced_quotes_alone() {
+        // both an opening and a closing unescaped quote: looks deliberate.
+        // could be matching a literal `"foo"` substring in source code
+        let cleaned = clean_regex_pattern("\"foo\"");
+        assert_eq!(cleaned.pattern, "\"foo\"");
+        assert!(cleaned.note.is_none());
+    }
+
+    #[test]
+    fn clean_regex_leaves_multiple_unescaped_quotes_alone() {
+        // a pattern with 3 unescaped quotes is suspicious in either
+        // direction. don't second-guess: hands off
+        let cleaned = clean_regex_pattern("\"foo\"bar\"");
+        assert_eq!(cleaned.pattern, "\"foo\"bar\"");
+        assert!(cleaned.note.is_none());
+    }
+
+    #[test]
+    fn clean_regex_leaves_internal_unescaped_quote_alone() {
+        // an unescaped quote in the middle (no trailing `"`) shouldn't
+        // be touched even though it's solitary
+        let cleaned = clean_regex_pattern("foo\"bar");
+        assert_eq!(cleaned.pattern, "foo\"bar");
+        assert!(cleaned.note.is_none());
+    }
+
+    #[test]
+    fn clean_regex_passes_through_when_no_trailing_quote() {
+        let cleaned = clean_regex_pattern("just_a_normal_pattern");
+        assert_eq!(cleaned.pattern, "just_a_normal_pattern");
+        assert!(cleaned.note.is_none());
+    }
+
+    #[test]
+    fn clean_regex_strips_lone_quote_only() {
+        // pathological: a pattern that's just `"`. there are no other
+        // characters, so by our rule we strip it to empty. fd/rg will
+        // then surface a clear error rather than silently match nothing
+        let cleaned = clean_regex_pattern("\"");
+        assert_eq!(cleaned.pattern, "");
+        assert!(cleaned.note.is_some());
     }
 }

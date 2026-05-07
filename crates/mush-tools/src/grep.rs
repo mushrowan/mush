@@ -14,7 +14,7 @@ use ignore::WalkBuilder;
 use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
 use serde::Deserialize;
 
-use crate::util::{resolve_path, truncate_lines};
+use crate::util::{clean_regex_pattern, inject_note, resolve_path, truncate_lines};
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -84,6 +84,7 @@ impl AgentTool for GrepTool {
     fn description(&self) -> &str {
         "Search file contents using ripgrep. Respects .gitignore. \
          Returns matching lines with file paths and line numbers. \
+         The pattern is a raw regex; do not wrap it in quotes (e.g. pass `fn main`, not `\"fn main\"`). \
          Use 'count' output to get per-file match counts instead of full lines. \
          Use 'files' output to get just filenames with matches. \
          Always use this tool instead of running grep or rg via the bash tool."
@@ -94,7 +95,7 @@ impl AgentTool for GrepTool {
             "type": "object",
             "properties": {
                 "pattern": {
-                    "description": "regex pattern to search for",
+                    "description": "regex pattern to search for. raw regex, no quote-wrapping",
                     "type": "string"
                 },
                 "path": {
@@ -161,10 +162,11 @@ impl AgentTool for GrepTool {
             .unwrap_or_else(|| self.cwd.to_path_buf());
 
         let cwd = self.cwd.clone();
-        let pattern = args.pattern.clone();
+        let cleaned = clean_regex_pattern(&args.pattern);
+        let pattern = cleaned.pattern.clone();
         let include = args.include.clone();
 
-        tokio::task::spawn_blocking(move || {
+        let result = tokio::task::spawn_blocking(move || {
             run_search(
                 &cwd,
                 &pattern,
@@ -181,7 +183,8 @@ impl AgentTool for GrepTool {
             )
         })
         .await
-        .unwrap_or_else(|e| ToolResult::error(format!("task join error: {e}")))
+        .unwrap_or_else(|e| ToolResult::error(format!("task join error: {e}")));
+        inject_note(result, cleaned.note)
     }
 }
 
@@ -860,6 +863,32 @@ mod tests {
         assert_eq!(files.len(), 2);
         // sorted desc by count
         assert!(files[0]["count"].as_u64().unwrap() >= files[1]["count"].as_u64().unwrap());
+    }
+
+    #[tokio::test]
+    async fn grep_strips_trailing_unmatched_quote_and_notes_it() {
+        // same agent bug as find: `pattern: "foo\""` arrives with a
+        // trailing literal `"` that prevents any match. grep must clean
+        // it AND surface a note so the agent can self-correct
+        let dir = temp_dir();
+        fs::write(dir.path().join("test.txt"), "hello world\n").unwrap();
+
+        let tool = GrepTool::new(dir.path().into());
+        let result = tool
+            .execute(serde_json::json!({
+                "pattern": "hello\"",
+                "path": dir.path().to_str().unwrap()
+            }))
+            .await;
+        let text = extract_text(&result);
+        assert!(
+            text.contains("hello world"),
+            "must run cleaned pattern and find the match (got: {text})"
+        );
+        assert!(
+            text.contains("trailing unmatched"),
+            "must surface a note about the strip (got: {text})"
+        );
     }
 
     #[tokio::test]

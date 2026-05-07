@@ -7,7 +7,7 @@ use std::sync::Arc;
 use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
 use serde::Deserialize;
 
-use crate::util::{resolve_path, truncate_lines};
+use crate::util::{clean_regex_pattern, inject_note, resolve_path, truncate_lines};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -37,7 +37,8 @@ impl AgentTool for GlobTool {
     fn description(&self) -> &str {
         "Fast file pattern matching using glob syntax. Respects .gitignore. \
          Returns matching file paths sorted by modification time (newest first). \
-         Use this when you need to find files by name patterns like '**/*.rs' or 'src/**/*.ts'."
+         The pattern is a raw glob; do not wrap it in quotes (e.g. pass `**/*.rs`, not `\"**/*.rs\"`). \
+         Use this when you need to find files by name patterns like **/*.rs or src/**/*.ts."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -46,7 +47,7 @@ impl AgentTool for GlobTool {
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": "glob pattern to match files (e.g. '**/*.rs', 'src/**/*.ts', '*.toml')"
+                    "description": "glob pattern to match files (e.g. **/*.rs, src/**/*.ts, *.toml). raw glob, no quote-wrapping"
                 },
                 "path": {
                     "type": "string",
@@ -63,6 +64,8 @@ impl AgentTool for GlobTool {
             Err(error) => return error,
         };
 
+        let cleaned = clean_regex_pattern(&args.pattern);
+
         let search_dir = args
             .path
             .as_deref()
@@ -70,7 +73,7 @@ impl AgentTool for GlobTool {
             .unwrap_or_else(|| self.cwd.to_path_buf());
 
         let mut cmd = tokio::process::Command::new("fd");
-        cmd.args(["--glob", &args.pattern, "--type", "f"])
+        cmd.args(["--glob", &cleaned.pattern, "--type", "f"])
             .arg("--color=never")
             .current_dir(&search_dir)
             .stdout(Stdio::piped())
@@ -86,11 +89,12 @@ impl AgentTool for GlobTool {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let lines: Vec<&str> = stdout.lines().collect();
 
-        if lines.is_empty() {
-            return ToolResult::text("no files found");
-        }
-
-        ToolResult::text(truncate_lines(&lines, "files"))
+        let result = if lines.is_empty() {
+            ToolResult::text("no files found")
+        } else {
+            ToolResult::text(truncate_lines(&lines, "files"))
+        };
+        inject_note(result, cleaned.note)
     }
 }
 
@@ -135,5 +139,28 @@ mod tests {
             .await;
         let text = crate::util::extract_text(&result);
         assert_eq!(text, "no files found");
+    }
+
+    #[tokio::test]
+    async fn glob_strips_trailing_unmatched_quote_and_notes_it() {
+        // mirror the find/grep behaviour: a pattern with a stray
+        // trailing `"` should still find files (after cleaning) and
+        // come back with a note explaining what was changed
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]").unwrap();
+
+        let tool = GlobTool::new(dir.path().into());
+        let result = tool
+            .execute(serde_json::json!({ "pattern": "**/*.toml\"" }))
+            .await;
+        let text = crate::util::extract_text(&result);
+        assert!(
+            text.contains("Cargo.toml"),
+            "must run cleaned pattern and find the file (got: {text})"
+        );
+        assert!(
+            text.contains("trailing unmatched"),
+            "must surface a note about the strip (got: {text})"
+        );
     }
 }
