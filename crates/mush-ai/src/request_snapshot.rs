@@ -157,12 +157,43 @@ pub fn last_messages_prefix_fingerprint() -> Option<u64> {
     }
 }
 
+/// header names whose values must never be written to disk. matched
+/// case-insensitively. anything matching is replaced with
+/// `<redacted>` in the snapshot envelope. defence in depth: callers
+/// should already avoid passing secrets, but a typo'd integration
+/// shouldn't dump api keys to a debug file
+const SENSITIVE_HEADERS: &[&str] = &[
+    "authorization",
+    "proxy-authorization",
+    "cookie",
+    "set-cookie",
+    "x-api-key",
+];
+
+/// placeholder substituted for sensitive header values in dumps
+pub const REDACTED_HEADER_VALUE: &str = "<redacted>";
+
+fn is_sensitive_header(name: &str) -> bool {
+    SENSITIVE_HEADERS
+        .iter()
+        .any(|s| s.eq_ignore_ascii_case(name))
+}
+
 /// write a request snapshot: a JSON file containing the fingerprint
 /// as a `_snapshot` header followed by the raw body. returns the path
 /// on success. rotates the dir to keep at most [`SNAPSHOT_RETENTION`]
-/// files per provider. uses the default [`snapshot_dir`]
-pub fn dump(provider: &str, fingerprint: &RequestFingerprint, body_json: &str) -> Option<PathBuf> {
-    dump_in(&snapshot_dir(), provider, fingerprint, body_json)
+/// files per provider. uses the default [`snapshot_dir`].
+///
+/// `headers` is captured into `_snapshot.headers` with sensitive
+/// entries (auth, cookies, api keys) redacted. pass an empty slice
+/// when headers aren't relevant
+pub fn dump(
+    provider: &str,
+    fingerprint: &RequestFingerprint,
+    body_json: &str,
+    headers: &[(&str, &str)],
+) -> Option<PathBuf> {
+    dump_in(&snapshot_dir(), provider, fingerprint, body_json, headers)
 }
 
 /// same as [`dump`] but writes to an explicit dir. used by tests to
@@ -172,6 +203,7 @@ pub fn dump_in(
     provider: &str,
     fingerprint: &RequestFingerprint,
     body_json: &str,
+    headers: &[(&str, &str)],
 ) -> Option<PathBuf> {
     std::fs::create_dir_all(dir).ok()?;
 
@@ -183,6 +215,18 @@ pub fn dump_in(
     let filename = format!("{provider}-{ts_ms:013}-{seq:04}.json");
     let path = dir.join(&filename);
 
+    let headers_json: serde_json::Map<String, serde_json::Value> = headers
+        .iter()
+        .map(|(name, value)| {
+            let safe = if is_sensitive_header(name) {
+                REDACTED_HEADER_VALUE.to_string()
+            } else {
+                (*value).to_string()
+            };
+            ((*name).to_string(), serde_json::Value::String(safe))
+        })
+        .collect();
+
     // embed fingerprint as a sibling top-level field by wrapping the
     // body in a small envelope. keeps the file valid json while making
     // the fingerprint trivially greppable
@@ -191,6 +235,7 @@ pub fn dump_in(
             "provider": provider,
             "timestamp_ms": ts_ms,
             "fingerprint": fingerprint,
+            "headers": headers_json,
         },
         "body": match serde_json::from_str::<serde_json::Value>(body_json) {
             Ok(v) => v,
@@ -279,6 +324,51 @@ fn prune_old_snapshots(dir: &Path, provider: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dump_records_headers_and_redacts_authorization() {
+        // header drift between calls (e.g. anthropic-beta or auth
+        // tokens) silently invalidates server-side caches without
+        // showing up in the body diff. capture them in the envelope
+        // so cache-bust forensics can spot it. authorization-style
+        // values must be redacted so dumps don't leak api keys
+        let dir = tempfile::tempdir().unwrap();
+        let fp = RequestFingerprint::from_json_sections("[]", "[]", "[]");
+        let headers = [
+            ("anthropic-beta", "claude-code-20250219,oauth-2025-04-20"),
+            ("anthropic-version", "2023-06-01"),
+            ("authorization", "Bearer sk-secret-do-not-leak"),
+            ("Authorization", "Bearer also-redact-mixed-case"),
+            ("x-api-key", "shhhh"),
+        ];
+        let path = dump_in(dir.path(), "p", &fp, "{}", &headers).expect("dump succeeds");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let recorded = parsed["_snapshot"]["headers"]
+            .as_object()
+            .expect("headers object present");
+        assert_eq!(
+            recorded["anthropic-beta"],
+            "claude-code-20250219,oauth-2025-04-20"
+        );
+        assert_eq!(recorded["anthropic-version"], "2023-06-01");
+        assert_eq!(recorded["authorization"], "<redacted>");
+        // case-insensitive redaction: a second authorization header
+        // (e.g. canonicalised by hyper) must also be scrubbed
+        let dump_text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !dump_text.contains("sk-secret"),
+            "authorization value leaked into dump: {dump_text}"
+        );
+        assert!(
+            !dump_text.contains("also-redact"),
+            "mixed-case authorization leaked into dump: {dump_text}"
+        );
+        assert!(
+            !dump_text.contains("shhhh"),
+            "x-api-key leaked into dump: {dump_text}"
+        );
+    }
 
     #[test]
     fn fingerprint_is_stable_for_identical_input() {
@@ -388,7 +478,7 @@ mod tests {
             "[]",
             r#"[{"role":"user","content":[{"type":"text","text":"hi"}]}]"#,
         );
-        dump_in(dir.path(), "anthropic", &fp, "{}").expect("dump succeeds");
+        dump_in(dir.path(), "anthropic", &fp, "{}", &[]).expect("dump succeeds");
         let observed = last_messages_prefix_fingerprint();
         assert_eq!(
             observed,
@@ -402,7 +492,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let fp = RequestFingerprint::from_json_sections("[]", "[]", "[]");
         let body = r#"{"model":"test","messages":[]}"#;
-        let path = dump_in(dir.path(), "testprovider", &fp, body).expect("dump succeeds");
+        let path = dump_in(dir.path(), "testprovider", &fp, body, &[]).expect("dump succeeds");
         let contents = std::fs::read_to_string(&path).unwrap();
         assert!(contents.contains("_snapshot"));
         assert!(contents.contains("fingerprint"));
@@ -415,7 +505,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let fp = RequestFingerprint::from_json_sections("[]", "[]", "[]");
         for i in 0..3 {
-            dump_in(dir.path(), "p", &fp, &format!(r#"{{"call":{i}}}"#)).unwrap();
+            dump_in(dir.path(), "p", &fp, &format!(r#"{{"call":{i}}}"#), &[]).unwrap();
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         let paths = recent_snapshots_in(dir.path(), "p", 2);
@@ -430,7 +520,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let fp = RequestFingerprint::from_json_sections("[]", "[]", "[]");
         for i in 0..(SNAPSHOT_RETENTION + 3) {
-            dump_in(dir.path(), "pr", &fp, &format!(r#"{{"call":{i}}}"#)).unwrap();
+            dump_in(dir.path(), "pr", &fp, &format!(r#"{{"call":{i}}}"#), &[]).unwrap();
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
         let all = recent_snapshots_in(dir.path(), "pr", usize::MAX);

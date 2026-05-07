@@ -120,37 +120,6 @@ impl ApiProvider for AnthropicProvider {
             "anthropic request body"
         );
 
-        // snapshot the outgoing body for cache-bust triage. serialise
-        // once here so the fingerprint hashes the exact bytes that
-        // sibling sections end up on the wire. kept best-effort: a
-        // filesystem hiccup shouldn't affect the actual api call
-        if let Ok(body_json) = serde_json::to_string(&body) {
-            let system_json = body
-                .system
-                .as_ref()
-                .and_then(|s| serde_json::to_string(s).ok())
-                .unwrap_or_default();
-            let tools_json = body
-                .tools
-                .as_ref()
-                .and_then(|t| serde_json::to_string(t).ok())
-                .unwrap_or_default();
-            let messages_json = serde_json::to_string(&body.messages).unwrap_or_default();
-            let fp = crate::request_snapshot::RequestFingerprint::from_json_sections(
-                &system_json,
-                &tools_json,
-                &messages_json,
-            );
-            tracing::info!(
-                system = fp.system,
-                tools = fp.tools,
-                messages_prefix = fp.messages_prefix,
-                last_user = fp.last_user,
-                "anthropic request fingerprint"
-            );
-            let _ = crate::request_snapshot::dump("anthropic", &fp, &body_json);
-        }
-
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
@@ -194,6 +163,54 @@ impl ApiProvider for AnthropicProvider {
             let mut api_key_hv = HeaderValue::from_str(key)?;
             api_key_hv.set_sensitive(true);
             headers.insert("x-api-key", api_key_hv);
+        }
+
+        // snapshot the outgoing body for cache-bust triage. serialise
+        // once here so the fingerprint hashes the exact bytes that
+        // sibling sections end up on the wire. kept best-effort: a
+        // filesystem hiccup shouldn't affect the actual api call.
+        // deferred until after headers are built so the dump captures
+        // the full wire request including beta flags and version
+        // headers, which silently affect server-side cache scope
+        if let Ok(body_json) = serde_json::to_string(&body) {
+            let system_json = body
+                .system
+                .as_ref()
+                .and_then(|s| serde_json::to_string(s).ok())
+                .unwrap_or_default();
+            let tools_json = body
+                .tools
+                .as_ref()
+                .and_then(|t| serde_json::to_string(t).ok())
+                .unwrap_or_default();
+            let messages_json = serde_json::to_string(&body.messages).unwrap_or_default();
+            let fp = crate::request_snapshot::RequestFingerprint::from_json_sections(
+                &system_json,
+                &tools_json,
+                &messages_json,
+            );
+            tracing::info!(
+                system = fp.system,
+                tools = fp.tools,
+                messages_prefix = fp.messages_prefix,
+                last_user = fp.last_user,
+                messages_tail = fp.messages_tail,
+                "anthropic request fingerprint"
+            );
+            let header_pairs: Vec<(String, String)> = headers
+                .iter()
+                .map(|(name, value)| {
+                    (
+                        name.as_str().to_string(),
+                        value.to_str().unwrap_or("<non-utf8>").to_string(),
+                    )
+                })
+                .collect();
+            let header_refs: Vec<(&str, &str)> = header_pairs
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            let _ = crate::request_snapshot::dump("anthropic", &fp, &body_json, &header_refs);
         }
 
         let base_url = if model.base_url.is_empty() {
