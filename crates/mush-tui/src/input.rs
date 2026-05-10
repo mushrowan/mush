@@ -327,18 +327,6 @@ fn handle_idle_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         app.toggle_thinking_expanded();
         return None;
     }
-    if app
-        .keymap
-        .matches(crate::keybinds::Action::TogglePromptInjection, key)
-    {
-        app.interaction.show_prompt_injection = !app.interaction.show_prompt_injection;
-        app.status = Some(if app.interaction.show_prompt_injection {
-            "prompt injection visible".into()
-        } else {
-            "prompt injection hidden".into()
-        });
-        return None;
-    }
 
     match (key.modifiers, key.code) {
         // tab completion / slash menu
@@ -1954,19 +1942,6 @@ mod tests {
         assert!(app.messages[0].thinking_expanded);
         handle_key(&mut app, ctrl(KeyCode::Char('o')));
         assert!(!app.messages[0].thinking_expanded);
-    }
-
-    #[test]
-    fn ctrl_i_toggles_prompt_injection_preview() {
-        let mut app = App::new("test".into(), TokenCount::new(200_000));
-        assert!(!app.interaction.show_prompt_injection);
-        handle_key(&mut app, ctrl(KeyCode::Char('i')));
-        assert!(app.interaction.show_prompt_injection);
-        assert_eq!(app.status.as_deref(), Some("prompt injection visible"));
-
-        handle_key(&mut app, ctrl(KeyCode::Char('i')));
-        assert!(!app.interaction.show_prompt_injection);
-        assert_eq!(app.status.as_deref(), Some("prompt injection hidden"));
     }
 
     #[test]

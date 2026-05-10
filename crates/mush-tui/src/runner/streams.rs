@@ -16,7 +16,7 @@ use crate::event_handler;
 use crate::file_tracker::FileTracker;
 use crate::pane::{PaneId, PaneManager};
 
-use super::{HintMode, PromptEnricher, TuiConfig};
+use super::TuiConfig;
 
 /// monotonically increasing generation counter for stream identity.
 /// each new stream (or abort) advances the generation, so events from
@@ -70,8 +70,6 @@ pub(super) struct StreamConfig {
     pub system_prompt: Option<String>,
     pub options: StreamOptions,
     pub max_turns: usize,
-    pub prompt_enricher: Option<PromptEnricher>,
-    pub hint_mode: HintMode,
     pub provider_api_keys: HashMap<String, mush_ai::ApiKey>,
     pub confirm_tools: bool,
     pub auto_compact: bool,
@@ -786,21 +784,10 @@ async fn start_stream_for_prompt<'a>(
             return;
         };
         let (app, conversation, _) = pane.fields_mut();
-        append_prompt_and_snapshot(
-            app,
-            conversation,
-            prompt,
-            deps.config.hint_mode,
-            &deps.config.prompt_enricher,
-        )
+        append_prompt_and_snapshot(app, conversation, prompt)
     };
 
     let context_window = model.context_window;
-    let enricher_arc = if deps.config.hint_mode == HintMode::Transform {
-        deps.config.prompt_enricher.clone()
-    } else {
-        None
-    };
     let (compact_model, compact_options) = deps
         .config
         .compaction_model
@@ -813,7 +800,6 @@ async fn start_stream_for_prompt<'a>(
         .unwrap_or(0);
     let context_tokens_shared = Arc::new(std::sync::atomic::AtomicU64::new(initial_ctx));
     let transform = build_context_transform(
-        enricher_arc,
         compact_model,
         compact_options,
         do_auto_compact,
@@ -950,53 +936,14 @@ fn append_prompt_and_snapshot(
     app: &mut crate::app::App,
     conversation: &mut mush_session::ConversationState,
     prompt: String,
-    hint_mode: HintMode,
-    prompt_enricher: &Option<PromptEnricher>,
 ) -> Vec<Message> {
-    let prompt_preview = prompt.clone();
-    let mut injection_preview: Option<String> = None;
-    let user_text = if hint_mode == HintMode::Message
-        && let Some(ref enricher) = *prompt_enricher
-        && let Some(hint) = enricher(&prompt)
-    {
-        if app.interaction.show_prompt_injection {
-            injection_preview = Some(format!("message hint\n{hint}"));
-        }
-        format!("{hint}\n\n{prompt}")
-    } else {
-        prompt
-    };
-
-    if app.interaction.show_prompt_injection
-        && hint_mode == HintMode::Transform
-        && let Some(ref enricher) = *prompt_enricher
-        && let Some(hint) = enricher(&prompt_preview)
-    {
-        injection_preview = Some(format!(
-            "transform hint\n{hint}\n\n(applied before each llm call)"
-        ));
-    }
-
-    if app.interaction.show_prompt_injection {
-        if let Some(preview) = injection_preview {
-            app.push_system_message(preview);
-        } else {
-            let note = match hint_mode {
-                HintMode::None => "no injection (hint mode is none)",
-                _ if prompt_enricher.is_none() => "no injection (enricher unavailable)",
-                _ => "no injection hint matched",
-            };
-            app.push_system_message(note);
-        }
-    }
-
     let user_message = Message::User(UserMessage {
         content: if app.input.images.is_empty() {
-            UserContent::Text(user_text)
+            UserContent::Text(prompt)
         } else {
             let images = app.input.take_images();
             let mut parts: Vec<UserContentPart> =
-                vec![UserContentPart::Text(TextContent { text: user_text })];
+                vec![UserContentPart::Text(TextContent { text: prompt })];
             for image in images {
                 use base64::Engine;
 
@@ -1015,7 +962,6 @@ fn append_prompt_and_snapshot(
 
 #[allow(clippy::too_many_arguments)]
 fn build_context_transform(
-    enricher_arc: Option<PromptEnricher>,
     compact_model: Model,
     compact_options: StreamOptions,
     do_auto_compact: bool,
@@ -1025,6 +971,9 @@ fn build_context_transform(
     lifecycle_hooks: mush_agent::LifecycleHooks,
     cwd: std::path::PathBuf,
 ) -> Option<mush_agent::TransformFn> {
+    if !do_auto_compact {
+        return None;
+    }
     let ctx_tokens_for_transform = context_tokens_shared;
     #[expect(clippy::type_complexity)]
     let compaction_cache: std::sync::Arc<tokio::sync::Mutex<Option<(usize, Vec<Message>)>>> =
@@ -1034,15 +983,7 @@ fn build_context_transform(
     let registry = Arc::new(registry);
 
     Some(Box::new(move |messages| {
-        let hint_match = enricher_arc
-            .as_ref()
-            .is_some_and(|enricher| event_handler::would_inject_hint(messages, enricher.as_ref()));
-        let owned_messages = if do_auto_compact || hint_match {
-            Some(messages.to_vec())
-        } else {
-            None
-        };
-        let enricher = enricher_arc.clone();
+        let owned_messages = messages.to_vec();
         let model = compact_model.clone();
         let options = compact_options.clone();
         let cache = compaction_cache.clone();
@@ -1051,77 +992,48 @@ fn build_context_transform(
         let cwd = cwd.clone();
         let registry = registry.clone();
         Box::pin(async move {
-            let mut replayed_cached_compaction = false;
-            let mut fresh_compaction = false;
-            let mut maybe_msgs: Option<Vec<Message>> = None;
+            let mut guard = cache.lock().await;
+            let current_tokens =
+                TokenCount::new(ctx_tokens.load(std::sync::atomic::Ordering::Relaxed));
 
-            if do_auto_compact {
-                #[expect(
-                    clippy::expect_used,
-                    reason = "owned_messages always Some inside context_transform"
-                )]
-                let messages = owned_messages
-                    .as_ref()
-                    .expect("owned messages required for context transform");
-                let mut guard = cache.lock().await;
-                let current_tokens =
-                    TokenCount::new(ctx_tokens.load(std::sync::atomic::Ordering::Relaxed));
-
-                let msgs = if let Some((orig_len, ref compacted)) = *guard {
-                    if messages.len() >= orig_len {
-                        replayed_cached_compaction = true;
-                        let mut result = compacted.clone();
-                        result.extend(messages[orig_len..].iter().cloned());
-                        result
-                    } else {
-                        *guard = None;
-                        messages.clone()
-                    }
+            let msgs = if let Some((orig_len, ref compacted)) = *guard {
+                if owned_messages.len() >= orig_len {
+                    let mut result = compacted.clone();
+                    result.extend(owned_messages[orig_len..].iter().cloned());
+                    result
                 } else {
-                    messages.clone()
-                };
-
-                let pre_len = msgs.len();
-                let compacted = event_handler::auto_compact(
-                    msgs,
-                    current_tokens,
-                    context_window,
-                    &registry,
-                    &model,
-                    &options,
-                    Some(&hooks),
-                    Some(cwd.as_path()),
-                )
-                .await;
-                if compacted.len() < pre_len {
-                    *guard = Some((pre_len, compacted.clone()));
-                    replayed_cached_compaction = false;
-                    fresh_compaction = true;
+                    *guard = None;
+                    owned_messages.clone()
                 }
-                maybe_msgs = Some(compacted);
-            }
+            } else {
+                owned_messages.clone()
+            };
 
-            if !fresh_compaction && !replayed_cached_compaction && !hint_match {
-                return mush_agent::ContextTransformResult::Unchanged;
-            }
-
-            #[expect(
-                clippy::expect_used,
-                reason = "owned_messages always Some inside context_transform"
-            )]
-            let mut msgs = maybe_msgs.unwrap_or_else(|| {
-                owned_messages.expect("owned messages required for context transform")
-            });
-            let mut changed = fresh_compaction || replayed_cached_compaction;
-
-            if let Some(ref enricher) = enricher {
-                changed |= event_handler::inject_hint(&mut msgs, enricher.as_ref());
+            let pre_len = msgs.len();
+            let compacted = event_handler::auto_compact(
+                msgs,
+                current_tokens,
+                context_window,
+                &registry,
+                &model,
+                &options,
+                Some(&hooks),
+                Some(cwd.as_path()),
+            )
+            .await;
+            let mut fresh_compaction = false;
+            let mut replayed_cached_compaction = false;
+            if compacted.len() < pre_len {
+                *guard = Some((pre_len, compacted.clone()));
+                fresh_compaction = true;
+            } else if guard.is_some() {
+                replayed_cached_compaction = true;
             }
 
             if fresh_compaction {
-                mush_agent::ContextTransformResult::Updated(msgs)
-            } else if changed {
-                mush_agent::ContextTransformResult::Silent(msgs)
+                mush_agent::ContextTransformResult::Updated(compacted)
+            } else if replayed_cached_compaction {
+                mush_agent::ContextTransformResult::Silent(compacted)
             } else {
                 mush_agent::ContextTransformResult::Unchanged
             }
@@ -1332,8 +1244,6 @@ mod tests {
             system_prompt: None,
             options: StreamOptions::default(),
             max_turns: 32,
-            prompt_enricher: None,
-            hint_mode: super::super::HintMode::None,
             provider_api_keys: HashMap::new(),
             confirm_tools: false,
             auto_compact: false,
@@ -1782,8 +1692,6 @@ mod tests {
             initial_messages: vec![],
             initial_panes: vec![],
             theme: crate::theme::Theme::default(),
-            prompt_enricher: None,
-            hint_mode: crate::runner::HintMode::Message,
             config_path: None,
             provider_api_keys: std::collections::HashMap::new(),
             thinking_prefs: super::super::ThinkingPrefs::default(),

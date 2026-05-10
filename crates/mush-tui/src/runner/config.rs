@@ -1,34 +1,6 @@
 use mush_ai::types::{Message, Model, StreamOptions};
 use mush_session::ConversationState;
 
-/// callback that returns a relevance hint for a user message.
-/// used to nudge the model toward the most relevant skills.
-/// wrapped in Arc so it can be shared with context transform closures.
-pub type PromptEnricher = std::sync::Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
-
-/// how to inject skill relevance hints into the conversation
-#[derive(
-    Debug,
-    Default,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    serde::Deserialize,
-    serde::Serialize,
-    schemars::JsonSchema,
-)]
-#[serde(rename_all = "lowercase")]
-pub enum HintMode {
-    /// prepend hint to user message (evaluated once per message)
-    #[default]
-    Message,
-    /// inject via context transform (re-evaluated before each LLM call)
-    Transform,
-    /// no hint (all skills still loaded in system prompt)
-    None,
-}
-
 /// callback to persist the imperative favourites list. only called when
 /// favourites aren't locked by config.toml
 pub type FavouriteModelsSaver = std::sync::Arc<dyn Fn(&[String]) + Send + Sync>;
@@ -90,10 +62,6 @@ pub struct TuiConfig {
     pub initial_panes: Vec<PaneSnapshot>,
     /// colour theme
     pub theme: crate::theme::Theme,
-    /// optional callback to auto-inject context (e.g. skills) per user message
-    pub prompt_enricher: Option<PromptEnricher>,
-    /// where to inject skill relevance hints
-    pub hint_mode: HintMode,
     /// path to config file for hot-reload
     pub config_path: Option<std::path::PathBuf>,
     /// per-provider api keys from config

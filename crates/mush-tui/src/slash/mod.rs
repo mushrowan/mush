@@ -83,7 +83,6 @@ pub enum SlashAction {
     Logs {
         count: usize,
     },
-    Injection,
     /// view or modify runtime settings (anthropic betas, scope)
     Settings {
         args: String,
@@ -220,7 +219,6 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
             .parse::<usize>()
             .map(|count| SlashAction::Logs { count })
             .map_err(|_| SlashParseError::LogsUsage),
-        "injection" => Ok(SlashAction::Injection),
         "settings" => Ok(SlashAction::Settings {
             args: args.to_string(),
         }),

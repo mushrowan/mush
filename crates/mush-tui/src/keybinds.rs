@@ -59,9 +59,6 @@ pub enum Action {
     /// jump the message log to the bottom without aborting or
     /// otherwise affecting the stream. default binding: `shift-end`
     JumpToBottom,
-    /// toggle the prompt-injection preview in the chat history.
-    /// default binding: `ctrl-i`
-    TogglePromptInjection,
     /// expand or collapse the thinking text on the focused message.
     /// default binding: `ctrl-o`
     ToggleThinkingExpanded,
@@ -78,7 +75,6 @@ impl Action {
             Self::EnterSearch => "enter_search",
             Self::EnterScroll => "enter_scroll",
             Self::JumpToBottom => "jump_to_bottom",
-            Self::TogglePromptInjection => "toggle_prompt_injection",
             Self::ToggleThinkingExpanded => "toggle_thinking_expanded",
         }
     }
@@ -92,7 +88,6 @@ impl Action {
         Self::EnterSearch,
         Self::EnterScroll,
         Self::JumpToBottom,
-        Self::TogglePromptInjection,
         Self::ToggleThinkingExpanded,
     ];
 }
@@ -258,14 +253,6 @@ impl Default for KeyMap {
             )),
         );
 
-        bindings.insert(
-            Action::TogglePromptInjection,
-            Binding::single(KeyCombination::new(
-                KeyCode::Char('i'),
-                KeyModifiers::CONTROL,
-            )),
-        );
-
         Self { bindings }
     }
 }
@@ -351,10 +338,6 @@ mod tests {
         assert!(map.matches(
             Action::ToggleThinkingExpanded,
             KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)
-        ));
-        assert!(map.matches(
-            Action::TogglePromptInjection,
-            KeyEvent::new(KeyCode::Char('i'), KeyModifiers::CONTROL)
         ));
     }
 

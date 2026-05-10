@@ -190,11 +190,6 @@ pub fn status(terminal_overrides: mush_tui::TerminalPolicyOverrides) -> Result<(
     println!("  mouse tracking: {}", terminal.mouse_tracking.as_str());
     println!("  image probe: {}", terminal.image_probe.as_str());
 
-    #[cfg(feature = "embeddings")]
-    println!("  embeddings: enabled");
-    #[cfg(not(feature = "embeddings"))]
-    println!("  embeddings: disabled");
-
     // auth status
     println!("\n\x1b[1mauth\x1b[0m\n");
 

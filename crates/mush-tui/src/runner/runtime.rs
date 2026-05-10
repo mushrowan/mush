@@ -421,8 +421,6 @@ mod tests {
             initial_messages: vec![],
             initial_panes: vec![],
             theme: crate::theme::Theme::default(),
-            prompt_enricher: None,
-            hint_mode: crate::runner::HintMode::Message,
             config_path: None,
             provider_api_keys: HashMap::new(),
             thinking_prefs: ThinkingPrefs::default(),

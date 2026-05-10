@@ -3,24 +3,15 @@
   craneLib,
   src,
   fd,
-  onnxruntime,
   openssl,
   pkg-config,
   cacert,
-  enableEmbeddings ? false,
   enableProfiling ? false,
 }: let
   featureFlags =
-    (
-      if enableEmbeddings
-      then ["embeddings"]
-      else []
-    )
-    ++ (
-      if enableProfiling
-      then ["profiling"]
-      else []
-    );
+    if enableProfiling
+    then ["profiling"]
+    else [];
 
   cargoExtraArgs =
     if featureFlags == []
@@ -35,25 +26,7 @@
       strictDeps = true;
 
       nativeBuildInputs = [pkg-config];
-      buildInputs =
-        [openssl]
-        ++ (
-          if enableEmbeddings
-          then [onnxruntime]
-          else []
-        );
-
-      env =
-        {}
-        // (
-          if enableEmbeddings
-          then {
-            # point ort at nix-provided onnxruntime instead of downloading
-            ORT_LIB_LOCATION = "${onnxruntime}/lib";
-            ORT_PREFER_DYNAMIC_LINK = "1";
-          }
-          else {}
-        );
+      buildInputs = [openssl];
     }
     // (
       if enableProfiling

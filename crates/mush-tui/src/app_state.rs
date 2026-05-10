@@ -143,8 +143,6 @@ pub struct InteractionState {
     pub confirm_prompt: Option<String>,
     /// tool call being confirmed
     pub confirm_tool_call_id: Option<ToolCallId>,
-    /// whether to show prompt injection previews in the chat
-    pub show_prompt_injection: bool,
     /// whether to show dollar cost in status bar
     pub show_cost: bool,
     /// whether to render per-message usage lines (off by default, same info is in status bar)
@@ -171,7 +169,6 @@ impl Default for InteractionState {
             search: SearchState::default(),
             confirm_prompt: None,
             confirm_tool_call_id: None,
-            show_prompt_injection: false,
             show_cost: false,
             show_usage_lines: false,
             show_token_counters: false,

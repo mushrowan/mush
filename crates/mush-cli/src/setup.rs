@@ -31,8 +31,6 @@ pub struct AppSetup {
     pub file_rules: Option<mush_agent::FileRuleCallback>,
     /// LSP diagnostic injection callback
     pub lsp_diagnostics: Option<mush_agent::DiagnosticCallback>,
-    /// MCP tool name/description pairs for semantic search
-    pub tool_descriptions: Vec<(String, String)>,
     /// shared http client for all network calls
     pub http_client: reqwest::Client,
 }
@@ -109,13 +107,13 @@ impl AppSetup {
             t.phase("builtin tools");
         }
 
-        let tool_descriptions = init_mcp(&cfg, args.no_tools, &mut tools).await;
+        init_mcp(&cfg, args.no_tools, &mut tools).await;
         if let Some(t) = &mut timer {
             t.phase("mcp");
         }
 
         let project_context = loader::discover_project_context(&cwd);
-        init_skill_tools(&project_context, &cfg, args.no_tools, &mut tools);
+        init_skill_tools(&project_context, args.no_tools, &mut tools);
         if let Some(t) = &mut timer {
             t.phase("project context");
         }
@@ -123,13 +121,7 @@ impl AppSetup {
         let system_prompt = args
             .system
             .or(cfg.system_prompt.clone())
-            .unwrap_or_else(|| {
-                build_system_prompt_from_context(
-                    &project_context,
-                    &cwd,
-                    cfg.retrieval.context_strategy,
-                )
-            });
+            .unwrap_or_else(|| build_system_prompt_from_context(&project_context, &cwd));
         if let Some(t) = &mut timer {
             t.phase("system prompt");
         }
@@ -192,7 +184,6 @@ impl AppSetup {
                 lifecycle_hooks,
                 file_rules,
                 lsp_diagnostics,
-                tool_descriptions,
                 http_client,
             },
             report,
@@ -224,37 +215,29 @@ async fn init_mcp(
     cfg: &config::Config,
     no_tools: bool,
     tools: &mut mush_agent::tool::ToolRegistry,
-) -> Vec<(String, String)> {
-    let mut tool_descriptions = Vec::new();
+) {
     if no_tools || cfg.mcp.is_empty() {
-        return tool_descriptions;
+        return;
     }
 
     let (mcp_manager, mcp_tools) = mush_mcp::McpManager::connect_all(&cfg.mcp).await;
     if cfg.dynamic_mcp {
         let conns = mcp_manager.connections();
         if !conns.is_empty() {
-            let index = mush_mcp::dynamic::McpToolIndex::new(&conns);
-            tool_descriptions = index.tool_descriptions();
             let dynamic = mush_mcp::dynamic::dynamic_mcp_tools(&conns);
             tools.extend_shared(dynamic.iter().cloned());
         }
     } else {
         tools.extend_shared(mcp_tools.iter().cloned());
     }
-    tool_descriptions
 }
 
 fn init_skill_tools(
     project_context: &loader::ProjectContext,
-    cfg: &config::Config,
     no_tools: bool,
     tools: &mut mush_agent::tool::ToolRegistry,
 ) {
-    if no_tools
-        || !cfg.retrieval.context_strategy.needs_skill_tools()
-        || project_context.skills.is_empty()
-    {
+    if no_tools || project_context.skills.is_empty() {
         return;
     }
     let skill_infos: Vec<mush_tools::skills::SkillInfo> = project_context
@@ -293,12 +276,11 @@ fn init_repo_map(
     no_tools: bool,
     tools: &mut mush_agent::tool::ToolRegistry,
 ) {
-    if !cfg.retrieval.repo_map || no_tools || !mush_treesitter::is_inside_repo(cwd) {
+    if !cfg.repo_map.enabled || no_tools || !mush_treesitter::is_inside_repo(cwd) {
         return;
     }
 
-    let shared =
-        mush_tools::repo_map::RepoMapShared::lazy(cwd.to_path_buf(), cfg.retrieval.context_budget);
+    let shared = mush_tools::repo_map::RepoMapShared::lazy(cwd.to_path_buf(), cfg.repo_map.budget);
     tools.register_shared(std::sync::Arc::new(mush_tools::repo_map::RepoMapTool::new(
         shared,
     )));
@@ -386,144 +368,9 @@ fn format_available_skills(skills: &[loader::Skill]) -> String {
     out
 }
 
-fn is_skill_name_char(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')
-}
-
-fn whole_word_match_positions(query: &str, skill_name: &str) -> Vec<usize> {
-    let mut positions = Vec::new();
-
-    for (start, _) in query.match_indices(skill_name) {
-        let end = start + skill_name.len();
-        let before_ok = start == 0 || !is_skill_name_char(query.as_bytes()[start - 1]);
-        let after_ok = end == query.len() || !is_skill_name_char(query.as_bytes()[end]);
-        if before_ok && after_ok {
-            positions.push(start);
-        }
-    }
-
-    positions
-}
-
-fn explicit_skill_mentions(query: &str, skills: &[loader::Skill]) -> Vec<(usize, String)> {
-    let mut matches = Vec::new();
-    let bytes = query.as_bytes();
-    let mut index = 0;
-
-    while index < bytes.len() {
-        if bytes[index] != b'$' {
-            index += 1;
-            continue;
-        }
-
-        let start = index + 1;
-        let mut end = start;
-        while end < bytes.len() && is_skill_name_char(bytes[end]) {
-            end += 1;
-        }
-
-        if end > start {
-            let mention = &query[start..end];
-            if let Some(skill) = skills
-                .iter()
-                .find(|skill| skill.name.eq_ignore_ascii_case(mention))
-            {
-                matches.push((index, skill.name.clone()));
-            }
-            index = end;
-        } else {
-            index += 1;
-        }
-    }
-
-    matches
-}
-
-fn has_plain_skill_cue(query: &str, start: usize, end: usize) -> bool {
-    const BEFORE_CUES: [&str; 8] = [
-        "use", "using", "with", "follow", "load", "apply", "need", "needs",
-    ];
-    const AFTER_CUES: [&str; 3] = ["skill", "workflow", "instructions"];
-
-    let before_words: Vec<_> = query[..start].split_whitespace().rev().take(3).collect();
-    if before_words.iter().any(|word| BEFORE_CUES.contains(word)) {
-        return true;
-    }
-
-    query[end..]
-        .split_whitespace()
-        .next()
-        .is_some_and(|word| AFTER_CUES.contains(&word))
-}
-
-fn plain_skill_mentions(query: &str, skills: &[loader::Skill]) -> Vec<(usize, String)> {
-    let query = query.to_lowercase();
-    let mut matches = Vec::new();
-
-    for skill in skills {
-        let skill_name = skill.name.to_lowercase();
-        let distinctive = skill_name.contains(['-', '_']) || skill_name.len() > 6;
-        for start in whole_word_match_positions(&query, &skill_name) {
-            let end = start + skill_name.len();
-            if distinctive || has_plain_skill_cue(&query, start, end) {
-                matches.push((start, skill.name.clone()));
-                break;
-            }
-        }
-    }
-
-    matches
-}
-
-fn requested_skill_mentions(query: &str, skills: &[loader::Skill]) -> Vec<String> {
-    let mut seen = std::collections::HashSet::new();
-    let mut matches = explicit_skill_mentions(query, skills);
-    matches.extend(plain_skill_mentions(query, skills));
-    matches.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
-
-    matches
-        .into_iter()
-        .filter_map(|(_, name)| {
-            let key = name.to_lowercase();
-            seen.insert(key).then_some(name)
-        })
-        .collect()
-}
-
-fn explicit_skill_hint(query: &str, skills: &[loader::Skill]) -> Option<String> {
-    let matches = requested_skill_mentions(query, skills);
-    if matches.is_empty() {
-        return None;
-    }
-
-    Some(format!(
-        "[relevant skills: {}. the user explicitly requested them. use the skill tool to load them before answering.]",
-        matches.join(", ")
-    ))
-}
-
-#[cfg(feature = "embeddings")]
-fn join_prompt_hints(hints: impl IntoIterator<Item = Option<String>>) -> Option<String> {
-    let mut merged = Vec::new();
-
-    for hint in hints.into_iter().flatten() {
-        if !hint.is_empty() && !merged.contains(&hint) {
-            merged.push(hint);
-        }
-    }
-
-    if merged.is_empty() {
-        None
-    } else {
-        Some(merged.join("\n"))
-    }
-}
-
-/// build the default system prompt from pre-discovered project context
 pub fn build_system_prompt_from_context(
     context: &loader::ProjectContext,
     cwd: &std::path::Path,
-    strategy: config::ContextStrategy,
 ) -> String {
     let cwd_str = cwd.display();
     let mut prompt = format!(
@@ -553,36 +400,12 @@ pub fn build_system_prompt_from_context(
     }
 
     if !context.skills.is_empty() {
-        match strategy {
-            config::ContextStrategy::Prepended => {
-                prompt.push_str(
-                    "\n\nThe following skills provide specialised instructions for specific tasks.\n\
-                     When a skill is relevant to the request, follow its instructions.\n",
-                );
-                for skill in &context.skills {
-                    if let Ok(content) = std::fs::read_to_string(&skill.path) {
-                        prompt.push_str(&format!(
-                            "\n### {}\n{}\n\n{}\n",
-                            skill.name, skill.description, content,
-                        ));
-                    }
-                }
-            }
-            config::ContextStrategy::Summaries | config::ContextStrategy::Embedded => {
-                prompt.push_str(
-                    "\n\nSkills provide specialised instructions for specific tasks. \
-                     Use the skill tool to load a skill when a task matches its description. \
-                     If the user explicitly names a skill with `$skill-name`, load that skill before answering.\n\n",
-                );
-                prompt.push_str(&format_available_skills(&context.skills));
-            }
-            config::ContextStrategy::EmbedInject => {
-                prompt.push_str(
-                    "\n\nSpecialised skill instructions may be automatically provided \
-                     with your messages when relevant to the task.\n",
-                );
-            }
-        }
+        prompt.push_str(
+            "\n\nSkills provide specialised instructions for specific tasks. \
+             Use the skill tool to load a skill when a task matches its description. \
+             If the user explicitly names a skill with `$skill-name`, load that skill before answering.\n\n",
+        );
+        prompt.push_str(&format_available_skills(&context.skills));
     }
 
     prompt
@@ -712,140 +535,6 @@ fn parse_language_name(name: &str) -> Option<mush_treesitter::Language> {
         "nix" => Some(mush_treesitter::Language::Nix),
         _ => None,
     }
-}
-
-/// build a prompt enricher that returns a relevance hint for the user message
-#[cfg(feature = "embeddings")]
-pub fn build_prompt_enricher(
-    cwd: &std::path::Path,
-    retrieval: &config::RetrievalConfig,
-    tool_descriptions: &[(String, String)],
-) -> Option<mush_tui::PromptEnricher> {
-    use mush_ext::context;
-    use std::sync::Arc;
-
-    let project = loader::discover_project_context(cwd);
-    let skills = Arc::new(project.skills.clone());
-    let supports_explicit_skill_hints =
-        retrieval.context_strategy.needs_skill_tools() && !skills.is_empty();
-
-    if !retrieval.context_strategy.needs_embeddings() {
-        if !supports_explicit_skill_hints {
-            return None;
-        }
-
-        return Some(Arc::new(move |query: &str| {
-            explicit_skill_hint(query, skills.as_ref())
-        }));
-    }
-
-    let has_skills = !project.skills.is_empty();
-    let has_tools = !tool_descriptions.is_empty();
-
-    if !has_skills && !has_tools {
-        eprintln!("\x1b[2mno skills or tools discovered, enricher disabled\x1b[0m");
-        return None;
-    }
-
-    let mut docs = if has_skills {
-        eprintln!(
-            "\x1b[2mfound {} skills, building index...\x1b[0m",
-            project.skills.len()
-        );
-        context::build_skill_documents(&project.skills)
-    } else {
-        vec![]
-    };
-
-    if has_tools {
-        eprintln!(
-            "\x1b[2mindexing {} MCP tool descriptions\x1b[0m",
-            tool_descriptions.len()
-        );
-        docs.extend(context::build_tool_documents(tool_descriptions));
-    }
-
-    if docs.is_empty() {
-        if !supports_explicit_skill_hints {
-            eprintln!(
-                "\x1b[33mwarning: skills/tools found but none readable, enricher disabled\x1b[0m",
-            );
-            return None;
-        }
-
-        return Some(Arc::new(move |query: &str| {
-            explicit_skill_hint(query, skills.as_ref())
-        }));
-    }
-
-    let (model_choice, model_name) = match retrieval.embedding_model {
-        config::EmbeddingModel::Coderank => (
-            context::EmbeddingModelChoice::CodeRankEmbed,
-            "CodeRankEmbed",
-        ),
-        config::EmbeddingModel::Gemma => (context::EmbeddingModelChoice::Gemma300M, "Gemma-300M"),
-    };
-
-    let include_hints = retrieval.context_strategy != config::ContextStrategy::EmbedInject;
-
-    let doc_count = docs.len();
-    match context::ContextIndex::build_with_model(docs, model_choice) {
-        Ok(index) => {
-            let index = Arc::new(index);
-            eprintln!(
-                "\x1b[2mindexed {doc_count} documents for auto-context ({model_name})\x1b[0m"
-            );
-            let threshold = retrieval.auto_load_threshold;
-            Some(Arc::new(move |query: &str| {
-                let explicit = if supports_explicit_skill_hints {
-                    explicit_skill_hint(query, skills.as_ref())
-                } else {
-                    None
-                };
-                let matches = index.search(query, 3, 0.35);
-                let routed = if matches.is_empty() {
-                    None
-                } else {
-                    Some(context::route_matches(&matches, threshold, include_hints))
-                };
-                join_prompt_hints([explicit, routed])
-            }))
-        }
-        Err(e) => {
-            if supports_explicit_skill_hints {
-                eprintln!(
-                    "\x1b[33mwarning: failed to build context index: {e}, using explicit skill mentions only\x1b[0m"
-                );
-                Some(Arc::new(move |query: &str| {
-                    explicit_skill_hint(query, skills.as_ref())
-                }))
-            } else {
-                eprintln!("\x1b[33mwarning: failed to build context index: {e}\x1b[0m");
-                None
-            }
-        }
-    }
-}
-
-#[cfg(not(feature = "embeddings"))]
-pub fn build_prompt_enricher(
-    cwd: &std::path::Path,
-    retrieval: &config::RetrievalConfig,
-    _tool_descriptions: &[(String, String)],
-) -> Option<mush_tui::PromptEnricher> {
-    if !retrieval.context_strategy.needs_skill_tools() {
-        return None;
-    }
-
-    let project = loader::discover_project_context(cwd);
-    if project.skills.is_empty() {
-        return None;
-    }
-
-    let skills = std::sync::Arc::new(project.skills);
-    Some(std::sync::Arc::new(move |query: &str| {
-        explicit_skill_hint(query, skills.as_ref())
-    }))
 }
 
 /// resolve API key from config file for a given provider
@@ -1106,11 +795,7 @@ mod tests {
             agents_md: vec![],
             skills: vec![],
         };
-        let prompt = build_system_prompt_from_context(
-            &context,
-            std::path::Path::new("/repo"),
-            config::ContextStrategy::Summaries,
-        );
+        let prompt = build_system_prompt_from_context(&context, std::path::Path::new("/repo"));
         assert!(
             prompt.contains("grep"),
             "expected guidance to mention grep for exploration"
@@ -1139,11 +824,7 @@ mod tests {
             ],
         };
 
-        let prompt = build_system_prompt_from_context(
-            &context,
-            std::path::Path::new("/repo"),
-            config::ContextStrategy::Summaries,
-        );
+        let prompt = build_system_prompt_from_context(&context, std::path::Path::new("/repo"));
 
         let alpha = prompt.find("<name>alpha</name>").unwrap();
         let zeta = prompt.find("<name>zeta</name>").unwrap();
@@ -1155,58 +836,6 @@ mod tests {
         assert!(prompt.contains("$skill-name"));
         assert!(!prompt.contains("load_skill"));
         assert!(alpha < zeta);
-    }
-
-    #[test]
-    fn explicit_skill_mentions_produce_hint() {
-        let hint = explicit_skill_hint(
-            "please use $zeta first, then $alpha",
-            &[
-                Skill {
-                    name: "zeta".into(),
-                    description: "zeta skill".into(),
-                    path: "/tmp/zeta/SKILL.md".into(),
-                },
-                Skill {
-                    name: "alpha".into(),
-                    description: "alpha skill".into(),
-                    path: "/tmp/alpha/SKILL.md".into(),
-                },
-            ],
-        )
-        .unwrap();
-
-        assert!(hint.starts_with("[relevant skills: zeta, alpha."));
-        assert!(hint.contains("use the skill tool"));
-    }
-
-    #[test]
-    fn plain_skill_mentions_produce_hint() {
-        let hint = explicit_skill_hint(
-            "please use nix for this flake",
-            &[Skill {
-                name: "nix".into(),
-                description: "nix skill".into(),
-                path: "/tmp/nix/SKILL.md".into(),
-            }],
-        )
-        .unwrap();
-
-        assert!(hint.contains("[relevant skills: nix."));
-    }
-
-    #[test]
-    fn plain_skill_mentions_ignore_substrings() {
-        let hint = explicit_skill_hint(
-            "this unix socket is acting up",
-            &[Skill {
-                name: "nix".into(),
-                description: "nix skill".into(),
-                path: "/tmp/nix/SKILL.md".into(),
-            }],
-        );
-
-        assert!(hint.is_none());
     }
 
     #[test]

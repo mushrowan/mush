@@ -179,29 +179,6 @@ pub fn handle_agent_event(
     }
 }
 
-/// inject a relevance hint into the last user message
-pub fn inject_hint(
-    msgs: &mut [Message],
-    enricher: &(dyn Fn(&str) -> Option<String> + Send + Sync),
-) -> bool {
-    if let Some((pos, content, timestamp_ms)) = hinted_user_message(msgs, enricher) {
-        msgs[pos] = Message::User(UserMessage {
-            content: UserContent::Text(content),
-            timestamp_ms,
-        });
-        true
-    } else {
-        false
-    }
-}
-
-pub fn would_inject_hint(
-    msgs: &[Message],
-    enricher: &(dyn Fn(&str) -> Option<String> + Send + Sync),
-) -> bool {
-    hinted_user_message(msgs, enricher).is_some()
-}
-
 /// settle a streamed assistant `MessageEnd` into app state. in-band
 /// errors (stop_reason=Error or non-empty error_message, e.g. anthropic
 /// `Overloaded`) surface as a system message and bypass stats, since
@@ -231,19 +208,6 @@ fn apply_message_end(app: &mut App, message: &AssistantMessage, model: &Model, d
             message.usage.cache_read_tokens
         ));
     }
-}
-
-fn hinted_user_message(
-    msgs: &[Message],
-    enricher: &(dyn Fn(&str) -> Option<String> + Send + Sync),
-) -> Option<(usize, String, Timestamp)> {
-    let pos = msgs.iter().rposition(|m| matches!(m, Message::User(_)))?;
-    let Message::User(user_msg) = &msgs[pos] else {
-        return None;
-    };
-    let text = user_msg.text();
-    let hint = enricher(&text)?;
-    Some((pos, format!("{hint}\n\n{text}"), user_msg.timestamp_ms))
 }
 
 /// resolve API key and account ID for a model. mirrors the cli's

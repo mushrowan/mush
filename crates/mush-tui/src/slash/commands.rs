@@ -10,7 +10,7 @@ use mush_session::ConversationState;
 
 use crate::TuiConfig;
 use crate::app::App;
-use crate::runner::{HintMode, ThinkingPrefs};
+use crate::runner::ThinkingPrefs;
 use crate::text::truncate_with_ellipsis;
 
 use super::SlashAction;
@@ -290,28 +290,6 @@ pub fn handle(
             } else {
                 app.push_system_message("logging not available");
             }
-            None
-        }
-        SlashAction::Injection => {
-            app.interaction.show_prompt_injection = !app.interaction.show_prompt_injection;
-            let mode = match tui_config.hint_mode {
-                HintMode::Message => "message",
-                HintMode::Transform => "transform",
-                HintMode::None => "none",
-            };
-            let enricher = if tui_config.prompt_enricher.is_some() {
-                "ready"
-            } else {
-                "unavailable"
-            };
-            app.push_system_message(format!(
-                "prompt injection preview: {} (mode: {mode}, enricher: {enricher})",
-                if app.interaction.show_prompt_injection {
-                    "on"
-                } else {
-                    "off"
-                }
-            ));
             None
         }
         SlashAction::Settings { args } => {

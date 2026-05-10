@@ -17,14 +17,8 @@ craneLib.devShell {
     cargo-watch
     gh
     jujutsu
-    onnxruntime
     openssl
     pkg-config
     samply
   ];
-
-  env = {
-    ORT_LIB_LOCATION = "${pkgs.onnxruntime}/lib";
-    ORT_PREFER_DYNAMIC_LINK = "1";
-  };
 }

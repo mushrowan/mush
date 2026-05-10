@@ -6,10 +6,6 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
-[features]
-default = []
-embeddings = ["dep:fastembed", "dep:hf-hub"]
-
 [dependencies]
 mush-ai.workspace = true
 mush-agent.workspace = true
@@ -18,8 +14,6 @@ mush-treesitter.workspace = true
 globset = "0.4"
 thiserror.workspace = true
 tracing.workspace = true
-fastembed = { version = "5", optional = true }
-hf-hub = { version = "0.5", optional = true }
 
 [dev-dependencies]
 pretty_assertions.workspace = true

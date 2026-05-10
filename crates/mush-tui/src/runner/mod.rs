@@ -24,8 +24,8 @@ use mush_ai::registry::ApiRegistry;
 
 use self::caching_backend::{CachingBackend, spawn_sigwinch_listener};
 pub use self::config::{
-    HintMode, PaneSnapshot, PromptEnricher, ReloadCallback, ReloadedContext, SessionSaver,
-    SessionSnapshot, TitleUpdater, TuiConfig,
+    PaneSnapshot, ReloadCallback, ReloadedContext, SessionSaver, SessionSnapshot, TitleUpdater,
+    TuiConfig,
 };
 use self::input::LoopAction;
 pub use self::last_model::{LastModels, LastModelsSaver};
@@ -125,8 +125,6 @@ pub async fn run_tui(
                     system_prompt: tui_config.system_prompt.clone(),
                     options: tui_config.stream_options(),
                     max_turns: tui_config.max_turns,
-                    prompt_enricher: tui_config.prompt_enricher.clone(),
-                    hint_mode: tui_config.hint_mode,
                     provider_api_keys: tui_config.provider_api_keys.clone(),
                     confirm_tools: tui_config.confirm_tools,
                     auto_compact: tui_config.auto_compact,

@@ -14,8 +14,8 @@ use mush_cli::{commands, config, logging, setup, timing};
 use mush_tui::TuiConfig;
 
 use setup::{
-    AppSetup, SetupArgs, auto_compact, build_prompt_enricher, build_system_prompt_from_context,
-    expand_template, format_error,
+    AppSetup, SetupArgs, auto_compact, build_system_prompt_from_context, expand_template,
+    format_error,
 };
 
 #[derive(Parser)]
@@ -200,18 +200,6 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
     if let Some(report) = startup_report {
         eprintln!("{report}");
     }
-
-    // in print mode, hint is always prepended (one-shot, no transform loop)
-    let enricher =
-        build_prompt_enricher(&setup.cwd, &setup.cfg.retrieval, &setup.tool_descriptions);
-    let prompt = if setup.cfg.hint_mode != config::HintMode::None
-        && let Some(ref enricher) = enricher
-        && let Some(hint) = enricher(&prompt)
-    {
-        format!("{hint}\n\n{prompt}")
-    } else {
-        prompt
-    };
 
     // session: resume or create new
     let cwd_str = setup.cwd.display().to_string();
@@ -493,10 +481,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
     let system_prompt = session.system_prompt.clone().unwrap_or(setup.system_prompt);
 
     let theme = mush_tui::Theme::from_config(&setup.cfg.theme);
-    let prompt_enricher =
-        build_prompt_enricher(&setup.cwd, &setup.cfg.retrieval, &setup.tool_descriptions);
 
-    let hint_mode = setup.cfg.hint_mode;
     let terminal_policy = setup.cfg.terminal.with_overrides(terminal_policy_overrides);
 
     // build agent card before setup fields are moved into tui_config
@@ -524,8 +509,6 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         initial_messages,
         initial_panes,
         theme,
-        prompt_enricher,
-        hint_mode,
         config_path: if config_file.exists() {
             Some(config_file)
         } else {
@@ -628,20 +611,17 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
             }
             km
         },
-        reload_context: {
-            let strategy = setup.cfg.retrieval.context_strategy;
-            Some(std::sync::Arc::new(
-                move |cwd: &std::path::Path| -> mush_tui::ReloadedContext {
-                    let project = mush_ext::loader::discover_project_context(cwd);
-                    let system_prompt = build_system_prompt_from_context(&project, cwd, strategy);
-                    let templates = mush_ext::discover_templates(cwd);
-                    mush_tui::ReloadedContext {
-                        system_prompt,
-                        templates,
-                    }
-                },
-            ))
-        },
+        reload_context: Some(std::sync::Arc::new(
+            move |cwd: &std::path::Path| -> mush_tui::ReloadedContext {
+                let project = mush_ext::loader::discover_project_context(cwd);
+                let system_prompt = build_system_prompt_from_context(&project, cwd);
+                let templates = mush_ext::discover_templates(cwd);
+                mush_tui::ReloadedContext {
+                    system_prompt,
+                    templates,
+                }
+            },
+        )),
         forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars::new(
             setup.cfg.forbidden_chars.iter().copied(),
         ),

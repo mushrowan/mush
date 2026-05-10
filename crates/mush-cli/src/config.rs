@@ -40,7 +40,6 @@ enum ThinkingConfigWire {
     Level(ThinkingLevel),
 }
 
-pub use mush_tui::HintMode;
 pub use mush_tui::IsolationMode;
 pub use mush_tui::StatusBarConfig;
 pub use mush_tui::TerminalPolicy;
@@ -59,7 +58,6 @@ pub struct Config {
     pub cache_retention: Option<mush_ai::types::CacheRetention>,
     pub debug_cache: bool,
     pub system_prompt: Option<String>,
-    pub hint_mode: HintMode,
     /// tracing filter string (e.g. "mush=debug,warn")
     pub log_filter: Option<String>,
     /// how to display thinking text (hidden, collapse, expanded)
@@ -104,9 +102,9 @@ pub struct Config {
     /// lifecycle hooks
     #[serde(default)]
     pub hooks: HooksConfig,
-    /// retrieval / auto-context settings
+    /// repo map tool configuration
     #[serde(default)]
-    pub retrieval: RetrievalConfig,
+    pub repo_map: RepoMapConfig,
     /// LSP integration settings
     #[serde(default)]
     pub lsp: LspConfig,
@@ -163,7 +161,6 @@ impl Default for Config {
             cache_retention: None,
             debug_cache: false,
             system_prompt: None,
-            hint_mode: HintMode::default(),
             log_filter: None,
             thinking_display: mush_tui::ThinkingDisplay::default(),
             force_budget_thinking: false,
@@ -182,7 +179,7 @@ impl Default for Config {
             mcp: std::collections::HashMap::default(),
             dynamic_mcp: false,
             hooks: HooksConfig::default(),
-            retrieval: RetrievalConfig::default(),
+            repo_map: RepoMapConfig::default(),
             lsp: LspConfig::default(),
             model_tiers: HashMap::default(),
             favourite_models: Vec::new(),
@@ -244,17 +241,6 @@ fn default_timeout() -> u64 {
     30
 }
 
-/// which local embedding model to use for semantic search
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize, JsonSchema)]
-#[serde(rename_all = "lowercase")]
-pub enum EmbeddingModel {
-    /// nomic CodeRankEmbed-137M, code-specialised, fast
-    #[default]
-    Coderank,
-    /// google EmbeddingGemma-300M, general purpose, larger
-    Gemma,
-}
-
 /// LSP integration configuration
 #[derive(Debug, Default, Deserialize, Serialize, JsonSchema, Clone, PartialEq, Eq)]
 #[serde(default)]
@@ -276,72 +262,28 @@ pub struct LspServerEntry {
     pub args: Vec<String>,
 }
 
-/// how skills are discovered and injected into context
+/// repo map tool configuration
 ///
-/// each strategy trades off token cost vs accuracy vs latency:
-/// - `prepended`: all skills in system prompt
-/// - `summaries`: skill catalogue in prompt, `skill` tool on demand
-/// - `embedded`: skill catalogue plus embedding hints, `skill` tool on demand
-/// - `embed_inject`: auto-inject from embeddings, no tool needed
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ContextStrategy {
-    /// all skill bodies dumped into the system prompt
-    Prepended,
-    /// names + descriptions listed, `skill` tool for on-demand reading
-    #[default]
-    Summaries,
-    /// embedding similarity hints + `skill` tool
-    Embedded,
-    /// embedding auto-injects matched skill content, no tool needed
-    EmbedInject,
-}
-
-impl ContextStrategy {
-    /// whether this strategy requires the embeddings feature
-    #[cfg(feature = "embeddings")]
-    pub fn needs_embeddings(self) -> bool {
-        matches!(self, Self::Embedded | Self::EmbedInject)
-    }
-
-    /// whether this strategy registers skill tools (list/describe/load)
-    pub fn needs_skill_tools(self) -> bool {
-        matches!(self, Self::Summaries | Self::Embedded)
-    }
-}
-
-/// retrieval tier configuration
-///
-/// controls which auto-context sources are active and how much
-/// of the context budget they can use.
-#[derive(Debug, Deserialize, Serialize, JsonSchema, Clone, PartialEq)]
+/// the `repo_map` tool exposes a tree-sitter built structural overview
+/// of the codebase. it's an opt-in tool the model invokes on demand,
+/// not a system-prompt injection. the budget controls how much text
+/// the tool can return per call (well below the central tool-output cap)
+#[derive(Debug, Deserialize, Serialize, JsonSchema, Clone, PartialEq, Eq)]
 #[serde(default)]
-pub struct RetrievalConfig {
-    /// tier 1: tree-sitter repo map in system prompt
-    pub repo_map: bool,
-    /// total token budget for all retrieval context (default 2048)
-    pub context_budget: usize,
-    /// how skills are discovered and injected
-    pub context_strategy: ContextStrategy,
-    /// which embedding model to use: "coderank" (default) or "gemma"
-    pub embedding_model: EmbeddingModel,
-    /// cosine similarity threshold for auto-loading full skill content (default 0.5)
-    #[serde(default = "default_auto_load_threshold")]
-    pub auto_load_threshold: f32,
+pub struct RepoMapConfig {
+    /// register the repo_map tool when running inside a vcs repo (default true)
+    pub enabled: bool,
+    /// per-call rendering budget in tokens (default 8192). raise if the
+    /// model needs to see more of the map at once. caps at the central
+    /// tool-output cap regardless of this value
+    pub budget: usize,
 }
 
-fn default_auto_load_threshold() -> f32 {
-    0.5
-}
-
-impl Default for RetrievalConfig {
+impl Default for RepoMapConfig {
     fn default() -> Self {
         Self {
-            repo_map: true,
-            context_budget: 2048,
-            context_strategy: ContextStrategy::default(),
-            embedding_model: EmbeddingModel::default(),
-            auto_load_threshold: default_auto_load_threshold(),
+            enabled: true,
+            budget: 8192,
         }
     }
 }
@@ -787,24 +729,6 @@ advisor = true
     }
 
     #[test]
-    fn parse_hint_mode() {
-        let config: Config = toml::from_str(r#"hint_mode = "transform""#).unwrap();
-        assert_eq!(config.hint_mode, HintMode::Transform);
-
-        let config: Config = toml::from_str(r#"hint_mode = "none""#).unwrap();
-        assert_eq!(config.hint_mode, HintMode::None);
-
-        let config: Config = toml::from_str(r#"hint_mode = "message""#).unwrap();
-        assert_eq!(config.hint_mode, HintMode::Message);
-    }
-
-    #[test]
-    fn hint_mode_defaults_to_message() {
-        let config: Config = toml::from_str("").unwrap();
-        assert_eq!(config.hint_mode, HintMode::Message);
-    }
-
-    #[test]
     fn parse_isolation_mode() {
         let config: Config = toml::from_str(r#"isolation = "jj""#).unwrap();
         assert_eq!(config.isolation, IsolationMode::Jj);
@@ -1000,91 +924,35 @@ blocking = true
     }
 
     #[test]
-    fn retrieval_defaults() {
+    fn repo_map_defaults() {
         let config: Config = toml::from_str("").unwrap();
-        assert!(config.retrieval.repo_map);
-        assert_eq!(config.retrieval.context_budget, 2048);
-        assert_eq!(
-            config.retrieval.context_strategy,
-            ContextStrategy::Summaries
-        );
-        assert_eq!(config.retrieval.embedding_model, EmbeddingModel::Coderank);
-        assert!((config.retrieval.auto_load_threshold - 0.5).abs() < f32::EPSILON);
+        assert!(config.repo_map.enabled);
+        assert_eq!(config.repo_map.budget, 8192);
     }
 
     #[test]
-    fn retrieval_context_strategy_all_variants() {
-        for (input, expected) in [
-            ("prepended", ContextStrategy::Prepended),
-            ("summaries", ContextStrategy::Summaries),
-            ("embedded", ContextStrategy::Embedded),
-            ("embed_inject", ContextStrategy::EmbedInject),
-        ] {
-            let toml = format!("[retrieval]\ncontext_strategy = \"{input}\"");
-            let config: Config = toml::from_str(&toml).unwrap();
-            assert_eq!(
-                config.retrieval.context_strategy, expected,
-                "failed for {input}"
-            );
-        }
-    }
-
-    #[test]
-    #[cfg(feature = "embeddings")]
-    fn context_strategy_needs_embeddings() {
-        assert!(!ContextStrategy::Prepended.needs_embeddings());
-        assert!(!ContextStrategy::Summaries.needs_embeddings());
-        assert!(ContextStrategy::Embedded.needs_embeddings());
-        assert!(ContextStrategy::EmbedInject.needs_embeddings());
-    }
-
-    #[test]
-    fn context_strategy_needs_skill_tools() {
-        assert!(!ContextStrategy::Prepended.needs_skill_tools());
-        assert!(ContextStrategy::Summaries.needs_skill_tools());
-        assert!(ContextStrategy::Embedded.needs_skill_tools());
-        assert!(!ContextStrategy::EmbedInject.needs_skill_tools());
-    }
-
-    #[test]
-    fn retrieval_embedding_model_gemma() {
+    fn repo_map_custom_budget() {
         let config: Config = toml::from_str(
             r#"
-[retrieval]
-embedding_model = "gemma"
+[repo_map]
+budget = 32768
 "#,
         )
         .unwrap();
-        assert_eq!(config.retrieval.embedding_model, EmbeddingModel::Gemma);
+        assert!(config.repo_map.enabled);
+        assert_eq!(config.repo_map.budget, 32768);
     }
 
     #[test]
-    fn retrieval_auto_load_threshold_custom() {
+    fn repo_map_disabled() {
         let config: Config = toml::from_str(
             r#"
-[retrieval]
-auto_load_threshold = 0.7
+[repo_map]
+enabled = false
 "#,
         )
         .unwrap();
-        assert!((config.retrieval.auto_load_threshold - 0.7).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn retrieval_partial_override() {
-        let config: Config = toml::from_str(
-            r#"
-[retrieval]
-context_strategy = "prepended"
-"#,
-        )
-        .unwrap();
-        assert!(config.retrieval.repo_map); // default
-        assert_eq!(
-            config.retrieval.context_strategy,
-            ContextStrategy::Prepended
-        );
-        assert_eq!(config.retrieval.context_budget, 2048); // default
+        assert!(!config.repo_map.enabled);
     }
 
     #[test]
