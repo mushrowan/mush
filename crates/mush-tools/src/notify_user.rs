@@ -55,6 +55,11 @@ impl AgentTool for NotifyUserTool {
         })
     }
 
+    fn output_limit(&self) -> mush_agent::tool::OutputLimit {
+        // single-line ack, never truncates
+        mush_agent::tool::OutputLimit::Head
+    }
+
     async fn execute(&self, args: serde_json::Value) -> ToolResult {
         let args = match parse_tool_args::<NotifyUserArgs>(args) {
             Ok(args) => args,

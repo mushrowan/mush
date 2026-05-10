@@ -138,6 +138,12 @@ impl AgentTool for DelegateTaskTool {
         })
     }
 
+    fn output_limit(&self) -> mush_agent::tool::OutputLimit {
+        // delegated agent's final reply: head keeps the executive
+        // summary which usually leads the response
+        mush_agent::tool::OutputLimit::Head
+    }
+
     async fn execute(&self, args: serde_json::Value) -> ToolResult {
         let params: DelegateArgs = match parse_tool_args(args) {
             Ok(p) => p,

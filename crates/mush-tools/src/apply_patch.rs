@@ -526,6 +526,12 @@ impl AgentTool for ApplyPatchTool {
         })
     }
 
+    fn output_limit(&self) -> mush_agent::tool::OutputLimit {
+        // success summary + first lines of patched files; head keeps
+        // the per-file outcome list intact
+        mush_agent::tool::OutputLimit::Head
+    }
+
     async fn execute(&self, args: serde_json::Value) -> ToolResult {
         let args = match parse_tool_args::<ApplyPatchArgs>(args) {
             Ok(args) => args,

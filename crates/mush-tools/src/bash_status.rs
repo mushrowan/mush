@@ -64,6 +64,11 @@ impl AgentTool for BashStatusTool {
         })
     }
 
+    fn output_limit(&self) -> mush_agent::tool::OutputLimit {
+        // matches BashTool: bash output's signal lives at the end
+        mush_agent::tool::OutputLimit::Tail
+    }
+
     async fn execute(&self, args: serde_json::Value) -> ToolResult {
         let args = match parse_tool_args::<StatusArgs>(args) {
             Ok(args) => args,

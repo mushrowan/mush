@@ -92,7 +92,6 @@ pub fn apply(result: ToolResult, limit: OutputLimit) -> ToolResult {
     match limit {
         OutputLimit::Head => truncate(result, MAX_LINES, MAX_BYTES, OutputLimit::Head),
         OutputLimit::Tail => truncate(result, MAX_LINES, MAX_BYTES, OutputLimit::Tail),
-        OutputLimit::Middle => truncate(result, MAX_LINES, MAX_BYTES, OutputLimit::Middle),
     }
 }
 
@@ -166,29 +165,6 @@ pub fn truncate(
             };
             let hint = actionable_hint(&saved_path);
             format!("[{omitted} lines truncated… ({total} total). {hint}]\n\n{preview}")
-        }
-        OutputLimit::Middle => {
-            let half_lines = max_lines / 2;
-            let half_bytes = max_bytes / 2;
-            let (head, _) = collect_head(&lines, half_lines, half_bytes);
-            let (tail, _) = collect_tail(&lines, half_lines, half_bytes);
-            let omitted = total.saturating_sub(head.len() + tail.len());
-            let head_text = if head.is_empty() && !lines.is_empty() {
-                let sample = sample_line_head(lines[0], half_bytes);
-                format!("{sample}\n[partial line]")
-            } else {
-                head.join("\n")
-            };
-            let tail_text = if tail.is_empty() && !lines.is_empty() {
-                let sample = sample_line_tail(lines[lines.len() - 1], half_bytes);
-                format!("[partial line]\n{sample}")
-            } else {
-                tail.join("\n")
-            };
-            let hint = actionable_hint(&saved_path);
-            format!(
-                "[…{omitted} lines truncated ({total} total). {hint}]\n\n{head_text}\n\n[…]\n\n{tail_text}"
-            )
         }
     };
 
@@ -289,7 +265,7 @@ mod tests {
     #[test]
     fn small_output_not_truncated() {
         let result = ToolResult::text("hello world");
-        let out = apply(result, OutputLimit::Middle);
+        let out = apply(result, OutputLimit::Head);
         assert_text(&out, |t| {
             assert_eq!(t, "hello world");
         });
@@ -298,7 +274,7 @@ mod tests {
     #[test]
     fn all_directions_enforce_truncation() {
         let big = make_lines(3000);
-        for direction in [OutputLimit::Head, OutputLimit::Tail, OutputLimit::Middle] {
+        for direction in [OutputLimit::Head, OutputLimit::Tail] {
             let out = apply(ToolResult::text(big.clone()), direction);
             assert_text(&out, |t| {
                 assert!(
@@ -310,21 +286,9 @@ mod tests {
     }
 
     #[test]
-    fn middle_truncates_by_line_count() {
-        let big = make_lines(3000);
-        let out = apply(ToolResult::text(big), OutputLimit::Middle);
-        assert_text(&out, |t| {
-            assert!(t.contains("line 0"));
-            assert!(t.contains("line 2999"));
-            assert!(t.contains("lines truncated"));
-            assert!(t.contains("3000 total"));
-        });
-    }
-
-    #[test]
     fn truncates_by_byte_count() {
         let big = "x".repeat(MAX_BYTES + 10000);
-        let out = apply(ToolResult::text(big), OutputLimit::Middle);
+        let out = apply(ToolResult::text(big), OutputLimit::Head);
         assert_text(&out, |t| {
             assert!(t.contains("lines truncated"));
         });
@@ -339,7 +303,7 @@ mod tests {
         // of the actual line so the model can classify it without
         // reaching for the saved file
         let huge = "x".repeat(MAX_BYTES + 10_000);
-        for direction in [OutputLimit::Head, OutputLimit::Tail, OutputLimit::Middle] {
+        for direction in [OutputLimit::Head, OutputLimit::Tail] {
             let out = apply(ToolResult::text(huge.clone()), direction);
             assert_text(&out, |t| {
                 let preview = t.split("\n\n").nth(1).unwrap_or("");
@@ -364,7 +328,7 @@ mod tests {
         // MAX_BYTES (otherwise we'd defeat the truncation we're trying
         // to apply)
         let huge = "x".repeat(MAX_BYTES * 4);
-        for direction in [OutputLimit::Head, OutputLimit::Tail, OutputLimit::Middle] {
+        for direction in [OutputLimit::Head, OutputLimit::Tail] {
             let out = apply(ToolResult::text(huge.clone()), direction);
             assert_text(&out, |t| {
                 assert!(
@@ -391,7 +355,7 @@ mod tests {
     #[test]
     fn error_results_also_truncated() {
         let big = make_lines(3000);
-        let out = apply(ToolResult::error(big), OutputLimit::Middle);
+        let out = apply(ToolResult::error(big), OutputLimit::Head);
         assert!(out.outcome.is_error());
         assert_text(&out, |t| {
             assert!(t.contains("lines truncated"));
@@ -402,10 +366,10 @@ mod tests {
     fn hint_appears_at_top_for_all_directions() {
         // every truncation direction must surface the recovery hint at
         // the start of the preview. for bash (Tail) this is already the
-        // case; for Head / Middle this prevents the model from reading
-        // 2000 lines before noticing there's more available
+        // case; for Head this prevents the model from reading 2000
+        // lines before noticing there's more available
         let big = make_lines(5000);
-        for direction in [OutputLimit::Head, OutputLimit::Tail, OutputLimit::Middle] {
+        for direction in [OutputLimit::Head, OutputLimit::Tail] {
             let out = apply(ToolResult::text(big.clone()), direction);
             assert_text(&out, |t| {
                 assert!(
@@ -437,24 +401,6 @@ mod tests {
             assert!(t.contains("line 2"));
             assert!(!t.contains("line 9"), "Head must not include the tail");
             assert!(t.contains("7 lines truncated"));
-        });
-    }
-
-    #[test]
-    fn middle_keeps_head_and_tail_after_top_hint() {
-        // Middle direction: top hint, then head + tail of the input
-        // separated by a small gap marker so the model can see where
-        // the omission is
-        let lines = make_lines(20);
-        let out = truncate(ToolResult::text(lines), 6, usize::MAX, OutputLimit::Middle);
-        assert_text(&out, |t| {
-            assert!(t.starts_with('['), "hint at top");
-            assert!(t.contains("line 0"));
-            assert!(t.contains("line 2"));
-            assert!(t.contains("line 17"));
-            assert!(t.contains("line 19"));
-            assert!(!t.contains("line 10"), "middle must drop the middle");
-            assert!(t.contains("14 lines truncated"));
         });
     }
 
@@ -497,24 +443,10 @@ mod tests {
     }
 
     #[test]
-    fn hint_survives_middle_truncation() {
-        let big = make_lines(5000);
-        let out = truncate(ToolResult::text(big), 100, usize::MAX, OutputLimit::Middle);
-        assert_text(&out, |t| {
-            for frag in EXPECTED_HINT_FRAGMENTS {
-                assert!(
-                    t.contains(frag),
-                    "middle truncation missing hint fragment: {frag}"
-                );
-            }
-        });
-    }
-
-    #[test]
     fn hint_survives_extreme_truncation() {
         // even with a budget of 1 line, the hint must be complete
         let big = make_lines(5000);
-        for direction in [OutputLimit::Head, OutputLimit::Tail, OutputLimit::Middle] {
+        for direction in [OutputLimit::Head, OutputLimit::Tail] {
             let out = truncate(ToolResult::text(big.clone()), 1, usize::MAX, direction);
             assert_text(&out, |t| {
                 for frag in EXPECTED_HINT_FRAGMENTS {
@@ -556,7 +488,7 @@ mod tests {
     #[test]
     fn truncated_output_has_line_count_and_total() {
         let big = make_lines(5000);
-        for direction in [OutputLimit::Head, OutputLimit::Tail, OutputLimit::Middle] {
+        for direction in [OutputLimit::Head, OutputLimit::Tail] {
             let out = truncate(ToolResult::text(big.clone()), 100, usize::MAX, direction);
             assert_text(&out, |t| {
                 assert!(

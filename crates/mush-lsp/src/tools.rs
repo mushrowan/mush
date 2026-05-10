@@ -54,6 +54,12 @@ impl AgentTool for DiagnosticsTool {
         })
     }
 
+    fn output_limit(&self) -> mush_agent::tool::OutputLimit {
+        // diagnostics list grouped by file. head keeps the first
+        // diagnostics which are typically the most actionable
+        mush_agent::tool::OutputLimit::Head
+    }
+
     async fn execute(&self, args: Value) -> ToolResult {
         let path_str = match args.get("path").and_then(|v| v.as_str()) {
             Some(p) => p,

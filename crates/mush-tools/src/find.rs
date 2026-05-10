@@ -81,6 +81,12 @@ impl AgentTool for FindTool {
         })
     }
 
+    fn output_limit(&self) -> mush_agent::tool::OutputLimit {
+        // ranked file list, narrow-your-search hint sits at the end of
+        // the preview already, so head keeps the first matches visible
+        mush_agent::tool::OutputLimit::Head
+    }
+
     async fn execute(&self, args: serde_json::Value) -> ToolResult {
         let args = match parse_tool_args::<FindArgs>(args) {
             Ok(args) => args,

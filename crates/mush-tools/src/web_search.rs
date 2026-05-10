@@ -105,6 +105,12 @@ impl AgentTool for WebSearchTool {
         })
     }
 
+    fn output_limit(&self) -> mush_agent::tool::OutputLimit {
+        // exa returns ranked results: middle-truncation would gut a
+        // result entry from the list, head keeps the top hits intact
+        mush_agent::tool::OutputLimit::Head
+    }
+
     async fn execute(&self, args: serde_json::Value) -> ToolResult {
         let args = match parse_tool_args::<WebSearchArgs>(args) {
             Ok(args) => args,

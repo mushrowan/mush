@@ -59,6 +59,13 @@ impl AgentTool for McpTool {
         })
     }
 
+    fn output_limit(&self) -> mush_agent::tool::OutputLimit {
+        // unknown shape; head keeps any structured prefix (titles,
+        // status, the first list entries) which is usually where the
+        // signal lives
+        mush_agent::tool::OutputLimit::Head
+    }
+
     async fn execute(&self, args: serde_json::Value) -> ToolResult {
         match self
             .connection

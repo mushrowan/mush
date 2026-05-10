@@ -55,6 +55,11 @@ impl AgentTool for WriteTool {
         })
     }
 
+    fn output_limit(&self) -> mush_agent::tool::OutputLimit {
+        // single-line success/error message, never truncates in practice
+        mush_agent::tool::OutputLimit::Head
+    }
+
     async fn execute(&self, args: serde_json::Value) -> ToolResult {
         let args = match parse_tool_args::<WriteArgs>(args) {
             Ok(args) => args,

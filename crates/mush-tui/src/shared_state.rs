@@ -195,6 +195,12 @@ impl AgentTool for ReadStateTool {
         })
     }
 
+    fn output_limit(&self) -> mush_agent::tool::OutputLimit {
+        // shared state read: structured json blob, head keeps the
+        // top-level keys
+        mush_agent::tool::OutputLimit::Head
+    }
+
     async fn execute(&self, args: serde_json::Value) -> ToolResult {
         let args = match parse_tool_args::<ReadStateArgs>(args) {
             Ok(args) => args,
@@ -261,6 +267,11 @@ impl AgentTool for WriteStateTool {
             },
             "required": ["key", "value"]
         })
+    }
+
+    fn output_limit(&self) -> mush_agent::tool::OutputLimit {
+        // single-line ack
+        mush_agent::tool::OutputLimit::Head
     }
 
     async fn execute(&self, args: serde_json::Value) -> ToolResult {

@@ -51,15 +51,12 @@ impl ToolResult {
 }
 
 /// how a tool's output should be truncated when it exceeds limits
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputLimit {
-    /// keep the start (file reads, directory listings)
+    /// keep the start (file reads, directory listings, search results)
     Head,
     /// keep the end (command output, logs)
     Tail,
-    /// keep head + tail with gap marker
-    #[default]
-    Middle,
 }
 
 /// trait for tools that the agent can invoke
@@ -92,10 +89,11 @@ pub trait AgentTool: Send + Sync {
     /// execute the tool with the given arguments
     async fn execute(&self, args: serde_json::Value) -> ToolResult;
 
-    /// how this tool's output should be truncated by the agent loop
-    fn output_limit(&self) -> OutputLimit {
-        OutputLimit::Middle
-    }
+    /// how this tool's output should be truncated by the agent loop.
+    /// every tool must declare a direction explicitly: middle truncation
+    /// is not an option because it gutters whichever entry happens to
+    /// land in the dropped span (see web_search regression history).
+    fn output_limit(&self) -> OutputLimit;
 }
 
 pub type SharedTool = Arc<dyn AgentTool>;
@@ -371,6 +369,9 @@ mod tests {
             let text = args["text"].as_str().unwrap_or("no text");
             ToolResult::text(text)
         }
+        fn output_limit(&self) -> OutputLimit {
+            OutputLimit::Head
+        }
     }
 
     #[tokio::test]
@@ -420,12 +421,21 @@ mod tests {
             let text = args["text"].as_str().unwrap_or("no text");
             ToolResult::text(text.to_uppercase())
         }
+        fn output_limit(&self) -> OutputLimit {
+            OutputLimit::Head
+        }
     }
 
     #[test]
-    fn default_output_limit_is_middle() {
-        let tool = EchoTool;
-        assert_eq!(tool.output_limit(), OutputLimit::Middle);
+    fn output_limit_choices_only_head_or_tail() {
+        // sanity: every concrete impl must compile-pick one direction.
+        // missing the trait method is a compile error (no default).
+        // the audit lives in mush-tools::tests::truncation_audit, this
+        // smoke test just pins the local fixtures to keep them honest
+        let echo = EchoTool;
+        assert_eq!(echo.output_limit(), OutputLimit::Head);
+        let upper = UpperEchoTool;
+        assert_eq!(upper.output_limit(), OutputLimit::Head);
     }
 
     #[tokio::test]

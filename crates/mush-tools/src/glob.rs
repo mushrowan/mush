@@ -58,6 +58,11 @@ impl AgentTool for GlobTool {
         })
     }
 
+    fn output_limit(&self) -> mush_agent::tool::OutputLimit {
+        // ranked path matches; head keeps the most relevant entries
+        mush_agent::tool::OutputLimit::Head
+    }
+
     async fn execute(&self, args: serde_json::Value) -> ToolResult {
         let args = match parse_tool_args::<GlobArgs>(args) {
             Ok(args) => args,

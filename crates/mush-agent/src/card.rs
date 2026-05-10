@@ -113,6 +113,9 @@ mod tests {
             fn parameters_schema(&self) -> serde_json::Value {
                 serde_json::json!({"type": "object"})
             }
+            fn output_limit(&self) -> crate::tool::OutputLimit {
+                crate::tool::OutputLimit::Head
+            }
             async fn execute(&self, _: serde_json::Value) -> ToolResult {
                 ToolResult::text("ok")
             }

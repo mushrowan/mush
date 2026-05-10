@@ -366,6 +366,9 @@ mod tests {
                 "required": ["content"]
             })
         }
+        fn output_limit(&self) -> mush_agent::tool::OutputLimit {
+            mush_agent::tool::OutputLimit::Head
+        }
         async fn execute(&self, args: serde_json::Value) -> ToolResult {
             *self.received.lock().unwrap() = Some(args);
             ToolResult::text("ok")

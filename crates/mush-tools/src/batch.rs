@@ -147,7 +147,10 @@ impl AgentTool for BatchTool {
     }
 
     fn output_limit(&self) -> OutputLimit {
-        OutputLimit::Middle
+        // batch's overall output is delimited per sub-call; head keeps
+        // the earliest sub-results which are most often the ones the
+        // model needs to see (especially when the batch is mostly reads)
+        OutputLimit::Head
     }
 
     async fn execute(&self, params: serde_json::Value) -> ToolResult {
@@ -228,7 +231,7 @@ impl AgentTool for BatchTool {
                     } else {
                         success_count += 1;
                     }
-                    truncation::apply(result.clone(), limit.unwrap_or_default())
+                    truncation::apply(result.clone(), limit.unwrap_or(OutputLimit::Head))
                 }
                 Err(error) => {
                     error_count += 1;
@@ -395,6 +398,9 @@ mod tests {
                 serde_json::json!({"type": "object"})
             }
 
+            fn output_limit(&self) -> mush_agent::tool::OutputLimit {
+                mush_agent::tool::OutputLimit::Head
+            }
             async fn execute(&self, _params: serde_json::Value) -> ToolResult {
                 let lines: Vec<String> = (0..5000).map(|i| format!("line {i}")).collect();
                 ToolResult::text(lines.join("\n"))
@@ -415,7 +421,10 @@ mod tests {
         assert!(text.contains("lines truncated"));
         assert!(text.contains("Use the Grep tool to search"));
         assert!(text.contains("line 0"));
-        assert!(text.contains("line 4999"));
+        // LargeTool declares Head, so the tail is dropped (matches what
+        // a standalone Head tool would produce: that's the contract this
+        // test name asserts)
+        assert!(!text.contains("line 4999"));
     }
 
     #[tokio::test]
@@ -440,6 +449,9 @@ mod tests {
                 serde_json::json!({"type": "object"})
             }
 
+            fn output_limit(&self) -> mush_agent::tool::OutputLimit {
+                mush_agent::tool::OutputLimit::Head
+            }
             async fn execute(&self, params: serde_json::Value) -> ToolResult {
                 // each call returns ~20KB with a unique marker
                 let idx = params.get("idx").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -513,6 +525,9 @@ mod tests {
             fn parameters_schema(&self) -> serde_json::Value {
                 serde_json::json!({"type": "object"})
             }
+            fn output_limit(&self) -> mush_agent::tool::OutputLimit {
+                mush_agent::tool::OutputLimit::Head
+            }
             async fn execute(&self, params: serde_json::Value) -> ToolResult {
                 let idx = params.get("idx").and_then(|v| v.as_u64()).unwrap_or(0);
                 // simulate individually-truncated output with a file path hint in the middle
@@ -569,6 +584,9 @@ mod tests {
             }
             fn parameters_schema(&self) -> serde_json::Value {
                 serde_json::json!({"type": "object"})
+            }
+            fn output_limit(&self) -> mush_agent::tool::OutputLimit {
+                mush_agent::tool::OutputLimit::Head
             }
             async fn execute(&self, params: serde_json::Value) -> ToolResult {
                 let dir = self.dir.clone();
@@ -643,6 +661,9 @@ mod tests {
             }
             fn parameters_schema(&self) -> serde_json::Value {
                 serde_json::json!({"type": "object"})
+            }
+            fn output_limit(&self) -> mush_agent::tool::OutputLimit {
+                mush_agent::tool::OutputLimit::Head
             }
             async fn execute(&self, params: serde_json::Value) -> ToolResult {
                 let id = params["id"].as_str().unwrap_or("?").to_string();
@@ -730,6 +751,9 @@ mod tests {
             fn parameters_schema(&self) -> serde_json::Value {
                 serde_json::json!({"type": "object"})
             }
+            fn output_limit(&self) -> mush_agent::tool::OutputLimit {
+                mush_agent::tool::OutputLimit::Head
+            }
             async fn execute(&self, params: serde_json::Value) -> ToolResult {
                 let id = params["id"].as_str().unwrap_or("?").to_string();
                 // short sleep so parallel-mode would interleave but
@@ -786,6 +810,9 @@ mod tests {
             }
             fn parameters_schema(&self) -> serde_json::Value {
                 serde_json::json!({"type": "object"})
+            }
+            fn output_limit(&self) -> mush_agent::tool::OutputLimit {
+                mush_agent::tool::OutputLimit::Head
             }
             async fn execute(&self, params: serde_json::Value) -> ToolResult {
                 let raw = params["path"].as_str().unwrap();
@@ -856,6 +883,9 @@ mod tests {
                 serde_json::json!({"type": "object"})
             }
 
+            fn output_limit(&self) -> mush_agent::tool::OutputLimit {
+                mush_agent::tool::OutputLimit::Head
+            }
             async fn execute(&self, _params: serde_json::Value) -> ToolResult {
                 ToolResult::text("ok")
             }

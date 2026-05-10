@@ -12,11 +12,15 @@
 //!   last stop before the agent loop forwards a [`ToolResult`] to the
 //!   model. each tool declares its preferred direction via
 //!   [`AgentTool::output_limit`]:
-//!     - `Head`  → keep the first `MAX_LINES` / `MAX_BYTES` (ls,
-//!       read, repo_map, skills, web_fetch)
-//!     - `Tail`  → keep the last `MAX_LINES` / `MAX_BYTES` (bash)
-//!     - `Middle`→ keep half from the start, half from the end
-//!       (default; batch explicitly opts in)
+//!     - `Head`  → keep the first `MAX_LINES` / `MAX_BYTES` (most
+//!       structured/ranked output: ls, read, repo_map, skills,
+//!       web_fetch, web_search, find/glob/grep, edits)
+//!     - `Tail`  → keep the last `MAX_LINES` / `MAX_BYTES` (bash and
+//!       bash-status polling)
+//!
+//!   the trait method has no default: every tool picks one explicitly,
+//!   so a missing choice is a compile error rather than a silent
+//!   middle-truncation regression (see web_search history).
 //!
 //!   when central truncation kicks in, the full text is dumped to
 //!   `~/.local/share/mush/tool-output/tool_<unix_ms>.txt` and a hint
@@ -106,6 +110,105 @@ fn with_data_dir<R>(f: impl FnOnce(&Path) -> R) -> R {
     f(tmp.path())
 }
 
+// section: per-tool output_limit choices
+//
+// every `impl AgentTool` in the workspace must declare whether its
+// output is head-shaped (structured, ranked, file-like → keep the start)
+// or tail-shaped (log/process output → keep the end). there is no
+// fallback default on the trait: missing the choice is a compile error.
+// this test pins the current choices so refactors can't silently flip
+// a tool from Head to Tail (or vice versa) without updating the audit.
+
+#[test]
+fn audit_per_tool_output_limit_choices() {
+    use mush_agent::tool::AgentTool;
+    use std::sync::Arc;
+
+    let cwd: Arc<std::path::Path> = Arc::from(std::env::temp_dir().as_path());
+    let bg = mush_tools::background::BackgroundJobRegistry::new();
+    let http = reqwest::Client::new();
+
+    let cases: Vec<(&str, OutputLimit, Box<dyn AgentTool>)> = vec![
+        // tail: bash and bash polling. errors and final results live at
+        // the end; head would lose them
+        (
+            "bash",
+            OutputLimit::Tail,
+            Box::new(mush_tools::bash::BashTool::new(cwd.clone())),
+        ),
+        (
+            "bash_status",
+            OutputLimit::Tail,
+            Box::new(mush_tools::bash_status::BashStatusTool::new(bg)),
+        ),
+        // head: file/list/structured-output tools. relevant content lives
+        // up top; tail would drop the entry the model wanted
+        (
+            "ls",
+            OutputLimit::Head,
+            Box::new(mush_tools::ls::LsTool::new(cwd.clone())),
+        ),
+        (
+            "read",
+            OutputLimit::Head,
+            Box::new(mush_tools::read::ReadTool::new(cwd.clone())),
+        ),
+        (
+            "find",
+            OutputLimit::Head,
+            Box::new(mush_tools::find::FindTool::new(cwd.clone())),
+        ),
+        (
+            "glob",
+            OutputLimit::Head,
+            Box::new(mush_tools::glob::GlobTool::new(cwd.clone())),
+        ),
+        (
+            "grep",
+            OutputLimit::Head,
+            Box::new(mush_tools::grep::GrepTool::new(cwd.clone())),
+        ),
+        (
+            "edit",
+            OutputLimit::Head,
+            Box::new(mush_tools::edit::EditTool::new(cwd.clone())),
+        ),
+        (
+            "write",
+            OutputLimit::Head,
+            Box::new(mush_tools::write::WriteTool::new(cwd.clone())),
+        ),
+        (
+            "apply_patch",
+            OutputLimit::Head,
+            Box::new(mush_tools::apply_patch::ApplyPatchTool::new(cwd.clone())),
+        ),
+        (
+            "notify_user",
+            OutputLimit::Head,
+            Box::new(mush_tools::notify_user::NotifyUserTool::new()),
+        ),
+        (
+            "web_fetch",
+            OutputLimit::Head,
+            Box::new(mush_tools::web_fetch::WebFetchTool::new(http.clone())),
+        ),
+        (
+            "web_search",
+            OutputLimit::Head,
+            Box::new(mush_tools::web_search::WebSearchTool::new(http)),
+        ),
+    ];
+
+    for (name, expected, tool) in cases {
+        assert_eq!(
+            tool.output_limit(),
+            expected,
+            "tool {name} declares the wrong output_limit"
+        );
+    }
+}
+
 // section: central truncation (the hint contract)
 
 #[test]
@@ -168,36 +271,6 @@ fn audit_central_tail_truncation() {
     assert!(text.ends_with("line 4999"), "tail kept last line");
 }
 
-#[test]
-fn audit_central_middle_truncation() {
-    // 5000 lines through Middle: hint at the top, then head + a `[…]`
-    // gap marker + tail. the gap marker tells the model where the
-    // omitted span lives even though the count is in the top hint
-    let big = make_lines(5000);
-    let out = with_data_dir(|_| truncation::apply(ToolResult::text(big), OutputLimit::Middle));
-    let text = mask_saved_path(&extract_text(&out));
-
-    assert!(
-        text.starts_with('['),
-        "hint at top, got prefix {:?}",
-        &text[..text.len().min(80)]
-    );
-    assert!(
-        text.contains("lines truncated (5000 total)"),
-        "total preserved"
-    );
-    assert!(
-        text.contains("Full output: <DATA_DIR>/tool-output/tool_<TS>.txt"),
-        "saved path present"
-    );
-    assert!(text.contains("\n\nline 0\n"), "head preview kept");
-    assert!(
-        text.contains("\n\n[…]\n\n"),
-        "gap marker between head and tail"
-    );
-    assert!(text.ends_with("line 4999"), "tail preview kept");
-}
-
 // section: extreme cases
 
 #[test]
@@ -206,8 +279,7 @@ fn audit_central_byte_overflow_truncation() {
     // still emit the recovery hint AND a sampled head/tail of the line
     // so the model can classify the content (base64? minified js?)
     let huge_line = "x".repeat(MAX_BYTES + 10000);
-    let out =
-        with_data_dir(|_| truncation::apply(ToolResult::text(huge_line), OutputLimit::Middle));
+    let out = with_data_dir(|_| truncation::apply(ToolResult::text(huge_line), OutputLimit::Head));
     let text = mask_saved_path(&extract_text(&out));
     assert!(text.contains("lines truncated"), "byte-overflow truncated");
     assert!(
@@ -229,7 +301,7 @@ fn audit_central_extreme_budget_keeps_hint_intact() {
     // budget of 1 line, regardless of direction: the hint still has
     // every actionable phrase the model needs
     let big = make_lines(5000);
-    for direction in [OutputLimit::Head, OutputLimit::Tail, OutputLimit::Middle] {
+    for direction in [OutputLimit::Head, OutputLimit::Tail] {
         let out = with_data_dir(|_| {
             truncation::truncate(ToolResult::text(big.clone()), 1, usize::MAX, direction)
         });

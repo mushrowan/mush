@@ -145,6 +145,11 @@ impl AgentTool for GrepTool {
         })
     }
 
+    fn output_limit(&self) -> mush_agent::tool::OutputLimit {
+        // ranked match list with its own "narrow your search" hint
+        mush_agent::tool::OutputLimit::Head
+    }
+
     async fn execute(&self, args: serde_json::Value) -> ToolResult {
         let args = match parse_tool_args::<GrepArgs>(args) {
             Ok(args) => args,

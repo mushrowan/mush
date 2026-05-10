@@ -67,16 +67,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("(total chars: {})", text.len());
 
-    banner("CENTRAL MIDDLE (5000 lines, batch / default path)");
-    let out = truncation::apply(ToolResult::text(big.clone()), OutputLimit::Middle);
-    let text = extract(&out);
-    println!(
-        "[first 4 lines]\n{}\n[last 4 lines]\n{}",
-        first_n_lines(&text, 4),
-        last_n_lines(&text, 4)
-    );
-    println!("(total chars: {})", text.len());
-
     banner("READ TOOL on 5000-line file");
     let dir = tempfile::tempdir()?;
     let file = dir.path().join("big.txt");
@@ -103,9 +93,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         last_n_lines(&out, 3)
     );
 
-    banner("BYTE OVERFLOW (single huge line through Middle)");
+    banner("BYTE OVERFLOW (single huge line through Head)");
     let huge = "x".repeat(100_000);
-    let out = truncation::apply(ToolResult::text(huge), OutputLimit::Middle);
+    let out = truncation::apply(ToolResult::text(huge), OutputLimit::Head);
     let text = extract(&out);
     let preview = if text.len() > 300 {
         format!("{}\n...\n{}", &text[..150], &text[text.len() - 150..])

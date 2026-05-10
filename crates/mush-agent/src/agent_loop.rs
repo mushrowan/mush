@@ -868,6 +868,9 @@ mod tests {
         fn parameters_schema(&self) -> serde_json::Value {
             serde_json::json!({"type": "object", "properties": {}})
         }
+        fn output_limit(&self) -> crate::tool::OutputLimit {
+            crate::tool::OutputLimit::Head
+        }
         async fn execute(&self, _args: serde_json::Value) -> ToolResult {
             ToolResult::text("42")
         }
@@ -975,6 +978,9 @@ mod tests {
         }
         fn parameters_schema(&self) -> serde_json::Value {
             serde_json::json!({"type": "object", "properties": {}})
+        }
+        fn output_limit(&self) -> crate::tool::OutputLimit {
+            crate::tool::OutputLimit::Head
         }
         async fn execute(&self, _args: serde_json::Value) -> ToolResult {
             ToolResult::text("results")

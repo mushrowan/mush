@@ -133,6 +133,11 @@ impl AgentTool for McpListToolsTool {
             }
         })
     }
+    fn output_limit(&self) -> mush_agent::tool::OutputLimit {
+        // listing tool: structured top-of-output, head keeps the first
+        // server's tools intact
+        mush_agent::tool::OutputLimit::Head
+    }
     async fn execute(&self, args: serde_json::Value) -> ToolResult {
         let filter = args
             .get("server")
@@ -206,6 +211,10 @@ impl AgentTool for McpGetSchemasTool {
             },
             "required": ["names"]
         })
+    }
+    fn output_limit(&self) -> mush_agent::tool::OutputLimit {
+        // schemas listed in requested order; head keeps the first ones
+        mush_agent::tool::OutputLimit::Head
     }
     async fn execute(&self, args: serde_json::Value) -> ToolResult {
         let args = match parse_tool_args::<GetSchemasArgs>(args) {
@@ -287,6 +296,11 @@ impl AgentTool for McpCallToolTool {
             },
             "required": ["name"]
         })
+    }
+    fn output_limit(&self) -> mush_agent::tool::OutputLimit {
+        // proxies through to a downstream MCP tool; same fallback as
+        // the static McpTool: head keeps any structured prefix
+        mush_agent::tool::OutputLimit::Head
     }
     async fn execute(&self, args: serde_json::Value) -> ToolResult {
         let args = match parse_tool_args::<CallToolArgs>(args) {
