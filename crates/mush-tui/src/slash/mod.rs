@@ -132,6 +132,10 @@ pub enum SlashAction {
     /// released models in the static-catalogue + discovery merge.
     RefreshModels,
     Quit,
+    /// toggle whether the focused assistant message's thinking text is
+    /// expanded. used to be ctrl+o; promoted to a slash command so the
+    /// keybind is freed up for user binds
+    ToggleThinkingExpanded,
     Other {
         name: String,
         args: String,
@@ -252,6 +256,7 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
         "debug" => Ok(SlashAction::Debug),
         "reload" => Ok(SlashAction::Reload),
         "refresh-models" | "models-refresh" => Ok(SlashAction::RefreshModels),
+        "thinking-expand" => Ok(SlashAction::ToggleThinkingExpanded),
         "quit" | "exit" | "q" => Ok(SlashAction::Quit),
         other => Ok(SlashAction::Other {
             name: other.to_string(),
@@ -293,6 +298,17 @@ pub(crate) fn split_name_and_args(command: &str) -> (&str, &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_thinking_expand_action() {
+        // ctrl+o used to be hardcoded to toggle the focused message's
+        // thinking visibility. it's been moved to a slash command so
+        // ctrl+o stays free for whatever the user wants to bind it to
+        assert_eq!(
+            parse("/thinking-expand").unwrap(),
+            SlashAction::ToggleThinkingExpanded
+        );
+    }
 
     #[test]
     fn parse_fork_compact() {

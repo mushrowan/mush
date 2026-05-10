@@ -329,6 +329,10 @@ pub fn handle(
             app.should_quit = true;
             None
         }
+        SlashAction::ToggleThinkingExpanded => {
+            app.toggle_thinking_expanded();
+            None
+        }
         SlashAction::Other { name, args } => try_template(app, name, args),
         _ => None,
     }

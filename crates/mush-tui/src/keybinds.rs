@@ -59,9 +59,6 @@ pub enum Action {
     /// jump the message log to the bottom without aborting or
     /// otherwise affecting the stream. default binding: `shift-end`
     JumpToBottom,
-    /// expand or collapse the thinking text on the focused message.
-    /// default binding: `ctrl-o`
-    ToggleThinkingExpanded,
 }
 
 impl Action {
@@ -75,7 +72,6 @@ impl Action {
             Self::EnterSearch => "enter_search",
             Self::EnterScroll => "enter_scroll",
             Self::JumpToBottom => "jump_to_bottom",
-            Self::ToggleThinkingExpanded => "toggle_thinking_expanded",
         }
     }
 
@@ -88,7 +84,6 @@ impl Action {
         Self::EnterSearch,
         Self::EnterScroll,
         Self::JumpToBottom,
-        Self::ToggleThinkingExpanded,
     ];
 }
 
@@ -245,14 +240,6 @@ impl Default for KeyMap {
             )),
         );
 
-        bindings.insert(
-            Action::ToggleThinkingExpanded,
-            Binding::single(KeyCombination::new(
-                KeyCode::Char('o'),
-                KeyModifiers::CONTROL,
-            )),
-        );
-
         Self { bindings }
     }
 }
@@ -327,17 +314,13 @@ mod tests {
 
     #[test]
     fn default_keymap_has_toggle_actions() {
-        // ctrl+t / ctrl+o / ctrl+i used to be hardcoded in input.rs.
-        // they're now configurable so users can rebind them without
-        // editing the source. defaults stay the same as before
+        // ctrl+t used to be hardcoded in input.rs and is now
+        // configurable so users can rebind it without editing the
+        // source. defaults stay the same as before
         let map = KeyMap::default();
         assert!(map.matches(
             Action::CycleThinkingLevel,
             KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL)
-        ));
-        assert!(map.matches(
-            Action::ToggleThinkingExpanded,
-            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)
         ));
     }
 

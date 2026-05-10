@@ -320,13 +320,6 @@ fn handle_idle_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         app.cycle_thinking_level();
         return Some(AppEvent::CycleThinkingLevel);
     }
-    if app
-        .keymap
-        .matches(crate::keybinds::Action::ToggleThinkingExpanded, key)
-    {
-        app.toggle_thinking_expanded();
-        return None;
-    }
 
     match (key.modifiers, key.code) {
         // tab completion / slash menu
@@ -1931,17 +1924,22 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_o_toggles_thinking_expanded() {
+    fn ctrl_o_no_longer_toggles_thinking_expanded() {
+        // moved to /thinking-expand. ctrl+o is no longer bound to
+        // anything by default so the keystroke falls through to the
+        // input editor (or future user binds)
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.start_streaming();
         app.push_thinking_delta("thoughts");
         app.push_text_delta("text");
         app.finish_streaming(None, None);
 
-        // starts expanded (default ThinkingDisplay::Expanded)
-        assert!(app.messages[0].thinking_expanded);
+        let initial = app.messages[0].thinking_expanded;
         handle_key(&mut app, ctrl(KeyCode::Char('o')));
-        assert!(!app.messages[0].thinking_expanded);
+        assert_eq!(
+            app.messages[0].thinking_expanded, initial,
+            "ctrl+o must not toggle thinking expansion any more"
+        );
     }
 
     #[test]
