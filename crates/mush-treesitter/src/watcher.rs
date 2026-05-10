@@ -11,13 +11,16 @@ use std::time::Duration;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::Language;
-use crate::repo_map::IncrementalRepoMap;
+use crate::repo_map::{IncrementalRepoMap, RepoMap};
 
 /// debounce interval for file change events
 const DEBOUNCE_MS: u64 = 500;
 
-/// shared repo map text that the watcher keeps up to date
-pub type SharedMapText = Arc<RwLock<String>>;
+/// shared structured repo map that the watcher keeps up to date.
+/// readers acquire a brief read lock and clone the structured map
+/// (cheap: paths, ranks, symbol metadata) before rendering it
+/// per-call with their own [`RenderOptions`](crate::RenderOptions).
+pub type SharedRepoMap = Arc<RwLock<RepoMap>>;
 
 /// walk `root` and yield the directories that should be watched.
 ///
@@ -44,15 +47,16 @@ fn discover_watch_dirs(root: &Path) -> Vec<PathBuf> {
     dirs
 }
 
-/// watches a repo and keeps a formatted repo map string current
+/// watches a repo and keeps a structured repo map current
 ///
 /// the watcher runs in a background thread. consumers read the
-/// latest map text from the shared `SharedMapText`. the initial
-/// build happens asynchronously so `start` returns immediately.
-/// use `is_ready` to check whether the first build has completed.
+/// latest [`RepoMap`] from the shared [`SharedRepoMap`] and render
+/// it per-call. the initial build happens asynchronously so `start`
+/// returns immediately. use `is_ready` to check whether the first
+/// build has completed.
 pub struct RepoMapWatcher {
     _watcher: Arc<Mutex<Option<RecommendedWatcher>>>,
-    map_text: SharedMapText,
+    map: SharedRepoMap,
     ready: Arc<AtomicBool>,
 }
 
@@ -61,21 +65,20 @@ impl RepoMapWatcher {
     ///
     /// returns immediately with an empty map. the initial treesitter
     /// build runs in a background thread and publishes via the shared
-    /// map text when complete. file change events are queued during
+    /// map when complete. file change events are queued during
     /// the build and processed afterwards.
     #[tracing::instrument(name = "repo_map_watcher", skip_all)]
-    pub fn start(root: &Path, token_budget: usize) -> Option<Self> {
-        let map_text: SharedMapText = Arc::new(RwLock::new(String::new()));
+    pub fn start(root: &Path) -> Option<Self> {
+        let map: SharedRepoMap = Arc::new(RwLock::new(RepoMap::default()));
         let ready = Arc::new(AtomicBool::new(false));
 
         let state = Arc::new(std::sync::Mutex::new(WatcherState {
             incr_map: None,
             pending_changed: Vec::new(),
             pending_removed: Vec::new(),
-            token_budget,
         }));
 
-        let map_text_clone = map_text.clone();
+        let map_clone = map.clone();
         let state_clone = state.clone();
         let ready_clone = ready.clone();
         let root_owned_for_build = root.to_path_buf();
@@ -87,11 +90,11 @@ impl RepoMapWatcher {
         std::thread::spawn(move || {
             // phase 1: build the initial repo map (the expensive part)
             let incr_map = IncrementalRepoMap::new(&root_owned_for_build);
-            let initial_text = incr_map.map().format_for_tokens(token_budget);
+            let initial = incr_map.map().clone();
 
-            // publish the initial text and store the map
-            if let Ok(mut text) = map_text_clone.write() {
-                *text = initial_text;
+            // publish the initial map and store the structured incr
+            if let Ok(mut guard) = map_clone.write() {
+                *guard = initial;
             }
             {
                 let mut guard = state_clone.lock().unwrap_or_else(|e| e.into_inner());
@@ -100,16 +103,15 @@ impl RepoMapWatcher {
                 // process any events that arrived during the build
                 let changed: Vec<PathBuf> = guard.pending_changed.drain(..).collect();
                 let removed: Vec<PathBuf> = guard.pending_removed.drain(..).collect();
-                if !changed.is_empty() || !removed.is_empty() {
-                    let budget = guard.token_budget;
-                    if let Some(ref mut map) = guard.incr_map {
-                        let any_update = map.update(&changed, &removed);
-                        let any_new = map.add_new_files();
-                        if any_update || any_new {
-                            let new_text = map.map().format_for_tokens(budget);
-                            if let Ok(mut text) = map_text_clone.write() {
-                                *text = new_text;
-                            }
+                if (!changed.is_empty() || !removed.is_empty())
+                    && let Some(ref mut incr) = guard.incr_map
+                {
+                    let any_update = incr.update(&changed, &removed);
+                    let any_new = incr.add_new_files();
+                    if any_update || any_new {
+                        let snapshot = incr.map().clone();
+                        if let Ok(mut guard) = map_clone.write() {
+                            *guard = snapshot;
                         }
                     }
                 }
@@ -133,17 +135,17 @@ impl RepoMapWatcher {
                     continue;
                 }
 
-                let budget = guard.token_budget;
-                if let Some(ref mut map) = guard.incr_map {
-                    let any_update = map.update(&changed, &removed);
-                    let any_new = map.add_new_files();
+                if let Some(ref mut incr) = guard.incr_map {
+                    let any_update = incr.update(&changed, &removed);
+                    let any_new = incr.add_new_files();
 
                     if any_update || any_new {
-                        let new_text = map.map().format_for_tokens(budget);
-                        if let Ok(mut text) = map_text_clone.write() {
-                            *text = new_text;
+                        let snapshot = incr.map().clone();
+                        let file_count = snapshot.files.len();
+                        if let Ok(mut guard) = map_clone.write() {
+                            *guard = snapshot;
                         }
-                        tracing::debug!(files = map.map().files.len(), "repo map updated");
+                        tracing::debug!(files = file_count, "repo map updated");
                     }
                 }
             }
@@ -231,7 +233,7 @@ impl RepoMapWatcher {
 
         Some(Self {
             _watcher: watcher_slot,
-            map_text,
+            map,
             ready,
         })
     }
@@ -241,12 +243,13 @@ impl RepoMapWatcher {
         self.ready.load(Ordering::Acquire)
     }
 
-    /// get the shared map text handle
+    /// get the shared structured map handle
     ///
-    /// the text is updated by the background watcher thread.
-    /// readers should acquire a read lock briefly.
-    pub fn map_text(&self) -> &SharedMapText {
-        &self.map_text
+    /// the map is updated by the background watcher thread.
+    /// readers should acquire a read lock briefly and clone the
+    /// snapshot before rendering it.
+    pub fn map(&self) -> &SharedRepoMap {
+        &self.map
     }
 }
 
@@ -254,7 +257,6 @@ struct WatcherState {
     incr_map: Option<IncrementalRepoMap>,
     pending_changed: Vec<PathBuf>,
     pending_removed: Vec<PathBuf>,
-    token_budget: usize,
 }
 
 #[cfg(test)]
@@ -284,15 +286,24 @@ mod tests {
         }
     }
 
+    fn map_text(watcher: &RepoMapWatcher) -> String {
+        watcher
+            .map()
+            .read()
+            .unwrap()
+            .render(crate::RenderOptions::for_tokens(1024))
+    }
+
     #[test]
     fn watcher_returns_immediately_with_empty_map() {
         let dir = tempfile::tempdir().unwrap();
         setup_test_repo(dir.path());
 
-        let watcher = RepoMapWatcher::start(dir.path(), 1024).unwrap();
+        let watcher = RepoMapWatcher::start(dir.path()).unwrap();
         // should not block: map starts empty, build happens in background
+        let map = watcher.map().read().unwrap();
         assert!(
-            !watcher.map_text().read().unwrap().is_empty() || !watcher.is_ready(),
+            !map.files.is_empty() || !watcher.is_ready(),
             "either the map is empty (not built yet) or it was fast enough to be ready"
         );
     }
@@ -302,10 +313,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         setup_test_repo(dir.path());
 
-        let watcher = RepoMapWatcher::start(dir.path(), 1024).unwrap();
+        let watcher = RepoMapWatcher::start(dir.path()).unwrap();
         wait_ready(&watcher, Duration::from_secs(10));
 
-        let text = watcher.map_text().read().unwrap();
+        let text = map_text(&watcher);
         assert!(
             text.contains("lib.rs"),
             "map should contain lib.rs after build"
@@ -335,12 +346,12 @@ mod tests {
         )
         .unwrap();
 
-        let watcher = RepoMapWatcher::start(dir.path(), 1024).unwrap();
+        let watcher = RepoMapWatcher::start(dir.path()).unwrap();
         wait_ready(&watcher, Duration::from_secs(10));
 
         // sanity: initial map shouldn't contain the ignored dir either
         {
-            let text = watcher.map_text().read().unwrap();
+            let text = map_text(&watcher);
             assert!(
                 !text.contains("build_script"),
                 "initial discovery should skip target/: {text}"
@@ -358,7 +369,7 @@ mod tests {
         // wait well past the debounce window
         std::thread::sleep(Duration::from_millis(DEBOUNCE_MS + 500));
 
-        let text = watcher.map_text().read().unwrap();
+        let text = map_text(&watcher);
         assert!(
             !text.contains("junk_symbol_xyz"),
             "ignored target/ files should not enter the repo map: {text}"
@@ -374,12 +385,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         setup_test_repo(dir.path());
 
-        let watcher = RepoMapWatcher::start(dir.path(), 1024).unwrap();
+        let watcher = RepoMapWatcher::start(dir.path()).unwrap();
         wait_ready(&watcher, Duration::from_secs(10));
 
         // verify initial state
         {
-            let text = watcher.map_text().read().unwrap();
+            let text = map_text(&watcher);
             assert!(
                 !text.contains("goodbye"),
                 "should not contain goodbye initially"
@@ -396,7 +407,7 @@ mod tests {
         // wait for debounce + processing
         std::thread::sleep(Duration::from_millis(DEBOUNCE_MS + 500));
 
-        let text = watcher.map_text().read().unwrap();
+        let text = map_text(&watcher);
         assert!(
             text.contains("goodbye"),
             "map should update after file change: {text}"

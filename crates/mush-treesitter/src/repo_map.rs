@@ -31,60 +31,151 @@ pub struct RankedFile {
 }
 
 /// the generated repo map
-#[derive(Debug)]
+#[derive(Debug, Clone, Default)]
 pub struct RepoMap {
     /// files ranked by importance (highest first)
     pub files: Vec<RankedFile>,
 }
 
+/// rendering options for [`RepoMap::render`]
+#[derive(Debug, Clone, Copy)]
+pub struct RenderOptions {
+    /// soft cap on output bytes (~ 4 chars per token)
+    pub max_chars: usize,
+    /// hard cap on number of files emitted; usize::MAX = no limit
+    pub max_files: usize,
+    /// emit only `path: (N symbols, rank=...)` per file
+    pub summary_only: bool,
+}
+
+impl RenderOptions {
+    /// default rendering: full symbol bodies, all files within the
+    /// byte budget
+    #[must_use]
+    pub fn for_chars(max_chars: usize) -> Self {
+        Self {
+            max_chars,
+            max_files: usize::MAX,
+            summary_only: false,
+        }
+    }
+
+    /// rendering targeting a token count (4 chars per token)
+    #[must_use]
+    pub fn for_tokens(max_tokens: usize) -> Self {
+        Self::for_chars(max_tokens * 4)
+    }
+}
+
 impl RepoMap {
-    /// format the repo map as a text string
+    /// keep only files whose path begins with `prefix` (path-component
+    /// boundary), preserving rank order. used by the repo_map tool to
+    /// scope the rendered output to a subtree before spending the
+    /// budget on it
+    #[must_use]
+    pub fn filter_path(&self, prefix: &str) -> Self {
+        let prefix = prefix.trim_end_matches('/');
+        let files = self
+            .files
+            .iter()
+            .filter(|f| {
+                let path = f.path.to_string_lossy();
+                path.starts_with(prefix)
+                    && path.as_bytes().get(prefix.len()).is_none_or(|&b| b == b'/')
+            })
+            .cloned()
+            .collect();
+        Self { files }
+    }
+
+    /// number of files in the structured map. distinct from "files
+    /// rendered into the text" which depends on the budget
+    #[must_use]
+    pub fn file_count(&self) -> usize {
+        self.files.len()
+    }
+
+    /// render the repo map as a text string with the given options
     ///
-    /// each file shows its path and ranked symbol signatures,
-    /// trimmed to fit within `max_chars` (rough token estimate: 1 token ~ 4 chars)
-    pub fn format(&self, max_chars: usize) -> String {
+    /// when files are dropped because of the budget, a footer line is
+    /// appended so the model knows the slice is incomplete and can
+    /// either narrow with `path` / `limit` or accept the trim
+    #[must_use]
+    pub fn render(&self, opts: RenderOptions) -> String {
         let mut output = String::new();
-        let mut budget = max_chars;
+        let mut budget = opts.max_chars;
+        let mut emitted = 0usize;
 
         for entry in &self.files {
+            if emitted >= opts.max_files {
+                break;
+            }
             if budget == 0 {
                 break;
             }
 
-            let mut file_block = format!("{}:\n", entry.path.display());
+            let block = if opts.summary_only {
+                format!(
+                    "{}: ({} symbols, rank={:.4})\n\n",
+                    entry.path.display(),
+                    entry.symbols.len(),
+                    entry.rank,
+                )
+            } else {
+                let mut s = format!("{}:\n", entry.path.display());
+                for sym in &entry.symbols {
+                    s.push_str(&format!(
+                        "  {:>4}│{} {}\n",
+                        sym.start_line + 1,
+                        sym.kind.label(),
+                        sym.signature,
+                    ));
+                }
+                s.push('\n');
+                s
+            };
 
-            for sym in &entry.symbols {
-                let line = format!(
-                    "  {:>4}│{} {}\n",
-                    sym.start_line + 1,
-                    sym.kind.label(),
-                    sym.signature,
-                );
-                file_block.push_str(&line);
-            }
-            file_block.push('\n');
-
-            if file_block.len() > budget {
-                // try to fit at least the file header
-                let header = format!("{}:\n  ⋮...\n\n", entry.path.display());
-                if header.len() <= budget {
-                    output.push_str(&header);
+            if block.len() > budget {
+                if !opts.summary_only {
+                    let header = format!("{}:\n  ⋮...\n\n", entry.path.display());
+                    if header.len() <= budget {
+                        output.push_str(&header);
+                        emitted += 1;
+                    }
                 }
                 break;
             }
 
-            budget -= file_block.len();
-            output.push_str(&file_block);
+            budget -= block.len();
+            output.push_str(&block);
+            emitted += 1;
+        }
+
+        let dropped = self.files.len().saturating_sub(emitted);
+        if dropped > 0 {
+            output.push_str(&format!(
+                "[…{dropped} more files omitted from this view ({} total). \
+                 narrow with `path` to focus on a subtree, raise `limit`, \
+                 or pass `summary_only=true` to fit more entries.]\n",
+                self.files.len()
+            ));
         }
 
         output
     }
 
-    /// format the repo map targeting a token budget
-    ///
-    /// uses a rough estimate of 4 chars per token
+    /// format the repo map as a text string targeting `max_chars` of
+    /// output. retained for callers that don't need fine-grained
+    /// rendering control
+    #[must_use]
+    pub fn format(&self, max_chars: usize) -> String {
+        self.render(RenderOptions::for_chars(max_chars))
+    }
+
+    /// format the repo map targeting a token budget (4 chars per token)
+    #[must_use]
     pub fn format_for_tokens(&self, max_tokens: usize) -> String {
-        self.format(max_tokens * 4)
+        self.render(RenderOptions::for_tokens(max_tokens))
     }
 }
 
