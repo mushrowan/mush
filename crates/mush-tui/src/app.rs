@@ -518,14 +518,20 @@ impl App {
     }
 
     /// finish a batch tool, distributing results to individual sub-calls
-    pub fn end_batch_tool(&mut self, tool_call_id: &ToolCallId, output: Option<&str>) {
-        // mark the active tool as done
+    pub fn end_batch_tool(
+        &mut self,
+        tool_call_id: &ToolCallId,
+        outcome: mush_ai::types::ToolOutcome,
+        output: Option<&str>,
+    ) {
+        // mark the active tool with the batch-level outcome so the live
+        // panel reflects a failed batch instead of always showing green
         if let Some(tool) = self
             .active_tools
             .iter_mut()
             .find(|t| &t.tool_call_id == tool_call_id)
         {
-            tool.status = ToolCallStatus::Done;
+            tool.status = ToolCallStatus::from(outcome);
             tool.output = output.map(truncate_output);
             tool.live_output = None;
         }
@@ -589,11 +595,7 @@ impl App {
         output: Option<&str>,
         image_data: Option<Vec<u8>>,
     ) {
-        let status = if outcome.is_error() {
-            ToolCallStatus::Error
-        } else {
-            ToolCallStatus::Done
-        };
+        let status = ToolCallStatus::from(outcome);
         // mark done in active_tools (panel persists until next turn)
         if let Some(tool) = self
             .active_tools
@@ -1692,7 +1694,7 @@ error: could not compile
 
 batch: 1/2 succeeded, 1 failed";
 
-        app.end_batch_tool(&tc_id, Some(output));
+        app.end_batch_tool(&tc_id, ToolOutcome::Error, Some(output));
 
         let tcs = &app.messages.last().unwrap().tool_calls;
         assert_eq!(tcs[0].status, ToolCallStatus::Done);
@@ -1734,7 +1736,7 @@ batch: 1/2 succeeded, 1 failed";
 
         let output = "invalid arguments: missing field `parameters` at line 1 column 42\n\
                       received: {tool_calls: [{tool: \"read\"}]}";
-        app.end_batch_tool(&tc_id, Some(output));
+        app.end_batch_tool(&tc_id, ToolOutcome::Error, Some(output));
 
         let tcs = &app.messages.last().unwrap().tool_calls;
         assert_eq!(tcs[0].status, ToolCallStatus::Error);
@@ -1751,6 +1753,58 @@ batch: 1/2 succeeded, 1 failed";
                 "preview must not hide the real error behind a placeholder: {preview:?}",
             );
         }
+    }
+
+    #[test]
+    fn batch_end_with_error_outcome_marks_active_panel_error() {
+        // the live tool panel (active_tools) sits above the message history
+        // and shows the batch's current status. previously end_batch_tool
+        // unconditionally set it to Done, so a failed batch still rendered a
+        // green check in the live header even though sub-call entries below
+        // were marked red. the panel should reflect the batch outcome plumbed
+        // through from the event handler
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.messages
+            .push(DisplayMessage::new(MessageRole::Assistant, ""));
+
+        let tc_id = ToolCallId::from("tc_batch");
+        app.start_batch_tool(&tc_id, "1 tool call", &[("read".into(), "a.rs".into())]);
+
+        app.end_batch_tool(
+            &tc_id,
+            ToolOutcome::Error,
+            Some("--- [0] read [error] ---\nboom\n\nbatch: 0/1 succeeded, 1 failed"),
+        );
+
+        let panel = app
+            .active_tools
+            .iter()
+            .find(|t| t.tool_call_id == tc_id)
+            .expect("active panel for batch");
+        assert_eq!(panel.status, ToolCallStatus::Error);
+    }
+
+    #[test]
+    fn batch_end_with_success_outcome_marks_active_panel_done() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.messages
+            .push(DisplayMessage::new(MessageRole::Assistant, ""));
+
+        let tc_id = ToolCallId::from("tc_batch");
+        app.start_batch_tool(&tc_id, "1 tool call", &[("read".into(), "a.rs".into())]);
+
+        app.end_batch_tool(
+            &tc_id,
+            ToolOutcome::Success,
+            Some("--- [0] read [ok] ---\nhi\n\nbatch: 1/1 succeeded, 0 failed"),
+        );
+
+        let panel = app
+            .active_tools
+            .iter()
+            .find(|t| t.tool_call_id == tc_id)
+            .expect("active panel for batch");
+        assert_eq!(panel.status, ToolCallStatus::Done);
     }
 
     #[test]

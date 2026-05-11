@@ -82,7 +82,7 @@ pub fn handle_agent_event(
             });
 
             if tool_name.as_str().eq_ignore_ascii_case("batch") {
-                app.end_batch_tool(tool_call_id, output_text);
+                app.end_batch_tool(tool_call_id, result.outcome, output_text);
             } else {
                 // extract image data from tool result (base64 → raw bytes)
                 let image_data = result.content.iter().find_map(|p| match p {

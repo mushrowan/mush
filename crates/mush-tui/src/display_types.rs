@@ -1,6 +1,6 @@
 //! display-oriented tui types
 
-use mush_ai::types::{Dollars, ModelId, ToolCallId, Usage};
+use mush_ai::types::{Dollars, ModelId, ToolCallId, ToolOutcome, Usage};
 use ratatui::layout::Rect;
 
 /// a fenced code block extracted from conversation messages
@@ -102,6 +102,16 @@ pub enum ToolCallStatus {
     Running,
     Done,
     Error,
+}
+
+impl From<ToolOutcome> for ToolCallStatus {
+    fn from(outcome: ToolOutcome) -> Self {
+        if outcome.is_error() {
+            Self::Error
+        } else {
+            Self::Done
+        }
+    }
 }
 
 /// state for a currently executing tool (shown in the tool panels)
