@@ -152,7 +152,7 @@ impl DiscoveryCache {
     /// entries were dropped.
     pub fn remove_all_stale(&mut self) -> usize {
         let mut removed = 0;
-        for (_, provider) in self.providers.iter_mut() {
+        for provider in self.providers.values_mut() {
             let cutoff = provider.fetched_at;
             let before = provider.models.len();
             provider.models.retain(|e| e.last_seen_at >= cutoff);

@@ -16,7 +16,7 @@ schemars.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 async-trait.workspace = true
-rmcp = { version = "1.5", default-features = false, features = [
+rmcp = { version = "1.7", default-features = false, features = [
   "client",
   "transport-child-process",
   "transport-streamable-http-client-reqwest",

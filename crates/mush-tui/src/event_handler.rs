@@ -4,6 +4,7 @@
 //! history, session tree, and image protocol state
 
 use mush_agent::{AgentEvent, summarise_tool_args};
+use mush_ai::ApiKey;
 use mush_ai::models;
 use mush_ai::stream::StreamEvent;
 use mush_ai::types::*;
@@ -216,49 +217,13 @@ pub async fn resolve_auth_for_model(
     model: &Model,
     provider_api_keys: &std::collections::HashMap<String, mush_ai::ApiKey>,
 ) -> (Option<ApiKey>, Option<String>) {
-    if let Some(key) = mush_ai::env::env_api_key(&model.provider) {
-        return (Some(key), None);
-    }
-
-    let provider_name = model.provider.to_string();
-    if let Some(key) = provider_api_keys.get(&provider_name) {
-        return (Some(key.clone()), None);
-    }
-
-    // stored credential (managed by the `/login` picker)
-    if let Ok(Some(key)) = mush_ai::credentials::default_store().get(&provider_name) {
-        return (Some(key), None);
-    }
-
-    match &model.provider {
-        Provider::Anthropic => {
-            let token = mush_ai::oauth::get_oauth_token("anthropic")
-                .await
-                .ok()
-                .flatten()
-                .and_then(ApiKey::new);
-            (token, None)
-        }
-        Provider::Custom(name) if name == "openai-codex" => {
-            let token = mush_ai::oauth::get_oauth_token("openai-codex")
-                .await
-                .ok()
-                .flatten()
-                .and_then(ApiKey::new);
-            let account_id = oauth_account_id("openai-codex");
-            (token, account_id)
-        }
-        _ => (None, None),
-    }
-}
-
-fn oauth_account_id(provider_id: &str) -> Option<String> {
-    mush_ai::oauth::load_credentials().ok().and_then(|store| {
-        store
-            .providers
-            .get(provider_id)
-            .and_then(|c| c.account_id.clone())
-    })
+    let resolved = mush_ai::auth::resolve_auth(
+        &model.provider,
+        provider_api_keys,
+        mush_ai::credentials::default_store().as_ref(),
+    )
+    .await;
+    (resolved.api_key, resolved.account_id)
 }
 
 /// compact messages when approaching context limit.

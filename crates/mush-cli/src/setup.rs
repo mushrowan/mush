@@ -3,7 +3,6 @@
 use std::sync::Arc;
 
 use color_eyre::eyre::{Result, eyre};
-use mush_ai::models;
 use mush_ai::providers;
 use mush_ai::registry::ApiRegistry;
 use mush_ai::types::*;
@@ -537,16 +536,6 @@ fn parse_language_name(name: &str) -> Option<mush_treesitter::Language> {
     }
 }
 
-/// resolve API key from config file for a given provider
-pub fn config_api_key(cfg: &config::Config, provider: &Provider) -> Option<ApiKey> {
-    match provider {
-        Provider::Anthropic => cfg.api_keys.anthropic.clone(),
-        Provider::OpenRouter => cfg.api_keys.openrouter.clone(),
-        Provider::Custom(name) if name == "openai" => cfg.api_keys.openai.clone(),
-        Provider::Custom(name) => cfg.api_keys.other.get(name).cloned(),
-    }
-}
-
 /// resolve the thinking level from CLI flags, saved per-dir+model prefs,
 /// the per-model fallback, the model's own default, and the config-file
 /// fallback.
@@ -584,50 +573,14 @@ pub async fn resolve_api_key(options: &mut StreamOptions, model: &Model, cfg: &c
         return;
     }
 
-    if let Some(key) = mush_ai::env::env_api_key(&model.provider) {
-        options.api_key = Some(key);
-        return;
-    }
-
-    if let Some(key) = config_api_key(cfg, &model.provider) {
-        options.api_key = Some(key);
-        return;
-    }
-
-    // stored credential (managed by `/login` picker for api-key
-    // providers). keyed by the provider's display name to mirror the
-    // catalogue in `mush_ai::login`
-    let storage_key = model.provider.to_string();
-    if let Ok(Some(key)) = mush_ai::credentials::default_store().get(&storage_key) {
-        options.api_key = Some(key);
-        return;
-    }
-
-    if let Some(provider_id) = oauth_provider_id(model)
-        && let Ok(Some(token)) = mush_ai::oauth::get_oauth_token(provider_id).await
-    {
-        options.api_key = ApiKey::new(token);
-        options.account_id = oauth_account_id(provider_id);
-    }
-}
-
-/// map model provider to oauth provider id
-pub fn oauth_provider_id(model: &Model) -> Option<&'static str> {
-    match &model.provider {
-        Provider::Anthropic => Some("anthropic"),
-        Provider::Custom(name) if name == "openai-codex" => Some("openai-codex"),
-        _ => None,
-    }
-}
-
-/// look up the account id from stored oauth credentials
-pub fn oauth_account_id(provider_id: &str) -> Option<String> {
-    mush_ai::oauth::load_credentials().ok().and_then(|store| {
-        store
-            .providers
-            .get(provider_id)
-            .and_then(|c| c.account_id.clone())
-    })
+    let resolved = mush_ai::auth::resolve_auth(
+        &model.provider,
+        &cfg.api_keys.to_map(),
+        mush_ai::credentials::default_store().as_ref(),
+    )
+    .await;
+    options.api_key = resolved.api_key;
+    options.account_id = resolved.account_id;
 }
 
 /// pick the default model based on per-cwd memory then available auth
@@ -665,7 +618,7 @@ pub fn default_model_id(cfg: &config::Config, cwd: &std::path::Path) -> String {
 
 /// short model list for error messages
 pub fn list_models_short() -> String {
-    models::all_models_with_user()
+    mush_ai::discovery::merged_models()
         .iter()
         .map(|m| format!("  {} ({})", m.id, m.provider))
         .collect::<Vec<_>>()

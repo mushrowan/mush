@@ -2,7 +2,6 @@
 
 use color_eyre::eyre::{Result, eyre};
 
-use mush_ai::models;
 use mush_ai::types::CacheRetention;
 use mush_session::SessionStore;
 
@@ -10,7 +9,7 @@ use crate::config;
 use crate::setup::default_model_id;
 
 pub fn list_models() -> Result<()> {
-    for m in models::all_models_with_user() {
+    for m in mush_ai::discovery::merged_models() {
         let cost = format!("${:.2}/${:.2} per 1M tokens", m.cost.input, m.cost.output);
         println!("  \x1b[1m{}\x1b[0m ({})", m.id, m.provider);
         println!(
