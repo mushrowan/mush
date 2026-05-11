@@ -1341,17 +1341,31 @@ fn handle_model_picker_delete_confirm_key(app: &mut App, key: KeyEvent) -> Optio
     }
 }
 
+/// replace `app.completion.completions` and
+/// `app.completion.model_completions` from a freshly-merged catalogue
+/// slice. shared by every code path that needs the slash menu and
+/// model picker to reflect new discovery results (delete-stale,
+/// `/refresh-models`, post-login refresh) without restarting the app
+pub(crate) fn apply_model_completions(app: &mut App, merged: &[mush_ai::discovery::MergedModel]) {
+    use crate::slash_menu::model_completion_from_merged;
+    let new_completions: Vec<_> = merged.iter().map(model_completion_from_merged).collect();
+    app.completion.completions = new_completions.iter().map(|m| m.id.clone()).collect();
+    app.completion.model_completions = new_completions;
+}
+
+/// load the on-disk discovery cache and apply it to the app's
+/// completion state. used after `/refresh-models` and after a login
+/// completes so newly-discovered models become selectable immediately
+pub(crate) fn reload_model_completions(app: &mut App) {
+    let merged = mush_ai::discovery::merged_catalogue();
+    apply_model_completions(app, &merged);
+}
+
 /// rebuild the model picker's catalogue from the freshly-mutated
 /// discovery cache and clamp `selected` so it stays valid when the
 /// deleted row vanishes
 fn refresh_model_picker_overlay_after_delete(app: &mut App) {
-    use crate::slash_menu::model_completion_from_merged;
-    let new_completions: Vec<_> = mush_ai::discovery::merged_catalogue()
-        .iter()
-        .map(model_completion_from_merged)
-        .collect();
-    app.completion.completions = new_completions.iter().map(|m| m.id.clone()).collect();
-    app.completion.model_completions = new_completions;
+    reload_model_completions(app);
 
     if let Some(picker) = app.interaction.model_picker.as_mut() {
         picker.models = crate::slash_menu::prepare_picker_models(
@@ -1630,6 +1644,60 @@ mod tests {
             kind: KeyEventKind::Press,
             state: KeyEventState::NONE,
         }
+    }
+
+    #[test]
+    fn apply_model_completions_populates_completion_state_from_merged_rows() {
+        // simulates the path after `/refresh-models` (or a fresh discovery
+        // fetch) writes new entries into the discovery cache: we hand the
+        // helper a hand-built merged-catalogue slice and expect both
+        // `completions` and `model_completions` to be replaced with the
+        // matching ids/rows. this is the bit that makes new chatgpt
+        // subscription models show up in the picker without an app restart
+        use mush_ai::discovery::{MergedModel, ModelSource};
+        use mush_ai::types::{Api, InputModality, Model, ModelCost, Provider, TokenCount};
+
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        assert!(app.completion.model_completions.is_empty());
+
+        let merged = vec![MergedModel {
+            model: Model {
+                id: "gpt-test-discovered".into(),
+                name: "GPT Test (discovered)".into(),
+                api: Api::OpenaiResponses,
+                provider: Provider::Custom("openai-codex".into()),
+                base_url: "https://chatgpt.com/backend-api".into(),
+                reasoning: true,
+                input: vec![InputModality::Text],
+                cost: ModelCost {
+                    input: 0.0,
+                    output: 0.0,
+                    cache_read: 0.0,
+                    cache_write: 0.0,
+                },
+                context_window: TokenCount::new(400_000),
+                max_output_tokens: TokenCount::new(64_000),
+                supports_adaptive_thinking: false,
+                supported_thinking_levels: Vec::new(),
+                default_thinking_level: None,
+            },
+            source: ModelSource::Discovered,
+            raw: None,
+        }];
+
+        apply_model_completions(&mut app, &merged);
+
+        assert_eq!(app.completion.model_completions.len(), 1);
+        assert_eq!(
+            app.completion.model_completions[0].id,
+            "gpt-test-discovered"
+        );
+        assert!(
+            app.completion
+                .completions
+                .iter()
+                .any(|c| c == "gpt-test-discovered")
+        );
     }
 
     #[test]

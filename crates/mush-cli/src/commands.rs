@@ -315,6 +315,14 @@ pub async fn login(provider_id: Option<String>) -> Result<()> {
     oauth::save_credentials(&store).map_err(|e| eyre!("failed to save credentials: {e}"))?;
 
     eprintln!("\n\x1b[32m✓ logged in to {}\x1b[0m", provider.name());
+
+    // refresh the discovery cache so the picker reflects whatever
+    // models the just-logged-in subscription exposes on next launch
+    eprintln!("refreshing model catalogue...");
+    let client = reqwest::Client::new();
+    let summary = mush_ai::discovery::refresh_and_save(client).await;
+    eprintln!("model discovery: {}", summary.one_line());
+
     Ok(())
 }
 

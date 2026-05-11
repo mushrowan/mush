@@ -155,7 +155,21 @@ pub(super) async fn handle_slash_action(
         }
         SlashAction::LoginComplete { code } => {
             let pane = pane_mgr.focused_mut();
-            complete_login(&mut pane.app, code).await;
+            let logged_in = complete_login(&mut pane.app, code).await;
+            if logged_in {
+                let client = tui_config.http_client.clone().unwrap_or_default();
+                pane_mgr.focused_mut().app.status = Some("refreshing models…".into());
+                let summary = mush_ai::discovery::refresh_and_save(client).await;
+                let line = summary.one_line();
+                for pane in pane_mgr.panes_mut() {
+                    crate::input::reload_model_completions(&mut pane.app);
+                }
+                pane_mgr
+                    .focused_mut()
+                    .app
+                    .push_system_message(format!("model discovery: {line}"));
+                pane_mgr.focused_mut().app.status = None;
+            }
         }
         SlashAction::Credits => {
             handle_credits(pane_mgr.focused_mut(), tui_config).await;
@@ -355,6 +369,9 @@ pub(super) async fn handle_slash_action(
             pane_mgr.focused_mut().app.status = Some("refreshing models…".into());
             let summary = mush_ai::discovery::refresh_and_save(client).await;
             let line = summary.one_line();
+            for pane in pane_mgr.panes_mut() {
+                crate::input::reload_model_completions(&mut pane.app);
+            }
             pane_mgr
                 .focused_mut()
                 .app
@@ -483,15 +500,19 @@ pub(super) fn save_thinking_pref(
 
 /// finish the oauth flow started via /login: exchange the user-supplied
 /// code for credentials using the PKCE challenge stashed on the app.
-/// on success, save credentials so future runs can pick them up
-pub(super) async fn complete_login(app: &mut crate::app::App, code: String) {
+/// on success, save credentials so future runs can pick them up.
+///
+/// returns `true` when credentials were successfully exchanged and
+/// saved, so the caller can kick off a discovery refresh to pull in
+/// any models the just-logged-in subscription exposes
+pub(super) async fn complete_login(app: &mut crate::app::App, code: String) -> bool {
     use mush_ai::oauth;
 
     let Some(pending) = app.pending_oauth.take() else {
         app.push_system_message(
             "no in-progress oauth flow. start one with /login [provider] first",
         );
-        return;
+        return false;
     };
 
     let Some(provider) = oauth::get_provider(&pending.provider_id) else {
@@ -499,7 +520,7 @@ pub(super) async fn complete_login(app: &mut crate::app::App, code: String) {
             "oauth provider {} is no longer available",
             pending.provider_id
         ));
-        return;
+        return false;
     };
 
     let trimmed = code.trim();
@@ -507,7 +528,7 @@ pub(super) async fn complete_login(app: &mut crate::app::App, code: String) {
         app.push_system_message("no code provided. usage: /login-complete <code>");
         // keep pending_oauth so they can retry
         app.pending_oauth = Some(pending);
-        return;
+        return false;
     }
 
     match provider.exchange_code(trimmed, &pending.pkce).await {
@@ -520,11 +541,13 @@ pub(super) async fn complete_login(app: &mut crate::app::App, code: String) {
                         "✓ logged in to {} (credentials saved)",
                         pending.provider_name
                     ));
+                    true
                 }
                 Err(e) => {
                     app.push_system_message(format!(
                         "logged in but saving credentials failed: {e}"
                     ));
+                    false
                 }
             }
         }
@@ -532,6 +555,7 @@ pub(super) async fn complete_login(app: &mut crate::app::App, code: String) {
             app.push_system_message(format!("oauth login failed: {e}"));
             // restore pending state so user can try a different code
             app.pending_oauth = Some(pending);
+            false
         }
     }
 }
