@@ -418,6 +418,17 @@ impl App {
         self.messages.iter().any(|m| m.queued)
     }
 
+    /// the assistant message that owns the in-flight turn's tool calls.
+    /// queued steering bubbles always sit at the tail of `messages`, so a
+    /// naive `last_mut()` would route tool start/end onto the user bubble
+    /// when steering is pending. tool calls only ever belong to an
+    /// assistant turn, so we walk backwards for the most recent assistant
+    fn current_turn_message_mut(&mut self) -> Option<&mut DisplayMessage> {
+        self.messages
+            .iter_mut()
+            .rfind(|m| m.role == MessageRole::Assistant)
+    }
+
     /// start streaming a new assistant message
     pub fn start_streaming(&mut self) {
         self.stream.start();
@@ -471,15 +482,18 @@ impl App {
             output: None,
         });
         self.stream.tool_args.clear();
-        // add to the last message's tool calls if we have one in progress
-        if let Some(last) = self.messages.last_mut() {
-            last.tool_calls.push(DisplayToolCall {
+        // attach to the current turn's assistant message rather than
+        // messages.last_mut(): queued steering bubbles tail the list, and
+        // we must not push tool calls onto a queued user bubble
+        let batch_idx = self.current_tool_batch;
+        if let Some(turn) = self.current_turn_message_mut() {
+            turn.tool_calls.push(DisplayToolCall {
                 name: name.to_string(),
                 summary: summary.to_string(),
                 status: ToolCallStatus::Running,
                 output_preview: None,
                 image_data: None,
-                batch: self.current_tool_batch,
+                batch: batch_idx,
             });
         }
     }
@@ -502,16 +516,19 @@ impl App {
             output: None,
         });
         self.stream.tool_args.clear();
-        // individual display entries for message history
-        if let Some(last) = self.messages.last_mut() {
+        // individual display entries for message history. target the
+        // assistant turn explicitly since queued steering bubbles tail the
+        // list and must not receive tool calls
+        let batch_idx = self.current_tool_batch;
+        if let Some(turn) = self.current_turn_message_mut() {
             for (name, sub_summary) in sub_calls {
-                last.tool_calls.push(DisplayToolCall {
+                turn.tool_calls.push(DisplayToolCall {
                     name: name.clone(),
                     summary: sub_summary.clone(),
                     status: ToolCallStatus::Running,
                     output_preview: None,
                     image_data: None,
-                    batch: self.current_tool_batch,
+                    batch: batch_idx,
                 });
             }
         }
@@ -538,9 +555,9 @@ impl App {
         // parse output into per-sub-call sections and update display entries
         let Some(text) = output else { return };
         let sections = parse_batch_output(text);
-        if let Some(last) = self.messages.last_mut() {
+        if let Some(turn) = self.current_turn_message_mut() {
             // find the running batch sub-calls (they're the last N running entries)
-            let running: Vec<usize> = last
+            let running: Vec<usize> = turn
                 .tool_calls
                 .iter()
                 .enumerate()
@@ -555,7 +572,7 @@ impl App {
             if sections.is_empty() && !text.trim().is_empty() {
                 let preview = truncate_output(text);
                 for &idx in &running {
-                    let tc = &mut last.tool_calls[idx];
+                    let tc = &mut turn.tool_calls[idx];
                     tc.status = ToolCallStatus::Error;
                     tc.output_preview = Some(preview.clone());
                 }
@@ -564,7 +581,7 @@ impl App {
 
             for (section_idx, section) in sections.iter().enumerate() {
                 if let Some(&tc_idx) = running.get(section_idx) {
-                    let tc = &mut last.tool_calls[tc_idx];
+                    let tc = &mut turn.tool_calls[tc_idx];
                     tc.status = if section.is_error {
                         ToolCallStatus::Error
                     } else {
@@ -579,7 +596,7 @@ impl App {
             // batch output can't silently render as a successful null tool
             // result in the message history
             for &idx in running.iter().skip(sections.len()) {
-                let tc = &mut last.tool_calls[idx];
+                let tc = &mut turn.tool_calls[idx];
                 tc.status = ToolCallStatus::Error;
                 tc.output_preview = Some("missing result in batch output".into());
             }
@@ -606,8 +623,8 @@ impl App {
             tool.output = output.map(|o| preview_for_tool(name, o));
             tool.live_output = None;
         }
-        if let Some(last) = self.messages.last_mut()
-            && let Some(tc) = last.tool_calls.iter_mut().rfind(|t| t.name == name)
+        if let Some(turn) = self.current_turn_message_mut()
+            && let Some(tc) = turn.tool_calls.iter_mut().rfind(|t| t.name == name)
         {
             tc.status = status;
             tc.output_preview = output.map(|o| preview_for_tool(name, o));
@@ -2089,6 +2106,105 @@ batch: 1/2 succeeded, 1 failed";
         assert_eq!(app.messages[0].content, "assistant reply");
         assert_eq!(app.messages[1].role, MessageRole::User);
         assert_eq!(app.messages[1].content, "steer");
+    }
+
+    #[test]
+    fn tool_output_attaches_to_assistant_when_steering_queued_mid_tool() {
+        // regression: when the user queues a steering message while a tool
+        // is running, the queued user bubble sits at the end of
+        // app.messages. tool start/end used to push and look up via
+        // messages.last_mut(), which is the queued user bubble in this
+        // scenario instead of the assistant message that actually owns
+        // the tool call. the result: the tool_call entry never got its
+        // status flipped to Done and the output_preview was silently
+        // dropped, so when the steering eventually injected (queued ->
+        // actual) and the live panel cleared on the next TurnStart, the
+        // output had no visible home in the message history. tool calls
+        // must always attach to the assistant message owning the turn,
+        // not whatever happens to be last in the visible message list
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.push_user_message("do thing");
+        app.start_streaming();
+        app.push_text_delta("on it");
+        app.finish_streaming(None, None);
+
+        let tc_id = ToolCallId::from("tc_1");
+        app.start_tool(&tc_id, "bash", "ls");
+
+        // user queues a steering message while the tool is mid-flight
+        app.push_queued_message("also do this");
+
+        app.end_tool(
+            &tc_id,
+            "bash",
+            ToolOutcome::Success,
+            Some("file_a\nfile_b\n"),
+            None,
+        );
+
+        let assistant = app
+            .messages
+            .iter()
+            .find(|m| m.role == MessageRole::Assistant)
+            .expect("assistant message");
+        assert_eq!(
+            assistant.tool_calls.len(),
+            1,
+            "tool call must live on the assistant turn, not the queued user bubble"
+        );
+        assert_eq!(assistant.tool_calls[0].name, "bash");
+        assert_eq!(assistant.tool_calls[0].status, ToolCallStatus::Done);
+        let preview = assistant.tool_calls[0]
+            .output_preview
+            .as_deref()
+            .unwrap_or_default();
+        assert!(
+            preview.contains("file_a") && preview.contains("file_b"),
+            "tool output must not be swallowed; got preview {preview:?}",
+        );
+
+        let queued = app
+            .messages
+            .iter()
+            .find(|m| m.queued)
+            .expect("queued steering bubble");
+        assert!(
+            queued.tool_calls.is_empty(),
+            "queued user bubble must not collect tool calls"
+        );
+    }
+
+    #[test]
+    fn tool_start_attaches_to_assistant_when_steering_already_queued() {
+        // companion regression: a queued steering message present at the
+        // moment a new tool starts must not become the parent of the new
+        // tool_call entry
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.push_user_message("do thing");
+        app.start_streaming();
+        app.push_text_delta("on it");
+        app.finish_streaming(None, None);
+
+        // steering queued BEFORE any tool fires
+        app.push_queued_message("also do this");
+
+        let tc_id = ToolCallId::from("tc_1");
+        app.start_tool(&tc_id, "read", "src/lib.rs");
+
+        let assistant = app
+            .messages
+            .iter()
+            .find(|m| m.role == MessageRole::Assistant)
+            .expect("assistant message");
+        assert_eq!(assistant.tool_calls.len(), 1);
+        assert_eq!(assistant.tool_calls[0].name, "read");
+
+        let queued = app
+            .messages
+            .iter()
+            .find(|m| m.queued)
+            .expect("queued steering bubble");
+        assert!(queued.tool_calls.is_empty());
     }
 
     #[test]
