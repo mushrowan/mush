@@ -230,6 +230,21 @@ fn apply_batch_result(
         return;
     };
 
+    // batch-level error: the whole batch failed before producing
+    // per-sub-call sections (e.g. BatchArgs parse error). surface the
+    // real error text on every sub-call so reloaded sessions match the
+    // live event path's behaviour and the user can see what went wrong
+    if sections.is_empty() && !text.trim().is_empty() {
+        let preview = truncate_output(&text);
+        for i in 0..count {
+            if let Some(tc) = message.tool_calls.get_mut(first_tc + i) {
+                tc.status = ToolCallStatus::Error;
+                tc.output_preview = Some(preview.clone());
+            }
+        }
+        return;
+    }
+
     for (i, section) in sections.iter().enumerate() {
         let tc_idx = first_tc + i;
         if tc_idx >= first_tc + count {
@@ -512,6 +527,67 @@ mod tests {
             app.messages[0].tool_calls[2].output_preview.as_deref(),
             Some("missing result in batch output")
         );
+    }
+
+    #[test]
+    fn batch_rebuild_with_top_level_error_shows_error_on_subcalls() {
+        // rebuild_display sibling of batch_end_with_top_level_error_shows
+        // _on_subcalls: when a session reload encounters a batch result
+        // that is a top-level error string (no `--- [N] ... ---` headers,
+        // typically from a BatchArgs parse failure), every sub-call entry
+        // should show the real error text and not the placeholder
+        let mut app = app();
+        let model = test_model();
+        let conversation = vec![Message::Assistant(
+            AssistantMessage::builder()
+                .content(vec![AssistantContentPart::ToolCall(ToolCall {
+                    id: ToolCallId::from("batch_1"),
+                    name: ToolName::from("batch"),
+                    arguments: serde_json::json!({
+                        "tool_calls": [
+                            {"tool": "read", "parameters": {"path": "a.rs"}},
+                            {"tool": "read", "parameters": {"path": "b.rs"}}
+                        ]
+                    }),
+                })])
+                .model(model.id)
+                .provider(Provider::Anthropic)
+                .api(Api::AnthropicMessages)
+                .usage(Usage {
+                    input_tokens: TokenCount::new(10),
+                    output_tokens: TokenCount::new(5),
+                    cache_read_tokens: TokenCount::ZERO,
+                    cache_write_tokens: TokenCount::ZERO,
+                })
+                .stop_reason(StopReason::ToolUse)
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        ), Message::ToolResult(ToolResultMessage {
+            tool_call_id: ToolCallId::from("batch_1"),
+            tool_name: ToolName::from("batch"),
+            content: vec![ToolResultContentPart::Text(TextContent {
+                text: "invalid arguments: unknown field `params`, expected `tool` or `parameters`\nreceived: {tool_calls: [...]}".into(),
+            })],
+            outcome: ToolOutcome::Error,
+            timestamp_ms: Timestamp::zero(),
+        })];
+
+        rebuild_display(&mut app, &conversation);
+
+        assert_eq!(app.messages.len(), 1);
+        assert_eq!(app.messages[0].tool_calls.len(), 2);
+        for tc in &app.messages[0].tool_calls {
+            assert_eq!(tc.status, ToolCallStatus::Error);
+            let preview = tc.output_preview.as_deref().unwrap_or_default();
+            assert!(
+                preview.contains("invalid arguments") && preview.contains("unknown field `params`"),
+                "expected real error in preview, got: {preview:?}",
+            );
+            assert!(
+                !preview.contains("missing result in batch output"),
+                "preview must not hide the real error: {preview:?}",
+            );
+        }
     }
 
     #[test]

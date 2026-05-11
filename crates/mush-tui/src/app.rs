@@ -542,6 +542,20 @@ impl App {
                 .map(|(i, _)| i)
                 .collect();
 
+            // batch-level error: the whole batch failed before producing
+            // per-sub-call sections (e.g. BatchArgs parse error). surface
+            // the real error text on every sub-call instead of hiding it
+            // behind a "missing result" placeholder
+            if sections.is_empty() && !text.trim().is_empty() {
+                let preview = truncate_output(text);
+                for &idx in &running {
+                    let tc = &mut last.tool_calls[idx];
+                    tc.status = ToolCallStatus::Error;
+                    tc.output_preview = Some(preview.clone());
+                }
+                return;
+            }
+
             for (section_idx, section) in sections.iter().enumerate() {
                 if let Some(&tc_idx) = running.get(section_idx) {
                     let tc = &mut last.tool_calls[tc_idx];
@@ -1691,6 +1705,52 @@ batch: 1/2 succeeded, 1 failed";
                 .unwrap()
                 .contains("could not compile")
         );
+    }
+
+    #[test]
+    fn batch_end_with_top_level_error_shows_error_on_subcalls() {
+        // when the batch tool itself errors before producing per-sub-call
+        // sections (e.g. BatchArgs parse failure: missing `parameters` on
+        // one call, or extra fields rejected by deny_unknown_fields), the
+        // result is a single top-level error string with no `--- [N] ...
+        // ---` headers. previously every sub-call display entry fell
+        // through to the unhelpful "missing result in batch output"
+        // fallback, which hid the real error from the user. the actual
+        // error text should be surfaced on every sub-call instead so the
+        // user can see what actually went wrong
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.messages
+            .push(DisplayMessage::new(MessageRole::Assistant, ""));
+
+        let tc_id = ToolCallId::from("tc_batch");
+        app.start_batch_tool(
+            &tc_id,
+            "2 tool calls",
+            &[
+                ("read".into(), "a.rs".into()),
+                ("read".into(), "b.rs".into()),
+            ],
+        );
+
+        let output = "invalid arguments: missing field `parameters` at line 1 column 42\n\
+                      received: {tool_calls: [{tool: \"read\"}]}";
+        app.end_batch_tool(&tc_id, Some(output));
+
+        let tcs = &app.messages.last().unwrap().tool_calls;
+        assert_eq!(tcs[0].status, ToolCallStatus::Error);
+        assert_eq!(tcs[1].status, ToolCallStatus::Error);
+        for tc in tcs {
+            let preview = tc.output_preview.as_deref().unwrap_or_default();
+            assert!(
+                preview.contains("invalid arguments")
+                    && preview.contains("missing field `parameters`"),
+                "expected real error in preview, got: {preview:?}",
+            );
+            assert!(
+                !preview.contains("missing result in batch output"),
+                "preview must not hide the real error behind a placeholder: {preview:?}",
+            );
+        }
     }
 
     #[test]
