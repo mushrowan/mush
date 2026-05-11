@@ -257,7 +257,79 @@ fn convert_input_messages(
     };
     walk_messages(messages, &mut visitor);
 
-    converted
+    fix_orphaned_function_calls(converted)
+}
+
+/// ensure function_call / function_call_output pairing is consistent.
+///
+/// handles both directions:
+/// - function_call without function_call_output: injects a synthetic
+///   output so openai responses doesn't reject the whole request with
+///   "No tool output found for function call <id>"
+/// - function_call_output without function_call: strips the orphan
+///
+/// orphans appear when a stream errors or the agent loop is cancelled
+/// mid-turn (the assistant message with the call is pushed before
+/// execution begins) or when compaction reshapes history across a tool
+/// boundary. mirrors the equivalent fix in the anthropic provider
+fn fix_orphaned_function_calls(items: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    let mut out: Vec<serde_json::Value> = Vec::with_capacity(items.len());
+    let mut pending: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for item in items {
+        let kind = item.get("type").and_then(|v| v.as_str());
+        match kind {
+            Some("function_call") => {
+                if let Some(id) = item.get("call_id").and_then(|v| v.as_str()) {
+                    pending.push(id.to_string());
+                }
+                out.push(item);
+            }
+            Some("function_call_output") => {
+                let id = item
+                    .get("call_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                if pending.iter().any(|p| p == id) {
+                    seen.insert(id.to_string());
+                    out.push(item);
+                } else {
+                    tracing::warn!(
+                        call_id = id,
+                        "stripping orphaned function_call_output (no matching function_call)"
+                    );
+                }
+            }
+            _ => {
+                flush_synthetic_function_outputs(&mut out, &mut pending, &mut seen);
+                out.push(item);
+            }
+        }
+    }
+    flush_synthetic_function_outputs(&mut out, &mut pending, &mut seen);
+    out
+}
+
+fn flush_synthetic_function_outputs(
+    out: &mut Vec<serde_json::Value>,
+    pending: &mut Vec<String>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    for id in pending.drain(..) {
+        if !seen.contains(&id) {
+            tracing::warn!(
+                call_id = %id,
+                "injecting synthetic function_call_output for orphaned function_call"
+            );
+            out.push(serde_json::json!({
+                "type": "function_call_output",
+                "call_id": id,
+                "output": "(tool execution was interrupted, no result available)",
+            }));
+        }
+    }
+    seen.clear();
 }
 
 struct OpenaiResponsesVisitor<'a> {
@@ -1527,6 +1599,158 @@ mod tests {
         assert_eq!(
             body.reasoning.as_ref().map(|r| r.effort.as_str()),
             Some("xhigh")
+        );
+    }
+
+    fn sample_codex_model() -> Model {
+        Model {
+            id: "gpt-5.2".into(),
+            name: "GPT-5.2".into(),
+            api: Api::OpenaiResponses,
+            provider: Provider::Custom("openai".into()),
+            base_url: "https://api.openai.com/v1".into(),
+            reasoning: false,
+            input: vec![InputModality::Text],
+            cost: ModelCost {
+                input: 0.0,
+                output: 0.0,
+                cache_read: 0.0,
+                cache_write: 0.0,
+            },
+            context_window: TokenCount::new(400_000),
+            max_output_tokens: TokenCount::new(64_000),
+            supports_adaptive_thinking: false,
+            supported_thinking_levels: Vec::new(),
+            default_thinking_level: None,
+        }
+    }
+
+    #[test]
+    fn orphaned_function_call_gets_synthetic_output() {
+        // simulates the bug rowan hit: an assistant turn emits a tool_call
+        // but the stream errored / agent cancelled before the tool result
+        // was produced and pushed. on the next request, openai responses
+        // rejects with "No tool output found for function call call_X".
+        // sanitisation must inject a synthetic function_call_output so the
+        // history stays valid without forcing the user to ditch the
+        // entire session
+        let model = sample_codex_model();
+        let messages = vec![
+            Message::User(UserMessage {
+                content: UserContent::Text("hello".into()),
+                timestamp_ms: Timestamp::zero(),
+            }),
+            Message::Assistant(
+                AssistantMessage::builder()
+                    .model("gpt-5.2".into())
+                    .provider(Provider::Custom("openai".into()))
+                    .api(Api::OpenaiResponses)
+                    .timestamp_ms(Timestamp::zero())
+                    .content(vec![AssistantContentPart::ToolCall(ToolCall {
+                        id: "call_orphan".into(),
+                        name: "read".into(),
+                        arguments: serde_json::json!({"path": "foo.rs"}),
+                    })])
+                    .build(),
+            ),
+            // user message follows without a matching tool result —
+            // request was sent before the call could be executed
+            Message::User(UserMessage {
+                content: UserContent::Text("retrying".into()),
+                timestamp_ms: Timestamp::zero(),
+            }),
+        ];
+
+        let input =
+            convert_input_messages(&model, &None, &messages, ToolResultTrimming::SlidingWindow);
+        let types: Vec<&str> = input
+            .iter()
+            .map(|item| {
+                item.get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| item.get("role").and_then(|v| v.as_str()).unwrap_or(""))
+            })
+            .collect();
+
+        // expect: user, function_call, synthetic function_call_output, user
+        assert!(
+            types.contains(&"function_call"),
+            "expected function_call in {types:?}"
+        );
+        assert!(
+            types.contains(&"function_call_output"),
+            "expected synthesized function_call_output, got {types:?}"
+        );
+        let output = input
+            .iter()
+            .find(|item| item.get("type").and_then(|v| v.as_str()) == Some("function_call_output"))
+            .expect("synthesized output");
+        assert_eq!(output["call_id"], "call_orphan");
+    }
+
+    #[test]
+    fn matched_function_call_output_pair_is_untouched() {
+        let model = sample_codex_model();
+        let messages = vec![
+            Message::Assistant(
+                AssistantMessage::builder()
+                    .model("gpt-5.2".into())
+                    .provider(Provider::Custom("openai".into()))
+                    .api(Api::OpenaiResponses)
+                    .timestamp_ms(Timestamp::zero())
+                    .content(vec![AssistantContentPart::ToolCall(ToolCall {
+                        id: "call_ok".into(),
+                        name: "read".into(),
+                        arguments: serde_json::json!({"path": "foo.rs"}),
+                    })])
+                    .build(),
+            ),
+            Message::ToolResult(ToolResultMessage {
+                tool_call_id: "call_ok".into(),
+                tool_name: "read".into(),
+                content: vec![ToolResultContentPart::Text(TextContent {
+                    text: "file contents".into(),
+                })],
+                outcome: ToolOutcome::Success,
+                timestamp_ms: Timestamp::zero(),
+            }),
+        ];
+
+        let input =
+            convert_input_messages(&model, &None, &messages, ToolResultTrimming::SlidingWindow);
+        let outputs: Vec<&serde_json::Value> = input
+            .iter()
+            .filter(|item| {
+                item.get("type").and_then(|v| v.as_str()) == Some("function_call_output")
+            })
+            .collect();
+        assert_eq!(outputs.len(), 1, "should not duplicate matched output");
+        assert_eq!(outputs[0]["output"], "file contents");
+    }
+
+    #[test]
+    fn orphaned_function_call_output_is_stripped() {
+        // tool result without a preceding assistant tool_call — would
+        // happen if compaction or session manipulation removed the call
+        let model = sample_codex_model();
+        let messages = vec![Message::ToolResult(ToolResultMessage {
+            tool_call_id: "call_ghost".into(),
+            tool_name: "read".into(),
+            content: vec![ToolResultContentPart::Text(TextContent {
+                text: "stale".into(),
+            })],
+            outcome: ToolOutcome::Success,
+            timestamp_ms: Timestamp::zero(),
+        })];
+
+        let input =
+            convert_input_messages(&model, &None, &messages, ToolResultTrimming::SlidingWindow);
+        assert!(
+            input
+                .iter()
+                .all(|item| item.get("type").and_then(|v| v.as_str())
+                    != Some("function_call_output")),
+            "orphaned function_call_output should be stripped, got {input:?}"
         );
     }
 }
