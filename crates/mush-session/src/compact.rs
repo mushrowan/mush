@@ -7,7 +7,7 @@
 //! supports both structured (no LLM) and LLM-based summarisation.
 
 use futures::StreamExt;
-use mush_ai::registry::{ApiRegistry, LlmContext};
+use mush_ai::registry::{ApiRegistry, LlmContext, is_retryable_stream_error_message};
 use mush_ai::stream::StreamEvent;
 use mush_ai::types::*;
 
@@ -19,6 +19,12 @@ const DEFAULT_KEEP_OBSERVATIONS: usize = 5;
 
 /// maximum output tokens requested for LLM-generated compaction summaries
 const COMPACTION_MAX_OUTPUT_TOKENS: u64 = 8192;
+
+/// retry budget for transient compaction provider failures
+const COMPACTION_MAX_RETRIES: u32 = 5;
+
+/// maximum exponential backoff between compaction retry attempts
+const COMPACTION_MAX_BACKOFF_SECS: u64 = 16;
 
 /// rough chars-per-token ratio for estimation (LLM tokenisers average ~4)
 const CHARS_PER_TOKEN: usize = 4;
@@ -487,40 +493,61 @@ pub async fn llm_compact(
     let old_messages = &messages[..split_at];
     let recent_messages = &messages[split_at..];
 
-    // build the prompt for the LLM. recent kept messages are passed
-    // as context-only so the summariser knows the current state and
-    // doesn't mislabel recently-completed tasks as in-progress
-    let request_body = build_compaction_request(old_messages, recent_messages);
-
-    let context = LlmContext {
-        system_prompt: Some(COMPACTION_PROMPT.to_string()),
-        messages: vec![Message::User(UserMessage {
-            content: UserContent::Text(request_body),
-            timestamp_ms: Timestamp::now(),
-        })],
-        tools: vec![],
-    };
-
     let compact_options = compaction_stream_options(model, options);
+    let mut old_start = 0;
+    let summary = loop {
+        let old_slice = &old_messages[old_start..];
+        let context = compaction_context(old_slice, recent_messages);
 
-    let summary = match call_for_text(registry, model, &context, &compact_options).await {
-        Some(text) => {
-            tracing::info!(chars = text.len(), "LLM compaction succeeded");
-            text
-        }
-        None => {
-            tracing::warn!("LLM compaction failed, using structured fallback");
-            // fallback: structured dump (no LLM)
-            let prompt = build_compaction_prompt(old_messages);
-            fallback_summary_from_prompt(&prompt)
+        match call_for_text(registry, model, &context, &compact_options).await {
+            Ok(text) => {
+                tracing::info!(
+                    chars = text.len(),
+                    dropped_messages = old_start,
+                    "LLM compaction succeeded"
+                );
+                break text;
+            }
+            Err(error) if error.is_context_overflow() && old_slice.len() > 1 => {
+                let dropped = (old_slice.len() / 4).max(1);
+                old_start += dropped;
+                tracing::warn!(%error, dropped, total_dropped = old_start, "compaction request too large, trimming oldest summary input and retrying");
+            }
+            Err(error) => {
+                tracing::warn!(%error, "LLM compaction failed, using structured fallback");
+                // fallback: structured dump (no LLM)
+                let prompt = build_compaction_prompt(old_messages);
+                break fallback_summary_from_prompt(&prompt, &error);
+            }
         }
     };
 
     compact_with_summary(messages, &summary, keep_recent)
 }
 
-fn fallback_summary_from_prompt(prompt: &str) -> String {
-    format!("{FALLBACK_SUMMARY_HEADING}\n\n{FALLBACK_SUMMARY_INTRO}\n\n{prompt}")
+fn compaction_context(old_messages: &[Message], recent_messages: &[Message]) -> LlmContext {
+    // recent kept messages are passed as context-only so the summariser
+    // knows the current state and doesn't mislabel recently-completed
+    // tasks as in-progress
+    let request_body = build_compaction_request(old_messages, recent_messages);
+
+    LlmContext {
+        system_prompt: Some(COMPACTION_PROMPT.to_string()),
+        messages: vec![Message::User(UserMessage {
+            content: UserContent::Text(request_body),
+            timestamp_ms: Timestamp::now(),
+        })],
+        tools: vec![],
+    }
+}
+
+fn fallback_summary_from_prompt(prompt: &str, error: &CompactionFailure) -> String {
+    format!(
+        "{FALLBACK_SUMMARY_HEADING}\n\n\
+         ## Compaction fallback reason\n\n\
+         LLM summarisation failed: {error}\n\n\
+         {FALLBACK_SUMMARY_INTRO}\n\n{prompt}"
+    )
 }
 
 fn compaction_stream_options(model: &Model, options: &StreamOptions) -> StreamOptions {
@@ -536,25 +563,126 @@ async fn call_for_text(
     model: &Model,
     context: &LlmContext,
     options: &StreamOptions,
-) -> Option<String> {
-    let mut stream = registry.stream(model, context, options).await.ok()?;
+) -> Result<String, CompactionFailure> {
+    let mut last_error = None;
 
+    for attempt in 0..=COMPACTION_MAX_RETRIES {
+        if attempt > 0 {
+            let delay = std::time::Duration::from_secs(
+                (1u64 << (attempt - 1)).min(COMPACTION_MAX_BACKOFF_SECS),
+            );
+            tracing::warn!(attempt, ?delay, "retrying compaction after transient error");
+            tokio::time::sleep(delay).await;
+        }
+
+        let stream = match registry.stream(model, context, options).await {
+            Ok(stream) => stream,
+            Err(error) if error.is_retryable() && attempt < COMPACTION_MAX_RETRIES => {
+                tracing::warn!(%error, "retryable compaction request error");
+                last_error = Some(CompactionFailure::Request(error.to_string()));
+                continue;
+            }
+            Err(error) => return Err(CompactionFailure::Request(error.to_string())),
+        };
+
+        match collect_text(stream).await {
+            Ok(text) => return Ok(text),
+            Err(error) if error.is_retryable() && attempt < COMPACTION_MAX_RETRIES => {
+                tracing::warn!(%error, "retryable compaction stream error");
+                last_error = Some(error);
+                continue;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(last_error.unwrap_or(CompactionFailure::EmptyResponse))
+}
+
+async fn collect_text(
+    mut stream: mush_ai::registry::EventStream,
+) -> Result<String, CompactionFailure> {
     let mut text = String::new();
     while let Some(event) = stream.next().await {
         match event {
             StreamEvent::TextDelta { delta, .. } => text.push_str(&delta),
-            StreamEvent::Done { .. } => break,
-            StreamEvent::Error { .. } => return None,
+            StreamEvent::Done { reason, message } => {
+                if reason == StopReason::Error || message.stop_reason == StopReason::Error {
+                    return Err(CompactionFailure::Stream(
+                        message
+                            .error_message
+                            .unwrap_or_else(|| "stream ended with error".into()),
+                    ));
+                }
+                break;
+            }
+            StreamEvent::Error { message, .. } => {
+                return Err(CompactionFailure::Stream(
+                    message
+                        .error_message
+                        .unwrap_or_else(|| "stream emitted error".into()),
+                ));
+            }
             _ => {}
         }
     }
 
-    if text.is_empty() { None } else { Some(text) }
+    if text.is_empty() {
+        Err(CompactionFailure::EmptyResponse)
+    } else {
+        Ok(text)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+enum CompactionFailure {
+    #[error("request failed: {0}")]
+    Request(String),
+    #[error("stream error: {0}")]
+    Stream(String),
+    #[error("stream completed without text")]
+    EmptyResponse,
+}
+
+impl CompactionFailure {
+    fn is_retryable(&self) -> bool {
+        match self {
+            Self::Request(_) => false,
+            Self::Stream(message) => is_retryable_stream_error_message(message),
+            Self::EmptyResponse => false,
+        }
+    }
+
+    fn is_context_overflow(&self) -> bool {
+        let message = match self {
+            Self::Request(message) | Self::Stream(message) => message,
+            Self::EmptyResponse => return false,
+        }
+        .to_ascii_lowercase();
+
+        [
+            "context_length_exceeded",
+            "context length exceeded",
+            "context window",
+            "too many input tokens",
+            "input tokens exceed",
+            "maximum context",
+            "prompt is too long",
+        ]
+        .iter()
+        .any(|pat| message.contains(pat))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use mush_ai::registry::{ApiProvider, EventStream, ProviderError};
 
     fn user_msg(text: &str) -> Message {
         Message::User(UserMessage {
@@ -575,6 +703,29 @@ mod tests {
                 .timestamp_ms(Timestamp::zero())
                 .build(),
         )
+    }
+
+    fn test_model() -> Model {
+        Model {
+            id: "test".into(),
+            name: "test".into(),
+            api: Api::AnthropicMessages,
+            provider: Provider::Anthropic,
+            base_url: "https://api.anthropic.com".into(),
+            reasoning: false,
+            input: vec![InputModality::Text],
+            cost: ModelCost {
+                input: 0.0,
+                output: 0.0,
+                cache_read: 0.0,
+                cache_write: 0.0,
+            },
+            context_window: TokenCount::new(200_000),
+            max_output_tokens: TokenCount::new(8192),
+            supports_adaptive_thinking: false,
+            supported_thinking_levels: Vec::new(),
+            default_thinking_level: None,
+        }
     }
 
     #[test]
@@ -908,6 +1059,173 @@ mod tests {
         assert_eq!(result.summarised_count, 15);
         assert_eq!(result.messages.len(), 6); // 1 summary + 5 kept
         assert!(result.summary.contains("Summary of earlier conversation"));
+    }
+
+    #[tokio::test]
+    async fn llm_compact_fallback_includes_failure_reason() {
+        let registry = ApiRegistry::new();
+        let model = test_model();
+        let options = StreamOptions::default();
+        let msgs: Vec<Message> = (0..20)
+            .map(|i| {
+                if i % 2 == 0 {
+                    user_msg(&format!("question {i}"))
+                } else {
+                    assistant_msg(&format!("answer {i}"))
+                }
+            })
+            .collect();
+
+        let result = llm_compact(msgs, &registry, &model, &options, Some(5)).await;
+
+        assert!(
+            result.summary.contains("Compaction fallback reason"),
+            "fallback should explain why the LLM summary failed: {}",
+            result.summary
+        );
+        assert!(
+            result.summary.contains("no provider registered"),
+            "fallback should preserve the provider error: {}",
+            result.summary
+        );
+    }
+
+    #[tokio::test]
+    async fn llm_compact_retries_retryable_stream_errors() {
+        struct FlakyProvider {
+            calls: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl ApiProvider for FlakyProvider {
+            fn api(&self) -> Api {
+                Api::AnthropicMessages
+            }
+
+            async fn stream(
+                &self,
+                model: &Model,
+                _context: &LlmContext,
+                _options: &StreamOptions,
+            ) -> Result<EventStream, ProviderError> {
+                let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                let message = AssistantMessage::builder()
+                    .model(model.id.clone())
+                    .provider(model.provider.clone())
+                    .api(model.api)
+                    .timestamp_ms(Timestamp::zero())
+                    .build();
+
+                if call == 0 {
+                    let mut errored = message.clone();
+                    errored.stop_reason = StopReason::Error;
+                    errored.error_message = Some("overloaded_error: try again".into());
+                    Ok(Box::pin(futures::stream::iter(vec![StreamEvent::Done {
+                        reason: StopReason::Error,
+                        message: errored,
+                    }])))
+                } else {
+                    Ok(Box::pin(futures::stream::iter(vec![
+                        StreamEvent::TextDelta {
+                            content_index: 0,
+                            delta: "real summary".into(),
+                        },
+                        StreamEvent::Done {
+                            reason: StopReason::Stop,
+                            message,
+                        },
+                    ])))
+                }
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = ApiRegistry::new();
+        registry.register(Box::new(FlakyProvider {
+            calls: calls.clone(),
+        }));
+        let model = test_model();
+        let options = StreamOptions::default();
+        let msgs: Vec<Message> = (0..20)
+            .map(|i| {
+                if i % 2 == 0 {
+                    user_msg(&format!("question {i}"))
+                } else {
+                    assistant_msg(&format!("answer {i}"))
+                }
+            })
+            .collect();
+
+        let result = llm_compact(msgs, &registry, &model, &options, Some(5)).await;
+
+        assert_eq!(result.summary, "real summary");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn llm_compact_trims_and_retries_context_overflow() {
+        struct OverflowOnceProvider {
+            calls: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl ApiProvider for OverflowOnceProvider {
+            fn api(&self) -> Api {
+                Api::AnthropicMessages
+            }
+
+            async fn stream(
+                &self,
+                model: &Model,
+                _context: &LlmContext,
+                _options: &StreamOptions,
+            ) -> Result<EventStream, ProviderError> {
+                let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                if call == 0 {
+                    return Err(ProviderError::Other(
+                        "context_length_exceeded: too many input tokens".into(),
+                    ));
+                }
+                let message = AssistantMessage::builder()
+                    .model(model.id.clone())
+                    .provider(model.provider.clone())
+                    .api(model.api)
+                    .timestamp_ms(Timestamp::zero())
+                    .build();
+                Ok(Box::pin(futures::stream::iter(vec![
+                    StreamEvent::TextDelta {
+                        content_index: 0,
+                        delta: "summary after trim".into(),
+                    },
+                    StreamEvent::Done {
+                        reason: StopReason::Stop,
+                        message,
+                    },
+                ])))
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = ApiRegistry::new();
+        registry.register(Box::new(OverflowOnceProvider {
+            calls: calls.clone(),
+        }));
+        let model = test_model();
+        let options = StreamOptions::default();
+        let msgs: Vec<Message> = (0..20)
+            .map(|i| {
+                if i % 2 == 0 {
+                    user_msg(&format!("question {i}"))
+                } else {
+                    assistant_msg(&format!("answer {i}"))
+                }
+            })
+            .collect();
+
+        let result = llm_compact(msgs, &registry, &model, &options, Some(5)).await;
+
+        assert_eq!(result.summary, "summary after trim");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]
