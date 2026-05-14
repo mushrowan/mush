@@ -744,19 +744,31 @@ impl MessageVisitor for AnthropicVisitor {
 
 fn anthropic_tool_id(id: &str) -> String {
     let mut out = String::with_capacity(id.len());
+    let mut changed = false;
     for byte in id.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-') {
             out.push(byte as char);
         } else {
             out.push('_');
+            changed = true;
         }
     }
 
     if out.is_empty() {
-        "tool_call".into()
-    } else {
-        out
+        out.push_str("tool_call");
+        changed = true;
     }
+
+    if changed {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(id.as_bytes());
+        out.push('_');
+        for byte in &digest[..4] {
+            out.push_str(&format!("{byte:02x}"));
+        }
+    }
+
+    out
 }
 
 /// ensure tool_use/tool_result pairing is consistent.
@@ -1549,8 +1561,20 @@ mod tests {
 
         let converted = convert_messages(&messages, false, None, ToolResultTrimming::SlidingWindow);
 
-        assert_eq!(converted[0].content[0]["id"], "call_abc_123");
-        assert_eq!(converted[1].content[0]["tool_use_id"], "call_abc_123");
+        let id = converted[0].content[0]["id"].as_str().unwrap();
+        assert!(id.starts_with("call_abc_123_"), "normalised id: {id}");
+        assert_eq!(converted[1].content[0]["tool_use_id"], id);
+    }
+
+    #[test]
+    fn anthropic_tool_id_avoids_normalisation_collisions() {
+        let dot = anthropic_tool_id("call.a");
+        let colon = anthropic_tool_id("call:a");
+
+        assert_ne!(dot, colon);
+        assert!(dot.starts_with("call_a_"));
+        assert!(colon.starts_with("call_a_"));
+        assert_eq!(anthropic_tool_id("call_a"), "call_a");
     }
 
     #[test]
