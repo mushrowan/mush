@@ -17,6 +17,9 @@ const DEFAULT_KEEP_RECENT: usize = 10;
 /// how many recent assistant turns to keep full tool output for
 const DEFAULT_KEEP_OBSERVATIONS: usize = 5;
 
+/// maximum output tokens requested for LLM-generated compaction summaries
+const COMPACTION_MAX_OUTPUT_TOKENS: u64 = 8192;
+
 /// rough chars-per-token ratio for estimation (LLM tokenisers average ~4)
 const CHARS_PER_TOKEN: usize = 4;
 
@@ -494,10 +497,7 @@ pub async fn llm_compact(
         tools: vec![],
     };
 
-    // use reduced max_tokens for the summary, no thinking
-    let mut compact_options = options.clone();
-    compact_options.max_tokens = Some(mush_ai::types::TokenCount::new(4096));
-    compact_options.thinking = None;
+    let compact_options = compaction_stream_options(model, options);
 
     let summary = match call_for_text(registry, model, &context, &compact_options).await {
         Some(text) => {
@@ -517,6 +517,13 @@ pub async fn llm_compact(
     };
 
     compact_with_summary(messages, &summary, keep_recent)
+}
+
+fn compaction_stream_options(model: &Model, options: &StreamOptions) -> StreamOptions {
+    let mut compact_options = options.clone();
+    compact_options.max_tokens = Some(TokenCount::new(COMPACTION_MAX_OUTPUT_TOKENS));
+    compact_options.thinking = model.reasoning.then_some(ThinkingLevel::Low);
+    compact_options
 }
 
 /// make a simple LLM call and collect the text response
@@ -897,6 +904,39 @@ mod tests {
         assert_eq!(result.summarised_count, 15);
         assert_eq!(result.messages.len(), 6); // 1 summary + 5 kept
         assert!(result.summary.contains("Summary of earlier conversation"));
+    }
+
+    #[test]
+    fn compaction_options_request_low_reasoning_for_reasoning_models() {
+        let model = Model {
+            id: "openai/gpt-5.4-nano".into(),
+            name: "GPT 5.4 Nano".into(),
+            api: Api::OpenaiCompletions,
+            provider: Provider::OpenRouter,
+            base_url: "https://openrouter.ai/api/v1".into(),
+            reasoning: true,
+            input: vec![InputModality::Text],
+            cost: ModelCost {
+                input: 0.0,
+                output: 0.0,
+                cache_read: 0.0,
+                cache_write: 0.0,
+            },
+            context_window: TokenCount::new(400_000),
+            max_output_tokens: TokenCount::new(128_000),
+            supports_adaptive_thinking: false,
+            supported_thinking_levels: Vec::new(),
+            default_thinking_level: None,
+        };
+        let options = StreamOptions {
+            thinking: None,
+            ..StreamOptions::default()
+        };
+
+        let compact_options = compaction_stream_options(&model, &options);
+
+        assert_eq!(compact_options.max_tokens, Some(TokenCount::new(8192)));
+        assert_eq!(compact_options.thinking, Some(ThinkingLevel::Low));
     }
 
     #[test]
