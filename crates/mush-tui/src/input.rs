@@ -1359,6 +1359,14 @@ pub(crate) fn apply_model_completions(app: &mut App, merged: &[mush_ai::discover
 pub(crate) fn reload_model_completions(app: &mut App) {
     let merged = mush_ai::discovery::merged_catalogue();
     apply_model_completions(app, &merged);
+    if let Some(picker) = app.interaction.model_picker.as_mut() {
+        picker.models = crate::slash_menu::prepare_picker_models(
+            &app.completion.model_completions,
+            picker.show_all,
+        );
+        let visible_len = crate::model_picker::filtered_models(picker).len();
+        picker.selected = picker.selected.min(visible_len.saturating_sub(1));
+    }
 }
 
 /// rebuild the model picker's catalogue from the freshly-mutated
@@ -3512,6 +3520,35 @@ mod tests {
         let visible = crate::model_picker::filtered_models(picker);
         let ids: Vec<&str> = visible.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, vec!["gpt-5"]);
+    }
+
+    #[test]
+    fn reload_model_completions_refreshes_open_picker_models() {
+        use crate::slash_menu::ModelCompletion;
+
+        let mut app = app_with_models();
+        app.open_model_picker_overlay();
+        app.completion.model_completions.push(ModelCompletion {
+            id: "stale-only".into(),
+            name: "Stale Only".into(),
+            provider: "openai".into(),
+            stale: false,
+            description: None,
+            speed_tiers: Vec::new(),
+            priority: 0,
+            visibility: None,
+        });
+
+        reload_model_completions(&mut app);
+
+        let picker = app.interaction.model_picker.as_ref().unwrap();
+        assert!(
+            picker
+                .models
+                .iter()
+                .any(|m| m.id == "gpt-5.5" || m.id == "claude-opus-4-7")
+        );
+        assert!(!picker.models.iter().any(|m| m.id == "stale-only"));
     }
 
     #[test]
