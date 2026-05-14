@@ -296,6 +296,10 @@ pub fn handle(
             handle_settings(app, tui_config, args);
             None
         }
+        SlashAction::CompactionModel { model_id } => {
+            handle_compaction_model(app, tui_config, model_id.as_deref());
+            None
+        }
         SlashAction::Login { provider } => {
             handle_login_start(app, tui_config, provider.as_deref());
             None
@@ -336,6 +340,41 @@ pub fn handle(
         SlashAction::Other { name, args } => try_template(app, name, args),
         _ => None,
     }
+}
+
+fn handle_compaction_model(app: &mut App, tui_config: &mut TuiConfig, model_id: Option<&str>) {
+    let Some(model_id) = model_id else {
+        let current = tui_config
+            .compaction_model
+            .as_ref()
+            .map(|(model, _)| model.id.as_str())
+            .unwrap_or("same as active model");
+        app.push_system_message(format!("compaction model: {current}"));
+        return;
+    };
+
+    if matches!(model_id, "same" | "active" | "default") {
+        tui_config.compaction_model = None;
+        app.compaction_model_id = None;
+        app.push_system_message("compaction model: same as active model");
+        return;
+    }
+
+    let Some(resolve) = &tui_config.resolve_model else {
+        app.push_system_message("cannot change compaction model in this build");
+        return;
+    };
+    let Some(model) = resolve(model_id) else {
+        app.push_system_message(format!("unknown compaction model: {model_id}"));
+        return;
+    };
+
+    let mut options = tui_config.options.clone();
+    options.session_id = Some(tui_config.session_id.clone());
+    let id = model.id.clone();
+    tui_config.compaction_model = Some((model, options));
+    app.compaction_model_id = Some(id.clone());
+    app.push_system_message(format!("compaction model: {}", id.as_str()));
 }
 
 /// dump internal state for troubleshooting. triggered by `/debug`.
@@ -1053,6 +1092,8 @@ pub fn handle_export(app: &mut App, conversation: &ConversationState, args: &str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use std::sync::Arc;
 
     #[test]
     fn show_cost_includes_reuse_and_write_percentages() {
@@ -1103,6 +1144,108 @@ mod tests {
         assert!(dump.contains("pane: 1/3"));
         assert!(dump.contains("claude-opus-4-7"));
         assert!(dump.contains("12345"));
+    }
+
+    fn test_model(id: &str) -> Model {
+        Model {
+            id: id.into(),
+            name: id.into(),
+            api: Api::AnthropicMessages,
+            provider: Provider::Anthropic,
+            base_url: "https://api.anthropic.com".into(),
+            reasoning: false,
+            input: vec![InputModality::Text],
+            cost: ModelCost {
+                input: 0.0,
+                output: 0.0,
+                cache_read: 0.0,
+                cache_write: 0.0,
+            },
+            context_window: TokenCount::new(200_000),
+            max_output_tokens: TokenCount::new(8192),
+            supports_adaptive_thinking: false,
+            supported_thinking_levels: Vec::new(),
+            default_thinking_level: None,
+        }
+    }
+
+    fn test_tui_config(resolve: Option<crate::runner::ModelResolver>) -> TuiConfig {
+        let model = test_model("active-model");
+        TuiConfig {
+            model,
+            system_prompt: None,
+            options: StreamOptions::default(),
+            max_turns: 32,
+            initial_messages: vec![],
+            initial_panes: vec![],
+            theme: crate::theme::Theme::default(),
+            config_path: None,
+            provider_api_keys: HashMap::new(),
+            thinking_prefs: Default::default(),
+            save_thinking_prefs: None,
+            last_models: Default::default(),
+            save_last_models: None,
+            save_session: None,
+            update_title: None,
+            confirm_tools: false,
+            auto_compact: false,
+            auto_fork_compact: false,
+            show_cost: false,
+            show_usage_lines: false,
+            show_token_counters: false,
+            status_bar_config: Default::default(),
+            debug_cache: false,
+            cache_timer: false,
+            thinking_display: Default::default(),
+            tool_output_live: None,
+            log_buffer: None,
+            isolation_mode: crate::file_tracker::IsolationMode::None,
+            terminal_policy: crate::terminal_policy::TerminalPolicy::default(),
+            lifecycle_hooks: Default::default(),
+            cwd: std::path::PathBuf::from("/tmp"),
+            dynamic_system_context: None,
+            file_rules: None,
+            lsp_diagnostics: None,
+            agent_card: None,
+            model_tiers: HashMap::new(),
+            compaction_model: None,
+            resolve_model: resolve,
+            http_client: None,
+            session_id: SessionId::new(),
+            settings: Default::default(),
+            scroll_lines: crate::app::DEFAULT_SCROLL_LINES,
+            favourite_models: Vec::new(),
+            favourites_locked: false,
+            save_favourite_models: None,
+            keymap: Default::default(),
+            reload_context: None,
+            forbidden_chars: Default::default(),
+        }
+    }
+
+    #[test]
+    fn compaction_model_command_sets_and_resets_model() {
+        let mut app = App::new("active-model".into(), TokenCount::new(200_000));
+        let mut config = test_tui_config(Some(Arc::new(|id| Some(test_model(id)))));
+
+        handle_compaction_model(&mut app, &mut config, Some("summary-model"));
+
+        assert_eq!(
+            config
+                .compaction_model
+                .as_ref()
+                .map(|(model, _)| model.id.as_str()),
+            Some("summary-model")
+        );
+        assert_eq!(
+            app.compaction_model_id.as_ref().map(|id| id.as_str()),
+            Some("summary-model")
+        );
+
+        handle_compaction_model(&mut app, &mut config, Some("same"));
+
+        assert!(config.compaction_model.is_none());
+        assert!(app.compaction_model_id.is_none());
     }
 
     /// when an unknown slash command runs (e.g. the user accidentally

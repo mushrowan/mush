@@ -588,6 +588,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         agent_card: Some(agent_card),
         model_tiers: setup.cfg.model_tiers,
         compaction_model: setup.compaction_model,
+        resolve_model: Some(std::sync::Arc::new(mush_ai::discovery::resolve_model_by_id)),
         http_client: Some(setup.http_client),
         session_id: session_id.clone(),
         settings: mush_tui::settings::ScopedSettings {

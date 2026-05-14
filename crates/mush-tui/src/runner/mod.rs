@@ -24,8 +24,8 @@ use mush_ai::registry::ApiRegistry;
 
 use self::caching_backend::{CachingBackend, spawn_sigwinch_listener};
 pub use self::config::{
-    PaneSnapshot, ReloadCallback, ReloadedContext, SessionSaver, SessionSnapshot, TitleUpdater,
-    TuiConfig,
+    ModelResolver, PaneSnapshot, ReloadCallback, ReloadedContext, SessionSaver, SessionSnapshot,
+    TitleUpdater, TuiConfig,
 };
 use self::input::LoopAction;
 pub use self::last_model::{LastModels, LastModelsSaver};

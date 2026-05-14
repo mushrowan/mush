@@ -50,6 +50,9 @@ pub struct ReloadedContext {
 /// discovery primitives live
 pub type ReloadCallback = std::sync::Arc<dyn Fn(&std::path::Path) -> ReloadedContext + Send + Sync>;
 
+/// callback to resolve model ids at runtime
+pub type ModelResolver = std::sync::Arc<dyn Fn(&str) -> Option<Model> + Send + Sync>;
+
 /// configuration for the TUI runner (owned, 'static-friendly)
 pub struct TuiConfig {
     pub model: Model,
@@ -123,6 +126,8 @@ pub struct TuiConfig {
     pub model_tiers: std::collections::HashMap<String, String>,
     /// separate model + options for compaction (None = use active model)
     pub compaction_model: Option<(Model, StreamOptions)>,
+    /// callback to resolve model ids for runtime compaction-model changes
+    pub resolve_model: Option<ModelResolver>,
     /// shared http client for usage polling and other http calls
     pub http_client: Option<reqwest::Client>,
     /// current session id (updated by /new)

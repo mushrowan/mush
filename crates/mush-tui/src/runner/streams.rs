@@ -1722,6 +1722,7 @@ mod tests {
             agent_card: None,
             model_tiers: std::collections::HashMap::new(),
             compaction_model: None,
+            resolve_model: None,
             http_client: None,
             session_id: mush_ai::types::SessionId::new(),
             settings: Default::default(),

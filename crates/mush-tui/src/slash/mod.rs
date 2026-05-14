@@ -34,6 +34,8 @@ pub enum SlashParseError {
     TaskUsage,
     #[error("usage: /login-complete <code>")]
     LoginCodeUsage,
+    #[error("usage: /compaction-model [same|<model-id>]")]
+    CompactionModelUsage,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,6 +62,12 @@ pub enum SlashAction {
     Tree,
     Compact,
     ForkCompact,
+    /// view or change the model used for compaction. None shows current,
+    /// `same` resets to the active model, any other string resolves as
+    /// a model id
+    CompactionModel {
+        model_id: Option<String>,
+    },
     Export {
         path: Option<String>,
     },
@@ -204,6 +212,9 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
             .map_err(|_| SlashParseError::BranchUsage),
         "tree" => Ok(SlashAction::Tree),
         "compact" => Ok(SlashAction::Compact),
+        "compaction-model" | "compact-model" => Ok(SlashAction::CompactionModel {
+            model_id: (!args.is_empty()).then(|| args.to_string()),
+        }),
         "fork-compact" | "fc" => Ok(SlashAction::ForkCompact),
         "export" => Ok(SlashAction::Export {
             path: (!args.is_empty()).then(|| args.to_string()),
@@ -314,6 +325,20 @@ mod tests {
     fn parse_fork_compact() {
         assert_eq!(parse("/fork-compact").unwrap(), SlashAction::ForkCompact);
         assert_eq!(parse("/fc").unwrap(), SlashAction::ForkCompact);
+    }
+
+    #[test]
+    fn parse_compaction_model() {
+        assert_eq!(
+            parse("/compaction-model").unwrap(),
+            SlashAction::CompactionModel { model_id: None }
+        );
+        assert_eq!(
+            parse("/compact-model claude-sonnet-4-20250514").unwrap(),
+            SlashAction::CompactionModel {
+                model_id: Some("claude-sonnet-4-20250514".into())
+            }
+        );
     }
 
     #[test]
