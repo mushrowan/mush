@@ -7,6 +7,8 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use std::sync::LazyLock;
+use tabled::builder::Builder;
+use tabled::settings::style::Style as TableStyle;
 
 use crate::theme::Theme;
 
@@ -247,72 +249,58 @@ fn try_render_table(source: &[&str], theme: &Theme, out: &mut Vec<Line<'static>>
         idx += 1;
     }
 
-    // compute column widths (display width) across header + body
-    let mut widths: Vec<usize> = header
-        .iter()
-        .map(|c| unicode_width::UnicodeWidthStr::width(*c))
-        .collect();
-    for row in &body_rows {
-        for (i, cell) in row.iter().enumerate() {
-            if i < widths.len() {
-                let w = unicode_width::UnicodeWidthStr::width(cell.as_str());
-                if w > widths[i] {
-                    widths[i] = w;
-                }
-            }
-        }
-    }
-
-    out.push(Line::styled(
-        build_table_border(&widths, '┌', '┬', '┐'),
-        theme.horizontal_rule,
-    ));
-    out.push(build_table_row(&header, &widths, theme));
-    out.push(Line::styled(
-        build_table_border(&widths, '├', '┼', '┤'),
-        theme.horizontal_rule,
-    ));
-    for row in &body_rows {
-        let cells: Vec<&str> = row.iter().map(String::as_str).collect();
-        out.push(build_table_row(&cells, &widths, theme));
-    }
-    out.push(Line::styled(
-        build_table_border(&widths, '└', '┴', '┘'),
-        theme.horizontal_rule,
-    ));
+    let mut records = Vec::with_capacity(body_rows.len() + 1);
+    records.push(header.into_iter().map(str::to_string).collect());
+    records.extend(body_rows);
+    let table = render_records_with_tabled(records);
+    out.extend(table.lines().map(|line| styled_table_line(line, theme)));
 
     Some(idx)
 }
 
-fn build_table_border(widths: &[usize], left: char, mid: char, right: char) -> String {
-    let mut out = String::new();
-    out.push(left);
-    for (i, w) in widths.iter().enumerate() {
-        if i > 0 {
-            out.push(mid);
-        }
-        // pad with 2 (one space each side) + content width
-        for _ in 0..w + 2 {
-            out.push('─');
-        }
+fn render_records_with_tabled(records: Vec<Vec<String>>) -> String {
+    let mut builder = Builder::new();
+    for record in records {
+        builder.push_record(record);
     }
-    out.push(right);
-    out
+    builder.build().with(TableStyle::sharp()).to_string()
 }
 
-fn build_table_row(cells: &[&str], widths: &[usize], theme: &Theme) -> Line<'static> {
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    spans.push(Span::styled("│", theme.horizontal_rule));
-    for (i, cell) in cells.iter().enumerate() {
-        let width = widths.get(i).copied().unwrap_or(0);
-        let cell_w = unicode_width::UnicodeWidthStr::width(*cell);
-        let pad = width.saturating_sub(cell_w);
-        spans.push(Span::raw(" "));
-        spans.extend(render_inline_spans(cell, theme));
-        spans.push(Span::raw(format!("{} ", " ".repeat(pad))));
-        spans.push(Span::styled("│", theme.horizontal_rule));
+fn styled_table_line(line: &str, theme: &Theme) -> Line<'static> {
+    if is_table_border_line(line) {
+        return Line::styled(line.to_string(), theme.horizontal_rule);
+    }
+    let mut spans = Vec::new();
+    for segment in line.split_inclusive('│') {
+        if segment == "│" {
+            spans.push(Span::styled("│", theme.horizontal_rule));
+        } else if let Some(cell) = segment.strip_suffix('│') {
+            spans.extend(render_inline_spans(cell, theme));
+            spans.push(Span::styled("│", theme.horizontal_rule));
+        } else {
+            spans.extend(render_inline_spans(segment, theme));
+        }
     }
     Line::from(spans)
+}
+
+fn is_table_border_line(line: &str) -> bool {
+    line.chars()
+        .all(|c| matches!(c, '┌' | '┬' | '┐' | '├' | '┼' | '┤' | '└' | '┴' | '┘' | '─'))
+}
+
+#[cfg(test)]
+fn render_markdown_table_with_tabled(source: &str) -> Option<String> {
+    let source_lines: Vec<&str> = source.lines().collect();
+    let mut lines = Vec::new();
+    try_render_table(&source_lines, &Theme::default(), &mut lines)?;
+    Some(
+        lines
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
 }
 
 fn render_code_block(code_lines: &[String], lang: &str, theme: &Theme) -> Vec<Line<'static>> {
@@ -774,5 +762,35 @@ done.";
         let rendered: Vec<String> = text.lines.iter().map(Line::to_string).collect();
         assert_eq!(rendered.len(), 1);
         assert_eq!(rendered[0], "| just | one | line |");
+    }
+
+    #[test]
+    fn tabled_dependency_is_used_for_markdown_tables() {
+        let source = "\
+| Name | Age |
+|------|-----|
+| Ada  | 36  |";
+        let rendered = render_markdown_table_with_tabled(source).expect("table should render");
+
+        assert!(rendered.contains('┌'));
+        assert!(rendered.contains("Ada"));
+    }
+
+    #[test]
+    fn tabled_table_preserves_inline_formatting_in_cells() {
+        let source = "\
+| Name | Note |
+|------|------|
+| Ada  | **bold** |";
+        let text = render(source, &t());
+
+        let data_row = text
+            .lines
+            .iter()
+            .find(|line| line.to_string().contains("bold"))
+            .expect("table data row should render");
+        assert!(data_row.spans.iter().any(|span| {
+            span.content.as_ref() == "bold" && span.style.add_modifier.contains(Modifier::BOLD)
+        }));
     }
 }
