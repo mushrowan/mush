@@ -637,12 +637,22 @@ fn shift_later_slots(app: &mut App, cutoff: usize, delta: isize) {
 
 /// shared text editing bindings (cursor movement, deletion, character input)
 fn handle_editing(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
+    if app
+        .keymap
+        .matches(crate::keybinds::Action::DeleteWordBackward, key)
+    {
+        app.input.delete_word_backward();
+        return None;
+    }
+    if app
+        .keymap
+        .matches(crate::keybinds::Action::DeleteWordForward, key)
+    {
+        app.input.delete_word_forward();
+        return None;
+    }
+
     match (key.modifiers, key.code) {
-        // word deletion
-        (KeyModifiers::CONTROL, KeyCode::Backspace)
-        | (KeyModifiers::ALT, KeyCode::Backspace)
-        | (KeyModifiers::CONTROL, KeyCode::Char('w')) => app.input.delete_word_backward(),
-        (KeyModifiers::ALT, KeyCode::Char('d')) => app.input.delete_word_forward(),
         (_, KeyCode::Backspace) => app.input.backspace(),
         (_, KeyCode::Delete) => app.input.delete(),
 
@@ -2072,6 +2082,27 @@ mod tests {
         app.input.text = "hello world".into();
         app.input.cursor = 11;
         handle_key(&mut app, ctrl(KeyCode::Char('w')));
+        assert_eq!(app.input.text, "hello ");
+    }
+
+    #[test]
+    fn configured_word_delete_binding_is_used() {
+        use std::collections::HashMap;
+
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        let raw = HashMap::from([(
+            "delete_word_backward".to_string(),
+            crate::keybinds::BindingSource::One("alt+q".into()),
+        )]);
+        app.keymap.override_from(&raw);
+        app.input.text = "hello world".into();
+        app.input.cursor = 11;
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::ALT),
+        );
+
         assert_eq!(app.input.text, "hello ");
     }
 

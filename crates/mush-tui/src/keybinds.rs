@@ -59,6 +59,11 @@ pub enum Action {
     /// jump the message log to the bottom without aborting or
     /// otherwise affecting the stream. default binding: `shift-end`
     JumpToBottom,
+    /// delete the word before the cursor. default bindings:
+    /// `ctrl-backspace`, `alt-backspace`, `ctrl-w`
+    DeleteWordBackward,
+    /// delete the word after the cursor. default binding: `alt-d`
+    DeleteWordForward,
 }
 
 impl Action {
@@ -72,6 +77,8 @@ impl Action {
             Self::EnterSearch => "enter_search",
             Self::EnterScroll => "enter_scroll",
             Self::JumpToBottom => "jump_to_bottom",
+            Self::DeleteWordBackward => "delete_word_backward",
+            Self::DeleteWordForward => "delete_word_forward",
         }
     }
 
@@ -84,6 +91,8 @@ impl Action {
         Self::EnterSearch,
         Self::EnterScroll,
         Self::JumpToBottom,
+        Self::DeleteWordBackward,
+        Self::DeleteWordForward,
     ];
 }
 
@@ -240,6 +249,20 @@ impl Default for KeyMap {
             )),
         );
 
+        bindings.insert(
+            Action::DeleteWordBackward,
+            Binding(vec![
+                KeyCombination::new(KeyCode::Backspace, KeyModifiers::CONTROL),
+                KeyCombination::new(KeyCode::Backspace, KeyModifiers::ALT),
+                KeyCombination::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+            ]),
+        );
+
+        bindings.insert(
+            Action::DeleteWordForward,
+            Binding::single(KeyCombination::new(KeyCode::Char('d'), KeyModifiers::ALT)),
+        );
+
         Self { bindings }
     }
 }
@@ -331,6 +354,23 @@ mod tests {
         let ctrl_s = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
         assert!(map.matches(Action::EnterSearch, ctrl_f));
         assert!(map.matches(Action::EnterScroll, ctrl_s));
+    }
+
+    #[test]
+    fn default_keymap_has_word_deletion_bindings() {
+        let map = KeyMap::default();
+        assert!(map.matches(
+            Action::DeleteWordBackward,
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL)
+        ));
+        assert!(map.matches(
+            Action::DeleteWordBackward,
+            KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)
+        ));
+        assert!(map.matches(
+            Action::DeleteWordForward,
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::ALT)
+        ));
     }
 
     #[test]
