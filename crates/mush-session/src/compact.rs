@@ -47,6 +47,50 @@ pub struct CompactionResult {
     pub summarised_count: usize,
     /// the summary text that was generated
     pub summary: String,
+    /// diagnostic information about LLM compaction retries and fallback
+    pub diagnostics: CompactionDiagnostics,
+}
+
+/// diagnostic information from an LLM compaction attempt.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct CompactionDiagnostics {
+    /// model that generated or attempted the summary
+    pub model_id: String,
+    /// number of retry attempts after the initial request
+    pub retries: u32,
+    /// number of oldest messages dropped from the summary request to
+    /// make a too-large compaction prompt fit the model context window
+    pub trimmed_messages: usize,
+    /// fallback reason when LLM summarisation failed
+    pub fallback_reason: Option<String>,
+}
+
+impl CompactionDiagnostics {
+    #[must_use]
+    pub fn status_note(&self) -> Option<String> {
+        if let Some(reason) = &self.fallback_reason {
+            return Some(format!("compaction fallback: {reason}"));
+        }
+        if self.trimmed_messages > 0 && self.retries > 0 {
+            return Some(format!(
+                "compaction recovered after trimming {} messages and {} retries",
+                self.trimmed_messages, self.retries
+            ));
+        }
+        if self.trimmed_messages > 0 {
+            return Some(format!(
+                "compaction recovered after trimming {} messages",
+                self.trimmed_messages
+            ));
+        }
+        if self.retries > 0 {
+            return Some(format!(
+                "compaction recovered after {} retries",
+                self.retries
+            ));
+        }
+        None
+    }
 }
 
 /// estimate token count for a message list (rough: chars / CHARS_PER_TOKEN)
@@ -296,6 +340,7 @@ pub fn compact_with_summary(
             summarised_count: 0,
             summary: String::new(),
             messages,
+            diagnostics: CompactionDiagnostics::default(),
         };
     }
 
@@ -314,6 +359,7 @@ pub fn compact_with_summary(
             summarised_count: 0,
             summary: String::new(),
             messages,
+            diagnostics: CompactionDiagnostics::default(),
         };
     };
     let kept = messages[split_at..].to_vec();
@@ -333,6 +379,7 @@ pub fn compact_with_summary(
         summarised_count: split_at,
         summary: summary.to_string(),
         messages: result,
+        diagnostics: CompactionDiagnostics::default(),
     }
 }
 
@@ -486,6 +533,10 @@ pub async fn llm_compact(
             summarised_count: 0,
             summary: String::new(),
             messages,
+            diagnostics: CompactionDiagnostics {
+                model_id: model.id.to_string(),
+                ..CompactionDiagnostics::default()
+            },
         };
     }
 
@@ -495,34 +546,45 @@ pub async fn llm_compact(
 
     let compact_options = compaction_stream_options(model, options);
     let mut old_start = 0;
+    let mut diagnostics = CompactionDiagnostics {
+        model_id: model.id.to_string(),
+        ..CompactionDiagnostics::default()
+    };
     let summary = loop {
         let old_slice = &old_messages[old_start..];
         let context = compaction_context(old_slice, recent_messages);
 
         match call_for_text(registry, model, &context, &compact_options).await {
-            Ok(text) => {
+            Ok(outcome) => {
+                diagnostics.retries += outcome.retries;
                 tracing::info!(
-                    chars = text.len(),
+                    chars = outcome.text.len(),
                     dropped_messages = old_start,
                     "LLM compaction succeeded"
                 );
-                break text;
+                break outcome.text;
             }
-            Err(error) if error.is_context_overflow() && old_slice.len() > 1 => {
+            Err(error) if error.failure.is_context_overflow() && old_slice.len() > 1 => {
+                diagnostics.retries += error.retries;
                 let dropped = (old_slice.len() / 4).max(1);
                 old_start += dropped;
-                tracing::warn!(%error, dropped, total_dropped = old_start, "compaction request too large, trimming oldest summary input and retrying");
+                diagnostics.trimmed_messages = old_start;
+                tracing::warn!(error = %error.failure, dropped, total_dropped = old_start, "compaction request too large, trimming oldest summary input and retrying");
             }
             Err(error) => {
-                tracing::warn!(%error, "LLM compaction failed, using structured fallback");
+                diagnostics.retries += error.retries;
+                diagnostics.fallback_reason = Some(error.failure.to_string());
+                tracing::warn!(error = %error.failure, "LLM compaction failed, using structured fallback");
                 // fallback: structured dump (no LLM)
                 let prompt = build_compaction_prompt(old_messages);
-                break fallback_summary_from_prompt(&prompt, &error);
+                break fallback_summary_from_prompt(&prompt, &error.failure);
             }
         }
     };
 
-    compact_with_summary(messages, &summary, keep_recent)
+    let mut result = compact_with_summary(messages, &summary, keep_recent);
+    result.diagnostics = diagnostics;
+    result
 }
 
 fn compaction_context(old_messages: &[Message], recent_messages: &[Message]) -> LlmContext {
@@ -563,7 +625,7 @@ async fn call_for_text(
     model: &Model,
     context: &LlmContext,
     options: &StreamOptions,
-) -> Result<String, CompactionFailure> {
+) -> Result<CompactionText, CompactionError> {
     let mut last_error = None;
 
     for attempt in 0..=COMPACTION_MAX_RETRIES {
@@ -582,21 +644,51 @@ async fn call_for_text(
                 last_error = Some(CompactionFailure::Request(error.to_string()));
                 continue;
             }
-            Err(error) => return Err(CompactionFailure::Request(error.to_string())),
+            Err(error) => {
+                return Err(CompactionError {
+                    failure: CompactionFailure::Request(error.to_string()),
+                    retries: attempt,
+                });
+            }
         };
 
         match collect_text(stream).await {
-            Ok(text) => return Ok(text),
+            Ok(text) => {
+                return Ok(CompactionText {
+                    text,
+                    retries: attempt,
+                });
+            }
             Err(error) if error.is_retryable() && attempt < COMPACTION_MAX_RETRIES => {
                 tracing::warn!(%error, "retryable compaction stream error");
                 last_error = Some(error);
                 continue;
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                return Err(CompactionError {
+                    failure: error,
+                    retries: attempt,
+                });
+            }
         }
     }
 
-    Err(last_error.unwrap_or(CompactionFailure::EmptyResponse))
+    Err(CompactionError {
+        failure: last_error.unwrap_or(CompactionFailure::EmptyResponse),
+        retries: COMPACTION_MAX_RETRIES,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CompactionText {
+    text: String,
+    retries: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CompactionError {
+    failure: CompactionFailure,
+    retries: u32,
 }
 
 async fn collect_text(

@@ -368,6 +368,10 @@ fn build_initial_app(tui_config: &TuiConfig, cwd: &Path) -> App {
     app.keymap = tui_config.keymap.clone();
     app.theme = tui_config.theme.clone();
     app.scroll_lines = tui_config.scroll_lines;
+    app.compaction_model_id = tui_config
+        .compaction_model
+        .as_ref()
+        .map(|(model, _)| model.id.clone());
     app.cache.seed_for_model(
         &tui_config.model,
         &tui_config.options,

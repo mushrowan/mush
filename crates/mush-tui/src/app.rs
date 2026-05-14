@@ -206,6 +206,9 @@ pub struct App {
     /// submits into the queued-message bubble instead of clobbering
     /// the input buffer
     pub compacting: bool,
+    /// model used for explicit and automatic compaction, or None when
+    /// compaction uses the active pane model
+    pub compaction_model_id: Option<ModelId>,
 }
 
 /// state captured when /login starts an oauth flow, consumed when the user
@@ -261,6 +264,7 @@ impl App {
             keymap: crate::keybinds::KeyMap::default(),
             confirm_quit_pending: false,
             compacting: false,
+            compaction_model_id: None,
         }
     }
 

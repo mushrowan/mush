@@ -345,6 +345,10 @@ fn app_from_parent(parent: &crate::pane::Pane, tui_config: &TuiConfig) -> App {
     app.interaction.show_token_counters = tui_config.show_token_counters;
     app.interaction.status_bar = tui_config.status_bar_config.clone();
     app.keymap = tui_config.keymap.clone();
+    app.compaction_model_id = tui_config
+        .compaction_model
+        .as_ref()
+        .map(|(model, _)| model.id.clone());
     app
 }
 

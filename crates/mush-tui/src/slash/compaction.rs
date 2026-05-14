@@ -36,6 +36,8 @@ pub struct CompactionTaskResult {
     pub tokens_after: usize,
     pub summarised_count: usize,
     pub before_count: usize,
+    pub model_id: String,
+    pub diagnostics: mush_session::compact::CompactionDiagnostics,
 }
 
 /// which compaction flavour produced a `CompactionTaskResult`. drives
@@ -72,8 +74,9 @@ pub fn start_compaction(
     cwd: Option<PathBuf>,
 ) -> tokio::task::JoinHandle<CompactionTaskResult> {
     let before_count = messages.len();
+    let model_id = model.id.to_string();
     tokio::spawn(async move {
-        let (compacted, tokens_before, tokens_after, summarised_count) = run_compaction(
+        let run = run_compaction(
             messages,
             &model,
             &options,
@@ -83,11 +86,13 @@ pub fn start_compaction(
         )
         .await;
         CompactionTaskResult {
-            messages: compacted,
-            tokens_before,
-            tokens_after,
-            summarised_count,
+            messages: run.messages,
+            tokens_before: run.tokens_before,
+            tokens_after: run.tokens_after,
+            summarised_count: run.summarised_count,
             before_count,
+            model_id,
+            diagnostics: run.diagnostics,
         }
     })
 }
@@ -124,10 +129,14 @@ pub fn apply_compaction_result(
     if let Some(body) = summary_body {
         app.push_system_message(crate::conversation_display::format_compaction_banner(&body));
     }
+    if let Some(note) = result.diagnostics.status_note() {
+        app.push_system_message(note);
+    }
 
     app.status = Some(match kind {
         CompactionKind::Compact => format!(
-            "compacted: {} → {} messages, ~{} → ~{} tokens ({} summarised)",
+            "compacted with {}: {} → {} messages, ~{} → ~{} tokens ({} summarised)",
+            result.model_id,
             result.before_count,
             after_count,
             result.tokens_before,
@@ -135,8 +144,12 @@ pub fn apply_compaction_result(
             result.summarised_count,
         ),
         CompactionKind::ForkCompact => format!(
-            "fork-compacted: {} → {} messages, ~{} → ~{} tokens (original preserved, /tree to navigate)",
-            result.before_count, after_count, result.tokens_before, result.tokens_after,
+            "fork-compacted with {}: {} → {} messages, ~{} → ~{} tokens (original preserved, /tree to navigate)",
+            result.model_id,
+            result.before_count,
+            after_count,
+            result.tokens_before,
+            result.tokens_after,
         ),
     });
 }
@@ -253,16 +266,27 @@ pub async fn fork_and_compact(
         format!("{label} from branch with {before} messages for compaction"),
     );
 
-    let (compacted_messages, tokens_before, tokens_after, _) =
-        run_compaction(messages, model, options, registry, lifecycle_hooks, cwd).await;
+    let run = run_compaction(messages, model, options, registry, lifecycle_hooks, cwd).await;
 
-    conversation.replace_messages(compacted_messages);
-    Some((conversation.context_len(), tokens_before, tokens_after))
+    conversation.replace_messages(run.messages);
+    Some((
+        conversation.context_len(),
+        run.tokens_before,
+        run.tokens_after,
+    ))
 }
 
 /// shared compaction + hook logic for /compact, /fork-compact, and auto-fork-compact
 ///
 /// returns (compacted_messages, tokens_before, tokens_after, summarised_count)
+pub struct RunCompactionResult {
+    pub messages: Vec<Message>,
+    pub tokens_before: usize,
+    pub tokens_after: usize,
+    pub summarised_count: usize,
+    pub diagnostics: mush_session::compact::CompactionDiagnostics,
+}
+
 pub async fn run_compaction(
     messages: Vec<Message>,
     model: &Model,
@@ -270,7 +294,7 @@ pub async fn run_compaction(
     registry: &ApiRegistry,
     lifecycle_hooks: Option<&mush_agent::LifecycleHooks>,
     cwd: Option<&std::path::Path>,
-) -> (Vec<Message>, usize, usize, usize) {
+) -> RunCompactionResult {
     use mush_session::compact;
 
     let tokens_before = compact::estimate_tokens(&messages);
@@ -305,12 +329,13 @@ pub async fn run_compaction(
     }
 
     let tokens_after = compact::estimate_tokens(&compacted);
-    (
-        compacted,
+    RunCompactionResult {
+        messages: compacted,
         tokens_before,
         tokens_after,
-        result.summarised_count,
-    )
+        summarised_count: result.summarised_count,
+        diagnostics: result.diagnostics,
+    }
 }
 
 #[cfg(test)]
@@ -533,6 +558,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn apply_compaction_result_surfaces_diagnostic_note() {
+        let mut conversation = ConversationState::from_messages(vec![
+            user_msg("question"),
+            assistant_msg("answer", 10),
+        ]);
+        let mut app = App::new(test_model().id, TokenCount::new(200_000));
+        let result = CompactionTaskResult {
+            messages: conversation.context(),
+            tokens_before: 100,
+            tokens_after: 50,
+            summarised_count: 1,
+            before_count: 2,
+            model_id: "summary-model".into(),
+            diagnostics: mush_session::compact::CompactionDiagnostics {
+                model_id: "summary-model".into(),
+                retries: 2,
+                trimmed_messages: 0,
+                fallback_reason: None,
+            },
+        };
+
+        apply_compaction_result(&mut app, &mut conversation, result, CompactionKind::Compact);
+
+        assert!(
+            app.messages
+                .iter()
+                .any(|m| m.content.contains("compaction recovered after 2 retries")),
+            "expected diagnostic system message, got: {:?}",
+            app.messages
+                .iter()
+                .map(|m| m.content.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            app.status
+                .as_deref()
+                .is_some_and(|status| status.contains("summary-model"))
+        );
+    }
+
     /// `CompactionKind::ForkCompact` must format status text that hints
     /// at the preserved original branch. without this, /fork-compact
     /// would just look like /compact in the status bar and the user
@@ -568,7 +634,7 @@ mod tests {
 
         let status = app.status.as_deref().unwrap_or_default();
         assert!(
-            status.starts_with("fork-compacted:"),
+            status.starts_with("fork-compacted with"),
             "expected fork-specific status prefix, got: {status:?}"
         );
         assert!(
@@ -637,13 +703,18 @@ mod tests {
             "the message that used to be last must still appear before the new summary"
         );
 
-        // last message must be the compaction summary banner
-        let last = app.messages.last().expect("at least one message");
-        assert_eq!(last.role, crate::app::MessageRole::System);
+        // a compaction summary banner must be appended. diagnostic notes
+        // may follow it when the summary had to fall back or retry
         assert!(
-            last.content.contains("compacted summary"),
-            "expected last message to be the summary banner, got: {:?}",
-            last.content
+            app.messages.iter().skip(display_count_before).any(|m| {
+                m.role == crate::app::MessageRole::System && m.content.contains("compacted summary")
+            }),
+            "expected appended summary banner, got: {:?}",
+            app.messages
+                .iter()
+                .skip(display_count_before)
+                .map(|m| m.content.as_str())
+                .collect::<Vec<_>>()
         );
     }
 }

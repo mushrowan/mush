@@ -363,6 +363,13 @@ fn build_debug_dump(app: &App, session_id: &str) -> String {
         app.model_id.as_str(),
         app.thinking_level
     );
+    let _ = writeln!(
+        out,
+        "compaction: {}",
+        app.compaction_model_id
+            .as_ref()
+            .map_or("same as active", |id| id.as_str())
+    );
 
     let _ = writeln!(out, "\n[messages]");
     let total = app.messages.len();
