@@ -426,9 +426,6 @@ Use this EXACT format:
 Keep each section concise. Preserve exact file paths, function names, and error messages.";
 
 const FALLBACK_SUMMARY_HEADING: &str = "## Summary of earlier conversation";
-const FALLBACK_SUMMARY_INTRO: &str =
-    "The following is a condensed summary of the conversation so far:";
-
 /// trigger compaction when context usage exceeds this percentage
 const COMPACTION_THRESHOLD: u64 = 95;
 
@@ -575,9 +572,12 @@ pub async fn llm_compact(
                 diagnostics.retries += error.retries;
                 diagnostics.fallback_reason = Some(error.failure.to_string());
                 tracing::warn!(error = %error.failure, "LLM compaction failed, using structured fallback");
-                // fallback: structured dump (no LLM)
-                let prompt = build_compaction_prompt(old_messages);
-                break fallback_summary_from_prompt(&prompt, &error.failure);
+                break fallback_summary_from_messages(
+                    old_messages,
+                    recent_messages,
+                    old_start,
+                    &error.failure,
+                );
             }
         }
     };
@@ -603,13 +603,198 @@ fn compaction_context(old_messages: &[Message], recent_messages: &[Message]) -> 
     }
 }
 
-fn fallback_summary_from_prompt(prompt: &str, error: &CompactionFailure) -> String {
-    format!(
+fn fallback_summary_from_messages(
+    old_messages: &[Message],
+    recent_messages: &[Message],
+    dropped_messages: usize,
+    error: &CompactionFailure,
+) -> String {
+    let mut out = format!(
         "{FALLBACK_SUMMARY_HEADING}\n\n\
          ## Compaction fallback reason\n\n\
-         LLM summarisation failed: {error}\n\n\
-         {FALLBACK_SUMMARY_INTRO}\n\n{prompt}"
-    )
+         LLM summarisation failed: {error}\n"
+    );
+
+    if dropped_messages > 0 {
+        out.push_str(&format!(
+            "\nThe LLM compaction request also had to drop the oldest {dropped_messages} messages before falling back.\n"
+        ));
+    }
+
+    let prior_summaries = fallback_prior_summaries(old_messages);
+    if !prior_summaries.is_empty() {
+        out.push_str("\n## Prior summaries\n\n");
+        for summary in prior_summaries {
+            out.push_str(&format!("- {}\n", truncate_with_ellipsis(&summary, 500)));
+        }
+    }
+
+    let user_requests = fallback_recent_user_requests(old_messages, recent_messages, 8);
+    if !user_requests.is_empty() {
+        out.push_str("\n## Recent user requests\n\n");
+        for request in user_requests {
+            out.push_str(&format!("- {request}\n"));
+        }
+    }
+
+    let assistant_notes = fallback_recent_assistant_notes(old_messages, 8);
+    if !assistant_notes.is_empty() {
+        out.push_str("\n## Recent assistant notes\n\n");
+        for note in assistant_notes {
+            out.push_str(&format!("- {note}\n"));
+        }
+    }
+
+    let tool_activity = fallback_recent_tool_activity(old_messages, recent_messages, 12);
+    if !tool_activity.is_empty() {
+        out.push_str("\n## Tool and file activity\n\n");
+        for activity in tool_activity {
+            out.push_str(&format!("- {activity}\n"));
+        }
+    }
+
+    if !recent_messages.is_empty() {
+        out.push_str("\n## Live recent context kept verbatim\n\n");
+        out.push_str("The newest messages were not summarised because they remain in the live conversation after this summary.\n");
+    }
+
+    out.push_str("\n## Raw compacted-message appendix\n\n");
+    out.push_str("This appendix is kept as a safety net because LLM summarisation failed.\n\n");
+    out.push_str(&build_compaction_prompt(old_messages));
+    out
+}
+
+fn fallback_prior_summaries(messages: &[Message]) -> Vec<String> {
+    messages
+        .iter()
+        .filter_map(|message| match message {
+            Message::User(user) => {
+                let text = user.text();
+                text.strip_prefix(COMPACTION_SUMMARY_PREFIX)
+                    .map(str::trim)
+                    .filter(|summary| !summary.is_empty())
+                    .map(str::to_string)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn fallback_recent_user_requests(
+    old_messages: &[Message],
+    recent_messages: &[Message],
+    limit: usize,
+) -> Vec<String> {
+    old_messages
+        .iter()
+        .chain(recent_messages.iter())
+        .rev()
+        .filter_map(|message| match message {
+            Message::User(user) => {
+                let text = user.text();
+                if text.starts_with(COMPACTION_SUMMARY_PREFIX) {
+                    None
+                } else {
+                    Some(truncate_with_ellipsis(&text, 240))
+                }
+            }
+            _ => None,
+        })
+        .take(limit)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
+}
+
+fn fallback_recent_assistant_notes(messages: &[Message], limit: usize) -> Vec<String> {
+    messages
+        .iter()
+        .rev()
+        .filter_map(|message| match message {
+            Message::Assistant(assistant) => assistant_text(assistant)
+                .filter(|text| !text.trim().is_empty())
+                .map(|text| truncate_with_ellipsis(&text, 240)),
+            _ => None,
+        })
+        .take(limit)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
+}
+
+fn fallback_recent_tool_activity(
+    old_messages: &[Message],
+    recent_messages: &[Message],
+    limit: usize,
+) -> Vec<String> {
+    old_messages
+        .iter()
+        .chain(recent_messages.iter())
+        .rev()
+        .filter_map(|message| match message {
+            Message::Assistant(assistant) => {
+                let tools = assistant_tool_names(assistant);
+                (!tools.is_empty())
+                    .then(|| format!("assistant requested tools: {}", tools.join(", ")))
+            }
+            Message::ToolResult(result) => {
+                let status = if result.outcome.is_error() {
+                    "error"
+                } else {
+                    "ok"
+                };
+                let text = tool_result_text(result);
+                Some(format!(
+                    "{} result ({status}): {}",
+                    result.tool_name,
+                    truncate_with_ellipsis(&text, 180)
+                ))
+            }
+            Message::User(_) => None,
+        })
+        .take(limit)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
+}
+
+fn assistant_text(assistant: &AssistantMessage) -> Option<String> {
+    let text = assistant
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            AssistantContentPart::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!text.is_empty()).then_some(text)
+}
+
+fn assistant_tool_names(assistant: &AssistantMessage) -> Vec<&str> {
+    assistant
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            AssistantContentPart::ToolCall(tool) => Some(tool.name.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn tool_result_text(result: &ToolResultMessage) -> String {
+    result
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            ToolResultContentPart::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn compaction_stream_options(model: &Model, options: &StreamOptions) -> StreamOptions {
@@ -1180,6 +1365,45 @@ mod tests {
             "fallback should preserve the provider error: {}",
             result.summary
         );
+    }
+
+    #[tokio::test]
+    async fn llm_compact_fallback_keeps_recent_context_first() {
+        let registry = ApiRegistry::new();
+        let model = test_model();
+        let options = StreamOptions::default();
+        let mut msgs: Vec<Message> = (0..12)
+            .map(|i| {
+                if i % 2 == 0 {
+                    user_msg(&format!("older request {i}"))
+                } else {
+                    assistant_msg(&format!("older answer {i}"))
+                }
+            })
+            .collect();
+        msgs.push(user_msg("important recent task: preserve this"));
+        msgs.push(assistant_msg("recent decision: keep the new parser"));
+
+        let result = llm_compact(msgs, &registry, &model, &options, Some(2)).await;
+
+        assert!(result.summary.contains("## Recent user requests"));
+        assert!(
+            result
+                .summary
+                .contains("important recent task: preserve this")
+        );
+        assert!(
+            result
+                .summary
+                .contains("## Live recent context kept verbatim")
+        );
+        assert!(result.summary.contains("## Raw compacted-message appendix"));
+        let recent_section = result.summary.find("## Recent user requests").unwrap();
+        let raw_appendix = result
+            .summary
+            .find("## Raw compacted-message appendix")
+            .unwrap();
+        assert!(recent_section < raw_appendix);
     }
 
     #[tokio::test]
