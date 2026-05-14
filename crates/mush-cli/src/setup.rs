@@ -265,6 +265,10 @@ async fn init_compaction_model(
         model.clone()
     });
     let mut compact_opts = options.clone();
+    if m.provider != model.provider {
+        compact_opts.api_key = None;
+        compact_opts.account_id = None;
+    }
     resolve_api_key(&mut compact_opts, &m, cfg).await;
     Some((m, compact_opts))
 }
@@ -936,6 +940,41 @@ mod tests {
             Some(ThinkingLevel::Medium),
             "per-model fallback should outrank model.default_thinking_level"
         );
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "env mutation tests need serial access while async auth resolves env vars"
+    )]
+    async fn init_compaction_model_resolves_auth_for_compaction_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let active_model = mush_ai::discovery::resolve_model_by_id("claude-opus-4-7").unwrap();
+        let active_options = StreamOptions {
+            api_key: Some(ApiKey::new("sk-ant-oat-active-token").unwrap()),
+            account_id: Some("anthropic-account".into()),
+            ..StreamOptions::default()
+        };
+
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = EnvGuard::set(&[
+            ("MUSH_CONFIG_DIR", Some(path)),
+            ("MUSH_DATA_DIR", Some(path)),
+            ("ANTHROPIC_API_KEY", None),
+            ("ANTHROPIC_OAUTH_TOKEN", Some("sk-ant-oat-active-token")),
+            ("OPENAI_CODEX_API_KEY", Some("codex-compaction-token")),
+        ]);
+        let cfg: config::Config = toml::from_str(r#"compaction_model = "gpt-5.4""#).unwrap();
+        let (_, compact_options) = init_compaction_model(&cfg, &active_model, &active_options)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            compact_options.api_key,
+            Some(ApiKey::new("codex-compaction-token").unwrap())
+        );
+        assert_eq!(compact_options.account_id, None);
     }
 
     #[test]

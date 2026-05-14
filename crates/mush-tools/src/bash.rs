@@ -432,6 +432,7 @@ impl BashTool {
             status: crate::background::JobStatus::Running,
             stdout: String::new(),
             stderr: String::new(),
+            output_consumed: false,
             started: std::time::Instant::now(),
             finished: None,
             cwd: self.cwd.clone(),

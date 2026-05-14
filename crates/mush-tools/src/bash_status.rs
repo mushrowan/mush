@@ -94,7 +94,9 @@ impl AgentTool for BashStatusTool {
         loop {
             let state = handle.read().await;
             if !state.status.is_running() {
-                return format_job_result(&state);
+                drop(state);
+                let mut state = handle.write().await;
+                return format_job_result(&mut state);
             }
             drop(state);
 
@@ -115,19 +117,24 @@ impl AgentTool for BashStatusTool {
     }
 }
 
-fn format_job_result(state: &crate::background::JobState) -> ToolResult {
+fn format_job_result(state: &mut crate::background::JobState) -> ToolResult {
     let mut output = String::new();
-    if !state.stdout.is_empty() {
-        output.push_str(&state.stdout);
-    }
-    if !state.stderr.is_empty() {
-        if !output.is_empty() {
-            output.push('\n');
+    if state.output_consumed {
+        output = "(output already consumed by an earlier bash_status poll)".into();
+    } else {
+        if !state.stdout.is_empty() {
+            output.push_str(&state.stdout);
         }
-        output.push_str(&state.stderr);
-    }
-    if output.is_empty() {
-        output = "(no output)".into();
+        if !state.stderr.is_empty() {
+            if !output.is_empty() {
+                output.push('\n');
+            }
+            output.push_str(&state.stderr);
+        }
+        if output.is_empty() {
+            output = "(no output)".into();
+        }
+        state.output_consumed = true;
     }
 
     let (status, exit_code) = match &state.status {
@@ -249,6 +256,7 @@ mod tests {
                 status: JobStatus::Done { exit_code: 0 },
                 stdout: "hello\n".into(),
                 stderr: String::new(),
+                output_consumed: false,
                 started: std::time::Instant::now(),
                 finished: Some(std::time::Instant::now()),
                 cwd: std::sync::Arc::from(std::path::Path::new(".")),
@@ -270,6 +278,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completed_job_output_is_consumed_after_first_poll() {
+        let registry = make_registry();
+        registry
+            .insert(crate::background::JobState {
+                id: "bg_0".into(),
+                command: "echo hello".into(),
+                status: JobStatus::Done { exit_code: 0 },
+                stdout: "hello\n".into(),
+                stderr: String::new(),
+                output_consumed: false,
+                started: std::time::Instant::now(),
+                finished: Some(std::time::Instant::now()),
+                cwd: std::sync::Arc::from(std::path::Path::new(".")),
+            })
+            .await;
+
+        let tool = BashStatusTool::new(registry);
+        let first = tool
+            .execute(serde_json::json!({"job_id": "bg_0", "timeout": 0}))
+            .await;
+        let second = tool
+            .execute(serde_json::json!({"job_id": "bg_0", "timeout": 0}))
+            .await;
+        let first_text = extract_text(&first);
+        let second_text = extract_text(&second);
+
+        assert!(
+            first_text.contains("hello"),
+            "first poll should include output: {first_text}"
+        );
+        assert!(
+            !second_text.contains("hello"),
+            "second poll should not replay consumed output: {second_text}"
+        );
+        assert!(
+            second_text.contains("already consumed"),
+            "second poll should explain the missing output: {second_text}"
+        );
+    }
+
+    #[tokio::test]
     async fn status_running_job_returns_progress() {
         let registry = make_registry();
         registry
@@ -279,6 +328,7 @@ mod tests {
                 status: JobStatus::Running,
                 stdout: "partial output\n".into(),
                 stderr: String::new(),
+                output_consumed: false,
                 started: std::time::Instant::now(),
                 finished: None,
                 cwd: std::sync::Arc::from(std::path::Path::new(".")),
@@ -316,6 +366,7 @@ mod tests {
                 status: JobStatus::Running,
                 stdout: String::new(),
                 stderr: String::new(),
+                output_consumed: false,
                 started: std::time::Instant::now(),
                 finished: None,
                 cwd: std::sync::Arc::from(std::path::Path::new(".")),
@@ -349,6 +400,7 @@ mod tests {
                 status: JobStatus::Failed("spawn failed".into()),
                 stdout: String::new(),
                 stderr: String::new(),
+                output_consumed: false,
                 started: std::time::Instant::now(),
                 finished: None,
                 cwd: std::sync::Arc::from(std::path::Path::new(".")),
@@ -381,6 +433,7 @@ mod tests {
                 status: JobStatus::TimedOut,
                 stdout: String::new(),
                 stderr: String::new(),
+                output_consumed: false,
                 started,
                 finished: Some(finished),
                 cwd: std::sync::Arc::from(std::path::Path::new(".")),
