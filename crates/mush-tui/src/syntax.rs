@@ -145,4 +145,16 @@ mod tests {
         let theme = Theme::dark();
         assert!(highlight_line("x = 1", "not-a-real-lang", &theme).is_none());
     }
+
+    #[test]
+    fn highlight_line_styles_shell_keywords() {
+        let theme = Theme::dark();
+        let spans = highlight_line("for file in *.rs; do echo $file; done", "sh", &theme)
+            .expect("should highlight shell");
+        let styles: std::collections::HashSet<_> = spans.iter().map(|s| s.style).collect();
+        assert!(
+            styles.len() >= 2,
+            "expected multiple styles for shell code, got {styles:?}"
+        );
+    }
 }

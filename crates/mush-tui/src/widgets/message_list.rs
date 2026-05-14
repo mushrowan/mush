@@ -1515,7 +1515,22 @@ fn render_single_tool_box(
 
     // content: summary line
     let inner = width.saturating_sub(4); // │ + space + space + │
-    push_box_content_line(&tc.summary, inner, border, dim, &indent, lines);
+    if let Some(lang) = tool_summary_language(tc) {
+        push_highlighted_box_line(
+            &tc.summary,
+            inner,
+            &ToolHighlightCtx {
+                border,
+                fallback_style: dim,
+                indent: indent.clone(),
+                lang,
+                theme,
+            },
+            lines,
+        );
+    } else {
+        push_box_content_line(&tc.summary, inner, border, dim, &indent, lines);
+    }
 
     // content: output preview with diff colouring / syntax highlighting
     if let Some(ref output) = tc.output_preview {
@@ -1556,6 +1571,7 @@ fn render_single_tool_box(
             // so bash / cargo / jj output doesn't render as garbage escape
             // sequences. fall back to the old plain path for output that
             // contains no escapes at all
+            let lang = tool_output_language(tc);
             for text_line in output.lines() {
                 let base_style = diff_line_style(text_line, theme);
                 if text_line.contains('\x1b') {
@@ -1567,6 +1583,19 @@ fn render_single_tool_box(
                         line_spans.push(Span::styled(" │", border));
                         lines.push(Line::from(line_spans));
                     }
+                } else if let Some(lang) = lang {
+                    push_highlighted_box_line(
+                        text_line,
+                        inner,
+                        &ToolHighlightCtx {
+                            border,
+                            fallback_style: base_style,
+                            indent: indent.clone(),
+                            lang,
+                            theme,
+                        },
+                        lines,
+                    );
                 } else {
                     push_box_content_line(text_line, inner, border, base_style, &indent, lines);
                 }
@@ -1581,6 +1610,23 @@ fn render_single_tool_box(
         Span::styled("─".repeat(width.saturating_sub(2)), border),
         Span::styled("┘", border),
     ]));
+}
+
+fn tool_summary_language(tc: &DisplayToolCall) -> Option<&'static str> {
+    match tc.name.to_lowercase().replace('_', "").as_str() {
+        "bash" => Some("sh"),
+        "write" | "edit" | "read" => crate::syntax::lang_from_path(&tc.summary),
+        _ => None,
+    }
+}
+
+fn tool_output_language(tc: &DisplayToolCall) -> Option<&'static str> {
+    match tc.name.to_lowercase().replace('_', "").as_str() {
+        "bash" => Some("sh"),
+        "write" | "applypatch" => crate::syntax::lang_from_path(&tc.summary),
+        "grep" | "find" | "glob" | "ls" | "repomap" | "websearch" | "webfetch" => Some("text"),
+        _ => None,
+    }
 }
 
 /// render parallel tools side-by-side in a shared bordered box
@@ -1726,6 +1772,52 @@ fn push_box_content_line<'a>(
             Span::styled(" │", border),
         ]));
     }
+}
+
+struct ToolHighlightCtx<'a> {
+    border: Style,
+    fallback_style: Style,
+    indent: Span<'static>,
+    lang: &'a str,
+    theme: &'a Theme,
+}
+
+fn push_highlighted_box_line<'a>(
+    text: &str,
+    inner_width: usize,
+    ctx: &ToolHighlightCtx<'_>,
+    lines: &mut Vec<Line<'a>>,
+) {
+    if unicode_width::UnicodeWidthStr::width(text) > inner_width {
+        push_box_content_line(
+            text,
+            inner_width,
+            ctx.border,
+            ctx.fallback_style,
+            &ctx.indent,
+            lines,
+        );
+        return;
+    }
+
+    let Some(spans) = crate::syntax::highlight_line(text, ctx.lang, ctx.theme) else {
+        push_box_content_line(
+            text,
+            inner_width,
+            ctx.border,
+            ctx.fallback_style,
+            &ctx.indent,
+            lines,
+        );
+        return;
+    };
+    let fitted = super::diff::fit_spans(spans, inner_width, ctx.fallback_style);
+    lines.push(Line::from({
+        let mut line_spans = vec![ctx.indent.clone(), Span::styled("│ ", ctx.border)];
+        line_spans.extend(fitted);
+        line_spans.push(Span::styled(" │", ctx.border));
+        line_spans
+    }));
 }
 
 /// parse a read-tool output line of the form `L<n>: <content>`. returns
@@ -3447,6 +3539,84 @@ mod tests {
         assert!(
             fgs.len() >= 2,
             "expected multiple syntect fgs on highlighted read row, got {fgs:?}"
+        );
+    }
+
+    #[test]
+    fn bash_tool_summary_is_syntax_highlighted() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.messages.push(DisplayMessage {
+            tool_calls: vec![crate::app::DisplayToolCall {
+                name: "bash".into(),
+                summary: "for file in *.rs; do echo $file; done".into(),
+                status: ToolCallStatus::Done,
+                output_preview: Some("done".into()),
+                image_data: None,
+                batch: 1,
+            }],
+            ..DisplayMessage::new(MessageRole::Assistant, "")
+        });
+        let buf = render_app(&app, 120, 12);
+
+        let target_row = (0..buf.area.height)
+            .find(|&y| {
+                let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+                row.contains("for file")
+            })
+            .expect("no row containing bash command in rendered output");
+
+        let mut fgs = std::collections::HashSet::new();
+        for x in 0..buf.area.width {
+            let cell = &buf[(x, target_row)];
+            let sym = cell.symbol();
+            if sym.trim().is_empty() || matches!(sym, "│" | "┌" | "┐" | "└" | "┘" | "─")
+            {
+                continue;
+            }
+            fgs.insert(cell.fg);
+        }
+        assert!(
+            fgs.len() >= 2,
+            "expected multiple syntect fgs on highlighted bash row, got {fgs:?}"
+        );
+    }
+
+    #[test]
+    fn bash_tool_output_is_syntax_highlighted_when_plain() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.messages.push(DisplayMessage {
+            tool_calls: vec![crate::app::DisplayToolCall {
+                name: "bash".into(),
+                summary: "script".into(),
+                status: ToolCallStatus::Done,
+                output_preview: Some("for file in *.rs; do echo $file; done".into()),
+                image_data: None,
+                batch: 1,
+            }],
+            ..DisplayMessage::new(MessageRole::Assistant, "")
+        });
+        let buf = render_app(&app, 120, 12);
+
+        let target_row = (0..buf.area.height)
+            .find(|&y| {
+                let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+                row.contains("for file")
+            })
+            .expect("no row containing bash output in rendered output");
+
+        let mut fgs = std::collections::HashSet::new();
+        for x in 0..buf.area.width {
+            let cell = &buf[(x, target_row)];
+            let sym = cell.symbol();
+            if sym.trim().is_empty() || matches!(sym, "│" | "┌" | "┐" | "└" | "┘" | "─")
+            {
+                continue;
+            }
+            fgs.insert(cell.fg);
+        }
+        assert!(
+            fgs.len() >= 2,
+            "expected multiple syntect fgs on highlighted bash output row, got {fgs:?}"
         );
     }
 
