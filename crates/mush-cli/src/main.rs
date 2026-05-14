@@ -500,6 +500,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
     let provider_api_keys = setup.cfg.api_keys.to_map();
     let (favourite_models, favourites_locked) =
         config::resolve_favourites(&setup.cfg.favourite_models, config::load_favourite_models());
+    let startup_discovery_client = setup.http_client.clone();
 
     let tui_config = TuiConfig {
         model: setup.model,
@@ -627,25 +628,28 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         ),
     };
 
-    // fire-and-forget background discovery refresh on startup. silently
-    // populates ~/.local/share/mush/discovered-models.json so the next
-    // launch sees newly released models without waiting for `/refresh-models`.
-    {
-        let client = tui_config.http_client.clone().unwrap_or_default();
-        tokio::spawn(async move {
-            let summary = mush_ai::discovery::refresh_and_save(client).await;
-            tracing::info!(
-                target: "mush::discovery",
-                models = summary.total_models(),
-                "{}",
-                summary.one_line()
-            );
-        });
-    }
+    let (discovery_tx, discovery_rx) = std::sync::mpsc::channel();
+    tokio::spawn(async move {
+        let summary = mush_ai::discovery::refresh_and_save(startup_discovery_client).await;
+        tracing::info!(
+            target: "mush::discovery",
+            models = summary.total_models(),
+            "{}",
+            summary.one_line()
+        );
+        let _ = discovery_tx.send(mush_tui::runner::DiscoveryUpdate::Refreshed(
+            summary.one_line(),
+        ));
+    });
 
-    mush_tui::run_tui(tui_config, &setup.tools, &setup.registry)
-        .await
-        .map_err(|e| eyre!("TUI error: {e}"))?;
+    mush_tui::run_tui(
+        tui_config,
+        &setup.tools,
+        &setup.registry,
+        Some(discovery_rx),
+    )
+    .await
+    .map_err(|e| eyre!("TUI error: {e}"))?;
 
     Ok(())
 }

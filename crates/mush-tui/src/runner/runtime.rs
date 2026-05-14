@@ -64,6 +64,10 @@ pub(super) struct RunnerServices {
 /// has its own internal cache interval for actual HTTP requests)
 const USAGE_POLL_TICK: std::time::Duration = std::time::Duration::from_secs(60);
 
+pub enum DiscoveryUpdate {
+    Refreshed(String),
+}
+
 pub(super) struct RunnerRuntime {
     pub cwd: PathBuf,
     pub pane_mgr: PaneManager,
@@ -80,6 +84,7 @@ pub(super) struct RunnerRuntime {
     last_usage_poll: std::time::Instant,
     _config_watcher: Option<RecommendedWatcher>,
     config_rx: Option<mpsc::Receiver<crate::theme::Theme>>,
+    discovery_rx: Option<mpsc::Receiver<DiscoveryUpdate>>,
 }
 
 impl RunnerRuntime {
@@ -144,6 +149,7 @@ impl RunnerRuntime {
                 last_usage_poll: std::time::Instant::now() - USAGE_POLL_TICK,
                 _config_watcher,
                 config_rx,
+                discovery_rx: None,
             },
             RunnerServices {
                 message_bus,
@@ -164,6 +170,33 @@ impl RunnerRuntime {
             }
             self.pane_mgr.focused_mut().app.status = Some("config reloaded".into());
         }
+    }
+
+    pub(super) fn install_discovery_updates(&mut self, rx: mpsc::Receiver<DiscoveryUpdate>) {
+        self.discovery_rx = Some(rx);
+    }
+
+    pub(super) fn apply_discovery_updates(&mut self) -> bool {
+        let Some(rx) = self.discovery_rx.as_ref() else {
+            return false;
+        };
+
+        let mut changed = false;
+        while let Ok(update) = rx.try_recv() {
+            match update {
+                DiscoveryUpdate::Refreshed(line) => {
+                    for pane in self.pane_mgr.panes_mut() {
+                        crate::input::reload_model_completions(&mut pane.app);
+                    }
+                    self.pane_mgr
+                        .focused_mut()
+                        .app
+                        .push_system_message(format!("model discovery: {line}"));
+                    changed = true;
+                }
+            }
+        }
+        changed
     }
 
     pub(super) fn focused_should_quit(&self) -> bool {
@@ -393,6 +426,7 @@ fn replay_initial_messages(app: &mut App, initial_messages: &[Message]) -> Conve
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::mpsc;
 
     use super::*;
     use crate::runner::LastModels;
@@ -618,5 +652,30 @@ mod tests {
         assert!(pane.pending_prompt.is_none());
         assert!(!pane.app.stream.active);
         assert!(pane.app.messages.is_empty());
+    }
+
+    #[test]
+    fn apply_discovery_updates_reloads_models_and_posts_message() {
+        let mut config = test_config();
+        let (mut runtime, _) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(RunnerRuntime::new(&mut config));
+        let (tx, rx) = mpsc::channel();
+        runtime.install_discovery_updates(rx);
+
+        tx.send(DiscoveryUpdate::Refreshed(
+            "7 models from openai-codex".into(),
+        ))
+        .unwrap();
+
+        assert!(runtime.apply_discovery_updates());
+        let app = &runtime.pane_mgr.focused().app;
+        assert!(app.messages.iter().any(|m| {
+            m.content
+                .contains("model discovery: 7 models from openai-codex")
+        }));
+        assert!(!app.completion.model_completions.is_empty());
     }
 }

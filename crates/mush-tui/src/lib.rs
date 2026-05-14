@@ -43,8 +43,9 @@ pub use app_state::StatusBarConfig;
 pub use file_tracker::IsolationMode;
 pub use keybinds::{Action as KeybindAction, KeyMap, KeysConfig};
 pub use runner::{
-    LastModels, LastModelsSaver, PaneSnapshot, ReloadCallback, ReloadedContext, SessionSaver,
-    SessionSnapshot, ThinkingPrefs, ThinkingPrefsSaver, TuiConfig, canonical_dir, run_tui,
+    DiscoveryUpdate, LastModels, LastModelsSaver, PaneSnapshot, ReloadCallback, ReloadedContext,
+    SessionSaver, SessionSnapshot, ThinkingPrefs, ThinkingPrefsSaver, TuiConfig, canonical_dir,
+    run_tui,
 };
 pub use terminal_policy::{
     IMAGE_PROBE_ENV, ImageProbeMode, KEYBOARD_ENHANCEMENT_ENV, KeyboardEnhancementMode,

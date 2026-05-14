@@ -31,6 +31,7 @@ use self::input::LoopAction;
 pub use self::last_model::{LastModels, LastModelsSaver};
 use self::looping::run_loop_iteration;
 use self::render::draw_panes;
+pub use self::runtime::DiscoveryUpdate;
 use self::runtime::RunnerRuntime;
 use self::streams::{
     StreamConfig, StreamDeps, StreamState, new_agent_streams, start_pending_streams,
@@ -48,6 +49,7 @@ pub async fn run_tui(
     mut tui_config: TuiConfig,
     tools: &ToolRegistry,
     registry: &ApiRegistry,
+    startup_discovery: Option<std::sync::mpsc::Receiver<DiscoveryUpdate>>,
 ) -> io::Result<()> {
     // fail fast if we can't host a full TUI. piped stdin/stdout would
     // otherwise leak raw-mode escape sequences into the output stream,
@@ -88,6 +90,9 @@ pub async fn run_tui(
     // don't overwrite
     terminal.clear()?;
     let (mut runtime, services) = RunnerRuntime::new(&mut tui_config).await;
+    if let Some(rx) = startup_discovery {
+        runtime.install_discovery_updates(rx);
+    }
 
     // start IPC listener if we have an agent card
     let _ipc_listener = tui_config.agent_card.as_ref().and_then(|card| {
@@ -163,6 +168,7 @@ pub async fn run_tui(
         }
 
         runtime.apply_config_reload(&mut tui_config);
+        let discovery_updated = runtime.apply_discovery_updates();
         if runtime.focused_should_quit() {
             break;
         }
@@ -185,6 +191,7 @@ pub async fn run_tui(
 
         // redraw on state changes, or every ~1s so timers tick
         let should_draw = matches!(action, LoopAction::Redraw)
+            || discovery_updated
             || compaction_finished
             || last_draw.elapsed() >= std::time::Duration::from_secs(1);
         if should_draw {
