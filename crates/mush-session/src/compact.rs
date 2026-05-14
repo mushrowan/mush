@@ -372,6 +372,10 @@ Use this EXACT format:
 
 Keep each section concise. Preserve exact file paths, function names, and error messages.";
 
+const FALLBACK_SUMMARY_HEADING: &str = "## Summary of earlier conversation";
+const FALLBACK_SUMMARY_INTRO: &str =
+    "The following is a condensed summary of the conversation so far:";
+
 /// trigger compaction when context usage exceeds this percentage
 const COMPACTION_THRESHOLD: u64 = 95;
 
@@ -508,15 +512,15 @@ pub async fn llm_compact(
             tracing::warn!("LLM compaction failed, using structured fallback");
             // fallback: structured dump (no LLM)
             let prompt = build_compaction_prompt(old_messages);
-            format!(
-                "## Summary of earlier conversation\n\n\
-                 The following is a condensed summary of the conversation so far:\n\n\
-                 {prompt}"
-            )
+            fallback_summary_from_prompt(&prompt)
         }
     };
 
     compact_with_summary(messages, &summary, keep_recent)
+}
+
+fn fallback_summary_from_prompt(prompt: &str) -> String {
+    format!("{FALLBACK_SUMMARY_HEADING}\n\n{FALLBACK_SUMMARY_INTRO}\n\n{prompt}")
 }
 
 fn compaction_stream_options(model: &Model, options: &StreamOptions) -> StreamOptions {
