@@ -64,6 +64,16 @@ pub enum Action {
     DeleteWordBackward,
     /// delete the word after the cursor. default binding: `alt-d`
     DeleteWordForward,
+    /// split the current pane. default binding: `ctrl-shift-enter`
+    SplitPane,
+    /// focus the next pane. default binding: `ctrl-tab`
+    FocusNextPane,
+    /// focus the previous pane. default binding: `ctrl-shift-tab`
+    FocusPrevPane,
+    /// grow the focused pane to the right. default binding: `ctrl-shift-right`
+    ResizePaneRight,
+    /// grow the focused pane to the left. default binding: `ctrl-shift-left`
+    ResizePaneLeft,
 }
 
 impl Action {
@@ -79,6 +89,11 @@ impl Action {
             Self::JumpToBottom => "jump_to_bottom",
             Self::DeleteWordBackward => "delete_word_backward",
             Self::DeleteWordForward => "delete_word_forward",
+            Self::SplitPane => "split_pane",
+            Self::FocusNextPane => "focus_next_pane",
+            Self::FocusPrevPane => "focus_prev_pane",
+            Self::ResizePaneRight => "resize_pane_right",
+            Self::ResizePaneLeft => "resize_pane_left",
         }
     }
 
@@ -93,6 +108,11 @@ impl Action {
         Self::JumpToBottom,
         Self::DeleteWordBackward,
         Self::DeleteWordForward,
+        Self::SplitPane,
+        Self::FocusNextPane,
+        Self::FocusPrevPane,
+        Self::ResizePaneRight,
+        Self::ResizePaneLeft,
     ];
 }
 
@@ -263,6 +283,42 @@ impl Default for KeyMap {
             Binding::single(KeyCombination::new(KeyCode::Char('d'), KeyModifiers::ALT)),
         );
 
+        bindings.insert(
+            Action::SplitPane,
+            Binding::single(KeyCombination::new(
+                KeyCode::Enter,
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            )),
+        );
+        bindings.insert(
+            Action::FocusNextPane,
+            Binding::single(KeyCombination::new(KeyCode::Tab, KeyModifiers::CONTROL)),
+        );
+        bindings.insert(
+            Action::FocusPrevPane,
+            Binding(vec![
+                KeyCombination::new(KeyCode::BackTab, KeyModifiers::CONTROL),
+                KeyCombination::new(
+                    KeyCode::BackTab,
+                    KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                ),
+            ]),
+        );
+        bindings.insert(
+            Action::ResizePaneRight,
+            Binding::single(KeyCombination::new(
+                KeyCode::Right,
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            )),
+        );
+        bindings.insert(
+            Action::ResizePaneLeft,
+            Binding::single(KeyCombination::new(
+                KeyCode::Left,
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            )),
+        );
+
         Self { bindings }
     }
 }
@@ -370,6 +426,31 @@ mod tests {
         assert!(map.matches(
             Action::DeleteWordForward,
             KeyEvent::new(KeyCode::Char('d'), KeyModifiers::ALT)
+        ));
+    }
+
+    #[test]
+    fn default_keymap_has_pane_bindings() {
+        let map = KeyMap::default();
+        assert!(map.matches(
+            Action::SplitPane,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+        ));
+        assert!(map.matches(
+            Action::FocusNextPane,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::CONTROL)
+        ));
+        assert!(map.matches(
+            Action::FocusPrevPane,
+            KeyEvent::new(KeyCode::BackTab, KeyModifiers::CONTROL)
+        ));
+        assert!(map.matches(
+            Action::ResizePaneLeft,
+            KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+        ));
+        assert!(map.matches(
+            Action::ResizePaneRight,
+            KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL | KeyModifiers::SHIFT)
         ));
     }
 

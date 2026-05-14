@@ -151,7 +151,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     }
 
     // 3. pane management (works regardless of streaming state)
-    if let Some(event) = handle_pane_keys(key) {
+    if let Some(event) = handle_pane_keys(app, key) {
         return Some(event);
     }
 
@@ -214,28 +214,39 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
 }
 
 /// pane management bindings, independent of streaming state
-fn handle_pane_keys(key: KeyEvent) -> Option<AppEvent> {
+fn handle_pane_keys(app: &App, key: KeyEvent) -> Option<AppEvent> {
+    if app.keymap.matches(crate::keybinds::Action::SplitPane, key) {
+        return Some(AppEvent::SplitPane);
+    }
+    if app
+        .keymap
+        .matches(crate::keybinds::Action::FocusNextPane, key)
+    {
+        return Some(AppEvent::FocusNextPane);
+    }
+    if app
+        .keymap
+        .matches(crate::keybinds::Action::FocusPrevPane, key)
+    {
+        return Some(AppEvent::FocusPrevPane);
+    }
+    if app
+        .keymap
+        .matches(crate::keybinds::Action::ResizePaneLeft, key)
+    {
+        return Some(AppEvent::ResizePane(-4));
+    }
+    if app
+        .keymap
+        .matches(crate::keybinds::Action::ResizePaneRight, key)
+    {
+        return Some(AppEvent::ResizePane(4));
+    }
+
     match (key.modifiers, key.code) {
         (KeyModifiers::ALT, KeyCode::Char(c @ '1'..='9')) => {
             Some(AppEvent::FocusPaneByIndex((c as usize) - ('1' as usize)))
         }
-        (m, KeyCode::Enter)
-            if m.contains(KeyModifiers::CONTROL) && m.contains(KeyModifiers::SHIFT) =>
-        {
-            Some(AppEvent::SplitPane)
-        }
-        (m, KeyCode::Left)
-            if m.contains(KeyModifiers::CONTROL) && m.contains(KeyModifiers::SHIFT) =>
-        {
-            Some(AppEvent::ResizePane(-4))
-        }
-        (m, KeyCode::Right)
-            if m.contains(KeyModifiers::CONTROL) && m.contains(KeyModifiers::SHIFT) =>
-        {
-            Some(AppEvent::ResizePane(4))
-        }
-        (KeyModifiers::CONTROL, KeyCode::Tab) => Some(AppEvent::FocusNextPane),
-        (m, KeyCode::BackTab) if m.contains(KeyModifiers::CONTROL) => Some(AppEvent::FocusPrevPane),
         _ => None,
     }
 }
@@ -2104,6 +2115,22 @@ mod tests {
         );
 
         assert_eq!(app.input.text, "hello ");
+    }
+
+    #[test]
+    fn configured_pane_split_binding_is_used() {
+        use std::collections::HashMap;
+
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        let raw = HashMap::from([(
+            "split_pane".to_string(),
+            crate::keybinds::BindingSource::One("alt+enter".into()),
+        )]);
+        app.keymap.override_from(&raw);
+
+        let event = handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
+
+        assert!(matches!(event, Some(AppEvent::SplitPane)));
     }
 
     #[test]
