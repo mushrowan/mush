@@ -1525,7 +1525,13 @@ fn render_single_tool_box(
             // `tc.summary` holds the file path for edit, use it to detect a
             // syntect language so we can highlight unchanged tokens
             let lang = crate::syntax::lang_from_path(&tc.summary);
-            for row in super::diff::render_diff_with_lang(output, inner, theme, lang) {
+            for row in super::diff::render_diff_with_lang_mode(
+                output,
+                inner,
+                theme,
+                lang,
+                super::diff::DiffLayout::Inline,
+            ) {
                 let mut spans = vec![indent.clone(), Span::styled("│ ", border)];
                 spans.extend(row.spans);
                 spans.push(Span::styled(" │", border));
@@ -2592,10 +2598,10 @@ mod tests {
     }
 
     #[test]
-    fn edit_tool_renders_side_by_side_diff_when_wide() {
-        // edit tool output contains +/- diff lines. at wide widths the box
-        // should render a side-by-side column layout with `│` separating
-        // removed (left) from added (right)
+    fn edit_tool_renders_inline_diff_when_wide() {
+        // edit tool output defaults to inline even on a wide terminal. the
+        // old side-by-side threshold made small edits harder to scan by
+        // splitting the changed lines across the whole tool panel width
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.messages.push(DisplayMessage {
             tool_calls: vec![crate::app::DisplayToolCall {
@@ -2610,14 +2616,15 @@ mod tests {
         });
         let buf = render_app(&app, 120, 10);
         let content = buffer_to_string(&buf);
-        // both versions visible on the same row implies side-by-side
-        let row_with_both = content
+        let any_row_with_both = content
             .lines()
-            .find(|row| row.contains("println!(\"hello\")") && row.contains("println!(\"world\")"));
+            .any(|row| row.contains("println!(\"hello\")") && row.contains("println!(\"world\")"));
         assert!(
-            row_with_both.is_some(),
-            "expected side-by-side row with both versions, got:\n{content}"
+            !any_row_with_both,
+            "wide edit diff should render inline, not side-by-side; got:\n{content}"
         );
+        assert!(content.contains("hello"));
+        assert!(content.contains("world"));
     }
 
     #[test]

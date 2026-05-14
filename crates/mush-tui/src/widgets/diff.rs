@@ -347,8 +347,25 @@ pub fn render_diff_with_lang(
     theme: &Theme,
     lang: Option<&str>,
 ) -> Vec<Line<'static>> {
+    render_diff_with_lang_mode(text, inner_width, theme, lang, DiffLayout::Auto)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffLayout {
+    Auto,
+    Inline,
+}
+
+#[must_use]
+pub fn render_diff_with_lang_mode(
+    text: &str,
+    inner_width: usize,
+    theme: &Theme,
+    lang: Option<&str>,
+    layout: DiffLayout,
+) -> Vec<Line<'static>> {
     let events = parse_diff_lines(text);
-    if inner_width >= SIDE_BY_SIDE_MIN_WIDTH {
+    if layout == DiffLayout::Auto && inner_width >= SIDE_BY_SIDE_MIN_WIDTH {
         render_side_by_side(&events, inner_width, theme, lang)
     } else {
         render_inline(&events, inner_width, theme, lang)
