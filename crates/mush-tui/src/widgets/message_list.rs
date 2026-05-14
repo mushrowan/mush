@@ -736,7 +736,7 @@ fn render_message(
                     line_count,
                 });
             } else {
-                let md_text = render_markdown_cached(app, &msg.content);
+                let md_text = render_markdown_cached(app, &msg.content, content_width);
                 let mut indented = Vec::new();
                 for line in md_text.lines {
                     indented.extend(indent_line(line, content_width));
@@ -750,7 +750,7 @@ fn render_message(
             }
         } else {
             // block highlight active: compute fresh with style overrides
-            let md_text = render_markdown_cached(app, &msg.content);
+            let md_text = render_markdown_cached(app, &msg.content, content_width);
             for (i, line) in md_text.lines.into_iter().enumerate() {
                 let style_override = if let Some((start, end)) = highlight_range
                     && i >= start
@@ -1286,7 +1286,7 @@ fn truncate_line(s: &str, max: usize) -> String {
 }
 
 /// render markdown text to styled ratatui Text
-fn render_markdown_cached(app: &App, source: &str) -> Text<'static> {
+fn render_markdown_cached(app: &App, source: &str, width: usize) -> Text<'static> {
     if source.is_empty() {
         return Text::default();
     }
@@ -1295,17 +1295,17 @@ fn render_markdown_cached(app: &App, source: &str) -> Text<'static> {
         .render_state
         .markdown_cache
         .borrow()
-        .get(source)
+        .get(&format!("{width}\0{source}"))
         .cloned()
     {
         return cached;
     }
 
-    let rendered = crate::markdown::render(source, &app.theme);
+    let rendered = crate::markdown::render_with_width(source, &app.theme, Some(width));
     app.render_state
         .markdown_cache
         .borrow_mut()
-        .insert(source.to_string(), rendered.clone());
+        .insert(format!("{width}\0{source}"), rendered.clone());
     rendered
 }
 

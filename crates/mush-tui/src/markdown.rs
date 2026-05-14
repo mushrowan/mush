@@ -8,6 +8,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use std::sync::LazyLock;
 use tabled::builder::Builder;
+use tabled::settings::Width;
 use tabled::settings::style::Style as TableStyle;
 
 use crate::theme::Theme;
@@ -32,6 +33,11 @@ thread_local! {
 
 /// render a markdown string to styled ratatui Text
 pub fn render(source: &str, theme: &Theme) -> Text<'static> {
+    render_with_width(source, theme, None)
+}
+
+/// render markdown with an optional target width for width-aware blocks.
+pub fn render_with_width(source: &str, theme: &Theme, width: Option<usize>) -> Text<'static> {
     #[cfg(test)]
     RENDER_CALLS.with(|calls| calls.set(calls.get() + 1));
 
@@ -74,7 +80,7 @@ pub fn render(source: &str, theme: &Theme) -> Text<'static> {
         }
 
         // table: `| ... |` header row, `|---|---|` separator, then `| ... |` body rows
-        if let Some(consumed) = try_render_table(&source_lines[idx..], theme, &mut lines) {
+        if let Some(consumed) = try_render_table(&source_lines[idx..], theme, &mut lines, width) {
             idx += consumed;
             continue;
         }
@@ -228,7 +234,12 @@ fn is_table_separator_row(line: &str) -> bool {
 /// returns the number of source lines consumed, or `None` if the
 /// prefix doesn't form a valid table (missing separator row, ragged
 /// cell counts, etc)
-fn try_render_table(source: &[&str], theme: &Theme, out: &mut Vec<Line<'static>>) -> Option<usize> {
+fn try_render_table(
+    source: &[&str],
+    theme: &Theme,
+    out: &mut Vec<Line<'static>>,
+    width: Option<usize>,
+) -> Option<usize> {
     let header = parse_table_row(source.first()?)?;
     let separator = source.get(1)?;
     if !is_table_separator_row(separator) {
@@ -252,18 +263,23 @@ fn try_render_table(source: &[&str], theme: &Theme, out: &mut Vec<Line<'static>>
     let mut records = Vec::with_capacity(body_rows.len() + 1);
     records.push(header.into_iter().map(str::to_string).collect());
     records.extend(body_rows);
-    let table = render_records_with_tabled(records);
+    let table = render_records_with_tabled(records, width);
     out.extend(table.lines().map(|line| styled_table_line(line, theme)));
 
     Some(idx)
 }
 
-fn render_records_with_tabled(records: Vec<Vec<String>>) -> String {
+fn render_records_with_tabled(records: Vec<Vec<String>>, width: Option<usize>) -> String {
     let mut builder = Builder::new();
     for record in records {
         builder.push_record(record);
     }
-    builder.build().with(TableStyle::sharp()).to_string()
+    let mut table = builder.build();
+    table.with(TableStyle::sharp());
+    if let Some(width) = width {
+        table.with(Width::wrap(width));
+    }
+    table.to_string()
 }
 
 fn styled_table_line(line: &str, theme: &Theme) -> Line<'static> {
@@ -293,7 +309,7 @@ fn is_table_border_line(line: &str) -> bool {
 fn render_markdown_table_with_tabled(source: &str) -> Option<String> {
     let source_lines: Vec<&str> = source.lines().collect();
     let mut lines = Vec::new();
-    try_render_table(&source_lines, &Theme::default(), &mut lines)?;
+    try_render_table(&source_lines, &Theme::default(), &mut lines, None)?;
     Some(
         lines
             .iter()
@@ -792,5 +808,24 @@ done.";
         assert!(data_row.spans.iter().any(|span| {
             span.content.as_ref() == "bold" && span.style.add_modifier.contains(Modifier::BOLD)
         }));
+    }
+
+    #[test]
+    fn table_wraps_to_requested_width() {
+        let source = "\
+| Name | Notes |
+|------|-------|
+| Ada  | this is a very long table cell that should wrap |";
+        let text = render_with_width(source, &t(), Some(34));
+
+        for line in &text.lines {
+            let width = unicode_width::UnicodeWidthStr::width(line.to_string().as_str());
+            assert!(width <= 34, "line exceeded width 34: {line:?}");
+        }
+        assert!(
+            text.lines.len() > 5,
+            "wrapped table should use extra physical rows: {:?}",
+            text.lines
+        );
     }
 }
