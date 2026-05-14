@@ -55,7 +55,7 @@ pub fn is_hidden_visibility(model: &ModelCompletion) -> bool {
     model
         .visibility
         .as_deref()
-        .is_some_and(|v| !v.is_empty() && v != "default")
+        .is_some_and(|v| !v.is_empty() && v != "default" && v != "list")
 }
 
 /// stable-sort codex models by priority desc within their contiguous
@@ -162,10 +162,12 @@ mod picker_ordering_tests {
 
     #[test]
     fn is_hidden_visibility_only_flags_non_default_codex_values() {
-        // None and "default" stay visible; everything else is hidden so the
-        // picker can keep its default view focused on production-ready models
+        // None, "default", and "list" stay visible. codex uses "list" for
+        // normal picker-visible models, while only internal-ish values should
+        // be hidden from the default view.
         assert!(!is_hidden_visibility(&codex("a", 0, None)));
         assert!(!is_hidden_visibility(&codex("a", 0, Some("default"))));
+        assert!(!is_hidden_visibility(&codex("a", 0, Some("list"))));
         assert!(is_hidden_visibility(&codex("a", 0, Some("internal"))));
         assert!(is_hidden_visibility(&codex("a", 0, Some("experimental"))));
     }
@@ -206,7 +208,7 @@ mod picker_ordering_tests {
         // /model with no flags hides experimental/internal codex entries so
         // the picker doesn't drown the user in upstream test models
         let models = vec![
-            codex("public", 5, Some("default")),
+            codex("public", 5, Some("list")),
             codex("internal-thing", 9, Some("internal")),
             codex("experimental", 3, Some("experimental")),
         ];
