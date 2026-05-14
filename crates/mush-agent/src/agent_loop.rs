@@ -457,7 +457,24 @@ pub fn agent_loop(
                                 let partial = message.clone();
                                 if !partial.content.is_empty() {
                                     yield AgentEvent::MessageEnd { message: partial.clone() };
-                                    messages.push(Message::Assistant(partial));
+                                    messages.push(Message::Assistant(partial.clone()));
+                                    for tc in tool_calls_in_message(&partial) {
+                                        let result = ToolResult::error(
+                                            "tool call cancelled because the assistant stream errored",
+                                        );
+                                        yield AgentEvent::ToolExecEnd {
+                                            tool_call_id: tc.id.clone(),
+                                            tool_name: tc.name.clone(),
+                                            result: result.clone(),
+                                        };
+                                        messages.push(Message::ToolResult(ToolResultMessage {
+                                            tool_call_id: tc.id.clone(),
+                                            tool_name: tc.name.clone(),
+                                            content: result.content,
+                                            outcome: result.outcome,
+                                            timestamp_ms: Timestamp::now(),
+                                        }));
+                                    }
                                 }
                                 yield AgentEvent::Error { error: error_msg };
                                 yield AgentEvent::AgentEnd;
@@ -834,6 +851,13 @@ fn is_file_modifying_tool(name: &str) -> bool {
         name.to_lowercase().as_str(),
         "write" | "edit" | "apply_patch"
     )
+}
+
+fn tool_calls_in_message(message: &AssistantMessage) -> impl Iterator<Item = &ToolCall> {
+    message.content.iter().filter_map(|part| match part {
+        AssistantContentPart::ToolCall(tool_call) => Some(tool_call),
+        _ => None,
+    })
 }
 
 #[tracing::instrument(name = "tool_exec", skip_all, fields(tool = %tool_call.name))]
@@ -1492,6 +1516,76 @@ mod tests {
                 event,
                 AgentEvent::ToolExecEnd { tool_call_id, result, .. }
                     if tool_call_id.as_str() == "tc_cancelled" && result.outcome.is_error()
+            )
+        }));
+    }
+
+    #[test]
+    fn stream_error_with_partial_tool_call_emits_stub_tool_result() {
+        struct ErrorAfterToolCallProvider;
+
+        #[async_trait::async_trait]
+        impl mush_ai::registry::ApiProvider for ErrorAfterToolCallProvider {
+            fn api(&self) -> Api {
+                Api::AnthropicMessages
+            }
+
+            async fn stream(
+                &self,
+                model: &Model,
+                _context: &mush_ai::registry::LlmContext,
+                _options: &StreamOptions,
+            ) -> Result<mush_ai::registry::EventStream, mush_ai::registry::ProviderError>
+            {
+                let partial = AssistantMessage::builder()
+                    .content(vec![AssistantContentPart::ToolCall(ToolCall {
+                        id: "tc_stream_error".into(),
+                        name: "counter".into(),
+                        arguments: serde_json::json!({}),
+                    })])
+                    .model(model.id.clone())
+                    .provider(model.provider.clone())
+                    .api(model.api)
+                    .stop_reason(StopReason::Error)
+                    .error_message("decode failed")
+                    .timestamp_ms(Timestamp::zero())
+                    .build();
+                let s = async_stream::stream! {
+                    yield StreamEvent::Start { partial: partial.clone() };
+                    yield StreamEvent::ToolCallStart { content_index: 0 };
+                    yield StreamEvent::Error { reason: StopReason::Error, message: partial };
+                };
+                Ok(Box::pin(s) as mush_ai::registry::EventStream)
+            }
+        }
+
+        let mut registry = ApiRegistry::new();
+        registry.register(Box::new(ErrorAfterToolCallProvider));
+        let config = AgentConfig {
+            model: test_model(),
+            system_prompt: None,
+            tools: ToolRegistry::from_boxed(vec![Box::new(CounterTool)]),
+            registry: &registry,
+            options: StreamOptions::default(),
+            max_turns: DEFAULT_MAX_TURNS,
+            hooks: Box::new(NoopHooks),
+            injections: AgentInjections::default(),
+            cancel: None,
+        };
+        let messages = vec![Message::User(UserMessage {
+            content: UserContent::Text("use a tool".into()),
+            timestamp_ms: Timestamp::zero(),
+        })];
+
+        let events: Vec<AgentEvent> = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async { agent_loop(config, messages).collect().await });
+
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                AgentEvent::ToolExecEnd { tool_call_id, result, .. }
+                    if tool_call_id.as_str() == "tc_stream_error" && result.outcome.is_error()
             )
         }));
     }
