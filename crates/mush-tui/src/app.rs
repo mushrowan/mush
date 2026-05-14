@@ -17,8 +17,8 @@ pub use crate::batch_output::{
 pub use crate::cache::{
     BustReason, CACHE_COLD_DISPLAY_SECS, CACHE_WARN_SECS, CacheAnomaly, CacheBustDiagnostic,
     CacheTimer, CallConfig, ContextManagementMode, TokenStats, cache_ttl_secs,
-    detect_cache_anomalies, direct_route_serving_provider, dump_cache_bust_diagnostic,
-    resolve_cache_ttl_secs,
+    cache_warning_display, detect_cache_anomalies, direct_route_serving_provider,
+    dump_cache_bust_diagnostic, resolve_cache_ttl_secs,
 };
 pub use crate::display_types::{
     ActiveToolState, Block, BlockKind, CodeBlock, DisplayMessage, DisplayToolCall, ImageRenderArea,
@@ -182,6 +182,9 @@ pub struct App {
     current_tool_batch: u32,
     /// oauth usage data (5h and 7d rolling windows)
     pub oauth_usage: Option<mush_ai::oauth::usage::OAuthUsage>,
+    /// provider id that produced `oauth_usage`.
+    /// prevents stale claude usage bars showing while a codex/openai pane is active
+    pub oauth_usage_provider: Option<String>,
     /// in-progress oauth flow started via /login.
     /// consumed when /login-complete fires with the authorization code
     pub pending_oauth: Option<PendingOAuth>,
@@ -250,6 +253,7 @@ impl App {
             cache: CacheTimer::new(300),
             current_tool_batch: 0,
             oauth_usage: None,
+            oauth_usage_provider: None,
             pending_oauth: None,
             settings_menu: None,
             theme: crate::theme::Theme::default(),

@@ -299,6 +299,7 @@ impl RunnerRuntime {
         if let Some(usage) = poller.get_usage().await {
             for pane in self.pane_mgr.panes_mut() {
                 pane.app.oauth_usage = Some(usage.clone());
+                pane.app.oauth_usage_provider = Some("anthropic".into());
             }
         }
     }

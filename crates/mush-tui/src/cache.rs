@@ -30,6 +30,50 @@ pub fn cache_ttl_secs(
     }
 }
 
+/// user-facing warmth warning points for prompt-cache providers.
+///
+/// ambiguous automatic caches use the low end of the published range as
+/// the first warning. providers with a longer usable tier expose a second
+/// warning near that upper tier, not the absolute max eviction bound.
+#[must_use]
+pub fn cache_warning_tiers(provider: &Provider, retention: Option<&CacheRetention>) -> Vec<u16> {
+    match provider {
+        Provider::Anthropic => match retention.copied().unwrap_or(CacheRetention::Short) {
+            CacheRetention::None => Vec::new(),
+            CacheRetention::Short => vec![240],
+            CacheRetention::Long => vec![240, 3540],
+        },
+        Provider::Custom(name) if name == "openai" || name == "openai-codex" => vec![300, 3540],
+        Provider::OpenRouter => vec![240, 3540],
+        _ => vec![240],
+    }
+}
+
+/// format active cache warning timers from elapsed seconds since the last
+/// cache read/write. tiers at or before the elapsed time are omitted.
+#[must_use]
+pub fn cache_warning_display(
+    provider: &Provider,
+    retention: Option<&CacheRetention>,
+    elapsed_secs: Option<u64>,
+) -> Option<String> {
+    let elapsed = elapsed_secs?;
+    let active = cache_warning_tiers(provider, retention)
+        .into_iter()
+        .filter_map(|tier| tier.checked_sub(elapsed.min(u16::MAX as u64) as u16))
+        .filter(|remaining| *remaining > 0)
+        .map(format_duration)
+        .collect::<Vec<_>>();
+
+    (!active.is_empty()).then(|| active.join("/"))
+}
+
+fn format_duration(secs: u16) -> String {
+    let mins = secs / 60;
+    let secs = secs % 60;
+    format!("{mins}:{secs:02}")
+}
+
 /// the upstream serving provider for a *direct* route, when known
 /// from `model.provider` alone. returns `None` for openrouter and
 /// other multiplexer-style providers where the upstream is ambiguous
@@ -741,6 +785,33 @@ mod tests {
         // of the providers serving that model. don't seed; wait for
         // /generation to tell us who actually served the turn
         assert!(direct_route_serving_provider(&Provider::OpenRouter).is_none());
+    }
+
+    #[test]
+    fn cache_warning_tiers_include_short_and_long_windows() {
+        assert_eq!(cache_warning_tiers(&Provider::Anthropic, None), vec![240]);
+        assert_eq!(
+            cache_warning_tiers(&Provider::Anthropic, Some(&CacheRetention::Long)),
+            vec![240, 3540]
+        );
+        assert_eq!(
+            cache_warning_tiers(&Provider::Custom("openai-codex".into()), None),
+            vec![300, 3540]
+        );
+    }
+
+    #[test]
+    fn cache_warning_display_counts_down_active_tiers() {
+        assert_eq!(
+            cache_warning_display(&Provider::Anthropic, Some(&CacheRetention::Long), Some(30))
+                .as_deref(),
+            Some("3:30/58:30")
+        );
+        assert_eq!(
+            cache_warning_display(&Provider::Anthropic, Some(&CacheRetention::Long), Some(250))
+                .as_deref(),
+            Some("54:50")
+        );
     }
 
     #[test]

@@ -212,6 +212,7 @@ fn left_spans(app: &App, width: u16) -> Vec<Span<'static>> {
 
         // colour by cache warmth, with context pressure overriding
         let cache_remaining = app.cache.remaining_secs();
+        let cache_tiers = cache_warning_display_for_app(app);
         let ctx_style = if pct > 75 {
             // context pressure always takes priority
             app.theme.context_danger
@@ -228,13 +229,14 @@ fn left_spans(app: &App, width: u16) -> Vec<Span<'static>> {
         };
 
         // append cache countdown when active
-        let cache_suffix = match cache_remaining {
-            Some(r) if r > 0 => {
+        let cache_suffix = match (cache_tiers, cache_remaining) {
+            (Some(tiers), _) => format!(" {tiers}"),
+            (_, Some(r)) if r > 0 => {
                 let mins = r / 60;
                 let secs = r % 60;
                 format!(" {mins}:{secs:02}")
             }
-            Some(0) => {
+            (_, Some(0)) => {
                 // show "cold" briefly then fade out
                 let elapsed = app.cache.elapsed_secs().unwrap_or(0);
                 if elapsed < (app.cache.ttl_secs as u64) + crate::app::CACHE_COLD_DISPLAY_SECS {
@@ -260,6 +262,8 @@ fn left_spans(app: &App, width: u16) -> Vec<Span<'static>> {
 
     // oauth usage bars
     if app.interaction.status_bar.show_oauth_usage
+        && app.oauth_usage_provider.as_deref() == Some("anthropic")
+        && app.model_id.as_str().contains("claude")
         && let Some(ref usage) = app.oauth_usage
     {
         let bar_w = usage_bar_width(width);
@@ -371,6 +375,27 @@ fn scroll_selection_label(app: &crate::app::App) -> String {
             }
         }
     }
+}
+
+fn cache_warning_display_for_app(app: &crate::app::App) -> Option<String> {
+    let provider = if app.model_id.as_str().contains("codex") {
+        mush_ai::types::Provider::Custom("openai-codex".into())
+    } else if app.model_id.as_str().starts_with("gpt-") || app.model_id.as_str().contains("/gpt-") {
+        mush_ai::types::Provider::Custom("openai".into())
+    } else if app.model_id.as_str().contains("claude") {
+        mush_ai::types::Provider::Anthropic
+    } else {
+        return None;
+    };
+
+    let retention =
+        if matches!(provider, mush_ai::types::Provider::Anthropic) && app.cache.ttl_secs >= 3600 {
+            Some(mush_ai::types::CacheRetention::Long)
+        } else {
+            None
+        };
+
+    crate::cache::cache_warning_display(&provider, retention.as_ref(), app.cache.elapsed_secs())
 }
 
 /// ensure `app.render_state.status_bar_cache` is populated for `width`.
@@ -710,6 +735,8 @@ mod tests {
         use chrono;
         use mush_ai::oauth::usage::{OAuthUsage, UsageWindow};
         let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.model_id = "claude-sonnet-4-5".into();
+        app.oauth_usage_provider = Some("anthropic".into());
         app.oauth_usage = Some(OAuthUsage {
             five_hour: Some(UsageWindow {
                 utilization: 50.0,
@@ -751,6 +778,22 @@ mod tests {
         // should show "10k/200k 4:59" or similar
         assert!(content.contains("10k/200k"));
         assert!(content.contains(":"));
+    }
+
+    #[test]
+    fn status_bar_shows_short_and_long_cache_tiers_for_hour_claude_cache() {
+        let mut app = App::new("claude-sonnet-4".into(), TokenCount::new(200_000));
+        app.cache.ttl_secs = 3600;
+        app.stats.context_tokens = TokenCount::new(10_000);
+        app.cache.refresh();
+
+        let buf = render_status(&app, 140, 1);
+        let content = buffer_to_string(&buf);
+
+        assert!(
+            content.contains("4:00/59:00") || content.contains("3:59/58:59"),
+            "expected both short and long cache tier countdowns: {content}"
+        );
     }
 
     #[test]
@@ -888,10 +931,34 @@ mod tests {
     }
 
     #[test]
+    fn status_bar_hides_anthropic_usage_for_codex_model() {
+        use mush_ai::oauth::usage::{OAuthUsage, UsageWindow};
+        let mut app = App::new("openai/gpt-5.1-codex".into(), TokenCount::new(200_000));
+        app.oauth_usage_provider = Some("anthropic".into());
+        app.oauth_usage = Some(OAuthUsage {
+            five_hour: Some(UsageWindow {
+                utilization: 37.0,
+                resets_at: chrono::Utc::now() + chrono::TimeDelta::minutes(150),
+            }),
+            seven_day: None,
+        });
+
+        let buf = render_status(&app, 140, 1);
+        let content = buffer_to_string(&buf);
+
+        assert!(
+            !content.contains("5h"),
+            "stale claude usage leaked: {content}"
+        );
+    }
+
+    #[test]
     fn status_bar_shows_usage_bars() {
         use mush_ai::oauth::usage::{OAuthUsage, UsageWindow};
 
         let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.model_id = "claude-sonnet-4".into();
+        app.oauth_usage_provider = Some("anthropic".into());
         app.oauth_usage = Some(OAuthUsage {
             five_hour: Some(UsageWindow {
                 utilization: 37.0,
