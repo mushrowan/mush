@@ -117,7 +117,10 @@ pub struct Config {
     /// toast) so config stays the single source of truth
     #[serde(default)]
     pub favourite_models: Vec<String>,
-    /// optional model to use for compaction (defaults to the active model)
+    /// optional model id to use for compaction summaries.
+    /// defaults to the active model when unset. can be changed at runtime
+    /// with `/compaction-model <model-id>` or reset with
+    /// `/compaction-model same`.
     pub compaction_model: Option<String>,
     /// provider-specific settings (anthropic betas, scope, etc.)
     #[serde(default)]

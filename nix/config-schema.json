@@ -634,7 +634,7 @@
     },
     "compaction_model": {
       "default": null,
-      "description": "optional model to use for compaction (defaults to the active model)",
+      "description": "optional model id to use for compaction summaries.\ndefaults to the active model when unset. can be changed at runtime\nwith `/compaction-model <model-id>` or reset with\n`/compaction-model same`.",
       "type": [
         "string",
         "null"
