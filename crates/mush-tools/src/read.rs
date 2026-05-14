@@ -73,8 +73,6 @@ enum ReadArgsError {
     AroundLineConflictsWithSpan,
     #[error("around_line cannot be combined with offset or limit")]
     AroundLineConflictsWithOffsetLimit,
-    #[error("start_line cannot be combined with offset")]
-    StartLineConflictsWithOffset,
     #[error("context_before/context_after require around_line")]
     ContextRequiresAroundLine,
     #[error("end_line cannot be combined with limit")]
@@ -151,9 +149,6 @@ impl ReadArgs {
                 context_before: 20,
                 context_after: 20,
             },
-            (Some(_), _, _) if self.offset.is_some() => {
-                return Err(ReadArgsError::StartLineConflictsWithOffset);
-            }
             (Some(_), _, _) if self.context_before.is_some() || self.context_after.is_some() => {
                 return Err(ReadArgsError::ContextRequiresAroundLine);
             }
@@ -171,7 +166,7 @@ impl ReadArgs {
                 end_line,
             },
             (Some(start_line), None, _) => ReadWindow::Span {
-                start_line,
+                start_line: start_line + self.offset.unwrap_or(0),
                 limit: self.limit,
             },
             (None, Some(_), _) => return Err(ReadArgsError::EndLineRequiresStartLine),
@@ -685,6 +680,35 @@ mod tests {
         assert!(text.contains("L8: line 8"));
         assert!(!text.contains("L4:"));
         assert!(!text.contains("L9:"));
+    }
+
+    #[tokio::test]
+    async fn read_start_line_accepts_offset_as_relative_skip() {
+        let dir = temp_dir();
+        let file = dir.path().join("test.txt");
+        let content: String = (1..=20)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&file, &content).unwrap();
+
+        let tool = super::ReadTool::new(dir.path().into());
+        let result = tool
+            .execute(serde_json::json!({
+                "path": file.to_str().unwrap(),
+                "start_line": 5,
+                "offset": 2,
+                "limit": 3,
+            }))
+            .await;
+        let text = extract_text(&result);
+
+        assert!(result.outcome.is_success(), "expected success: {text}");
+        assert!(!text.contains("L5:"));
+        assert!(!text.contains("L6:"));
+        assert!(text.contains("L7: line 7"));
+        assert!(text.contains("L9: line 9"));
+        assert!(!text.contains("L10:"));
     }
 
     #[tokio::test]
