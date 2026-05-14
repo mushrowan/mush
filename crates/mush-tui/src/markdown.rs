@@ -1003,17 +1003,31 @@ done.";
 | Name | Notes |
 |------|-------|
 | Ada  | this is a very long table cell that should wrap |";
-        let text = render_with_width(source, &t(), Some(34));
+        let text = render_with_width(source, &t(), Some(28));
 
         for line in &text.lines {
             let width = unicode_width::UnicodeWidthStr::width(line.to_string().as_str());
-            assert!(width <= 34, "line exceeded width 34: {line:?}");
+            assert!(width <= 28, "line exceeded width 28: {line:?}");
         }
         assert!(
             text.lines.len() > 5,
             "wrapped table should use extra physical rows: {:?}",
             text.lines
         );
+    }
+
+    #[test]
+    fn table_wraps_long_unspaced_cells_to_requested_width() {
+        let source = "\
+| Path | Digest |
+|------|--------|
+| crate | abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz |";
+        let text = render_with_width(source, &t(), Some(30));
+
+        for line in &text.lines {
+            let width = unicode_width::UnicodeWidthStr::width(line.to_string().as_str());
+            assert!(width <= 30, "line exceeded width 30: {line:?}");
+        }
     }
 
     #[test]

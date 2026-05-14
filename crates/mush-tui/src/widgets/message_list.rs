@@ -333,7 +333,8 @@ impl Widget for MessageList<'_> {
             }
             if !self.app.stream.text.is_empty() {
                 let visible_text = self.app.visible_streaming_text();
-                let md_text = render_streaming_markdown_cached(self.app, visible_text);
+                let md_text =
+                    render_streaming_markdown_cached(self.app, visible_text, stream_content_width);
                 for line in md_text.lines {
                     lines.extend(indent_line(line, stream_content_width));
                 }
@@ -1309,7 +1310,7 @@ fn render_markdown_cached(app: &App, source: &str, width: usize) -> Text<'static
     rendered
 }
 
-fn render_streaming_markdown_cached(app: &App, source: &str) -> Text<'static> {
+fn render_streaming_markdown_cached(app: &App, source: &str, width: usize) -> Text<'static> {
     if source.is_empty() {
         return Text::default();
     }
@@ -1319,16 +1320,18 @@ fn render_streaming_markdown_cached(app: &App, source: &str) -> Text<'static> {
     // re-parse when new deltas arrive
     let full = &app.stream.text;
 
-    if let Some((cached_source, cached)) = app.render_state.stream_markdown_cache.borrow().as_ref()
+    if let Some((cached_width, cached_source, cached)) =
+        app.render_state.stream_markdown_cache.borrow().as_ref()
+        && *cached_width == width
         && cached_source == full
     {
         // cache hit: truncate the pre-rendered output to the visible char count
         return truncate_text(cached.clone(), source.chars().count());
     }
 
-    let rendered = crate::markdown::render(full, &app.theme);
+    let rendered = crate::markdown::render_with_width(full, &app.theme, Some(width));
     *app.render_state.stream_markdown_cache.borrow_mut() =
-        Some((full.to_string(), rendered.clone()));
+        Some((width, full.to_string(), rendered.clone()));
     truncate_text(rendered, source.chars().count())
 }
 
@@ -4504,6 +4507,33 @@ mod tests {
             min, max,
             "viewport drifted during thinking->text transition \
              (anchor={anchor}, min={min}, max={max}): {scrolls:?}"
+        );
+    }
+
+    #[test]
+    fn streaming_markdown_cache_is_keyed_by_width() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.stream.text =
+            "| Name | Notes |\n|------|-------|\n| Ada | this is a long table cell |".into();
+
+        let _ = render_streaming_markdown_cached(&app, &app.stream.text, 60);
+        assert_eq!(
+            app.render_state
+                .stream_markdown_cache
+                .borrow()
+                .as_ref()
+                .map(|(width, _, _)| *width),
+            Some(60)
+        );
+
+        let _ = render_streaming_markdown_cached(&app, &app.stream.text, 24);
+        assert_eq!(
+            app.render_state
+                .stream_markdown_cache
+                .borrow()
+                .as_ref()
+                .map(|(width, _, _)| *width),
+            Some(24)
         );
     }
 

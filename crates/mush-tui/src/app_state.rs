@@ -238,8 +238,10 @@ pub struct RenderState {
     pub render_scroll: Cell<u16>,
     /// cached markdown rendering for stable message content
     pub markdown_cache: RefCell<HashMap<String, Text<'static>>>,
-    /// cached markdown rendering for the current visible streaming text
-    pub stream_markdown_cache: RefCell<Option<(String, Text<'static>)>>,
+    /// cached markdown rendering for the current visible streaming text.
+    /// keyed by `(message_width, full_stream_text)` because tables wrap
+    /// to the message width and must reflow after resizes
+    pub stream_markdown_cache: RefCell<Option<(usize, String, Text<'static>)>>,
     /// total content lines (set during render by MessageList)
     pub total_content_lines: Cell<u16>,
     /// visible area height (set during render by MessageList)
