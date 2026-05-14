@@ -716,6 +716,7 @@ fn format_result(
     json_output: bool,
 ) -> ToolResult {
     let duration_secs = (duration.as_secs_f32() * 10.0).round() / 10.0;
+    let status = command_status(exit_code, timed_out);
 
     if json_output {
         let json = serde_json::json!({
@@ -723,6 +724,7 @@ fn format_result(
             "stderr": &stderr,
             "exit_code": exit_code,
             "timed_out": timed_out,
+            "status": status.as_str(),
             "duration_seconds": duration_secs,
             "stdout_lines": stdout.lines().count(),
             "stderr_lines": stderr.lines().count(),
@@ -760,10 +762,13 @@ fn format_result(
         }
 
         // structured preamble so the model sees exit status without parsing
-        let preamble = format!("Exit code: {exit_code}\nDuration: {duration_secs}s\n\n");
+        let preamble = format!(
+            "Exit code: {exit_code}\nStatus: {}\nDuration: {duration_secs}s\n\n",
+            status.as_str()
+        );
 
         // agent loop handles truncation (middle-out with actionable hint)
-        if exit_code != 0 {
+        if exit_code != 0 || timed_out {
             let text = format!("{preamble}{output}");
             ToolResult {
                 content: vec![mush_ai::types::ToolResultContentPart::Text(
@@ -774,6 +779,33 @@ fn format_result(
         } else {
             ToolResult::text(format!("{preamble}{output}"))
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandStatus {
+    Success,
+    Failed,
+    TimedOut,
+}
+
+impl CommandStatus {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Failed => "failed",
+            Self::TimedOut => "timed_out",
+        }
+    }
+}
+
+const fn command_status(exit_code: i32, timed_out: bool) -> CommandStatus {
+    if timed_out {
+        CommandStatus::TimedOut
+    } else if exit_code == 0 {
+        CommandStatus::Success
+    } else {
+        CommandStatus::Failed
     }
 }
 
@@ -1029,6 +1061,7 @@ mod tests {
         assert!(result.outcome.is_error());
         let text = extract_text(&result);
         assert!(text.contains("Exit code: 1"));
+        assert!(text.contains("Status: failed"));
     }
 
     #[tokio::test]
@@ -1059,6 +1092,7 @@ mod tests {
         assert!(json["stderr"].as_str().unwrap().contains("err"));
         assert_eq!(json["exit_code"], 0);
         assert_eq!(json["timed_out"], false);
+        assert_eq!(json["status"], "success");
     }
 
     #[tokio::test]
@@ -1069,6 +1103,7 @@ mod tests {
         let text = extract_text(&result);
         let json: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(json["exit_code"], 42);
+        assert_eq!(json["status"], "failed");
         assert!(json["stderr"].as_str().unwrap().contains("oops"));
     }
 

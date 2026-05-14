@@ -210,7 +210,8 @@ impl AgentTool for ReadTool {
     fn description(&self) -> &str {
         "Read a file's contents with 1-indexed line numbers. Supports text files and images \
          (jpg, png, gif, webp). Images are returned as attachments. Use offset/limit for \
-         large files, start_line/end_line for exact spans, or around_line for contextual reads."
+         large files, start_line/end_line for exact spans, or around_line for contextual reads. \
+         When start_line and offset are both set, offset is a relative line skip from start_line."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -223,7 +224,7 @@ impl AgentTool for ReadTool {
                 },
                 "offset": {
                     "type": "integer",
-                    "description": "line number to start reading from (1-indexed)"
+                    "description": "line number to start reading from (1-indexed). when used with start_line, offset is a relative line skip from start_line"
                 },
                 "limit": {
                     "type": "integer",

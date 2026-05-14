@@ -112,7 +112,7 @@ impl AgentTool for BatchTool {
     }
 
     fn description(&self) -> &str {
-        "Execute multiple tool calls concurrently to reduce latency. Each call gets the same output limits as a standalone call. Do NOT nest batch inside batch.\n\nGood for: reading multiple files, grep+glob combos, multiple bash commands, multi-part edits.\nBad for: operations that depend on prior output, ordered stateful mutations.\n\nSet sequential=true to run calls strictly in submission order, stopping at the first failure. Use for dependent operations (e.g. mkdir then cd then run)."
+        "Execute multiple tool calls concurrently to reduce latency. Each call gets the same output limits as a standalone call. If any child call fails, the batch result is an error and the per-call sections show which call failed. Do NOT nest batch inside batch.\n\nGood for: reading multiple files, grep+glob combos, multiple bash commands, multi-part edits.\nBad for: operations that depend on prior output, ordered stateful mutations.\n\nSet sequential=true to run calls strictly in submission order, stopping at the first failure. Use for dependent operations (e.g. mkdir then cd then run)."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -309,10 +309,14 @@ impl AgentTool for BatchTool {
             ));
         }
 
-        output.push_str(&format!(
-            "batch: {success_count}/{total} succeeded, {error_count} failed"
-        ));
-        ToolResult::text(output)
+        let summary = format!("batch: {success_count}/{total} succeeded, {error_count} failed");
+        output.push_str(&summary);
+
+        if error_count > 0 {
+            ToolResult::error(output)
+        } else {
+            ToolResult::text(output)
+        }
     }
 }
 
@@ -373,6 +377,10 @@ mod tests {
             ToolResultContentPart::Text(t) => &t.text,
             _ => panic!("expected text"),
         };
+        assert!(
+            result.outcome.is_error(),
+            "batch should be an error when any child fails: {text}"
+        );
         assert!(text.contains("unknown tool"));
     }
 

@@ -43,6 +43,8 @@ impl AgentTool for BashStatusTool {
     }
     fn description(&self) -> &str {
         "Poll a background bash job for completion. Returns current status and output. \
+         The timeout is only how long this poll waits, not the job timeout. If it expires \
+         while the job is still running, this tool returns a successful running status. \
          Use timeout to wait up to N seconds for the job to finish (default 30s, 0 for instant check). \
          Each poll keeps the API cache warm during long-running commands."
     }
@@ -57,7 +59,7 @@ impl AgentTool for BashStatusTool {
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "seconds to wait for completion (default 30, 0 for instant check)"
+                    "description": "seconds this poll waits for completion (default 30, 0 for instant check). this does not kill the job; expiry returns running status"
                 }
             },
             "required": ["job_id"]
@@ -98,7 +100,14 @@ impl AgentTool for BashStatusTool {
 
             if tokio::time::Instant::now() >= deadline {
                 let state = handle.read().await;
-                return format_running_status(&state);
+                return format_running_status(
+                    &state,
+                    if args.timeout > 0 {
+                        PollWait::Elapsed
+                    } else {
+                        PollWait::Instant
+                    },
+                );
             }
 
             tokio::time::sleep(poll_interval).await;
@@ -121,9 +130,10 @@ fn format_job_result(state: &crate::background::JobState) -> ToolResult {
         output = "(no output)".into();
     }
 
-    let (status_str, exit_code) = match &state.status {
-        JobStatus::Done { exit_code } => ("done", *exit_code),
-        JobStatus::TimedOut => ("timed_out", -1),
+    let (status, exit_code) = match &state.status {
+        JobStatus::Done { exit_code } if *exit_code == 0 => (BackgroundStatus::Done, *exit_code),
+        JobStatus::Done { exit_code } => (BackgroundStatus::Failed, *exit_code),
+        JobStatus::TimedOut => (BackgroundStatus::TimedOut, -1),
         JobStatus::Failed(e) => {
             return ToolResult::error(format!("background job {} failed: {e}", state.id));
         }
@@ -135,8 +145,10 @@ fn format_job_result(state: &crate::background::JobState) -> ToolResult {
     // with wall-clock; that masked `Status: timed_out` once and made
     // the agent loop on bash_status thinking the job was still running
     let elapsed = state.run_duration().as_secs();
-    let preamble =
-        format!("Exit code: {exit_code}\nStatus: {status_str}\nDuration: {elapsed}s\n\n");
+    let preamble = format!(
+        "Exit code: {exit_code}\nStatus: {}\nDuration: {elapsed}s\n\n",
+        status.as_str()
+    );
 
     if exit_code != 0 {
         ToolResult {
@@ -152,7 +164,45 @@ fn format_job_result(state: &crate::background::JobState) -> ToolResult {
     }
 }
 
-fn format_running_status(state: &crate::background::JobState) -> ToolResult {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BackgroundStatus {
+    Done,
+    Failed,
+    TimedOut,
+}
+
+impl BackgroundStatus {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Done => "done",
+            Self::Failed => "failed",
+            Self::TimedOut => "timed_out",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PollWait {
+    Instant,
+    Elapsed,
+}
+
+impl PollWait {
+    const fn elapsed(self) -> bool {
+        matches!(self, Self::Elapsed)
+    }
+
+    const fn message(self) -> &'static str {
+        match self {
+            Self::Elapsed => {
+                "still running after this poll's wait timeout. no error: poll again to check for completion"
+            }
+            Self::Instant => "still running. poll again to check for completion",
+        }
+    }
+}
+
+fn format_running_status(state: &crate::background::JobState, poll_wait: PollWait) -> ToolResult {
     let elapsed = state.run_duration().as_secs();
     let stdout_lines = state.stdout.lines().count();
     let stderr_lines = state.stderr.lines().count();
@@ -164,7 +214,8 @@ fn format_running_status(state: &crate::background::JobState) -> ToolResult {
         "elapsed_seconds": elapsed,
         "stdout_lines_so_far": stdout_lines,
         "stderr_lines_so_far": stderr_lines,
-        "message": "still running. poll again to check for completion",
+        "poll_wait_elapsed": poll_wait.elapsed(),
+        "message": poll_wait.message(),
     });
     ToolResult::text(json.to_string())
 }
@@ -245,6 +296,47 @@ mod tests {
             text.contains("stdout_lines_so_far"),
             "should show progress: {text}"
         );
+        assert!(
+            text.contains("poll_wait_elapsed"),
+            "should make poll timeout status explicit: {text}"
+        );
+        assert!(
+            text.contains("no error") || text.contains("poll again"),
+            "should not imply the running status is a failure: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_timeout_on_running_job_is_successful_status() {
+        let registry = make_registry();
+        registry
+            .insert(crate::background::JobState {
+                id: "bg_0".into(),
+                command: "sleep 100".into(),
+                status: JobStatus::Running,
+                stdout: String::new(),
+                stderr: String::new(),
+                started: std::time::Instant::now(),
+                finished: None,
+                cwd: std::sync::Arc::from(std::path::Path::new(".")),
+            })
+            .await;
+
+        let tool = BashStatusTool::new(registry);
+        let result = tool
+            .execute(serde_json::json!({"job_id": "bg_0", "timeout": 1}))
+            .await;
+        let text = extract_text(&result);
+
+        assert!(
+            result.outcome.is_success(),
+            "poll wait expiry should not be a tool error: {text}"
+        );
+        assert!(
+            text.contains("\"poll_wait_elapsed\":true"),
+            "should distinguish a poll wait expiry from instant status: {text}"
+        );
+        assert!(text.contains("no error"), "should say no error: {text}");
     }
 
     #[tokio::test]

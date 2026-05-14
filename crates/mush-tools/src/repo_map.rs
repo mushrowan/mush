@@ -5,6 +5,7 @@
 
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use mush_agent::tool::{AgentTool, OutputLimit, ToolResult, parse_tool_args};
 use mush_treesitter::{RenderOptions, RepoMap, SharedRepoMap};
@@ -23,6 +24,14 @@ struct RepoMapArgs {
     /// file under crates/foo")
     #[serde(default)]
     summary_only: bool,
+    /// seconds to wait for a lazy repo map build to finish before returning
+    /// a still-building status
+    #[serde(default = "default_wait_timeout_secs")]
+    wait_timeout: u64,
+}
+
+const fn default_wait_timeout_secs() -> u64 {
+    120
 }
 
 #[derive(Clone)]
@@ -84,7 +93,7 @@ impl RepoMapShared {
             .unwrap_or_else(|_| Arc::new(RwLock::new(RepoMap::default())))
     }
 
-    fn ensure_started(&self) -> Result<(), RepoMapEnsureError> {
+    fn ensure_ready(&self) -> Result<(), RepoMapEnsureError> {
         let mut state = self
             .state
             .write()
@@ -130,6 +139,19 @@ impl RepoMapShared {
         Ok(())
     }
 
+    async fn wait_until_ready(&self, timeout: Duration) -> Result<(), RepoMapEnsureError> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            match self.ensure_ready() {
+                Ok(()) => return Ok(()),
+                Err(RepoMapEnsureError::Building) if tokio::time::Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
     fn swap_map(&self, fresh: SharedRepoMap) -> Result<(), RepoMapEnsureError> {
         let mut current = self
             .map
@@ -161,7 +183,7 @@ impl AgentTool for RepoMapTool {
     }
 
     fn description(&self) -> &str {
-        "Get a structural overview of the repository showing the most important files and their symbols (types, functions, traits, modules) ranked by importance. Use this instead of reading many files when you need to understand the codebase structure. Filter to a subtree with `path`, list more files at the cost of detail with `summary_only=true`, or cap with `limit`."
+        "Get a structural overview of the repository showing the most important files and their symbols (types, functions, traits, modules) ranked by importance. Use this instead of reading many files when you need to understand the codebase structure. If the lazy repo map is still building, this waits up to wait_timeout seconds by default. Filter to a subtree with `path`, list more files at the cost of detail with `summary_only=true`, or cap with `limit`."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -180,6 +202,11 @@ impl AgentTool for RepoMapTool {
                     "description": "if true, emit one line per file with symbol counts only (no per-symbol detail). use to fit many files in a small output, or to get a directory listing of the parsed graph",
                     "type": "boolean",
                     "default": false
+                },
+                "wait_timeout": {
+                    "description": "seconds to wait for a lazy repo map build to finish before returning a still-building status (default 120, 0 for instant check)",
+                    "type": "integer",
+                    "default": 120
                 }
             }
         })
@@ -191,7 +218,11 @@ impl AgentTool for RepoMapTool {
             Err(e) => return e,
         };
 
-        if let Err(error) = self.shared.ensure_started() {
+        if let Err(error) = self
+            .shared
+            .wait_until_ready(Duration::from_secs(args.wait_timeout))
+            .await
+        {
             return ToolResult::error(error.to_string());
         }
 
@@ -342,17 +373,10 @@ mod tests {
         // the higher-ranked files
         let shared = RepoMapShared::lazy(dir.path().to_path_buf(), 64);
         let tool = RepoMapTool::new(shared);
-        let mut text = String::new();
-        for _ in 0..50 {
-            let result = tool
-                .execute(serde_json::json!({"path": "crates/mush-b"}))
-                .await;
-            text = result_text(&result);
-            if !text.contains("repo map build is still running") {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
+        let result = tool
+            .execute(serde_json::json!({"path": "crates/mush-b", "wait_timeout": 10}))
+            .await;
+        let text = result_text(&result);
         assert!(
             text.contains("crates/mush-b/src/b"),
             "filter should surface mush-b files even when rank ordering \
@@ -380,13 +404,36 @@ mod tests {
     #[tokio::test]
     async fn empty_map_returns_error_so_args_are_logged() {
         let tool = make_tool(RepoMap::default());
-        let result = tool.execute(serde_json::json!({})).await;
+        let result = tool.execute(serde_json::json!({"wait_timeout": 0})).await;
         assert!(result.outcome.is_error());
         let text = result_text(&result);
         assert!(
             text.contains("repo map build is still running")
                 || text.contains("not available")
                 || text.contains("still building")
+        );
+    }
+
+    #[tokio::test]
+    async fn lazy_repo_map_waits_for_initial_build() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/lib.rs"), "pub fn ready() {}\n").unwrap();
+
+        let shared = RepoMapShared::lazy(dir.path().to_path_buf(), 8192);
+        let tool = RepoMapTool::new(shared);
+        let result = tool.execute(serde_json::json!({"wait_timeout": 10})).await;
+        let text = result_text(&result);
+
+        assert!(result.outcome.is_success(), "expected ready map: {text}");
+        assert!(
+            text.contains("src/lib.rs"),
+            "expected lib.rs in map: {text}"
+        );
+        assert!(
+            !text.contains("repo map build is still running"),
+            "tool should wait instead of surfacing transient building state: {text}"
         );
     }
 
