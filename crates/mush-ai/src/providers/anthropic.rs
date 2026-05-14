@@ -687,9 +687,10 @@ impl MessageVisitor for AnthropicVisitor {
                     } else {
                         tc.name.as_str().to_string()
                     };
+                    let id = anthropic_tool_id(tc.id.as_str());
                     Some(serde_json::json!({
                         "type": "tool_use",
-                        "id": tc.id.as_str(),
+                        "id": id,
                         "name": name,
                         "input": tc.arguments,
                     }))
@@ -730,7 +731,7 @@ impl MessageVisitor for AnthropicVisitor {
 
         let content = serde_json::json!([{
             "type": "tool_result",
-            "tool_use_id": tr.tool_call_id.as_str(),
+            "tool_use_id": anthropic_tool_id(tr.tool_call_id.as_str()),
             "content": content_blocks,
             "is_error": tr.outcome.is_error(),
         }]);
@@ -738,6 +739,23 @@ impl MessageVisitor for AnthropicVisitor {
             role: "user".into(),
             content,
         });
+    }
+}
+
+fn anthropic_tool_id(id: &str) -> String {
+    let mut out = String::with_capacity(id.len());
+    for byte in id.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-') {
+            out.push(byte as char);
+        } else {
+            out.push('_');
+        }
+    }
+
+    if out.is_empty() {
+        "tool_call".into()
+    } else {
+        out
     }
 }
 
@@ -1499,6 +1517,40 @@ mod tests {
         assert_eq!(converted[1].content[0]["type"], "tool_result");
         assert_eq!(converted[1].content[0]["tool_use_id"], "tc_1");
         assert_eq!(converted[1].content[0]["is_error"], true);
+    }
+
+    #[test]
+    fn convert_normalises_non_anthropic_tool_ids() {
+        let messages = vec![
+            Message::Assistant(
+                AssistantMessage::builder()
+                    .content(vec![AssistantContentPart::ToolCall(ToolCall {
+                        id: "call.abc:123".into(),
+                        name: "read".into(),
+                        arguments: serde_json::json!({"path": "foo.rs"}),
+                    })])
+                    .model("gpt-history".into())
+                    .provider(Provider::Custom("openai".into()))
+                    .api(Api::OpenaiResponses)
+                    .stop_reason(StopReason::ToolUse)
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            ),
+            Message::ToolResult(ToolResultMessage {
+                tool_call_id: "call.abc:123".into(),
+                tool_name: "read".into(),
+                content: vec![ToolResultContentPart::Text(TextContent {
+                    text: "contents".into(),
+                })],
+                outcome: ToolOutcome::Success,
+                timestamp_ms: Timestamp::zero(),
+            }),
+        ];
+
+        let converted = convert_messages(&messages, false, None, ToolResultTrimming::SlidingWindow);
+
+        assert_eq!(converted[0].content[0]["id"], "call_abc_123");
+        assert_eq!(converted[1].content[0]["tool_use_id"], "call_abc_123");
     }
 
     #[test]
