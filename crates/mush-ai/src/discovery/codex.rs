@@ -35,6 +35,7 @@
 
 use std::time::SystemTime;
 
+use semver::Version;
 use serde::Deserialize;
 
 use super::{DiscoveredModel, DiscoveryError, DiscoveryReport, ModelDiscovery};
@@ -45,6 +46,7 @@ use crate::types::{
 const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const DEFAULT_CONTEXT_WINDOW: u64 = 200_000;
 const DEFAULT_MAX_OUTPUT: u64 = 64_000;
+const MIN_DISCOVERY_CLIENT_VERSION: Version = Version::new(1, 0, 0);
 const PROVIDER_NAME: &str = "openai-codex";
 
 /// codex discovery client
@@ -74,9 +76,21 @@ impl CodexDiscovery {
             base_url: base_url.into(),
             access_token,
             account_id,
-            client_version: client_version.into(),
+            client_version: discovery_client_version(&client_version.into()),
         }
     }
+}
+
+fn discovery_client_version(version: &str) -> String {
+    let parsed = Version::parse(version)
+        .map(|mut version| {
+            version.pre = semver::Prerelease::EMPTY;
+            version.build = semver::BuildMetadata::EMPTY;
+            version
+        })
+        .unwrap_or_else(|_| MIN_DISCOVERY_CLIENT_VERSION.clone());
+
+    std::cmp::max(parsed, MIN_DISCOVERY_CLIENT_VERSION.clone()).to_string()
 }
 
 impl ModelDiscovery for CodexDiscovery {
@@ -567,5 +581,15 @@ mod tests {
         assert!(extras.supported_reasoning_levels.is_empty());
         assert!(!extras.supports_reasoning_summaries);
         assert_eq!(extras.priority, 0);
+    }
+
+    #[test]
+    fn discovery_client_version_has_floor_for_old_app_versions() {
+        assert_eq!(discovery_client_version("0.1.0"), "1.0.0");
+    }
+
+    #[test]
+    fn discovery_client_version_drops_prerelease_suffix() {
+        assert_eq!(discovery_client_version("1.5.0-alpha.2"), "1.5.0");
     }
 }

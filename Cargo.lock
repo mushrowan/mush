@@ -2752,6 +2752,7 @@ dependencies = [
  "pretty_assertions",
  "reqwest 0.13.3",
  "schemars",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.11.0",
