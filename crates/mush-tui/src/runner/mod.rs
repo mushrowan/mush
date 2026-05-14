@@ -69,11 +69,23 @@ pub async fn run_tui(
     }
 
     restore_terminal_state();
+    let mut startup_phases = vec![diag::StartupPhase::new(
+        "after_preflight_restore",
+        crossterm::terminal::size().map(Some),
+    )];
 
     let image_picker = probe_image_picker(tui_config.terminal_policy);
+    startup_phases.push(diag::StartupPhase::new(
+        "after_image_probe",
+        crossterm::terminal::size().map(Some),
+    ));
     let mut terminal_guard = TerminalStateGuard::new();
 
     enter_tui_terminal(tui_config.terminal_policy)?;
+    startup_phases.push(diag::StartupPhase::new(
+        "after_enter_tui_terminal",
+        crossterm::terminal::size().map(Some),
+    ));
     install_panic_cleanup_hook();
 
     let backend = CachingBackend::new(CrosstermBackend::new(io::stdout()));
@@ -84,11 +96,19 @@ pub async fn run_tui(
     // backend's `size()` / `window_size()` consume it on the next call
     let sigwinch_task = spawn_sigwinch_listener(size_cache.resize_pending_flag());
     let mut terminal = Terminal::new(backend)?;
+    startup_phases.push(diag::StartupPhase::new(
+        "after_terminal_new",
+        terminal.size().map(|size| Some((size.width, size.height))),
+    ));
     // alt screen may inherit content from the main screen buffer on some
     // terminals (esp. after pre-tui eprintln output like the startup report).
     // clear explicitly so no stale lines leak through cells that widgets
     // don't overwrite
     terminal.clear()?;
+    startup_phases.push(diag::StartupPhase::new(
+        "after_terminal_clear",
+        terminal.size().map(|size| Some((size.width, size.height))),
+    ));
     let (mut runtime, services) = RunnerRuntime::new(&mut tui_config).await;
     if let Some(rx) = startup_discovery {
         runtime.install_discovery_updates(rx);
@@ -113,6 +133,11 @@ pub async fn run_tui(
         &image_picker,
         &tui_config.settings,
     )?;
+    startup_phases.push(diag::StartupPhase::new(
+        "after_first_draw",
+        terminal.size().map(|size| Some((size.width, size.height))),
+    ));
+    diag::write_startup_diagnostics(startup_phases, Vec::new());
 
     let mut agent_streams = new_agent_streams();
     let mut stream_state = StreamState::new();

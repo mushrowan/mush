@@ -26,6 +26,31 @@ pub(super) struct TerminalStateDump {
     pub notes: Vec<String>,
 }
 
+pub(super) struct TerminalStartupDump {
+    pub timestamp: String,
+    pub pid: u32,
+    pub tty: Option<String>,
+    pub term: Option<String>,
+    pub term_program: Option<String>,
+    pub phases: Vec<StartupPhase>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct StartupPhase {
+    pub name: String,
+    pub size: Result<Option<(u16, u16)>, String>,
+}
+
+impl StartupPhase {
+    pub fn new(name: impl Into<String>, size: io::Result<Option<(u16, u16)>>) -> Self {
+        Self {
+            name: name.into(),
+            size: size.map_err(|error| error.to_string()),
+        }
+    }
+}
+
 /// snapshot of the real tty line discipline via `tcgetattr`. when
 /// `icanon` or `echo` are false we know the underlying tty is in a
 /// raw-ish state regardless of what crossterm's own flag says
@@ -113,12 +138,76 @@ impl TerminalStateDump {
     }
 }
 
+impl TerminalStartupDump {
+    pub fn capture(phases: Vec<StartupPhase>, notes: Vec<String>) -> Self {
+        Self {
+            timestamp: current_timestamp(),
+            pid: std::process::id(),
+            tty: current_tty(),
+            term: std::env::var("TERM").ok(),
+            term_program: std::env::var("TERM_PROGRAM").ok(),
+            phases,
+            notes,
+        }
+    }
+
+    pub fn render(&self) -> String {
+        let mut s = String::new();
+        s.push_str("# mush terminal-startup dump\n");
+        s.push_str(&format!("timestamp: {}\n", self.timestamp));
+        s.push_str(&format!("pid: {}\n", self.pid));
+        s.push_str(&format!(
+            "tty: {}\n",
+            self.tty.as_deref().unwrap_or("unknown")
+        ));
+        s.push_str(&format!(
+            "term: {}\n",
+            self.term.as_deref().unwrap_or("unset")
+        ));
+        s.push_str(&format!(
+            "term_program: {}\n",
+            self.term_program.as_deref().unwrap_or("unset")
+        ));
+        s.push_str("\nstartup phases:\n");
+        for phase in &self.phases {
+            match &phase.size {
+                Ok(Some((width, height))) => {
+                    s.push_str(&format!("- {}: size={}x{}\n", phase.name, width, height));
+                }
+                Ok(None) => {
+                    s.push_str(&format!("- {}: size=not checked\n", phase.name));
+                }
+                Err(error) => {
+                    s.push_str(&format!("- {}: size_error={}\n", phase.name, error));
+                }
+            }
+        }
+        if !self.notes.is_empty() {
+            s.push_str("\nnotes:\n");
+            for note in &self.notes {
+                s.push_str(&format!("- {note}\n"));
+            }
+        }
+        s
+    }
+}
+
 pub(super) fn write_terminal_state_dump(
     dir: &Path,
     dump: &TerminalStateDump,
 ) -> io::Result<PathBuf> {
     fs::create_dir_all(dir)?;
     let path = dir.join(format!("mush-term-{}-{}.txt", dump.timestamp, dump.pid));
+    write_owner_only(&path, dump.render().as_bytes())?;
+    Ok(path)
+}
+
+pub(super) fn write_terminal_startup_dump(
+    dir: &Path,
+    dump: &TerminalStartupDump,
+) -> io::Result<PathBuf> {
+    fs::create_dir_all(dir)?;
+    let path = dir.join(format!("mush-startup-{}-{}.txt", dump.timestamp, dump.pid));
     write_owner_only(&path, dump.render().as_bytes())?;
     Ok(path)
 }
@@ -244,6 +333,30 @@ pub(super) fn verify_terminal_restored(extra_notes: Vec<String>) {
     }
 }
 
+pub(super) fn write_startup_diagnostics(phases: Vec<StartupPhase>, mut notes: Vec<String>) {
+    let suspicious_size = phases
+        .iter()
+        .any(|phase| matches!(phase.size, Ok(Some((0, _))) | Ok(Some((_, 0))) | Err(_)));
+    if !suspicious_size {
+        return;
+    }
+
+    notes.push("terminal reported suspicious size during startup".into());
+    let dump = TerminalStartupDump::capture(phases, notes);
+    let dir = default_dump_dir();
+    match write_terminal_startup_dump(&dir, &dump) {
+        Ok(path) => {
+            tracing::warn!(
+                dump = %path.display(),
+                "suspicious terminal state during startup; diagnostics written"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(?error, "failed to write terminal startup diagnostics");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,5 +433,47 @@ mod tests {
         assert_eq!(dump.pid, std::process::id());
         assert!(!dump.raw_mode_still_enabled);
         assert!(!dump.timestamp.is_empty());
+    }
+
+    #[test]
+    fn startup_dump_records_terminal_init_phases() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dump = TerminalStartupDump {
+            timestamp: "20260514T213000Z".into(),
+            pid: 42,
+            tty: Some("/dev/pts/9".into()),
+            term: Some("xterm-ghostty".into()),
+            term_program: Some("ghostty".into()),
+            phases: vec![
+                StartupPhase::new("before_restore", Ok(Some((120, 40)))),
+                StartupPhase::new("after_enter", Ok(Some((0, 0)))),
+            ],
+            notes: vec!["terminal reported zero size during startup".into()],
+        };
+
+        let path = write_terminal_startup_dump(tmp.path(), &dump).unwrap();
+        let contents = fs::read_to_string(&path).unwrap();
+
+        assert!(contents.contains("# mush terminal-startup dump"));
+        assert!(contents.contains("before_restore: size=120x40"));
+        assert!(contents.contains("after_enter: size=0x0"));
+        assert!(contents.contains("terminal reported zero size"));
+
+        #[cfg(unix)]
+        assert_eq!(path.metadata().unwrap().mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn startup_diagnostics_ignore_normal_sizes() {
+        let phases = [
+            StartupPhase::new("before", Ok(Some((120, 40)))),
+            StartupPhase::new("after", Ok(Some((120, 40)))),
+        ];
+
+        let suspicious = phases
+            .iter()
+            .any(|phase| matches!(phase.size, Ok(Some((0, _))) | Ok(Some((_, 0))) | Err(_)));
+
+        assert!(!suspicious);
     }
 }
