@@ -98,6 +98,7 @@ crossterm = { version = "0.29", features = ["osc52"] }
 # instead of raw `\x1b[31m` garbage
 ansi-to-tui = "8.0.1"
 tabled = { version = "0.20.0", default-features = false, features = ["std"] }
+pulldown-cmark = "0.13.3"
 
 # configurable keybind parsing ("ctrl-k", "alt-enter", ...). wraps
 # crossterm so bindings loaded from the user's config.toml land in the

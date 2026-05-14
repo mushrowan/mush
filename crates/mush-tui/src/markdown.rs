@@ -4,6 +4,7 @@
 //! inline code, code blocks, lists, and horizontal rules. not a full
 //! markdown parser, just enough for readable agent output.
 
+use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use std::sync::LazyLock;
@@ -240,33 +241,90 @@ fn try_render_table(
     out: &mut Vec<Line<'static>>,
     width: Option<usize>,
 ) -> Option<usize> {
-    let header = parse_table_row(source.first()?)?;
+    let consumed = table_source_line_count(source)?;
+    let records = pulldown_table_rows(&source[..consumed].join("\n"))?;
+    let table = render_records_with_tabled(records, width);
+    out.extend(table.lines().map(|line| styled_table_line(line, theme)));
+
+    Some(consumed)
+}
+
+fn table_source_line_count(source: &[&str]) -> Option<usize> {
+    parse_table_row(source.first()?)?;
     let separator = source.get(1)?;
     if !is_table_separator_row(separator) {
         return None;
     }
-    let col_count = header.len();
 
-    let mut body_rows: Vec<Vec<String>> = Vec::new();
     let mut idx = 2;
-    while idx < source.len() {
-        let Some(cells) = parse_table_row(source[idx]) else {
-            break;
-        };
-        // pad or truncate to header column count so the grid stays rectangular
-        let mut row: Vec<String> = cells.into_iter().map(str::to_string).collect();
-        row.resize(col_count, String::new());
-        body_rows.push(row);
+    while idx < source.len() && parse_table_row(source[idx]).is_some() {
         idx += 1;
     }
-
-    let mut records = Vec::with_capacity(body_rows.len() + 1);
-    records.push(header.into_iter().map(str::to_string).collect());
-    records.extend(body_rows);
-    let table = render_records_with_tabled(records, width);
-    out.extend(table.lines().map(|line| styled_table_line(line, theme)));
-
     Some(idx)
+}
+
+fn pulldown_table_rows(source: &str) -> Option<Vec<Vec<String>>> {
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_TABLES);
+    let parser = Parser::new_ext(source, options);
+
+    let mut rows = Vec::new();
+    let mut current_row: Option<Vec<String>> = None;
+    let mut current_cell = String::new();
+    let mut in_cell = false;
+    let mut saw_table = false;
+    let mut in_table_head = false;
+    let mut head_row: Option<Vec<String>> = None;
+
+    for event in parser {
+        match event {
+            Event::Start(Tag::Table(_)) => saw_table = true,
+            Event::Start(Tag::TableHead) => {
+                in_table_head = true;
+                current_row = Some(Vec::new());
+            }
+            Event::Start(Tag::TableRow) => current_row = Some(Vec::new()),
+            Event::Start(Tag::TableCell) => {
+                current_cell.clear();
+                in_cell = true;
+            }
+            Event::Start(Tag::Strong) if in_cell => current_cell.push_str("**"),
+            Event::Start(Tag::Emphasis) if in_cell => current_cell.push('*'),
+            Event::Text(text) if in_cell => current_cell.push_str(&text),
+            Event::Code(text) if in_cell => {
+                current_cell.push('`');
+                current_cell.push_str(&text);
+                current_cell.push('`');
+            }
+            Event::SoftBreak | Event::HardBreak if in_cell => current_cell.push(' '),
+            Event::End(TagEnd::TableCell) => {
+                in_cell = false;
+                if let Some(row) = &mut current_row {
+                    row.push(current_cell.trim().to_string());
+                }
+            }
+            Event::End(TagEnd::TableRow) => {
+                if let Some(row) = current_row.take() {
+                    if in_table_head {
+                        head_row = Some(row);
+                    } else {
+                        rows.push(row);
+                    }
+                }
+            }
+            Event::End(TagEnd::TableHead) => {
+                in_table_head = false;
+                if let Some(row) = current_row.take().or_else(|| head_row.take()) {
+                    rows.insert(0, row);
+                }
+            }
+            Event::End(TagEnd::Strong) if in_cell => current_cell.push_str("**"),
+            Event::End(TagEnd::Emphasis) if in_cell => current_cell.push('*'),
+            _ => {}
+        }
+    }
+
+    (saw_table && !rows.is_empty()).then_some(rows)
 }
 
 fn render_records_with_tabled(records: Vec<Vec<String>>, width: Option<usize>) -> String {
@@ -827,5 +885,10 @@ done.";
             "wrapped table should use extra physical rows: {:?}",
             text.lines
         );
+    }
+
+    #[test]
+    fn markdown_uses_pulldown_cmark_for_tables() {
+        assert!(pulldown_table_rows("| a | b |\n|---|---|\n| c | d |").is_some());
     }
 }
