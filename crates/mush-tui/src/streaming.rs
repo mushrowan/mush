@@ -29,6 +29,9 @@ struct TypewriterState {
 }
 
 impl TypewriterState {
+    const MIN_CHARS_PER_TICK: usize = 1;
+    const MAX_CHARS_PER_TICK: usize = 12;
+
     fn reset(&mut self) {
         self.total_chars = 0;
         self.visible_chars = 0;
@@ -46,7 +49,9 @@ impl TypewriterState {
             return;
         }
         let remaining = self.total_chars - self.visible_chars;
-        let step = remaining.div_ceil(2).max(1);
+        let step = remaining
+            .div_ceil(4)
+            .clamp(Self::MIN_CHARS_PER_TICK, Self::MAX_CHARS_PER_TICK);
         let new_visible = (self.visible_chars + step).min(self.total_chars);
 
         // walk forward from current byte offset to find new boundary
@@ -112,6 +117,11 @@ impl StreamingState {
     #[must_use]
     pub fn visible_thinking(&self) -> &str {
         self.think_tw.visible(&self.thinking)
+    }
+
+    #[must_use]
+    pub fn visible_text_len(&self) -> usize {
+        self.visible_text().chars().count()
     }
 
     /// advance typewriter: move visible chars towards full buffer

@@ -300,7 +300,50 @@ struct ChunkDelta {
     #[serde(default)]
     reasoning_content: Option<String>,
     #[serde(default)]
+    reasoning: Option<String>,
+    #[serde(default)]
+    reasoning_text: Option<String>,
+    #[serde(default)]
+    reasoning_details: Option<Vec<ReasoningDetail>>,
+    #[serde(default)]
     tool_calls: Option<Vec<ChunkToolCall>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReasoningDetail {
+    #[serde(rename = "type", default)]
+    detail_type: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
+}
+
+impl ChunkDelta {
+    fn reasoning_delta(&self) -> Option<String> {
+        let mut delta = [
+            self.reasoning_content.as_deref(),
+            self.reasoning.as_deref(),
+            self.reasoning_text.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<String>();
+
+        if let Some(details) = &self.reasoning_details {
+            delta.extend(
+                details
+                    .iter()
+                    .filter(|detail| {
+                        detail
+                            .detail_type
+                            .as_deref()
+                            .is_none_or(|ty| ty == "reasoning.text")
+                    })
+                    .filter_map(|detail| detail.text.as_deref()),
+            );
+        }
+
+        (!delta.is_empty()).then_some(delta)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -447,9 +490,7 @@ fn process_chunk(
     }
 
     // handle reasoning/thinking content
-    if let Some(reasoning) = choice.delta.reasoning_content
-        && !reasoning.is_empty()
-    {
+    if let Some(reasoning) = choice.delta.reasoning_delta() {
         match current {
             Some(StreamBlock::Thinking { text, .. }) => {
                 text.push_str(&reasoning);
@@ -870,6 +911,37 @@ mod tests {
                 .any(|e| matches!(e, StreamEvent::TextStart { .. }))
         );
         assert_eq!(output.content.len(), 2);
+    }
+
+    #[test]
+    fn process_openrouter_reasoning_details_as_thinking() {
+        let mut output = test_output();
+        let mut current = None;
+        let mut tool_blocks = Vec::new();
+
+        let chunk: ChunkResponse = serde_json::from_value(serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "reasoning_details": [{
+                        "type": "reasoning.text",
+                        "text": "thinking via details",
+                        "index": 0
+                    }]
+                }
+            }]
+        }))
+        .unwrap();
+
+        let events = process_chunk(chunk, &mut output, &mut current, &mut tool_blocks);
+
+        assert!(matches!(current, Some(StreamBlock::Thinking { .. })));
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                StreamEvent::ThinkingDelta { delta, .. } if delta == "thinking via details"
+            )
+        }));
+        assert_eq!(output.thinking().as_deref(), Some("thinking via details"));
     }
 
     #[test]

@@ -463,6 +463,11 @@ impl App {
         self.stream.visible_text()
     }
 
+    /// visible streaming text length in chars, for tests and render metrics
+    pub fn visible_streaming_text_len(&self) -> usize {
+        self.stream.visible_text_len()
+    }
+
     /// visible portion of streaming thinking (typewriter effect)
     pub fn visible_streaming_thinking(&self) -> &str {
         self.stream.visible_thinking()
@@ -1446,6 +1451,21 @@ mod tests {
             app.tick();
         }
         assert_eq!(app.visible_streaming_text(), "hello world");
+    }
+
+    #[test]
+    fn typewriter_does_not_reveal_large_bursts_in_one_tick() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.start_streaming();
+        app.push_text_delta(&"x".repeat(200));
+
+        app.tick();
+
+        assert!(
+            app.visible_streaming_text_len() <= 12,
+            "large provider bursts should reveal smoothly, visible chars={}",
+            app.visible_streaming_text_len()
+        );
     }
 
     #[test]
