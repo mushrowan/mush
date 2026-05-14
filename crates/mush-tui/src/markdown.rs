@@ -157,15 +157,11 @@ impl<'a> MarkdownRenderer<'a> {
                 };
                 self.pending_item_prefix = Some(prefix);
             }
-            Tag::CodeBlock(kind) => {
-                let lang = match kind {
-                    CodeBlockKind::Fenced(info) => {
-                        info.split_whitespace().next().unwrap_or("").to_string()
-                    }
-                    CodeBlockKind::Indented => String::new(),
-                };
+            Tag::CodeBlock(CodeBlockKind::Fenced(info)) => {
+                let lang = info.split_whitespace().next().unwrap_or("").to_string();
                 self.code_block = Some((lang, String::new()));
             }
+            Tag::CodeBlock(CodeBlockKind::Indented) => {}
             Tag::Table(_) => self.table = Some(TableCapture::default()),
             _ => {}
         }
@@ -454,6 +450,10 @@ fn pulldown_table_rows(source: &str) -> Option<Vec<Vec<String>>> {
 }
 
 fn render_records_with_tabled(records: Vec<Vec<String>>, width: Option<usize>) -> String {
+    if width.is_some_and(|width| width < 24) {
+        return render_records_as_list(records);
+    }
+
     let mut builder = Builder::new();
     for record in records {
         builder.push_record(record);
@@ -464,6 +464,27 @@ fn render_records_with_tabled(records: Vec<Vec<String>>, width: Option<usize>) -
         table.with(Width::wrap(width));
     }
     table.to_string()
+}
+
+fn render_records_as_list(records: Vec<Vec<String>>) -> String {
+    let Some((header, rows)) = records.split_first() else {
+        return String::new();
+    };
+
+    let mut out = String::new();
+    for (row_index, row) in rows.iter().enumerate() {
+        if row_index > 0 {
+            out.push('\n');
+        }
+        for (idx, cell) in row.iter().enumerate() {
+            let key = header.get(idx).filter(|key| !key.trim().is_empty());
+            match key {
+                Some(key) => out.push_str(&format!("- {}: {}\n", key.trim(), cell.trim())),
+                None => out.push_str(&format!("- {}\n", cell.trim())),
+            }
+        }
+    }
+    out.trim_end().to_string()
 }
 
 fn styled_table_line(line: &str, theme: &Theme) -> Line<'static> {
@@ -817,6 +838,18 @@ mod tests {
     }
 
     #[test]
+    fn indented_markdown_is_not_treated_as_code_block() {
+        let text = render("currently:\n    core/component.yml owns:Pipeline", &t());
+        let rendered = text.lines.iter().map(Line::to_string).collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered,
+            vec!["currently:", "    core/component.yml owns:Pipeline"]
+        );
+        assert_eq!(text.lines[1].spans[0].style, Style::default());
+    }
+
+    #[test]
     fn unknown_language_code_block_skips_syntax_highlighting() {
         reset_highlight_code_block_call_count();
 
@@ -1028,6 +1061,20 @@ done.";
             let width = unicode_width::UnicodeWidthStr::width(line.to_string().as_str());
             assert!(width <= 30, "line exceeded width 30: {line:?}");
         }
+    }
+
+    #[test]
+    fn narrow_table_falls_back_to_key_value_list() {
+        let source = "\
+| Name | Notes |
+|------|-------|
+| Ada  | this is a long table cell |";
+        let text = render_with_width(source, &t(), Some(20));
+        let rendered = text.lines.iter().map(Line::to_string).collect::<Vec<_>>();
+
+        assert_eq!(rendered[0], "- Name: Ada");
+        assert_eq!(rendered[1], "- Notes: this is a long table cell");
+        assert!(rendered.iter().all(|line| !line.contains('│')));
     }
 
     #[test]
