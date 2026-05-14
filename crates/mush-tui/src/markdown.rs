@@ -4,7 +4,7 @@
 //! inline code, code blocks, lists, and horizontal rules. not a full
 //! markdown parser, just enough for readable agent output.
 
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use std::sync::LazyLock;
@@ -49,107 +49,293 @@ pub fn render_with_width(source: &str, theme: &Theme, width: Option<usize>) -> T
         return render_plain_text(source);
     }
 
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    let mut in_code_block = false;
-    let mut code_block_lang = String::new();
-    let mut code_block_lines: Vec<String> = Vec::new();
+    Text::from(render_pulldown(source, theme, width))
+}
 
-    let source_lines: Vec<&str> = source.lines().collect();
-    let mut idx = 0;
-    while idx < source_lines.len() {
-        let raw_line = source_lines[idx];
-        if raw_line.starts_with("```") {
-            if in_code_block {
-                // end code block - highlight and emit
-                let highlighted = render_code_block(&code_block_lines, &code_block_lang, theme);
-                lines.extend(highlighted);
-                code_block_lines.clear();
-                code_block_lang.clear();
-                in_code_block = false;
+fn render_pulldown(source: &str, theme: &Theme, width: Option<usize>) -> Vec<Line<'static>> {
+    let source = normalise_thematic_breaks(source);
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+
+    let mut renderer = MarkdownRenderer::new(theme, width);
+    for event in Parser::new_ext(&source, options) {
+        renderer.handle(event);
+    }
+    renderer.finish()
+}
+
+fn normalise_thematic_breaks(source: &str) -> String {
+    source
+        .lines()
+        .map(|line| {
+            if matches!(line.trim(), "---" | "***" | "___") {
+                "\n---\n".to_string()
             } else {
-                code_block_lang = raw_line.trim_start_matches('`').trim().to_string();
-                in_code_block = true;
+                line.to_string()
             }
-            idx += 1;
-            continue;
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+struct MarkdownRenderer<'a> {
+    theme: &'a Theme,
+    width: Option<usize>,
+    lines: Vec<Line<'static>>,
+    current: Vec<Span<'static>>,
+    style_stack: Vec<Style>,
+    list_stack: Vec<Option<u64>>,
+    pending_item_prefix: Option<String>,
+    code_block: Option<(String, String)>,
+    table: Option<TableCapture>,
+}
+
+#[derive(Default)]
+struct TableCapture {
+    rows: Vec<Vec<String>>,
+    current_row: Option<Vec<String>>,
+    current_cell: String,
+    in_cell: bool,
+    in_head: bool,
+    head_row: Option<Vec<String>>,
+}
+
+impl<'a> MarkdownRenderer<'a> {
+    fn new(theme: &'a Theme, width: Option<usize>) -> Self {
+        Self {
+            theme,
+            width,
+            lines: Vec::new(),
+            current: Vec::new(),
+            style_stack: vec![Style::default()],
+            list_stack: Vec::new(),
+            pending_item_prefix: None,
+            code_block: None,
+            table: None,
+        }
+    }
+
+    fn handle(&mut self, event: Event<'_>) {
+        if self.handle_code_block(&event) || self.handle_table(&event) {
+            return;
         }
 
-        if in_code_block {
-            code_block_lines.push(raw_line.to_string());
-            idx += 1;
-            continue;
+        match event {
+            Event::Start(tag) => self.start_tag(tag),
+            Event::End(tag) => self.end_tag(tag),
+            Event::Text(text) => self.push_text(&text),
+            Event::Code(code) => self
+                .current
+                .push(Span::styled(code.to_string(), self.theme.inline_code)),
+            Event::SoftBreak | Event::HardBreak => self.push_current_line(),
+            Event::Rule => self
+                .lines
+                .push(Line::styled("─".repeat(40), self.theme.horizontal_rule)),
+            Event::Html(html) | Event::InlineHtml(html) => self.push_text(&html),
+            _ => {}
         }
+    }
 
-        // table: `| ... |` header row, `|---|---|` separator, then `| ... |` body rows
-        if let Some(consumed) = try_render_table(&source_lines[idx..], theme, &mut lines, width) {
-            idx += consumed;
-            continue;
+    fn start_tag(&mut self, tag: Tag<'_>) {
+        match tag {
+            Tag::Heading { level, .. } => self.push_style(heading_style(level, self.theme)),
+            Tag::Strong => self.push_style(self.current_style().add_modifier(Modifier::BOLD)),
+            Tag::Emphasis => self.push_style(self.current_style().add_modifier(Modifier::ITALIC)),
+            Tag::Strikethrough => {
+                self.push_style(self.current_style().add_modifier(Modifier::CROSSED_OUT))
+            }
+            Tag::List(start) => self.list_stack.push(start),
+            Tag::Item => {
+                let prefix = match self.list_stack.last_mut().and_then(Option::as_mut) {
+                    Some(next) => {
+                        let prefix = format!("{next}. ");
+                        *next += 1;
+                        prefix
+                    }
+                    None => "• ".into(),
+                };
+                self.pending_item_prefix = Some(prefix);
+            }
+            Tag::CodeBlock(kind) => {
+                let lang = match kind {
+                    CodeBlockKind::Fenced(info) => {
+                        info.split_whitespace().next().unwrap_or("").to_string()
+                    }
+                    CodeBlockKind::Indented => String::new(),
+                };
+                self.code_block = Some((lang, String::new()));
+            }
+            Tag::Table(_) => self.table = Some(TableCapture::default()),
+            _ => {}
         }
+    }
 
-        // headings
-        if let Some(rest) = raw_line.strip_prefix("### ") {
-            lines.push(Line::styled(rest.to_string(), theme.heading_h3));
-            idx += 1;
-            continue;
+    fn end_tag(&mut self, tag: TagEnd) {
+        match tag {
+            TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::Item => self.push_current_line(),
+            TagEnd::Strong | TagEnd::Emphasis | TagEnd::Strikethrough => self.pop_style(),
+            TagEnd::List(_) => {
+                self.list_stack.pop();
+            }
+            TagEnd::CodeBlock => {
+                if let Some((lang, text)) = self.code_block.take() {
+                    let lines = text.lines().map(str::to_string).collect::<Vec<_>>();
+                    self.lines
+                        .extend(render_code_block(&lines, &lang, self.theme));
+                }
+            }
+            _ => {}
         }
-        if let Some(rest) = raw_line.strip_prefix("## ") {
-            lines.push(Line::styled(rest.to_string(), theme.heading));
-            idx += 1;
-            continue;
-        }
-        if let Some(rest) = raw_line.strip_prefix("# ") {
-            lines.push(Line::styled(
-                rest.to_string(),
-                theme.heading.add_modifier(Modifier::UNDERLINED),
-            ));
-            idx += 1;
-            continue;
-        }
+    }
 
-        // horizontal rule
-        if raw_line == "---" || raw_line == "***" || raw_line == "___" {
-            lines.push(Line::styled("─".repeat(40), theme.horizontal_rule));
-            idx += 1;
-            continue;
-        }
-
-        // list items
-        if let Some(rest) = raw_line
-            .strip_prefix("- ")
-            .or_else(|| raw_line.strip_prefix("* "))
+    fn handle_code_block(&mut self, event: &Event<'_>) -> bool {
+        if let Some((_, text)) = &mut self.code_block
+            && let Event::Text(chunk) = event
         {
-            let mut spans = vec![Span::styled("• ", theme.list_bullet)];
-            spans.extend(render_inline_spans(rest, theme));
-            lines.push(Line::from(spans));
-            idx += 1;
-            continue;
+            text.push_str(chunk);
+            return true;
         }
-
-        // numbered list items
-        if let Some((prefix, rest)) = numbered_list_item(raw_line) {
-            let mut spans = vec![Span::styled(format!("{prefix} "), theme.list_bullet)];
-            spans.extend(render_inline_spans(rest, theme));
-            lines.push(Line::from(spans));
-            idx += 1;
-            continue;
-        }
-
-        // regular paragraph with inline formatting
-        if raw_line.is_empty() {
-            lines.push(Line::raw(""));
-        } else {
-            lines.push(Line::from(render_inline_spans(raw_line, theme)));
-        }
-        idx += 1;
+        false
     }
 
-    // close any unclosed code block
-    if in_code_block {
-        let highlighted = render_code_block(&code_block_lines, &code_block_lang, theme);
-        lines.extend(highlighted);
+    fn handle_table(&mut self, event: &Event<'_>) -> bool {
+        let Some(table) = &mut self.table else {
+            return false;
+        };
+
+        match event {
+            Event::Start(Tag::Table(_)) => true,
+            Event::Start(Tag::TableHead) => {
+                table.in_head = true;
+                table.current_row = Some(Vec::new());
+                true
+            }
+            Event::Start(Tag::TableRow) => {
+                table.current_row = Some(Vec::new());
+                true
+            }
+            Event::Start(Tag::TableCell) => {
+                table.current_cell.clear();
+                table.in_cell = true;
+                true
+            }
+            Event::Start(Tag::Strong) if table.in_cell => {
+                table.current_cell.push_str("**");
+                true
+            }
+            Event::Start(Tag::Emphasis) if table.in_cell => {
+                table.current_cell.push('*');
+                true
+            }
+            Event::Text(text) if table.in_cell => {
+                table.current_cell.push_str(text);
+                true
+            }
+            Event::Code(text) if table.in_cell => {
+                table.current_cell.push('`');
+                table.current_cell.push_str(text);
+                table.current_cell.push('`');
+                true
+            }
+            Event::SoftBreak | Event::HardBreak if table.in_cell => {
+                table.current_cell.push(' ');
+                true
+            }
+            Event::End(TagEnd::TableCell) => {
+                table.in_cell = false;
+                if let Some(row) = &mut table.current_row {
+                    row.push(table.current_cell.trim().to_string());
+                }
+                true
+            }
+            Event::End(TagEnd::TableRow) => {
+                if let Some(row) = table.current_row.take() {
+                    if table.in_head {
+                        table.head_row = Some(row);
+                    } else {
+                        table.rows.push(row);
+                    }
+                }
+                true
+            }
+            Event::End(TagEnd::TableHead) => {
+                table.in_head = false;
+                if let Some(row) = table.current_row.take().or_else(|| table.head_row.take()) {
+                    table.rows.insert(0, row);
+                }
+                true
+            }
+            Event::End(TagEnd::Table) => {
+                let table = self.table.take().unwrap_or_default();
+                if !table.rows.is_empty() {
+                    let rendered = render_records_with_tabled(table.rows, self.width);
+                    self.lines.extend(
+                        rendered
+                            .lines()
+                            .map(|line| styled_table_line(line, self.theme)),
+                    );
+                }
+                true
+            }
+            Event::End(TagEnd::Strong) if table.in_cell => {
+                table.current_cell.push_str("**");
+                true
+            }
+            Event::End(TagEnd::Emphasis) if table.in_cell => {
+                table.current_cell.push('*');
+                true
+            }
+            _ => true,
+        }
     }
 
-    Text::from(lines)
+    fn push_text(&mut self, text: &str) {
+        if let Some(prefix) = self.pending_item_prefix.take() {
+            self.current
+                .push(Span::styled(prefix, self.theme.list_bullet));
+        }
+        self.current
+            .push(Span::styled(text.to_string(), self.current_style()));
+    }
+
+    fn push_current_line(&mut self) {
+        if !self.current.is_empty() || self.pending_item_prefix.is_some() {
+            if let Some(prefix) = self.pending_item_prefix.take() {
+                self.current
+                    .push(Span::styled(prefix, self.theme.list_bullet));
+            }
+            self.lines
+                .push(Line::from(std::mem::take(&mut self.current)));
+        }
+    }
+
+    fn push_style(&mut self, style: Style) {
+        self.style_stack.push(style);
+    }
+
+    fn pop_style(&mut self) {
+        if self.style_stack.len() > 1 {
+            self.style_stack.pop();
+        }
+    }
+
+    fn current_style(&self) -> Style {
+        *self.style_stack.last().unwrap_or(&Style::default())
+    }
+
+    fn finish(mut self) -> Vec<Line<'static>> {
+        self.push_current_line();
+        self.lines
+    }
+}
+
+fn heading_style(level: HeadingLevel, theme: &Theme) -> Style {
+    match level {
+        HeadingLevel::H1 => theme.heading.add_modifier(Modifier::UNDERLINED),
+        HeadingLevel::H2 => theme.heading,
+        _ => theme.heading_h3,
+    }
 }
 
 fn render_plain_text(source: &str) -> Text<'static> {
@@ -202,67 +388,7 @@ fn numbered_list_item(line: &str) -> Option<(&str, &str)> {
     Some((&line[..=dot_pos], &line[dot_pos + 2..]))
 }
 
-/// parse a `| a | b | c |` row into trimmed cell strings. returns `None`
-/// if the line doesn't look like a table row (no surrounding pipes, no
-/// inner pipes). the outer pipes are stripped before splitting so cells
-/// never contain the delimiter itself
-fn parse_table_row(line: &str) -> Option<Vec<&str>> {
-    let trimmed = line.trim();
-    let inner = trimmed.strip_prefix('|')?.strip_suffix('|')?;
-    if !inner.contains('|') {
-        return None;
-    }
-    Some(inner.split('|').map(str::trim).collect())
-}
-
-/// a separator row uses dashes (with optional colons for alignment)
-/// between the pipes. every cell must be a dash/colon run, and there
-/// must be at least one dash to disambiguate from header rows that
-/// contain only colons
-fn is_table_separator_row(line: &str) -> bool {
-    let Some(cells) = parse_table_row(line) else {
-        return false;
-    };
-    if cells.is_empty() {
-        return false;
-    }
-    cells.iter().all(|cell| {
-        !cell.is_empty() && cell.chars().all(|c| c == '-' || c == ':') && cell.contains('-')
-    })
-}
-
-/// try to recognise and render a gfm table starting at `lines[0]`.
-/// returns the number of source lines consumed, or `None` if the
-/// prefix doesn't form a valid table (missing separator row, ragged
-/// cell counts, etc)
-fn try_render_table(
-    source: &[&str],
-    theme: &Theme,
-    out: &mut Vec<Line<'static>>,
-    width: Option<usize>,
-) -> Option<usize> {
-    let consumed = table_source_line_count(source)?;
-    let records = pulldown_table_rows(&source[..consumed].join("\n"))?;
-    let table = render_records_with_tabled(records, width);
-    out.extend(table.lines().map(|line| styled_table_line(line, theme)));
-
-    Some(consumed)
-}
-
-fn table_source_line_count(source: &[&str]) -> Option<usize> {
-    parse_table_row(source.first()?)?;
-    let separator = source.get(1)?;
-    if !is_table_separator_row(separator) {
-        return None;
-    }
-
-    let mut idx = 2;
-    while idx < source.len() && parse_table_row(source[idx]).is_some() {
-        idx += 1;
-    }
-    Some(idx)
-}
-
+#[cfg(test)]
 fn pulldown_table_rows(source: &str) -> Option<Vec<Vec<String>>> {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
@@ -365,9 +491,12 @@ fn is_table_border_line(line: &str) -> bool {
 
 #[cfg(test)]
 fn render_markdown_table_with_tabled(source: &str) -> Option<String> {
-    let source_lines: Vec<&str> = source.lines().collect();
-    let mut lines = Vec::new();
-    try_render_table(&source_lines, &Theme::default(), &mut lines, None)?;
+    let rows = pulldown_table_rows(source)?;
+    let table = render_records_with_tabled(rows, None);
+    let lines = table
+        .lines()
+        .map(|line| styled_table_line(line, &Theme::default()))
+        .collect::<Vec<_>>();
     Some(
         lines
             .iter()
@@ -755,13 +884,13 @@ mod tests {
         let text = render("alpha\n**beta**\ngamma", &t());
 
         assert_eq!(text.lines.len(), 3);
-        assert_eq!(parse_inline_call_count(), 1);
+        assert_eq!(parse_inline_call_count(), 0);
     }
 
     #[test]
     fn mixed_content() {
         let text = render("# title\n\nsome **bold** and `code`\n\n- a list item", &t());
-        assert!(text.lines.len() >= 4);
+        assert!(text.lines.len() >= 3);
     }
 
     #[test]
