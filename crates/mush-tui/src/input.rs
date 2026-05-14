@@ -765,6 +765,7 @@ fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         (_, KeyCode::Char('b')) => {
             app.navigation.scroll_unit = match app.navigation.scroll_unit {
                 ScrollUnit::Message => {
+                    app.navigation.selection_anchor = None;
                     // switching to block mode, initialise selection
                     let blocks = app.blocks();
                     app.navigation.selected_block = if blocks.is_empty() {
@@ -776,6 +777,7 @@ fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
                 }
                 ScrollUnit::Block => {
                     app.navigation.selected_block = None;
+                    app.navigation.selection_anchor = None;
                     ScrollUnit::Message
                 }
             };
@@ -864,54 +866,9 @@ fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             app.navigation.selected_message = Some(0);
         }
         (_, KeyCode::Char('y')) => {
-            if app.navigation.scroll_unit == ScrollUnit::Block {
-                // copy selected block (paragraph or code-fence body)
-                let blocks = app.blocks();
-                if let Some(sel) = app.navigation.selected_block
-                    && let Some(block) = blocks.get(sel)
-                {
-                    if copy_to_clipboard(&block.content) {
-                        let label = match &block.kind {
-                            crate::app::BlockKind::Paragraph => "paragraph".to_string(),
-                            crate::app::BlockKind::Fenced { lang } => lang
-                                .as_deref()
-                                .map(|l| format!("{l} block"))
-                                .unwrap_or_else(|| "code block".into()),
-                        };
-                        app.status = Some(format!(
-                            "copied {label} ({} chars)",
-                            block.content.chars().count()
-                        ));
-                    } else {
-                        app.status = Some("clipboard copy failed".into());
-                    }
-                }
-            } else if let Some((start, end)) = app.selection_range() {
-                // copy visual selection range
-                let text: String = app.messages[start..=end]
-                    .iter()
-                    .map(|m| m.content.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n\n");
-                let count = end - start + 1;
-                if copy_to_clipboard(&text) {
-                    app.status = Some(format!(
-                        "copied {count} messages ({} chars)",
-                        text.chars().count()
-                    ));
-                } else {
-                    app.status = Some("clipboard copy failed".into());
-                }
-                app.navigation.selection_anchor = None;
-            } else if let Some(sel) = app.navigation.selected_message
-                && let Some(msg) = app.messages.get(sel)
-            {
-                // copy single selected message
-                if copy_to_clipboard(&msg.content) {
-                    app.status = Some(format!(
-                        "copied message ({} chars)",
-                        msg.content.chars().count()
-                    ));
+            if let Some(selection) = app.copy_selection() {
+                if copy_to_clipboard(&selection.text) {
+                    app.status = Some(selection.status);
                 } else {
                     app.status = Some("clipboard copy failed".into());
                 }

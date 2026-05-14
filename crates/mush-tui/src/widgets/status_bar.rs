@@ -309,13 +309,10 @@ fn left_spans(app: &App, width: u16) -> Vec<Span<'static>> {
 
     // scroll mode indicator
     if app.interaction.mode == crate::app::AppMode::Scroll {
-        let unit_label = match app.navigation.scroll_unit {
-            crate::app::ScrollUnit::Block => "blocks",
-            crate::app::ScrollUnit::Message => "messages",
-        };
+        let unit_label = scroll_selection_label(app);
         b.section_break();
         b.push_inline(Span::styled(
-            format!("scroll: {unit_label} (b)"),
+            format!("scroll: {unit_label}"),
             app.theme.scroll_indicator,
         ));
     }
@@ -343,6 +340,37 @@ fn left_spans(app: &App, width: u16) -> Vec<Span<'static>> {
     }
 
     b.into_spans()
+}
+
+fn scroll_selection_label(app: &crate::app::App) -> String {
+    match app.navigation.scroll_unit {
+        crate::app::ScrollUnit::Block => match app
+            .navigation
+            .selected_block
+            .and_then(|idx| app.blocks().get(idx).cloned())
+        {
+            Some(block) => {
+                let label = match block.kind {
+                    crate::app::BlockKind::Paragraph => "paragraph".to_string(),
+                    crate::app::BlockKind::Fenced { lang } => lang
+                        .map(|lang| format!("{lang} block"))
+                        .unwrap_or_else(|| "code block".into()),
+                };
+                format!("blocks, y copies {label}, b messages")
+            }
+            None => "blocks, nothing selected, b messages".into(),
+        },
+        crate::app::ScrollUnit::Message => {
+            if let Some((start, end)) = app.selection_range() {
+                let count = end - start + 1;
+                format!("messages, visual {count} bodies, y copies, b blocks")
+            } else if app.navigation.selected_message.is_some() {
+                "messages, y copies body, v visual, b blocks".into()
+            } else {
+                "messages, nothing selected, b blocks".into()
+            }
+        }
+    }
 }
 
 /// ensure `app.render_state.status_bar_cache` is populated for `width`.
@@ -963,10 +991,15 @@ mod tests {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.interaction.mode = crate::app::AppMode::Scroll;
         app.navigation.scroll_unit = crate::app::ScrollUnit::Block;
+        app.messages.push(crate::app::DisplayMessage::new(
+            crate::app::MessageRole::Assistant,
+            "para",
+        ));
+        app.navigation.selected_block = Some(0);
         let buf = render_status(&app, 120, 1);
         let content = buffer_to_string(&buf);
         assert!(
-            content.contains("blocks"),
+            content.contains("blocks, y copies paragraph, b messages"),
             "missing block mode indicator: {content}"
         );
     }
@@ -976,11 +1009,27 @@ mod tests {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.interaction.mode = crate::app::AppMode::Scroll;
         app.navigation.scroll_unit = crate::app::ScrollUnit::Message;
+        app.navigation.selected_message = Some(0);
         let buf = render_status(&app, 120, 1);
         let content = buffer_to_string(&buf);
         assert!(
-            content.contains("messages"),
+            content.contains("messages, y copies body, v visual, b blocks"),
             "missing message mode indicator: {content}"
+        );
+    }
+
+    #[test]
+    fn status_bar_shows_visual_message_copy_count() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.interaction.mode = crate::app::AppMode::Scroll;
+        app.navigation.scroll_unit = crate::app::ScrollUnit::Message;
+        app.navigation.selected_message = Some(2);
+        app.navigation.selection_anchor = Some(0);
+        let buf = render_status(&app, 120, 1);
+        let content = buffer_to_string(&buf);
+        assert!(
+            content.contains("messages, visual 3 bodies, y copies, b blocks"),
+            "missing visual mode copy indicator: {content}"
         );
     }
 }

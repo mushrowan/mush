@@ -101,6 +101,12 @@ pub enum ScrollUnit {
     Block,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CopySelection {
+    pub text: String,
+    pub status: String,
+}
+
 /// pick the next thinking level. when `supported` is non-empty, walks
 /// the curated list (cheap → expensive) wrapping around. when empty,
 /// falls back to the legacy hardcoded cycle so uncurated models still
@@ -907,6 +913,62 @@ impl App {
         let anchor = self.navigation.selection_anchor?;
         let cursor = self.navigation.selected_message?;
         Some((anchor.min(cursor), anchor.max(cursor)))
+    }
+
+    /// Build the exact text copied by scroll-mode yank and the status
+    /// shown afterwards. Message mode copies only message body text. Tool
+    /// previews and hidden/visible thinking are deliberately excluded for
+    /// now, so the copied payload matches the highlighted message bodies.
+    /// Block mode copies the selected paragraph or fenced code body.
+    pub fn copy_selection(&mut self) -> Option<CopySelection> {
+        match self.navigation.scroll_unit {
+            ScrollUnit::Block => self.copy_block_selection(),
+            ScrollUnit::Message => self.copy_message_selection(),
+        }
+    }
+
+    fn copy_block_selection(&self) -> Option<CopySelection> {
+        let blocks = self.blocks();
+        let block = blocks.get(self.navigation.selected_block?)?;
+        let label = match &block.kind {
+            BlockKind::Paragraph => "paragraph".to_string(),
+            BlockKind::Fenced { lang } => lang
+                .as_deref()
+                .map(|l| format!("{l} block"))
+                .unwrap_or_else(|| "code block".into()),
+        };
+        Some(CopySelection {
+            text: block.content.clone(),
+            status: format!("copied {label} ({} chars)", block.content.chars().count()),
+        })
+    }
+
+    fn copy_message_selection(&mut self) -> Option<CopySelection> {
+        if let Some((start, end)) = self.selection_range() {
+            let text: String = self.messages[start..=end]
+                .iter()
+                .map(|m| m.content.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            let count = end - start + 1;
+            self.navigation.selection_anchor = None;
+            return Some(CopySelection {
+                status: format!(
+                    "copied {count} message bodies ({} chars)",
+                    text.chars().count()
+                ),
+                text,
+            });
+        }
+
+        let msg = self.messages.get(self.navigation.selected_message?)?;
+        Some(CopySelection {
+            text: msg.content.clone(),
+            status: format!(
+                "copied message body ({} chars)",
+                msg.content.chars().count()
+            ),
+        })
     }
 
     /// find which message is displayed at a given screen row
@@ -2309,6 +2371,63 @@ batch: 1/2 succeeded, 1 failed";
         app.navigation.selection_anchor = Some(2);
         app.navigation.selected_message = Some(2);
         assert_eq!(app.selection_range(), Some((2, 2)));
+    }
+
+    #[test]
+    fn copy_message_selection_copies_body_only_and_labels_it() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.navigation.scroll_unit = ScrollUnit::Message;
+        let mut msg = DisplayMessage::new(MessageRole::Assistant, "visible body");
+        msg.thinking = Some("hidden thinking".into());
+        msg.tool_calls.push(DisplayToolCall {
+            name: "bash".into(),
+            summary: "echo secret".into(),
+            status: ToolCallStatus::Done,
+            output_preview: Some("tool output".into()),
+            image_data: None,
+            batch: 1,
+        });
+        app.messages.push(msg);
+        app.navigation.selected_message = Some(0);
+
+        let copied = app.copy_selection().expect("selection should copy");
+
+        assert_eq!(copied.text, "visible body");
+        assert_eq!(copied.status, "copied message body (12 chars)");
+    }
+
+    #[test]
+    fn copy_visual_message_selection_copies_body_range_and_clears_anchor() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.navigation.scroll_unit = ScrollUnit::Message;
+        app.messages
+            .push(DisplayMessage::new(MessageRole::User, "one"));
+        app.messages
+            .push(DisplayMessage::new(MessageRole::Assistant, "two"));
+        app.navigation.selected_message = Some(1);
+        app.navigation.selection_anchor = Some(0);
+
+        let copied = app.copy_selection().expect("selection should copy");
+
+        assert_eq!(copied.text, "one\n\ntwo");
+        assert_eq!(copied.status, "copied 2 message bodies (8 chars)");
+        assert_eq!(app.navigation.selection_anchor, None);
+    }
+
+    #[test]
+    fn copy_block_selection_copies_selected_block_content() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.navigation.scroll_unit = ScrollUnit::Block;
+        app.messages.push(DisplayMessage::new(
+            MessageRole::Assistant,
+            "para\n\n```rust\nfn main() {}\n```",
+        ));
+        app.navigation.selected_block = Some(1);
+
+        let copied = app.copy_selection().expect("block should copy");
+
+        assert_eq!(copied.text, "fn main() {}");
+        assert_eq!(copied.status, "copied rust block (12 chars)");
     }
 
     /// set up `app` with `count` messages whose cached render height is
