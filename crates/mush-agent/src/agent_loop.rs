@@ -639,6 +639,21 @@ pub fn agent_loop(
                     // check cancellation before executing tools
                     if config.cancel.as_ref().is_some_and(|t| t.is_cancelled()) {
                         tracing::info!("agent_loop cancelled before tool execution");
+                        for tc in &allowed {
+                            let result = ToolResult::error("tool call cancelled before execution");
+                            yield AgentEvent::ToolExecEnd {
+                                tool_call_id: tc.id.clone(),
+                                tool_name: tc.name.clone(),
+                                result: result.clone(),
+                            };
+                            messages.push(Message::ToolResult(ToolResultMessage {
+                                tool_call_id: tc.id.clone(),
+                                tool_name: tc.name.clone(),
+                                content: result.content,
+                                outcome: result.outcome,
+                                timestamp_ms: Timestamp::now(),
+                            }));
+                        }
                         break 'outer;
                     }
 
@@ -667,6 +682,21 @@ pub fn agent_loop(
                             r = futs => r,
                             _ = token.cancelled() => {
                                 tracing::info!("agent_loop cancelled during tool execution");
+                                for tc in &allowed {
+                                    let result = ToolResult::error("tool call cancelled during execution");
+                                    yield AgentEvent::ToolExecEnd {
+                                        tool_call_id: tc.id.clone(),
+                                        tool_name: tc.name.clone(),
+                                        result: result.clone(),
+                                    };
+                                    messages.push(Message::ToolResult(ToolResultMessage {
+                                        tool_call_id: tc.id.clone(),
+                                        tool_name: tc.name.clone(),
+                                        content: result.content,
+                                        outcome: result.outcome,
+                                        timestamp_ms: Timestamp::now(),
+                                    }));
+                                }
                                 break 'outer;
                             }
                         },
@@ -1389,6 +1419,81 @@ mod tests {
                 .any(|e| matches!(e, AgentEvent::TurnStart { .. })),
             "cancelled agent should not start any turns"
         );
+    }
+
+    #[test]
+    fn cancelled_before_tool_execution_emits_stub_tool_results() {
+        struct ToolCallProvider;
+
+        #[async_trait::async_trait]
+        impl mush_ai::registry::ApiProvider for ToolCallProvider {
+            fn api(&self) -> Api {
+                Api::AnthropicMessages
+            }
+
+            async fn stream(
+                &self,
+                model: &Model,
+                _context: &mush_ai::registry::LlmContext,
+                _options: &StreamOptions,
+            ) -> Result<mush_ai::registry::EventStream, mush_ai::registry::ProviderError>
+            {
+                let message = AssistantMessage::builder()
+                    .content(vec![AssistantContentPart::ToolCall(ToolCall {
+                        id: "tc_cancelled".into(),
+                        name: "counter".into(),
+                        arguments: serde_json::json!({}),
+                    })])
+                    .model(model.id.clone())
+                    .provider(model.provider.clone())
+                    .api(model.api)
+                    .timestamp_ms(Timestamp::zero())
+                    .build();
+                let s = async_stream::stream! {
+                    yield StreamEvent::Start { partial: message.clone() };
+                    yield StreamEvent::Done { reason: StopReason::ToolUse, message };
+                };
+                Ok(Box::pin(s) as mush_ai::registry::EventStream)
+            }
+        }
+
+        let mut registry = ApiRegistry::new();
+        registry.register(Box::new(ToolCallProvider));
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let cancel_from_hook = cancel.clone();
+        let config = AgentConfig {
+            model: test_model(),
+            system_prompt: None,
+            tools: ToolRegistry::from_boxed(vec![Box::new(CounterTool)]),
+            registry: &registry,
+            options: StreamOptions::default(),
+            max_turns: DEFAULT_MAX_TURNS,
+            hooks: Box::new(ClosureHooks {
+                confirm: Some(Box::new(move |_, _, _| {
+                    cancel_from_hook.cancel();
+                    Box::pin(async { ConfirmAction::Allow })
+                })),
+                ..ClosureHooks::default()
+            }),
+            injections: AgentInjections::default(),
+            cancel: Some(cancel),
+        };
+        let messages = vec![Message::User(UserMessage {
+            content: UserContent::Text("use a tool".into()),
+            timestamp_ms: Timestamp::zero(),
+        })];
+
+        let events: Vec<AgentEvent> = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async { agent_loop(config, messages).collect().await });
+
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                AgentEvent::ToolExecEnd { tool_call_id, result, .. }
+                    if tool_call_id.as_str() == "tc_cancelled" && result.outcome.is_error()
+            )
+        }));
     }
 
     #[test]

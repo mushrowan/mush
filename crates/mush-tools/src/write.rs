@@ -84,9 +84,10 @@ fn write_file(path: &Path, content: &str) -> ToolResult {
 
     match std::fs::write(path, content) {
         Ok(()) => ToolResult::text(format!(
-            "Successfully wrote {} bytes to {}",
+            "Successfully wrote {} bytes to {}\n\npreview:\n{}",
             content.len(),
-            path.display()
+            path.display(),
+            content
         )),
         Err(e) => ToolResult::error(format!("failed to write file: {e}")),
     }
@@ -126,5 +127,30 @@ mod tests {
         let result = write_file(&path, "new content");
         assert!(result.outcome.is_success());
         assert_eq!(fs::read_to_string(&path).unwrap(), "new content");
+    }
+
+    #[test]
+    fn write_result_includes_content_preview() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("preview.txt");
+
+        let result = write_file(&path, "first line\nsecond line");
+        let text = result_text(&result);
+
+        assert!(text.contains("preview:"), "got: {text}");
+        assert!(text.contains("first line"), "got: {text}");
+        assert!(text.contains("second line"), "got: {text}");
+    }
+
+    fn result_text(result: &ToolResult) -> String {
+        result
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                mush_ai::types::ToolResultContentPart::Text(text) => Some(text.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }

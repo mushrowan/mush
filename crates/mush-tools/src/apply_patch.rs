@@ -546,14 +546,49 @@ impl AgentTool for ApplyPatchTool {
             Err(e) => return ToolResult::error(format!("patch parse error: {e}")),
         };
 
+        let preview = diff_preview(&hunks);
+
         match apply_hunks(&self.cwd, &hunks) {
             Ok(summary) => {
-                let output = format!("applied patch successfully:\n{}", summary.join("\n"));
+                let output = format!(
+                    "applied patch successfully:\n{}\n\ndiff:\n{}",
+                    summary.join("\n"),
+                    preview
+                );
                 ToolResult::text(output)
             }
             Err(e) => ToolResult::error(format!("patch apply error: {e}")),
         }
     }
+}
+
+fn diff_preview(hunks: &[Hunk]) -> String {
+    let mut lines = Vec::new();
+    for hunk in hunks {
+        match hunk {
+            Hunk::Add { path, contents } => {
+                lines.push(format!("+++ {path}"));
+                lines.extend(contents.lines().map(|line| format!("+{line}")));
+            }
+            Hunk::Delete { path } => {
+                lines.push(format!("--- {path}"));
+            }
+            Hunk::Update { path, chunks, .. } => {
+                lines.push(format!("--- {path}"));
+                lines.push(format!("+++ {path}"));
+                for chunk in chunks {
+                    if let Some(context) = &chunk.context {
+                        lines.push(format!("@@ {context}"));
+                    } else {
+                        lines.push("@@".into());
+                    }
+                    lines.extend(chunk.old_lines.iter().map(|line| format!("-{line}")));
+                    lines.extend(chunk.new_lines.iter().map(|line| format!("+{line}")));
+                }
+            }
+        }
+    }
+    lines.join("\n")
 }
 
 #[cfg(test)]
@@ -1201,5 +1236,35 @@ mod tests {
         let content = fs::read_to_string(dir.path().join("existing.rs")).unwrap();
         assert!(content.contains("new()"));
         assert!(!content.contains("old()"));
+    }
+
+    #[test]
+    fn apply_patch_result_includes_diff_preview() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("file.txt"), "old\n").unwrap();
+        let tool = ApplyPatchTool::new(dir.path().into());
+
+        let result = tokio::runtime::Runtime::new().unwrap().block_on(tool.execute(
+            serde_json::json!({
+                "patch_text": "*** Begin Patch\n*** Update File: file.txt\n@@\n-old\n+new\n*** End Patch"
+            }),
+        ));
+        let text = result_text(&result);
+
+        assert!(text.contains("diff:"), "got: {text}");
+        assert!(text.contains("-old"), "got: {text}");
+        assert!(text.contains("+new"), "got: {text}");
+    }
+
+    fn result_text(result: &ToolResult) -> String {
+        result
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                mush_ai::types::ToolResultContentPart::Text(text) => Some(text.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }
