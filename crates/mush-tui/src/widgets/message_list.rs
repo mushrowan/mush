@@ -5,6 +5,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Widget;
+use unicode_width::UnicodeWidthStr;
 
 use throbber_widgets_tui::{BRAILLE_SIX, Throbber, WhichUse};
 
@@ -1329,7 +1330,7 @@ fn render_streaming_markdown_cached(app: &App, source: &str, width: usize) -> Te
         return truncate_text(cached.clone(), source.chars().count());
     }
 
-    let rendered = crate::markdown::render_with_width(full, &app.theme, Some(width));
+    let rendered = crate::markdown::render_streaming_with_width(full, &app.theme, Some(width));
     *app.render_state.stream_markdown_cache.borrow_mut() =
         Some((width, full.to_string(), rendered.clone()));
     truncate_text(rendered, source.chars().count())
@@ -1392,6 +1393,7 @@ const MIN_SINGLE_BOX_WIDTH: usize = 20;
 /// width that allows `widgets::diff` to pick side-by-side rendering.
 /// this is the side-by-side threshold + box chrome
 const DIFF_PREFERRED_WIDTH: usize = crate::widgets::diff::SIDE_BY_SIDE_MIN_WIDTH + 4;
+const BASH_OUTPUT_WRAP_WIDTH: usize = 88;
 
 /// compute the natural width a single tool box needs to render its
 /// title, summary, and output_preview without wrapping any individual
@@ -1400,14 +1402,19 @@ const DIFF_PREFERRED_WIDTH: usize = crate::widgets::diff::SIDE_BY_SIDE_MIN_WIDTH
 /// diffs are reachable on wide terminals. returns a width that the
 /// caller should clamp to available space
 fn natural_single_box_width(tc: &DisplayToolCall) -> usize {
-    use unicode_width::UnicodeWidthStr;
     // "┌─ icon name ─┐" = corner(2) + icon+spaces(3) + name + space(1) + fill(1) + corner(1)
     let title_w = UnicodeWidthStr::width(tc.name.as_str()) + 8;
     let summary_w = UnicodeWidthStr::width(tc.summary.as_str()) + 4;
     let output_w = tc
         .output_preview
         .as_deref()
-        .map(|o| o.lines().map(UnicodeWidthStr::width).max().unwrap_or(0) + 4)
+        .map(|o| {
+            o.lines()
+                .map(|line| boxed_preview_width(line, tc.name.as_str()))
+                .max()
+                .unwrap_or(0)
+                + 4
+        })
         .unwrap_or(0);
     let diff_w = if tc.name == "edit" && tc.output_preview.is_some() {
         DIFF_PREFERRED_WIDTH
@@ -1419,6 +1426,15 @@ fn natural_single_box_width(tc: &DisplayToolCall) -> usize {
         .max(output_w)
         .max(diff_w)
         .max(MIN_SINGLE_BOX_WIDTH)
+}
+
+fn boxed_preview_width(line: &str, tool_name: &str) -> usize {
+    let width = UnicodeWidthStr::width(line);
+    if tool_name.eq_ignore_ascii_case("bash") {
+        width.max(BASH_OUTPUT_WRAP_WIDTH)
+    } else {
+        width
+    }
 }
 
 /// compute a grid shape (rows, cols) for laying out `n` panels across
@@ -1578,14 +1594,7 @@ fn render_single_tool_box(
             for text_line in output.lines() {
                 let base_style = diff_line_style(text_line, theme);
                 if text_line.contains('\x1b') {
-                    let rows = super::ansi::ansi_lines(text_line, base_style);
-                    for spans in rows {
-                        let fitted = super::diff::fit_spans(spans, inner, base_style);
-                        let mut line_spans = vec![indent.clone(), Span::styled("│ ", border)];
-                        line_spans.extend(fitted);
-                        line_spans.push(Span::styled(" │", border));
-                        lines.push(Line::from(line_spans));
-                    }
+                    push_ansi_box_lines(text_line, inner, border, base_style, &indent, lines);
                 } else if let Some(lang) = lang {
                     push_highlighted_box_line(
                         text_line,
@@ -1621,6 +1630,40 @@ fn tool_summary_language(tc: &DisplayToolCall) -> Option<&'static str> {
         "write" | "edit" | "read" => crate::syntax::lang_from_path(&tc.summary),
         _ => None,
     }
+}
+
+fn push_ansi_box_lines<'a>(
+    text: &str,
+    inner_width: usize,
+    border: Style,
+    base_style: Style,
+    indent: &Span<'a>,
+    lines: &mut Vec<Line<'a>>,
+) {
+    let rows = super::ansi::ansi_lines(text, base_style);
+    for spans in rows {
+        for wrapped in wrap_styled_spans(spans, inner_width, base_style) {
+            let mut line_spans = vec![indent.clone(), Span::styled("│ ", border)];
+            line_spans.extend(wrapped);
+            line_spans.push(Span::styled(" │", border));
+            lines.push(Line::from(line_spans));
+        }
+    }
+}
+
+fn push_fitted_box_line<'a>(
+    spans: Vec<Span<'static>>,
+    inner_width: usize,
+    border: Style,
+    base_style: Style,
+    indent: &Span<'a>,
+    lines: &mut Vec<Line<'a>>,
+) {
+    let fitted = super::diff::fit_spans(spans, inner_width, base_style);
+    let mut line_spans = vec![indent.clone(), Span::styled("│ ", border)];
+    line_spans.extend(fitted);
+    line_spans.push(Span::styled(" │", border));
+    lines.push(Line::from(line_spans));
 }
 
 fn tool_output_language(tc: &DisplayToolCall) -> Option<&'static str> {
@@ -1814,13 +1857,72 @@ fn push_highlighted_box_line<'a>(
         );
         return;
     };
-    let fitted = super::diff::fit_spans(spans, inner_width, ctx.fallback_style);
-    lines.push(Line::from({
-        let mut line_spans = vec![ctx.indent.clone(), Span::styled("│ ", ctx.border)];
-        line_spans.extend(fitted);
-        line_spans.push(Span::styled(" │", ctx.border));
-        line_spans
-    }));
+    for wrapped in wrap_styled_spans(spans, inner_width, ctx.fallback_style) {
+        push_fitted_box_line(
+            wrapped,
+            inner_width,
+            ctx.border,
+            ctx.fallback_style,
+            &ctx.indent,
+            lines,
+        );
+    }
+}
+
+fn wrap_styled_spans(
+    spans: Vec<Span<'static>>,
+    width: usize,
+    _pad_style: Style,
+) -> Vec<Vec<Span<'static>>> {
+    if width == 0 {
+        return vec![spans];
+    }
+
+    let mut rows = Vec::new();
+    let mut current = Vec::new();
+    let mut current_width = 0usize;
+    for span in spans {
+        append_span_wrapped(span, width, &mut current, &mut current_width, &mut rows);
+    }
+    if !current.is_empty() || rows.is_empty() {
+        rows.push(current);
+    }
+    rows
+}
+
+fn append_span_wrapped(
+    span: Span<'static>,
+    width: usize,
+    current: &mut Vec<Span<'static>>,
+    current_width: &mut usize,
+    rows: &mut Vec<Vec<Span<'static>>>,
+) {
+    let style = span.style;
+    let mut chunk = String::new();
+    for ch in span.content.chars() {
+        let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if *current_width + ch_width > width && *current_width > 0 {
+            flush_styled_chunk(&mut chunk, style, current);
+            rows.push(std::mem::take(current));
+            *current_width = 0;
+            if ch == ' ' {
+                continue;
+            }
+        }
+        chunk.push(ch);
+        *current_width += ch_width;
+    }
+    flush_styled_chunk(&mut chunk, style, current);
+    if *current_width == width {
+        rows.push(std::mem::take(current));
+        *current_width = 0;
+    }
+}
+
+fn flush_styled_chunk(chunk: &mut String, style: Style, current: &mut Vec<Span<'static>>) {
+    if !chunk.is_empty() {
+        current.push(Span::styled(std::mem::take(chunk), style));
+    }
 }
 
 /// parse a read-tool output line of the form `L<n>: <content>`. returns
@@ -2171,7 +2273,7 @@ fn block_line_ranges(source: &str) -> Vec<(usize, usize)> {
         if line.starts_with("```") {
             if in_fence {
                 // closing fence: emit fence range
-                ranges.push((fence_start, rendered_idx));
+                ranges.push((fence_start + 1, rendered_idx + 1));
                 in_fence = false;
             } else {
                 // opening fence: flush any open paragraph first
@@ -2186,6 +2288,9 @@ fn block_line_ranges(source: &str) -> Vec<(usize, usize)> {
         }
 
         if in_fence {
+            if rendered_idx == fence_start {
+                rendered_idx += 1;
+            }
             rendered_idx += 1;
             continue;
         }
@@ -2206,7 +2311,7 @@ fn block_line_ranges(source: &str) -> Vec<(usize, usize)> {
         ranges.push((start, rendered_idx));
     }
     if in_fence && rendered_idx > fence_start {
-        ranges.push((fence_start, rendered_idx));
+        ranges.push((fence_start + 1, rendered_idx + 1));
     }
 
     ranges
@@ -3623,6 +3728,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn bash_tool_output_wraps_long_highlighted_lines() {
+        let long_json = r#"{"duration_seconds":12.0,"exit_code":0,"status":"success","stderr":"Compiling mush-tui v0.1.0 (/home/rowan/dev/mush/crates/mush-tui) and then a lot more output that should wrap"}"#;
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.messages.push(DisplayMessage {
+            tool_calls: vec![crate::app::DisplayToolCall {
+                name: "bash".into(),
+                summary: "cargo nextest run".into(),
+                status: ToolCallStatus::Done,
+                output_preview: Some(long_json.into()),
+                image_data: None,
+                batch: 1,
+            }],
+            ..DisplayMessage::new(MessageRole::Assistant, "")
+        });
+
+        let buf = render_app(&app, 120, 12);
+        let content = buffer_to_string(&buf);
+
+        assert!(content.contains("duration_seconds"));
+        assert!(content.contains("Compiling mush-tui"));
+        assert!(
+            !content.contains("lot more output that should wrap…"),
+            "long highlighted bash output should wrap rather than use an inline ellipsis: {content}"
+        );
+    }
+
     /// helper: convert buffer to string for assertions
     fn buffer_to_string(buf: &Buffer) -> String {
         let mut s = String::new();
@@ -4535,6 +4667,23 @@ mod tests {
                 .map(|(width, _, _)| *width),
             Some(24)
         );
+    }
+
+    #[test]
+    fn streaming_markdown_skips_syntax_highlighting() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.stream.text = "```rust\nlet x = 42;\n```".into();
+
+        crate::markdown::reset_highlight_code_block_call_count();
+
+        let text = render_streaming_markdown_cached(&app, &app.stream.text, 60);
+
+        assert!(
+            text.lines
+                .iter()
+                .any(|line| line.to_string().contains("let x"))
+        );
+        assert_eq!(crate::markdown::highlight_code_block_call_count(), 0);
     }
 
     #[test]

@@ -160,6 +160,47 @@
           fi
           exec ${pkgs.samply}/bin/samply load "$target"
         '';
+        packages.perf = pkgs.writeShellScriptBin "mush-perf" ''
+          data_dir="''${XDG_DATA_HOME:-$HOME/.local/share}/mush/profiles/perf-$(date +%Y%m%d-%H%M%S)"
+          mkdir -p "$data_dir"
+
+          export RUST_LOG=''${RUST_LOG:-warn,mush_agent=trace,mush_ai=trace,mush_tools=trace,mush_tui=trace,mush_cli=trace,mush_ext=trace,mush_session=trace,mush_lsp=trace,mush_mcp=trace,mush_treesitter=trace}
+          export MUSH_TRACE=true
+          export MUSH_PROFILE_STARTUP=true
+          export MUSH_TRACE_DIR="$data_dir"
+
+          printf '%s\n' "${craneOutputsProfiling.package}/bin/mush $*" > "$data_dir/command.txt"
+
+          echo "perf profiling: logs + tracing timeline + startup phases + raw perf" >&2
+          echo "output dir: $data_dir" >&2
+          echo "log file: ''${XDG_DATA_HOME:-$HOME/.local/share}/mush/mush.log" >&2
+          echo "trace dir: $MUSH_TRACE_DIR" >&2
+          echo "" >&2
+
+          set +e
+          ${pkgs.perf}/bin/perf record -q -F ''${MUSH_PERF_FREQ:-99} \
+            --call-graph dwarf,''${MUSH_PERF_STACK_SIZE:-4096} \
+            --user-callchains --exclude-perf \
+            -m ''${MUSH_PERF_MMAP_PAGES:-1024} \
+            -o "$data_dir/perf.data" -- \
+            ${craneOutputsProfiling.package}/bin/mush "$@"
+          status=$?
+          set -e
+
+          ${pkgs.perf}/bin/perf report --stdio --stdio-color never \
+            -i "$data_dir/perf.data" > "$data_dir/perf.report.txt" 2> "$data_dir/perf.report.stderr" || true
+          ${pkgs.perf}/bin/perf script \
+            -i "$data_dir/perf.data" > "$data_dir/perf.script.txt" 2> "$data_dir/perf.script.stderr" || true
+          ${pkgs.perf}/bin/perf report --stdio --header-only --stdio-color never \
+            -i "$data_dir/perf.data" > "$data_dir/perf.header.txt" 2> "$data_dir/perf.header.stderr" || true
+
+          echo "" >&2
+          echo "perf bundle saved: $data_dir" >&2
+          echo "raw data: $data_dir/perf.data" >&2
+          echo "script output: $data_dir/perf.script.txt" >&2
+          echo "report: $data_dir/perf.report.txt" >&2
+          exit "$status"
+        '';
 
         checks = {
           inherit (craneOutputs) package clippy test fmt deny doctest schemaCheck;

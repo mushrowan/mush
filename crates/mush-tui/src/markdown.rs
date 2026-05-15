@@ -39,6 +39,23 @@ pub fn render(source: &str, theme: &Theme) -> Text<'static> {
 
 /// render markdown with an optional target width for width-aware blocks.
 pub fn render_with_width(source: &str, theme: &Theme, width: Option<usize>) -> Text<'static> {
+    render_with_options(source, theme, width, CodeHighlighting::Enabled)
+}
+
+pub(crate) fn render_streaming_with_width(
+    source: &str,
+    theme: &Theme,
+    width: Option<usize>,
+) -> Text<'static> {
+    render_with_options(source, theme, width, CodeHighlighting::Disabled)
+}
+
+fn render_with_options(
+    source: &str,
+    theme: &Theme,
+    width: Option<usize>,
+    code_highlighting: CodeHighlighting,
+) -> Text<'static> {
     #[cfg(test)]
     RENDER_CALLS.with(|calls| calls.set(calls.get() + 1));
 
@@ -49,16 +66,27 @@ pub fn render_with_width(source: &str, theme: &Theme, width: Option<usize>) -> T
         return render_plain_text(source);
     }
 
-    Text::from(render_pulldown(source, theme, width))
+    Text::from(render_pulldown(source, theme, width, code_highlighting))
 }
 
-fn render_pulldown(source: &str, theme: &Theme, width: Option<usize>) -> Vec<Line<'static>> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodeHighlighting {
+    Enabled,
+    Disabled,
+}
+
+fn render_pulldown(
+    source: &str,
+    theme: &Theme,
+    width: Option<usize>,
+    code_highlighting: CodeHighlighting,
+) -> Vec<Line<'static>> {
     let source = normalise_thematic_breaks(source);
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_STRIKETHROUGH);
 
-    let mut renderer = MarkdownRenderer::new(theme, width);
+    let mut renderer = MarkdownRenderer::new(theme, width, code_highlighting);
     for event in Parser::new_ext(&source, options) {
         renderer.handle(event);
     }
@@ -89,6 +117,13 @@ struct MarkdownRenderer<'a> {
     pending_item_prefix: Option<String>,
     code_block: Option<(String, String)>,
     table: Option<TableCapture>,
+    link_stack: Vec<LinkCapture>,
+    code_highlighting: CodeHighlighting,
+}
+
+struct LinkCapture {
+    destination: String,
+    text: String,
 }
 
 #[derive(Default)]
@@ -102,7 +137,7 @@ struct TableCapture {
 }
 
 impl<'a> MarkdownRenderer<'a> {
-    fn new(theme: &'a Theme, width: Option<usize>) -> Self {
+    fn new(theme: &'a Theme, width: Option<usize>, code_highlighting: CodeHighlighting) -> Self {
         Self {
             theme,
             width,
@@ -113,6 +148,8 @@ impl<'a> MarkdownRenderer<'a> {
             pending_item_prefix: None,
             code_block: None,
             table: None,
+            link_stack: Vec::new(),
+            code_highlighting,
         }
     }
 
@@ -125,10 +162,9 @@ impl<'a> MarkdownRenderer<'a> {
             Event::Start(tag) => self.start_tag(tag),
             Event::End(tag) => self.end_tag(tag),
             Event::Text(text) => self.push_text(&text),
-            Event::Code(code) => self
-                .current
-                .push(Span::styled(code.to_string(), self.theme.inline_code)),
-            Event::SoftBreak | Event::HardBreak => self.push_current_line(),
+            Event::Code(code) => self.push_inline_code(&code),
+            Event::SoftBreak => self.push_text(" "),
+            Event::HardBreak => self.push_current_line(),
             Event::Rule => self
                 .lines
                 .push(Line::styled("─".repeat(40), self.theme.horizontal_rule)),
@@ -158,11 +194,17 @@ impl<'a> MarkdownRenderer<'a> {
                 self.pending_item_prefix = Some(prefix);
             }
             Tag::CodeBlock(CodeBlockKind::Fenced(info)) => {
+                self.push_current_line();
+                self.push_blank_line();
                 let lang = info.split_whitespace().next().unwrap_or("").to_string();
                 self.code_block = Some((lang, String::new()));
             }
             Tag::CodeBlock(CodeBlockKind::Indented) => {}
             Tag::Table(_) => self.table = Some(TableCapture::default()),
+            Tag::Link { dest_url, .. } => self.link_stack.push(LinkCapture {
+                destination: dest_url.to_string(),
+                text: String::new(),
+            }),
             _ => {}
         }
     }
@@ -177,8 +219,18 @@ impl<'a> MarkdownRenderer<'a> {
             TagEnd::CodeBlock => {
                 if let Some((lang, text)) = self.code_block.take() {
                     let lines = text.lines().map(str::to_string).collect::<Vec<_>>();
-                    self.lines
-                        .extend(render_code_block(&lines, &lang, self.theme));
+                    self.lines.extend(render_code_block(
+                        &lines,
+                        &lang,
+                        self.theme,
+                        self.code_highlighting,
+                    ));
+                    self.push_blank_line();
+                }
+            }
+            TagEnd::Link => {
+                if let Some(link) = self.link_stack.pop() {
+                    self.push_link_destination(&link);
                 }
             }
             _ => {}
@@ -287,12 +339,33 @@ impl<'a> MarkdownRenderer<'a> {
     }
 
     fn push_text(&mut self, text: &str) {
+        if let Some(link) = self.link_stack.last_mut() {
+            link.text.push_str(text);
+        }
         if let Some(prefix) = self.pending_item_prefix.take() {
             self.current
                 .push(Span::styled(prefix, self.theme.list_bullet));
         }
         self.current
             .push(Span::styled(text.to_string(), self.current_style()));
+    }
+
+    fn push_inline_code(&mut self, code: &str) {
+        if let Some(link) = self.link_stack.last_mut() {
+            link.text.push_str(code);
+        }
+        self.current
+            .push(Span::styled(format!("`{code}`"), self.theme.inline_code));
+    }
+
+    fn push_link_destination(&mut self, link: &LinkCapture) {
+        if link.destination.is_empty() || link.destination == link.text {
+            return;
+        }
+        self.current.push(Span::styled(
+            format!(" ({})", link.destination),
+            self.theme.link,
+        ));
     }
 
     fn push_current_line(&mut self) {
@@ -304,6 +377,13 @@ impl<'a> MarkdownRenderer<'a> {
             self.lines
                 .push(Line::from(std::mem::take(&mut self.current)));
         }
+    }
+
+    fn push_blank_line(&mut self) {
+        if self.lines.last().is_some_and(|line| line.spans.is_empty()) {
+            return;
+        }
+        self.lines.push(Line::raw(""));
     }
 
     fn push_style(&mut self, style: Style) {
@@ -322,6 +402,9 @@ impl<'a> MarkdownRenderer<'a> {
 
     fn finish(mut self) -> Vec<Line<'static>> {
         self.push_current_line();
+        while self.lines.last().is_some_and(|line| line.spans.is_empty()) {
+            self.lines.pop();
+        }
         self.lines
     }
 }
@@ -373,7 +456,7 @@ fn is_plain_text_line(line: &str) -> bool {
 fn needs_inline_parsing(text: &str) -> bool {
     text.as_bytes()
         .iter()
-        .any(|byte| matches!(*byte, b'`' | b'*' | b'_'))
+        .any(|byte| matches!(*byte, b'`' | b'*' | b'_' | b'[' | b']'))
 }
 
 fn numbered_list_item(line: &str) -> Option<(&str, &str)> {
@@ -527,7 +610,16 @@ fn render_markdown_table_with_tabled(source: &str) -> Option<String> {
     )
 }
 
-fn render_code_block(code_lines: &[String], lang: &str, theme: &Theme) -> Vec<Line<'static>> {
+fn render_code_block(
+    code_lines: &[String],
+    lang: &str,
+    theme: &Theme,
+    code_highlighting: CodeHighlighting,
+) -> Vec<Line<'static>> {
+    if code_highlighting == CodeHighlighting::Disabled {
+        return render_plain_code_block(code_lines);
+    }
+
     let ps = &*SYNTAX_SET;
     let Some(syntax) = code_block_syntax(ps, lang) else {
         return render_plain_code_block(code_lines);
@@ -544,11 +636,38 @@ fn code_block_syntax<'a>(ps: &'a SyntaxSet, lang: &str) -> Option<&'a SyntaxRefe
 }
 
 fn render_plain_code_block(code_lines: &[String]) -> Vec<Line<'static>> {
-    let mut lines = Vec::with_capacity(code_lines.len());
+    let mut lines = Vec::with_capacity(code_lines.len() + 2);
+    let width = code_block_width(code_lines, "");
+    lines.push(Line::styled(
+        format!("┌{}┐", "─".repeat(width + 2)),
+        Style::default().fg(Color::DarkGray),
+    ));
     for code_line in code_lines {
-        lines.push(Line::raw(format!("  {code_line}")));
+        lines.push(Line::from(vec![
+            Span::styled("│ ", Style::default().fg(Color::DarkGray)),
+            Span::styled(pad_code_line(code_line, width), Style::default()),
+            Span::styled(" │", Style::default().fg(Color::DarkGray)),
+        ]));
     }
+    lines.push(Line::styled(
+        format!("└{}┘", "─".repeat(width + 2)),
+        Style::default().fg(Color::DarkGray),
+    ));
     lines
+}
+
+fn code_block_width(code_lines: &[String], lang: &str) -> usize {
+    let content_width = code_lines
+        .iter()
+        .map(|line| unicode_width::UnicodeWidthStr::width(line.as_str()))
+        .max()
+        .unwrap_or(0);
+    content_width.max(lang.len()).max(1)
+}
+
+fn pad_code_line(line: &str, width: usize) -> String {
+    let line_width = unicode_width::UnicodeWidthStr::width(line);
+    format!("{line}{}", " ".repeat(width.saturating_sub(line_width)))
 }
 
 /// highlight a code block using syntect
@@ -563,8 +682,18 @@ fn highlight_code_block(
 
     let theme = &THEME_SET.themes["base16-ocean.dark"];
     let mut h = HighlightLines::new(syntax, theme);
-    let mut lines = Vec::with_capacity(code_lines.len());
+    let width = code_block_width(code_lines, &syntax.name);
+    let mut lines = Vec::with_capacity(code_lines.len() + 2);
     let mut line_with_nl = String::new();
+
+    lines.push(Line::from(vec![
+        Span::styled("┌─ ", ui_theme.horizontal_rule),
+        Span::styled(syntax.name.to_string(), ui_theme.inline_code),
+        Span::styled(
+            format!(" {}┐", "─".repeat(width.saturating_sub(syntax.name.len()))),
+            ui_theme.horizontal_rule,
+        ),
+    ]));
 
     for code_line in code_lines {
         // append newline so syntect can track state across lines
@@ -573,7 +702,8 @@ fn highlight_code_block(
         line_with_nl.push('\n');
         match h.highlight_line(&line_with_nl, ps) {
             Ok(ranges) => {
-                let mut spans: Vec<Span<'static>> = vec![Span::raw("  ")];
+                let mut spans: Vec<Span<'static>> =
+                    vec![Span::styled("│ ", ui_theme.horizontal_rule)];
                 for (style, text) in ranges {
                     let text = text.trim_end_matches('\n').to_string();
                     if text.is_empty() {
@@ -581,13 +711,27 @@ fn highlight_code_block(
                     }
                     spans.push(Span::styled(text, syntect_to_style(style)));
                 }
+                let line_width = unicode_width::UnicodeWidthStr::width(code_line.as_str());
+                if width > line_width {
+                    spans.push(Span::raw(" ".repeat(width - line_width)));
+                }
+                spans.push(Span::styled(" │", ui_theme.horizontal_rule));
                 lines.push(Line::from(spans));
             }
             Err(_) => {
-                lines.push(Line::styled(format!("  {code_line}"), ui_theme.code_block));
+                lines.push(Line::from(vec![
+                    Span::styled("│ ", ui_theme.horizontal_rule),
+                    Span::styled(pad_code_line(code_line, width), ui_theme.code_block),
+                    Span::styled(" │", ui_theme.horizontal_rule),
+                ]));
             }
         }
     }
+
+    lines.push(Line::styled(
+        format!("└{}┘", "─".repeat(width + 2)),
+        ui_theme.horizontal_rule,
+    ));
 
     lines
 }
@@ -795,35 +939,80 @@ mod tests {
     fn inline_code() {
         let text = render("use `cargo build`", &t());
         assert_eq!(text.lines.len(), 1);
-        assert_eq!(text.lines[0].to_string(), "use cargo build");
+        assert_eq!(text.lines[0].to_string(), "use `cargo build`");
+    }
+
+    #[test]
+    fn terminal_markdown_spacing_and_code_blocks() {
+        let source = "Current wrappers:\n\n```sh\nnix run .#profiler\n```\n\nenables:\nMUSH_TRACE=true\nMUSH_PROFILE_STARTUP=true";
+        let text = render(source, &t());
+        let rendered = text.lines.iter().map(Line::to_string).collect::<Vec<_>>();
+
+        assert!(
+            rendered
+                .windows(2)
+                .any(|lines| lines == ["Current wrappers:", ""]),
+            "paragraphs should be separated from following blocks: {rendered:?}"
+        );
+        assert!(
+            rendered.iter().any(|line| line.contains("sh")),
+            "fenced code blocks should show their language label: {rendered:?}"
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("nix run .#profiler")),
+            "code block content should remain visible: {rendered:?}"
+        );
+        assert!(
+            rendered.iter().any(|line| line.contains('┌'))
+                && rendered.iter().any(|line| line.contains('└')),
+            "code blocks should render with a visible box: {rendered:?}"
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line == "enables: MUSH_TRACE=true MUSH_PROFILE_STARTUP=true"),
+            "soft breaks inside prose should become spaces: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn links_include_url_when_text_differs() {
+        let text = render("read [the docs](https://example.com/docs)", &t());
+
+        assert_eq!(
+            text.lines[0].to_string(),
+            "read the docs (https://example.com/docs)"
+        );
     }
 
     #[test]
     fn code_block() {
         let text = render("```rust\nfn main() {}\n```", &t());
-        assert_eq!(text.lines.len(), 1);
+        assert_eq!(text.lines.len(), 4);
         // content should be indented with syntax highlighting applied
-        let content = text.lines[0].to_string();
+        let content = text.lines[2].to_string();
         assert!(content.contains("fn main()"), "got: {content}");
     }
 
     #[test]
     fn code_block_has_colour() {
         let text = render("```rust\nlet x = 42;\n```", &t());
-        assert_eq!(text.lines.len(), 1);
+        assert_eq!(text.lines.len(), 4);
         // should have multiple spans (indentation + highlighted tokens)
         assert!(
-            text.lines[0].spans.len() > 1,
+            text.lines[1].spans.len() > 1,
             "expected syntax highlighting spans, got: {:?}",
-            text.lines[0].spans
+            text.lines[1].spans
         );
     }
 
     #[test]
     fn code_block_unknown_lang() {
         let text = render("```xyz\nhello world\n```", &t());
-        assert_eq!(text.lines.len(), 1);
-        assert!(text.lines[0].to_string().contains("hello world"));
+        assert_eq!(text.lines.len(), 4);
+        assert!(text.lines[2].to_string().contains("hello world"));
     }
 
     #[test]
@@ -832,8 +1021,8 @@ mod tests {
 
         let text = render("```\nhello world\n```", &t());
 
-        assert_eq!(text.lines.len(), 1);
-        assert!(text.lines[0].to_string().contains("hello world"));
+        assert_eq!(text.lines.len(), 4);
+        assert!(text.lines[2].to_string().contains("hello world"));
         assert_eq!(highlight_code_block_call_count(), 0);
     }
 
@@ -855,8 +1044,8 @@ mod tests {
 
         let text = render("```xyz\nhello world\n```", &t());
 
-        assert_eq!(text.lines.len(), 1);
-        assert!(text.lines[0].to_string().contains("hello world"));
+        assert_eq!(text.lines.len(), 4);
+        assert!(text.lines[2].to_string().contains("hello world"));
         assert_eq!(highlight_code_block_call_count(), 0);
     }
 
@@ -867,8 +1056,8 @@ mod tests {
 
         let text = render(&source, &t());
 
-        assert_eq!(text.lines.len(), 80);
-        assert!(text.lines[0].to_string().contains("let x = 42;"));
+        assert_eq!(text.lines.len(), 83);
+        assert!(text.lines[2].to_string().contains("let x = 42;"));
         assert_eq!(highlight_code_block_call_count(), 0);
     }
 
@@ -916,7 +1105,7 @@ mod tests {
 
         let text = render("alpha\n**beta**\ngamma", &t());
 
-        assert_eq!(text.lines.len(), 3);
+        assert_eq!(text.lines.len(), 1);
         assert_eq!(parse_inline_call_count(), 0);
     }
 
