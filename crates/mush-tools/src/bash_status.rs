@@ -42,7 +42,7 @@ impl AgentTool for BashStatusTool {
         "Bash Status"
     }
     fn description(&self) -> &str {
-        "Poll a background bash job for completion. Returns current status and output. \
+        "Poll a background bash job for completion. Returns current status and new output since the previous poll. \
          The timeout is only how long this poll waits, not the job timeout. If it expires \
          while the job is still running, this tool returns a successful running status. \
          Use timeout to wait up to N seconds for the job to finish (default 30s, 0 for instant check). \
@@ -101,9 +101,9 @@ impl AgentTool for BashStatusTool {
             drop(state);
 
             if tokio::time::Instant::now() >= deadline {
-                let state = handle.read().await;
+                let mut state = handle.write().await;
                 return format_running_status(
-                    &state,
+                    &mut state,
                     if args.timeout > 0 {
                         PollWait::Elapsed
                     } else {
@@ -118,24 +118,7 @@ impl AgentTool for BashStatusTool {
 }
 
 fn format_job_result(state: &mut crate::background::JobState) -> ToolResult {
-    let mut output = String::new();
-    if state.output_consumed {
-        output = "(output already consumed by an earlier bash_status poll)".into();
-    } else {
-        if !state.stdout.is_empty() {
-            output.push_str(&state.stdout);
-        }
-        if !state.stderr.is_empty() {
-            if !output.is_empty() {
-                output.push('\n');
-            }
-            output.push_str(&state.stderr);
-        }
-        if output.is_empty() {
-            output = "(no output)".into();
-        }
-        state.output_consumed = true;
-    }
+    let output = take_new_output(state);
 
     let (status, exit_code) = match &state.status {
         JobStatus::Done { exit_code } if *exit_code == 0 => (BackgroundStatus::Done, *exit_code),
@@ -168,6 +151,45 @@ fn format_job_result(state: &mut crate::background::JobState) -> ToolResult {
         }
     } else {
         ToolResult::text(format!("{preamble}{output}"))
+    }
+}
+
+fn take_new_output(state: &mut crate::background::JobState) -> String {
+    let output = format_new_output(state);
+    state.stdout_consumed_bytes = state.stdout.len();
+    state.stderr_consumed_bytes = state.stderr.len();
+    output
+}
+
+fn format_new_output(state: &crate::background::JobState) -> String {
+    let stdout = state
+        .stdout
+        .get(state.stdout_consumed_bytes..)
+        .unwrap_or("");
+    let stderr = state
+        .stderr
+        .get(state.stderr_consumed_bytes..)
+        .unwrap_or("");
+    let mut output = String::new();
+
+    if !stdout.is_empty() {
+        output.push_str(stdout);
+    }
+    if !stderr.is_empty() {
+        if !output.is_empty() && !output.ends_with('\n') {
+            output.push('\n');
+        }
+        output.push_str(stderr);
+    }
+
+    if output.is_empty() {
+        if state.stdout_consumed_bytes == 0 && state.stderr_consumed_bytes == 0 {
+            "(no output)".into()
+        } else {
+            "(no new output since previous bash_status poll)".into()
+        }
+    } else {
+        output
     }
 }
 
@@ -209,10 +231,26 @@ impl PollWait {
     }
 }
 
-fn format_running_status(state: &crate::background::JobState, poll_wait: PollWait) -> ToolResult {
+fn format_running_status(
+    state: &mut crate::background::JobState,
+    poll_wait: PollWait,
+) -> ToolResult {
     let elapsed = state.run_duration().as_secs();
     let stdout_lines = state.stdout.lines().count();
     let stderr_lines = state.stderr.lines().count();
+    let new_stdout = state
+        .stdout
+        .get(state.stdout_consumed_bytes..)
+        .unwrap_or("")
+        .lines()
+        .count();
+    let new_stderr = state
+        .stderr
+        .get(state.stderr_consumed_bytes..)
+        .unwrap_or("")
+        .lines()
+        .count();
+    let output = take_new_output(state);
 
     let json = serde_json::json!({
         "job_id": state.id,
@@ -221,6 +259,9 @@ fn format_running_status(state: &crate::background::JobState, poll_wait: PollWai
         "elapsed_seconds": elapsed,
         "stdout_lines_so_far": stdout_lines,
         "stderr_lines_so_far": stderr_lines,
+        "new_stdout_lines": new_stdout,
+        "new_stderr_lines": new_stderr,
+        "output": output,
         "poll_wait_elapsed": poll_wait.elapsed(),
         "message": poll_wait.message(),
     });
@@ -256,7 +297,8 @@ mod tests {
                 status: JobStatus::Done { exit_code: 0 },
                 stdout: "hello\n".into(),
                 stderr: String::new(),
-                output_consumed: false,
+                stdout_consumed_bytes: 0,
+                stderr_consumed_bytes: 0,
                 started: std::time::Instant::now(),
                 finished: Some(std::time::Instant::now()),
                 cwd: std::sync::Arc::from(std::path::Path::new(".")),
@@ -278,7 +320,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn completed_job_output_is_consumed_after_first_poll() {
+    async fn completed_job_returns_only_new_output_after_first_poll() {
         let registry = make_registry();
         registry
             .insert(crate::background::JobState {
@@ -287,7 +329,8 @@ mod tests {
                 status: JobStatus::Done { exit_code: 0 },
                 stdout: "hello\n".into(),
                 stderr: String::new(),
-                output_consumed: false,
+                stdout_consumed_bytes: 0,
+                stderr_consumed_bytes: 0,
                 started: std::time::Instant::now(),
                 finished: Some(std::time::Instant::now()),
                 cwd: std::sync::Arc::from(std::path::Path::new(".")),
@@ -313,8 +356,55 @@ mod tests {
             "second poll should not replay consumed output: {second_text}"
         );
         assert!(
-            second_text.contains("already consumed"),
+            second_text.contains("no new output"),
             "second poll should explain the missing output: {second_text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn running_poll_consumes_only_output_seen_so_far() {
+        let registry = make_registry();
+        let handle = registry
+            .insert(crate::background::JobState {
+                id: "bg_0".into(),
+                command: "slow".into(),
+                status: JobStatus::Running,
+                stdout: "first\n".into(),
+                stderr: String::new(),
+                stdout_consumed_bytes: 0,
+                stderr_consumed_bytes: 0,
+                started: std::time::Instant::now(),
+                finished: None,
+                cwd: std::sync::Arc::from(std::path::Path::new(".")),
+            })
+            .await;
+
+        let tool = BashStatusTool::new(registry);
+        let first = tool
+            .execute(serde_json::json!({"job_id": "bg_0", "timeout": 0}))
+            .await;
+        {
+            let mut state = handle.write().await;
+            state.stdout.push_str("second\n");
+        }
+        let second = tool
+            .execute(serde_json::json!({"job_id": "bg_0", "timeout": 0}))
+            .await;
+
+        let first_text = extract_text(&first);
+        let second_text = extract_text(&second);
+        assert!(first_text.contains("first"), "first poll: {first_text}");
+        assert!(
+            !second_text.contains("first"),
+            "second poll must not replay old output: {second_text}"
+        );
+        assert!(
+            second_text.contains("second"),
+            "second poll should include new output: {second_text}"
+        );
+        assert!(
+            second_text.contains(r#""new_stdout_lines":1"#),
+            "second poll should report the delta line count: {second_text}"
         );
     }
 
@@ -328,7 +418,8 @@ mod tests {
                 status: JobStatus::Running,
                 stdout: "partial output\n".into(),
                 stderr: String::new(),
-                output_consumed: false,
+                stdout_consumed_bytes: 0,
+                stderr_consumed_bytes: 0,
                 started: std::time::Instant::now(),
                 finished: None,
                 cwd: std::sync::Arc::from(std::path::Path::new(".")),
@@ -366,7 +457,8 @@ mod tests {
                 status: JobStatus::Running,
                 stdout: String::new(),
                 stderr: String::new(),
-                output_consumed: false,
+                stdout_consumed_bytes: 0,
+                stderr_consumed_bytes: 0,
                 started: std::time::Instant::now(),
                 finished: None,
                 cwd: std::sync::Arc::from(std::path::Path::new(".")),
@@ -400,7 +492,8 @@ mod tests {
                 status: JobStatus::Failed("spawn failed".into()),
                 stdout: String::new(),
                 stderr: String::new(),
-                output_consumed: false,
+                stdout_consumed_bytes: 0,
+                stderr_consumed_bytes: 0,
                 started: std::time::Instant::now(),
                 finished: None,
                 cwd: std::sync::Arc::from(std::path::Path::new(".")),
@@ -433,7 +526,8 @@ mod tests {
                 status: JobStatus::TimedOut,
                 stdout: String::new(),
                 stderr: String::new(),
-                output_consumed: false,
+                stdout_consumed_bytes: 0,
+                stderr_consumed_bytes: 0,
                 started,
                 finished: Some(finished),
                 cwd: std::sync::Arc::from(std::path::Path::new(".")),

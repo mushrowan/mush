@@ -1,19 +1,24 @@
-//! glob tool - find files by glob pattern using fd
+//! glob tool - find files by glob pattern
 
-use std::path::Path;
-use std::process::Stdio;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use globset::GlobBuilder;
+use ignore::WalkBuilder;
 use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
 use serde::Deserialize;
 
-use crate::util::{clean_regex_pattern, inject_note, resolve_path, truncate_lines};
+use crate::find::{format_lines_with_ignored_note, format_lines_with_ignored_summary};
+use crate::util::{clean_regex_pattern, inject_note, resolve_path};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GlobArgs {
     pattern: String,
     path: Option<String>,
+    #[serde(default)]
+    include_ignored: bool,
 }
 
 pub struct GlobTool {
@@ -31,12 +36,15 @@ impl AgentTool for GlobTool {
     fn name(&self) -> &str {
         "glob"
     }
+
     fn label(&self) -> &str {
         "Glob"
     }
+
     fn description(&self) -> &str {
         "Fast file pattern matching using glob syntax. Respects .gitignore. \
-         Returns matching file paths sorted by modification time (newest first). \
+         Returns matching file paths sorted by modification time (newest first). Ignored matches are summarised by default. \
+         Pass include_ignored: true to show ignored matches, prefixed with *. \
          The pattern is a raw glob; do not wrap it in quotes (e.g. pass `**/*.rs`, not `\"**/*.rs\"`). \
          Use this when you need to find files by name patterns like **/*.rs or src/**/*.ts."
     }
@@ -52,6 +60,10 @@ impl AgentTool for GlobTool {
                 "path": {
                     "type": "string",
                     "description": "directory to search in (defaults to cwd)"
+                },
+                "include_ignored": {
+                    "type": "boolean",
+                    "description": "include gitignored and hidden matches instead of summarising ignored base directories"
                 }
             },
             "required": ["pattern"]
@@ -59,7 +71,6 @@ impl AgentTool for GlobTool {
     }
 
     fn output_limit(&self) -> mush_agent::tool::OutputLimit {
-        // ranked path matches; head keeps the most relevant entries
         mush_agent::tool::OutputLimit::Head
     }
 
@@ -69,38 +80,146 @@ impl AgentTool for GlobTool {
             Err(error) => return error,
         };
 
-        let cleaned = clean_regex_pattern(&args.pattern);
-
         let search_dir = args
             .path
             .as_deref()
             .map(|path| resolve_path(&self.cwd, path))
             .unwrap_or_else(|| self.cwd.to_path_buf());
 
-        let mut cmd = tokio::process::Command::new("fd");
-        cmd.args(["--glob", &cleaned.pattern, "--type", "f"])
-            .arg("--color=never")
-            .current_dir(&search_dir)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        let output = match cmd.output().await {
-            Ok(o) => o,
-            Err(e) => {
-                return ToolResult::error(format!("failed to run fd: {e}"));
-            }
-        };
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let lines: Vec<&str> = stdout.lines().collect();
-
-        let result = if lines.is_empty() {
-            ToolResult::text("no files found")
-        } else {
-            ToolResult::text(truncate_lines(&lines, "files"))
-        };
-        inject_note(result, cleaned.note)
+        run_glob(&self.cwd, &args.pattern, &search_dir, args.include_ignored).await
     }
+}
+
+async fn run_glob(
+    cwd: &Path,
+    pattern: &str,
+    search_dir: &Path,
+    include_ignored: bool,
+) -> ToolResult {
+    let cleaned = clean_regex_pattern(pattern);
+    let result = run_glob_inner(cwd, &cleaned.pattern, search_dir, include_ignored);
+    inject_note(result, cleaned.note)
+}
+
+fn run_glob_inner(
+    cwd: &Path,
+    pattern: &str,
+    search_dir: &Path,
+    include_ignored: bool,
+) -> ToolResult {
+    if !search_dir.is_dir() {
+        return ToolResult::error(format!(
+            "search path is not a directory: {}",
+            search_dir.display()
+        ));
+    }
+
+    let glob = match GlobBuilder::new(pattern).literal_separator(true).build() {
+        Ok(glob) => glob.compile_matcher(),
+        Err(error) => return ToolResult::error(format!("glob error: {error}")),
+    };
+
+    let visible = collect_matches(cwd, search_dir, &glob, false);
+    let all = collect_matches(cwd, search_dir, &glob, true);
+    let visible_paths: BTreeSet<PathBuf> = visible.iter().map(|entry| entry.path.clone()).collect();
+
+    let mut lines: Vec<String> = visible.into_iter().map(|entry| entry.display).collect();
+    let ignored: Vec<GlobMatch> = all
+        .into_iter()
+        .filter(|entry| !visible_paths.contains(&entry.path))
+        .collect();
+
+    if include_ignored {
+        lines.extend(
+            ignored
+                .into_iter()
+                .map(|entry| format!("* {}", entry.display)),
+        );
+        return ToolResult::text(format_lines_with_ignored_note(&lines, "files", true));
+    }
+
+    let ignored_for_find: Vec<crate::find::FindMatchForSummary> = ignored
+        .iter()
+        .map(|entry| crate::find::FindMatchForSummary {
+            path: entry.path.clone(),
+        })
+        .collect();
+    ToolResult::text(format_lines_with_ignored_summary(
+        &lines,
+        &crate::find::summarise_ignored(search_dir, &ignored_for_find),
+        "files",
+    ))
+}
+
+#[derive(Debug, Clone)]
+struct GlobMatch {
+    path: PathBuf,
+    display: String,
+    modified: Option<std::time::SystemTime>,
+}
+
+fn collect_matches(
+    cwd: &Path,
+    search_dir: &Path,
+    glob: &globset::GlobMatcher,
+    include_ignored: bool,
+) -> Vec<GlobMatch> {
+    let mut builder = WalkBuilder::new(search_dir);
+    builder
+        .hidden(!include_ignored)
+        .ignore(!include_ignored)
+        .git_ignore(!include_ignored)
+        .git_exclude(!include_ignored)
+        .git_global(!include_ignored)
+        .parents(true)
+        .require_git(false);
+
+    let mut matches = Vec::new();
+    for entry in builder.build().filter_map(Result::ok) {
+        if !entry
+            .file_type()
+            .is_some_and(|file_type| file_type.is_file())
+        {
+            continue;
+        }
+
+        let relative = entry
+            .path()
+            .strip_prefix(search_dir)
+            .unwrap_or(entry.path());
+        if !glob.is_match(relative) {
+            continue;
+        }
+
+        let path = entry.path().to_path_buf();
+        let modified = entry
+            .metadata()
+            .ok()
+            .and_then(|metadata| metadata.modified().ok());
+        matches.push(GlobMatch {
+            display: display_path(cwd, search_dir, &path),
+            path,
+            modified,
+        });
+    }
+
+    matches.sort_by(|left, right| {
+        right
+            .modified
+            .cmp(&left.modified)
+            .then_with(|| left.display.cmp(&right.display))
+    });
+    matches
+}
+
+fn display_path(cwd: &Path, search_dir: &Path, path: &Path) -> String {
+    path.strip_prefix(search_dir)
+        .ok()
+        .filter(|relative| !relative.as_os_str().is_empty())
+        .or_else(|| path.strip_prefix(cwd).ok())
+        .unwrap_or(path)
+        .display()
+        .to_string()
 }
 
 #[cfg(test)]
@@ -123,10 +242,7 @@ mod tests {
         std::fs::write(dir.path().join("nested/config.toml"), "x = 1").unwrap();
         std::fs::write(dir.path().join("readme.md"), "hi").unwrap();
 
-        let tool = GlobTool::new(dir.path().into());
-        let result = tool
-            .execute(serde_json::json!({ "pattern": "**/*.toml" }))
-            .await;
+        let result = run_glob(dir.path(), "**/*.toml", dir.path(), false).await;
         let text = crate::util::extract_text(&result);
         assert!(text.contains("Cargo.toml"));
         assert!(text.contains("nested/config.toml"));
@@ -138,26 +254,17 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::write(dir.path().join("a.txt"), "x").unwrap();
 
-        let tool = GlobTool::new(dir.path().into());
-        let result = tool
-            .execute(serde_json::json!({ "pattern": "**/*.rs" }))
-            .await;
+        let result = run_glob(dir.path(), "**/*.rs", dir.path(), false).await;
         let text = crate::util::extract_text(&result);
         assert_eq!(text, "no files found");
     }
 
     #[tokio::test]
     async fn glob_strips_trailing_unmatched_quote_and_notes_it() {
-        // mirror the find/grep behaviour: a pattern with a stray
-        // trailing `"` should still find files (after cleaning) and
-        // come back with a note explaining what was changed
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::write(dir.path().join("Cargo.toml"), "[package]").unwrap();
 
-        let tool = GlobTool::new(dir.path().into());
-        let result = tool
-            .execute(serde_json::json!({ "pattern": "**/*.toml\"" }))
-            .await;
+        let result = run_glob(dir.path(), "**/*.toml\"", dir.path(), false).await;
         let text = crate::util::extract_text(&result);
         assert!(
             text.contains("Cargo.toml"),
@@ -166,6 +273,40 @@ mod tests {
         assert!(
             text.contains("trailing unmatched"),
             "must surface a note about the strip (got: {text})"
+        );
+    }
+
+    #[tokio::test]
+    async fn glob_summarises_ignored_matches_by_default() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "target/\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("target/debug")).unwrap();
+        std::fs::write(dir.path().join("target/debug/generated.rs"), "").unwrap();
+
+        let result = run_glob(dir.path(), "**/*.rs", dir.path(), false).await;
+        let text = crate::util::extract_text(&result);
+
+        assert!(text.contains("no visible files found"), "got: {text}");
+        assert!(text.contains("ignored matches omitted"), "got: {text}");
+        assert!(text.contains("* target/ 1 match"), "got: {text}");
+        assert!(text.contains("include_ignored: true"), "got: {text}");
+        assert!(!text.contains("target/debug/generated.rs"), "got: {text}");
+    }
+
+    #[tokio::test]
+    async fn glob_include_ignored_marks_ignored_matches() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "target/\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("target/debug")).unwrap();
+        std::fs::write(dir.path().join("target/debug/generated.rs"), "").unwrap();
+
+        let result = run_glob(dir.path(), "**/*.rs", dir.path(), true).await;
+        let text = crate::util::extract_text(&result);
+
+        assert!(text.contains("* target/debug/generated.rs"), "got: {text}");
+        assert!(
+            text.contains("Ignored matches are prefixed with *"),
+            "got: {text}"
         );
     }
 }

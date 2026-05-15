@@ -174,13 +174,6 @@ self: {
     inherit schema;
     prefix = ["programs"];
     settingsAttr = "settings";
-    overrides = {
-      # `keys` is mush's keybindings map (action → key string or list of
-      # key strings). schemars can't infer the value shape from the
-      # untyped HashMap so we pin it here
-      keys.type = lib.types.attrsOf (lib.types.either lib.types.str (lib.types.listOf lib.types.str));
-    };
-
     # nix-only options that sit alongside `enable` (not part of the
     # rust-side Config). package selection, AGENTS.md content, and the
     # skills installer all belong here rather than in `settings`

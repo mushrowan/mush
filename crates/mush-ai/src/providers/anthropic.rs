@@ -115,11 +115,6 @@ impl ApiProvider for AnthropicProvider {
             is_oauth,
         );
 
-        tracing::trace!(
-            body = %serde_json::to_string_pretty(&body).unwrap_or_default(),
-            "anthropic request body"
-        );
-
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));

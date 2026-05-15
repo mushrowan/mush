@@ -607,7 +607,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         },
         keymap: {
             let mut km = mush_tui::KeyMap::default();
-            let warnings = km.override_from(&setup.cfg.keys.raw);
+            let warnings = km.override_scoped(&setup.cfg.keys.scoped());
             for warning in warnings {
                 tracing::warn!("keybind config: {warning}");
             }

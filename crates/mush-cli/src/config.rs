@@ -128,7 +128,8 @@ pub struct Config {
     /// lines scrolled per j/k keystroke in scroll mode (default 3)
     #[serde(default = "default_scroll_lines")]
     pub scroll_lines: u16,
-    /// configurable keybinds: action → key combination(s)
+    /// configurable keybinds grouped by scope, for example
+    /// `[keys.normal]` and `[keys.model_picker]`.
     #[serde(default)]
     pub keys: mush_tui::KeysConfig,
     /// characters that are forbidden in file edits/writes. tools that
@@ -842,6 +843,36 @@ image_probe = "disabled"
         let from_empty: Config = toml::from_str("").unwrap();
         let from_default = Config::default();
         assert_eq!(from_empty.cache_timer, from_default.cache_timer);
+    }
+
+    #[test]
+    fn flat_keys_config_is_rejected() {
+        let err = toml::from_str::<Config>(
+            r#"
+            [keys]
+            edit_steering = "alt+k"
+            "#,
+        )
+        .expect_err("flat keys should be rejected");
+
+        assert!(
+            err.to_string()
+                .contains("old flat [keys] entry `edit_steering`"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn scoped_keys_config_is_accepted() {
+        let config = toml::from_str::<Config>(
+            r#"
+            [keys.normal]
+            edit_steering = "alt+k"
+            "#,
+        )
+        .expect("scoped keys should be accepted");
+
+        assert!(config.keys.normal.raw.contains_key("edit_steering"));
     }
 
     #[test]

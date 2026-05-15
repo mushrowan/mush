@@ -38,7 +38,8 @@ pub struct JobState {
     pub status: JobStatus,
     pub stdout: String,
     pub stderr: String,
-    pub output_consumed: bool,
+    pub stdout_consumed_bytes: usize,
+    pub stderr_consumed_bytes: usize,
     pub started: Instant,
     /// instant the status transitioned out of `Running`. `None` while
     /// the job is still running. used to report a stable run-time
@@ -197,7 +198,8 @@ mod tests {
             status: JobStatus::Running,
             stdout: String::new(),
             stderr: String::new(),
-            output_consumed: false,
+            stdout_consumed_bytes: 0,
+            stderr_consumed_bytes: 0,
             started: Instant::now(),
             finished: None,
             cwd: Arc::from(Path::new(".")),

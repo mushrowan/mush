@@ -36,6 +36,43 @@ pub fn preview_text(text: &str, max_chars: usize) -> String {
     out
 }
 
+#[must_use]
+pub fn safe_preview_text(text: &str, max_chars: usize) -> String {
+    preview_text(&redact_secret_text(text), max_chars)
+}
+
+#[must_use]
+pub fn safe_preview_bytes(bytes: &[u8], max_chars: usize) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    safe_preview_text(&text, max_chars)
+}
+
+fn redact_secret_text(text: &str) -> String {
+    text.split_whitespace()
+        .map(redact_secret_word)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn redact_secret_word(word: &str) -> String {
+    let trimmed = word.trim_matches(|ch: char| ch.is_ascii_punctuation());
+    if looks_like_secret(trimmed) {
+        word.replacen(trimmed, "<redacted>", 1)
+    } else {
+        word.to_string()
+    }
+}
+
+fn looks_like_secret(text: &str) -> bool {
+    if text.len() < 12 {
+        return false;
+    }
+    text.starts_with("sk-")
+        || text.starts_with("sk_")
+        || text.starts_with("sess-")
+        || text.starts_with("eyJ")
+}
+
 /// incrementally parses SSE from byte chunks
 pub struct SseParser {
     chunk_buf: Vec<u8>,
@@ -194,7 +231,7 @@ pub fn run_sse_stream(
                         provider = %provider_name,
                         api = ?api,
                         chunk_len,
-                        chunk_preview = %preview_bytes(&chunk, 240),
+                        chunk_preview = %safe_preview_bytes(&chunk, 240),
                         "{label} raw stream chunk"
                     );
                     for raw in parser.push(&chunk) {
@@ -203,7 +240,7 @@ pub fn run_sse_stream(
                             provider = %provider_name,
                             api = ?api,
                             event_name = raw.event.as_deref().unwrap_or("message"),
-                            data_preview = %preview_text(raw.data.trim(), 240),
+                            data_preview = %safe_preview_text(raw.data.trim(), 240),
                             "{label} sse event"
                         );
                         match processor.process(&raw, &mut output) {
@@ -234,7 +271,7 @@ pub fn run_sse_stream(
                         error = %e,
                         captured_bytes = raw_capture.len(),
                         capture_path = capture_path.as_deref().unwrap_or("<none>"),
-                        capture_preview = %preview_bytes(&raw_capture, 400),
+                        capture_preview = %safe_preview_bytes(&raw_capture, 400),
                         "{label} body stream decode error"
                     );
                     processor.finish(&mut output);
@@ -366,5 +403,26 @@ mod tests {
         let mut parser = SseParser::new();
         parser.push(b"data: partial");
         assert!(!parser.buffered_bytes().is_empty());
+    }
+
+    #[test]
+    fn safe_preview_redacts_secret_shaped_values() {
+        let preview = safe_preview_text(
+            "data: {\"text\":\"Bearer sk-stream-secret-123 and sess-private-token-456\"}",
+            200,
+        );
+
+        assert!(
+            !preview.contains("sk-stream-secret-123"),
+            "api key leaked: {preview}"
+        );
+        assert!(
+            !preview.contains("sess-private-token-456"),
+            "session token leaked: {preview}"
+        );
+        assert!(
+            preview.contains("<redacted>"),
+            "redaction marker missing: {preview}"
+        );
     }
 }

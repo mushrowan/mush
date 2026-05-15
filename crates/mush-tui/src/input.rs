@@ -2,7 +2,7 @@
 //!
 //! maps crossterm key events to app mutations and events
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::KeyEvent;
 
 use crate::app::{App, AppEvent, AppMode};
 use crate::session_picker::{SessionScope, filtered_sessions};
@@ -10,7 +10,7 @@ use crate::session_picker::{SessionScope, filtered_sessions};
 // A trailing '\' escapes plain Enter into a literal newline, but only when the
 // cursor is at the end of the current line.
 fn should_escape_enter_to_newline(app: &App, key: KeyEvent) -> bool {
-    if key.code != KeyCode::Enter || !key.modifiers.is_empty() || app.input.cursor == 0 {
+    if !crate::keybinds::is_plain_enter(key) || app.input.cursor == 0 {
         return false;
     }
 
@@ -83,8 +83,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     //   empty input + idle, armed → quit
     // any other key resets the armed flag so a stray earlier ctrl+c
     // can't quit later
-    let is_ctrl_c = key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('c');
-    if is_ctrl_c {
+    if app
+        .keymap
+        .matches(crate::keybinds::Action::QuitOrAbort, key)
+    {
         if !app.input.text.is_empty() || !app.input.images.is_empty() {
             app.input.take_text();
             app.input.take_images();
@@ -106,7 +108,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
 
     // ctrl+v works in both idle and streaming so the user can stage
     // images for mid-turn steering without aborting the stream
-    if let (KeyModifiers::CONTROL, KeyCode::Char('v')) = (key.modifiers, key.code) {
+    if app.keymap.matches(crate::keybinds::Action::PasteImage, key) {
         return Some(AppEvent::PasteImage);
     }
     // scroll / cancel cascade: esc (or ctrl+[) first jumps to bottom if
@@ -117,7 +119,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     // works during the tool-execution window between an assistant
     // `MessageEnd` and the next `TurnStart`, when text is no longer
     // streaming but the agent is still cranking through tool calls
-    if is_cancel_key(key) {
+    if is_cancel_key(app, key) {
         if app.scroll_offset > 0 {
             app.scroll_to_bottom();
             return None;
@@ -135,19 +137,22 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         app.scroll_to_bottom();
         return None;
     }
-    match key.code {
-        KeyCode::PageUp => {
-            app.scroll_offset = app.scroll_offset.saturating_add(10);
-            return Some(AppEvent::ScrollUp(10));
+    if app
+        .keymap
+        .matches(crate::keybinds::Action::ScrollPageUp, key)
+    {
+        app.scroll_offset = app.scroll_offset.saturating_add(10);
+        return Some(AppEvent::ScrollUp(10));
+    }
+    if app
+        .keymap
+        .matches(crate::keybinds::Action::ScrollPageDown, key)
+    {
+        app.scroll_offset = app.scroll_offset.saturating_sub(10);
+        if app.scroll_offset == 0 {
+            app.navigation.has_unread = false;
         }
-        KeyCode::PageDown => {
-            app.scroll_offset = app.scroll_offset.saturating_sub(10);
-            if app.scroll_offset == 0 {
-                app.navigation.has_unread = false;
-            }
-            return Some(AppEvent::ScrollDown(10));
-        }
-        _ => {}
+        return Some(AppEvent::ScrollDown(10));
     }
 
     // 3. pane management (works regardless of streaming state)
@@ -179,13 +184,12 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     }
 
     // 4. multiline enter (before mode-specific enter handling)
-    match (key.modifiers, key.code) {
-        (KeyModifiers::ALT | KeyModifiers::SHIFT, KeyCode::Enter)
-        | (KeyModifiers::CONTROL, KeyCode::Char('j')) => {
-            app.input_char('\n');
-            return None;
-        }
-        _ => {}
+    if app
+        .keymap
+        .matches(crate::keybinds::Action::InsertNewline, key)
+    {
+        app.input_char('\n');
+        return None;
     }
 
     // 5. edit_steering action: lift the last queued steering message
@@ -199,7 +203,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             .keymap
             .matches(crate::keybinds::Action::EditSteering, key)
     {
-        let is_alt_combo = key.modifiers.contains(KeyModifiers::ALT);
+        let is_alt_combo = crate::keybinds::has_alt(key);
         if is_alt_combo || app.input.text.is_empty() {
             return Some(AppEvent::EditSteering);
         }
@@ -243,17 +247,30 @@ fn handle_pane_keys(app: &App, key: KeyEvent) -> Option<AppEvent> {
         return Some(AppEvent::ResizePane(4));
     }
 
-    match (key.modifiers, key.code) {
-        (KeyModifiers::ALT, KeyCode::Char(c @ '1'..='9')) => {
-            Some(AppEvent::FocusPaneByIndex((c as usize) - ('1' as usize)))
-        }
-        _ => None,
-    }
+    focus_pane_index(app, key).map(AppEvent::FocusPaneByIndex)
+}
+
+fn focus_pane_index(app: &App, key: KeyEvent) -> Option<usize> {
+    use crate::keybinds::Action;
+
+    [
+        Action::FocusPane1,
+        Action::FocusPane2,
+        Action::FocusPane3,
+        Action::FocusPane4,
+        Action::FocusPane5,
+        Action::FocusPane6,
+        Action::FocusPane7,
+        Action::FocusPane8,
+        Action::FocusPane9,
+    ]
+    .into_iter()
+    .position(|action| app.keymap.matches(action, key))
 }
 
 /// keys specific to streaming: enter submits to steering queue
 fn handle_streaming_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
-    if key.code == KeyCode::Enter {
+    if crate::keybinds::is_plain_enter(key) {
         if should_escape_enter_to_newline(app, key) {
             app.input.backspace();
             app.input_char('\n');
@@ -332,9 +349,9 @@ fn handle_idle_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         return Some(AppEvent::CycleThinkingLevel);
     }
 
-    match (key.modifiers, key.code) {
+    match () {
         // tab completion / slash menu
-        (_, KeyCode::Tab) | (KeyModifiers::SHIFT, KeyCode::BackTab) => {
+        _ if crate::keybinds::is_tab(key) || crate::keybinds::is_backtab(key) => {
             // @-template expansion takes priority over generic tab completion
             // so users can type `@review<tab>` and get the template content.
             // bare `@` with no matching template falls through to normal
@@ -357,7 +374,7 @@ fn handle_idle_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         }
 
         // submit (accept ghost text, parse slash commands)
-        (_, KeyCode::Enter) => {
+        _ if app.keymap.matches(crate::keybinds::Action::Confirm, key) => {
             if should_escape_enter_to_newline(app, key) {
                 app.input.backspace();
                 app.input_char('\n');
@@ -384,8 +401,11 @@ fn handle_idle_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             Some(AppEvent::UserSubmit { text })
         }
 
-        // ctrl+d: quit on empty, delete char otherwise
-        (KeyModifiers::CONTROL, KeyCode::Char('d')) => {
+        // delete-char-or-quit: quit on empty, delete char otherwise
+        _ if app
+            .keymap
+            .matches(crate::keybinds::Action::DeleteCharOrQuit, key) =>
+        {
             if app.input.text.is_empty() {
                 return Some(AppEvent::Quit);
             }
@@ -487,24 +507,31 @@ fn handle_at_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         return None;
     };
     let count = picker.matches.len();
-    match (key.modifiers, key.code) {
-        (KeyModifiers::SHIFT, KeyCode::BackTab) => {
+    match () {
+        _ if app.keymap.matches_in(
+            crate::keybinds::KeyScope::AtPicker,
+            crate::keybinds::Action::PreviousItem,
+            key,
+        ) =>
+        {
             picker.selected = (picker.selected + count - 1) % count;
             None
         }
-        (_, KeyCode::Tab) => {
+        _ if app.keymap.matches_in(
+            crate::keybinds::KeyScope::AtPicker,
+            crate::keybinds::Action::NextItem,
+            key,
+        ) =>
+        {
             picker.selected = (picker.selected + 1) % count;
             None
         }
-        (_, KeyCode::Up) | (KeyModifiers::CONTROL, KeyCode::Char('k')) => {
-            picker.selected = (picker.selected + count - 1) % count;
-            None
-        }
-        (_, KeyCode::Down) | (KeyModifiers::CONTROL, KeyCode::Char('j')) => {
-            picker.selected = (picker.selected + 1) % count;
-            None
-        }
-        (_, KeyCode::Enter) => {
+        _ if app.keymap.matches_in(
+            crate::keybinds::KeyScope::AtPicker,
+            crate::keybinds::Action::Confirm,
+            key,
+        ) =>
+        {
             // copy out the fields we need before replacing the input,
             // since insertion mutates app.input via &mut
             let template = picker.matches[picker.selected].clone();
@@ -515,19 +542,24 @@ fn handle_at_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             insert_template(app, start, end, &template.content);
             None
         }
-        (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('[')) => {
+        _ if app.keymap.matches_in(
+            crate::keybinds::KeyScope::AtPicker,
+            crate::keybinds::Action::Cancel,
+            key,
+        ) =>
+        {
             app.interaction.at_picker = None;
             app.interaction.mode = AppMode::Normal;
             None
         }
-        (_, KeyCode::Backspace) => {
+        _ if crate::keybinds::is_backspace(key) => {
             // backspacing into the trigger narrows the filter. dropping
             // back past the `@` closes the picker entirely
             app.input.backspace();
             refresh_at_picker(app);
             None
         }
-        (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
+        _ if let Some(c) = crate::keybinds::typed_char(key) => {
             app.input_char(c);
             refresh_at_picker(app);
             None
@@ -574,23 +606,42 @@ fn handle_slot_edit_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         return None;
     };
     let count = state.slots.len();
-    match (key.modifiers, key.code) {
-        (KeyModifiers::SHIFT, KeyCode::BackTab) => {
+    match () {
+        _ if app.keymap.matches_in(
+            crate::keybinds::KeyScope::SlotEdit,
+            crate::keybinds::Action::PreviousItem,
+            key,
+        ) =>
+        {
             let next = (state.current + count - 1) % count;
             jump_to_slot(app, next);
             None
         }
-        (_, KeyCode::Tab) => {
+        _ if app.keymap.matches_in(
+            crate::keybinds::KeyScope::SlotEdit,
+            crate::keybinds::Action::NextItem,
+            key,
+        ) =>
+        {
             let next = (state.current + 1) % count;
             jump_to_slot(app, next);
             None
         }
-        (_, KeyCode::Enter) | (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('[')) => {
+        _ if app.keymap.matches_in(
+            crate::keybinds::KeyScope::SlotEdit,
+            crate::keybinds::Action::Confirm,
+            key,
+        ) || app.keymap.matches_in(
+            crate::keybinds::KeyScope::SlotEdit,
+            crate::keybinds::Action::Cancel,
+            key,
+        ) =>
+        {
             app.interaction.slot_edit = None;
             app.interaction.mode = AppMode::Normal;
             None
         }
-        (_, KeyCode::Backspace) => {
+        _ if crate::keybinds::is_backspace(key) => {
             // shift later slots back by 1 if a byte gets removed. avoid
             // deleting past the current slot's start so users can't
             // accidentally chew through earlier verbatim template content
@@ -604,7 +655,7 @@ fn handle_slot_edit_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             shift_later_slots(app, cursor, -1);
             None
         }
-        (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
+        _ if let Some(c) = crate::keybinds::typed_char(key) => {
             let cursor = app.input.cursor;
             app.input_char(c);
             let inserted = app.input.cursor - cursor;
@@ -662,30 +713,81 @@ fn handle_editing(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         app.input.delete_word_forward();
         return None;
     }
+    if app
+        .keymap
+        .matches(crate::keybinds::Action::DeleteToStart, key)
+    {
+        app.input.delete_to_start();
+        return None;
+    }
+    if app
+        .keymap
+        .matches(crate::keybinds::Action::DeleteToEnd, key)
+    {
+        app.input.delete_to_end();
+        return None;
+    }
+    if app
+        .keymap
+        .matches(crate::keybinds::Action::CursorWordLeft, key)
+    {
+        app.input.cursor_word_left();
+        return None;
+    }
+    if app
+        .keymap
+        .matches(crate::keybinds::Action::CursorWordRight, key)
+    {
+        app.input.cursor_word_right();
+        return None;
+    }
+    if app
+        .keymap
+        .matches(crate::keybinds::Action::CursorLineStart, key)
+    {
+        app.input.cursor_home();
+        return None;
+    }
+    if app
+        .keymap
+        .matches(crate::keybinds::Action::CursorLineEnd, key)
+    {
+        app.input.cursor_end();
+        return None;
+    }
 
     match (key.modifiers, key.code) {
-        (_, KeyCode::Backspace) => app.input.backspace(),
-        (_, KeyCode::Delete) => app.input.delete(),
+        _ if crate::keybinds::is_backspace(key) => app.input.backspace(),
+        _ if crate::keybinds::is_delete(key) => app.input.delete(),
 
         // cursor movement
-        (KeyModifiers::ALT, KeyCode::Left)
-        | (KeyModifiers::CONTROL, KeyCode::Left)
-        | (KeyModifiers::ALT, KeyCode::Char('b')) => app.input.cursor_word_left(),
-        (KeyModifiers::ALT, KeyCode::Right)
-        | (KeyModifiers::CONTROL, KeyCode::Right)
-        | (KeyModifiers::ALT, KeyCode::Char('f')) => app.input.cursor_word_right(),
-        (KeyModifiers::CONTROL, KeyCode::Char('b')) => app.input.cursor_left(),
-        (_, KeyCode::Left) => app.input.cursor_left(),
-        (_, KeyCode::Right) => app.input.cursor_right(),
-        (_, KeyCode::Home) | (KeyModifiers::CONTROL, KeyCode::Char('a')) => app.input.cursor_home(),
-        (_, KeyCode::End) | (KeyModifiers::CONTROL, KeyCode::Char('e')) => app.input.cursor_end(),
-
-        // line editing
-        (KeyModifiers::CONTROL, KeyCode::Char('u')) => app.input.delete_to_start(),
-        (KeyModifiers::CONTROL, KeyCode::Char('k')) => app.input.delete_to_end(),
+        _ if app.keymap.matches_in(
+            crate::keybinds::KeyScope::Edit,
+            crate::keybinds::Action::CursorLeft,
+            key,
+        ) =>
+        {
+            app.input.cursor_left()
+        }
+        _ if app.keymap.matches_in(
+            crate::keybinds::KeyScope::Edit,
+            crate::keybinds::Action::CursorLeft,
+            key,
+        ) =>
+        {
+            app.input.cursor_left()
+        }
+        _ if app.keymap.matches_in(
+            crate::keybinds::KeyScope::Edit,
+            crate::keybinds::Action::CursorRight,
+            key,
+        ) =>
+        {
+            app.input.cursor_right()
+        }
 
         // character input
-        (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => app.input_char(c),
+        _ if let Some(c) = crate::keybinds::typed_char(key) => app.input_char(c),
 
         _ => {}
     }
@@ -694,37 +796,65 @@ fn handle_editing(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
 
 /// handle keys in /settings overlay mode
 fn handle_settings_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
+    use crate::keybinds::{Action, KeyScope};
+
     let Some(menu) = app.settings_menu.as_mut() else {
         app.interaction.mode = AppMode::Normal;
         return None;
     };
-    match (key.modifiers, key.code) {
-        (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('c' | '[')) => {
-            app.settings_menu = None;
-            app.interaction.mode = AppMode::Normal;
-        }
-        (_, KeyCode::Down | KeyCode::Char('j')) => menu.move_down(),
-        (_, KeyCode::Up | KeyCode::Char('k')) => menu.move_up(),
-        (_, KeyCode::Home | KeyCode::Char('g')) => menu.top(),
-        (_, KeyCode::End | KeyCode::Char('G')) => menu.bottom(),
-        (_, KeyCode::Enter | KeyCode::Char(' ')) => {
-            return Some(AppEvent::SettingsToggleSelected);
-        }
-        _ => {}
+    if app.keymap.matches(Action::QuitOrAbort, key)
+        || app
+            .keymap
+            .matches_in(KeyScope::Settings, Action::Cancel, key)
+    {
+        app.settings_menu = None;
+        app.interaction.mode = AppMode::Normal;
+    } else if app
+        .keymap
+        .matches_in(KeyScope::Settings, Action::NextItem, key)
+    {
+        menu.move_down();
+    } else if app
+        .keymap
+        .matches_in(KeyScope::Settings, Action::PreviousItem, key)
+    {
+        menu.move_up();
+    } else if app
+        .keymap
+        .matches_in(KeyScope::Settings, Action::NavigateTop, key)
+    {
+        menu.top();
+    } else if app
+        .keymap
+        .matches_in(KeyScope::Settings, Action::NavigateBottom, key)
+    {
+        menu.bottom();
+    } else if app
+        .keymap
+        .matches_in(KeyScope::Settings, Action::SelectOrSpace, key)
+    {
+        return Some(AppEvent::SettingsToggleSelected);
     }
     None
 }
 
 /// handle keys in session picker mode
 fn handle_search_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
-    match (key.modifiers, key.code) {
-        (KeyModifiers::CONTROL, KeyCode::Char('c')) => return Some(AppEvent::Quit),
-        (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('f' | '[')) => {
+    use crate::keybinds::{Action, KeyScope};
+
+    match () {
+        _ if app.keymap.matches(Action::QuitOrAbort, key) => return Some(AppEvent::Quit),
+        _ if app.keymap.matches_in(KeyScope::Search, Action::Cancel, key)
+            || app.keymap.matches(Action::EnterSearch, key) =>
+        {
             app.interaction.mode = AppMode::Normal;
             app.interaction.search.query.clear();
             app.interaction.search.matches.clear();
         }
-        (_, KeyCode::Enter) => {
+        _ if app
+            .keymap
+            .matches_in(KeyScope::Search, Action::Confirm, key) =>
+        {
             // jump to selected match and enter scroll mode
             if let Some(&idx) = app
                 .interaction
@@ -740,26 +870,26 @@ fn handle_search_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
                 app.interaction.mode = AppMode::Normal;
             }
         }
-        (_, KeyCode::Up)
-        | (KeyModifiers::CONTROL, KeyCode::Char('p'))
-        | (KeyModifiers::CONTROL, KeyCode::Char('k'))
-            if !app.interaction.search.matches.is_empty() =>
+        _ if app
+            .keymap
+            .matches_in(KeyScope::Search, Action::PreviousItem, key)
+            && !app.interaction.search.matches.is_empty() =>
         {
             app.interaction.search.selected = app.interaction.search.selected.saturating_sub(1);
         }
-        (_, KeyCode::Down)
-        | (KeyModifiers::CONTROL, KeyCode::Char('n'))
-        | (KeyModifiers::CONTROL, KeyCode::Char('j'))
-            if !app.interaction.search.matches.is_empty()
-                && app.interaction.search.selected + 1 < app.interaction.search.matches.len() =>
+        _ if app
+            .keymap
+            .matches_in(KeyScope::Search, Action::NextItem, key)
+            && !app.interaction.search.matches.is_empty()
+            && app.interaction.search.selected + 1 < app.interaction.search.matches.len() =>
         {
             app.interaction.search.selected += 1;
         }
-        (_, KeyCode::Backspace) => {
+        _ if crate::keybinds::is_backspace(key) => {
             app.interaction.search.query.pop();
             app.update_search();
         }
-        (_, KeyCode::Char(c)) => {
+        _ if let Some(c) = crate::keybinds::any_char(key) => {
             app.interaction.search.query.push(c);
             app.update_search();
         }
@@ -770,132 +900,151 @@ fn handle_search_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
 
 fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     use crate::app::ScrollUnit;
+    use crate::keybinds::{Action, KeyScope};
 
-    match (key.modifiers, key.code) {
-        (KeyModifiers::CONTROL, KeyCode::Char('c')) => return Some(AppEvent::Quit),
-        (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('s' | '[')) => {
-            if app.navigation.selection_anchor.is_some() {
-                // first esc clears selection, stays in scroll mode
+    if app.keymap.matches(Action::QuitOrAbort, key) {
+        return Some(AppEvent::Quit);
+    }
+    if app.keymap.matches_in(KeyScope::Scroll, Action::Cancel, key) {
+        if app.navigation.selection_anchor.is_some() {
+            app.navigation.selection_anchor = None;
+        } else {
+            app.interaction.mode = AppMode::Normal;
+            app.navigation.selected_message = None;
+            app.navigation.selected_block = None;
+        }
+        return None;
+    }
+    if app
+        .keymap
+        .matches_in(KeyScope::Scroll, Action::ToggleBlockMode, key)
+    {
+        app.navigation.scroll_unit = match app.navigation.scroll_unit {
+            ScrollUnit::Message => {
                 app.navigation.selection_anchor = None;
-            } else {
-                app.interaction.mode = AppMode::Normal;
-                app.navigation.selected_message = None;
-                app.navigation.selected_block = None;
-            }
-        }
-        (_, KeyCode::Char('b')) => {
-            app.navigation.scroll_unit = match app.navigation.scroll_unit {
-                ScrollUnit::Message => {
-                    app.navigation.selection_anchor = None;
-                    // switching to block mode, initialise selection
-                    let blocks = app.blocks();
-                    app.navigation.selected_block = if blocks.is_empty() {
-                        None
-                    } else {
-                        Some(blocks.len() - 1)
-                    };
-                    ScrollUnit::Block
-                }
-                ScrollUnit::Block => {
-                    app.navigation.selected_block = None;
-                    app.navigation.selection_anchor = None;
-                    ScrollUnit::Message
-                }
-            };
-        }
-        (_, KeyCode::Char('v')) if app.navigation.scroll_unit == ScrollUnit::Message => {
-            // toggle visual selection (message mode only)
-            if app.navigation.selection_anchor.is_some() {
-                app.navigation.selection_anchor = None;
-            } else {
-                app.navigation.selection_anchor = app.navigation.selected_message;
-            }
-        }
-        (_, KeyCode::Char('j')) | (_, KeyCode::Down) => {
-            let scroll_lines = app.scroll_lines;
-            if app.navigation.scroll_unit == ScrollUnit::Block {
-                // move to next block (paragraph or fence body)
-                let blocks = app.blocks();
-                if let Some(sel) = app.navigation.selected_block
-                    && sel + 1 < blocks.len()
-                {
-                    app.navigation.selected_block = Some(sel + 1);
-                    app.navigation.selected_message = Some(blocks[sel + 1].msg_idx);
-                    app.scroll_offset = app.scroll_offset.saturating_sub(scroll_lines);
-                    if app.scroll_offset == 0 {
-                        app.navigation.has_unread = false;
-                    }
-                }
-            } else {
-                // message mode: scroll down, advance selection only if the
-                // next message is visible in the new viewport
-                app.scroll_offset = app.scroll_offset.saturating_sub(scroll_lines);
-                if app.scroll_offset == 0 {
-                    app.navigation.has_unread = false;
-                }
-                if let Some(sel) = app.navigation.selected_message
-                    && sel + 1 < app.messages.len()
-                    && app.is_message_visible(sel + 1)
-                {
-                    app.navigation.selected_message = Some(sel + 1);
-                }
-            }
-        }
-        (_, KeyCode::Char('k')) | (_, KeyCode::Up) => {
-            let scroll_lines = app.scroll_lines;
-            if app.navigation.scroll_unit == ScrollUnit::Block {
-                // move to previous block (paragraph or fence body)
-                let blocks = app.blocks();
-                if let Some(sel) = app.navigation.selected_block {
-                    let new_sel = sel.saturating_sub(1);
-                    app.navigation.selected_block = Some(new_sel);
-                    app.navigation.selected_message = Some(blocks[new_sel].msg_idx);
-                    app.scroll_offset = app.scroll_offset.saturating_add(scroll_lines);
-                }
-            } else {
-                // message mode: scroll up, move selection to previous message
-                // only if it's visible in the new viewport
-                app.scroll_offset = app.scroll_offset.saturating_add(scroll_lines);
-                if let Some(sel) = app.navigation.selected_message {
-                    let target = sel.saturating_sub(1);
-                    if target != sel && app.is_message_visible(target) {
-                        app.navigation.selected_message = Some(target);
-                    }
-                }
-            }
-        }
-        (_, KeyCode::Char('G')) => {
-            app.scroll_to_bottom();
-            if app.navigation.scroll_unit == ScrollUnit::Block {
                 let blocks = app.blocks();
                 app.navigation.selected_block = if blocks.is_empty() {
                     None
                 } else {
                     Some(blocks.len() - 1)
                 };
+                ScrollUnit::Block
             }
-            if !app.messages.is_empty() {
-                app.navigation.selected_message = Some(app.messages.len() - 1);
+            ScrollUnit::Block => {
+                app.navigation.selected_block = None;
+                app.navigation.selection_anchor = None;
+                ScrollUnit::Message
+            }
+        };
+        return None;
+    }
+    if app
+        .keymap
+        .matches_in(KeyScope::Scroll, Action::ToggleVisualSelection, key)
+        && app.navigation.scroll_unit == ScrollUnit::Message
+    {
+        if app.navigation.selection_anchor.is_some() {
+            app.navigation.selection_anchor = None;
+        } else {
+            app.navigation.selection_anchor = app.navigation.selected_message;
+        }
+        return None;
+    }
+    if app
+        .keymap
+        .matches_in(KeyScope::Scroll, Action::NextItem, key)
+    {
+        let scroll_lines = app.scroll_lines;
+        if app.navigation.scroll_unit == ScrollUnit::Block {
+            let blocks = app.blocks();
+            if let Some(sel) = app.navigation.selected_block
+                && sel + 1 < blocks.len()
+            {
+                app.navigation.selected_block = Some(sel + 1);
+                app.navigation.selected_message = Some(blocks[sel + 1].msg_idx);
+                app.scroll_offset = app.scroll_offset.saturating_sub(scroll_lines);
+                if app.scroll_offset == 0 {
+                    app.navigation.has_unread = false;
+                }
+            }
+        } else {
+            app.scroll_offset = app.scroll_offset.saturating_sub(scroll_lines);
+            if app.scroll_offset == 0 {
+                app.navigation.has_unread = false;
+            }
+            if let Some(sel) = app.navigation.selected_message
+                && sel + 1 < app.messages.len()
+                && app.is_message_visible(sel + 1)
+            {
+                app.navigation.selected_message = Some(sel + 1);
             }
         }
-        (_, KeyCode::Char('g')) => {
-            app.scroll_offset = u16::MAX;
-            if app.navigation.scroll_unit == ScrollUnit::Block {
-                let blocks = app.blocks();
-                app.navigation.selected_block = if blocks.is_empty() { None } else { Some(0) };
+        return None;
+    }
+    if app
+        .keymap
+        .matches_in(KeyScope::Scroll, Action::PreviousItem, key)
+    {
+        let scroll_lines = app.scroll_lines;
+        if app.navigation.scroll_unit == ScrollUnit::Block {
+            let blocks = app.blocks();
+            if let Some(sel) = app.navigation.selected_block {
+                let new_sel = sel.saturating_sub(1);
+                app.navigation.selected_block = Some(new_sel);
+                app.navigation.selected_message = Some(blocks[new_sel].msg_idx);
+                app.scroll_offset = app.scroll_offset.saturating_add(scroll_lines);
             }
-            app.navigation.selected_message = Some(0);
-        }
-        (_, KeyCode::Char('y')) => {
-            if let Some(selection) = app.copy_selection() {
-                if copy_to_clipboard(&selection.text) {
-                    app.status = Some(selection.status);
-                } else {
-                    app.status = Some("clipboard copy failed".into());
+        } else {
+            app.scroll_offset = app.scroll_offset.saturating_add(scroll_lines);
+            if let Some(sel) = app.navigation.selected_message {
+                let target = sel.saturating_sub(1);
+                if target != sel && app.is_message_visible(target) {
+                    app.navigation.selected_message = Some(target);
                 }
             }
         }
-        _ => {}
+        return None;
+    }
+    if app
+        .keymap
+        .matches_in(KeyScope::Scroll, Action::NavigateBottom, key)
+    {
+        app.scroll_to_bottom();
+        if app.navigation.scroll_unit == ScrollUnit::Block {
+            let blocks = app.blocks();
+            app.navigation.selected_block = if blocks.is_empty() {
+                None
+            } else {
+                Some(blocks.len() - 1)
+            };
+        }
+        if !app.messages.is_empty() {
+            app.navigation.selected_message = Some(app.messages.len() - 1);
+        }
+        return None;
+    }
+    if app
+        .keymap
+        .matches_in(KeyScope::Scroll, Action::NavigateTop, key)
+    {
+        app.scroll_offset = u16::MAX;
+        if app.navigation.scroll_unit == ScrollUnit::Block {
+            let blocks = app.blocks();
+            app.navigation.selected_block = if blocks.is_empty() { None } else { Some(0) };
+        }
+        app.navigation.selected_message = Some(0);
+        return None;
+    }
+    if app
+        .keymap
+        .matches_in(KeyScope::Scroll, Action::CopySelection, key)
+        && let Some(selection) = app.copy_selection()
+    {
+        if copy_to_clipboard(&selection.text) {
+            app.status = Some(selection.status);
+        } else {
+            app.status = Some("clipboard copy failed".into());
+        }
     }
     None
 }
@@ -955,13 +1104,20 @@ fn copy_via_shell(text: &str) -> bool {
 }
 
 fn handle_slash_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
-    match (key.modifiers, key.code) {
-        (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('c' | '[')) => {
+    use crate::keybinds::{Action, KeyScope};
+
+    match () {
+        _ if app.keymap.matches(Action::QuitOrAbort, key)
+            || app.keymap.matches_in(KeyScope::Normal, Action::Cancel, key) =>
+        {
             app.close_slash_menu();
             None
         }
         // enter accepts the highlighted command and closes the menu
-        (_, KeyCode::Enter) => {
+        _ if app
+            .keymap
+            .matches_in(KeyScope::Normal, Action::Confirm, key) =>
+        {
             if let Some(ref menu) = app.completion.slash_menu
                 && let Some(cmd) = menu.matches.get(menu.selected)
             {
@@ -973,7 +1129,10 @@ fn handle_slash_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             None
         }
         // tab cycles selection forward
-        (_, KeyCode::Tab) => {
+        _ if app
+            .keymap
+            .matches_in(KeyScope::Normal, Action::NextItem, key) =>
+        {
             if let Some(ref mut menu) = app.completion.slash_menu {
                 let len = menu.matches.len();
                 if len > 0 {
@@ -983,7 +1142,10 @@ fn handle_slash_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             None
         }
         // shift+backtab cycles backward with wrap
-        (KeyModifiers::SHIFT, KeyCode::BackTab) | (_, KeyCode::BackTab) => {
+        _ if app
+            .keymap
+            .matches_in(KeyScope::Normal, Action::PreviousItem, key) =>
+        {
             if let Some(ref mut menu) = app.completion.slash_menu {
                 let len = menu.matches.len();
                 if len > 0 {
@@ -993,23 +1155,8 @@ fn handle_slash_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             None
         }
         // navigate
-        (_, KeyCode::Up) | (KeyModifiers::CONTROL, KeyCode::Char('k')) => {
-            if let Some(ref mut menu) = app.completion.slash_menu {
-                menu.selected = menu.selected.saturating_sub(1);
-            }
-            None
-        }
-        (_, KeyCode::Down) | (KeyModifiers::CONTROL, KeyCode::Char('j')) => {
-            if let Some(ref mut menu) = app.completion.slash_menu {
-                let len = menu.matches.len();
-                if menu.selected + 1 < len {
-                    menu.selected += 1;
-                }
-            }
-            None
-        }
         // backspace: edit input and update filter
-        (_, KeyCode::Backspace) => {
+        _ if crate::keybinds::is_backspace(key) => {
             app.input.backspace();
             if app.input.text.is_empty() || !app.input.text.starts_with('/') {
                 app.close_slash_menu();
@@ -1019,7 +1166,7 @@ fn handle_slash_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             None
         }
         // typing narrows the filter
-        (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
+        _ if let Some(c) = crate::keybinds::typed_char(key) => {
             app.input_char(c);
             app.update_slash_menu();
             None
@@ -1080,18 +1227,21 @@ fn cycle_favourite_model(app: &mut App, direction: isize) -> Option<AppEvent> {
 /// kitty's DISAMBIGUATE_ESCAPE_CODES. on terminals with it, crossterm reports
 /// ctrl+[ as (CONTROL, Char('[')). this helper treats them equivalently so
 /// users can cancel modals with either on any terminal
-fn is_cancel_key(key: KeyEvent) -> bool {
-    matches!(key.code, KeyCode::Esc)
-        || (key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('['))
+fn is_cancel_key(app: &App, key: KeyEvent) -> bool {
+    app.keymap.matches(crate::keybinds::Action::Cancel, key)
 }
 
 fn handle_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     match (key.modifiers, key.code) {
-        (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('c' | '[')) => {
+        _ if app
+            .keymap
+            .matches(crate::keybinds::Action::QuitOrAbort, key)
+            || app.keymap.matches(crate::keybinds::Action::Cancel, key) =>
+        {
             app.close_session_picker();
             None
         }
-        (_, KeyCode::Tab) | (_, KeyCode::BackTab) => {
+        _ if app.keymap.matches(crate::keybinds::Action::NextItem, key) => {
             // toggle scope between this dir and all dirs
             if let Some(ref mut picker) = app.interaction.session_picker {
                 picker.scope = match picker.scope {
@@ -1102,7 +1252,7 @@ fn handle_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             }
             None
         }
-        (_, KeyCode::Enter) => {
+        _ if app.keymap.matches(crate::keybinds::Action::Confirm, key) => {
             // select session — return a slash command that the runner handles
             if let Some(meta) = app.selected_session() {
                 let id = meta.id.to_string();
@@ -1116,13 +1266,16 @@ fn handle_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
                 None
             }
         }
-        (_, KeyCode::Up) | (KeyModifiers::CONTROL, KeyCode::Char('k')) => {
+        _ if app
+            .keymap
+            .matches(crate::keybinds::Action::PreviousItem, key) =>
+        {
             if let Some(ref mut picker) = app.interaction.session_picker {
                 picker.selected = picker.selected.saturating_sub(1);
             }
             None
         }
-        (_, KeyCode::Down) | (KeyModifiers::CONTROL, KeyCode::Char('j')) => {
+        _ if app.keymap.matches(crate::keybinds::Action::NextItem, key) => {
             if let Some(ref mut picker) = app.interaction.session_picker {
                 let filtered_len = filtered_sessions(picker).len();
                 if picker.selected + 1 < filtered_len {
@@ -1131,14 +1284,14 @@ fn handle_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             }
             None
         }
-        (_, KeyCode::Backspace) => {
+        _ if crate::keybinds::is_backspace(key) => {
             if let Some(ref mut picker) = app.interaction.session_picker {
                 picker.filter.pop();
                 picker.selected = 0;
             }
             None
         }
-        (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
+        _ if let Some(c) = crate::keybinds::typed_char(key) => {
             if let Some(ref mut picker) = app.interaction.session_picker {
                 picker.filter.push(c);
                 picker.selected = 0;
@@ -1154,6 +1307,8 @@ fn handle_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
 /// favourite), ctrl+d (arm delete-stale prompt), and a confirmation
 /// flow that intercepts y/n while a delete is armed
 fn handle_model_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
+    use crate::keybinds::{Action, KeyScope};
+
     // intercept y/n when a delete prompt is armed
     if app
         .interaction
@@ -1164,12 +1319,18 @@ fn handle_model_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         return handle_model_picker_delete_confirm_key(app, key);
     }
 
-    match (key.modifiers, key.code) {
-        (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('c' | '[')) => {
+    match () {
+        _ if app
+            .keymap
+            .matches_in(KeyScope::ModelPicker, Action::QuitOrAbort, key)
+            || app
+                .keymap
+                .matches_in(KeyScope::ModelPicker, Action::Cancel, key) =>
+        {
             app.close_model_picker();
             None
         }
-        (_, KeyCode::Tab) | (_, KeyCode::BackTab) => {
+        _ if crate::keybinds::is_tab(key) => {
             if let Some(ref mut picker) = app.interaction.model_picker {
                 picker.toggle_tab();
                 if matches!(picker.tab, crate::model_picker::ModelPickerTab::Favourites)
@@ -1182,7 +1343,10 @@ fn handle_model_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             }
             None
         }
-        (_, KeyCode::Enter) => {
+        _ if app
+            .keymap
+            .matches_in(KeyScope::ModelPicker, Action::Confirm, key) =>
+        {
             let id = app.selected_model_id()?;
             let show_all = app
                 .interaction
@@ -1198,13 +1362,19 @@ fn handle_model_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
                 },
             })
         }
-        (_, KeyCode::Up) | (KeyModifiers::CONTROL, KeyCode::Char('k')) => {
+        _ if app
+            .keymap
+            .matches_in(KeyScope::ModelPicker, Action::PreviousItem, key) =>
+        {
             if let Some(ref mut picker) = app.interaction.model_picker {
                 picker.selected = picker.selected.saturating_sub(1);
             }
             None
         }
-        (_, KeyCode::Down) | (KeyModifiers::CONTROL, KeyCode::Char('j')) => {
+        _ if app
+            .keymap
+            .matches_in(KeyScope::ModelPicker, Action::NextItem, key) =>
+        {
             if let Some(ref mut picker) = app.interaction.model_picker {
                 let filtered_len = crate::model_picker::filtered_models(picker).len();
                 if picker.selected + 1 < filtered_len {
@@ -1213,24 +1383,31 @@ fn handle_model_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             }
             None
         }
-        (KeyModifiers::CONTROL, KeyCode::Char('f')) => toggle_overlay_favourite(app),
-        (mods, KeyCode::Char('d'))
-            if mods.contains(KeyModifiers::CONTROL) && mods.contains(KeyModifiers::SHIFT) =>
+        _ if app.keymap.matches_in(
+            KeyScope::ModelPicker,
+            Action::ModelPickerToggleFavourite,
+            key,
+        ) =>
+        {
+            toggle_overlay_favourite(app)
+        }
+        _ if app.keymap.matches_in(
+            KeyScope::ModelPicker,
+            Action::ModelPickerDeleteAllStale,
+            key,
+        ) =>
         {
             if let Some(ref mut picker) = app.interaction.model_picker {
                 picker.arm_delete_all_stale();
             }
             None
         }
-        (KeyModifiers::ALT, KeyCode::Char('d')) => {
-            // some terminals send alt+d for ctrl+shift+d; treat both
-            // as the "delete every stale" path
-            if let Some(ref mut picker) = app.interaction.model_picker {
-                picker.arm_delete_all_stale();
-            }
-            None
-        }
-        (KeyModifiers::CONTROL, KeyCode::Char('d')) => {
+        _ if app.keymap.matches_in(
+            KeyScope::ModelPicker,
+            Action::ModelPickerDeleteSelectedStale,
+            key,
+        ) =>
+        {
             if let Some(ref mut picker) = app.interaction.model_picker
                 && !picker.arm_delete_selected()
             {
@@ -1238,14 +1415,14 @@ fn handle_model_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             }
             None
         }
-        (_, KeyCode::Backspace) => {
+        _ if crate::keybinds::is_backspace(key) => {
             if let Some(ref mut picker) = app.interaction.model_picker {
                 picker.filter.pop();
                 picker.selected = 0;
             }
             None
         }
-        (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
+        _ if let Some(c) = crate::keybinds::typed_char(key) => {
             if let Some(ref mut picker) = app.interaction.model_picker {
                 picker.filter.push(c);
                 picker.selected = 0;
@@ -1297,7 +1474,7 @@ fn handle_model_picker_delete_confirm_key(app: &mut App, key: KeyEvent) -> Optio
         .and_then(|p| p.confirm_delete.clone())?;
 
     match (key.modifiers, key.code) {
-        (_, KeyCode::Char('y' | 'Y')) => {
+        _ if matches!(crate::keybinds::any_char(key), Some('y' | 'Y')) => {
             let removed = apply_delete_confirm(&confirm);
             if let Some(picker) = app.interaction.model_picker.as_mut() {
                 picker.confirm_delete = None;
@@ -1401,11 +1578,15 @@ fn handle_login_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     }
 
     match (key.modifiers, key.code) {
-        (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('c' | '[')) => {
+        _ if app
+            .keymap
+            .matches(crate::keybinds::Action::QuitOrAbort, key)
+            || app.keymap.matches(crate::keybinds::Action::Cancel, key) =>
+        {
             app.close_login_picker();
             None
         }
-        (_, KeyCode::Enter) => {
+        _ if app.keymap.matches(crate::keybinds::Action::Confirm, key) => {
             // resolve the selected row's id + method without holding
             // the immutable borrow into the mutating branches below
             let (id, method, logged_in) = {
@@ -1442,13 +1623,16 @@ fn handle_login_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
                 }
             }
         }
-        (_, KeyCode::Up) | (KeyModifiers::CONTROL, KeyCode::Char('k')) => {
+        _ if app
+            .keymap
+            .matches(crate::keybinds::Action::PreviousItem, key) =>
+        {
             if let Some(picker) = app.interaction.login_picker.as_mut() {
                 picker.selected = picker.selected.saturating_sub(1);
             }
             None
         }
-        (_, KeyCode::Down) | (KeyModifiers::CONTROL, KeyCode::Char('j')) => {
+        _ if app.keymap.matches(crate::keybinds::Action::NextItem, key) => {
             if let Some(picker) = app.interaction.login_picker.as_mut() {
                 let visible_len = crate::login_picker::filtered_entries(picker).len();
                 if picker.selected + 1 < visible_len {
@@ -1457,14 +1641,14 @@ fn handle_login_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             }
             None
         }
-        (_, KeyCode::Backspace) => {
+        _ if crate::keybinds::is_backspace(key) => {
             if let Some(picker) = app.interaction.login_picker.as_mut() {
                 picker.filter.pop();
                 picker.selected = 0;
             }
             None
         }
-        (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
+        _ if let Some(c) = crate::keybinds::typed_char(key) => {
             if let Some(picker) = app.interaction.login_picker.as_mut() {
                 picker.filter.push(c);
                 picker.selected = 0;
@@ -1487,7 +1671,7 @@ fn handle_login_picker_logout_confirm_key(app: &mut App, key: KeyEvent) -> Optio
         .and_then(|p| p.confirm_logout.clone())?;
 
     match (key.modifiers, key.code) {
-        (_, KeyCode::Char('y' | 'Y')) => {
+        _ if matches!(crate::keybinds::any_char(key), Some('y' | 'Y')) => {
             let toast = perform_logout(app, &entry_id);
             if let Some(picker) = app.interaction.login_picker.as_mut() {
                 picker.confirm_logout = None;
@@ -1545,14 +1729,20 @@ fn perform_logout(app: &App, entry_id: &str) -> String {
 /// async validation + save, esc cancels and returns to the picker
 fn handle_login_picker_entry_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     match (key.modifiers, key.code) {
-        (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('c' | '[')) => {
+        _ if app
+            .keymap
+            .matches(crate::keybinds::Action::QuitOrAbort, key)
+            || app.keymap.matches(crate::keybinds::Action::Cancel, key) =>
+        {
             if let Some(picker) = app.interaction.login_picker.as_mut() {
                 picker.cancel_entry();
             }
             None
         }
-        (_, KeyCode::Enter) => submit_login_picker_entry(app),
-        (_, KeyCode::Backspace) => {
+        _ if app.keymap.matches(crate::keybinds::Action::Confirm, key) => {
+            submit_login_picker_entry(app)
+        }
+        _ if crate::keybinds::is_backspace(key) => {
             if let Some(prompt) = app
                 .interaction
                 .login_picker
@@ -1563,9 +1753,7 @@ fn handle_login_picker_entry_key(app: &mut App, key: KeyEvent) -> Option<AppEven
             }
             None
         }
-        (mods, KeyCode::Char(c))
-            if !mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::ALT) =>
-        {
+        _ if let Some(c) = crate::keybinds::typed_char(key) => {
             if let Some(prompt) = app
                 .interaction
                 .login_picker
@@ -2098,14 +2286,15 @@ mod tests {
 
     #[test]
     fn configured_word_delete_binding_is_used() {
-        use std::collections::HashMap;
-
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        let raw = HashMap::from([(
-            "delete_word_backward".to_string(),
-            crate::keybinds::BindingSource::One("alt+q".into()),
-        )]);
-        app.keymap.override_from(&raw);
+        let raw = crate::keybinds::scoped_test_config(
+            crate::keybinds::KeyScope::Edit,
+            [(
+                "delete_word_backward",
+                crate::keybinds::BindingSource::One("alt+q".into()),
+            )],
+        );
+        app.keymap.override_scoped(&raw);
         app.input.text = "hello world".into();
         app.input.cursor = 11;
 
@@ -2119,14 +2308,15 @@ mod tests {
 
     #[test]
     fn configured_pane_split_binding_is_used() {
-        use std::collections::HashMap;
-
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        let raw = HashMap::from([(
-            "split_pane".to_string(),
-            crate::keybinds::BindingSource::One("alt+enter".into()),
-        )]);
-        app.keymap.override_from(&raw);
+        let raw = crate::keybinds::scoped_test_config(
+            crate::keybinds::KeyScope::Pane,
+            [(
+                "split_pane",
+                crate::keybinds::BindingSource::One("alt+enter".into()),
+            )],
+        );
+        app.keymap.override_scoped(&raw);
 
         let event = handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
 
@@ -2156,6 +2346,156 @@ mod tests {
         app.input.cursor = 1;
         handle_key(&mut app, ctrl(KeyCode::Char('d')));
         assert_eq!(app.input.text, "ac");
+    }
+
+    #[test]
+    fn configured_delete_char_or_quit_binding_is_used() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        let raw = crate::keybinds::scoped_test_config(
+            crate::keybinds::KeyScope::Edit,
+            [(
+                "delete_char_or_quit",
+                crate::keybinds::BindingSource::One("alt+x".into()),
+            )],
+        );
+        app.keymap.override_scoped(&raw);
+        app.input.text = "abc".into();
+        app.input.cursor = 1;
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT),
+        );
+
+        assert_eq!(app.input.text, "ac");
+    }
+
+    #[test]
+    fn configured_line_delete_bindings_are_used() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        let raw = crate::keybinds::scoped_test_config(
+            crate::keybinds::KeyScope::Edit,
+            [
+                (
+                    "delete_to_start",
+                    crate::keybinds::BindingSource::One("alt+u".into()),
+                ),
+                (
+                    "delete_to_end",
+                    crate::keybinds::BindingSource::One("alt+k".into()),
+                ),
+            ],
+        );
+        app.keymap.override_scoped(&raw);
+        app.input.text = "hello world".into();
+        app.input.cursor = 5;
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::ALT),
+        );
+        assert_eq!(app.input.text, " world");
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::ALT),
+        );
+        assert_eq!(app.input.text, "");
+    }
+
+    #[test]
+    fn configured_cursor_bindings_are_used() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        let raw = crate::keybinds::scoped_test_config(
+            crate::keybinds::KeyScope::Edit,
+            [
+                (
+                    "cursor_line_start",
+                    crate::keybinds::BindingSource::One("alt+a".into()),
+                ),
+                (
+                    "cursor_line_end",
+                    crate::keybinds::BindingSource::One("alt+e".into()),
+                ),
+            ],
+        );
+        app.keymap.override_scoped(&raw);
+        app.input.text = "hello world".into();
+        app.input.cursor = 5;
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::ALT),
+        );
+        assert_eq!(app.input.cursor, 11);
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT),
+        );
+        assert_eq!(app.input.cursor, 0);
+    }
+
+    #[test]
+    fn configured_insert_newline_binding_is_used() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        let raw = crate::keybinds::scoped_test_config(
+            crate::keybinds::KeyScope::Normal,
+            [(
+                "insert_newline",
+                crate::keybinds::BindingSource::One("alt+n".into()),
+            )],
+        );
+        app.keymap.override_scoped(&raw);
+        app.input.text = "a".into();
+        app.input.cursor = 1;
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::ALT),
+        );
+
+        assert_eq!(app.input.text, "a\n");
+    }
+
+    #[test]
+    fn configured_global_bindings_are_used() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        let raw = crate::keybinds::scoped_test_config(
+            crate::keybinds::KeyScope::Shared,
+            [(
+                "quit_or_abort",
+                crate::keybinds::BindingSource::One("alt+q".into()),
+            )],
+        );
+        app.keymap.override_scoped(&raw);
+
+        let event = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::ALT),
+        );
+
+        assert!(event.is_none());
+        assert!(app.confirm_quit_pending);
+    }
+
+    #[test]
+    fn configured_focus_pane_binding_is_used() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        let raw = crate::keybinds::scoped_test_config(
+            crate::keybinds::KeyScope::Pane,
+            [(
+                "focus_pane_two",
+                crate::keybinds::BindingSource::One("alt+w".into()),
+            )],
+        );
+        app.keymap.override_scoped(&raw);
+
+        let event = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('w'), KeyModifiers::ALT),
+        );
+
+        assert!(matches!(event, Some(AppEvent::FocusPaneByIndex(1))));
     }
 
     #[test]

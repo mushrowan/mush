@@ -212,10 +212,44 @@
       "type": "string"
     },
     "KeysConfig": {
-      "additionalProperties": {
-        "$ref": "#/$defs/BindingSource"
+      "description": "config-side type used by `KeysConfig` below. users put scoped tables\nunder `[keys]`, such as `[keys.normal]` and `[keys.model_picker]`.",
+      "properties": {
+        "edit": {
+          "additionalProperties": {
+            "$ref": "#/$defs/BindingSource"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "model_picker": {
+          "additionalProperties": {
+            "$ref": "#/$defs/BindingSource"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "normal": {
+          "additionalProperties": {
+            "$ref": "#/$defs/BindingSource"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "pane": {
+          "additionalProperties": {
+            "$ref": "#/$defs/BindingSource"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "shared": {
+          "additionalProperties": {
+            "$ref": "#/$defs/BindingSource"
+          },
+          "default": {},
+          "type": "object"
+        }
       },
-      "description": "config-side type used by `KeysConfig` below. users put these in\n`[keys]` in config.toml. `deserialise_keys` turns the toml table\ninto raw strings so `KeyMap::override_from` can layer them on top\nof the defaults without losing context on which actions are known",
       "type": "object"
     },
     "LspConfig": {
@@ -695,8 +729,14 @@
     },
     "keys": {
       "$ref": "#/$defs/KeysConfig",
-      "default": {},
-      "description": "configurable keybinds: action → key combination(s)"
+      "default": {
+        "edit": {},
+        "model_picker": {},
+        "normal": {},
+        "pane": {},
+        "shared": {}
+      },
+      "description": "configurable keybinds grouped by scope, for example\n`[keys.normal]` and `[keys.model_picker]`."
     },
     "log_filter": {
       "default": null,

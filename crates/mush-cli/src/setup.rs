@@ -387,6 +387,10 @@ pub fn build_system_prompt_from_context(
          - Use edit for precise changes (old text must match exactly)\n\
          - Use write only for new files or complete rewrites\n\
          - Be concise in your responses\n\
+         - Your final answers are plain text that will be styled by the terminal TUI. \
+         Use Markdown-compatible basics for readability: short paragraphs, simple lists, \
+         inline backticks for paths and commands, and fenced code blocks for snippets. \
+         Avoid HTML, ANSI codes, and complex nested formatting\n\
          - Explore with targeted tools first: prefer grep, find, or glob to locate \
          relevant code before reading. When reading large files, use offset/limit, \
          start_line/end_line, or around_line to fetch only the sections you need \
@@ -761,6 +765,21 @@ mod tests {
             prompt.contains("targeted"),
             "expected prompt to mention targeted reads"
         );
+    }
+
+    #[test]
+    fn default_prompt_mentions_terminal_markdown_rendering() {
+        let context = ProjectContext {
+            agents_md: vec![],
+            skills: vec![],
+        };
+        let prompt = build_system_prompt_from_context(&context, std::path::Path::new("/repo"));
+
+        assert!(prompt.contains("plain text that will be styled by the terminal TUI"));
+        assert!(prompt.contains("Markdown-compatible basics"));
+        assert!(prompt.contains("terminal TUI"));
+        assert!(prompt.contains("fenced code blocks"));
+        assert!(prompt.contains("Avoid HTML, ANSI codes"));
     }
 
     #[test]

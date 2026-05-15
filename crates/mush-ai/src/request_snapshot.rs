@@ -170,6 +170,20 @@ const SENSITIVE_HEADERS: &[&str] = &[
     "x-api-key",
 ];
 
+const SENSITIVE_JSON_FIELDS: &[&str] = &[
+    "api_key",
+    "apikey",
+    "authorization",
+    "client_secret",
+    "cookie",
+    "id_token",
+    "refresh_token",
+    "secret",
+    "set_cookie",
+    "set-cookie",
+    "token",
+];
+
 /// placeholder substituted for sensitive header values in dumps
 pub const REDACTED_HEADER_VALUE: &str = "<redacted>";
 
@@ -177,6 +191,76 @@ fn is_sensitive_header(name: &str) -> bool {
     SENSITIVE_HEADERS
         .iter()
         .any(|s| s.eq_ignore_ascii_case(name))
+}
+
+fn is_sensitive_json_field(name: &str) -> bool {
+    let normalised = name.replace(['-', '_'], "").to_ascii_lowercase();
+    SENSITIVE_JSON_FIELDS.iter().any(|field| {
+        field
+            .replace(['-', '_'], "")
+            .eq_ignore_ascii_case(&normalised)
+    })
+}
+
+fn redact_snapshot_body(body_json: &str) -> serde_json::Value {
+    match serde_json::from_str::<serde_json::Value>(body_json) {
+        Ok(mut value) => {
+            redact_json_value(&mut value, None);
+            value
+        }
+        Err(_) => serde_json::Value::String(redact_secret_text(body_json)),
+    }
+}
+
+fn redact_json_value(value: &mut serde_json::Value, field_name: Option<&str>) {
+    if field_name.is_some_and(is_sensitive_json_field) {
+        *value = serde_json::Value::String(REDACTED_HEADER_VALUE.to_string());
+        return;
+    }
+
+    match value {
+        serde_json::Value::String(text) => {
+            *text = redact_secret_text(text);
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                redact_json_value(value, None);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (key, value) in map.iter_mut() {
+                redact_json_value(value, Some(key));
+            }
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+    }
+}
+
+fn redact_secret_text(text: &str) -> String {
+    text.split_whitespace()
+        .map(redact_secret_word)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn redact_secret_word(word: &str) -> String {
+    let trimmed = word.trim_matches(|ch: char| ch.is_ascii_punctuation());
+    if looks_like_secret(trimmed) {
+        word.replacen(trimmed, REDACTED_HEADER_VALUE, 1)
+    } else {
+        word.to_string()
+    }
+}
+
+fn looks_like_secret(text: &str) -> bool {
+    if text.len() < 12 {
+        return false;
+    }
+    text.starts_with("sk-")
+        || text.starts_with("sk_")
+        || text.starts_with("sk-ant-")
+        || text.starts_with("sess-")
+        || text.starts_with("eyJ")
 }
 
 /// write a request snapshot: a JSON file containing the fingerprint
@@ -237,10 +321,7 @@ pub fn dump_in(
             "fingerprint": fingerprint,
             "headers": headers_json,
         },
-        "body": match serde_json::from_str::<serde_json::Value>(body_json) {
-            Ok(v) => v,
-            Err(_) => serde_json::Value::String(body_json.to_string()),
-        }
+        "body": redact_snapshot_body(body_json)
     });
 
     match serde_json::to_string_pretty(&envelope) {
@@ -367,6 +448,44 @@ mod tests {
         assert!(
             !dump_text.contains("shhhh"),
             "x-api-key leaked into dump: {dump_text}"
+        );
+    }
+
+    #[test]
+    fn dump_redacts_secret_fields_and_secret_shaped_strings_from_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let fp = RequestFingerprint::from_json_sections("[]", "[]", "[]");
+        let body = serde_json::json!({
+            "api_key": "sk-body-field-secret-123",
+            "messages": [{
+                "role": "user",
+                "content": "please use Bearer sk-inline-secret-456 and token sk-ant-oat-inline-789"
+            }],
+            "safe": "keep me"
+        });
+
+        let path = dump_in(dir.path(), "p", &fp, &body.to_string(), &[]).expect("dump succeeds");
+        let dump_text = std::fs::read_to_string(&path).unwrap();
+
+        assert!(
+            dump_text.contains("keep me"),
+            "safe text should remain: {dump_text}"
+        );
+        assert!(
+            !dump_text.contains("sk-body-field-secret-123"),
+            "api key leaked: {dump_text}"
+        );
+        assert!(
+            !dump_text.contains("sk-inline-secret-456"),
+            "bearer leaked: {dump_text}"
+        );
+        assert!(
+            !dump_text.contains("sk-ant-oat-inline-789"),
+            "oauth token leaked: {dump_text}"
+        );
+        assert!(
+            dump_text.contains(REDACTED_HEADER_VALUE),
+            "redaction marker missing: {dump_text}"
         );
     }
 
