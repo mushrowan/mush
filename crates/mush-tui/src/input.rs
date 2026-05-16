@@ -1241,7 +1241,10 @@ fn handle_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             app.close_session_picker();
             None
         }
-        _ if app.keymap.matches(crate::keybinds::Action::NextItem, key) => {
+        _ if app
+            .keymap
+            .matches(crate::keybinds::Action::SessionPickerToggleScope, key) =>
+        {
             // toggle scope between this dir and all dirs
             if let Some(ref mut picker) = app.interaction.session_picker {
                 picker.scope = match picker.scope {
@@ -1266,16 +1269,23 @@ fn handle_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
                 None
             }
         }
-        _ if app
-            .keymap
-            .matches(crate::keybinds::Action::PreviousItem, key) =>
+        _ if app.keymap.matches_in(
+            crate::keybinds::KeyScope::SessionPicker,
+            crate::keybinds::Action::PreviousItem,
+            key,
+        ) =>
         {
             if let Some(ref mut picker) = app.interaction.session_picker {
                 picker.selected = picker.selected.saturating_sub(1);
             }
             None
         }
-        _ if app.keymap.matches(crate::keybinds::Action::NextItem, key) => {
+        _ if app.keymap.matches_in(
+            crate::keybinds::KeyScope::SessionPicker,
+            crate::keybinds::Action::NextItem,
+            key,
+        ) =>
+        {
             if let Some(ref mut picker) = app.interaction.session_picker {
                 let filtered_len = filtered_sessions(picker).len();
                 if picker.selected + 1 < filtered_len {
@@ -3727,26 +3737,84 @@ mod tests {
 
     #[test]
     fn ctrl_bracket_closes_session_picker() {
-        use mush_ai::types::{ModelId, SessionId, Timestamp};
-        use mush_session::SessionMeta;
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.open_session_picker(
-            vec![SessionMeta {
-                id: SessionId::new(),
+        app.open_session_picker(test_sessions(), "/tmp".into());
+        assert_eq!(app.interaction.mode, AppMode::SessionPicker);
+
+        handle_key(&mut app, ctrl(KeyCode::Char('[')));
+        assert_eq!(app.interaction.mode, AppMode::Normal);
+        assert!(app.interaction.session_picker.is_none());
+    }
+
+    #[test]
+    fn session_picker_plain_j_k_filter_instead_of_navigate() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.open_session_picker(test_sessions(), "/tmp".into());
+
+        handle_key(&mut app, key(KeyCode::Char('j')));
+        handle_key(&mut app, key(KeyCode::Char('k')));
+
+        let picker = app.interaction.session_picker.as_ref().unwrap();
+        assert_eq!(picker.selected, 0);
+        assert_eq!(picker.filter, "jk");
+    }
+
+    #[test]
+    fn session_picker_down_up_and_ctrl_j_k_navigate_visible_rows() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.open_session_picker(test_sessions(), "/tmp".into());
+
+        handle_key(&mut app, key(KeyCode::Down));
+        assert_eq!(app.interaction.session_picker.as_ref().unwrap().selected, 1);
+
+        handle_key(&mut app, key(KeyCode::Up));
+        assert_eq!(app.interaction.session_picker.as_ref().unwrap().selected, 0);
+
+        handle_key(&mut app, ctrl(KeyCode::Char('j')));
+        assert_eq!(app.interaction.session_picker.as_ref().unwrap().selected, 1);
+
+        handle_key(&mut app, ctrl(KeyCode::Char('k')));
+        assert_eq!(app.interaction.session_picker.as_ref().unwrap().selected, 0);
+    }
+
+    #[test]
+    fn session_picker_tab_toggles_scope() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.open_session_picker(test_sessions(), "/tmp".into());
+        assert_eq!(
+            app.interaction.session_picker.as_ref().unwrap().scope,
+            SessionScope::ThisDir
+        );
+
+        handle_key(&mut app, key(KeyCode::Tab));
+        assert_eq!(
+            app.interaction.session_picker.as_ref().unwrap().scope,
+            SessionScope::AllDirs
+        );
+    }
+
+    fn test_sessions() -> Vec<mush_session::SessionMeta> {
+        use mush_ai::types::{ModelId, SessionId, Timestamp};
+        vec![
+            mush_session::SessionMeta {
+                id: SessionId::from("one"),
                 title: Some("hello".into()),
                 model_id: ModelId::from("m"),
                 created_at: Timestamp::now(),
                 updated_at: Timestamp::now(),
                 message_count: 1,
                 cwd: "/tmp".into(),
-            }],
-            "/tmp".into(),
-        );
-        assert_eq!(app.interaction.mode, AppMode::SessionPicker);
-
-        handle_key(&mut app, ctrl(KeyCode::Char('[')));
-        assert_eq!(app.interaction.mode, AppMode::Normal);
-        assert!(app.interaction.session_picker.is_none());
+            },
+            mush_session::SessionMeta {
+                id: SessionId::from("two"),
+                title: Some("jkl session".into()),
+                model_id: ModelId::from("m"),
+                created_at: Timestamp::now(),
+                updated_at: Timestamp::now(),
+                message_count: 1,
+                cwd: "/tmp".into(),
+            },
+        ]
     }
 
     /// seed an app with two anthropic models and one openai model so
@@ -3819,6 +3887,30 @@ mod tests {
         assert_eq!(app.interaction.model_picker.as_ref().unwrap().selected, 2);
         handle_key(&mut app, ctrl(KeyCode::Char('k')));
         assert_eq!(app.interaction.model_picker.as_ref().unwrap().selected, 1);
+    }
+
+    #[test]
+    fn model_picker_overlay_plain_j_k_filter_instead_of_navigate() {
+        let mut app = app_with_models();
+        app.open_model_picker_overlay();
+
+        handle_key(&mut app, key(KeyCode::Char('j')));
+        handle_key(&mut app, key(KeyCode::Char('k')));
+
+        let picker = app.interaction.model_picker.as_ref().unwrap();
+        assert_eq!(picker.selected, 0);
+        assert_eq!(picker.filter, "jk");
+    }
+
+    #[test]
+    fn model_picker_overlay_ctrl_n_p_do_not_navigate() {
+        let mut app = app_with_models();
+        app.open_model_picker_overlay();
+
+        handle_key(&mut app, ctrl(KeyCode::Char('n')));
+        handle_key(&mut app, ctrl(KeyCode::Char('p')));
+
+        assert_eq!(app.interaction.model_picker.as_ref().unwrap().selected, 0);
     }
 
     #[test]

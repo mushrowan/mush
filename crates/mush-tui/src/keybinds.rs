@@ -44,6 +44,7 @@ pub enum KeyScope {
     Normal,
     Edit,
     Pane,
+    SessionPicker,
     ModelPicker,
     AtPicker,
     SlotEdit,
@@ -59,6 +60,7 @@ impl KeyScope {
             Self::Normal => "normal",
             Self::Edit => "edit",
             Self::Pane => "pane",
+            Self::SessionPicker => "session_picker",
             Self::ModelPicker => "model_picker",
             Self::AtPicker => "at_picker",
             Self::SlotEdit => "slot_edit",
@@ -73,6 +75,7 @@ impl KeyScope {
         Self::Normal,
         Self::Edit,
         Self::Pane,
+        Self::SessionPicker,
         Self::ModelPicker,
         Self::AtPicker,
         Self::SlotEdit,
@@ -248,6 +251,9 @@ pub enum Action {
     NavigateTop,
     NextItem,
     PreviousItem,
+    /// toggle the session picker between this directory and all
+    /// directories. default binding: `tab`
+    SessionPickerToggleScope,
     /// arm deletion for every stale model in the model picker. default
     /// bindings: `ctrl-shift-d`, `alt-d`
     ModelPickerDeleteAllStale,
@@ -293,6 +299,7 @@ impl Action {
             Self::NavigateTop => "navigate_top",
             Self::NextItem => "next_item",
             Self::PreviousItem => "previous_item",
+            Self::SessionPickerToggleScope => "session_picker_toggle_scope",
             Self::ModelPickerDeleteAllStale => "model_picker_delete_all_stale",
             Self::ModelPickerDeleteSelectedStale => "model_picker_delete_selected_stale",
             Self::ModelPickerToggleFavourite => "model_picker_toggle_favourite",
@@ -352,6 +359,7 @@ impl Action {
         Self::NavigateTop,
         Self::NextItem,
         Self::PreviousItem,
+        Self::SessionPickerToggleScope,
         Self::ModelPickerDeleteAllStale,
         Self::ModelPickerDeleteSelectedStale,
         Self::ModelPickerToggleFavourite,
@@ -532,6 +540,7 @@ const fn default_scope_for_action(action: Action) -> KeyScope {
         Action::CopySelection | Action::ToggleBlockMode | Action::ToggleVisualSelection => {
             KeyScope::Scroll
         }
+        Action::SessionPickerToggleScope => KeyScope::SessionPicker,
         Action::ModelPickerDeleteAllStale
         | Action::ModelPickerDeleteSelectedStale
         | Action::ModelPickerToggleFavourite => KeyScope::ModelPicker,
@@ -700,6 +709,48 @@ impl Default for KeyMap {
                 KeyCombination::new(KeyCode::Char('k'), KeyModifiers::NONE),
                 KeyCombination::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
                 KeyCombination::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+            ]),
+        );
+
+        bind!(
+            KeyScope::SessionPicker,
+            Action::NextItem,
+            Binding(vec![
+                KeyCombination::new(KeyCode::Down, KeyModifiers::NONE),
+                KeyCombination::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
+            ]),
+        );
+
+        bind!(
+            KeyScope::SessionPicker,
+            Action::PreviousItem,
+            Binding(vec![
+                KeyCombination::new(KeyCode::Up, KeyModifiers::NONE),
+                KeyCombination::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
+            ]),
+        );
+
+        bind!(
+            KeyScope::SessionPicker,
+            Action::SessionPickerToggleScope,
+            Binding(vec![KeyCombination::new(KeyCode::Tab, KeyModifiers::NONE)]),
+        );
+
+        bind!(
+            KeyScope::ModelPicker,
+            Action::NextItem,
+            Binding(vec![
+                KeyCombination::new(KeyCode::Down, KeyModifiers::NONE),
+                KeyCombination::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
+            ]),
+        );
+
+        bind!(
+            KeyScope::ModelPicker,
+            Action::PreviousItem,
+            Binding(vec![
+                KeyCombination::new(KeyCode::Up, KeyModifiers::NONE),
+                KeyCombination::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
             ]),
         );
 
