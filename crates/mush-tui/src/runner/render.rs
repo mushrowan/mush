@@ -2,7 +2,7 @@ use std::io;
 
 use crossterm::event::{MouseEvent, MouseEventKind};
 use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
+use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::layout::Rect;
 
 use crate::app::{self, App};
@@ -19,6 +19,8 @@ pub(super) fn draw_panes(
     image_picker: &Option<ratatui_image::picker::Picker>,
     settings: &crate::settings::ScopedSettings,
 ) -> io::Result<()> {
+    repair_terminal_before_frame(terminal)?;
+
     let pane_count = pane_mgr.pane_count() as u16;
     let focused_idx = pane_mgr.focused_index();
 
@@ -205,6 +207,10 @@ pub(super) fn draw_panes(
     Ok(())
 }
 
+fn repair_terminal_before_frame<B: Backend>(terminal: &mut Terminal<B>) -> Result<(), B::Error> {
+    terminal.clear()
+}
+
 pub(super) fn handle_mouse(app: &mut App, mouse: MouseEvent) {
     const SCROLL_LINES: u16 = 3;
 
@@ -251,6 +257,108 @@ pub(super) fn handle_mouse(app: &mut App, mouse: MouseEvent) {
 mod tests {
     use super::*;
     use mush_ai::types::TokenCount;
+    use ratatui::backend::{Backend, ClearType, TestBackend, WindowSize};
+    use ratatui::buffer::Cell as BufferCell;
+    use ratatui::layout::{Position, Size};
+    use std::cell::Cell;
+    use std::convert::Infallible;
+    use std::ops::Range;
+    use std::rc::Rc;
+
+    struct ClearCountingBackend {
+        inner: TestBackend,
+        clears: Rc<Cell<u32>>,
+    }
+
+    impl ClearCountingBackend {
+        fn new(clears: Rc<Cell<u32>>) -> Self {
+            Self {
+                inner: TestBackend::new(80, 24),
+                clears,
+            }
+        }
+    }
+
+    impl Backend for ClearCountingBackend {
+        type Error = Infallible;
+
+        fn draw<'a, I>(&mut self, content: I) -> Result<(), Self::Error>
+        where
+            I: Iterator<Item = (u16, u16, &'a BufferCell)>,
+        {
+            self.inner.draw(content)
+        }
+
+        fn hide_cursor(&mut self) -> Result<(), Self::Error> {
+            self.inner.hide_cursor()
+        }
+
+        fn show_cursor(&mut self) -> Result<(), Self::Error> {
+            self.inner.show_cursor()
+        }
+
+        fn get_cursor_position(&mut self) -> Result<Position, Self::Error> {
+            self.inner.get_cursor_position()
+        }
+
+        fn set_cursor_position<P: Into<Position>>(
+            &mut self,
+            position: P,
+        ) -> Result<(), Self::Error> {
+            self.inner.set_cursor_position(position)
+        }
+
+        fn clear(&mut self) -> Result<(), Self::Error> {
+            self.clears.set(self.clears.get() + 1);
+            self.inner.clear()
+        }
+
+        fn clear_region(&mut self, clear_type: ClearType) -> Result<(), Self::Error> {
+            if matches!(clear_type, ClearType::All) {
+                self.clears.set(self.clears.get() + 1);
+            }
+            self.inner.clear_region(clear_type)
+        }
+
+        fn size(&self) -> Result<Size, Self::Error> {
+            self.inner.size()
+        }
+
+        fn window_size(&mut self) -> Result<WindowSize, Self::Error> {
+            self.inner.window_size()
+        }
+
+        fn flush(&mut self) -> Result<(), Self::Error> {
+            self.inner.flush()
+        }
+
+        fn scroll_region_up(
+            &mut self,
+            region: Range<u16>,
+            line_count: u16,
+        ) -> Result<(), Self::Error> {
+            self.inner.scroll_region_up(region, line_count)
+        }
+
+        fn scroll_region_down(
+            &mut self,
+            region: Range<u16>,
+            line_count: u16,
+        ) -> Result<(), Self::Error> {
+            self.inner.scroll_region_down(region, line_count)
+        }
+    }
+
+    #[test]
+    fn repairs_terminal_before_each_frame() {
+        let clears = Rc::new(Cell::new(0));
+        let backend = ClearCountingBackend::new(clears.clone());
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        repair_terminal_before_frame(&mut terminal).unwrap();
+
+        assert_eq!(clears.get(), 1);
+    }
 
     #[test]
     fn mouse_scroll_over_messages_scrolls_conversation() {
