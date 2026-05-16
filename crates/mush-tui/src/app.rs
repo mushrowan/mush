@@ -31,6 +31,21 @@ pub use crate::streaming::StreamingState;
 
 use crate::slash_menu::{TabState, filter_command_matches};
 
+#[cfg(test)]
+thread_local! {
+    static BLOCKS_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_blocks_call_count() {
+    BLOCKS_CALLS.with(|calls| calls.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn blocks_call_count() -> usize {
+    BLOCKS_CALLS.with(std::cell::Cell::get)
+}
+
 /// tick() runs at ~60fps, divide by this to get spinner update rate (~8fps)
 const TICK_DIVISOR: u8 = 8;
 
@@ -1058,6 +1073,9 @@ impl App {
     /// scroll-mode block navigation (j/k cycles through these) and the
     /// y-yank action (copies the selected block's content).
     pub fn blocks(&self) -> Vec<Block> {
+        #[cfg(test)]
+        BLOCKS_CALLS.with(|calls| calls.set(calls.get() + 1));
+
         let mut blocks = Vec::new();
         for (msg_idx, msg) in self.messages.iter().enumerate() {
             let mut in_fence = false;

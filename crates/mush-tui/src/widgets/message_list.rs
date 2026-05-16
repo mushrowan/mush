@@ -12,7 +12,7 @@ use throbber_widgets_tui::{BRAILLE_SIX, Throbber, WhichUse};
 use mush_ai::types::TokenCount;
 
 use crate::app::{
-    App, Block, DisplayMessage, DisplayToolCall, ImageRenderArea, MessageRole, ToolCallStatus,
+    App, DisplayMessage, DisplayToolCall, ImageRenderArea, MessageRole, ToolCallStatus,
 };
 use crate::app_state::CachedHeight;
 use crate::widgets::shimmer::shimmer_spans;
@@ -179,6 +179,80 @@ struct DeferredCacheRender {
     line_count: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SelectedBlockInfo {
+    msg_idx: usize,
+    block_idx_in_msg: usize,
+}
+
+impl SelectedBlockInfo {
+    fn for_app(app: &App) -> Option<Self> {
+        if app.interaction.mode != crate::app::AppMode::Scroll
+            || app.navigation.scroll_unit != crate::app::ScrollUnit::Block
+        {
+            return None;
+        }
+
+        let selected_block = app.navigation.selected_block?;
+        let mut global_idx = 0usize;
+        for (msg_idx, msg) in app.messages.iter().enumerate() {
+            let block_count = count_blocks(&msg.content);
+            if selected_block < global_idx + block_count {
+                return Some(Self {
+                    msg_idx,
+                    block_idx_in_msg: selected_block - global_idx,
+                });
+            }
+            global_idx += block_count;
+        }
+
+        None
+    }
+}
+
+fn count_blocks(source: &str) -> usize {
+    let mut count = 0usize;
+    let mut in_fence = false;
+    let mut fence_has_content = false;
+    let mut para_has_content = false;
+
+    for raw_line in source.lines() {
+        if raw_line.starts_with("```") {
+            if in_fence {
+                if fence_has_content {
+                    count += 1;
+                }
+                fence_has_content = false;
+                in_fence = false;
+            } else {
+                if para_has_content {
+                    count += 1;
+                    para_has_content = false;
+                }
+                in_fence = true;
+            }
+            continue;
+        }
+
+        if in_fence {
+            fence_has_content = true;
+        } else if raw_line.trim().is_empty() {
+            if para_has_content {
+                count += 1;
+                para_has_content = false;
+            }
+        } else {
+            para_has_content = true;
+        }
+    }
+
+    if para_has_content || (in_fence && fence_has_content) {
+        count += 1;
+    }
+
+    count
+}
+
 impl Widget for MessageList<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let mut lines: Vec<Line<'_>> = Vec::new();
@@ -189,8 +263,7 @@ impl Widget for MessageList<'_> {
 
         let in_scroll_mode = self.app.interaction.mode == crate::app::AppMode::Scroll;
         let selection_range = self.app.selection_range();
-        // compute once, not per-message (was O(N²) in block scroll mode)
-        let all_blocks = self.app.blocks();
+        let selected_block_info = SelectedBlockInfo::for_app(self.app);
 
         // virtual scrolling: estimate per-message heights and determine
         // which messages overlap the viewport so we can skip expensive
@@ -281,7 +354,7 @@ impl Widget for MessageList<'_> {
                     &mut image_placeholders,
                     &mut deferred_renders,
                     area.width,
-                    &all_blocks,
+                    selected_block_info,
                 );
                 lines.push(Line::raw(""));
 
@@ -408,7 +481,7 @@ impl Widget for MessageList<'_> {
                 &mut image_placeholders,
                 &mut deferred_renders,
                 area.width,
-                &all_blocks,
+                selected_block_info,
             );
             lines.push(Line::raw(""));
         }
@@ -636,7 +709,7 @@ fn render_message(
     image_placeholders: &mut Vec<ImagePlaceholder>,
     deferred: &mut Vec<DeferredCacheRender>,
     width: u16,
-    all_blocks: &[Block],
+    selected_block_info: Option<SelectedBlockInfo>,
 ) {
     // user and assistant messages have no label line.
     // user messages are distinguished by a subtle background.
@@ -690,25 +763,9 @@ fn render_message(
         render_user_message_box(app, msg, msg_idx, width, lines, image_placeholders);
     } else {
         // determine if a code block in this message is selected
-        let highlight_block = if app.interaction.mode == crate::app::AppMode::Scroll
-            && app.navigation.scroll_unit == crate::app::ScrollUnit::Block
-        {
-            if let Some(sel) = app.navigation.selected_block {
-                all_blocks
-                    .get(sel)
-                    .filter(|b| b.msg_idx == msg_idx)
-                    .map(|_| {
-                        all_blocks[..sel]
-                            .iter()
-                            .filter(|b| b.msg_idx == msg_idx)
-                            .count()
-                    })
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        let highlight_block = selected_block_info
+            .filter(|selected| selected.msg_idx == msg_idx)
+            .map(|selected| selected.block_idx_in_msg);
 
         let content_width = message_content_width(width as usize);
         let highlight_range =
@@ -4684,6 +4741,25 @@ mod tests {
                 .any(|line| line.to_string().contains("let x"))
         );
         assert_eq!(crate::markdown::highlight_code_block_call_count(), 0);
+    }
+
+    #[test]
+    fn rendering_outside_block_scroll_does_not_build_block_list() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.interaction.mode = crate::app::AppMode::Scroll;
+        app.navigation.scroll_unit = crate::app::ScrollUnit::Message;
+        for i in 0..100 {
+            app.messages.push(DisplayMessage::new(
+                MessageRole::Assistant,
+                format!("message {i}\n\n```rust\nlet x = {i};\n```"),
+            ));
+        }
+
+        crate::app::reset_blocks_call_count();
+
+        render_app(&app, 60, 20);
+
+        assert_eq!(crate::app::blocks_call_count(), 0);
     }
 
     #[test]
