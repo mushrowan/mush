@@ -830,65 +830,7 @@ fn render_message(
         }
     }
 
-    // tool calls: group by batch, render as bordered boxes
-    // skip running tools (they're shown in the live tool panels)
-    let completed: Vec<(usize, &DisplayToolCall)> = msg
-        .tool_calls
-        .iter()
-        .enumerate()
-        .filter(|(_, tc)| tc.status != ToolCallStatus::Running)
-        .collect();
-
-    // group consecutive tools with the same batch
-    let mut i = 0;
-    while i < completed.len() {
-        let batch = completed[i].1.batch;
-        let group_start = i;
-        while i < completed.len() && completed[i].1.batch == batch {
-            i += 1;
-        }
-        let group = &completed[group_start..i];
-
-        // collect image placeholders before rendering the group
-        let image_group_indices: Vec<usize> = group
-            .iter()
-            .enumerate()
-            .filter_map(|(i, (_, tc))| tc.image_data.is_some().then_some(i))
-            .collect();
-
-        render_tool_box_group(
-            &group.iter().map(|(_, tc)| *tc).collect::<Vec<_>>(),
-            width,
-            lines,
-            &app.theme,
-        );
-
-        // after the boxes, render any image placeholders. register the
-        // placeholder at the body row so the render-area compute lands
-        // the image overlay on the right set of rows
-        for &gi in &image_group_indices {
-            let (tc_idx, _tc) = group[gi];
-            lines.push(Line::from(vec![
-                Span::styled("    📷 ", Style::default()),
-                Span::styled("image", app.theme.image_label),
-            ]));
-            // placeholder points at the first body row (after the label)
-            image_placeholders.push(ImagePlaceholder {
-                msg_idx,
-                tc_idx,
-                line_idx: lines.len(),
-                // tool-call images span the available inner area with a
-                // small horizontal margin, unchanged from pre-attachment
-                // layout
-                x_offset: 4,
-                cell_width: width.saturating_sub(8),
-                cell_height: IMAGE_HEIGHT.saturating_sub(1),
-            });
-            for _ in 1..IMAGE_HEIGHT {
-                lines.push(Line::raw(""));
-            }
-        }
-    }
+    render_completed_tool_boxes_cached(app, msg, msg_idx, width, lines, image_placeholders);
 
     // usage line (compact: total tokens + cost, with cache reuse + write ratios)
     // gated on show_usage_lines since the same info is in the status bar.
@@ -1509,6 +1451,156 @@ pub(crate) fn grid_dimensions(n: usize, width: usize, min: usize) -> (usize, usi
     let cols = n.min(max_cols);
     let rows = n.div_ceil(cols);
     (rows, cols)
+}
+
+fn render_completed_tool_boxes_cached<'a>(
+    app: &App,
+    msg: &DisplayMessage,
+    msg_idx: usize,
+    width: u16,
+    lines: &mut Vec<Line<'a>>,
+    image_placeholders: &mut Vec<ImagePlaceholder>,
+) {
+    let Some(hash) = tool_boxes_hash(msg) else {
+        return;
+    };
+    if completed_tool_boxes_have_images(msg) {
+        render_completed_tool_boxes(app, msg, msg_idx, width, lines, image_placeholders);
+        return;
+    }
+
+    if let Some(cached_lines) = app
+        .render_state
+        .tool_box_cache
+        .borrow()
+        .get(msg_idx)
+        .and_then(|entry| entry.as_ref())
+        .filter(|(h, w, _)| *h == hash && *w == width)
+        .map(|(_, _, cached)| cached.clone())
+    {
+        lines.extend(cached_lines);
+        return;
+    }
+
+    let mut rendered = Vec::new();
+    render_completed_tool_box_lines(app, msg, width, &mut rendered);
+    lines.extend(rendered.iter().cloned());
+
+    let mut cache = app.render_state.tool_box_cache.borrow_mut();
+    if cache.len() <= msg_idx {
+        cache.resize_with(msg_idx + 1, || None);
+    }
+    cache[msg_idx] = Some((hash, width, rendered));
+}
+
+fn render_completed_tool_boxes<'a>(
+    app: &App,
+    msg: &DisplayMessage,
+    msg_idx: usize,
+    width: u16,
+    lines: &mut Vec<Line<'a>>,
+    image_placeholders: &mut Vec<ImagePlaceholder>,
+) {
+    let completed: Vec<(usize, &DisplayToolCall)> = msg
+        .tool_calls
+        .iter()
+        .enumerate()
+        .filter(|(_, tc)| tc.status != ToolCallStatus::Running)
+        .collect();
+
+    for group in completed.chunk_by(|a, b| a.1.batch == b.1.batch) {
+        render_tool_box_group(
+            &group.iter().map(|(_, tc)| *tc).collect::<Vec<_>>(),
+            width,
+            lines,
+            &app.theme,
+        );
+        register_tool_image_placeholders(group, msg_idx, width, lines, image_placeholders, app);
+    }
+}
+
+fn render_completed_tool_box_lines<'a>(
+    app: &App,
+    msg: &DisplayMessage,
+    width: u16,
+    lines: &mut Vec<Line<'a>>,
+) {
+    let completed: Vec<&DisplayToolCall> = msg
+        .tool_calls
+        .iter()
+        .filter(|tc| tc.status != ToolCallStatus::Running)
+        .collect();
+
+    for group in completed.chunk_by(|a, b| a.batch == b.batch) {
+        render_tool_box_group(group, width, lines, &app.theme);
+    }
+}
+
+fn register_tool_image_placeholders(
+    group: &[(usize, &DisplayToolCall)],
+    msg_idx: usize,
+    width: u16,
+    lines: &mut Vec<Line<'_>>,
+    image_placeholders: &mut Vec<ImagePlaceholder>,
+    app: &App,
+) {
+    for &(tc_idx, tc) in group {
+        if tc.image_data.is_none() {
+            continue;
+        }
+
+        lines.push(Line::from(vec![
+            Span::styled("    📷 ", Style::default()),
+            Span::styled("image", app.theme.image_label),
+        ]));
+        image_placeholders.push(ImagePlaceholder {
+            msg_idx,
+            tc_idx,
+            line_idx: lines.len(),
+            x_offset: 4,
+            cell_width: width.saturating_sub(8),
+            cell_height: IMAGE_HEIGHT.saturating_sub(1),
+        });
+        for _ in 1..IMAGE_HEIGHT {
+            lines.push(Line::raw(""));
+        }
+    }
+}
+
+fn completed_tool_boxes_have_images(msg: &DisplayMessage) -> bool {
+    msg.tool_calls
+        .iter()
+        .any(|tc| tc.status != ToolCallStatus::Running && tc.image_data.is_some())
+}
+
+fn tool_boxes_hash(msg: &DisplayMessage) -> Option<u64> {
+    let mut has_completed = false;
+    let mut h = std::hash::DefaultHasher::new();
+    use std::hash::{Hash, Hasher};
+
+    for tc in msg
+        .tool_calls
+        .iter()
+        .filter(|tc| tc.status != ToolCallStatus::Running)
+    {
+        has_completed = true;
+        tc.name.hash(&mut h);
+        tc.summary.hash(&mut h);
+        tool_status_tag(tc.status).hash(&mut h);
+        tc.output_preview.hash(&mut h);
+        tc.image_data.as_ref().map(Vec::len).hash(&mut h);
+        tc.batch.hash(&mut h);
+    }
+
+    has_completed.then(|| h.finish())
+}
+
+fn tool_status_tag(status: ToolCallStatus) -> u8 {
+    match status {
+        ToolCallStatus::Running => 0,
+        ToolCallStatus::Done => 1,
+        ToolCallStatus::Error => 2,
+    }
 }
 
 /// render a group of completed tool calls (same batch) as bordered boxes
@@ -3782,6 +3874,70 @@ mod tests {
         assert!(
             fgs.len() >= 2,
             "expected multiple syntect fgs on highlighted bash output row, got {fgs:?}"
+        );
+    }
+
+    #[test]
+    fn stable_tool_boxes_reuse_highlighted_render() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.messages.push(DisplayMessage {
+            tool_calls: vec![crate::app::DisplayToolCall {
+                name: "bash".into(),
+                summary: "for file in *.rs; do echo $file; done".into(),
+                status: ToolCallStatus::Done,
+                output_preview: Some("for file in *.rs; do echo $file; done".into()),
+                image_data: None,
+                batch: 1,
+            }],
+            ..DisplayMessage::new(MessageRole::Assistant, "done")
+        });
+
+        crate::syntax::reset_highlight_line_call_count();
+        render_app(&app, 80, 20);
+        let first_calls = crate::syntax::highlight_line_call_count();
+        assert!(
+            first_calls > 0,
+            "first render should highlight tool box text"
+        );
+
+        render_app(&app, 80, 20);
+
+        assert_eq!(crate::syntax::highlight_line_call_count(), first_calls);
+    }
+
+    #[test]
+    fn cached_tool_boxes_preserve_image_order_by_batch() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.messages.push(DisplayMessage {
+            tool_calls: vec![
+                crate::app::DisplayToolCall {
+                    name: "bash".into(),
+                    summary: "first".into(),
+                    status: ToolCallStatus::Done,
+                    output_preview: None,
+                    image_data: Some(vec![0u8; 100]),
+                    batch: 1,
+                },
+                crate::app::DisplayToolCall {
+                    name: "bash".into(),
+                    summary: "second".into(),
+                    status: ToolCallStatus::Done,
+                    output_preview: None,
+                    image_data: None,
+                    batch: 2,
+                },
+            ],
+            ..DisplayMessage::new(MessageRole::Assistant, "done")
+        });
+
+        let first = buffer_to_string(&render_app(&app, 80, 30));
+        let second = buffer_to_string(&render_app(&app, 80, 30));
+
+        assert_eq!(second, first);
+        assert!(
+            first.find("image").expect("image label should render")
+                < first.find("second").expect("second tool should render"),
+            "image label should stay with the first batch: {first}"
         );
     }
 

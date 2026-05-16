@@ -198,6 +198,11 @@ pub struct NavigationState {
 /// keyed by (content_hash, width) so entries invalidate on content or resize.
 type CachedIndentedLines = (u64, u16, Vec<Line<'static>>);
 
+/// cached rendered lines for completed tool boxes.
+/// keyed by (content_hash, width) so entries invalidate on tool content
+/// changes or resize.
+pub type CachedToolBoxLines = (u64, u16, Vec<Line<'static>>);
+
 /// cached estimated height for a single message.
 /// keyed by cheap O(1) byte-length fingerprint so we avoid
 /// re-scanning content with chars().count() every frame
@@ -258,6 +263,10 @@ pub struct RenderState {
     /// avoids rehashing full content string every frame when checking
     /// indented cache validity. keyed by byte length (O(1) check)
     pub content_hash_cache: RefCell<Vec<Option<(usize, u64)>>>,
+    /// per-message rendered completed-tool box cache.
+    /// avoids re-running syntect over stable tool summaries and previews
+    /// every frame.
+    pub tool_box_cache: RefCell<Vec<Option<CachedToolBoxLines>>>,
     /// total content lines (actual) from the previous render frame.
     /// used to anchor scroll compensation during content fluctuation
     pub prev_content_lines: Cell<usize>,
@@ -305,6 +314,7 @@ impl RenderState {
             indented_cache: RefCell::new(Vec::new()),
             height_cache: RefCell::new(Vec::new()),
             content_hash_cache: RefCell::new(Vec::new()),
+            tool_box_cache: RefCell::new(Vec::new()),
             prev_content_lines: Cell::new(0),
             scroll_baseline: Cell::new(0),
             scroll_baseline_vis: Cell::new(0),
