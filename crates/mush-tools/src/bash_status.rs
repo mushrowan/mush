@@ -224,9 +224,16 @@ impl PollWait {
     const fn message(self) -> &'static str {
         match self {
             Self::Elapsed => {
-                "still running after this poll's wait timeout. no error: poll again to check for completion"
+                "poll timed out, job still running. no error: poll again to check for completion"
             }
             Self::Instant => "still running. poll again to check for completion",
+        }
+    }
+
+    const fn status(self) -> &'static str {
+        match self {
+            Self::Elapsed => "poll_timed_out",
+            Self::Instant => "instant_check",
         }
     }
 }
@@ -257,6 +264,7 @@ fn format_running_status(
         "status": "running",
         "command": state.command,
         "elapsed_seconds": elapsed,
+        "poll_status": poll_wait.status(),
         "stdout_lines_so_far": stdout_lines,
         "stderr_lines_so_far": stderr_lines,
         "new_stdout_lines": new_stdout,
@@ -480,6 +488,14 @@ mod tests {
             "should distinguish a poll wait expiry from instant status: {text}"
         );
         assert!(text.contains("no error"), "should say no error: {text}");
+        assert!(
+            text.contains(r#""poll_status":"poll_timed_out""#),
+            "should expose poll timeout as a running poll status, not a job timeout: {text}"
+        );
+        assert!(
+            text.contains("poll timed out, job still running"),
+            "should not phrase poll expiry like a command failure: {text}"
+        );
     }
 
     #[tokio::test]

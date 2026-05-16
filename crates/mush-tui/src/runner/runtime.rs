@@ -204,10 +204,18 @@ impl RunnerRuntime {
         self.pane_mgr.focused().app.should_quit
     }
 
-    pub(super) fn tick_streaming_panes(&mut self) {
+    pub(super) fn tick_animation_panes(&mut self) {
         for pane in self.pane_mgr.panes_mut() {
             if pane.app.is_busy() {
-                pane.app.tick();
+                pane.app.tick_animation();
+            }
+        }
+    }
+
+    pub(super) fn tick_streaming_text_panes(&mut self) {
+        for pane in self.pane_mgr.panes_mut() {
+            if pane.app.stream.active {
+                pane.app.tick_streaming_text();
             }
         }
     }

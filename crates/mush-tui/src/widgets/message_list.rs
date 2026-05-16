@@ -1,6 +1,6 @@
 //! message list widget - renders conversation history
 
-use ratatui::buffer::Buffer;
+use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
@@ -591,11 +591,13 @@ impl Widget for MessageList<'_> {
                 let img_x = area.x + ph.x_offset;
                 let img_w = ph.cell_width;
                 if img_w > 0 {
+                    let area = Rect::new(img_x, visible_y, img_w, ph.cell_height);
                     render_areas.push(ImageRenderArea {
                         msg_idx: ph.msg_idx,
                         tc_idx: ph.tc_idx,
-                        area: Rect::new(img_x, visible_y, img_w, ph.cell_height),
+                        area,
                     });
+                    mark_image_overlay_cells(area, buf);
                 }
             }
         }
@@ -661,6 +663,16 @@ impl Widget for MessageList<'_> {
                 scroll,
                 &self.app.render_state.message_row_ranges.borrow(),
             );
+        }
+    }
+}
+
+fn mark_image_overlay_cells(area: Rect, buf: &mut Buffer) {
+    for y in area.y..area.y.saturating_add(area.height) {
+        for x in area.x..area.x.saturating_add(area.width) {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_diff_option(CellDiffOption::AlwaysUpdate);
+            }
         }
     }
 }

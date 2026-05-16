@@ -164,7 +164,7 @@
           data_dir="''${XDG_DATA_HOME:-$HOME/.local/share}/mush/profiles/perf-$(date +%Y%m%d-%H%M%S)"
           mkdir -p "$data_dir"
 
-          export RUST_LOG=''${RUST_LOG:-warn,mush_agent=trace,mush_ai=trace,mush_tools=trace,mush_tui=trace,mush_cli=trace,mush_ext=trace,mush_session=trace,mush_lsp=trace,mush_mcp=trace,mush_treesitter=trace}
+          export RUST_LOG=''${RUST_LOG:-warn,mush_agent=trace,mush_ai=trace,mush_tools=trace,mush_tui=trace,mush_cli=trace,mush_ext=trace,mush_session=trace,mush_lsp=trace,mush_mcp=trace,mush_treesitter=trace,mush_tui::draw_reason=trace}
           export MUSH_TRACE=true
           export MUSH_PROFILE_STARTUP=true
           export MUSH_TRACE_DIR="$data_dir"
@@ -189,16 +189,150 @@
 
           ${pkgs.perf}/bin/perf report --stdio --stdio-color never \
             -i "$data_dir/perf.data" > "$data_dir/perf.report.txt" 2> "$data_dir/perf.report.stderr" || true
+          ${pkgs.perf}/bin/perf report --stdio --stdio-color never \
+            --comms mush,tokio-rt-worker,tracing-appende \
+            -i "$data_dir/perf.data" > "$data_dir/perf.report.mush.txt" 2> "$data_dir/perf.report.mush.stderr" || true
           ${pkgs.perf}/bin/perf script \
             -i "$data_dir/perf.data" > "$data_dir/perf.script.txt" 2> "$data_dir/perf.script.stderr" || true
           ${pkgs.perf}/bin/perf report --stdio --header-only --stdio-color never \
             -i "$data_dir/perf.data" > "$data_dir/perf.header.txt" 2> "$data_dir/perf.header.stderr" || true
+
+          ${pkgs.lib.getExe pkgs.python3} - "$data_dir" <<'PY' > "$data_dir/perf.summary.txt" 2> "$data_dir/perf.summary.stderr" || true
+          import collections
+          import json
+          import sys
+          from pathlib import Path
+
+          data_dir = Path(sys.argv[1])
+          report = data_dir / "perf.report.txt"
+          trace = next(data_dir.glob("mush-trace-*.json"), None)
+
+          def perf_rows(path):
+              if not path.exists():
+                  return []
+              rows = []
+              for line in path.read_text(errors="replace").splitlines():
+                  parts = line.split(None, 5)
+                  if len(parts) < 6 or not parts[0].endswith("%"):
+                      continue
+                  try:
+                      children = float(parts[0].rstrip("%"))
+                      self_pct = float(parts[1].rstrip("%"))
+                  except ValueError:
+                      continue
+                  rows.append((children, self_pct, parts[2], parts[3], parts[5].strip()))
+              return rows
+
+          rows = perf_rows(report)
+          by_command = collections.defaultdict(float)
+          mush_rows = []
+          for _children, self_pct, command, shared, symbol in rows:
+              by_command[command] += self_pct
+              if command in {"mush", "tokio-rt-worker", "tracing-appende"}:
+                  mush_rows.append((self_pct, command, shared, symbol))
+
+          def bucket(symbol):
+              text = symbol
+              if "ratatui_core::buffer" in text or "ratatui::terminal" in text:
+                  return "ratatui buffer/diff"
+              if "unicode_width" in text:
+                  return "unicode width"
+              if "unicode_segmentation" in text or "Grapheme" in text:
+                  return "unicode segmentation"
+              if "mush_tui::widgets::message_list" in text:
+                  return "message list"
+              if any(name in text for name in ("malloc", "free", "__rust_alloc", "__rust_dealloc", "__rdl_alloc")):
+                  return "allocation"
+              if any(name in text for name in ("memmove", "memset", "memcmp", "memcpy")):
+                  return "memory copy/set"
+              if "serde_json" in text or "tracing" in text:
+                  return "tracing/json"
+              if "hash::" in text or "Hasher" in text:
+                  return "hashing"
+              return "other"
+
+          by_bucket = collections.defaultdict(float)
+          for self_pct, _command, shared, symbol in mush_rows:
+              if shared == "[kernel.kallsyms]":
+                  by_bucket["kernel"] += self_pct
+              else:
+                  by_bucket[bucket(symbol)] += self_pct
+
+          print("perf summary")
+          print(f"bundle: {data_dir}")
+          print()
+
+          print("self cpu by command")
+          for command, pct in sorted(by_command.items(), key=lambda item: -item[1])[:20]:
+              print(f"  {pct:6.2f}% {command}")
+          print()
+
+          print("mush self cpu by bucket")
+          for name, pct in sorted(by_bucket.items(), key=lambda item: -item[1]):
+              print(f"  {pct:6.2f}% {name}")
+          print()
+
+          print("top mush self symbols")
+          for self_pct, command, shared, symbol in sorted(mush_rows, reverse=True)[:25]:
+              print(f"  {self_pct:6.2f}% {command:16} {shared:28} {symbol[:140]}")
+          print()
+
+          if trace and trace.exists():
+              events = json.loads(trace.read_text(errors="replace"))
+              counts = collections.Counter()
+              stacks = collections.defaultdict(list)
+              spans = collections.defaultdict(list)
+              for event in events:
+                  name = event.get("name", "")
+                  target = event.get("cat", "")
+                  args = event.get("args") or {}
+                  fields = event.get("fields") or {}
+                  if name == "draw requested" or target == "mush_tui::draw_reason":
+                      reason = args.get("reason") or fields.get("reason") or "unknown"
+                      counts[reason] += 1
+                  phase = event.get("ph")
+                  tid = event.get("tid", 0)
+                  if phase == "B":
+                      stacks[tid].append((name, event.get("ts", 0.0)))
+                  elif phase == "E" and stacks[tid]:
+                      start_name, start_ts = stacks[tid].pop()
+                      spans[start_name].append(event.get("ts", 0.0) - start_ts)
+
+              print("draw reasons")
+              if counts:
+                  for reason, count in counts.most_common():
+                      print(f"  {count:8d} {reason}")
+              else:
+                  print("  none found")
+              print()
+
+              print("trace span timings")
+              for name in ["draw_panes", "llm_stream", "tool_exec", "agent_turn"]:
+                  values = sorted(spans.get(name, []))
+                  if not values:
+                      continue
+                  total = sum(values) / 1000.0
+                  count = len(values)
+                  def quantile(q):
+                      index = min(count - 1, int(q * count))
+                      return values[index] / 1000.0
+                  print(
+                      f"  {name:12} n={count:8d} total={total:10.1f}ms "
+                      f"p50={quantile(0.50):7.3f}ms p90={quantile(0.90):7.3f}ms "
+                      f"p99={quantile(0.99):7.3f}ms max={values[-1] / 1000.0:7.3f}ms"
+                  )
+          else:
+              print("draw reasons")
+              print("  no trace file found")
+          PY
 
           echo "" >&2
           echo "perf bundle saved: $data_dir" >&2
           echo "raw data: $data_dir/perf.data" >&2
           echo "script output: $data_dir/perf.script.txt" >&2
           echo "report: $data_dir/perf.report.txt" >&2
+          echo "mush-only report: $data_dir/perf.report.mush.txt" >&2
+          echo "summary: $data_dir/perf.summary.txt" >&2
           exit "$status"
         '';
 

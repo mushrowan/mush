@@ -142,6 +142,7 @@ pub async fn run_tui(
     let mut agent_streams = new_agent_streams();
     let mut stream_state = StreamState::new();
     let mut last_draw = std::time::Instant::now();
+    let mut last_animation = std::time::Instant::now();
 
     'ui: loop {
         start_pending_streams(
@@ -206,7 +207,6 @@ pub async fn run_tui(
             &services.delegation_queue,
         );
 
-        runtime.tick_streaming_panes();
         runtime.notify_cache_state(tui_config.cache_timer);
 
         // finalise any background compaction tasks whose LLM call returned
@@ -220,6 +220,16 @@ pub async fn run_tui(
             || compaction_finished
             || last_draw.elapsed() >= std::time::Duration::from_secs(1);
         if should_draw {
+            if last_animation.elapsed() >= looping::ANIMATION_FRAME_INTERVAL {
+                runtime.tick_animation_panes();
+                last_animation = std::time::Instant::now();
+            }
+            trace_draw_reasons(
+                action,
+                discovery_updated,
+                compaction_finished,
+                last_draw.elapsed() >= std::time::Duration::from_secs(1),
+            );
             runtime.poll_usage().await;
             draw_panes(
                 &mut terminal,
@@ -236,4 +246,24 @@ pub async fn run_tui(
     terminal_guard.disarm();
     verify_terminal_restored(vec!["exit path: run_tui clean return".into()]);
     Ok(())
+}
+
+fn trace_draw_reasons(
+    action: LoopAction,
+    discovery_updated: bool,
+    compaction_finished: bool,
+    maintenance_tick: bool,
+) {
+    if matches!(action, LoopAction::Redraw) {
+        tracing::trace!(target: "mush_tui::draw_reason", reason = "loop_action", "draw requested");
+    }
+    if discovery_updated {
+        tracing::trace!(target: "mush_tui::draw_reason", reason = "discovery_updated", "draw requested");
+    }
+    if compaction_finished {
+        tracing::trace!(target: "mush_tui::draw_reason", reason = "compaction_finished", "draw requested");
+    }
+    if maintenance_tick {
+        tracing::trace!(target: "mush_tui::draw_reason", reason = "maintenance_tick", "draw requested");
+    }
 }

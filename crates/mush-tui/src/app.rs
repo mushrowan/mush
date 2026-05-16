@@ -46,8 +46,9 @@ pub(crate) fn blocks_call_count() -> usize {
     BLOCKS_CALLS.with(std::cell::Cell::get)
 }
 
-/// tick() runs at ~60fps, divide by this to get spinner update rate (~8fps)
-const TICK_DIVISOR: u8 = 8;
+/// target cadence for shimmer/throbber updates.
+pub(crate) const ANIMATION_FRAME_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(33);
 
 /// ticks in one full unread-flash cycle (~1 second at 60fps)
 const UNREAD_FLASH_CYCLE: u8 = 60;
@@ -167,8 +168,8 @@ pub struct App {
     pub active_tools: Vec<ActiveToolState>,
     /// spinner state for animations
     pub throbber_state: ThrobberState,
-    /// frame counter for throttling spinner speed
-    tick_count: u8,
+    /// steady animation frame counter
+    tick_count: u64,
     /// current thinking level
     pub thinking_level: ThinkingLevel,
     /// the active model's curated thinking levels (drives the cycler).
@@ -283,15 +284,24 @@ impl App {
         }
     }
 
-    /// advance the spinner state (throttled to ~8fps from ~60fps frame rate)
-    pub fn tick(&mut self) {
-        self.tick_count = self.tick_count.wrapping_add(1);
-        if self.tick_count.is_multiple_of(TICK_DIVISOR) {
-            self.throbber_state.calc_next();
-        }
+    /// advance streaming text only. token events may arrive in bursts,
+    /// so keep them from changing the visual animation phase
+    pub fn tick_streaming_text(&mut self) {
         if self.stream.active {
             self.stream.advance_typewriter();
         }
+    }
+
+    /// advance visible animations on a steady timer
+    pub fn tick_animation(&mut self) {
+        self.tick_count = self.tick_count.wrapping_add(1);
+        self.throbber_state.calc_next();
+        self.tick_streaming_text();
+    }
+
+    #[cfg(test)]
+    pub fn tick(&mut self) {
+        self.tick_animation();
     }
 
     /// reset the scroll anchor on a real terminal resize.
@@ -326,16 +336,16 @@ impl App {
     }
 
     /// whether the unread flash indicator is in the "on" phase
-    /// cycles at ~1hz (30 ticks on, 30 off at ~60fps)
+    /// cycles at ~1hz
     pub fn unread_flash_on(&self) -> bool {
-        self.tick_count % UNREAD_FLASH_CYCLE < UNREAD_FLASH_ON
+        self.tick_count % u64::from(UNREAD_FLASH_CYCLE) < u64::from(UNREAD_FLASH_ON)
     }
 
     /// phase offset for shimmer-styled labels. advances at the same
-    /// ~8fps cadence as the throbber so the wave glides in lockstep
-    /// with the spinner rather than chasing 60fps frames
+    /// steady cadence as the throbber so the wave glides in lockstep
+    /// with the spinner rather than chasing token arrival bursts
     pub fn shimmer_phase(&self) -> usize {
-        (self.tick_count / TICK_DIVISOR) as usize
+        self.tick_count as usize
     }
 
     /// whether the agent is currently active (streaming or executing tools)
@@ -2671,15 +2681,10 @@ batch: 1/2 succeeded, 1 failed";
     }
 
     #[test]
-    fn tick_throttles_spinner() {
+    fn tick_animation_advances_spinner() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         let initial = app.throbber_state.clone();
-        // single tick should not advance (throttled)
-        app.tick();
-        // but TICK_DIVISOR ticks should advance
-        for _ in 1..TICK_DIVISOR {
-            app.tick();
-        }
+        app.tick_animation();
         assert_ne!(format!("{:?}", app.throbber_state), format!("{initial:?}"));
     }
 
@@ -2714,9 +2719,7 @@ batch: 1/2 succeeded, 1 failed";
 
         // throbber should advance when ticked during tool execution
         let initial = app.throbber_state.clone();
-        for _ in 0..TICK_DIVISOR {
-            app.tick();
-        }
+        app.tick_animation();
         assert_ne!(
             format!("{:?}", app.throbber_state),
             format!("{initial:?}"),

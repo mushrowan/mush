@@ -14,6 +14,9 @@ use super::panes::drain_inboxes;
 use super::runtime::{RunnerRuntime, RunnerServices};
 use super::streams::{AgentStreams, StreamState, poll_confirmation_prompt, poll_live_tool_output};
 
+pub(super) const ANIMATION_FRAME_INTERVAL: std::time::Duration =
+    crate::app::ANIMATION_FRAME_INTERVAL;
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_loop_iteration(
     agent_streams: &mut AgentStreams<'_>,
@@ -100,7 +103,7 @@ async fn handle_streaming_iteration(
     image_picker: &Option<ratatui_image::picker::Picker>,
     size_cache: &std::rc::Rc<super::caching_backend::CachedSizeState>,
 ) -> io::Result<LoopAction> {
-    let tick = tokio::time::sleep(std::time::Duration::from_millis(16));
+    let tick = tokio::time::sleep(ANIMATION_FRAME_INTERVAL);
     tokio::pin!(tick);
 
     // wait for either an agent event or the frame tick
@@ -108,6 +111,8 @@ async fn handle_streaming_iteration(
         result = agent_streams.next() => {
             if let Some((pane_id, stream_gen, event)) = result {
                 dispatch_agent_event(pane_id, stream_gen, event, stream_state, runtime, services, tui_config, registry, image_picker).await;
+                trace_draw_reason("agent_event");
+                runtime.tick_streaming_text_panes();
             }
 
             // drain all immediately-available events within this frame
@@ -117,6 +122,8 @@ async fn handle_streaming_iteration(
                 match agent_streams.next().now_or_never() {
                     Some(Some((pane_id, stream_gen, event))) => {
                         dispatch_agent_event(pane_id, stream_gen, event, stream_state, runtime, services, tui_config, registry, image_picker).await;
+                        trace_draw_reason("agent_event_drain");
+                        runtime.tick_streaming_text_panes();
                     }
                     _ => break,
                 }
@@ -138,6 +145,8 @@ async fn handle_streaming_iteration(
             }
         }
         _ = tick => {
+            trace_draw_reason("animation_tick");
+            runtime.tick_animation_panes();
             poll_confirmation_prompt(&mut runtime.pane_mgr, stream_state).await;
             poll_live_tool_output(&mut runtime.pane_mgr, &tui_config.tool_output_live);
             drain_session_picker(&mut runtime.pane_mgr);
@@ -152,6 +161,10 @@ async fn handle_streaming_iteration(
     }
 
     Ok(LoopAction::Redraw)
+}
+
+fn trace_draw_reason(reason: &'static str) {
+    tracing::trace!(target: "mush_tui::draw_reason", reason, "draw requested");
 }
 
 /// process a single agent event (extracted for reuse in drain loop)
