@@ -180,7 +180,7 @@
           set +e
           ${pkgs.perf}/bin/perf record -q -F ''${MUSH_PERF_FREQ:-99} \
             --call-graph dwarf,''${MUSH_PERF_STACK_SIZE:-4096} \
-            --user-callchains --exclude-perf \
+            --user-callchains \
             -m ''${MUSH_PERF_MMAP_PAGES:-1024} \
             -o "$data_dir/perf.data" -- \
             ${craneOutputsProfiling.package}/bin/mush "$@"
