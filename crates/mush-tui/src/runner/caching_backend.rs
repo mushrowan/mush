@@ -26,10 +26,13 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use ratatui::backend::{Backend, ClearType, WindowSize};
 use ratatui::buffer::Cell as BufferCell;
 use ratatui::layout::{Position, Size};
+
+const SIZE_CACHE_TTL: Duration = Duration::from_millis(250);
 
 /// spawn a background task that flips `flag` to true on every
 /// `SIGWINCH`. wired into [`CachingBackend`] so a real os-level resize
@@ -76,6 +79,7 @@ pub(super) fn spawn_sigwinch_listener(_flag: Arc<AtomicBool>) -> tokio::task::Jo
 pub struct CachedSizeState {
     size: Cell<Option<Size>>,
     window_size: Cell<Option<WindowSize>>,
+    last_probe: Cell<Option<Instant>>,
     /// flipped to true by the sigwinch listener task (or any other
     /// off-thread observer) when the os reports a terminal resize.
     /// consumed at the top of `size()` / `window_size()` so a stale
@@ -91,6 +95,7 @@ impl CachedSizeState {
     pub fn invalidate(&self) {
         self.size.set(None);
         self.window_size.set(None);
+        self.last_probe.set(None);
     }
 
     /// shareable handle to the resize-pending flag. callers that
@@ -106,6 +111,16 @@ impl CachedSizeState {
     /// refetch
     fn consume_resize_pending(&self) -> bool {
         self.resize_pending.swap(false, Ordering::AcqRel)
+    }
+
+    fn cached_size_is_fresh(&self) -> bool {
+        self.last_probe
+            .get()
+            .is_some_and(|last_probe| last_probe.elapsed() < SIZE_CACHE_TTL)
+    }
+
+    fn mark_probed_now(&self) {
+        self.last_probe.set(Some(Instant::now()));
     }
 
     /// test helper: whether either cache slot currently holds a value.
@@ -184,13 +199,14 @@ impl<B: Backend> Backend for CachingBackend<B> {
     }
 
     fn size(&self) -> Result<Size, Self::Error> {
-        if self.state.consume_resize_pending() {
+        if self.state.consume_resize_pending() || !self.state.cached_size_is_fresh() {
             // os reported a resize since the last query; bypass both
             // caches so a follow-up window_size() in the same frame
             // also refreshes
             let s = self.inner.size()?;
             self.state.size.set(Some(s));
             self.state.window_size.set(None);
+            self.state.mark_probed_now();
             return Ok(s);
         }
         if let Some(s) = self.state.size.get() {
@@ -198,14 +214,16 @@ impl<B: Backend> Backend for CachingBackend<B> {
         }
         let s = self.inner.size()?;
         self.state.size.set(Some(s));
+        self.state.mark_probed_now();
         Ok(s)
     }
 
     fn window_size(&mut self) -> Result<WindowSize, Self::Error> {
-        if self.state.consume_resize_pending() {
+        if self.state.consume_resize_pending() || !self.state.cached_size_is_fresh() {
             let s = self.inner.window_size()?;
             self.state.window_size.set(Some(s));
             self.state.size.set(Some(s.columns_rows));
+            self.state.mark_probed_now();
             return Ok(s);
         }
         if let Some(s) = self.state.window_size.get() {
@@ -215,6 +233,7 @@ impl<B: Backend> Backend for CachingBackend<B> {
         self.state.window_size.set(Some(s));
         // keep `size` cache consistent with the fresh window_size
         self.state.size.set(Some(s.columns_rows));
+        self.state.mark_probed_now();
         Ok(s)
     }
 
@@ -331,6 +350,25 @@ mod tests {
             backend.inner.size_calls.get(),
             1,
             "inner size() should be called exactly once"
+        );
+    }
+
+    #[test]
+    fn stale_size_cache_forces_refresh_without_resize_event() {
+        let inner = CountingBackend::new(80, 25);
+        let backend = CachingBackend::new(inner);
+        let handle = backend.cache_handle();
+
+        let _ = backend.size().unwrap();
+        assert_eq!(backend.inner.size_calls.get(), 1);
+
+        handle.last_probe.set(Some(Instant::now() - SIZE_CACHE_TTL));
+        let _ = backend.size().unwrap();
+
+        assert_eq!(
+            backend.inner.size_calls.get(),
+            2,
+            "stale cache should probe the terminal again even without Event::Resize"
         );
     }
 
