@@ -343,6 +343,21 @@ impl App {
         self.tick_count as usize
     }
 
+    /// whether this pane currently has time-driven visual animation.
+    /// running tools remain busy for input/abort state, but their panels
+    /// redraw only when live output changes
+    pub fn has_visible_animation(&self) -> bool {
+        self.compacting || self.stream.active || self.navigation.has_unread
+    }
+
+    /// whether a draw is useful even when no event arrived. this keeps
+    /// wall-clock UI affordances fresh without forcing a maintenance
+    /// redraw every idle second
+    pub fn needs_periodic_redraw(&self, cache_timer_enabled: bool) -> bool {
+        self.has_visible_animation()
+            || (cache_timer_enabled && self.cache.remaining_secs().is_some())
+    }
+
     /// whether the agent is currently active (streaming or executing tools)
     pub fn is_busy(&self) -> bool {
         self.compacting
@@ -672,14 +687,19 @@ impl App {
     }
 
     /// update live output for an active tool
-    pub fn push_tool_output(&mut self, tool_call_id: &ToolCallId, output: &str) {
+    pub fn push_tool_output(&mut self, tool_call_id: &ToolCallId, output: &str) -> bool {
         if let Some(tool) = self
             .active_tools
             .iter_mut()
             .find(|t| &t.tool_call_id == tool_call_id)
         {
+            if tool.live_output.as_deref() == Some(output) {
+                return false;
+            }
             tool.live_output = Some(output.to_string());
+            return true;
         }
+        false
     }
 
     /// finish streaming, create the assistant message
@@ -2689,7 +2709,7 @@ batch: 1/2 succeeded, 1 failed";
     fn is_busy_during_tool_execution() {
         // stream.active is false during tool execution (text streaming
         // ended) but is_busy() should still return true when tools are
-        // running, so visible activity continues to update
+        // running so input shortcuts can still abort the turn
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         assert!(!app.stream.active);
         assert!(!app.is_busy());
@@ -2715,6 +2735,55 @@ batch: 1/2 succeeded, 1 failed";
         );
 
         app.tick_animation();
+    }
+
+    #[test]
+    fn running_tool_is_busy_but_not_a_visible_animation() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.active_tools
+            .push(crate::display_types::ActiveToolState {
+                tool_call_id: "test_1".into(),
+                name: "bash".into(),
+                summary: "running command".into(),
+                live_output: None,
+                status: ToolCallStatus::Running,
+                output: None,
+            });
+
+        assert!(app.is_busy());
+        assert!(!app.has_visible_animation());
+
+        app.stream.start();
+        assert!(app.has_visible_animation());
+
+        app.stream.active = false;
+        app.compacting = true;
+        assert!(app.has_visible_animation());
+    }
+
+    #[test]
+    fn running_tool_does_not_need_periodic_redraw_without_time_based_ui() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.active_tools
+            .push(crate::display_types::ActiveToolState {
+                tool_call_id: "test_1".into(),
+                name: "bash".into(),
+                summary: "running command".into(),
+                live_output: None,
+                status: ToolCallStatus::Running,
+                output: None,
+            });
+
+        assert!(!app.needs_periodic_redraw(false));
+    }
+
+    #[test]
+    fn cache_countdown_needs_periodic_redraw_when_enabled() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.cache.refresh();
+
+        assert!(app.needs_periodic_redraw(true));
+        assert!(!app.needs_periodic_redraw(false));
     }
 
     #[test]

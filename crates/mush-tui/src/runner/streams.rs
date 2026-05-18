@@ -194,7 +194,7 @@ pub(super) fn take_pending_prompts(
 pub(super) async fn poll_confirmation_prompt(
     pane_mgr: &mut PaneManager,
     stream_state: &mut StreamState,
-) {
+) -> bool {
     let focused_id = pane_mgr.focused().id;
     if let Some(meta) = stream_state.meta_mut(focused_id)
         && let Ok(confirm) = meta.confirm_req_rx.try_recv()
@@ -207,7 +207,9 @@ pub(super) async fn poll_confirmation_prompt(
             tool_call_id: confirm.tool_call_id,
             reply: confirm.reply,
         });
+        return true;
     }
+    false
 }
 
 pub(super) async fn answer_confirmation(
@@ -241,16 +243,17 @@ pub(super) async fn answer_confirmation(
 pub(super) fn poll_live_tool_output(
     pane_mgr: &mut PaneManager,
     live: &Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
-) {
+) -> bool {
     if let Some(live) = live {
         let app = &mut pane_mgr.focused_mut().app;
         if let Ok(guard) = live.lock()
             && let Some(last) = guard.as_ref()
             && let Some(active) = app.active_tools.last().map(|t| t.tool_call_id.clone())
         {
-            app.push_tool_output(&active, last);
+            return app.push_tool_output(&active, last);
         }
     }
+    false
 }
 
 /// track file conflicts in multi-pane mode when tools start/end
@@ -1514,7 +1517,7 @@ mod tests {
             .await
             .unwrap();
 
-        poll_confirmation_prompt(&mut pane_mgr, &mut stream_state).await;
+        assert!(poll_confirmation_prompt(&mut pane_mgr, &mut stream_state).await);
 
         let app = &pane_mgr.focused().app;
         assert_eq!(app.interaction.mode, crate::app::AppMode::ToolConfirm);
@@ -1569,7 +1572,7 @@ mod tests {
             .await
             .unwrap();
 
-        poll_confirmation_prompt(&mut pane_mgr, &mut stream_state).await;
+        assert!(poll_confirmation_prompt(&mut pane_mgr, &mut stream_state).await);
         answer_confirmation(&mut pane_mgr, &mut stream_state, true).await;
 
         assert!(reply_rx.await.unwrap());
@@ -1618,7 +1621,7 @@ mod tests {
             .await
             .unwrap();
 
-        poll_confirmation_prompt(&mut pane_mgr, &mut stream_state).await;
+        assert!(poll_confirmation_prompt(&mut pane_mgr, &mut stream_state).await);
         answer_confirmation(&mut pane_mgr, &mut stream_state, false).await;
 
         // reply channel gets `false` so the agent knows the tool was denied
@@ -1647,7 +1650,7 @@ mod tests {
         let live = Some(std::sync::Arc::new(std::sync::Mutex::new(Some(
             "running".to_string(),
         ))));
-        poll_live_tool_output(&mut pane_mgr, &live);
+        assert!(poll_live_tool_output(&mut pane_mgr, &live));
 
         assert_eq!(
             pane_mgr.focused().app.active_tools[0]
@@ -1655,6 +1658,24 @@ mod tests {
                 .as_deref(),
             Some("running")
         );
+    }
+
+    #[test]
+    fn poll_live_tool_output_reports_unchanged_output() {
+        let pane_id = PaneId::new(1);
+        let mut pane_mgr = PaneManager::new(Pane::new(pane_id, app()));
+        let tool_call_id = ToolCallId::from("tc_live");
+        pane_mgr
+            .focused_mut()
+            .app
+            .start_tool(&tool_call_id, "bash", "cargo test");
+        pane_mgr.focused_mut().app.push_tool_output(&tool_call_id, "running");
+
+        let live = Some(std::sync::Arc::new(std::sync::Mutex::new(Some(
+            "running".to_string(),
+        ))));
+
+        assert!(!poll_live_tool_output(&mut pane_mgr, &live));
     }
 
     #[test]

@@ -207,8 +207,15 @@ pub(super) fn draw_panes(
     Ok(())
 }
 
+pub(super) fn clear_for_first_frame<B: Backend>(
+    terminal: &mut Terminal<B>,
+) -> Result<(), B::Error> {
+    terminal
+        .backend_mut()
+        .clear_region(ratatui::backend::ClearType::All)
+}
+
 fn repair_terminal_before_frame<B: Backend>(terminal: &mut Terminal<B>) -> Result<(), B::Error> {
-    terminal.clear()?;
     terminal
         .backend_mut()
         .set_cursor_position(ratatui::layout::Position::new(0, 0))?;
@@ -272,6 +279,7 @@ mod tests {
     struct ClearCountingBackend {
         inner: TestBackend,
         clears: Rc<Cell<u32>>,
+        cursor_position_queries: Rc<Cell<u32>>,
         cursor_home_calls: Rc<Cell<u32>>,
         flushes: Rc<Cell<u32>>,
     }
@@ -281,6 +289,7 @@ mod tests {
             Self {
                 inner: TestBackend::new(80, 24),
                 clears,
+                cursor_position_queries: Rc::new(Cell::new(0)),
                 cursor_home_calls: Rc::new(Cell::new(0)),
                 flushes: Rc::new(Cell::new(0)),
             }
@@ -290,6 +299,7 @@ mod tests {
             Self {
                 inner: TestBackend::new(80, 24),
                 clears,
+                cursor_position_queries: Rc::new(Cell::new(0)),
                 cursor_home_calls,
                 flushes: Rc::new(Cell::new(0)),
             }
@@ -299,8 +309,22 @@ mod tests {
             Self {
                 inner: TestBackend::new(80, 24),
                 clears,
+                cursor_position_queries: Rc::new(Cell::new(0)),
                 cursor_home_calls: Rc::new(Cell::new(0)),
                 flushes,
+            }
+        }
+
+        fn with_cursor_position_queries(
+            clears: Rc<Cell<u32>>,
+            cursor_position_queries: Rc<Cell<u32>>,
+        ) -> Self {
+            Self {
+                inner: TestBackend::new(80, 24),
+                clears,
+                cursor_position_queries,
+                cursor_home_calls: Rc::new(Cell::new(0)),
+                flushes: Rc::new(Cell::new(0)),
             }
         }
     }
@@ -324,6 +348,8 @@ mod tests {
         }
 
         fn get_cursor_position(&mut self) -> Result<Position, Self::Error> {
+            self.cursor_position_queries
+                .set(self.cursor_position_queries.get() + 1);
             self.inner.get_cursor_position()
         }
 
@@ -381,18 +407,34 @@ mod tests {
     }
 
     #[test]
-    fn repairs_terminal_before_each_frame() {
+    fn does_not_clear_terminal_before_each_frame() {
         let clears = Rc::new(Cell::new(0));
         let backend = ClearCountingBackend::new(clears.clone());
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
 
         repair_terminal_before_frame(&mut terminal).unwrap();
 
-        assert_eq!(clears.get(), 1);
+        assert_eq!(clears.get(), 0);
     }
 
     #[test]
-    fn repair_moves_cursor_home_after_clearing() {
+    fn startup_clear_does_not_query_cursor_position() {
+        let clears = Rc::new(Cell::new(0));
+        let cursor_position_queries = Rc::new(Cell::new(0));
+        let backend = ClearCountingBackend::with_cursor_position_queries(
+            clears.clone(),
+            cursor_position_queries.clone(),
+        );
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        clear_for_first_frame(&mut terminal).unwrap();
+
+        assert_eq!(clears.get(), 1);
+        assert_eq!(cursor_position_queries.get(), 0);
+    }
+
+    #[test]
+    fn repair_moves_cursor_home_before_diff_draw() {
         let clears = Rc::new(Cell::new(0));
         let cursor_home_calls = Rc::new(Cell::new(0));
         let backend =

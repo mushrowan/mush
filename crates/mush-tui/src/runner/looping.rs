@@ -151,11 +151,23 @@ async fn handle_streaming_iteration(
             }
         }
         _ = tick => {
-            trace_draw_reason("animation_tick");
-            runtime.tick_animation_panes();
-            poll_confirmation_prompt(&mut runtime.pane_mgr, stream_state).await;
-            poll_live_tool_output(&mut runtime.pane_mgr, &tui_config.tool_output_live);
-            drain_session_picker(&mut runtime.pane_mgr);
+            let mut tick_changed = false;
+            if runtime.tick_animation_panes() {
+                tick_changed = true;
+                trace_draw_reason("animation_tick");
+            }
+            if poll_confirmation_prompt(&mut runtime.pane_mgr, stream_state).await {
+                tick_changed = true;
+                trace_draw_reason("confirmation_prompt");
+            }
+            if poll_live_tool_output(&mut runtime.pane_mgr, &tui_config.tool_output_live) {
+                tick_changed = true;
+                trace_draw_reason("live_tool_output");
+            }
+            if drain_session_picker(&mut runtime.pane_mgr) {
+                tick_changed = true;
+                trace_draw_reason("session_picker");
+            }
             drain_inboxes(&mut runtime.pane_mgr, stream_state).await;
 
             let (pane_mgr, mut deps) = input_parts(runtime, services, tui_config, registry, image_picker, size_cache);
@@ -163,13 +175,18 @@ async fn handle_streaming_iteration(
             if matches!(action, LoopAction::Quit) {
                 return Ok(LoopAction::Quit);
             }
+            if tick_changed {
+                return Ok(LoopAction::Redraw);
+            }
         }
     }
 
     if should_defer_streaming_redraw(saw_agent_event, last_redraw, std::time::Instant::now()) {
         Ok(LoopAction::Continue)
-    } else {
+    } else if saw_agent_event {
         Ok(LoopAction::Redraw)
+    } else {
+        Ok(LoopAction::Continue)
     }
 }
 
@@ -257,12 +274,14 @@ fn tool_exec_may_touch_tty(tool_name: &str) -> bool {
 /// state. the /sessions slash command kicks off a thread that parses
 /// session files off the event loop; the results land here on the next
 /// tick so the overlay populates progressively
-fn drain_session_picker(pane_mgr: &mut crate::pane::PaneManager) {
+fn drain_session_picker(pane_mgr: &mut crate::pane::PaneManager) -> bool {
+    let mut changed = false;
     for pane in pane_mgr.panes_mut() {
         if let Some(picker) = pane.app.interaction.session_picker.as_mut() {
-            picker.drain_incoming();
+            changed |= picker.drain_incoming();
         }
     }
+    changed
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -310,7 +329,7 @@ mod tests {
     }
 
     #[test]
-    fn does_not_defer_tick_only_redraws() {
+    fn tick_only_iterations_do_not_force_redraws() {
         let last_redraw = std::time::Instant::now();
         let now = last_redraw + ANIMATION_FRAME_INTERVAL / 2;
 

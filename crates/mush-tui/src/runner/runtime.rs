@@ -204,12 +204,15 @@ impl RunnerRuntime {
         self.pane_mgr.focused().app.should_quit
     }
 
-    pub(super) fn tick_animation_panes(&mut self) {
+    pub(super) fn tick_animation_panes(&mut self) -> bool {
+        let mut ticked = false;
         for pane in self.pane_mgr.panes_mut() {
-            if pane.app.is_busy() {
+            if pane.app.has_visible_animation() {
                 pane.app.tick_animation();
+                ticked = true;
             }
         }
+        ticked
     }
 
     pub(super) fn tick_streaming_text_panes(&mut self) {
@@ -218,6 +221,13 @@ impl RunnerRuntime {
                 pane.app.tick_streaming_text();
             }
         }
+    }
+
+    pub(super) fn needs_periodic_redraw(&self, cache_timer_enabled: bool) -> bool {
+        self.pane_mgr
+            .panes()
+            .iter()
+            .any(|pane| pane.app.needs_periodic_redraw(cache_timer_enabled))
     }
 
     /// finalise any background compaction tasks whose LLM call has

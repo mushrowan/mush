@@ -104,7 +104,7 @@ pub async fn run_tui(
     // terminals (esp. after pre-tui eprintln output like the startup report).
     // clear explicitly so no stale lines leak through cells that widgets
     // don't overwrite
-    terminal.clear()?;
+    render::clear_for_first_frame(&mut terminal)?;
     startup_phases.push(diag::StartupPhase::new(
         "after_terminal_clear",
         terminal.size().map(|size| Some((size.width, size.height))),
@@ -215,21 +215,25 @@ pub async fn run_tui(
         // summary, status, and token counter all show up immediately
         let compaction_finished = runtime.poll_pending_compactions().await;
 
-        // redraw on state changes, or every ~1s so timers tick
+        let maintenance_tick = last_draw.elapsed() >= std::time::Duration::from_secs(1)
+            && runtime.needs_periodic_redraw(tui_config.cache_timer);
+
+        // redraw on state changes, or every ~1s while visible timers tick
         let should_draw = matches!(action, LoopAction::Redraw)
             || discovery_updated
             || compaction_finished
-            || last_draw.elapsed() >= std::time::Duration::from_secs(1);
+            || maintenance_tick;
         if should_draw {
-            if last_animation.elapsed() >= looping::ANIMATION_FRAME_INTERVAL {
-                runtime.tick_animation_panes();
+            if last_animation.elapsed() >= looping::ANIMATION_FRAME_INTERVAL
+                && runtime.tick_animation_panes()
+            {
                 last_animation = std::time::Instant::now();
             }
             trace_draw_reasons(
                 action,
                 discovery_updated,
                 compaction_finished,
-                last_draw.elapsed() >= std::time::Duration::from_secs(1),
+                maintenance_tick,
             );
             runtime.poll_usage().await;
             draw_panes(
