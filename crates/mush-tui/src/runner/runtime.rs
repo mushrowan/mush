@@ -81,8 +81,7 @@ pub(super) struct RunnerRuntime {
     /// `poll_pending_compactions` finalises them on subsequent
     /// iterations. one per pane (panes are independent contexts).
     pub pending_compactions: HashMap<PaneId, PendingCompaction>,
-    pub usage_poller: Option<mush_ai::oauth::usage::UsagePoller>,
-    last_usage_poll: std::time::Instant,
+    usage_rx: Option<tokio::sync::mpsc::UnboundedReceiver<mush_ai::oauth::usage::OAuthUsage>>,
     _config_watcher: Option<RecommendedWatcher>,
     config_rx: Option<mpsc::Receiver<crate::theme::Theme>>,
     discovery_rx: Option<mpsc::Receiver<DiscoveryUpdate>>,
@@ -99,8 +98,7 @@ impl RunnerRuntime {
             lifecycle_hooks: mush_agent::LifecycleHooks::default(),
             pending_prompt: None,
             pending_compactions: HashMap::new(),
-            usage_poller: None,
-            last_usage_poll: std::time::Instant::now() - USAGE_POLL_TICK,
+            usage_rx: None,
             _config_watcher: None,
             config_rx: None,
             discovery_rx: None,
@@ -153,7 +151,8 @@ impl RunnerRuntime {
                 .filter(|store| store.providers.contains_key("anthropic"))
                 .map(|_| mush_ai::oauth::usage::UsagePoller::new(client.clone()))
         });
-        tracing::debug!(has_poller = usage_poller.is_some(), "usage poller setup");
+        let usage_rx = usage_poller.map(spawn_usage_poller);
+        tracing::debug!(has_poller = usage_rx.is_some(), "usage poller setup");
 
         (
             Self {
@@ -164,8 +163,7 @@ impl RunnerRuntime {
                 lifecycle_hooks: tui_config.lifecycle_hooks.clone(),
                 pending_prompt: None,
                 pending_compactions: HashMap::new(),
-                usage_poller,
-                last_usage_poll: std::time::Instant::now() - USAGE_POLL_TICK,
+                usage_rx,
                 _config_watcher,
                 config_rx,
                 discovery_rx: None,
@@ -340,22 +338,47 @@ impl RunnerRuntime {
         }
     }
 
-    /// poll oauth usage data and distribute to all panes
-    pub(super) async fn poll_usage(&mut self) {
-        if self.last_usage_poll.elapsed() < USAGE_POLL_TICK {
-            return;
-        }
-        self.last_usage_poll = std::time::Instant::now();
-        let Some(ref poller) = self.usage_poller else {
-            return;
+    /// drain completed oauth usage updates and distribute to all panes
+    pub(super) fn poll_usage(&mut self) -> bool {
+        let Some(rx) = &mut self.usage_rx else {
+            return false;
         };
-        if let Some(usage) = poller.get_usage().await {
-            for pane in self.pane_mgr.panes_mut() {
-                pane.app.oauth_usage = Some(usage.clone());
-                pane.app.oauth_usage_provider = Some("anthropic".into());
-            }
+
+        let mut latest = None;
+        while let Ok(usage) = rx.try_recv() {
+            latest = Some(usage);
         }
+
+        let Some(usage) = latest else {
+            return false;
+        };
+
+        for pane in self.pane_mgr.panes_mut() {
+            pane.app.oauth_usage = Some(usage.clone());
+            pane.app.oauth_usage_provider = Some("anthropic".into());
+        }
+        true
     }
+}
+
+fn spawn_usage_poller(
+    poller: mush_ai::oauth::usage::UsagePoller,
+) -> tokio::sync::mpsc::UnboundedReceiver<mush_ai::oauth::usage::OAuthUsage> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        loop {
+            if tx.is_closed() {
+                break;
+            }
+            if let Some(usage) = poller.get_usage().await
+                && tx.send(usage).is_err()
+            {
+                break;
+            }
+            tokio::time::sleep(USAGE_POLL_TICK).await;
+        }
+    });
+    rx
 }
 
 /// take any inputs queued during compaction and turn them into a
@@ -729,6 +752,35 @@ mod tests {
             RunnerRuntime::from_pane(Pane::new(PaneId::new(1), app), ThinkingPrefs::default());
 
         assert_eq!(runtime.active_tool_labels(), vec!["bash: cargo test"]);
+    }
+
+    #[test]
+    fn poll_usage_drains_background_updates_without_awaiting_http() {
+        let app = App::new("claude-sonnet-4-5".into(), TokenCount::new(200_000));
+        let mut runtime =
+            RunnerRuntime::from_pane(Pane::new(PaneId::new(1), app), ThinkingPrefs::default());
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        runtime.usage_rx = Some(rx);
+
+        tx.send(mush_ai::oauth::usage::OAuthUsage {
+            five_hour: Some(mush_ai::oauth::usage::UsageWindow {
+                utilization: 42.0,
+                resets_at: chrono::Utc::now() + chrono::TimeDelta::hours(1),
+            }),
+            seven_day: None,
+        })
+        .unwrap();
+
+        assert!(runtime.poll_usage());
+        let app = &runtime.pane_mgr.focused().app;
+        assert_eq!(app.oauth_usage_provider.as_deref(), Some("anthropic"));
+        assert_eq!(
+            app.oauth_usage
+                .as_ref()
+                .and_then(|usage| usage.five_hour.as_ref())
+                .map(|window| window.utilization),
+            Some(42.0)
+        );
     }
 
     #[test]

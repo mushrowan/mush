@@ -266,7 +266,7 @@ pub async fn run_tui(
                 compaction_finished,
                 maintenance_tick,
             );
-            runtime.poll_usage().await;
+            runtime.poll_usage();
             report_loop_progress(
                 &stall_watchdog,
                 &runtime,

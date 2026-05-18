@@ -8,13 +8,16 @@ use mush_agent::{AgentConfig, AgentEvent, agent_loop};
 use mush_ai::registry::ApiRegistry;
 use mush_ai::types::{
     ImageContent, Message, Model, Provider, StreamOptions, TextContent, ThinkingLevel, Timestamp,
-    TokenCount, ToolCallId, UserContent, UserContentPart, UserMessage,
+    TokenCount, ToolCallId, ToolOutcome, ToolResultMessage, UserContent, UserContentPart,
+    UserMessage,
 };
 use tokio::sync::Mutex;
 
 use crate::event_handler;
 use crate::file_tracker::FileTracker;
 use crate::pane::{PaneId, PaneManager};
+
+const USER_CANCELLED_TOOL_MESSAGE: &str = "user cancelled tool";
 
 use super::TuiConfig;
 
@@ -594,10 +597,7 @@ pub(super) async fn abort_focused_stream(
     delegation_queue: &crate::delegate::DelegationQueue,
 ) {
     let focused_id = pane_mgr.focused().id;
-    let app = &mut pane_mgr.focused_mut().app;
-    app.stream.active = false;
-    app.active_tools.clear();
-    app.status = Some("aborted".into());
+    record_cancelled_tools(pane_mgr.focused_mut());
 
     stream_state.abort(focused_id);
 
@@ -624,6 +624,39 @@ pub(super) async fn abort_focused_stream(
         pane.app.input.text = text.clone();
         pane.app.input.cursor = text.len();
     }
+}
+
+fn record_cancelled_tools(pane: &mut crate::pane::Pane) {
+    let running_tools: Vec<_> = pane
+        .app
+        .active_tools
+        .iter()
+        .filter(|tool| tool.status == crate::display_types::ToolCallStatus::Running)
+        .map(|tool| (tool.tool_call_id.clone(), tool.name.clone()))
+        .collect();
+
+    for (tool_call_id, tool_name) in running_tools {
+        let result = mush_agent::tool::ToolResult::error(USER_CANCELLED_TOOL_MESSAGE);
+        pane.app.end_tool(
+            &tool_call_id,
+            &tool_name,
+            ToolOutcome::Error,
+            Some(USER_CANCELLED_TOOL_MESSAGE),
+            None,
+        );
+        pane.conversation
+            .append_message(Message::ToolResult(ToolResultMessage {
+                tool_call_id,
+                tool_name: tool_name.into(),
+                content: result.content,
+                outcome: result.outcome,
+                timestamp_ms: Timestamp::now(),
+            }));
+    }
+
+    pane.app.stream.active = false;
+    pane.app.active_tools.clear();
+    pane.app.status = Some("aborted".into());
 }
 
 pub(super) async fn submit_streaming_input(
@@ -1669,7 +1702,10 @@ mod tests {
             .focused_mut()
             .app
             .start_tool(&tool_call_id, "bash", "cargo test");
-        pane_mgr.focused_mut().app.push_tool_output(&tool_call_id, "running");
+        pane_mgr
+            .focused_mut()
+            .app
+            .push_tool_output(&tool_call_id, "running");
 
         let live = Some(std::sync::Arc::new(std::sync::Mutex::new(Some(
             "running".to_string(),
@@ -2033,6 +2069,79 @@ mod tests {
         // both queues should now be empty
         assert!(pane_mgr.focused().steering_queue.lock().await.is_empty());
         assert!(!pane_mgr.focused().app.messages.iter().any(|m| m.queued));
+    }
+
+    #[tokio::test]
+    async fn abort_focused_stream_records_running_tools_as_cancelled_results() {
+        use crate::delegate;
+        use mush_ai::types::{
+            Api, AssistantContentPart, AssistantMessage, Message, Provider, TextContent, ToolCall,
+            ToolCallId, ToolName, ToolOutcome, ToolResultContentPart,
+        };
+
+        let pane_id = PaneId::new(1);
+        let mut pane_mgr = PaneManager::new(Pane::new(pane_id, app()));
+        let mut stream_state = StreamState::new();
+
+        let (_tx, rx) = tokio::sync::mpsc::channel(1);
+        stream_state.register_active(
+            pane_id,
+            StreamMeta {
+                steering_queue: pane_mgr.pane(pane_id).unwrap().steering_queue.clone(),
+                confirm_req_rx: rx,
+                confirm_reply: Arc::new(Mutex::new(None)),
+                model: models::all_models_with_user().into_iter().next().unwrap(),
+                context_tokens: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                cancel: tokio_util::sync::CancellationToken::new(),
+            },
+        );
+
+        let tool_call_id = ToolCallId::from("tc_cancelled");
+        pane_mgr
+            .focused_mut()
+            .conversation
+            .append_message(Message::Assistant(
+                AssistantMessage::builder()
+                    .content(vec![
+                        AssistantContentPart::Text(TextContent {
+                            text: "i will read that".into(),
+                        }),
+                        AssistantContentPart::ToolCall(ToolCall {
+                            id: tool_call_id.clone(),
+                            name: ToolName::from("read"),
+                            arguments: serde_json::json!({"path": "src/lib.rs"}),
+                        }),
+                    ])
+                    .model(ModelId::from("test-model"))
+                    .provider(Provider::Anthropic)
+                    .api(Api::AnthropicMessages)
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            ));
+        pane_mgr.focused_mut().app.start_streaming();
+        pane_mgr.focused_mut().app.finish_streaming(None, None);
+        pane_mgr
+            .focused_mut()
+            .app
+            .start_tool(&tool_call_id, "read", "src/lib.rs");
+
+        abort_focused_stream(&mut pane_mgr, &mut stream_state, &delegate::new_queue()).await;
+
+        let ctx = pane_mgr.focused().conversation.context();
+        let Some(Message::ToolResult(result)) = ctx.last() else {
+            panic!("abort should append a tool result");
+        };
+
+        assert_eq!(result.tool_call_id, tool_call_id);
+        assert_eq!(result.tool_name.as_str(), "read");
+        assert_eq!(result.outcome, ToolOutcome::Error);
+        assert!(
+            result
+                .content
+                .iter()
+                .any(|part| matches!(part, ToolResultContentPart::Text(text) if text.text == "user cancelled tool")),
+            "cancelled tool result should explain that the user cancelled it"
+        );
     }
 
     #[test]

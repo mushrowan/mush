@@ -60,7 +60,7 @@
         };
 
         rustToolchain = pkgs.rust-bin.nightly.latest.default.override {
-          extensions = ["rust-src" "rust-analyzer" "llvm-tools-preview"];
+          extensions = ["rust-src" "rust-analyzer" "llvm-tools-preview" "rustfmt"];
         };
 
         craneLib = (inputs.crane.mkLib pkgs).overrideToolchain rustToolchain;
