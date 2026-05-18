@@ -187,6 +187,7 @@ pub async fn run_tui(
             registry,
             &image_picker,
             &size_cache,
+            last_draw,
         )
         .await?;
         if matches!(action, LoopAction::Quit) {

@@ -27,6 +27,7 @@ pub(super) async fn run_loop_iteration(
     registry: &ApiRegistry,
     image_picker: &Option<ratatui_image::picker::Picker>,
     size_cache: &std::rc::Rc<super::caching_backend::CachedSizeState>,
+    last_redraw: std::time::Instant,
 ) -> io::Result<LoopAction> {
     if agent_streams.is_empty() {
         handle_idle_iteration(
@@ -49,6 +50,7 @@ pub(super) async fn run_loop_iteration(
             registry,
             image_picker,
             size_cache,
+            last_redraw,
         )
         .await
     }
@@ -102,14 +104,17 @@ async fn handle_streaming_iteration(
     registry: &ApiRegistry,
     image_picker: &Option<ratatui_image::picker::Picker>,
     size_cache: &std::rc::Rc<super::caching_backend::CachedSizeState>,
+    last_redraw: std::time::Instant,
 ) -> io::Result<LoopAction> {
     let tick = tokio::time::sleep(ANIMATION_FRAME_INTERVAL);
     tokio::pin!(tick);
+    let mut saw_agent_event = false;
 
     // wait for either an agent event or the frame tick
     tokio::select! {
         result = agent_streams.next() => {
             if let Some((pane_id, stream_gen, event)) = result {
+                saw_agent_event = true;
                 dispatch_agent_event(pane_id, stream_gen, event, stream_state, runtime, services, tui_config, registry, image_picker).await;
                 trace_draw_reason("agent_event");
                 runtime.tick_streaming_text_panes();
@@ -121,6 +126,7 @@ async fn handle_streaming_iteration(
                 use futures::FutureExt;
                 match agent_streams.next().now_or_never() {
                     Some(Some((pane_id, stream_gen, event))) => {
+                        saw_agent_event = true;
                         dispatch_agent_event(pane_id, stream_gen, event, stream_state, runtime, services, tui_config, registry, image_picker).await;
                         trace_draw_reason("agent_event_drain");
                         runtime.tick_streaming_text_panes();
@@ -160,7 +166,19 @@ async fn handle_streaming_iteration(
         }
     }
 
-    Ok(LoopAction::Redraw)
+    if should_defer_streaming_redraw(saw_agent_event, last_redraw, std::time::Instant::now()) {
+        Ok(LoopAction::Continue)
+    } else {
+        Ok(LoopAction::Redraw)
+    }
+}
+
+fn should_defer_streaming_redraw(
+    saw_agent_event: bool,
+    last_redraw: std::time::Instant,
+    now: std::time::Instant,
+) -> bool {
+    saw_agent_event && now.duration_since(last_redraw) < ANIMATION_FRAME_INTERVAL
 }
 
 fn trace_draw_reason(reason: &'static str) {
@@ -269,4 +287,33 @@ async fn handle_idle_iteration(
         size_cache,
     );
     handle_idle_terminal_events(pane_mgr, &mut deps).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defers_streaming_redraw_when_agent_events_arrive_inside_frame_budget() {
+        let last_redraw = std::time::Instant::now();
+        let now = last_redraw + ANIMATION_FRAME_INTERVAL / 2;
+
+        assert!(should_defer_streaming_redraw(true, last_redraw, now));
+    }
+
+    #[test]
+    fn does_not_defer_streaming_redraw_after_frame_budget() {
+        let last_redraw = std::time::Instant::now();
+        let now = last_redraw + ANIMATION_FRAME_INTERVAL;
+
+        assert!(!should_defer_streaming_redraw(true, last_redraw, now));
+    }
+
+    #[test]
+    fn does_not_defer_tick_only_redraws() {
+        let last_redraw = std::time::Instant::now();
+        let now = last_redraw + ANIMATION_FRAME_INTERVAL / 2;
+
+        assert!(!should_defer_streaming_redraw(false, last_redraw, now));
+    }
 }

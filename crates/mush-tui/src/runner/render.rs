@@ -208,7 +208,11 @@ pub(super) fn draw_panes(
 }
 
 fn repair_terminal_before_frame<B: Backend>(terminal: &mut Terminal<B>) -> Result<(), B::Error> {
-    terminal.clear()
+    terminal.clear()?;
+    terminal
+        .backend_mut()
+        .set_cursor_position(ratatui::layout::Position::new(0, 0))?;
+    terminal.backend_mut().flush()
 }
 
 pub(super) fn handle_mouse(app: &mut App, mouse: MouseEvent) {
@@ -268,6 +272,8 @@ mod tests {
     struct ClearCountingBackend {
         inner: TestBackend,
         clears: Rc<Cell<u32>>,
+        cursor_home_calls: Rc<Cell<u32>>,
+        flushes: Rc<Cell<u32>>,
     }
 
     impl ClearCountingBackend {
@@ -275,6 +281,26 @@ mod tests {
             Self {
                 inner: TestBackend::new(80, 24),
                 clears,
+                cursor_home_calls: Rc::new(Cell::new(0)),
+                flushes: Rc::new(Cell::new(0)),
+            }
+        }
+
+        fn with_cursor_home_calls(clears: Rc<Cell<u32>>, cursor_home_calls: Rc<Cell<u32>>) -> Self {
+            Self {
+                inner: TestBackend::new(80, 24),
+                clears,
+                cursor_home_calls,
+                flushes: Rc::new(Cell::new(0)),
+            }
+        }
+
+        fn with_flushes(clears: Rc<Cell<u32>>, flushes: Rc<Cell<u32>>) -> Self {
+            Self {
+                inner: TestBackend::new(80, 24),
+                clears,
+                cursor_home_calls: Rc::new(Cell::new(0)),
+                flushes,
             }
         }
     }
@@ -305,6 +331,10 @@ mod tests {
             &mut self,
             position: P,
         ) -> Result<(), Self::Error> {
+            let position = position.into();
+            if position == Position::new(0, 0) {
+                self.cursor_home_calls.set(self.cursor_home_calls.get() + 1);
+            }
             self.inner.set_cursor_position(position)
         }
 
@@ -329,6 +359,7 @@ mod tests {
         }
 
         fn flush(&mut self) -> Result<(), Self::Error> {
+            self.flushes.set(self.flushes.get() + 1);
             self.inner.flush()
         }
 
@@ -358,6 +389,31 @@ mod tests {
         repair_terminal_before_frame(&mut terminal).unwrap();
 
         assert_eq!(clears.get(), 1);
+    }
+
+    #[test]
+    fn repair_moves_cursor_home_after_clearing() {
+        let clears = Rc::new(Cell::new(0));
+        let cursor_home_calls = Rc::new(Cell::new(0));
+        let backend =
+            ClearCountingBackend::with_cursor_home_calls(clears, cursor_home_calls.clone());
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        repair_terminal_before_frame(&mut terminal).unwrap();
+
+        assert!(cursor_home_calls.get() >= 1);
+    }
+
+    #[test]
+    fn repair_flushes_before_diff_draw() {
+        let clears = Rc::new(Cell::new(0));
+        let flushes = Rc::new(Cell::new(0));
+        let backend = ClearCountingBackend::with_flushes(clears, flushes.clone());
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        repair_terminal_before_frame(&mut terminal).unwrap();
+
+        assert_eq!(flushes.get(), 1);
     }
 
     #[test]
