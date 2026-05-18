@@ -287,8 +287,8 @@ impl Theme {
             unread: Style::default().fg(Color::Yellow),
             // calm cyan→sky→purple→magenta→pink wave that reads against
             // most dark terminal palettes. five perceptual key stops
-            // expanded by interpolation into 25 RGB stops so adjacent
-            // chars (and frames) drift smoothly through the gradient
+            // expanded by interpolation into 125 RGB stops so adjacent
+            // chars and slowed animation phases drift through the gradient
             // rather than snapping between distant hues
             shimmer: crate::widgets::shimmer::interpolate_palette(
                 &[
@@ -298,7 +298,7 @@ impl Theme {
                     Color::Rgb(215, 95, 215), // pink-magenta
                     Color::Rgb(255, 95, 175), // hot pink
                 ],
-                4,
+                24,
             ),
         }
     }
@@ -410,7 +410,7 @@ impl Theme {
             // light theme: deeper saturations so the wave still reads
             // against a bright background. same key-stop sweep as dark
             // but shifted toward darker hues, then expanded by
-            // interpolation into 25 stops for a smooth gradient
+            // interpolation into 125 stops for a smooth gradient
             shimmer: crate::widgets::shimmer::interpolate_palette(
                 &[
                     Color::Rgb(0, 135, 175),  // teal
@@ -419,7 +419,7 @@ impl Theme {
                     Color::Rgb(135, 95, 175), // muted purple
                     Color::Rgb(215, 0, 135),  // bright pink
                 ],
-                4,
+                24,
             ),
         }
     }

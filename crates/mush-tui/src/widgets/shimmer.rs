@@ -261,6 +261,26 @@ mod tests {
     }
 
     #[test]
+    fn default_theme_palette_has_many_smooth_stops() {
+        let theme = crate::theme::Theme::default();
+
+        assert_eq!(theme.shimmer.len(), 125);
+
+        let mut max_d = 0f32;
+        for i in 0..theme.shimmer.len() {
+            let d = rgb_distance(
+                &theme.shimmer[i],
+                &theme.shimmer[(i + 1) % theme.shimmer.len()],
+            );
+            max_d = max_d.max(d);
+        }
+        assert!(
+            max_d < 12.0,
+            "default theme shimmer step distance was {max_d}, expected < 12"
+        );
+    }
+
+    #[test]
     fn interpolate_palette_handles_indexed_input() {
         // theme files that previously used `Color::Indexed(N)` still
         // need to flow through the smoother. xterm 256-colour mapping

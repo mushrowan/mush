@@ -7,8 +7,6 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Widget;
 use unicode_width::UnicodeWidthStr;
 
-use throbber_widgets_tui::{BRAILLE_SIX, Throbber, WhichUse};
-
 use mush_ai::types::TokenCount;
 
 use crate::app::{
@@ -379,16 +377,12 @@ impl Widget for MessageList<'_> {
         // streaming content
         if self.app.stream.active {
             let dim = self.app.theme.dim;
-            let throbber = Throbber::default()
-                .throbber_set(BRAILLE_SIX)
-                .use_type(WhichUse::Spin);
-            let spinner_span = throbber.to_symbol_span(&self.app.throbber_state);
             let stream_content_width = message_content_width(area.width as usize);
 
             if !self.app.stream.thinking.is_empty()
                 && self.app.thinking_display != crate::app::ThinkingDisplay::Hidden
             {
-                let mut spans = vec![Span::raw(" "), spinner_span.clone().style(dim)];
+                let mut spans = vec![Span::raw(" ")];
                 spans.extend(shimmer_spans(
                     " thinking",
                     &self.app.theme.shimmer,
@@ -414,7 +408,7 @@ impl Widget for MessageList<'_> {
                 }
             }
             if self.app.stream.text.is_empty() && self.app.stream.thinking.is_empty() {
-                let mut spans = vec![Span::raw(" "), spinner_span.clone().style(dim)];
+                let mut spans = vec![Span::raw(" ")];
                 spans.extend(shimmer_spans(
                     " working",
                     &self.app.theme.shimmer,
@@ -427,30 +421,21 @@ impl Widget for MessageList<'_> {
 
         // streaming tool args (model is building tool call, not yet executing)
         if self.app.active_tools.is_empty() && !self.app.stream.tool_args.is_empty() {
-            let throbber = Throbber::default()
-                .throbber_set(BRAILLE_SIX)
-                .use_type(WhichUse::Spin);
-            let spinner_span = throbber.to_symbol_span(&self.app.throbber_state);
             // show a truncated preview of the args being built
             let preview = truncate_line(&self.app.stream.tool_args, 60);
             lines.push(Line::from(vec![
                 Span::raw(" "),
-                spinner_span.style(self.app.theme.dim),
                 Span::styled(" building ", self.app.theme.dim),
                 Span::styled(preview, self.app.theme.dim),
             ]));
         }
 
-        // backgrounded /compact run: drop a single throbber+label row
+        // backgrounded /compact run: drop a single busy-label row
         // so the chat shows live progress without an inline system
         // message that would persist forever in scrollback
         if self.app.compacting {
             let dim = self.app.theme.dim;
-            let throbber = Throbber::default()
-                .throbber_set(BRAILLE_SIX)
-                .use_type(WhichUse::Spin);
-            let spinner_span = throbber.to_symbol_span(&self.app.throbber_state);
-            let mut spans = vec![Span::raw(" "), spinner_span.style(dim)];
+            let mut spans = vec![Span::raw(" ")];
             spans.extend(shimmer_spans(
                 " compacting…",
                 &self.app.theme.shimmer,
@@ -1238,7 +1223,7 @@ fn estimate_trailing_height(
         let has_text = !app.stream.text.is_empty();
 
         if has_thinking {
-            // spinner label + indented thinking lines + blank separator
+            // busy label + indented thinking lines + blank separator
             h += 1;
             h += count_estimated_lines(app.visible_streaming_thinking(), stream_content_width);
             h += 1;
@@ -1247,7 +1232,7 @@ fn estimate_trailing_height(
             h += count_estimated_lines(app.visible_streaming_text(), stream_content_width);
         }
         if !has_thinking && !has_text {
-            // spinner "working" line
+            // "working" busy label
             h += 1;
         }
     }
@@ -2628,10 +2613,10 @@ mod tests {
     #[test]
     fn compacting_renders_inline_busy_row_with_label() {
         // when /compact is in flight the message list grows a single
-        // status row with the throbber + "compacting…" label, so the
-        // user sees what's happening even when the status bar is
-        // hidden or full of other text. without an active stream there
-        // would otherwise be no on-chat indication of work
+        // status row with the busy label, so the user sees what's
+        // happening even when the status bar is hidden or full of other
+        // text. without an active stream there would otherwise be no
+        // on-chat indication of work
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.compacting = true;
         let buf = render_app(&app, 40, 10);
@@ -2643,9 +2628,40 @@ mod tests {
     }
 
     #[test]
+    fn inline_busy_rows_do_not_render_braille_spinners() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.start_streaming();
+
+        let content = buffer_to_string(&render_app(&app, 40, 10));
+
+        assert!(content.contains("working"));
+        assert_no_braille_spinner(&content);
+    }
+
+    #[test]
+    fn compacting_busy_row_does_not_render_braille_spinner() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.compacting = true;
+
+        let content = buffer_to_string(&render_app(&app, 40, 10));
+
+        assert!(content.contains("compacting"));
+        assert_no_braille_spinner(&content);
+    }
+
+    fn assert_no_braille_spinner(content: &str) {
+        for symbol in ["⠷", "⠯", "⠟", "⠻", "⠽", "⠾"] {
+            assert!(
+                !content.contains(symbol),
+                "inline busy rows should use only the gradient label, got spinner symbol {symbol:?} in:\n{content}"
+            );
+        }
+    }
+
+    #[test]
     fn compacting_row_disappears_once_flag_cleared() {
         // sanity: clearing the flag must remove the row so post-
-        // compaction frames don't leave a ghost spinner in scrollback
+        // compaction frames don't leave a ghost label in scrollback
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.compacting = true;
         let buf = render_app(&app, 40, 10);
@@ -3037,7 +3053,7 @@ mod tests {
         // Claude's thinking content typically starts each line with a single
         // leading space. indent_line prepends its own space so without
         // normalisation the body would render with two leading columns of
-        // whitespace, looking over-indented relative to the spinner header
+        // whitespace, looking over-indented relative to the busy header
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.messages.push(DisplayMessage {
             thinking: Some(" I'm thinking about the problem\n I should reconsider".into()),
@@ -4932,7 +4948,7 @@ mod tests {
 
     #[test]
     fn scroll_stays_stable_when_streaming_starts_from_empty() {
-        // regression: when streaming begins, the "working" spinner line
+        // regression: when streaming begins, the "working" busy line
         // appears, then disappears as the first text chunk arrives. the
         // working line is 1 line, the first chunk may also be 1 line, so
         // the transition should net zero. but if the line counts differ
@@ -4951,7 +4967,7 @@ mod tests {
 
         let mut scrolls = vec![anchor];
 
-        // streaming starts: render with empty stream (working spinner visible)
+        // streaming starts: render with empty stream (working label visible)
         app.start_streaming();
         for _ in 0..4 {
             app.tick();
@@ -4977,10 +4993,10 @@ mod tests {
     }
 
     #[test]
-    fn scroll_stays_stable_across_throbber_ticks_only() {
-        // regression: each tick advances the spinner state. spinner is
-        // a single-cell glyph on an existing line, so total line count
-        // shouldn't change. verify the throbber alone doesn't cause
+    fn scroll_stays_stable_across_busy_label_ticks_only() {
+        // regression: each tick advances the busy label styling. the
+        // label text stays on an existing line, so total line count
+        // shouldn't change. verify the animation alone doesn't cause
         // viewport drift
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         for i in 0..30 {
@@ -5014,7 +5030,7 @@ mod tests {
         let max = *scrolls.iter().max().unwrap();
         assert_eq!(
             min, max,
-            "throbber-only ticks shouldn't move the viewport \
+            "busy-label-only ticks shouldn't move the viewport \
              (anchor={anchor}, min={min}, max={max})"
         );
     }

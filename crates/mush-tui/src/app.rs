@@ -5,7 +5,6 @@
 
 use mush_ai::types::*;
 use mush_session::SessionMeta;
-use throbber_widgets_tui::ThrobberState;
 
 pub use crate::app_event::{AppEvent, AppMode};
 pub use crate::app_state::{
@@ -46,7 +45,7 @@ pub(crate) fn blocks_call_count() -> usize {
     BLOCKS_CALLS.with(std::cell::Cell::get)
 }
 
-/// target cadence for shimmer/throbber updates.
+/// target cadence for streaming text and shimmer updates.
 pub(crate) const ANIMATION_FRAME_INTERVAL: std::time::Duration =
     std::time::Duration::from_millis(33);
 
@@ -166,8 +165,6 @@ pub struct App {
     pub status: Option<String>,
     /// currently executing tools (for side-by-side panel display)
     pub active_tools: Vec<ActiveToolState>,
-    /// spinner state for animations
-    pub throbber_state: ThrobberState,
     /// steady animation frame counter
     tick_count: u64,
     /// current thinking level
@@ -217,7 +214,7 @@ pub struct App {
     /// when the prompt is empty and idle, cleared by any other key
     pub confirm_quit_pending: bool,
     /// true while a /compact or /fork-compact LLM call is running on
-    /// a background task. drives the spinner + activity label so the
+    /// a background task. drives the busy label so the
     /// user sees compaction as a discrete busy state and routes new
     /// submits into the queued-message bubble instead of clobbering
     /// the input buffer
@@ -248,7 +245,6 @@ impl App {
             should_quit: false,
             status: None,
             active_tools: Vec::new(),
-            throbber_state: ThrobberState::default(),
             tick_count: 0,
             thinking_level: ThinkingLevel::Off,
             supported_thinking_levels: Vec::new(),
@@ -295,7 +291,6 @@ impl App {
     /// advance visible animations on a steady timer
     pub fn tick_animation(&mut self) {
         self.tick_count = self.tick_count.wrapping_add(1);
-        self.throbber_state.calc_next();
         self.tick_streaming_text();
     }
 
@@ -341,9 +336,9 @@ impl App {
         self.tick_count % u64::from(UNREAD_FLASH_CYCLE) < u64::from(UNREAD_FLASH_ON)
     }
 
-    /// phase offset for shimmer-styled labels. advances at the same
-    /// steady cadence as the throbber so the wave glides in lockstep
-    /// with the spinner rather than chasing token arrival bursts
+    /// phase offset for shimmer-styled labels. advances every animation
+    /// frame, with the palette providing enough intermediate colours to
+    /// keep movement slow and smooth
     pub fn shimmer_phase(&self) -> usize {
         self.tick_count as usize
     }
@@ -2681,18 +2676,20 @@ batch: 1/2 succeeded, 1 failed";
     }
 
     #[test]
-    fn tick_animation_advances_spinner() {
+    fn shimmer_phase_advances_with_animation_frames() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        let initial = app.throbber_state.clone();
+
         app.tick_animation();
-        assert_ne!(format!("{:?}", app.throbber_state), format!("{initial:?}"));
+        assert_eq!(app.shimmer_phase(), 1);
+        app.tick_animation();
+        assert_eq!(app.shimmer_phase(), 2);
     }
 
     #[test]
     fn is_busy_during_tool_execution() {
         // stream.active is false during tool execution (text streaming
         // ended) but is_busy() should still return true when tools are
-        // running, so the throbber keeps animating
+        // running, so visible activity continues to update
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         assert!(!app.stream.active);
         assert!(!app.is_busy());
@@ -2717,14 +2714,7 @@ batch: 1/2 succeeded, 1 failed";
             "is_busy should be true when tools are running"
         );
 
-        // throbber should advance when ticked during tool execution
-        let initial = app.throbber_state.clone();
         app.tick_animation();
-        assert_ne!(
-            format!("{:?}", app.throbber_state),
-            format!("{initial:?}"),
-            "throbber should advance during tool execution"
-        );
     }
 
     #[test]
@@ -2815,7 +2805,7 @@ batch: 1/2 succeeded, 1 failed";
     #[test]
     fn compacting_makes_app_busy_with_label() {
         // a backgrounded /compact run is real work, so is_busy() must
-        // include it (drives the throbber tick) and activity_label()
+        // include it (drives the animation tick) and activity_label()
         // must surface it for the chat + status bar
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         assert!(!app.is_busy());

@@ -6,8 +6,6 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget, Wrap};
 
-use throbber_widgets_tui::{BRAILLE_SIX, Throbber, ThrobberState, WhichUse};
-
 use crate::app::{ActiveToolState, ToolCallStatus};
 use crate::path_utils::truncate_path;
 use crate::theme::Theme;
@@ -18,21 +16,12 @@ const MIN_PANEL_WIDTH: u16 = 30;
 /// renders active tools as side-by-side panels
 pub struct ToolPanels<'a> {
     tools: &'a [ActiveToolState],
-    throbber_state: &'a ThrobberState,
     theme: &'a Theme,
 }
 
 impl<'a> ToolPanels<'a> {
-    pub fn new(
-        tools: &'a [ActiveToolState],
-        throbber_state: &'a ThrobberState,
-        theme: &'a Theme,
-    ) -> Self {
-        Self {
-            tools,
-            throbber_state,
-            theme,
-        }
+    pub fn new(tools: &'a [ActiveToolState], theme: &'a Theme) -> Self {
+        Self { tools, theme }
     }
 }
 
@@ -64,33 +53,21 @@ impl Widget for ToolPanels<'_> {
                 .collect();
             let cells = Layout::horizontal(&col_constraints).split(*row_area);
             for (i, tool) in row_tools.iter().enumerate() {
-                render_panel(tool, self.throbber_state, self.theme, cells[i], buf);
+                render_panel(tool, self.theme, cells[i], buf);
             }
         }
     }
 }
 
-fn render_panel(
-    tool: &ActiveToolState,
-    throbber_state: &ThrobberState,
-    theme: &Theme,
-    area: Rect,
-    buf: &mut Buffer,
-) {
+fn render_panel(tool: &ActiveToolState, theme: &Theme, area: Rect, buf: &mut Buffer) {
     let (icon_span, border_colour) = match tool.status {
-        ToolCallStatus::Running => {
-            let throbber = Throbber::default()
-                .throbber_set(BRAILLE_SIX)
-                .use_type(WhichUse::Spin);
-            let spinner = throbber.to_symbol_span(throbber_state);
-            (
-                spinner.style(theme.tool_running),
-                theme
-                    .input_border
-                    .fg
-                    .unwrap_or(ratatui::style::Color::DarkGray),
-            )
-        }
+        ToolCallStatus::Running => (
+            Span::styled("…", theme.tool_running),
+            theme
+                .input_border
+                .fg
+                .unwrap_or(ratatui::style::Color::DarkGray),
+        ),
         ToolCallStatus::Done => (
             Span::styled("✓", theme.tool_done),
             theme.tool_done.fg.unwrap_or(ratatui::style::Color::Green),
@@ -197,14 +174,13 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     fn render_panels(tools: &[ActiveToolState], width: u16, height: u16) -> Buffer {
-        let state = ThrobberState::default();
         let theme = Theme::default();
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| {
                 let area = frame.area();
-                frame.render_widget(ToolPanels::new(tools, &state, &theme), area);
+                frame.render_widget(ToolPanels::new(tools, &theme), area);
             })
             .unwrap();
         terminal.backend().buffer().clone()
