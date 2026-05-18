@@ -14,6 +14,11 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+const STALL_WATCHDOG_INTERVAL: Duration = Duration::from_millis(250);
+const DEFAULT_STALL_THRESHOLD: Duration = Duration::from_secs(2);
 
 pub(super) struct TerminalStateDump {
     pub timestamp: String,
@@ -34,6 +39,34 @@ pub(super) struct TerminalStartupDump {
     pub term_program: Option<String>,
     pub phases: Vec<StartupPhase>,
     pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct StallSnapshot {
+    pub phase: String,
+    pub detail: String,
+    pub loop_iteration: u64,
+    pub draw_count: u64,
+    pub elapsed: Duration,
+    pub active_streams: usize,
+    pub active_tools: Vec<String>,
+}
+
+struct WatchdogState {
+    last_progress: Instant,
+    phase: String,
+    detail: String,
+    loop_iteration: u64,
+    draw_count: u64,
+    active_streams: usize,
+    active_tools: Vec<String>,
+    last_dumped_iteration: u64,
+    stop: bool,
+}
+
+pub(super) struct StallWatchdog {
+    state: Option<Arc<Mutex<WatchdogState>>>,
+    handle: Option<std::thread::JoinHandle<()>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -192,6 +225,113 @@ impl TerminalStartupDump {
     }
 }
 
+impl StallSnapshot {
+    pub fn render(&self) -> String {
+        let mut s = String::new();
+        s.push_str("# mush tui stall dump\n");
+        s.push_str(&format!("timestamp: {}\n", current_timestamp()));
+        s.push_str(&format!("pid: {}\n", std::process::id()));
+        s.push_str(&format!("phase: {}\n", self.phase));
+        s.push_str(&format!("detail: {}\n", self.detail));
+        s.push_str(&format!("loop_iteration: {}\n", self.loop_iteration));
+        s.push_str(&format!("draw_count: {}\n", self.draw_count));
+        s.push_str(&format!("elapsed_ms: {}\n", self.elapsed.as_millis()));
+        s.push_str(&format!("active_streams: {}\n", self.active_streams));
+        s.push_str("active_tools:\n");
+        if self.active_tools.is_empty() {
+            s.push_str("- none\n");
+        } else {
+            for tool in &self.active_tools {
+                s.push_str(&format!("- {tool}\n"));
+            }
+        }
+        s
+    }
+}
+
+impl StallWatchdog {
+    pub fn disabled() -> Self {
+        Self {
+            state: None,
+            handle: None,
+        }
+    }
+
+    pub fn from_env() -> Self {
+        if std::env::var_os("MUSH_STALL_WATCHDOG").is_none() {
+            return Self::disabled();
+        }
+        let threshold = std::env::var("MUSH_STALL_THRESHOLD_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(Duration::from_millis)
+            .unwrap_or(DEFAULT_STALL_THRESHOLD);
+        let dir = std::env::var_os("MUSH_STALL_DIR")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("MUSH_TRACE_DIR").map(PathBuf::from))
+            .unwrap_or_else(default_stall_dir);
+        Self::start(dir, threshold)
+    }
+
+    pub fn start(dir: PathBuf, threshold: Duration) -> Self {
+        let state = Arc::new(Mutex::new(WatchdogState {
+            last_progress: Instant::now(),
+            phase: "startup".into(),
+            detail: String::new(),
+            loop_iteration: 0,
+            draw_count: 0,
+            active_streams: 0,
+            active_tools: Vec::new(),
+            last_dumped_iteration: u64::MAX,
+            stop: false,
+        }));
+        let thread_state = state.clone();
+        let handle = std::thread::Builder::new()
+            .name("mush-stall-watchdog".into())
+            .spawn(move || run_stall_watchdog(thread_state, dir, threshold))
+            .ok();
+        Self {
+            state: Some(state),
+            handle,
+        }
+    }
+
+    pub fn progress(&self, phase: &'static str, detail: impl Into<String>, snapshot: LoopSnapshot) {
+        let Some(state) = &self.state else {
+            return;
+        };
+        if let Ok(mut state) = state.lock() {
+            state.last_progress = Instant::now();
+            state.phase = phase.into();
+            state.detail = detail.into();
+            state.loop_iteration = snapshot.loop_iteration;
+            state.draw_count = snapshot.draw_count;
+            state.active_streams = snapshot.active_streams;
+            state.active_tools = snapshot.active_tools;
+        }
+    }
+}
+
+impl Drop for StallWatchdog {
+    fn drop(&mut self) {
+        if let Some(state) = &self.state
+            && let Ok(mut state) = state.lock()
+        {
+            state.stop = true;
+        }
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+pub(super) struct LoopSnapshot {
+    pub loop_iteration: u64,
+    pub draw_count: u64,
+    pub active_streams: usize,
+    pub active_tools: Vec<String>,
+}
+
 pub(super) fn write_terminal_state_dump(
     dir: &Path,
     dump: &TerminalStateDump,
@@ -208,6 +348,18 @@ pub(super) fn write_terminal_startup_dump(
 ) -> io::Result<PathBuf> {
     fs::create_dir_all(dir)?;
     let path = dir.join(format!("mush-startup-{}-{}.txt", dump.timestamp, dump.pid));
+    write_owner_only(&path, dump.render().as_bytes())?;
+    Ok(path)
+}
+
+pub(super) fn write_stall_dump(dir: &Path, dump: &StallSnapshot) -> io::Result<PathBuf> {
+    fs::create_dir_all(dir)?;
+    let path = dir.join(format!(
+        "mush-stall-{}-{}-{}.txt",
+        current_timestamp(),
+        std::process::id(),
+        dump.loop_iteration
+    ));
     write_owner_only(&path, dump.render().as_bytes())?;
     Ok(path)
 }
@@ -279,6 +431,65 @@ fn probe_termios() -> Option<TermiosProbe> {
 /// location for terminal-state dumps. lives alongside other mush data
 pub(super) fn default_dump_dir() -> PathBuf {
     mush_session::data_dir().join("terminal-dumps")
+}
+
+fn default_stall_dir() -> PathBuf {
+    mush_session::data_dir().join("stall-dumps")
+}
+
+fn run_stall_watchdog(state: Arc<Mutex<WatchdogState>>, dir: PathBuf, threshold: Duration) {
+    loop {
+        std::thread::sleep(STALL_WATCHDOG_INTERVAL);
+        let Some(snapshot) = stalled_snapshot(&state, threshold) else {
+            if state.lock().map(|state| state.stop).unwrap_or(true) {
+                break;
+            }
+            continue;
+        };
+        match write_stall_dump(&dir, &snapshot) {
+            Ok(path) => {
+                tracing::warn!(
+                    dump = %path.display(),
+                    elapsed_ms = snapshot.elapsed.as_millis(),
+                    phase = %snapshot.phase,
+                    detail = %snapshot.detail,
+                    loop_iteration = snapshot.loop_iteration,
+                    draw_count = snapshot.draw_count,
+                    active_streams = snapshot.active_streams,
+                    active_tools = ?snapshot.active_tools,
+                    "tui loop stall detected"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(?error, "failed to write tui stall dump");
+            }
+        }
+    }
+}
+
+fn stalled_snapshot(
+    state: &Arc<Mutex<WatchdogState>>,
+    threshold: Duration,
+) -> Option<StallSnapshot> {
+    let now = Instant::now();
+    let mut state = state.lock().ok()?;
+    if state.stop {
+        return None;
+    }
+    let elapsed = now.duration_since(state.last_progress);
+    if elapsed < threshold || state.last_dumped_iteration == state.loop_iteration {
+        return None;
+    }
+    state.last_dumped_iteration = state.loop_iteration;
+    Some(StallSnapshot {
+        phase: state.phase.clone(),
+        detail: state.detail.clone(),
+        loop_iteration: state.loop_iteration,
+        draw_count: state.draw_count,
+        elapsed,
+        active_streams: state.active_streams,
+        active_tools: state.active_tools.clone(),
+    })
 }
 
 /// run after restore_terminal_state. if raw mode is still reporting
@@ -403,6 +614,53 @@ mod tests {
             contents.contains("actual_termios: icanon=false echo=false isig=true looks_raw=true")
         );
         assert!(contents.contains("restore_terminal_state completed without errors"));
+    }
+
+    #[test]
+    fn stall_dump_includes_loop_state() {
+        let dump = StallSnapshot {
+            phase: "draw".into(),
+            detail: "draw_panes".into(),
+            loop_iteration: 42,
+            draw_count: 7,
+            elapsed: Duration::from_millis(3500),
+            active_streams: 1,
+            active_tools: vec!["bash: cargo test".into()],
+        };
+
+        let rendered = dump.render();
+
+        assert!(rendered.contains("phase: draw"));
+        assert!(rendered.contains("detail: draw_panes"));
+        assert!(rendered.contains("loop_iteration: 42"));
+        assert!(rendered.contains("draw_count: 7"));
+        assert!(rendered.contains("elapsed_ms: 3500"));
+        assert!(rendered.contains("active_streams: 1"));
+        assert!(rendered.contains("- bash: cargo test"));
+    }
+
+    #[test]
+    fn stalled_snapshot_fires_once_per_loop_iteration() {
+        let state = Arc::new(Mutex::new(WatchdogState {
+            last_progress: Instant::now() - Duration::from_secs(3),
+            phase: "select".into(),
+            detail: "waiting".into(),
+            loop_iteration: 9,
+            draw_count: 4,
+            active_streams: 1,
+            active_tools: Vec::new(),
+            last_dumped_iteration: u64::MAX,
+            stop: false,
+        }));
+
+        let first = stalled_snapshot(&state, Duration::from_secs(2));
+        let second = stalled_snapshot(&state, Duration::from_secs(2));
+
+        assert!(first.is_some());
+        assert!(second.is_none());
+
+        state.lock().unwrap().loop_iteration = 10;
+        assert!(stalled_snapshot(&state, Duration::from_secs(2)).is_some());
     }
 
     #[test]

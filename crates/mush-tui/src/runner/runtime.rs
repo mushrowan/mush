@@ -89,6 +89,24 @@ pub(super) struct RunnerRuntime {
 }
 
 impl RunnerRuntime {
+    #[cfg(test)]
+    fn from_pane(pane: Pane, thinking_prefs: ThinkingPrefs) -> Self {
+        Self {
+            cwd: PathBuf::new(),
+            pane_mgr: PaneManager::new(pane),
+            thinking_prefs,
+            thinking_saver: None,
+            lifecycle_hooks: mush_agent::LifecycleHooks::default(),
+            pending_prompt: None,
+            pending_compactions: HashMap::new(),
+            usage_poller: None,
+            last_usage_poll: std::time::Instant::now() - USAGE_POLL_TICK,
+            _config_watcher: None,
+            config_rx: None,
+            discovery_rx: None,
+        }
+    }
+
     pub(super) async fn new(tui_config: &mut TuiConfig) -> (Self, RunnerServices) {
         let cwd = std::env::current_dir().unwrap_or_default();
         let mut app = build_initial_app(tui_config, &cwd);
@@ -228,6 +246,22 @@ impl RunnerRuntime {
             .panes()
             .iter()
             .any(|pane| pane.app.needs_periodic_redraw(cache_timer_enabled))
+    }
+
+    pub(super) fn active_tool_labels(&self) -> Vec<String> {
+        self.pane_mgr
+            .panes()
+            .iter()
+            .flat_map(|pane| {
+                pane.app.active_tools.iter().map(|tool| {
+                    if tool.summary.is_empty() {
+                        tool.name.clone()
+                    } else {
+                        format!("{}: {}", tool.name, tool.summary)
+                    }
+                })
+            })
+            .collect()
     }
 
     /// finalise any background compaction tasks whose LLM call has
@@ -677,6 +711,24 @@ mod tests {
         assert!(pane.pending_prompt.is_none());
         assert!(!pane.app.stream.active);
         assert!(pane.app.messages.is_empty());
+    }
+
+    #[test]
+    fn active_tool_labels_include_name_and_summary() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.active_tools
+            .push(crate::display_types::ActiveToolState {
+                tool_call_id: "tool_1".into(),
+                name: "bash".into(),
+                summary: "cargo test".into(),
+                live_output: None,
+                status: crate::display_types::ToolCallStatus::Running,
+                output: None,
+            });
+        let runtime =
+            RunnerRuntime::from_pane(Pane::new(PaneId::new(1), app), ThinkingPrefs::default());
+
+        assert_eq!(runtime.active_tool_labels(), vec!["bash: cargo test"]);
     }
 
     #[test]

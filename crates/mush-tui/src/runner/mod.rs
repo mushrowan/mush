@@ -34,7 +34,7 @@ use self::render::draw_panes;
 pub use self::runtime::DiscoveryUpdate;
 use self::runtime::RunnerRuntime;
 use self::streams::{
-    StreamConfig, StreamDeps, StreamState, new_agent_streams, start_pending_streams,
+    AgentStreams, StreamConfig, StreamDeps, StreamState, new_agent_streams, start_pending_streams,
 };
 use self::terminal::{
     TerminalStateGuard, cleanup, enter_tui_terminal, install_panic_cleanup_hook,
@@ -143,8 +143,21 @@ pub async fn run_tui(
     let mut stream_state = StreamState::new();
     let mut last_draw = std::time::Instant::now();
     let mut last_animation = std::time::Instant::now();
+    let mut loop_iteration = 0u64;
+    let mut draw_count = 1u64;
+    let stall_watchdog = diag::StallWatchdog::from_env();
 
     'ui: loop {
+        loop_iteration = loop_iteration.wrapping_add(1);
+        report_loop_progress(
+            &stall_watchdog,
+            &runtime,
+            &agent_streams,
+            loop_iteration,
+            draw_count,
+            "start_pending_streams",
+            "before start_pending_streams",
+        );
         start_pending_streams(
             &mut agent_streams,
             &mut stream_state,
@@ -178,6 +191,15 @@ pub async fn run_tui(
         )
         .await;
 
+        report_loop_progress(
+            &stall_watchdog,
+            &runtime,
+            &agent_streams,
+            loop_iteration,
+            draw_count,
+            "run_loop_iteration",
+            "before select/input handling",
+        );
         let action = run_loop_iteration(
             &mut agent_streams,
             &mut stream_state,
@@ -190,6 +212,15 @@ pub async fn run_tui(
             last_draw,
         )
         .await?;
+        report_loop_progress(
+            &stall_watchdog,
+            &runtime,
+            &agent_streams,
+            loop_iteration,
+            draw_count,
+            "post_loop_iteration",
+            format!("action={action:?}"),
+        );
         if matches!(action, LoopAction::Quit) {
             break 'ui;
         }
@@ -236,12 +267,22 @@ pub async fn run_tui(
                 maintenance_tick,
             );
             runtime.poll_usage().await;
+            report_loop_progress(
+                &stall_watchdog,
+                &runtime,
+                &agent_streams,
+                loop_iteration,
+                draw_count,
+                "draw",
+                "before draw_panes",
+            );
             draw_panes(
                 &mut terminal,
                 &mut runtime.pane_mgr,
                 &image_picker,
                 &tui_config.settings,
             )?;
+            draw_count = draw_count.wrapping_add(1);
             last_draw = std::time::Instant::now();
         }
     }
@@ -251,6 +292,27 @@ pub async fn run_tui(
     terminal_guard.disarm();
     verify_terminal_restored(vec!["exit path: run_tui clean return".into()]);
     Ok(())
+}
+
+fn report_loop_progress(
+    watchdog: &diag::StallWatchdog,
+    runtime: &RunnerRuntime,
+    agent_streams: &AgentStreams<'_>,
+    loop_iteration: u64,
+    draw_count: u64,
+    phase: &'static str,
+    detail: impl Into<String>,
+) {
+    watchdog.progress(
+        phase,
+        detail,
+        diag::LoopSnapshot {
+            loop_iteration,
+            draw_count,
+            active_streams: agent_streams.len(),
+            active_tools: runtime.active_tool_labels(),
+        },
+    );
 }
 
 fn trace_draw_reasons(

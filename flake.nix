@@ -168,6 +168,8 @@
           export MUSH_TRACE=true
           export MUSH_PROFILE_STARTUP=true
           export MUSH_TRACE_DIR="$data_dir"
+          export MUSH_STALL_WATCHDOG=true
+          export MUSH_STALL_DIR="$data_dir/stall-dumps"
 
           printf '%s\n' "${craneOutputsProfiling.package}/bin/mush $*" > "$data_dir/command.txt"
 
@@ -175,6 +177,7 @@
           echo "output dir: $data_dir" >&2
           echo "log file: ''${XDG_DATA_HOME:-$HOME/.local/share}/mush/mush.log" >&2
           echo "trace dir: $MUSH_TRACE_DIR" >&2
+          echo "stall dumps: $MUSH_STALL_DIR" >&2
           echo "" >&2
 
           set +e
@@ -260,6 +263,25 @@
 
           print("perf summary")
           print(f"bundle: {data_dir}")
+          print()
+
+          stall_dumps = sorted((data_dir / "stall-dumps").glob("mush-stall-*.txt"))
+          print("tui stall dumps")
+          if stall_dumps:
+              for path in stall_dumps:
+                  phase = "unknown"
+                  detail = ""
+                  elapsed = "unknown"
+                  for line in path.read_text(errors="replace").splitlines():
+                      if line.startswith("phase: "):
+                          phase = line.removeprefix("phase: ")
+                      elif line.startswith("detail: "):
+                          detail = line.removeprefix("detail: ")
+                      elif line.startswith("elapsed_ms: "):
+                          elapsed = line.removeprefix("elapsed_ms: ")
+                  print(f"  {path.name}: elapsed={elapsed}ms phase={phase} detail={detail}")
+          else:
+              print("  none found")
           print()
 
           print("self cpu by command")
