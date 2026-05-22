@@ -100,6 +100,7 @@ impl SessionPickerState {
                 .sort_by_key(|s| std::cmp::Reverse(s.updated_at));
         }
         if disconnected {
+            added |= self.loading;
             self.loading = false;
             self.incoming = None;
         }

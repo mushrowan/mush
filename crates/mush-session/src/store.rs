@@ -112,10 +112,14 @@ impl SessionStore {
 
 /// load just the metadata from a session file without deserialising all messages
 pub fn load_meta(path: &Path) -> Result<SessionMeta, StoreError> {
-    // for now we load the full file - could optimise later with streaming json
+    #[derive(serde::Deserialize)]
+    struct MetaEnvelope {
+        meta: SessionMeta,
+    }
+
     let json = std::fs::read_to_string(path)?;
-    let session: Session = serde_json::from_str(&json)?;
-    Ok(session.meta)
+    let envelope: MetaEnvelope = serde_json::from_str(&json)?;
+    Ok(envelope.meta)
 }
 
 /// resolve the mush data directory
@@ -159,6 +163,35 @@ mod tests {
         let loaded = store.load(&session.meta.id).unwrap();
         assert_eq!(loaded.meta.id, session.meta.id);
         assert_eq!(loaded.context().len(), 1);
+    }
+
+    #[test]
+    fn load_meta_ignores_large_or_corrupt_message_payloads() {
+        let (dir, _store) = temp_store();
+        let path = dir.path().join("sessions").join("meta-only.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{
+                "meta": {
+                    "id": "meta-only",
+                    "title": "metadata survives",
+                    "model_id": "test-model",
+                    "created_at": 1000,
+                    "updated_at": 2000,
+                    "message_count": 42,
+                    "cwd": "/tmp/project"
+                },
+                "messages": "this would fail full session deserialisation"
+            }"#,
+        )
+        .unwrap();
+
+        let meta = load_meta(&path).unwrap();
+
+        assert_eq!(meta.id, SessionId::from("meta-only"));
+        assert_eq!(meta.title.as_deref(), Some("metadata survives"));
+        assert_eq!(meta.message_count, 42);
     }
 
     #[test]

@@ -81,6 +81,9 @@ fn drain_incoming_appends_and_flips_loading() {
 
     drop(tx);
     // second drain detects disconnect and flips loading off
-    picker.drain_incoming();
+    assert!(
+        picker.drain_incoming(),
+        "loading state changes should request a redraw"
+    );
     assert!(!picker.loading, "loader done after sender dropped");
 }

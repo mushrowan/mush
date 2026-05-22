@@ -295,7 +295,7 @@ async fn handle_idle_iteration(
     size_cache: &std::rc::Rc<super::caching_backend::CachedSizeState>,
 ) -> io::Result<LoopAction> {
     drain_inboxes(&mut runtime.pane_mgr, stream_state).await;
-    drain_session_picker(&mut runtime.pane_mgr);
+    let picker_changed = drain_session_picker(&mut runtime.pane_mgr);
 
     let (pane_mgr, mut deps) = input_parts(
         runtime,
@@ -305,7 +305,12 @@ async fn handle_idle_iteration(
         image_picker,
         size_cache,
     );
-    handle_idle_terminal_events(pane_mgr, &mut deps).await
+    let action = handle_idle_terminal_events(pane_mgr, &mut deps).await?;
+    if matches!(action, LoopAction::Continue) && picker_changed {
+        Ok(LoopAction::Redraw)
+    } else {
+        Ok(action)
+    }
 }
 
 #[cfg(test)]
@@ -334,5 +339,20 @@ mod tests {
         let now = last_redraw + ANIMATION_FRAME_INTERVAL / 2;
 
         assert!(!should_defer_streaming_redraw(false, last_redraw, now));
+    }
+
+    #[test]
+    fn focused_pane_session_picker_drain_reports_disconnect() {
+        let app = crate::app::App::new("test".into(), mush_ai::types::TokenCount::new(200_000));
+        let pane = crate::pane::Pane::new(crate::pane::PaneId::new(0), app);
+        let mut pane_mgr = crate::pane::PaneManager::new(pane);
+        let (tx, rx) = std::sync::mpsc::channel();
+        pane_mgr
+            .focused_mut()
+            .app
+            .open_session_picker_streaming(rx, "/tmp".into());
+        drop(tx);
+
+        assert!(drain_session_picker(&mut pane_mgr));
     }
 }

@@ -656,7 +656,7 @@ fn mark_image_overlay_cells(area: Rect, buf: &mut Buffer) {
     for y in area.y..area.y.saturating_add(area.height) {
         for x in area.x..area.x.saturating_add(area.width) {
             if let Some(cell) = buf.cell_mut((x, y)) {
-                cell.set_diff_option(CellDiffOption::AlwaysUpdate);
+                cell.set_diff_option(CellDiffOption::Skip);
             }
         }
     }
@@ -2647,6 +2647,20 @@ mod tests {
 
         assert!(content.contains("compacting"));
         assert_no_braille_spinner(&content);
+    }
+
+    #[test]
+    fn image_overlay_cells_are_skipped_while_visible() {
+        let area = Rect::new(1, 1, 2, 2);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 5, 5));
+
+        mark_image_overlay_cells(area, &mut buf);
+
+        for y in 1..3 {
+            for x in 1..3 {
+                assert_eq!(buf[(x, y)].diff_option, CellDiffOption::Skip);
+            }
+        }
     }
 
     fn assert_no_braille_spinner(content: &str) {
