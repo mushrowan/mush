@@ -1,7 +1,7 @@
 use std::io;
 use std::path::Path;
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use mush_ai::registry::ApiRegistry;
 
 use crate::app::{self, App, AppEvent};
@@ -302,47 +302,24 @@ pub(super) async fn handle_streaming_terminal_events(
     stream_state: &mut StreamState,
     deps: &mut InputDeps<'_>,
 ) -> io::Result<LoopAction> {
+    let mut changed = false;
     while event::poll(std::time::Duration::ZERO)? {
         let event = event::read()?;
         match event {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
-                if pane_mgr.focused().app.interaction.mode == app::AppMode::ToolConfirm {
-                    if let Some(allowed) = confirmation_answer(key.code) {
-                        answer_confirmation(pane_mgr, stream_state, allowed).await;
-                    }
-                    continue;
-                }
-
-                let app_event = handle_key(&mut pane_mgr.focused_mut().app, key);
-                let Some(app_event) = app_event else {
-                    continue;
-                };
-
-                if let Some(action) =
-                    handle_common_app_event(&app_event, pane_mgr, Some(stream_state), deps).await
-                {
-                    if matches!(action, LoopAction::Quit) {
-                        return Ok(LoopAction::Quit);
-                    }
-                    continue;
-                }
-
-                match app_event {
-                    AppEvent::Abort => {
-                        abort_focused_stream(pane_mgr, stream_state, deps.delegation_queue).await;
-                    }
-                    AppEvent::UserSubmit { text } => {
-                        submit_streaming_input(pane_mgr, stream_state, text).await;
-                    }
-                    AppEvent::EditSteering => {
-                        edit_last_queued_steering(pane_mgr, stream_state).await;
-                    }
-                    _ => {}
+                match handle_streaming_key_event(pane_mgr, stream_state, deps, key).await? {
+                    LoopAction::Quit => return Ok(LoopAction::Quit),
+                    LoopAction::Redraw => changed = true,
+                    LoopAction::Continue => {}
                 }
             }
-            Event::Mouse(mouse) => handle_mouse(&mut pane_mgr.focused_mut().app, mouse),
+            Event::Mouse(mouse) => {
+                handle_mouse(&mut pane_mgr.focused_mut().app, mouse);
+                changed = true;
+            }
             Event::Paste(text) => {
                 pane_mgr.focused_mut().app.handle_paste(&text);
+                changed = true;
             }
             Event::Resize(w, h) => {
                 // invalidate the size cache so ratatui's autoresize
@@ -350,6 +327,7 @@ pub(super) async fn handle_streaming_terminal_events(
                 // reset every pane's scroll baseline so post-resize
                 // k/j presses don't get swallowed by stale baseline_vis
                 apply_resize(deps.size_cache, pane_mgr);
+                changed = true;
                 tracing::debug!(
                     phase = "streaming",
                     width = w,
@@ -361,7 +339,55 @@ pub(super) async fn handle_streaming_terminal_events(
         }
     }
 
-    Ok(LoopAction::Continue)
+    Ok(if changed {
+        LoopAction::Redraw
+    } else {
+        LoopAction::Continue
+    })
+}
+
+async fn handle_streaming_key_event(
+    pane_mgr: &mut PaneManager,
+    stream_state: &mut StreamState,
+    deps: &mut InputDeps<'_>,
+    key: KeyEvent,
+) -> io::Result<LoopAction> {
+    if pane_mgr.focused().app.interaction.mode == app::AppMode::ToolConfirm {
+        if let Some(allowed) = confirmation_answer(key.code) {
+            answer_confirmation(pane_mgr, stream_state, allowed).await;
+            return Ok(LoopAction::Redraw);
+        }
+        return Ok(LoopAction::Continue);
+    }
+
+    let app_event = handle_key(&mut pane_mgr.focused_mut().app, key);
+    let Some(app_event) = app_event else {
+        return Ok(LoopAction::Redraw);
+    };
+
+    if let Some(action) =
+        handle_common_app_event(&app_event, pane_mgr, Some(stream_state), deps).await
+    {
+        return Ok(match action {
+            LoopAction::Continue => LoopAction::Redraw,
+            action => action,
+        });
+    }
+
+    match app_event {
+        AppEvent::Abort => {
+            abort_focused_stream(pane_mgr, stream_state, deps.delegation_queue).await;
+        }
+        AppEvent::UserSubmit { text } => {
+            submit_streaming_input(pane_mgr, stream_state, text).await;
+        }
+        AppEvent::EditSteering => {
+            edit_last_queued_steering(pane_mgr, stream_state).await;
+        }
+        _ => {}
+    }
+
+    Ok(LoopAction::Redraw)
 }
 
 pub(super) async fn handle_idle_terminal_events(
@@ -591,8 +617,18 @@ mod tests {
     use super::*;
     use crate::pane::{Pane, PaneId, PaneManager};
     use crate::runner::caching_backend::CachedSizeState;
-    use mush_ai::types::TokenCount;
+    use crossterm::event::{KeyEvent, KeyEventState, KeyModifiers};
+    use mush_ai::types::{StreamOptions, TokenCount};
     use std::rc::Rc;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
+    }
 
     fn pane_with_baselines(id: u32, baseline: usize, baseline_vis: u16) -> Pane {
         let pane = Pane::new(
@@ -647,6 +683,125 @@ mod tests {
             !size_cache.has_cached_size(),
             "apply_resize should clear the cached size"
         );
+    }
+
+    #[tokio::test]
+    async fn streaming_key_input_requests_redraw() {
+        let pane = Pane::new(
+            PaneId::new(1),
+            App::new("test".into(), TokenCount::new(200_000)),
+        );
+        let mut pane_mgr = PaneManager::new(pane);
+        pane_mgr.focused_mut().app.start_tool(
+            &mush_ai::types::ToolCallId::from("toolu_test"),
+            "bash_status",
+            "job 1",
+        );
+        let (_tx, rx) = tokio::sync::mpsc::channel(1);
+        let mut stream_state = StreamState::new();
+        stream_state.register_active(
+            pane_mgr.focused().id,
+            super::super::streams::StreamMeta {
+                cancel: tokio_util::sync::CancellationToken::new(),
+                steering_queue: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
+                confirm_req_rx: rx,
+                confirm_reply: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+                context_tokens: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                model: mush_ai::models::all_models_with_user()
+                    .into_iter()
+                    .next()
+                    .expect("expected at least one model"),
+            },
+        );
+        let mut tui_config = crate::runner::TuiConfig {
+            model: mush_ai::models::all_models_with_user()
+                .into_iter()
+                .next()
+                .expect("expected at least one model"),
+            system_prompt: None,
+            options: StreamOptions::default(),
+            max_turns: 32,
+            initial_messages: Vec::new(),
+            initial_panes: Vec::new(),
+            theme: crate::theme::Theme::default(),
+            config_path: None,
+            provider_api_keys: std::collections::HashMap::new(),
+            thinking_prefs: ThinkingPrefs::default(),
+            save_thinking_prefs: None,
+            last_models: crate::runner::LastModels::default(),
+            save_last_models: None,
+            save_session: None,
+            update_title: None,
+            confirm_tools: false,
+            auto_compact: false,
+            auto_fork_compact: false,
+            show_cost: false,
+            show_usage_lines: false,
+            show_token_counters: false,
+            status_bar_config: Default::default(),
+            debug_cache: false,
+            cache_timer: false,
+            thinking_display: crate::app::ThinkingDisplay::Collapse,
+            tool_output_live: None,
+            log_buffer: None,
+            isolation_mode: crate::file_tracker::IsolationMode::None,
+            terminal_policy: crate::terminal_policy::TerminalPolicy::default(),
+            lifecycle_hooks: mush_agent::LifecycleHooks::default(),
+            cwd: std::path::PathBuf::new(),
+            dynamic_system_context: None,
+            file_rules: None,
+            lsp_diagnostics: None,
+            agent_card: None,
+            model_tiers: std::collections::HashMap::new(),
+            compaction_model: None,
+            resolve_model: None,
+            http_client: None,
+            session_id: mush_ai::types::SessionId::new(),
+            settings: Default::default(),
+            scroll_lines: crate::app::DEFAULT_SCROLL_LINES,
+            favourite_models: Vec::new(),
+            favourites_locked: false,
+            save_favourite_models: None,
+            keymap: crate::keybinds::KeyMap::default(),
+            reload_context: None,
+            forbidden_chars: Default::default(),
+        };
+        let registry = mush_ai::registry::ApiRegistry::new();
+        let message_bus = crate::messaging::MessageBus::new();
+        let file_tracker = crate::file_tracker::FileTracker::new(std::path::PathBuf::new());
+        let lifecycle_hooks = mush_agent::LifecycleHooks::default();
+        let mut pending_prompt = None;
+        let mut pending_compactions = std::collections::HashMap::new();
+        let delegation_queue = crate::delegate::new_queue();
+        let image_picker = None;
+        let size_cache = Rc::new(CachedSizeState::default());
+        let mut deps = InputDeps {
+            tui_config: &mut tui_config,
+            thinking_prefs: &mut ThinkingPrefs::default(),
+            thinking_saver: &None,
+            registry: &registry,
+            message_bus: &message_bus,
+            file_tracker: &file_tracker,
+            lifecycle_hooks: &lifecycle_hooks,
+            cwd: std::path::Path::new(""),
+            pending_prompt: &mut pending_prompt,
+            pending_compactions: &mut pending_compactions,
+            delegation_queue: &delegation_queue,
+            image_picker: &image_picker,
+            size_cache: &size_cache,
+        };
+
+        let action = handle_streaming_key_event(
+            &mut pane_mgr,
+            &mut stream_state,
+            &mut deps,
+            key(KeyCode::Char('h')),
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(action, LoopAction::Redraw));
+        assert_eq!(pane_mgr.focused().app.input.text, "h");
     }
 
     #[test]
