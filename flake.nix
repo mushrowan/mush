@@ -167,7 +167,7 @@
           data_dir="''${XDG_DATA_HOME:-$HOME/.local/share}/mush/profiles/perf-$(date +%Y%m%d-%H%M%S)"
           mkdir -p "$data_dir"
 
-          export RUST_LOG=''${RUST_LOG:-warn,mush_agent=trace,mush_ai=trace,mush_tools=trace,mush_tui=trace,mush_cli=trace,mush_ext=trace,mush_session=trace,mush_lsp=trace,mush_mcp=trace,mush_treesitter=trace,mush_tui::draw_reason=trace}
+          export RUST_LOG=''${RUST_LOG:-warn,mush_agent=debug,mush_ai=debug,mush_ai::providers::sse::wire=off,mush_tools=debug,mush_tui=debug,mush_cli=debug,mush_ext=debug,mush_session=debug,mush_lsp=debug,mush_mcp=debug,mush_treesitter=debug,mush_tui::draw_reason=trace}
           export MUSH_TRACE=true
           export MUSH_PROFILE_STARTUP=true
           export MUSH_TRACE_DIR="$data_dir"

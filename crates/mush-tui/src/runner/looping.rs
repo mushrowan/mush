@@ -16,6 +16,8 @@ use super::streams::{AgentStreams, StreamState, poll_confirmation_prompt, poll_l
 
 pub(super) const ANIMATION_FRAME_INTERVAL: std::time::Duration =
     crate::app::ANIMATION_FRAME_INTERVAL;
+const MAX_AGENT_EVENTS_PER_FRAME: usize = 32;
+const MAX_AGENT_EVENT_DRAIN: std::time::Duration = std::time::Duration::from_millis(8);
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_loop_iteration(
@@ -109,10 +111,13 @@ async fn handle_streaming_iteration(
     let tick = tokio::time::sleep(ANIMATION_FRAME_INTERVAL);
     tokio::pin!(tick);
     let mut saw_agent_event = false;
+    let terminal_action;
+    let mut tick_changed = false;
 
     // wait for either an agent event or the frame tick
     tokio::select! {
         result = agent_streams.next() => {
+            let drain_started = std::time::Instant::now();
             if let Some((pane_id, stream_gen, event)) = result {
                 saw_agent_event = true;
                 dispatch_agent_event(pane_id, stream_gen, event, stream_state, runtime, services, tui_config, registry, image_picker).await;
@@ -122,11 +127,20 @@ async fn handle_streaming_iteration(
 
             // drain all immediately-available events within this frame
             // so we don't redraw between each one
+            let mut drained_events = 0usize;
             loop {
+                if !should_continue_agent_drain(
+                    drained_events,
+                    drain_started,
+                    std::time::Instant::now(),
+                ) {
+                    break;
+                }
                 use futures::FutureExt;
                 match agent_streams.next().now_or_never() {
                     Some(Some((pane_id, stream_gen, event))) => {
                         saw_agent_event = true;
+                        drained_events += 1;
                         dispatch_agent_event(pane_id, stream_gen, event, stream_state, runtime, services, tui_config, registry, image_picker).await;
                         trace_draw_reason("agent_event_drain");
                         runtime.tick_streaming_text_panes();
@@ -149,9 +163,9 @@ async fn handle_streaming_iteration(
             if matches!(action, LoopAction::Quit) {
                 return Ok(LoopAction::Quit);
             }
+            terminal_action = action;
         }
         _ = tick => {
-            let mut tick_changed = false;
             if runtime.tick_animation_panes() {
                 tick_changed = true;
                 trace_draw_reason("animation_tick");
@@ -175,18 +189,44 @@ async fn handle_streaming_iteration(
             if matches!(action, LoopAction::Quit) {
                 return Ok(LoopAction::Quit);
             }
-            if tick_changed {
-                return Ok(LoopAction::Redraw);
-            }
+            terminal_action = action;
         }
     }
 
-    if should_defer_streaming_redraw(saw_agent_event, last_redraw, std::time::Instant::now()) {
-        Ok(LoopAction::Continue)
+    Ok(streaming_iteration_action(
+        saw_agent_event,
+        terminal_action,
+        tick_changed,
+        last_redraw,
+        std::time::Instant::now(),
+    ))
+}
+
+fn should_continue_agent_drain(
+    drained_events: usize,
+    drain_started: std::time::Instant,
+    now: std::time::Instant,
+) -> bool {
+    drained_events < MAX_AGENT_EVENTS_PER_FRAME
+        && now.duration_since(drain_started) < MAX_AGENT_EVENT_DRAIN
+}
+
+fn streaming_iteration_action(
+    saw_agent_event: bool,
+    terminal_action: LoopAction,
+    tick_changed: bool,
+    last_redraw: std::time::Instant,
+    now: std::time::Instant,
+) -> LoopAction {
+    if matches!(terminal_action, LoopAction::Redraw) || tick_changed {
+        return LoopAction::Redraw;
+    }
+    if should_defer_streaming_redraw(saw_agent_event, last_redraw, now) {
+        LoopAction::Continue
     } else if saw_agent_event {
-        Ok(LoopAction::Redraw)
+        LoopAction::Redraw
     } else {
-        Ok(LoopAction::Continue)
+        LoopAction::Continue
     }
 }
 
@@ -339,6 +379,43 @@ mod tests {
         let now = last_redraw + ANIMATION_FRAME_INTERVAL / 2;
 
         assert!(!should_defer_streaming_redraw(false, last_redraw, now));
+    }
+
+    #[test]
+    fn terminal_redraw_wins_over_streaming_frame_deferral() {
+        let last_redraw = std::time::Instant::now();
+        let now = last_redraw + ANIMATION_FRAME_INTERVAL / 2;
+
+        let action = streaming_iteration_action(true, LoopAction::Redraw, false, last_redraw, now);
+
+        assert!(matches!(action, LoopAction::Redraw));
+    }
+
+    #[test]
+    fn tick_branch_preserves_terminal_redraws() {
+        let last_redraw = std::time::Instant::now();
+        let now = last_redraw + ANIMATION_FRAME_INTERVAL / 2;
+
+        let action = streaming_iteration_action(false, LoopAction::Redraw, false, last_redraw, now);
+
+        assert!(matches!(action, LoopAction::Redraw));
+    }
+
+    #[test]
+    fn agent_event_drain_is_bounded_per_frame() {
+        let started = std::time::Instant::now();
+
+        assert!(should_continue_agent_drain(0, started, started));
+        assert!(!should_continue_agent_drain(
+            MAX_AGENT_EVENTS_PER_FRAME,
+            started,
+            started
+        ));
+        assert!(!should_continue_agent_drain(
+            1,
+            started,
+            started + MAX_AGENT_EVENT_DRAIN
+        ));
     }
 
     #[test]

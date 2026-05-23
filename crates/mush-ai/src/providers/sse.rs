@@ -227,6 +227,7 @@ pub fn run_sse_stream(
                     }
                     let chunk_len = chunk.len();
                     tracing::trace!(
+                        target: "mush_ai::providers::sse::wire",
                         model = %model_id,
                         provider = %provider_name,
                         api = ?api,
@@ -236,6 +237,7 @@ pub fn run_sse_stream(
                     );
                     for raw in parser.push(&chunk) {
                         tracing::trace!(
+                            target: "mush_ai::providers::sse::wire",
                             model = %model_id,
                             provider = %provider_name,
                             api = ?api,
