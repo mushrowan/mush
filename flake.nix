@@ -46,6 +46,7 @@
       imports = [
         inputs.treefmt-nix.flakeModule
         inputs.git-hooks.flakeModule
+        ./nix/hydra.nix
       ];
 
       perSystem = {

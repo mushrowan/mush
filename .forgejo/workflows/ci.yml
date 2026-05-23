@@ -1,0 +1,33 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # button in the forgejo Actions UI to fire this workflow on demand,
+  # useful when actions get enabled after a push or for one-off reruns
+  workflow_dispatch:
+
+# only one CI run per ref. cancel older runs on rapid pushes
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  flake-check:
+    runs-on: lix-node
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      # the lix-node image already has flakes enabled (baked into the
+      # image's /etc/nix/nix.conf), so no setup step is needed before
+      # running nix commands
+
+      # mush's flake check covers clippy, nextest, doctests,
+      # cargo-deny, schema generation checks, treefmt, and the build.
+      # default verbosity is terse on success. `--print-build-logs`
+      # would dump every dependency's compile output even on success,
+      # which is too noisy for routine CI.
+      - name: nix flake check
+        run: nix flake check
