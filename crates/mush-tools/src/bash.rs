@@ -23,6 +23,7 @@ const BACKGROUND_DEFAULT_TIMEOUT_SECS: u64 = 30 * 60;
 /// kill it. catches servers, daemons, and commands that hang waiting
 /// for a TTY (e.g. jj split, jj describe without -m)
 const NO_OUTPUT_TIMEOUT_SECS: u64 = 240;
+const STREAM_PIPE_YIELD_LINES: usize = 256;
 
 /// drop guard that SIGKILLs the bash child's process group when the tool
 /// future is cancelled (user abort, agent-loop cancel, dropped pane).
@@ -826,12 +827,14 @@ async fn stream_pipe<R: tokio::io::AsyncRead + Unpin>(
     let mut output = String::new();
     let mut line = String::new();
     let mut last_emit = std::time::Instant::now();
+    let mut lines_read = 0usize;
 
     loop {
         line.clear();
         match reader.read_line(&mut line).await {
             Ok(0) => break,
             Ok(_) => {
+                lines_read += 1;
                 output.push_str(&line);
                 if let Some(ref flag) = has_output {
                     flag.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -842,6 +845,9 @@ async fn stream_pipe<R: tokio::io::AsyncRead + Unpin>(
                 {
                     sink(line.trim_end());
                     last_emit = std::time::Instant::now();
+                }
+                if lines_read.is_multiple_of(STREAM_PIPE_YIELD_LINES) {
+                    tokio::task::yield_now().await;
                 }
             }
             Err(_) => break,
@@ -863,6 +869,36 @@ mod tests {
         assert!(result.outcome.is_success());
         let text = extract_text(&result);
         assert!(text.contains("hello"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stream_pipe_yields_while_draining_ready_output() {
+        let mut input = String::new();
+        for line in 0..10_000 {
+            input.push_str(&format!("line {line}\n"));
+        }
+        let reader = std::io::Cursor::new(input.into_bytes());
+        let yielded = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let drain = {
+            let yielded = yielded.clone();
+            async move {
+                let _ = stream_pipe(Some(reader), None, None).await;
+                assert!(
+                    yielded.load(std::sync::atomic::Ordering::Relaxed),
+                    "stream_pipe drained buffered output without yielding"
+                );
+            }
+        };
+        let marker = {
+            let yielded = yielded.clone();
+            async move {
+                tokio::task::yield_now().await;
+                yielded.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        };
+
+        tokio::join!(drain, marker);
     }
 
     #[test]

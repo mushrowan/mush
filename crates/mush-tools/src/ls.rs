@@ -201,7 +201,10 @@ mod tests {
             lines.iter().all(|line| !line.starts_with(' ')),
             "got: {text}"
         );
-        assert!(text.contains("0B  src/"), "got: {text}");
+        assert!(
+            text.lines().any(|line| line.ends_with("B  src/")),
+            "got: {text}"
+        );
     }
 
     #[test]

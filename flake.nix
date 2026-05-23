@@ -59,11 +59,13 @@
           overlays = [(import inputs.rust-overlay)];
         };
 
-        rustToolchain = pkgs.rust-bin.nightly.latest.default.override {
-          extensions = ["rust-src" "rust-analyzer" "llvm-tools-preview" "rustfmt"];
-        };
+        rustToolchainFor = p:
+          p.rust-bin.selectLatestNightlyWith (toolchain:
+            toolchain.default.override {
+              extensions = ["rust-src" "rust-analyzer" "llvm-tools-preview" "rustfmt"];
+            });
 
-        craneLib = (inputs.crane.mkLib pkgs).overrideToolchain rustToolchain;
+        craneLib = (inputs.crane.mkLib pkgs).overrideToolchain rustToolchainFor;
 
         # crane's default filter strips non-rust files. include the
         # `tests/fixtures/` paths so integration tests can `include_str!`

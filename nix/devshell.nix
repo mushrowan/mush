@@ -6,7 +6,13 @@
   shellHook ? "",
 }:
 craneLib.devShell {
-  inherit checks cargoArtifacts shellHook;
+  inherit checks cargoArtifacts;
+
+  shellHook = ''
+    export CARGO_HOME="$PWD/.direnv/cargo-home"
+    mkdir -p "$CARGO_HOME"
+    ${shellHook}
+  '';
 
   packages = with pkgs; [
     cargo-deny
