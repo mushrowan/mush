@@ -1380,7 +1380,7 @@ mod tests {
             supported_thinking_levels: Vec::new(),
             default_thinking_level: None,
         }];
-        std::fs::write(&path, serde_json::to_string(&models).unwrap()).unwrap();
+        crate::private_io::write_atomic(&path, serde_json::to_string(&models).unwrap()).unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
         let loaded: Vec<Model> = serde_json::from_str(&content).unwrap();
@@ -1416,7 +1416,7 @@ mod tests {
             supported_thinking_levels: Vec::new(),
             default_thinking_level: None,
         }];
-        std::fs::write(&path, serde_json::to_string(&first).unwrap()).unwrap();
+        crate::private_io::write_atomic(&path, serde_json::to_string(&first).unwrap()).unwrap();
         assert_eq!(find_model_by_id("custom/test").unwrap().name, "First");
 
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -1425,7 +1425,7 @@ mod tests {
             name: "Second".into(),
             ..first[0].clone()
         }];
-        std::fs::write(&path, serde_json::to_string(&second).unwrap()).unwrap();
+        crate::private_io::write_atomic(&path, serde_json::to_string(&second).unwrap()).unwrap();
 
         assert_eq!(find_model_by_id("custom/test").unwrap().name, "Second");
     }

@@ -6,6 +6,7 @@ pub enum AppEvent {
     /// user submitted a prompt
     UserSubmit {
         text: String,
+        images: Vec<crate::input_buffer::PendingImage>,
     },
     /// user executed a slash command
     SlashCommand {

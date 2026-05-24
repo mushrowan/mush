@@ -496,7 +496,7 @@ pub fn save_thinking_prefs(prefs: &mush_tui::ThinkingPrefs) {
         let _ = std::fs::create_dir_all(parent);
     }
     if let Ok(json) = serde_json::to_string_pretty(prefs) {
-        let _ = std::fs::write(&path, json);
+        let _ = mush_ai::private_io::write_atomic(&path, json);
     }
 }
 
@@ -532,7 +532,7 @@ pub fn save_last_models(last: &mush_tui::LastModels) {
         let _ = std::fs::create_dir_all(parent);
     }
     if let Ok(json) = serde_json::to_string_pretty(last) {
-        let _ = std::fs::write(&path, json);
+        let _ = mush_ai::private_io::write_atomic(&path, json);
     }
 }
 
@@ -569,7 +569,7 @@ pub(crate) fn save_favourite_models_to(path: &std::path::Path, models: &[String]
         let _ = std::fs::create_dir_all(parent);
     }
     if let Ok(json) = serde_json::to_string_pretty(models) {
-        let _ = std::fs::write(path, json);
+        let _ = mush_ai::private_io::write_atomic(path, json);
     }
 }
 

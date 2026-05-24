@@ -170,7 +170,7 @@ mod tests {
         let (dir, _store) = temp_store();
         let path = dir.path().join("sessions").join("meta-only.json");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(
+        mush_ai::private_io::write_atomic(
             &path,
             r#"{
                 "meta": {
@@ -236,8 +236,8 @@ mod tests {
             }}"#
         );
         std::fs::create_dir_all(dir.path().join("sessions")).unwrap();
-        std::fs::write(
-            dir.path().join("sessions").join(format!("{id}.json")),
+        mush_ai::private_io::write_atomic(
+            &dir.path().join("sessions").join(format!("{id}.json")),
             legacy_json,
         )
         .unwrap();

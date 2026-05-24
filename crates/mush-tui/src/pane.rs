@@ -15,6 +15,7 @@ use ratatui::layout::Rect;
 use tokio::sync::Mutex;
 
 use crate::app::App;
+use crate::input_buffer::PendingImage;
 use crate::isolation::PaneIsolation;
 
 pub use mush_ai::types::PaneId;
@@ -31,20 +32,53 @@ pub struct DelegationInfo {
 /// max agent turns for delegation sub-agents (prevents runaway resource usage)
 pub const DELEGATION_MAX_TURNS: usize = 10;
 
+#[derive(Debug, Clone)]
+pub struct PendingPrompt {
+    pub text: String,
+    pub images: Vec<PendingImage>,
+    persisted: bool,
+}
+
+impl PendingPrompt {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            images: Vec::new(),
+            persisted: false,
+        }
+    }
+
+    pub fn with_images(text: impl Into<String>, images: Vec<PendingImage>) -> Self {
+        Self {
+            text: text.into(),
+            images,
+            persisted: false,
+        }
+    }
+
+    pub fn is_persisted(&self) -> bool {
+        self.persisted
+    }
+
+    pub fn mark_persisted(&mut self) {
+        self.persisted = true;
+    }
+}
+
 /// per-pane state: independent agent session with display + conversation
 pub struct Pane {
     pub id: PaneId,
     pub app: App,
     pub conversation: ConversationState,
     pub image_protos: HashMap<(usize, usize), ratatui_image::protocol::StatefulProtocol>,
-    pub pending_prompt: Option<String>,
+    pub pending_prompt: Option<PendingPrompt>,
     pub steering_queue: Arc<Mutex<Vec<Message>>>,
     /// inputs the user submitted while a /compact (or /fork-compact)
     /// task was running. each entry is `(text, image_bytes)` mirroring
     /// what UserSubmit would normally have done. drained by the
     /// runtime once compaction lands so they replay as a fresh turn
     /// instead of getting silently dropped or clobbering the input box
-    pub pending_compaction_inputs: Vec<(String, Vec<Vec<u8>>)>,
+    pub pending_compaction_inputs: Vec<(String, Vec<PendingImage>)>,
     /// inbox for messages from sibling panes
     pub inbox: Option<tokio::sync::mpsc::UnboundedReceiver<crate::messaging::InterPaneMessage>>,
     /// user-facing label (auto-generated or manual)
@@ -110,12 +144,13 @@ impl Pane {
     /// records the (text, images) for later replay, surfaces a
     /// queued (dimmed) bubble in the chat so the user sees it didn't
     /// vanish, and clears the input buffer so they can keep typing
-    pub fn queue_input_during_compaction(&mut self, text: String, images: Vec<Vec<u8>>) {
-        if images.is_empty() {
+    pub fn queue_input_during_compaction(&mut self, text: String, images: Vec<PendingImage>) {
+        let image_bytes: Vec<Vec<u8>> = images.iter().map(|image| image.data.clone()).collect();
+        if image_bytes.is_empty() {
             self.app.push_queued_message(text.clone());
         } else {
             self.app
-                .push_queued_message_with_images(text.clone(), images.clone());
+                .push_queued_message_with_images(text.clone(), image_bytes);
         }
         self.pending_compaction_inputs.push((text, images));
         self.app.input.text.clear();
@@ -126,7 +161,7 @@ impl Pane {
     /// also clears the queued bubbles from the display so the runtime
     /// can render them as real (non-queued) user messages without
     /// duplicates
-    pub fn drain_compaction_inputs(&mut self) -> Vec<(String, Vec<Vec<u8>>)> {
+    pub fn drain_compaction_inputs(&mut self) -> Vec<(String, Vec<PendingImage>)> {
         let drained = std::mem::take(&mut self.pending_compaction_inputs);
         let _ = self.app.take_queued_messages();
         drained
@@ -432,6 +467,14 @@ mod tests {
             PaneId::new(id),
             App::new("test".into(), TokenCount::new(200_000)),
         )
+    }
+
+    fn pending_png(data: Vec<u8>) -> PendingImage {
+        PendingImage {
+            data,
+            mime_type: mush_ai::types::ImageMimeType::Png,
+            dimensions: None,
+        }
     }
 
     #[test]
@@ -807,7 +850,7 @@ mod tests {
         // aren't shown twice
         let mut pane = test_pane(1);
         pane.queue_input_during_compaction("first".into(), vec![]);
-        pane.queue_input_during_compaction("second".into(), vec![vec![0u8, 1, 2]]);
+        pane.queue_input_during_compaction("second".into(), vec![pending_png(vec![0u8, 1, 2])]);
         assert!(pane.app.has_queued_messages());
 
         let drained = pane.drain_compaction_inputs();
@@ -815,7 +858,7 @@ mod tests {
         assert_eq!(drained.len(), 2);
         assert_eq!(drained[0].0, "first");
         assert_eq!(drained[1].0, "second");
-        assert_eq!(drained[1].1, vec![vec![0u8, 1, 2]]);
+        assert_eq!(drained[1].1[0].data, vec![0u8, 1, 2]);
         assert!(pane.pending_compaction_inputs.is_empty());
         assert!(
             !pane.app.has_queued_messages(),

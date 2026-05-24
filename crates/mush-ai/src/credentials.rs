@@ -90,6 +90,20 @@ impl FileCredentialStore {
         crate::private_io::write_private(&self.path, json)?;
         Ok(())
     }
+
+    #[cfg(test)]
+    fn save_with_temp_path(
+        &self,
+        temp_path: &std::path::Path,
+        entries: &std::collections::HashMap<String, String>,
+    ) -> Result<(), CredentialError> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let json = serde_json::to_string_pretty(entries)?;
+        crate::private_io::atomic_write_for_test(&self.path, temp_path, json.as_bytes(), true)?;
+        Ok(())
+    }
 }
 
 impl Default for FileCredentialStore {
@@ -365,6 +379,28 @@ mod tests {
         assert!(store.get("anthropic").unwrap().is_none());
         store.set("anthropic", "v").unwrap();
         assert_eq!(store.get("anthropic").unwrap().unwrap().expose(), "v");
+    }
+
+    #[test]
+    fn file_store_preserves_existing_file_when_atomic_replacement_fails() {
+        let (_dir, store) = temp_store();
+        store.set("anthropic", "old-secret").unwrap();
+        let temp_path = store.path.with_file_name(format!(
+            "{}.tmp-test",
+            store.path.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::write(&temp_path, "blocked").unwrap();
+
+        let err = store.save_with_temp_path(
+            &temp_path,
+            &std::collections::HashMap::from([("anthropic".into(), "new-secret".into())]),
+        );
+
+        assert!(err.is_err());
+        assert_eq!(
+            store.get("anthropic").unwrap().unwrap().expose(),
+            "old-secret"
+        );
     }
 
     #[test]

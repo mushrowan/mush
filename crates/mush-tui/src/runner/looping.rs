@@ -183,6 +183,7 @@ async fn handle_streaming_iteration(
                 trace_draw_reason("session_picker");
             }
             drain_inboxes(&mut runtime.pane_mgr, stream_state).await;
+            stream_state.save_dirty_session(&runtime.pane_mgr, tui_config);
 
             let (pane_mgr, mut deps) = input_parts(runtime, services, tui_config, registry, image_picker, size_cache);
             let action = handle_streaming_terminal_events(pane_mgr, stream_state, &mut deps).await?;
@@ -326,7 +327,7 @@ fn drain_session_picker(pane_mgr: &mut crate::pane::PaneManager) -> bool {
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_idle_iteration(
-    stream_state: &StreamState,
+    stream_state: &mut StreamState,
     runtime: &mut RunnerRuntime,
     services: &RunnerServices,
     tui_config: &mut TuiConfig,
@@ -335,6 +336,7 @@ async fn handle_idle_iteration(
     size_cache: &std::rc::Rc<super::caching_backend::CachedSizeState>,
 ) -> io::Result<LoopAction> {
     drain_inboxes(&mut runtime.pane_mgr, stream_state).await;
+    stream_state.save_dirty_session(&runtime.pane_mgr, tui_config);
     let picker_changed = drain_session_picker(&mut runtime.pane_mgr);
 
     let (pane_mgr, mut deps) = input_parts(

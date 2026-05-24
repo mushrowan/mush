@@ -15,7 +15,8 @@ use tokio::sync::Mutex;
 
 use crate::event_handler;
 use crate::file_tracker::FileTracker;
-use crate::pane::{PaneId, PaneManager};
+use crate::pane::{PaneId, PaneManager, PendingPrompt};
+use crate::runner::runtime::save_pane_pending_prompt;
 
 const USER_CANCELLED_TOOL_MESSAGE: &str = "user cancelled tool";
 
@@ -64,6 +65,7 @@ pub(super) struct StreamState {
     generations: HashMap<PaneId, StreamGeneration>,
     next_gen: u64,
     last_session_save: std::time::Instant,
+    session_dirty: bool,
 }
 
 /// owned configuration fields for stream creation, grouped from the
@@ -103,6 +105,7 @@ impl StreamState {
             next_gen: 0,
             // start in the past so the first save happens immediately
             last_session_save: std::time::Instant::now() - SESSION_SAVE_DEBOUNCE,
+            session_dirty: false,
         }
     }
 
@@ -154,12 +157,25 @@ impl StreamState {
         pane_mgr: &PaneManager,
         tui_config: &super::TuiConfig,
     ) {
-        if self.last_session_save.elapsed() < SESSION_SAVE_DEBOUNCE {
+        self.session_dirty = true;
+        self.save_dirty_session(pane_mgr, tui_config);
+    }
+
+    /// flush pending session changes when the debounce interval has elapsed.
+    /// this keeps long streams checkpointed even if no further agent event
+    /// arrives after a message/tool boundary marks the session dirty
+    pub(super) fn save_dirty_session(
+        &mut self,
+        pane_mgr: &PaneManager,
+        tui_config: &super::TuiConfig,
+    ) {
+        if !self.session_dirty || self.last_session_save.elapsed() < SESSION_SAVE_DEBOUNCE {
             return;
         }
         if let Some(ref saver) = tui_config.save_session {
             saver(build_session_snapshot(pane_mgr, tui_config));
             self.last_session_save = std::time::Instant::now();
+            self.session_dirty = false;
         }
     }
 
@@ -172,6 +188,7 @@ impl StreamState {
         if let Some(ref saver) = tui_config.save_session {
             saver(build_session_snapshot(pane_mgr, tui_config));
             self.last_session_save = std::time::Instant::now();
+            self.session_dirty = false;
         }
     }
 }
@@ -179,10 +196,10 @@ impl StreamState {
 pub(super) fn take_pending_prompts(
     pane_mgr: &mut PaneManager,
     pending_prompt: &mut Option<String>,
-) -> Vec<(PaneId, String)> {
+) -> Vec<(PaneId, PendingPrompt)> {
     let mut prompts = Vec::new();
     if let Some(prompt) = pending_prompt.take() {
-        prompts.push((pane_mgr.focused().id, prompt));
+        prompts.push((pane_mgr.focused().id, PendingPrompt::text(prompt)));
     }
     for pane in pane_mgr.panes_mut() {
         if let Some(prompt) = pane.pending_prompt.take()
@@ -663,10 +680,10 @@ pub(super) async fn submit_streaming_input(
     pane_mgr: &mut PaneManager,
     stream_state: &StreamState,
     text: String,
+    images: Vec<crate::input_buffer::PendingImage>,
 ) {
     let focused_id = pane_mgr.focused().id;
     if let Some(meta) = stream_state.meta(focused_id) {
-        let images = pane_mgr.focused_mut().app.input.take_images();
         let content = build_user_content(&text, &images);
         meta.steering_queue
             .lock()
@@ -686,17 +703,26 @@ pub(super) async fn submit_streaming_input(
         }
     } else {
         let pane = pane_mgr.focused_mut();
-        pane.app.push_user_message(text.clone());
+        let image_bytes: Vec<Vec<u8>> = images.iter().map(|img| img.data.clone()).collect();
+        if image_bytes.is_empty() {
+            pane.app.push_user_message(text.clone());
+        } else {
+            pane.app
+                .push_user_message_with_images(text.clone(), image_bytes);
+        }
         pane.app.active_tools.clear();
         pane.app.start_streaming();
-        pane.pending_prompt = Some(text);
+        pane.pending_prompt = Some(PendingPrompt::with_images(text, images));
     }
 }
 
 /// build a UserContent, folding any attached images into a parts payload
 /// alongside the text. returns `Text` when there are no images so the
 /// wire format stays minimal for the common case
-fn build_user_content(text: &str, images: &[crate::input_buffer::PendingImage]) -> UserContent {
+pub(crate) fn build_user_content(
+    text: &str,
+    images: &[crate::input_buffer::PendingImage],
+) -> UserContent {
     if images.is_empty() {
         return UserContent::Text(text.to_owned());
     }
@@ -801,7 +827,7 @@ async fn start_stream_for_prompt<'a>(
     stream_state: &mut StreamState,
     pane_mgr: &mut PaneManager,
     pane_id: PaneId,
-    prompt: String,
+    prompt: PendingPrompt,
     deps: &StreamDeps<'a>,
 ) {
     let tools = deps.tools;
@@ -819,8 +845,11 @@ async fn start_stream_for_prompt<'a>(
         let Some(pane) = pane_mgr.pane_mut(pane_id) else {
             return;
         };
-        let (app, conversation, _) = pane.fields_mut();
-        append_prompt_and_snapshot(app, conversation, prompt)
+        pane.pending_prompt = Some(prompt);
+        save_pane_pending_prompt(pane);
+        let conversation = pane.conversation.context();
+        pane.pending_prompt = None;
+        conversation
     };
 
     let context_window = model.context_window;
@@ -966,34 +995,6 @@ fn effective_max_turns(pane_mgr: &PaneManager, pane_id: PaneId, default: usize) 
     } else {
         default
     }
-}
-
-fn append_prompt_and_snapshot(
-    app: &mut crate::app::App,
-    conversation: &mut mush_session::ConversationState,
-    prompt: String,
-) -> Vec<Message> {
-    let user_message = Message::User(UserMessage {
-        content: if app.input.images.is_empty() {
-            UserContent::Text(prompt)
-        } else {
-            let images = app.input.take_images();
-            let mut parts: Vec<UserContentPart> =
-                vec![UserContentPart::Text(TextContent { text: prompt })];
-            for image in images {
-                use base64::Engine;
-
-                parts.push(UserContentPart::Image(ImageContent {
-                    data: base64::engine::general_purpose::STANDARD.encode(&image.data),
-                    mime_type: image.mime_type,
-                }));
-            }
-            UserContent::Parts(parts)
-        },
-        timestamp_ms: Timestamp::now(),
-    });
-    conversation.append_message(user_message);
-    conversation.context()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1336,13 +1337,17 @@ mod tests {
             },
         );
 
-        pane_mgr.focused_mut().app.input.images.push(PendingImage {
-            data: vec![1, 2, 3, 4],
-            mime_type: ImageMimeType::Png,
-            dimensions: Some((10, 10)),
-        });
-
-        submit_streaming_input(&mut pane_mgr, &stream_state, "look at this".into()).await;
+        submit_streaming_input(
+            &mut pane_mgr,
+            &stream_state,
+            "look at this".into(),
+            vec![PendingImage {
+                data: vec![1, 2, 3, 4],
+                mime_type: ImageMimeType::Png,
+                dimensions: Some((10, 10)),
+            }],
+        )
+        .await;
 
         let queue = steering_queue.lock().await;
         assert_eq!(queue.len(), 1, "steering queue should have 1 entry");
@@ -1391,7 +1396,13 @@ mod tests {
             },
         );
 
-        submit_streaming_input(&mut pane_mgr, &stream_state, "just words".into()).await;
+        submit_streaming_input(
+            &mut pane_mgr,
+            &stream_state,
+            "just words".into(),
+            Vec::new(),
+        )
+        .await;
 
         let queue = steering_queue.lock().await;
         let Message::User(user_msg) = &queue[0] else {
@@ -1431,7 +1442,13 @@ mod tests {
 
         // first submit: "original message "  (with trailing space to exercise
         // whitespace-sensitive content match)
-        submit_streaming_input(&mut pane_mgr, &stream_state, "original message ".into()).await;
+        submit_streaming_input(
+            &mut pane_mgr,
+            &stream_state,
+            "original message ".into(),
+            Vec::new(),
+        )
+        .await;
         assert_eq!(
             steering_queue.lock().await.len(),
             1,
@@ -1458,7 +1475,7 @@ mod tests {
         pane_mgr.focused_mut().app.input.text = "edited message".into();
         pane_mgr.focused_mut().app.input.cursor = "edited message".len();
         let edited = pane_mgr.focused_mut().app.input.take_text();
-        submit_streaming_input(&mut pane_mgr, &stream_state, edited).await;
+        submit_streaming_input(&mut pane_mgr, &stream_state, edited, Vec::new()).await;
 
         let queue = steering_queue.lock().await;
         assert_eq!(
@@ -1484,14 +1501,16 @@ mod tests {
         pane_mgr.add_pane(Pane::new(PaneId::new(2), app()));
 
         let mut pending_prompt = Some("focused".to_string());
-        pane_mgr.focused_mut().pending_prompt = Some("duplicate".to_string());
-        pane_mgr.panes_mut()[1].pending_prompt = Some("other".to_string());
+        pane_mgr.focused_mut().pending_prompt = Some(PendingPrompt::text("duplicate"));
+        pane_mgr.panes_mut()[1].pending_prompt = Some(PendingPrompt::text("other"));
 
         let prompts = take_pending_prompts(&mut pane_mgr, &mut pending_prompt);
 
         assert_eq!(prompts.len(), 2);
-        assert_eq!(prompts[0], (PaneId::new(1), "focused".to_string()));
-        assert_eq!(prompts[1], (PaneId::new(2), "other".to_string()));
+        assert_eq!(prompts[0].0, PaneId::new(1));
+        assert_eq!(prompts[0].1.text, "focused");
+        assert_eq!(prompts[1].0, PaneId::new(2));
+        assert_eq!(prompts[1].1.text, "other");
         assert!(pending_prompt.is_none());
         assert!(pane_mgr.focused().pending_prompt.is_none());
         assert!(pane_mgr.panes()[1].pending_prompt.is_none());
@@ -1794,6 +1813,39 @@ mod tests {
     }
 
     #[test]
+    fn save_dirty_session_flushes_after_debounce() {
+        let mut pane_mgr = PaneManager::new(Pane::new(PaneId::new(1), app()));
+        pane_mgr
+            .focused_mut()
+            .conversation
+            .append_message(Message::User(UserMessage {
+                content: UserContent::Text("persist me".into()),
+                timestamp_ms: Timestamp::zero(),
+            }));
+        let mut config = test_tui_config();
+        let saves = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let saves_for_callback = saves.clone();
+        config.save_session = Some(Arc::new(move |_| {
+            saves_for_callback.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }));
+
+        let mut stream_state = StreamState::new();
+        stream_state.save_session_debounced(&pane_mgr, &config);
+        stream_state.save_session_debounced(&pane_mgr, &config);
+        stream_state.last_session_save = std::time::Instant::now() - SESSION_SAVE_DEBOUNCE;
+        stream_state.save_dirty_session(&pane_mgr, &config);
+
+        assert_eq!(saves.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn build_user_content_persists_pending_prompt_text() {
+        let content = build_user_content("hello from pending", &[]);
+
+        assert_eq!(content.text(), "hello from pending");
+    }
+
+    #[test]
     fn stream_options_uses_canonical_session_id_not_stale_options_field() {
         // /resume and /new only update the top-level `session_id`. the
         // wire request must derive `options.session_id` (which becomes
@@ -2042,8 +2094,20 @@ mod tests {
         // takes the queueing path rather than the cold-start path
         pane_mgr.focused_mut().app.start_streaming();
 
-        submit_streaming_input(&mut pane_mgr, &stream_state, "first steer".into()).await;
-        submit_streaming_input(&mut pane_mgr, &stream_state, "second steer".into()).await;
+        submit_streaming_input(
+            &mut pane_mgr,
+            &stream_state,
+            "first steer".into(),
+            Vec::new(),
+        )
+        .await;
+        submit_streaming_input(
+            &mut pane_mgr,
+            &stream_state,
+            "second steer".into(),
+            Vec::new(),
+        )
+        .await;
 
         // sanity: both queues should contain the two messages right now
         assert_eq!(pane_mgr.focused().steering_queue.lock().await.len(), 2);

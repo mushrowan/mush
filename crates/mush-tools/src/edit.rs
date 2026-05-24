@@ -282,9 +282,9 @@ fn edit_file(path: &Path, old_text: &str, new_text: &str, opts: &EditOpts) -> To
         let write_result = if has_bom {
             let mut out = vec![0xEF, 0xBB, 0xBF];
             out.extend_from_slice(replaced.as_bytes());
-            std::fs::write(path, out)
+            mush_ai::private_io::write_atomic(path, out)
         } else {
-            std::fs::write(path, replaced.as_bytes())
+            mush_ai::private_io::write_atomic(path, replaced.as_bytes())
         };
 
         return match write_result {

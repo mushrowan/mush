@@ -326,7 +326,7 @@ pub fn dump_in(
 
     match serde_json::to_string_pretty(&envelope) {
         Ok(json) => {
-            if std::fs::write(&path, json).is_err() {
+            if crate::private_io::write_private(&path, json).is_err() {
                 return None;
             }
             // publish the prefix fingerprint so the cache-bust classifier

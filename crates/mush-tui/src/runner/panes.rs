@@ -6,7 +6,8 @@ use mush_session::ConversationState;
 
 use crate::app::App;
 use crate::event_handler;
-use crate::pane::{PaneId, PaneManager};
+use crate::pane::{PaneId, PaneManager, PendingPrompt};
+use crate::runner::runtime::{save_pane_pending_prompt, save_prompt_to_conversation};
 use crate::slash;
 
 use super::TuiConfig;
@@ -50,7 +51,11 @@ pub(super) async fn drain_inboxes(
                 pane.app.push_system_message(display);
                 pane.app.push_user_message(text.clone());
                 pane.app.start_streaming();
-                pane.pending_prompt = Some(text);
+                pane.pending_prompt = Some(PendingPrompt::text(text));
+                if let Some(prompt) = pane.pending_prompt.as_mut() {
+                    save_prompt_to_conversation(&mut pane.conversation, prompt);
+                    prompt.mark_persisted();
+                }
             }
         }
     }
@@ -243,7 +248,8 @@ pub(super) async fn fork_pane(
         new_pane.app.push_user_message(text.clone());
         new_pane.app.active_tools.clear();
         new_pane.app.start_streaming();
-        new_pane.pending_prompt = Some(text.clone());
+        new_pane.pending_prompt = Some(PendingPrompt::text(text.clone()));
+        save_pane_pending_prompt(&mut new_pane);
         new_pane.label = Some(text.chars().take(20).collect());
     }
 
@@ -303,7 +309,8 @@ pub(super) fn process_delegations(
         let mut new_pane = crate::pane::Pane::new(new_id, new_app);
         new_pane.label = Some(format!("task: {}", truncate_label(&del.task)));
         new_pane.inbox = Some(bus.register(new_id));
-        new_pane.pending_prompt = Some(del.task);
+        new_pane.pending_prompt = Some(PendingPrompt::text(del.task));
+        save_pane_pending_prompt(&mut new_pane);
         new_pane.delegation = Some(crate::pane::DelegationInfo {
             from_pane: del.from,
             task_id: del.task_id.clone(),
@@ -426,6 +433,7 @@ mod tests {
 
     use crate::file_tracker::FileTracker;
     use crate::pane::Pane;
+    use crate::runner::streams::StreamState;
 
     fn app() -> App {
         App::new(ModelId::from("test-model"), TokenCount::new(4096))
@@ -630,6 +638,48 @@ mod tests {
         assert!(
             stream_state.meta(pane2).is_none(),
             "closing a pane should remove its stream metadata"
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_inboxes_starts_idle_pane_with_persistable_prompt() {
+        use crate::messaging::{InterPaneMessage, MessageBus, MessageIntent};
+        use mush_ai::types::Timestamp;
+
+        let pane_id = PaneId::new(1);
+        let sender_id = PaneId::new(2);
+        let bus = MessageBus::default();
+        let inbox = bus.register(pane_id);
+        let mut pane = Pane::new(pane_id, app());
+        pane.inbox = Some(inbox);
+        let mut pane_mgr = PaneManager::new(pane);
+        let stream_state = StreamState::new();
+
+        bus.send(
+            pane_id,
+            InterPaneMessage {
+                from: sender_id,
+                to: Some(pane_id),
+                intent: MessageIntent::Info,
+                content: "please investigate".into(),
+                task_id: Some("task-1".into()),
+                timestamp: Timestamp::from_ms(42),
+            },
+        )
+        .unwrap();
+
+        drain_inboxes(&mut pane_mgr, &stream_state).await;
+
+        let pane = pane_mgr.pane(pane_id).unwrap();
+        assert!(pane.app.stream.active);
+        assert!(pane.pending_prompt.is_some());
+        let messages = pane.conversation.context();
+        let Message::User(user) = &messages[0] else {
+            panic!("expected inbox message to persist as a user message");
+        };
+        assert_eq!(
+            user.text(),
+            "[info from pane 2 task=task-1]: please investigate"
         );
     }
 

@@ -1045,9 +1045,9 @@ pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
 /// export conversation to a markdown file
 pub fn handle_export(app: &mut App, conversation: &ConversationState, args: &str) {
     let path = if args.trim().is_empty() {
-        "conversation.md".to_string()
+        std::path::PathBuf::from("conversation.md")
     } else {
-        args.trim().to_string()
+        std::path::PathBuf::from(args.trim())
     };
 
     let mut md = String::new();
@@ -1083,8 +1083,12 @@ pub fn handle_export(app: &mut App, conversation: &ConversationState, args: &str
         }
     }
 
-    match std::fs::write(&path, &md) {
-        Ok(()) => app.push_system_message(format!("exported to {path} ({} bytes)", md.len())),
+    match mush_ai::private_io::write_atomic(&path, &md) {
+        Ok(()) => app.push_system_message(format!(
+            "exported to {} ({} bytes)",
+            path.display(),
+            md.len()
+        )),
         Err(e) => app.push_system_message(format!("export failed: {e}")),
     }
 }

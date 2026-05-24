@@ -378,8 +378,8 @@ async fn handle_streaming_key_event(
         AppEvent::Abort => {
             abort_focused_stream(pane_mgr, stream_state, deps.delegation_queue).await;
         }
-        AppEvent::UserSubmit { text } => {
-            submit_streaming_input(pane_mgr, stream_state, text).await;
+        AppEvent::UserSubmit { text, images } => {
+            submit_streaming_input(pane_mgr, stream_state, text, images).await;
         }
         AppEvent::EditSteering => {
             edit_last_queued_steering(pane_mgr, stream_state).await;
@@ -418,7 +418,7 @@ pub(super) async fn handle_idle_terminal_events(
                     }
                 } else {
                     match app_event {
-                        AppEvent::UserSubmit { text } => {
+                        AppEvent::UserSubmit { text, images } => {
                             // a backgrounded compaction is going to call
                             // `conversation.replace_messages(...)` on
                             // completion, which would clobber any user
@@ -430,13 +430,6 @@ pub(super) async fn handle_idle_terminal_events(
                             let pane_id = pane_mgr.focused().id;
                             if deps.pending_compactions.contains_key(&pane_id) {
                                 let pane = pane_mgr.focused_mut();
-                                let images: Vec<Vec<u8>> = pane
-                                    .app
-                                    .input
-                                    .take_images()
-                                    .into_iter()
-                                    .map(|img| img.data)
-                                    .collect();
                                 pane.queue_input_during_compaction(text, images);
                                 continue;
                             }
@@ -446,13 +439,8 @@ pub(super) async fn handle_idle_terminal_events(
                                 pane.label = Some(expanded.chars().take(30).collect());
                             }
                             let pane = pane_mgr.focused_mut();
-                            let pending_images: Vec<Vec<u8>> = pane
-                                .app
-                                .input
-                                .images
-                                .iter()
-                                .map(|img| img.data.clone())
-                                .collect();
+                            let pending_images: Vec<Vec<u8>> =
+                                images.iter().map(|img| img.data.clone()).collect();
                             if pending_images.is_empty() {
                                 pane.app.push_user_message(expanded.clone());
                             } else {
@@ -470,10 +458,12 @@ pub(super) async fn handle_idle_terminal_events(
                                     }
                                 }
                             }
-                            let app = &mut pane_mgr.focused_mut().app;
-                            app.active_tools.clear();
-                            app.start_streaming();
-                            *deps.pending_prompt = Some(expanded);
+                            let pane = pane_mgr.focused_mut();
+                            pane.app.active_tools.clear();
+                            pane.app.start_streaming();
+                            pane.pending_prompt =
+                                Some(crate::pane::PendingPrompt::with_images(expanded, images));
+                            super::runtime::save_pane_pending_prompt(pane);
                             // save the user message immediately so it survives crashes
                             if let Some(ref saver) = deps.tui_config.save_session {
                                 saver(super::streams::build_session_snapshot(

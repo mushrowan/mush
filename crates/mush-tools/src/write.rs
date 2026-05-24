@@ -82,7 +82,7 @@ fn write_file(path: &Path, content: &str) -> ToolResult {
         return ToolResult::error(format!("failed to create directories: {e}"));
     }
 
-    match std::fs::write(path, content) {
+    match mush_ai::private_io::write_atomic(path, content) {
         Ok(()) => ToolResult::text(format!(
             "Successfully wrote {} bytes to {}\n\npreview:\n{}",
             content.len(),

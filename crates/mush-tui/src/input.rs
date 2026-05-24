@@ -303,7 +303,10 @@ fn handle_streaming_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
                 }
             }
         }
-        return Some(AppEvent::UserSubmit { text });
+        return Some(AppEvent::UserSubmit {
+            text,
+            images: app.input.take_images(),
+        });
     }
 
     handle_editing(app, key)
@@ -398,7 +401,10 @@ fn handle_idle_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
                     }
                 }
             }
-            Some(AppEvent::UserSubmit { text })
+            Some(AppEvent::UserSubmit {
+                text,
+                images: app.input.take_images(),
+            })
         }
 
         // delete-char-or-quit: quit on empty, delete char otherwise
@@ -2070,7 +2076,10 @@ mod tests {
         app.input.cursor = 5;
         let event = handle_key(&mut app, key(KeyCode::Enter));
         match event {
-            Some(AppEvent::UserSubmit { text }) => assert_eq!(text, "hello"),
+            Some(AppEvent::UserSubmit { text, images }) => {
+                assert_eq!(text, "hello");
+                assert!(images.is_empty());
+            }
             other => panic!("expected UserSubmit, got {other:?}"),
         }
         assert!(app.input.text.is_empty());
@@ -2525,7 +2534,10 @@ mod tests {
         app.input.cursor = 10;
         let event = handle_key(&mut app, key(KeyCode::Enter));
         match event {
-            Some(AppEvent::UserSubmit { text }) => assert_eq!(text, "steer this"),
+            Some(AppEvent::UserSubmit { text, images }) => {
+                assert_eq!(text, "steer this");
+                assert!(images.is_empty());
+            }
             other => panic!("expected UserSubmit, got {other:?}"),
         }
     }
@@ -2653,8 +2665,9 @@ mod tests {
         app.input.cursor = app.input.text.len();
         let event = handle_key(&mut app, key(KeyCode::Enter));
         match event {
-            Some(AppEvent::UserSubmit { text }) => {
+            Some(AppEvent::UserSubmit { text, images }) => {
                 assert_eq!(text, "@asdf", "enter must send the raw @word");
+                assert!(images.is_empty());
             }
             other => panic!("expected UserSubmit, got {other:?}"),
         }

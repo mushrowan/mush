@@ -266,7 +266,8 @@ fn write_settings_file(path: &std::path::Path, settings: &ScopedSettings) -> Res
     let persisted = PersistedSettings::from(settings);
     let body =
         toml::to_string_pretty(&persisted).map_err(|e| format!("serialise settings: {e}"))?;
-    std::fs::write(path, body).map_err(|e| format!("write {}: {e}", path.display()))?;
+    mush_ai::private_io::write_atomic(path, body)
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
     Ok(())
 }
 

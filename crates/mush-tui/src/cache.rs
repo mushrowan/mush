@@ -656,7 +656,7 @@ pub fn dump_cache_bust_diagnostic_in(
     }
 
     match serde_json::to_string_pretty(&diag_out) {
-        Ok(json) => match std::fs::write(&path, json) {
+        Ok(json) => match mush_ai::private_io::write_private(&path, json) {
             Ok(()) => Some(path),
             Err(e) => {
                 tracing::error!(error = %e, "failed to write cache bust diagnostic");

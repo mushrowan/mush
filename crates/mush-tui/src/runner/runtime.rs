@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
-use super::{ThinkingPrefs, ThinkingPrefsSaver, TuiConfig};
-use mush_ai::types::{Message, ThinkingLevel};
+use super::{ThinkingPrefs, ThinkingPrefsSaver, TuiConfig, streams};
+use mush_ai::types::{Message, ThinkingLevel, Timestamp, UserMessage};
 use mush_session::ConversationState;
 use notify::RecommendedWatcher;
 
@@ -392,24 +392,47 @@ fn replay_compaction_inputs(pane: &mut Pane) {
         return;
     }
     let mut texts: Vec<String> = Vec::with_capacity(drained.len());
-    let mut images: Vec<Vec<u8>> = Vec::new();
+    let mut images = Vec::new();
     for (text, imgs) in drained {
         texts.push(text);
         images.extend(imgs);
     }
     let combined = texts.join("\n\n");
-    if images.is_empty() {
+    let image_bytes: Vec<Vec<u8>> = images.iter().map(|image| image.data.clone()).collect();
+    if image_bytes.is_empty() {
         pane.app.push_user_message(combined.clone());
     } else {
         pane.app
-            .push_user_message_with_images(combined.clone(), images);
+            .push_user_message_with_images(combined.clone(), image_bytes);
     }
     pane.app.active_tools.clear();
     pane.app.start_streaming();
     // take_pending_prompts drains every pane's slot, so setting just
     // this pane's slot is enough; no need to thread the focused
     // override through here
-    pane.pending_prompt = Some(combined);
+    pane.pending_prompt = Some(crate::pane::PendingPrompt::with_images(combined, images));
+}
+
+pub(super) fn save_pane_pending_prompt(pane: &mut Pane) {
+    let Some(prompt) = pane.pending_prompt.as_mut() else {
+        return;
+    };
+    if prompt.is_persisted() {
+        return;
+    }
+    save_prompt_to_conversation(&mut pane.conversation, prompt);
+    prompt.mark_persisted();
+}
+
+pub(super) fn save_prompt_to_conversation(
+    conversation: &mut ConversationState,
+    prompt: &crate::pane::PendingPrompt,
+) {
+    let user_message = Message::User(UserMessage {
+        content: streams::build_user_content(&prompt.text, &prompt.images),
+        timestamp_ms: Timestamp::now(),
+    });
+    conversation.append_message(user_message);
 }
 
 fn watch_config(
@@ -709,7 +732,9 @@ mod tests {
         assert!(!pane.app.has_queued_messages());
         assert!(pane.app.stream.active, "should kick off a new stream");
         assert_eq!(
-            pane.pending_prompt.as_deref(),
+            pane.pending_prompt
+                .as_ref()
+                .map(|prompt| prompt.text.as_str()),
             Some("first thought\n\nsecond thought")
         );
         // the combined prompt should have been pushed as a real (non-
@@ -734,6 +759,41 @@ mod tests {
         assert!(pane.pending_prompt.is_none());
         assert!(!pane.app.stream.active);
         assert!(pane.app.messages.is_empty());
+    }
+
+    #[test]
+    fn replay_compaction_inputs_preserves_images_for_pending_prompt() {
+        use crate::input_buffer::PendingImage;
+        use mush_ai::types::{ImageMimeType, Message, UserContent, UserContentPart};
+
+        let app = App::new("test".into(), TokenCount::new(200_000));
+        let mut pane = Pane::new(PaneId::new(1), app);
+        pane.queue_input_during_compaction(
+            "look".into(),
+            vec![PendingImage {
+                data: vec![1, 2, 3, 4],
+                mime_type: ImageMimeType::Png,
+                dimensions: Some((10, 10)),
+            }],
+        );
+
+        replay_compaction_inputs(&mut pane);
+
+        save_pane_pending_prompt(&mut pane);
+        assert!(pane.pending_prompt.is_some());
+        let snapshot =
+            crate::runner::streams::build_session_snapshot(&PaneManager::new(pane), &test_config());
+        let Message::User(user) = &snapshot.primary.context()[0] else {
+            panic!("expected user message");
+        };
+        let UserContent::Parts(parts) = &user.content else {
+            panic!("expected multipart user content");
+        };
+        assert!(
+            parts
+                .iter()
+                .any(|part| matches!(part, UserContentPart::Image(_)))
+        );
     }
 
     #[test]

@@ -75,7 +75,7 @@ impl DiscoveryCache {
         }
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        std::fs::write(path, json)
+        crate::private_io::write_atomic(path, json)
     }
 
     /// merge a fresh discovery report into the cache.

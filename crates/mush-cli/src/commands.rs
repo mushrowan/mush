@@ -87,7 +87,7 @@ pub fn open_config() -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(
+        mush_ai::private_io::write_atomic(
             &path,
             "# mush configuration\n\
              # model = \"gpt-5.4\"  # optional, auto-default depends on auth\n\
