@@ -344,10 +344,13 @@ impl App {
     }
 
     /// whether this pane currently has time-driven visual animation.
-    /// running tools remain busy for input/abort state, but their panels
-    /// redraw only when live output changes
+    /// running tools animate the status-bar activity label even when the
+    /// provider stream is parked waiting for tool completion
     pub fn has_visible_animation(&self) -> bool {
-        self.compacting || self.stream.active || self.navigation.has_unread
+        self.compacting
+            || self.stream.active
+            || self.navigation.has_unread
+            || self.has_running_tool()
     }
 
     /// whether a draw is useful even when no event arrived. this keeps
@@ -360,12 +363,7 @@ impl App {
 
     /// whether the agent is currently active (streaming or executing tools)
     pub fn is_busy(&self) -> bool {
-        self.compacting
-            || self.stream.active
-            || self
-                .active_tools
-                .iter()
-                .any(|t| t.status == ToolCallStatus::Running)
+        self.compacting || self.stream.active || self.has_running_tool()
     }
 
     /// short label describing what the agent is currently doing, suitable
@@ -377,12 +375,7 @@ impl App {
         if self.compacting {
             return Some("compacting…".into());
         }
-        let running: Vec<&str> = self
-            .active_tools
-            .iter()
-            .filter(|t| t.status == ToolCallStatus::Running)
-            .map(|t| t.name.as_str())
-            .collect();
+        let running: Vec<&str> = self.running_tool_names().collect();
         if !running.is_empty() {
             let first = running[0];
             let all_same = running.iter().all(|n| *n == first);
@@ -400,6 +393,17 @@ impl App {
             });
         }
         None
+    }
+
+    fn has_running_tool(&self) -> bool {
+        self.running_tool_names().next().is_some()
+    }
+
+    fn running_tool_names(&self) -> impl Iterator<Item = &str> {
+        self.active_tools
+            .iter()
+            .filter(|t| t.status == ToolCallStatus::Running)
+            .map(|t| t.name.as_str())
     }
 
     /// add a user message to the display
@@ -520,11 +524,7 @@ impl App {
     /// mark a tool as being executed
     pub fn start_tool(&mut self, tool_call_id: &ToolCallId, name: &str, summary: &str) {
         // new batch when no tools are currently running
-        let has_running = self
-            .active_tools
-            .iter()
-            .any(|t| t.status == ToolCallStatus::Running);
-        if !has_running {
+        if !self.has_running_tool() {
             self.current_tool_batch += 1;
         }
         self.active_tools.push(ActiveToolState {
@@ -2738,7 +2738,7 @@ batch: 1/2 succeeded, 1 failed";
     }
 
     #[test]
-    fn running_tool_is_busy_but_not_a_visible_animation() {
+    fn running_tool_is_busy_and_animates_activity_label() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.active_tools
             .push(crate::display_types::ActiveToolState {
@@ -2751,7 +2751,8 @@ batch: 1/2 succeeded, 1 failed";
             });
 
         assert!(app.is_busy());
-        assert!(!app.has_visible_animation());
+        assert!(app.has_visible_animation());
+        assert!(app.needs_periodic_redraw(false));
 
         app.stream.start();
         assert!(app.has_visible_animation());
@@ -2759,22 +2760,6 @@ batch: 1/2 succeeded, 1 failed";
         app.stream.active = false;
         app.compacting = true;
         assert!(app.has_visible_animation());
-    }
-
-    #[test]
-    fn running_tool_does_not_need_periodic_redraw_without_time_based_ui() {
-        let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.active_tools
-            .push(crate::display_types::ActiveToolState {
-                tool_call_id: "test_1".into(),
-                name: "bash".into(),
-                summary: "running command".into(),
-                live_output: None,
-                status: ToolCallStatus::Running,
-                output: None,
-            });
-
-        assert!(!app.needs_periodic_redraw(false));
     }
 
     #[test]

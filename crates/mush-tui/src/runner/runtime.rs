@@ -755,6 +755,25 @@ mod tests {
     }
 
     #[test]
+    fn running_tool_ticks_activity_shimmer() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.active_tools
+            .push(crate::display_types::ActiveToolState {
+                tool_call_id: "tool_1".into(),
+                name: "bash".into(),
+                summary: "sleep 10".into(),
+                live_output: None,
+                status: crate::display_types::ToolCallStatus::Running,
+                output: None,
+            });
+        let mut runtime =
+            RunnerRuntime::from_pane(Pane::new(PaneId::new(1), app), ThinkingPrefs::default());
+
+        assert!(runtime.tick_animation_panes());
+        assert_eq!(runtime.pane_mgr.focused().app.shimmer_phase(), 1);
+    }
+
+    #[test]
     fn poll_usage_drains_background_updates_without_awaiting_http() {
         let app = App::new("claude-sonnet-4-5".into(), TokenCount::new(200_000));
         let mut runtime =
