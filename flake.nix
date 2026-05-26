@@ -99,10 +99,11 @@
           exec ${craneOutputs.package}/bin/mush "$@"
         '';
         packages.profiler = pkgs.writeShellScriptBin "mush-profiler" ''
-          export RUST_LOG=''${RUST_LOG:-warn,mush_agent=info,mush_ai=info,mush_tools=info,mush_tui=info,mush_cli=info,mush_ext=info,mush_mcp=info,mush_treesitter=info}
+          export RUST_LOG=''${RUST_LOG:-warn,mush_agent=info,mush_ai=info,mush_tools=info,mush_tui=info,mush_cli=info,mush_ext=info,mush_mcp=info,mush_treesitter=info,mush_tui::resize=info,mush_tui::scroll=debug}
           export MUSH_TRACE=true
           export MUSH_PROFILE_STARTUP=true
           echo "profiling: tracing timeline + startup phases enabled" >&2
+          echo "resize/scroll diagnostics: mush_tui::resize=info, mush_tui::scroll=debug" >&2
           echo "trace output: ''${XDG_DATA_HOME:-$HOME/.local/share}/mush/mush-trace-$$.json" >&2
           echo "open traces at https://ui.perfetto.dev" >&2
           echo "" >&2
@@ -167,7 +168,7 @@
           data_dir="''${XDG_DATA_HOME:-$HOME/.local/share}/mush/profiles/perf-$(date +%Y%m%d-%H%M%S)"
           mkdir -p "$data_dir"
 
-          export RUST_LOG=''${RUST_LOG:-warn,mush_agent=debug,mush_ai=debug,mush_ai::providers::sse::wire=off,mush_tools=debug,mush_tui=debug,mush_cli=debug,mush_ext=debug,mush_session=debug,mush_lsp=debug,mush_mcp=debug,mush_treesitter=debug,mush_tui::draw_reason=trace}
+          export RUST_LOG=''${RUST_LOG:-warn,mush_agent=debug,mush_ai=debug,mush_ai::providers::sse::wire=off,mush_tools=debug,mush_tui=debug,mush_cli=debug,mush_ext=debug,mush_session=debug,mush_lsp=debug,mush_mcp=debug,mush_treesitter=debug,mush_tui::draw_reason=trace,mush_tui::scroll=trace,mush_tui::resize=trace}
           export MUSH_TRACE=true
           export MUSH_PROFILE_STARTUP=true
           export MUSH_TRACE_DIR="$data_dir"
@@ -177,6 +178,7 @@
           printf '%s\n' "${craneOutputsProfiling.package}/bin/mush $*" > "$data_dir/command.txt"
 
           echo "perf profiling: logs + tracing timeline + startup phases + raw perf" >&2
+          echo "resize/scroll diagnostics: mush_tui::resize=trace, mush_tui::scroll=trace" >&2
           echo "output dir: $data_dir" >&2
           echo "log file: ''${XDG_DATA_HOME:-$HOME/.local/share}/mush/mush.log" >&2
           echo "trace dir: $MUSH_TRACE_DIR" >&2

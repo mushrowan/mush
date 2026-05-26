@@ -86,7 +86,17 @@ fn trace_dropped_event(event: Event, phase: &str) {
             tracing::debug!(%phase, "focus lost");
         }
         Event::Resize(w, h) => {
-            tracing::debug!(%phase, width = w, height = h, "terminal resized");
+            // a resize that lands in trace_dropped_event means the
+            // current phase didn't handle it - the size cache and
+            // scroll baselines won't be reset. warn-level so a real
+            // resize regression is visible without tweaking RUST_LOG
+            tracing::warn!(
+                target: "mush_tui::resize",
+                %phase,
+                width = w,
+                height = h,
+                "resize event reached unhandled-event path (no apply_resize)"
+            );
         }
         event => {
             tracing::debug!(%phase, ?event, "unhandled terminal event");
@@ -292,6 +302,12 @@ pub(super) fn apply_resize(
     pane_mgr: &mut PaneManager,
 ) {
     size_cache.invalidate();
+    let pane_count = pane_mgr.panes().len();
+    tracing::info!(
+        target: "mush_tui::resize",
+        pane_count,
+        "apply_resize: size cache invalidated, notifying panes"
+    );
     for pane in pane_mgr.panes_mut() {
         pane.app.notify_resize();
     }
@@ -328,7 +344,8 @@ pub(super) async fn handle_streaming_terminal_events(
                 // k/j presses don't get swallowed by stale baseline_vis
                 apply_resize(deps.size_cache, pane_mgr);
                 changed = true;
-                tracing::debug!(
+                tracing::info!(
+                    target: "mush_tui::resize",
                     phase = "streaming",
                     width = w,
                     height = h,
@@ -544,7 +561,13 @@ pub(super) async fn handle_idle_terminal_events(
             }
             Event::Resize(w, h) => {
                 apply_resize(deps.size_cache, pane_mgr);
-                tracing::debug!(phase = "idle", width = w, height = h, "terminal resized");
+                tracing::info!(
+                    target: "mush_tui::resize",
+                    phase = "idle",
+                    width = w,
+                    height = h,
+                    "terminal resized"
+                );
             }
             event => trace_dropped_event(event, "idle"),
         }

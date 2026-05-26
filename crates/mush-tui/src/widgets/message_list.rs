@@ -39,17 +39,30 @@ pub(crate) const MESSAGE_INDENT_RIGHT: usize = 1;
 fn update_scroll_baseline(app: &App, current_vis: u16) -> (usize, u16) {
     let stored = app.render_state.scroll_baseline.get();
     let stored_vis = app.render_state.scroll_baseline_vis.get();
-    let (baseline, baseline_vis) = match (app.scroll_offset, stored) {
-        (0, _) => (0, 0),
+    let prev_content_lines = app.render_state.prev_content_lines.get();
+    let (baseline, baseline_vis, reason) = match (app.scroll_offset, stored) {
+        (0, _) => (0, 0, "at_bottom"),
         // first frame scrolled up: pin to prev actual + current vis
-        (_, 0) => (app.render_state.prev_content_lines.get(), current_vis),
+        (_, 0) => (prev_content_lines, current_vis, "first_capture"),
         // viewport grew past what was captured: re-pin so compensation
         // doesn't go negative and absorb scroll keypresses
-        (_, _) if current_vis > stored_vis => {
-            (app.render_state.prev_content_lines.get(), current_vis)
-        }
-        (_, current) => (current, stored_vis),
+        (_, _) if current_vis > stored_vis => (prev_content_lines, current_vis, "repin_grow"),
+        (_, current) => (current, stored_vis, "hold"),
     };
+    if baseline != stored || baseline_vis != stored_vis {
+        tracing::debug!(
+            target: "mush_tui::scroll",
+            reason,
+            scroll_offset = app.scroll_offset,
+            prev_baseline = stored,
+            prev_baseline_vis = stored_vis,
+            new_baseline = baseline,
+            new_baseline_vis = baseline_vis,
+            current_vis,
+            prev_content_lines,
+            "baseline updated"
+        );
+    }
     app.render_state.scroll_baseline.set(baseline);
     app.render_state.scroll_baseline_vis.set(baseline_vis);
     (baseline, baseline_vis)
@@ -550,6 +563,21 @@ impl Widget for MessageList<'_> {
         self.app.render_state.visible_area_height.set(visible);
         self.app.render_state.message_area.set(area);
         self.app.render_state.render_scroll.set(scroll);
+        tracing::trace!(
+            target: "mush_tui::scroll",
+            scroll_offset = self.app.scroll_offset,
+            effective_offset = effective_offset_final,
+            render_scroll = scroll,
+            max_scroll,
+            total_lines = total_lines_usize,
+            visible,
+            baseline,
+            baseline_vis,
+            compensation,
+            area_w = area.width,
+            area_h = area.height,
+            "frame settled"
+        );
 
         // compute image render areas based on scroll position
         let mut render_areas = Vec::new();

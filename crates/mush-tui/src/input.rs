@@ -961,6 +961,7 @@ fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         .matches_in(KeyScope::Scroll, Action::NextItem, key)
     {
         let scroll_lines = app.scroll_lines;
+        let prev_scroll_offset = app.scroll_offset;
         if app.navigation.scroll_unit == ScrollUnit::Block {
             let blocks = app.blocks();
             if let Some(sel) = app.navigation.selected_block
@@ -985,6 +986,14 @@ fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
                 app.navigation.selected_message = Some(sel + 1);
             }
         }
+        tracing::debug!(
+            target: "mush_tui::scroll",
+            key = "next_item",
+            scroll_lines,
+            prev_scroll_offset,
+            new_scroll_offset = app.scroll_offset,
+            "scroll keypress"
+        );
         return None;
     }
     if app
@@ -992,6 +1001,7 @@ fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         .matches_in(KeyScope::Scroll, Action::PreviousItem, key)
     {
         let scroll_lines = app.scroll_lines;
+        let prev_scroll_offset = app.scroll_offset;
         if app.navigation.scroll_unit == ScrollUnit::Block {
             let blocks = app.blocks();
             if let Some(sel) = app.navigation.selected_block {
@@ -1009,6 +1019,14 @@ fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
                 }
             }
         }
+        tracing::debug!(
+            target: "mush_tui::scroll",
+            key = "previous_item",
+            scroll_lines,
+            prev_scroll_offset,
+            new_scroll_offset = app.scroll_offset,
+            "scroll keypress"
+        );
         return None;
     }
     if app

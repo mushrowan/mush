@@ -325,9 +325,20 @@ impl App {
     /// resize while the new total propagates, then anchoring resumes
     /// correctly
     pub fn notify_resize(&mut self) {
+        let prior_baseline = self.render_state.scroll_baseline.get();
+        let prior_baseline_vis = self.render_state.scroll_baseline_vis.get();
+        let prior_prev_content_lines = self.render_state.prev_content_lines.get();
         self.render_state.scroll_baseline.set(0);
         self.render_state.scroll_baseline_vis.set(0);
         self.render_state.prev_content_lines.set(0);
+        tracing::info!(
+            target: "mush_tui::resize",
+            scroll_offset = self.scroll_offset,
+            prior_baseline,
+            prior_baseline_vis,
+            prior_prev_content_lines,
+            "notify_resize cleared scroll baseline"
+        );
     }
 
     /// whether the unread flash indicator is in the "on" phase
