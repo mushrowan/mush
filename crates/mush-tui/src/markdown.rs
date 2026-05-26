@@ -10,6 +10,7 @@ use ratatui::text::{Line, Span, Text};
 use std::sync::LazyLock;
 use tabled::builder::Builder;
 use tabled::settings::Width;
+use tabled::settings::peaker::Priority;
 use tabled::settings::style::Style as TableStyle;
 
 use crate::theme::Theme;
@@ -544,7 +545,15 @@ fn render_records_with_tabled(records: Vec<Vec<String>>, width: Option<usize>) -
     let mut table = builder.build();
     table.with(TableStyle::sharp());
     if let Some(width) = width {
-        table.with(Width::wrap(width));
+        // Priority::max(true) shrinks the widest column first so a
+        // very long second column does not collapse the short first
+        // column to zero-width (and discard its content). keep_words
+        // avoids breaking words mid-token when there's room
+        table.with(
+            Width::wrap(width)
+                .keep_words(true)
+                .priority(Priority::max(true)),
+        );
     }
     table.to_string()
 }
@@ -1269,5 +1278,40 @@ done.";
     #[test]
     fn markdown_uses_pulldown_cmark_for_tables() {
         assert!(pulldown_table_rows("| a | b |\n|---|---|\n| c | d |").is_some());
+    }
+
+    #[test]
+    fn imbalanced_table_keeps_first_column_content() {
+        // when one column is much longer than the other, tabled's default
+        // wrap strategy used to collapse the shorter column to a width of
+        // ~2 chars and discard its text entirely. regression test: the
+        // shorter column's content must always survive the wrap pass.
+        let source = "\
+| what the two vars actually mean today | actually configures |
+|---|---|
+| `spectral_base_domain` | the standalone spectral API endpoint when studio is NOT deployed. caddy renders one site: `<spectral_domain>` -> `spectral:8000`. |
+| `spectral_domain` | studio's root domain. studio UI lives at the root, with `api.` / `kratos.` / `hydra.` subdomains hanging off it. when studio is present, spectral's API also routes via this domain (studio owns the root, spectral piggybacks). |";
+
+        for width in [60usize, 70, 80, 90, 100, 120] {
+            let text = render_with_width(source, &t(), Some(width));
+            let rendered = text
+                .lines
+                .iter()
+                .map(Line::to_string)
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                rendered.contains("spectral_base_domain"),
+                "first-column content was dropped at width {width}:\n{rendered}"
+            );
+            assert!(
+                rendered.contains("spectral_domain"),
+                "first-column content was dropped at width {width}:\n{rendered}"
+            );
+            assert!(
+                rendered.contains("two vars"),
+                "first-column header was dropped at width {width}:\n{rendered}"
+            );
+        }
     }
 }
