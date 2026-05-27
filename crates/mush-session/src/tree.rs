@@ -158,6 +158,60 @@ impl SessionTree {
         Some(id)
     }
 
+    /// add a compaction marker at the current leaf summarising the first
+    /// `first_kept_context_index` context messages of the current branch.
+    /// existing entries are left in place so `/tree` and `/branch` can
+    /// still navigate back to pre-compaction state. the LLM context
+    /// produced by [`SessionTree::build_context`] will collapse to the
+    /// summary plus the messages from `first_kept_id` onward.
+    ///
+    /// `first_kept_context_index` is an index into the flat context
+    /// (the same shape `build_context` returns), counting Message and
+    /// BranchSummary entries as one each. returns `None` if no entry in
+    /// the current branch corresponds to that index, or if a prior
+    /// `EntryKind::Compaction` is in the branch (nested compactions are
+    /// not yet supported).
+    pub fn compact_at_leaf(
+        &mut self,
+        summary: String,
+        first_kept_context_index: usize,
+    ) -> Option<EntryId> {
+        let branch = self.current_branch();
+        let mut context_idx = 0usize;
+        let mut first_kept_id: Option<EntryId> = None;
+        for entry in &branch {
+            match entry.kind {
+                EntryKind::Message { .. } | EntryKind::BranchSummary { .. } => {
+                    if context_idx == first_kept_context_index {
+                        first_kept_id = Some(entry.id.clone());
+                        break;
+                    }
+                    context_idx += 1;
+                }
+                // nested compactions would require walking the synthetic
+                // summary + kept-message expansion that collect_context
+                // performs. punt on that until we actually need it
+                EntryKind::Compaction { .. } => return None,
+            }
+        }
+        let first_kept_id = first_kept_id?;
+        // re-borrow free of branch
+        let parent_id = self.leaf_id.clone();
+        let entry = SessionEntry {
+            id: EntryId::new(),
+            parent_id,
+            timestamp: Timestamp::now(),
+            kind: EntryKind::Compaction {
+                summary,
+                first_kept_id,
+            },
+        };
+        let id = entry.id.clone();
+        self.entries.push(entry);
+        self.leaf_id = Some(id.clone());
+        Some(id)
+    }
+
     /// reset leaf to before any entries (next append creates a root)
     pub fn reset_leaf(&mut self) {
         self.leaf_id = None;
@@ -518,6 +572,73 @@ mod tests {
         tree.branch_with_summary(&u1, "discussed topic A briefly");
 
         assert_eq!(tree.context_len(), tree.build_context().len());
+    }
+
+    #[test]
+    fn compact_at_leaf_preserves_old_entries_and_collapses_context() {
+        // simulate a /compact: long conversation, then compact at index 3
+        // (keep last 2 messages, summarise the first 3)
+        let mut tree = SessionTree::new();
+        tree.append_message(user_msg("q1"));
+        tree.append_message(assistant_msg("a1"));
+        tree.append_message(user_msg("q2"));
+        tree.append_message(assistant_msg("a2"));
+        let kept_first = tree.append_message(user_msg("q3"));
+        let _kept_last = tree.append_message(assistant_msg("a3"));
+        let entries_before = tree.entries().len();
+
+        let compaction_id = tree
+            .compact_at_leaf("summary of q1/a1/q2/a2".into(), 4)
+            .expect("compaction should succeed when index is in current branch");
+
+        // leaf moves to the compaction node
+        assert_eq!(tree.leaf_id(), Some(&compaction_id));
+
+        // all six pre-compaction entries still in the tree (plus the new
+        // compaction node = 7 entries total). the user can /branch back
+        assert_eq!(tree.entries().len(), entries_before + 1);
+
+        // LLM context now sees: synthetic summary message + last 2 kept messages
+        let ctx = tree.build_context();
+        assert_eq!(ctx.len(), 3);
+        if let Message::User(u) = &ctx[0] {
+            if let UserContent::Text(t) = &u.content {
+                assert!(t.contains("summary of q1/a1/q2/a2"));
+            } else {
+                panic!("expected text content in summary message");
+            }
+        } else {
+            panic!("expected first context message to be the summary");
+        }
+        // first kept message is q3
+        if let Message::User(u) = &ctx[1] {
+            if let UserContent::Text(t) = &u.content {
+                assert_eq!(t.as_str(), "q3");
+            }
+        } else {
+            panic!("expected q3 as first kept message");
+        }
+
+        // sanity: the Compaction entry's first_kept_id points at the q3 entry
+        if let EntryKind::Compaction { first_kept_id, .. } = &tree
+            .by_id(&compaction_id)
+            .expect("compaction entry present")
+            .kind
+        {
+            assert_eq!(first_kept_id, &kept_first);
+        } else {
+            panic!("expected Compaction kind on new entry");
+        }
+    }
+
+    #[test]
+    fn compact_at_leaf_rejects_index_past_branch() {
+        let mut tree = SessionTree::new();
+        tree.append_message(user_msg("q1"));
+        tree.append_message(assistant_msg("a1"));
+
+        // only 2 messages in branch, index 5 is out of range
+        assert!(tree.compact_at_leaf("summary".into(), 5).is_none());
     }
 
     #[test]

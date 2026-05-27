@@ -89,6 +89,19 @@ impl ConversationState {
         self.tree.branch_with_summary(from_id, summary)
     }
 
+    /// add a compaction marker at the current leaf, summarising the
+    /// first `first_kept_context_index` context messages of the current
+    /// branch. existing tree entries are preserved so `/tree` and
+    /// `/branch` can navigate back to the pre-compaction state.
+    /// see [`SessionTree::compact_at_leaf`] for the index semantics
+    pub fn compact_at_leaf(
+        &mut self,
+        summary: String,
+        first_kept_context_index: usize,
+    ) -> Option<EntryId> {
+        self.tree.compact_at_leaf(summary, first_kept_context_index)
+    }
+
     pub fn reset_leaf(&mut self) {
         self.tree.reset_leaf();
     }
