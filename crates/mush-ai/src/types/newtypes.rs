@@ -246,6 +246,71 @@ impl From<usize> for TokenCount {
     }
 }
 
+/// error returned when [`TokenCount`] cannot parse a human-readable string
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+pub enum TokenCountParseError {
+    #[error("token count cannot be empty")]
+    Empty,
+    #[error("token count '{0}' has an unknown unit suffix (expected k or m)")]
+    UnknownSuffix(String),
+    #[error("token count '{0}' is not a valid number")]
+    InvalidNumber(String),
+}
+
+impl std::str::FromStr for TokenCount {
+    type Err = TokenCountParseError;
+
+    /// parse a human-readable token count. accepts plain integers
+    /// (`1024`) and the `k` / `m` suffixes for 1_000 and 1_000_000
+    /// multipliers respectively. fractional values are allowed when
+    /// paired with a suffix (`1.5k` = 1_500).
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            return Err(TokenCountParseError::Empty);
+        }
+
+        // split off an optional trailing unit suffix. only ascii alpha
+        // is treated as a suffix so digits in the middle aren't mis-split
+        let (num_part, multiplier) = match trimmed.chars().last() {
+            Some(c) if c.is_ascii_alphabetic() => {
+                let (head, tail) = trimmed.split_at(trimmed.len() - c.len_utf8());
+                let mult = match tail.to_ascii_lowercase().as_str() {
+                    "k" => 1_000u64,
+                    "m" => 1_000_000u64,
+                    _ => return Err(TokenCountParseError::UnknownSuffix(s.to_string())),
+                };
+                (head, mult)
+            }
+            _ => (trimmed, 1u64),
+        };
+
+        if num_part.is_empty() {
+            return Err(TokenCountParseError::InvalidNumber(s.to_string()));
+        }
+
+        // float path only when the user wrote a decimal point, so plain
+        // integers don't lose precision through f64. negative values are
+        // rejected because TokenCount is unsigned
+        let value = if num_part.contains('.') {
+            let f: f64 = num_part
+                .parse()
+                .map_err(|_| TokenCountParseError::InvalidNumber(s.to_string()))?;
+            if !f.is_finite() || f < 0.0 {
+                return Err(TokenCountParseError::InvalidNumber(s.to_string()));
+            }
+            (f * multiplier as f64) as u64
+        } else {
+            let n: u64 = num_part
+                .parse()
+                .map_err(|_| TokenCountParseError::InvalidNumber(s.to_string()))?;
+            n.saturating_mul(multiplier)
+        };
+
+        Ok(Self(value))
+    }
+}
+
 impl std::ops::Add for TokenCount {
     type Output = Self;
     fn add(self, rhs: Self) -> Self {
@@ -577,5 +642,48 @@ mod tests {
         let mut a = Dollars::new(2.0);
         a -= Dollars::new(0.75);
         assert!((a.get() - 1.25).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn token_count_parse_plain() {
+        assert_eq!("1024".parse::<TokenCount>().unwrap(), TokenCount::new(1024));
+        assert_eq!("0".parse::<TokenCount>().unwrap(), TokenCount::ZERO);
+    }
+
+    #[test]
+    fn token_count_parse_k_suffix() {
+        assert_eq!(
+            "10k".parse::<TokenCount>().unwrap(),
+            TokenCount::new(10_000)
+        );
+        assert_eq!(
+            "10K".parse::<TokenCount>().unwrap(),
+            TokenCount::new(10_000)
+        );
+        assert_eq!(
+            "1.5k".parse::<TokenCount>().unwrap(),
+            TokenCount::new(1_500)
+        );
+    }
+
+    #[test]
+    fn token_count_parse_m_suffix() {
+        assert_eq!(
+            "1m".parse::<TokenCount>().unwrap(),
+            TokenCount::new(1_000_000)
+        );
+        assert_eq!(
+            "2.5M".parse::<TokenCount>().unwrap(),
+            TokenCount::new(2_500_000)
+        );
+    }
+
+    #[test]
+    fn token_count_parse_rejects_garbage() {
+        assert!("".parse::<TokenCount>().is_err());
+        assert!("abc".parse::<TokenCount>().is_err());
+        assert!("10g".parse::<TokenCount>().is_err());
+        assert!("-5".parse::<TokenCount>().is_err());
+        assert!("k".parse::<TokenCount>().is_err());
     }
 }

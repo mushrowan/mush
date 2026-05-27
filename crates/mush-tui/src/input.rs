@@ -3278,8 +3278,10 @@ mod tests {
         app.input.visible_lines.set(2);
         app.input.total_lines.set(8);
         app.input.scroll.set(0);
-        // use a blocked slash command so the input gets reinserted
-        app.input.text = "/compact a\nb\nc\nd".into();
+        // use a blocked slash command so the input gets reinserted.
+        // `/new` is in the blocked-during-stream list and ignores trailing
+        // args, so it parses successfully into a non-safe action
+        app.input.text = "/new a\nb\nc\nd".into();
         app.input.cursor = app.input.text.len();
 
         handle_key(&mut app, key(KeyCode::Enter));

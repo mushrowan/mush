@@ -503,6 +503,7 @@ pub async fn auto_compact(
         model,
         options,
         Some(DEFAULT_KEEP_RECENT),
+        None,
     )
     .await;
 
@@ -516,12 +517,19 @@ pub async fn auto_compact(
 
 /// compact messages using an LLM to generate the summary.
 /// falls back to structured compaction if the LLM call fails.
+///
+/// `context_budget` is an optional target size for the generated
+/// summary. when set, it's appended to the system prompt as a soft
+/// instruction so the LLM aims to produce output within that budget.
+/// the value is a hint, not a hard cap. the fallback path ignores it
+/// since the structured fallback summary has a fixed shape
 pub async fn llm_compact(
     messages: Vec<Message>,
     registry: &ApiRegistry,
     model: &Model,
     options: &StreamOptions,
     keep_recent: Option<usize>,
+    context_budget: Option<TokenCount>,
 ) -> CompactionResult {
     let keep = keep_recent.unwrap_or(DEFAULT_KEEP_RECENT);
 
@@ -549,7 +557,7 @@ pub async fn llm_compact(
     };
     let summary = loop {
         let old_slice = &old_messages[old_start..];
-        let context = compaction_context(old_slice, recent_messages);
+        let context = compaction_context(old_slice, recent_messages, context_budget);
 
         match call_for_text(registry, model, &context, &compact_options).await {
             Ok(outcome) => {
@@ -587,14 +595,28 @@ pub async fn llm_compact(
     result
 }
 
-fn compaction_context(old_messages: &[Message], recent_messages: &[Message]) -> LlmContext {
+fn compaction_context(
+    old_messages: &[Message],
+    recent_messages: &[Message],
+    context_budget: Option<TokenCount>,
+) -> LlmContext {
     // recent kept messages are passed as context-only so the summariser
     // knows the current state and doesn't mislabel recently-completed
     // tasks as in-progress
     let request_body = build_compaction_request(old_messages, recent_messages);
+    let system_prompt = match context_budget {
+        Some(budget) => format!(
+            "{COMPACTION_PROMPT}\n\n\
+             Target a summary length of approximately {} tokens. Trim lower-priority \
+             detail before higher-priority detail to fit within this budget. Keep the \
+             section structure intact even if individual sections become terser.",
+            budget.get()
+        ),
+        None => COMPACTION_PROMPT.to_string(),
+    };
 
     LlmContext {
-        system_prompt: Some(COMPACTION_PROMPT.to_string()),
+        system_prompt: Some(system_prompt),
         messages: vec![Message::User(UserMessage {
             content: UserContent::Text(request_body),
             timestamp_ms: Timestamp::now(),
@@ -1331,7 +1353,7 @@ mod tests {
             })
             .collect();
 
-        let result = llm_compact(msgs, &registry, &model, &options, Some(5)).await;
+        let result = llm_compact(msgs, &registry, &model, &options, Some(5), None).await;
         // split_at = 15, which is an assistant msg (not ToolResult), so stays at 15
         assert_eq!(result.summarised_count, 15);
         assert_eq!(result.messages.len(), 6); // 1 summary + 5 kept
@@ -1353,7 +1375,7 @@ mod tests {
             })
             .collect();
 
-        let result = llm_compact(msgs, &registry, &model, &options, Some(5)).await;
+        let result = llm_compact(msgs, &registry, &model, &options, Some(5), None).await;
 
         assert!(
             result.summary.contains("Compaction fallback reason"),
@@ -1384,7 +1406,7 @@ mod tests {
         msgs.push(user_msg("important recent task: preserve this"));
         msgs.push(assistant_msg("recent decision: keep the new parser"));
 
-        let result = llm_compact(msgs, &registry, &model, &options, Some(2)).await;
+        let result = llm_compact(msgs, &registry, &model, &options, Some(2), None).await;
 
         assert!(result.summary.contains("## Recent user requests"));
         assert!(
@@ -1472,7 +1494,7 @@ mod tests {
             })
             .collect();
 
-        let result = llm_compact(msgs, &registry, &model, &options, Some(5)).await;
+        let result = llm_compact(msgs, &registry, &model, &options, Some(5), None).await;
 
         assert_eq!(result.summary, "real summary");
         assert_eq!(calls.load(Ordering::SeqCst), 2);
@@ -1538,7 +1560,7 @@ mod tests {
             })
             .collect();
 
-        let result = llm_compact(msgs, &registry, &model, &options, Some(5)).await;
+        let result = llm_compact(msgs, &registry, &model, &options, Some(5), None).await;
 
         assert_eq!(result.summary, "summary after trim");
         assert_eq!(calls.load(Ordering::SeqCst), 2);

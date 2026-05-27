@@ -42,7 +42,7 @@ pub(super) async fn handle_slash_action(
     let mut state_changed = false;
 
     match action {
-        SlashAction::Compact => {
+        SlashAction::Compact { context_budget } => {
             let pane = pane_mgr.focused_mut();
             let pane_id = pane.id;
             let messages = pane.conversation.context();
@@ -78,6 +78,7 @@ pub(super) async fn handle_slash_action(
                             registry.clone(),
                             Some(lifecycle_hooks.clone()),
                             Some(cwd.to_path_buf()),
+                            context_budget,
                         );
                         slot.insert(slash::PendingCompaction {
                             task,
@@ -88,7 +89,7 @@ pub(super) async fn handle_slash_action(
                 }
             }
         }
-        SlashAction::ForkCompact => {
+        SlashAction::ForkCompact { context_budget } => {
             let pane = pane_mgr.focused_mut();
             let pane_id = pane.id;
             let before = pane.conversation.context_len();
@@ -135,6 +136,7 @@ pub(super) async fn handle_slash_action(
                             registry.clone(),
                             Some(lifecycle_hooks.clone()),
                             Some(cwd.to_path_buf()),
+                            context_budget,
                         );
                         slot.insert(slash::PendingCompaction {
                             task,

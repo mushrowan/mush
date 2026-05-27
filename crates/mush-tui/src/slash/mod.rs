@@ -5,7 +5,7 @@
 pub mod commands;
 pub mod compaction;
 
-use mush_ai::types::SessionId;
+use mush_ai::types::{SessionId, TokenCount, TokenCountParseError};
 use thiserror::Error;
 
 // re-export commonly used items so callers can keep using `slash::handle` etc
@@ -36,6 +36,12 @@ pub enum SlashParseError {
     LoginCodeUsage,
     #[error("usage: /compaction-model [same|<model-id>]")]
     CompactionModelUsage,
+    #[error("usage: /compact [--context-budget <count>] (e.g. 10k, 1024, 1.5k, 1m)")]
+    CompactUsage,
+    #[error("usage: /fork-compact [--context-budget <count>] (e.g. 10k, 1024, 1.5k, 1m)")]
+    ForkCompactUsage,
+    #[error("invalid context budget: {0}")]
+    InvalidContextBudget(#[from] TokenCountParseError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,8 +66,18 @@ pub enum SlashAction {
         index: Option<usize>,
     },
     Tree,
-    Compact,
-    ForkCompact,
+    /// `/compact` - in-place compaction of the active branch.
+    /// `context_budget` is an optional target post-compaction summary
+    /// size hint, parsed from `--context-budget`/`-b` (e.g. `10k`,
+    /// `1024`). when `None`, the summariser uses its default behaviour
+    Compact {
+        context_budget: Option<TokenCount>,
+    },
+    /// `/fork-compact` - same as `Compact` but forks the session tree
+    /// first so the original branch stays navigable via `/tree`
+    ForkCompact {
+        context_budget: Option<TokenCount>,
+    },
     /// view or change the model used for compaction. None shows current,
     /// `same` resets to the active model, any other string resolves as
     /// a model id
@@ -165,8 +181,8 @@ impl SlashAction {
                 | Self::New
                 | Self::Resume { .. }
                 | Self::Branch { .. }
-                | Self::Compact
-                | Self::ForkCompact
+                | Self::Compact { .. }
+                | Self::ForkCompact { .. }
                 | Self::Undo
                 | Self::Merge
                 | Self::Reload
@@ -211,11 +227,13 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
             .map(|index| SlashAction::Branch { index: Some(index) })
             .map_err(|_| SlashParseError::BranchUsage),
         "tree" => Ok(SlashAction::Tree),
-        "compact" => Ok(SlashAction::Compact),
+        "compact" => parse_context_budget(args, SlashParseError::CompactUsage)
+            .map(|context_budget| SlashAction::Compact { context_budget }),
         "compaction-model" | "compact-model" => Ok(SlashAction::CompactionModel {
             model_id: (!args.is_empty()).then(|| args.to_string()),
         }),
-        "fork-compact" | "fc" => Ok(SlashAction::ForkCompact),
+        "fork-compact" | "fc" => parse_context_budget(args, SlashParseError::ForkCompactUsage)
+            .map(|context_budget| SlashAction::ForkCompact { context_budget }),
         "export" => Ok(SlashAction::Export {
             path: (!args.is_empty()).then(|| args.to_string()),
         }),
@@ -306,6 +324,33 @@ pub(crate) fn split_name_and_args(command: &str) -> (&str, &str) {
     }
 }
 
+/// parse the `--context-budget <value>` / `-b <value>` flag shared by
+/// `/compact` and `/fork-compact`. accepts an empty arg list (no
+/// budget) or a single flag-value pair. anything else is rejected with
+/// the caller-supplied usage error so the message names the right
+/// command.
+fn parse_context_budget(
+    args: &str,
+    usage: SlashParseError,
+) -> Result<Option<TokenCount>, SlashParseError> {
+    let trimmed = args.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    let mut tokens = trimmed.split_whitespace();
+    let flag = tokens.next().ok_or_else(|| usage.clone())?;
+    if !matches!(flag, "--context-budget" | "-b") {
+        return Err(usage);
+    }
+    let value = tokens.next().ok_or_else(|| usage.clone())?;
+    if tokens.next().is_some() {
+        return Err(usage);
+    }
+    let budget: TokenCount = value.parse()?;
+    Ok(Some(budget))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -323,8 +368,95 @@ mod tests {
 
     #[test]
     fn parse_fork_compact() {
-        assert_eq!(parse("/fork-compact").unwrap(), SlashAction::ForkCompact);
-        assert_eq!(parse("/fc").unwrap(), SlashAction::ForkCompact);
+        assert_eq!(
+            parse("/fork-compact").unwrap(),
+            SlashAction::ForkCompact {
+                context_budget: None
+            }
+        );
+        assert_eq!(
+            parse("/fc").unwrap(),
+            SlashAction::ForkCompact {
+                context_budget: None
+            }
+        );
+    }
+
+    #[test]
+    fn parse_compact_bare() {
+        // bare `/compact` keeps the historical no-arg behaviour
+        assert_eq!(
+            parse("/compact").unwrap(),
+            SlashAction::Compact {
+                context_budget: None
+            }
+        );
+    }
+
+    #[test]
+    fn parse_compact_with_context_budget() {
+        // `--context-budget` accepts plain ints and human suffixes
+        // (k = 1_000, m = 1_000_000) via TokenCount::from_str
+        use mush_ai::types::TokenCount;
+
+        assert_eq!(
+            parse("/compact --context-budget 10k").unwrap(),
+            SlashAction::Compact {
+                context_budget: Some(TokenCount::new(10_000))
+            }
+        );
+        assert_eq!(
+            parse("/compact --context-budget 1024").unwrap(),
+            SlashAction::Compact {
+                context_budget: Some(TokenCount::new(1024))
+            }
+        );
+    }
+
+    #[test]
+    fn parse_compact_with_short_budget_flag() {
+        use mush_ai::types::TokenCount;
+        // `-b` is the short form, same semantics as `--context-budget`
+        assert_eq!(
+            parse("/compact -b 5k").unwrap(),
+            SlashAction::Compact {
+                context_budget: Some(TokenCount::new(5_000))
+            }
+        );
+    }
+
+    #[test]
+    fn parse_fork_compact_with_context_budget() {
+        use mush_ai::types::TokenCount;
+        assert_eq!(
+            parse("/fork-compact --context-budget 8k").unwrap(),
+            SlashAction::ForkCompact {
+                context_budget: Some(TokenCount::new(8_000))
+            }
+        );
+        assert_eq!(
+            parse("/fc -b 1m").unwrap(),
+            SlashAction::ForkCompact {
+                context_budget: Some(TokenCount::new(1_000_000))
+            }
+        );
+    }
+
+    #[test]
+    fn parse_compact_rejects_missing_budget_value() {
+        assert!(parse("/compact --context-budget").is_err());
+        assert!(parse("/compact -b").is_err());
+    }
+
+    #[test]
+    fn parse_compact_rejects_bad_budget_value() {
+        assert!(parse("/compact --context-budget garbage").is_err());
+        assert!(parse("/compact -b 10g").is_err());
+    }
+
+    #[test]
+    fn parse_compact_rejects_unknown_flag() {
+        assert!(parse("/compact --frobnicate 10k").is_err());
     }
 
     #[test]

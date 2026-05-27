@@ -21,7 +21,7 @@ const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("resume", "resume last session in cwd (or by id)"),
     ("branch", "branch from nth user message"),
     ("tree", "show conversation tree"),
-    ("compact", "summarise old messages to free context"),
+    ("compact", "summarise old messages (--context-budget <n>)"),
     ("compaction-model", "view or set the compaction model"),
     ("export", "save conversation as markdown"),
     ("undo", "revert last turn"),

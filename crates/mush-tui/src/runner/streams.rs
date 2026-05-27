@@ -577,6 +577,7 @@ async fn auto_fork_compact(
         registry,
         Some(&tui_config.lifecycle_hooks),
         Some(tui_config.cwd.as_path()),
+        None,
     )
     .await;
 

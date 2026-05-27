@@ -65,6 +65,11 @@ pub struct PendingCompaction {
 /// can return to the event loop while the LLM call runs. callers poll
 /// the handle from the main loop and use [`apply_compaction_result`]
 /// to finalise once the task completes.
+///
+/// `context_budget` is an optional summariser hint. when set, it's
+/// passed through to [`run_compaction`] and surfaces as an extra line
+/// in the compaction prompt asking the LLM to target that token count
+#[allow(clippy::too_many_arguments)]
 pub fn start_compaction(
     messages: Vec<Message>,
     model: Model,
@@ -72,6 +77,7 @@ pub fn start_compaction(
     registry: ApiRegistry,
     lifecycle_hooks: Option<mush_agent::LifecycleHooks>,
     cwd: Option<PathBuf>,
+    context_budget: Option<TokenCount>,
 ) -> tokio::task::JoinHandle<CompactionTaskResult> {
     let before_count = messages.len();
     let model_id = model.id.to_string();
@@ -83,6 +89,7 @@ pub fn start_compaction(
             &registry,
             lifecycle_hooks.as_ref(),
             cwd.as_deref(),
+            context_budget,
         )
         .await;
         CompactionTaskResult {
@@ -158,6 +165,7 @@ pub fn apply_compaction_result(
 /// wrapper over [`start_compaction`] + [`apply_compaction_result`] so
 /// existing tests and any synchronous callers (e.g. legacy paths,
 /// integration tests) keep working unchanged.
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_compact(
     app: &mut App,
     conversation: &mut ConversationState,
@@ -166,6 +174,7 @@ pub async fn handle_compact(
     registry: &ApiRegistry,
     lifecycle_hooks: Option<&mush_agent::LifecycleHooks>,
     cwd: Option<&std::path::Path>,
+    context_budget: Option<TokenCount>,
 ) {
     let messages = conversation.context();
     let before = messages.len();
@@ -182,6 +191,7 @@ pub async fn handle_compact(
         registry.clone(),
         lifecycle_hooks.cloned(),
         cwd.map(std::path::Path::to_path_buf),
+        context_budget,
     );
     let Ok(result) = task.await else {
         app.push_system_message("compaction task failed");
@@ -200,6 +210,7 @@ pub async fn handle_compact(
 /// chat and status bar. only used by tests today; production code goes
 /// through [`start_compaction`] + [`apply_compaction_result`] via the
 /// pending-compaction queue
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_fork_compact(
     app: &mut App,
     conversation: &mut ConversationState,
@@ -208,6 +219,7 @@ pub async fn handle_fork_compact(
     registry: &ApiRegistry,
     lifecycle_hooks: Option<&mush_agent::LifecycleHooks>,
     cwd: Option<&std::path::Path>,
+    context_budget: Option<TokenCount>,
 ) {
     let before = conversation.context_len();
     if before <= MIN_MESSAGES_FOR_COMPACTION {
@@ -224,6 +236,7 @@ pub async fn handle_fork_compact(
         registry,
         lifecycle_hooks,
         cwd,
+        context_budget,
     )
     .await;
     match result {
@@ -247,6 +260,7 @@ pub async fn handle_fork_compact(
 
 /// fork the session tree at the current leaf and compact the new branch.
 /// returns (after_count, tokens_before, tokens_after) or None if no leaf.
+#[allow(clippy::too_many_arguments)]
 pub async fn fork_and_compact(
     conversation: &mut ConversationState,
     label: &str,
@@ -255,6 +269,7 @@ pub async fn fork_and_compact(
     registry: &ApiRegistry,
     lifecycle_hooks: Option<&mush_agent::LifecycleHooks>,
     cwd: Option<&std::path::Path>,
+    context_budget: Option<TokenCount>,
 ) -> Option<(usize, usize, usize)> {
     let messages = conversation.context();
     let before = messages.len();
@@ -266,7 +281,16 @@ pub async fn fork_and_compact(
         format!("{label} from branch with {before} messages for compaction"),
     );
 
-    let run = run_compaction(messages, model, options, registry, lifecycle_hooks, cwd).await;
+    let run = run_compaction(
+        messages,
+        model,
+        options,
+        registry,
+        lifecycle_hooks,
+        cwd,
+        context_budget,
+    )
+    .await;
 
     conversation.replace_messages(run.messages);
     Some((
@@ -287,6 +311,7 @@ pub struct RunCompactionResult {
     pub diagnostics: mush_session::compact::CompactionDiagnostics,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_compaction(
     messages: Vec<Message>,
     model: &Model,
@@ -294,11 +319,13 @@ pub async fn run_compaction(
     registry: &ApiRegistry,
     lifecycle_hooks: Option<&mush_agent::LifecycleHooks>,
     cwd: Option<&std::path::Path>,
+    context_budget: Option<TokenCount>,
 ) -> RunCompactionResult {
     use mush_session::compact;
 
     let tokens_before = compact::estimate_tokens(&messages);
-    let result = compact::llm_compact(messages, registry, model, options, Some(10)).await;
+    let result =
+        compact::llm_compact(messages, registry, model, options, Some(10), context_budget).await;
     let mut compacted = result.messages;
 
     if let Some(hooks) = lifecycle_hooks
@@ -414,6 +441,7 @@ mod tests {
             &registry,
             None,
             None,
+            None,
         )
         .await;
 
@@ -455,6 +483,7 @@ mod tests {
             &model,
             &options,
             &registry,
+            None,
             None,
             None,
         )
@@ -508,6 +537,7 @@ mod tests {
             &registry,
             None,
             None,
+            None,
         )
         .await;
 
@@ -541,7 +571,15 @@ mod tests {
         let options = StreamOptions::default();
         let registry = ApiRegistry::new();
 
-        let task = start_compaction(conversation.context(), model, options, registry, None, None);
+        let task = start_compaction(
+            conversation.context(),
+            model,
+            options,
+            registry,
+            None,
+            None,
+            None,
+        );
         let result = task.await.expect("compaction task panicked");
 
         let mut conv = conversation;
@@ -622,6 +660,7 @@ mod tests {
             registry,
             None,
             None,
+            None,
         );
         let result = task.await.expect("compaction task panicked");
 
@@ -681,6 +720,7 @@ mod tests {
             &model,
             &options,
             &registry,
+            None,
             None,
             None,
         )
