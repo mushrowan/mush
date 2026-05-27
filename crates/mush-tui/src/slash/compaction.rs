@@ -31,9 +31,20 @@ pub const MIN_MESSAGES_FOR_COMPACTION: usize = 4;
 /// the synchronous finisher needs so the LLM call can run on a
 /// `tokio::spawn` task without borrowing from app/conversation/runtime.
 pub struct CompactionTaskResult {
+    /// flat compacted message list, used as a last-resort fallback when
+    /// the tree-native `compact_at_leaf` path can't find the boundary
     pub messages: Vec<Message>,
+    /// raw summary text produced by the LLM (or the structured fallback).
+    /// `apply_compaction_result` writes this into the new tree
+    /// `EntryKind::Compaction` node so `collect_context` can synthesise
+    /// the visible summary message
+    pub summary: String,
     pub tokens_before: usize,
     pub tokens_after: usize,
+    /// number of messages from the start of the original context that
+    /// were folded into `summary`. equivalently: the context index of
+    /// the first kept message, used as `first_kept_context_index` when
+    /// inserting the tree-native compaction node
     pub summarised_count: usize,
     pub before_count: usize,
     pub model_id: String,
@@ -94,6 +105,7 @@ pub fn start_compaction(
         .await;
         CompactionTaskResult {
             messages: run.messages,
+            summary: run.summary,
             tokens_before: run.tokens_before,
             tokens_after: run.tokens_after,
             summarised_count: run.summarised_count,
@@ -104,21 +116,21 @@ pub fn start_compaction(
     })
 }
 
-/// finalise a compaction task: swap the conversation messages so future
-/// API calls see the compacted context, append a "compacted summary"
-/// system banner to the visible chat (without nuking the existing
-/// scrollback), reset the "recent live call" token stats so the next
-/// real call doesn't trip a false ContextDecrease anomaly, and update
-/// the status bar. `kind` controls only the status text, since the
-/// underlying state mutation is identical for /compact and
-/// /fork-compact.
+/// finalise a compaction task: insert a tree-native compaction marker
+/// so future API calls see the collapsed context while keeping every
+/// pre-compaction entry navigable via `/tree` and `/branch`, append a
+/// "compacted summary" system banner to the visible chat (without
+/// nuking the existing scrollback), reset the "recent live call" token
+/// stats so the next real call doesn't trip a false ContextDecrease
+/// anomaly, and update the status bar. `kind` controls only the status
+/// text, since the underlying state mutation is identical for /compact
+/// and /fork-compact.
 ///
-/// the previous implementation rebuilt the display from the compacted
-/// conversation, which silently wiped every pre-compact user/assistant
-/// exchange the user could see. now the LLM-facing conversation diverges
-/// from the visible scrollback at the moment of compaction: app.messages
-/// keeps everything that was there, with a single summary banner appended
-/// so the user can scroll back through the full history at any time
+/// the display chat (app.messages) is unaffected by the LLM-context
+/// rewrite: the user keeps their full scrollback, and a single summary
+/// banner is appended so it's clear something happened. tree state is
+/// also preserved, so `/branch <n>` can rewind to a pre-compaction
+/// point if the user wants
 pub fn apply_compaction_result(
     app: &mut App,
     conversation: &mut ConversationState,
@@ -128,7 +140,20 @@ pub fn apply_compaction_result(
     app.compacting = false;
     let summary_body = extract_fresh_summary(&result.messages);
 
-    conversation.replace_messages(result.messages);
+    // tree-native path: append a Compaction entry summarising the first
+    // `summarised_count` context messages. preserves old entries so
+    // /tree / /branch can navigate back. falls back to the flat-list
+    // replace_messages path when the tree state is unexpected (no
+    // entries to compact, or a prior Compaction node already exists)
+    let tree_compaction_applied = !result.summary.is_empty()
+        && result.summarised_count > 0
+        && conversation
+            .compact_at_leaf(result.summary.clone(), result.summarised_count)
+            .is_some();
+    if !tree_compaction_applied {
+        conversation.replace_messages(result.messages);
+    }
+
     let after_count = conversation.context_len();
     app.stats
         .reset_live_state(TokenCount::new(result.tokens_after as u64));
@@ -292,7 +317,18 @@ pub async fn fork_and_compact(
     )
     .await;
 
-    conversation.replace_messages(run.messages);
+    // tree-native compaction preserves the pre-compact branch (the
+    // branch_with_summary above already added a fork marker). only fall
+    // back to replace_messages if the tree path can't apply (e.g. when
+    // the summary is empty because the conversation was too short)
+    let tree_applied = !run.summary.is_empty()
+        && run.summarised_count > 0
+        && conversation
+            .compact_at_leaf(run.summary.clone(), run.summarised_count)
+            .is_some();
+    if !tree_applied {
+        conversation.replace_messages(run.messages);
+    }
     Some((
         conversation.context_len(),
         run.tokens_before,
@@ -305,6 +341,9 @@ pub async fn fork_and_compact(
 /// returns (compacted_messages, tokens_before, tokens_after, summarised_count)
 pub struct RunCompactionResult {
     pub messages: Vec<Message>,
+    /// raw summary text from the LLM call (or the structured fallback);
+    /// empty when no compaction happened (e.g. conversation too short)
+    pub summary: String,
     pub tokens_before: usize,
     pub tokens_after: usize,
     pub summarised_count: usize,
@@ -326,6 +365,7 @@ pub async fn run_compaction(
     let tokens_before = compact::estimate_tokens(&messages);
     let result =
         compact::llm_compact(messages, registry, model, options, Some(10), context_budget).await;
+    let summary = result.summary.clone();
     let mut compacted = result.messages;
 
     if let Some(hooks) = lifecycle_hooks
@@ -358,6 +398,7 @@ pub async fn run_compaction(
     let tokens_after = compact::estimate_tokens(&compacted);
     RunCompactionResult {
         messages: compacted,
+        summary,
         tokens_before,
         tokens_after,
         summarised_count: result.summarised_count,
@@ -605,6 +646,7 @@ mod tests {
         let mut app = App::new(test_model().id, TokenCount::new(200_000));
         let result = CompactionTaskResult {
             messages: conversation.context(),
+            summary: String::new(),
             tokens_before: 100,
             tokens_after: 50,
             summarised_count: 1,
@@ -755,6 +797,75 @@ mod tests {
                 .skip(display_count_before)
                 .map(|m| m.content.as_str())
                 .collect::<Vec<_>>()
+        );
+    }
+
+    /// /compact must preserve the conversation tree so the user can
+    /// `/tree` / `/branch` back to pre-compaction state. the previous
+    /// implementation called `replace_messages` which built a fresh tree
+    /// from the flat compacted message list, wiping every original
+    /// entry. now the post-compact tree has the original entries plus a
+    /// new `EntryKind::Compaction` node, and the LLM context resolves
+    /// to summary + kept messages via `collect_context`
+    #[tokio::test]
+    async fn handle_compact_preserves_conversation_tree() {
+        let mut msgs = Vec::new();
+        for i in 0..12 {
+            msgs.push(user_msg(&format!("q {i}")));
+            msgs.push(assistant_msg(&format!("a {i}"), 1_000));
+        }
+        let mut conversation = ConversationState::from_messages(msgs);
+        let entries_before = conversation.tree().entries().len();
+        assert_eq!(entries_before, 24, "test precondition: 24 entries");
+
+        let mut app = App::new(test_model().id, TokenCount::new(200_000));
+        let registry = ApiRegistry::new();
+        let model = test_model();
+        let options = StreamOptions::default();
+
+        handle_compact(
+            &mut app,
+            &mut conversation,
+            &model,
+            &options,
+            &registry,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        let entries_after = conversation.tree().entries().len();
+        assert!(
+            entries_after > entries_before,
+            "tree must grow (compaction node appended), not shrink. \
+             before={entries_before} after={entries_after}. \
+             if entries_after < entries_before the tree was wiped via replace_messages"
+        );
+
+        // exactly one Compaction-kind entry should exist now
+        let compaction_count = conversation
+            .tree()
+            .entries()
+            .iter()
+            .filter(|e| matches!(e.kind, mush_session::tree::EntryKind::Compaction { .. }))
+            .count();
+        assert_eq!(
+            compaction_count, 1,
+            "expected exactly one Compaction tree entry after /compact"
+        );
+
+        // the original user/assistant messages must still be reachable
+        // via the tree (we can find them by id, not just walk current branch)
+        let original_messages_present = conversation
+            .tree()
+            .entries()
+            .iter()
+            .filter(|e| matches!(e.kind, mush_session::tree::EntryKind::Message { .. }))
+            .count();
+        assert_eq!(
+            original_messages_present, 24,
+            "all 24 original Message entries must remain in the tree"
         );
     }
 }
