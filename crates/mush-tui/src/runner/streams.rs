@@ -374,7 +374,7 @@ async fn handle_agent_end(
     }
 
     if tui_config.auto_fork_compact {
-        auto_fork_compact(pane_mgr, pane_id, tui_config, registry).await;
+        auto_compact(pane_mgr, pane_id, tui_config, registry).await;
     }
 
     stream_state.save_session_now(pane_mgr, tui_config);
@@ -536,10 +536,10 @@ fn truncate_result(s: &str, max: usize) -> String {
     }
 }
 
-/// fork the session tree and compact the new branch when the conversation
-/// is approaching the context limit. the original uncompacted branch is
-/// preserved and navigable via /tree + /branch.
-async fn auto_fork_compact(
+/// compact the current branch when the conversation is approaching the
+/// context limit. uses the same tree-native path as `/compact` so the
+/// pre-compaction state stays navigable via `/tree` + `/branch`.
+async fn auto_compact(
     pane_mgr: &mut PaneManager,
     pane_id: PaneId,
     tui_config: &TuiConfig,
@@ -562,51 +562,36 @@ async fn auto_fork_compact(
         reason = "pane existence verified by early return above"
     )]
     let pane = pane_mgr.pane_mut(pane_id).expect("pane exists after check");
-    let before = pane.conversation.context_len();
 
+    let messages = pane.conversation.context();
     let (compact_model, compact_options) = tui_config
         .compaction_model
         .as_ref()
-        .map(|(m, o)| (m, o))
-        .unwrap_or((&tui_config.model, &tui_config.options));
-    let result = crate::slash::fork_and_compact(
-        &mut pane.conversation,
-        "auto-forked",
+        .map(|(m, o)| (m.clone(), o.clone()))
+        .unwrap_or_else(|| (tui_config.model.clone(), tui_config.options.clone()));
+
+    let task = crate::slash::start_compaction(
+        messages,
         compact_model,
         compact_options,
-        registry,
-        Some(&tui_config.lifecycle_hooks),
-        Some(tui_config.cwd.as_path()),
+        registry.clone(),
+        Some(tui_config.lifecycle_hooks.clone()),
+        Some(tui_config.cwd.clone()),
         None,
-    )
-    .await;
+    );
+    let Ok(result) = task.await else {
+        pane.app.push_system_message("auto-compaction task failed");
+        return;
+    };
 
-    if let Some((after, tokens_before, tokens_after)) = result {
-        #[expect(
-            clippy::expect_used,
-            reason = "pane existence verified by compact call above"
-        )]
-        let pane = pane_mgr
-            .pane_mut(pane_id)
-            .expect("pane exists after compact");
-        // surface the freshly generated summary in the visible chat
-        // without nuking the existing scrollback (mirrors the manual
-        // /compact path: app.messages keeps its history, the LLM-facing
-        // conversation is the only thing that's been compacted)
-        if let Some(body) = crate::slash::extract_fresh_summary(&pane.conversation.context()) {
-            pane.app
-                .push_system_message(crate::conversation_display::format_compaction_banner(&body));
-        }
-        // mirror the manual /compact path: clear the live stats state
-        // so the next real call doesn't trip a false ContextDecrease
-        // anomaly
-        pane.app
-            .stats
-            .reset_live_state(mush_ai::types::TokenCount::new(tokens_after as u64));
-        pane.app.status = Some(format!(
-            "auto-fork-compacted: {before} → {after} messages, ~{tokens_before} → ~{tokens_after} tokens (original preserved)",
-        ));
-    }
+    #[expect(
+        clippy::expect_used,
+        reason = "pane existence verified by compact call above"
+    )]
+    let pane = pane_mgr
+        .pane_mut(pane_id)
+        .expect("pane exists after compact");
+    crate::slash::apply_compaction_result(&mut pane.app, &mut pane.conversation, result);
 }
 
 pub(super) async fn abort_focused_stream(

@@ -41,9 +41,6 @@ pub fn handle(
             help.push_str(
                 "  /compact [--context-budget <n>] - summarise old messages to free context\n",
             );
-            help.push_str(
-                "  /fork-compact [--context-budget <n>] - fork branch then compact (preserves original)\n",
-            );
             help.push_str("  /export [file] - save conversation as markdown\n");
             help.push_str("  /undo          - revert last turn\n");
             help.push_str("  /search [text] - search conversation (or ctrl+f)\n");

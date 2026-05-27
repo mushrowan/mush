@@ -19,7 +19,7 @@ fn handle_accessible_from_commands_submodule() {
 }
 
 #[test]
-fn fork_and_compact_accessible_from_compaction_submodule() {
-    use mush_tui::slash::compaction::fork_and_compact;
-    let _ = fork_and_compact as *const ();
+fn run_compaction_accessible_from_compaction_submodule() {
+    use mush_tui::slash::compaction::run_compaction;
+    let _ = run_compaction as *const ();
 }

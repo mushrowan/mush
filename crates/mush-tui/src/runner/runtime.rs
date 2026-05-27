@@ -294,12 +294,7 @@ impl RunnerRuntime {
             let Some(pane) = self.pane_mgr.pane_mut(pane_id) else {
                 continue;
             };
-            crate::slash::apply_compaction_result(
-                &mut pane.app,
-                &mut pane.conversation,
-                result,
-                pending.kind,
-            );
+            crate::slash::apply_compaction_result(&mut pane.app, &mut pane.conversation, result);
             // replay anything the user submitted while compaction
             // was running. multiple submits collapse into one combined
             // user turn so the agent sees a coherent prompt rather

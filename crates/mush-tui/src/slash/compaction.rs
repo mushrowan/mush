@@ -51,23 +51,9 @@ pub struct CompactionTaskResult {
     pub diagnostics: mush_session::compact::CompactionDiagnostics,
 }
 
-/// which compaction flavour produced a `CompactionTaskResult`. drives
-/// only the post-task status formatting; the apply path is otherwise
-/// identical for both kinds
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CompactionKind {
-    /// `/compact` - rewrites the active branch in place
-    Compact,
-    /// `/fork-compact` - branched the tree before compacting; the
-    /// original is still navigable via `/tree`
-    ForkCompact,
-}
-
-/// a backgrounded compaction the runtime is still waiting on. the
-/// kind disambiguates the status text shown when the task lands
+/// a backgrounded compaction the runtime is still waiting on
 pub struct PendingCompaction {
     pub task: tokio::task::JoinHandle<CompactionTaskResult>,
-    pub kind: CompactionKind,
 }
 
 /// spawn the LLM compaction on a background task and return its handle.
@@ -122,9 +108,7 @@ pub fn start_compaction(
 /// "compacted summary" system banner to the visible chat (without
 /// nuking the existing scrollback), reset the "recent live call" token
 /// stats so the next real call doesn't trip a false ContextDecrease
-/// anomaly, and update the status bar. `kind` controls only the status
-/// text, since the underlying state mutation is identical for /compact
-/// and /fork-compact.
+/// anomaly, and update the status bar.
 ///
 /// the display chat (app.messages) is unaffected by the LLM-context
 /// rewrite: the user keeps their full scrollback, and a single summary
@@ -135,7 +119,6 @@ pub fn apply_compaction_result(
     app: &mut App,
     conversation: &mut ConversationState,
     result: CompactionTaskResult,
-    kind: CompactionKind,
 ) {
     app.compacting = false;
     let summary_body = extract_fresh_summary(&result.messages);
@@ -165,25 +148,15 @@ pub fn apply_compaction_result(
         app.push_system_message(note);
     }
 
-    app.status = Some(match kind {
-        CompactionKind::Compact => format!(
-            "compacted with {}: {} → {} messages, ~{} → ~{} tokens ({} summarised)",
-            result.model_id,
-            result.before_count,
-            after_count,
-            result.tokens_before,
-            result.tokens_after,
-            result.summarised_count,
-        ),
-        CompactionKind::ForkCompact => format!(
-            "fork-compacted with {}: {} → {} messages, ~{} → ~{} tokens (original preserved, /tree to navigate)",
-            result.model_id,
-            result.before_count,
-            after_count,
-            result.tokens_before,
-            result.tokens_after,
-        ),
-    });
+    app.status = Some(format!(
+        "compacted with {}: {} → {} messages, ~{} → ~{} tokens ({} summarised)",
+        result.model_id,
+        result.before_count,
+        after_count,
+        result.tokens_before,
+        result.tokens_after,
+        result.summarised_count,
+    ));
 }
 
 /// run LLM compaction on the conversation synchronously. kept as a thin
@@ -222,123 +195,11 @@ pub async fn handle_compact(
         app.push_system_message("compaction task failed");
         return;
     };
-    apply_compaction_result(app, conversation, result, CompactionKind::Compact);
+    apply_compaction_result(app, conversation, result);
 }
 
-/// fork the session tree then compact the new branch
-///
-/// the original conversation is preserved in the parent branch.
-/// a summary of the old branch is injected at the fork point so
-/// the LLM knows the branch happened.
-///
-/// thin wrapper around [`fork_and_compact`] that updates the visible
-/// chat and status bar. only used by tests today; production code goes
-/// through [`start_compaction`] + [`apply_compaction_result`] via the
-/// pending-compaction queue
-#[allow(clippy::too_many_arguments)]
-pub async fn handle_fork_compact(
-    app: &mut App,
-    conversation: &mut ConversationState,
-    model: &Model,
-    options: &StreamOptions,
-    registry: &ApiRegistry,
-    lifecycle_hooks: Option<&mush_agent::LifecycleHooks>,
-    cwd: Option<&std::path::Path>,
-    context_budget: Option<TokenCount>,
-) {
-    let before = conversation.context_len();
-    if before <= MIN_MESSAGES_FOR_COMPACTION {
-        app.push_system_message("conversation too short to fork-compact");
-        return;
-    }
-
-    app.status = Some("fork-compacting…".into());
-    let result = fork_and_compact(
-        conversation,
-        "forked",
-        model,
-        options,
-        registry,
-        lifecycle_hooks,
-        cwd,
-        context_budget,
-    )
-    .await;
-    match result {
-        Some((after, tokens_before, tokens_after)) => {
-            // append the summary to the visible chat (mirrors the
-            // /compact path; preserves the user's scrollback)
-            if let Some(body) = extract_fresh_summary(&conversation.context()) {
-                app.push_system_message(crate::conversation_display::format_compaction_banner(
-                    &body,
-                ));
-            }
-            app.stats
-                .reset_live_state(TokenCount::new(tokens_after as u64));
-            app.status = Some(format!(
-                "fork-compacted: {before} → {after} messages, ~{tokens_before} → ~{tokens_after} tokens (original preserved, /tree to navigate)",
-            ));
-        }
-        None => app.push_system_message("no conversation to fork"),
-    }
-}
-
-/// fork the session tree at the current leaf and compact the new branch.
-/// returns (after_count, tokens_before, tokens_after) or None if no leaf.
-#[allow(clippy::too_many_arguments)]
-pub async fn fork_and_compact(
-    conversation: &mut ConversationState,
-    label: &str,
-    model: &Model,
-    options: &StreamOptions,
-    registry: &ApiRegistry,
-    lifecycle_hooks: Option<&mush_agent::LifecycleHooks>,
-    cwd: Option<&std::path::Path>,
-    context_budget: Option<TokenCount>,
-) -> Option<(usize, usize, usize)> {
-    let messages = conversation.context();
-    let before = messages.len();
-
-    let leaf_id = conversation.leaf_id().cloned()?;
-
-    conversation.branch_with_summary(
-        &leaf_id,
-        format!("{label} from branch with {before} messages for compaction"),
-    );
-
-    let run = run_compaction(
-        messages,
-        model,
-        options,
-        registry,
-        lifecycle_hooks,
-        cwd,
-        context_budget,
-    )
-    .await;
-
-    // tree-native compaction preserves the pre-compact branch (the
-    // branch_with_summary above already added a fork marker). only fall
-    // back to replace_messages if the tree path can't apply (e.g. when
-    // the summary is empty because the conversation was too short)
-    let tree_applied = !run.summary.is_empty()
-        && run.summarised_count > 0
-        && conversation
-            .compact_at_leaf(run.summary.clone(), run.summarised_count)
-            .is_some();
-    if !tree_applied {
-        conversation.replace_messages(run.messages);
-    }
-    Some((
-        conversation.context_len(),
-        run.tokens_before,
-        run.tokens_after,
-    ))
-}
-
-/// shared compaction + hook logic for /compact, /fork-compact, and auto-fork-compact
-///
-/// returns (compacted_messages, tokens_before, tokens_after, summarised_count)
+/// shared compaction + hook logic for /compact and the auto-compaction
+/// path triggered when context approaches the model's window
 pub struct RunCompactionResult {
     pub messages: Vec<Message>,
     /// raw summary text from the LLM call (or the structured fallback);
@@ -624,7 +485,7 @@ mod tests {
         let result = task.await.expect("compaction task panicked");
 
         let mut conv = conversation;
-        apply_compaction_result(&mut app, &mut conv, result, CompactionKind::Compact);
+        apply_compaction_result(&mut app, &mut conv, result);
 
         // same invariants the synchronous path tests assert
         assert!(app.stats.prev_usage().is_none());
@@ -660,7 +521,7 @@ mod tests {
             },
         };
 
-        apply_compaction_result(&mut app, &mut conversation, result, CompactionKind::Compact);
+        apply_compaction_result(&mut app, &mut conversation, result);
 
         assert!(
             app.messages
@@ -676,51 +537,6 @@ mod tests {
             app.status
                 .as_deref()
                 .is_some_and(|status| status.contains("summary-model"))
-        );
-    }
-
-    /// `CompactionKind::ForkCompact` must format status text that hints
-    /// at the preserved original branch. without this, /fork-compact
-    /// would just look like /compact in the status bar and the user
-    /// would have no clue they could `/tree` back to the pre-compact
-    /// state.
-    #[tokio::test]
-    async fn apply_compaction_result_formats_fork_status() {
-        let mut msgs = Vec::new();
-        for i in 0..12 {
-            msgs.push(user_msg(&format!("q {i}")));
-            msgs.push(assistant_msg(&format!("a {i}"), 100));
-        }
-        let mut conversation = ConversationState::from_messages(msgs.clone());
-        let mut app = App::new(test_model().id, TokenCount::new(200_000));
-        let registry = ApiRegistry::new();
-
-        let task = start_compaction(
-            conversation.context(),
-            test_model(),
-            StreamOptions::default(),
-            registry,
-            None,
-            None,
-            None,
-        );
-        let result = task.await.expect("compaction task panicked");
-
-        apply_compaction_result(
-            &mut app,
-            &mut conversation,
-            result,
-            CompactionKind::ForkCompact,
-        );
-
-        let status = app.status.as_deref().unwrap_or_default();
-        assert!(
-            status.starts_with("fork-compacted with"),
-            "expected fork-specific status prefix, got: {status:?}"
-        );
-        assert!(
-            status.contains("/tree"),
-            "fork status should hint at /tree navigation, got: {status:?}"
         );
     }
 

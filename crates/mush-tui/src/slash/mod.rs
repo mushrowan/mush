@@ -11,9 +11,8 @@ use thiserror::Error;
 // re-export commonly used items so callers can keep using `slash::handle` etc
 pub use commands::{expand_template, handle, handle_export, rebuild_display};
 pub use compaction::{
-    CompactionKind, CompactionTaskResult, MIN_MESSAGES_FOR_COMPACTION, PendingCompaction,
-    apply_compaction_result, extract_fresh_summary, fork_and_compact, handle_compact,
-    handle_fork_compact, run_compaction, start_compaction,
+    CompactionTaskResult, MIN_MESSAGES_FOR_COMPACTION, PendingCompaction, apply_compaction_result,
+    extract_fresh_summary, handle_compact, run_compaction, start_compaction,
 };
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -38,8 +37,6 @@ pub enum SlashParseError {
     CompactionModelUsage,
     #[error("usage: /compact [--context-budget <count>] (e.g. 10k, 1024, 1.5k, 1m)")]
     CompactUsage,
-    #[error("usage: /fork-compact [--context-budget <count>] (e.g. 10k, 1024, 1.5k, 1m)")]
-    ForkCompactUsage,
     #[error("invalid context budget: {0}")]
     InvalidContextBudget(#[from] TokenCountParseError),
 }
@@ -66,16 +63,13 @@ pub enum SlashAction {
         index: Option<usize>,
     },
     Tree,
-    /// `/compact` - in-place compaction of the active branch.
-    /// `context_budget` is an optional target post-compaction summary
-    /// size hint, parsed from `--context-budget`/`-b` (e.g. `10k`,
-    /// `1024`). when `None`, the summariser uses its default behaviour
+    /// `/compact` - compact the active conversation. preserves the
+    /// pre-compaction tree (navigable via `/tree` + `/branch`) and the
+    /// visible scrollback. `context_budget` is an optional target
+    /// post-compaction summary size, parsed from `--context-budget`/`-b`
+    /// (e.g. `10k`, `1024`). when `None`, the summariser uses its
+    /// default behaviour
     Compact {
-        context_budget: Option<TokenCount>,
-    },
-    /// `/fork-compact` - same as `Compact` but forks the session tree
-    /// first so the original branch stays navigable via `/tree`
-    ForkCompact {
         context_budget: Option<TokenCount>,
     },
     /// view or change the model used for compaction. None shows current,
@@ -182,7 +176,6 @@ impl SlashAction {
                 | Self::Resume { .. }
                 | Self::Branch { .. }
                 | Self::Compact { .. }
-                | Self::ForkCompact { .. }
                 | Self::Undo
                 | Self::Merge
                 | Self::Reload
@@ -232,8 +225,6 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
         "compaction-model" | "compact-model" => Ok(SlashAction::CompactionModel {
             model_id: (!args.is_empty()).then(|| args.to_string()),
         }),
-        "fork-compact" | "fc" => parse_context_budget(args, SlashParseError::ForkCompactUsage)
-            .map(|context_budget| SlashAction::ForkCompact { context_budget }),
         "export" => Ok(SlashAction::Export {
             path: (!args.is_empty()).then(|| args.to_string()),
         }),
@@ -324,11 +315,10 @@ pub(crate) fn split_name_and_args(command: &str) -> (&str, &str) {
     }
 }
 
-/// parse the `--context-budget <value>` / `-b <value>` flag shared by
-/// `/compact` and `/fork-compact`. accepts an empty arg list (no
-/// budget) or a single flag-value pair. anything else is rejected with
-/// the caller-supplied usage error so the message names the right
-/// command.
+/// parse the `--context-budget <value>` / `-b <value>` flag for the
+/// `/compact` command. accepts an empty arg list (no budget) or a
+/// single flag-value pair. anything else is rejected with the
+/// caller-supplied usage error.
 fn parse_context_budget(
     args: &str,
     usage: SlashParseError,
@@ -363,22 +353,6 @@ mod tests {
         assert_eq!(
             parse("/thinking-expand").unwrap(),
             SlashAction::ToggleThinkingExpanded
-        );
-    }
-
-    #[test]
-    fn parse_fork_compact() {
-        assert_eq!(
-            parse("/fork-compact").unwrap(),
-            SlashAction::ForkCompact {
-                context_budget: None
-            }
-        );
-        assert_eq!(
-            parse("/fc").unwrap(),
-            SlashAction::ForkCompact {
-                context_budget: None
-            }
         );
     }
 
@@ -426,20 +400,17 @@ mod tests {
     }
 
     #[test]
-    fn parse_fork_compact_with_context_budget() {
-        use mush_ai::types::TokenCount;
-        assert_eq!(
-            parse("/fork-compact --context-budget 8k").unwrap(),
-            SlashAction::ForkCompact {
-                context_budget: Some(TokenCount::new(8_000))
-            }
-        );
-        assert_eq!(
-            parse("/fc -b 1m").unwrap(),
-            SlashAction::ForkCompact {
-                context_budget: Some(TokenCount::new(1_000_000))
-            }
-        );
+    fn parse_fork_compact_is_no_longer_a_known_command() {
+        // /fork-compact and /fc used to map to SlashAction::ForkCompact.
+        // /compact now preserves the conversation tree natively (the
+        // behaviour /fork-compact used to claim) so the alternate
+        // command was removed. they now fall through to Other and the
+        // runner surfaces an "unknown command" message
+        assert!(matches!(
+            parse("/fork-compact").unwrap(),
+            SlashAction::Other { .. }
+        ));
+        assert!(matches!(parse("/fc").unwrap(), SlashAction::Other { .. }));
     }
 
     #[test]
