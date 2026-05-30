@@ -137,18 +137,13 @@ pub(crate) enum StreamBlock {
 
 /// map a thinking level to an openai-style reasoning effort string.
 /// shared by the openai completions and openai responses providers.
-pub(crate) fn openai_reasoning_effort(model: &Model, level: ThinkingLevel) -> Option<String> {
-    if level == ThinkingLevel::Off || !model.reasoning {
+/// the effort string is the level's own wire name; `Off` and
+/// non-reasoning models yield `None`.
+pub(crate) fn openai_reasoning_effort(model: &Model, level: &ThinkingLevel) -> Option<String> {
+    if !model.reasoning {
         return None;
     }
-
-    Some(match level {
-        ThinkingLevel::Off => unreachable!(),
-        ThinkingLevel::Minimal | ThinkingLevel::Low => "low".into(),
-        ThinkingLevel::Medium => "medium".into(),
-        ThinkingLevel::High => "high".into(),
-        ThinkingLevel::Xhigh => "xhigh".into(),
-    })
+    level.effort_name().map(str::to_string)
 }
 
 /// check an HTTP response for errors, logging metadata and returning a typed
@@ -256,22 +251,27 @@ mod tests {
     #[test]
     fn openai_reasoning_effort_maps_levels() {
         let model = reasoning_model();
-        assert_eq!(openai_reasoning_effort(&model, ThinkingLevel::Off), None);
+        assert_eq!(openai_reasoning_effort(&model, &ThinkingLevel::Off), None);
         assert_eq!(
-            openai_reasoning_effort(&model, ThinkingLevel::Low),
+            openai_reasoning_effort(&model, &ThinkingLevel::Low),
             Some("low".into())
         );
         assert_eq!(
-            openai_reasoning_effort(&model, ThinkingLevel::Medium),
+            openai_reasoning_effort(&model, &ThinkingLevel::Medium),
             Some("medium".into())
         );
         assert_eq!(
-            openai_reasoning_effort(&model, ThinkingLevel::High),
+            openai_reasoning_effort(&model, &ThinkingLevel::High),
             Some("high".into())
         );
         assert_eq!(
-            openai_reasoning_effort(&model, ThinkingLevel::Xhigh),
+            openai_reasoning_effort(&model, &ThinkingLevel::Xhigh),
             Some("xhigh".into())
+        );
+        // unknown upstream levels flow through verbatim, no code change
+        assert_eq!(
+            openai_reasoning_effort(&model, &ThinkingLevel::Other("max".into())),
+            Some("max".into())
         );
     }
 
@@ -281,7 +281,7 @@ mod tests {
             reasoning: false,
             ..reasoning_model()
         };
-        assert_eq!(openai_reasoning_effort(&model, ThinkingLevel::High), None);
+        assert_eq!(openai_reasoning_effort(&model, &ThinkingLevel::High), None);
     }
 
     #[tokio::test]

@@ -44,7 +44,6 @@ impl ThinkingPrefs {
         self.by_dir
             .get(dir)?
             .get(model_id)
-            .copied()
             .map(ThinkingLevel::normalize_visible)
     }
 
@@ -57,7 +56,6 @@ impl ThinkingPrefs {
     pub fn last_for_model(&self, model_id: &str) -> Option<ThinkingLevel> {
         self.last_for_model
             .get(model_id)
-            .copied()
             .map(ThinkingLevel::normalize_visible)
     }
 
@@ -69,7 +67,7 @@ impl ThinkingPrefs {
         self.by_dir
             .entry(dir)
             .or_default()
-            .insert(model_id.clone(), normalised);
+            .insert(model_id.clone(), normalised.clone());
         self.last_for_model.insert(model_id, normalised);
     }
 

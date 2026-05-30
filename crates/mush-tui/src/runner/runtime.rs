@@ -451,6 +451,7 @@ fn build_initial_app(tui_config: &TuiConfig, cwd: &Path) -> App {
     app.thinking_level = tui_config
         .options
         .thinking
+        .clone()
         .unwrap_or(ThinkingLevel::Off)
         .normalize_visible();
     app.supported_thinking_levels = tui_config.model.supported_thinking_levels.clone();

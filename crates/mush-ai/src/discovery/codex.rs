@@ -178,21 +178,22 @@ fn entry_to_model(entry: CodexModelEntry) -> Model {
         .iter()
         .any(|preset| !preset.effort.eq_ignore_ascii_case("none"));
 
-    // map codex's `supported_reasoning_levels` to our enum, dropping the
-    // synthetic `none` entry (the cycler treats an empty supported set
-    // as "no reasoning" rather than walking through Off explicitly) and
-    // any unknown values upstream might add later
+    // map codex's `supported_reasoning_levels` to our levels, dropping the
+    // synthetic `none` entry (the cycler treats an empty supported set as
+    // "no reasoning" rather than walking through Off explicitly). unknown
+    // names are preserved as `ThinkingLevel::Other` so newly-added upstream
+    // levels are autodetected without a code change
     let supported_thinking_levels = entry
         .supported_reasoning_levels
         .iter()
         .filter(|p| !p.effort.eq_ignore_ascii_case("none"))
-        .filter_map(|p| ThinkingLevel::from_codex_str(&p.effort))
+        .map(|p| ThinkingLevel::from_effort_str(&p.effort))
         .collect();
 
     let default_thinking_level = entry
         .default_reasoning_level
         .as_deref()
-        .and_then(ThinkingLevel::from_codex_str);
+        .map(ThinkingLevel::from_effort_str);
 
     let display = entry
         .display_name

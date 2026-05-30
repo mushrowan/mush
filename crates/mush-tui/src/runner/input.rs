@@ -119,7 +119,7 @@ async fn handle_common_app_event(
                 deps.thinking_saver,
                 deps.cwd,
                 &app.model_id,
-                app.thinking_level,
+                app.thinking_level.clone(),
             );
             Some(LoopAction::Redraw)
         }

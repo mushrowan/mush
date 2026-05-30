@@ -129,7 +129,7 @@ pub(super) async fn fork_pane(
             parent.app.messages.clone(),
             parent.app.model_id.clone(),
             parent.app.stats.context_window,
-            parent.app.thinking_level,
+            parent.app.thinking_level.clone(),
             parent.app.thinking_display,
             parent.app.completion.completions.clone(),
             parent.app.completion.slash_commands.clone(),
@@ -340,7 +340,7 @@ pub(super) fn process_delegations(
 /// create a fresh App inheriting display settings from a parent pane
 fn app_from_parent(parent: &crate::pane::Pane, tui_config: &TuiConfig) -> App {
     let mut app = App::new(parent.app.model_id.clone(), parent.app.stats.context_window);
-    app.thinking_level = parent.app.thinking_level;
+    app.thinking_level = parent.app.thinking_level.clone();
     app.thinking_display = parent.app.thinking_display;
     app.completion.completions = parent.app.completion.completions.clone();
     app.completion.slash_commands = parent.app.completion.slash_commands.clone();

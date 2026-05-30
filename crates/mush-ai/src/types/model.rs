@@ -115,7 +115,7 @@ impl Model {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ThinkingLevel {
     Off,
@@ -124,32 +124,56 @@ pub enum ThinkingLevel {
     Medium,
     High,
     Xhigh,
+    /// any provider-defined effort level we don't model with a typed
+    /// variant (e.g. anthropic's `max`, or a future `ultra-max`). carries
+    /// the raw effort name so newly-added upstream levels are supported by
+    /// autodetection without a code change. only appears on effort-based
+    /// models, never on the budget-token ladder
+    #[serde(untagged)]
+    Other(String),
 }
 
 impl ThinkingLevel {
     /// Keep `Minimal` for compatibility with older configs/runtime state, but
     /// treat it as `Low` in visible mush controls and persisted visible prefs.
     #[must_use]
-    pub const fn normalize_visible(self) -> Self {
+    pub fn normalize_visible(&self) -> Self {
         match self {
             Self::Minimal => Self::Low,
-            other => other,
+            other => other.clone(),
         }
     }
 
-    /// map a codex `effort` string to the corresponding [`ThinkingLevel`].
-    /// returns `None` for unknown values so callers can drop them on the
-    /// floor without bricking on an upstream rename.
+    /// the canonical effort name sent on the wire (anthropic
+    /// `output_config.effort`, openai `reasoning_effort`). `Off` returns
+    /// `None` since callers treat "no reasoning" separately.
     #[must_use]
-    pub fn from_codex_str(effort: &str) -> Option<Self> {
-        match effort {
-            "off" | "none" => Some(Self::Off),
-            "minimal" => Some(Self::Minimal),
-            "low" => Some(Self::Low),
-            "medium" => Some(Self::Medium),
-            "high" => Some(Self::High),
-            "xhigh" | "max" => Some(Self::Xhigh),
-            _ => None,
+    pub fn effort_name(&self) -> Option<&str> {
+        match self {
+            Self::Off => None,
+            Self::Minimal => Some("minimal"),
+            Self::Low => Some("low"),
+            Self::Medium => Some("medium"),
+            Self::High => Some("high"),
+            Self::Xhigh => Some("xhigh"),
+            Self::Other(name) => Some(name.as_str()),
+        }
+    }
+
+    /// parse a provider effort string into a level. known names map to
+    /// typed variants; `off`/`none` to `Off`; anything else (e.g. `max`,
+    /// a future `ultra-max`) becomes `Other` so new upstream levels work
+    /// via autodetection without a code change.
+    #[must_use]
+    pub fn from_effort_str(effort: &str) -> Self {
+        match effort.trim().to_ascii_lowercase().as_str() {
+            "off" | "none" => Self::Off,
+            "minimal" => Self::Minimal,
+            "low" => Self::Low,
+            "medium" => Self::Medium,
+            "high" => Self::High,
+            "xhigh" => Self::Xhigh,
+            other => Self::Other(other.to_string()),
         }
     }
 }
@@ -303,32 +327,73 @@ mod tests {
     }
 
     #[test]
-    fn thinking_level_from_codex_str_maps_known_efforts() {
-        // codex effort strings are lowercase short tokens. unknown values
-        // return None so callers can drop them on the floor without
-        // bricking on an upstream rename
+    fn thinking_level_from_effort_str_maps_known_efforts() {
+        // known effort names map to typed variants; case/whitespace is
+        // normalised
         assert_eq!(
-            ThinkingLevel::from_codex_str("minimal"),
-            Some(ThinkingLevel::Minimal)
+            ThinkingLevel::from_effort_str("minimal"),
+            ThinkingLevel::Minimal
+        );
+        assert_eq!(ThinkingLevel::from_effort_str("low"), ThinkingLevel::Low);
+        assert_eq!(
+            ThinkingLevel::from_effort_str("medium"),
+            ThinkingLevel::Medium
+        );
+        assert_eq!(ThinkingLevel::from_effort_str("High"), ThinkingLevel::High);
+        assert_eq!(
+            ThinkingLevel::from_effort_str("xhigh"),
+            ThinkingLevel::Xhigh
+        );
+        assert_eq!(ThinkingLevel::from_effort_str("none"), ThinkingLevel::Off);
+    }
+
+    #[test]
+    fn thinking_level_unknown_efforts_become_other() {
+        // the whole point of the hybrid: a level we don't model (today's
+        // `max`, a future `ultra-max`) is captured verbatim so the cycler
+        // can autodetect and use it without a code change
+        assert_eq!(
+            ThinkingLevel::from_effort_str("max"),
+            ThinkingLevel::Other("max".into())
         );
         assert_eq!(
-            ThinkingLevel::from_codex_str("low"),
-            Some(ThinkingLevel::Low)
+            ThinkingLevel::from_effort_str("ultra-max"),
+            ThinkingLevel::Other("ultra-max".into())
+        );
+    }
+
+    #[test]
+    fn thinking_level_effort_name_round_trips() {
+        for level in [
+            ThinkingLevel::Minimal,
+            ThinkingLevel::Low,
+            ThinkingLevel::Medium,
+            ThinkingLevel::High,
+            ThinkingLevel::Xhigh,
+            ThinkingLevel::Other("max".into()),
+        ] {
+            let name = level.effort_name().unwrap();
+            assert_eq!(ThinkingLevel::from_effort_str(name), level);
+        }
+        // Off carries no wire name
+        assert_eq!(ThinkingLevel::Off.effort_name(), None);
+    }
+
+    #[test]
+    fn thinking_level_other_serde_round_trips_untagged() {
+        // Other serialises as its bare name (like Provider::Custom) and
+        // parses back. known names still parse to their typed variants
+        let level = ThinkingLevel::Other("max".into());
+        let json = serde_json::to_string(&level).unwrap();
+        assert_eq!(json, r#""max""#);
+        assert_eq!(
+            serde_json::from_str::<ThinkingLevel>(r#""max""#).unwrap(),
+            ThinkingLevel::Other("max".into())
         );
         assert_eq!(
-            ThinkingLevel::from_codex_str("medium"),
-            Some(ThinkingLevel::Medium)
+            serde_json::from_str::<ThinkingLevel>(r#""high""#).unwrap(),
+            ThinkingLevel::High
         );
-        assert_eq!(
-            ThinkingLevel::from_codex_str("high"),
-            Some(ThinkingLevel::High)
-        );
-        assert_eq!(
-            ThinkingLevel::from_codex_str("none"),
-            Some(ThinkingLevel::Off)
-        );
-        // unknown variant: drop instead of guess
-        assert_eq!(ThinkingLevel::from_codex_str("turbocharged"), None);
     }
 
     fn model_with_cost(cache_read: f64, cache_write: f64) -> Model {

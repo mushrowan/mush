@@ -436,8 +436,8 @@ fn build_request_body(
         )
     };
 
-    let thinking = match options.thinking {
-        Some(level) if level != ThinkingLevel::Off && model.reasoning => {
+    let thinking = match &options.thinking {
+        Some(level) if *level != ThinkingLevel::Off && model.reasoning => {
             if model.supports_adaptive_thinking && !options.force_budget_thinking {
                 Some(ThinkingConfig::Adaptive {
                     config_type: "adaptive".into(),
@@ -454,12 +454,21 @@ fn build_request_body(
         }
         _ => None,
     };
-    let output_config = options
-        .thinking
-        .and_then(|level| anthropic_effort(&model.id, level))
-        .map(|effort| OutputConfig {
-            effort: effort.into(),
-        });
+    // the effort string is just the level's wire name; legality is
+    // enforced upstream by `supported_thinking_levels` (the cycler only
+    // offers levels the model actually advertises), so no per-model
+    // special-casing lives here. `Off` yields no name
+    let output_config = if model.reasoning {
+        options
+            .thinking
+            .as_ref()
+            .and_then(ThinkingLevel::effort_name)
+            .map(|effort| OutputConfig {
+                effort: effort.to_string(),
+            })
+    } else {
+        None
+    };
 
     // temperature is incompatible with thinking
     let temperature = if thinking.is_none() {
@@ -516,36 +525,16 @@ fn anthropic_cache_control(
     })
 }
 
-/// `anthropic_effort` maps the user-visible thinking level to anthropic's
-/// `effort` field (low/medium/high/xhigh/max). xhigh is opus-4-7 only;
-/// 4-6 maps it to "max" because it lacks "xhigh". keep this narrow until
-/// the per-level support moves into model metadata too.
-fn anthropic_effort(model_id: &str, level: ThinkingLevel) -> Option<&'static str> {
-    match (model_id, level) {
-        (_, ThinkingLevel::Off) => None,
-        (_, ThinkingLevel::Minimal | ThinkingLevel::Low) => Some("low"),
-        (_, ThinkingLevel::Medium) => Some("medium"),
-        (_, ThinkingLevel::High) => Some("high"),
-        (id, ThinkingLevel::Xhigh) if id.contains("opus-4-7") || id.contains("opus-4.7") => {
-            Some("xhigh")
-        }
-        // Model-specific effort support should eventually live in model metadata.
-        // Claude Opus 4.6 lacks `xhigh`, so map the top visible level to `max`.
-        (id, ThinkingLevel::Xhigh) if id.contains("opus-4-6") || id.contains("opus-4.6") => {
-            Some("max")
-        }
-        (_, ThinkingLevel::Xhigh) => Some("high"),
-    }
-}
-
-fn thinking_budget(level: ThinkingLevel, max_tokens: u64) -> u64 {
+fn thinking_budget(level: &ThinkingLevel, max_tokens: u64) -> u64 {
     let base = max_tokens.max(4096);
     match level {
         ThinkingLevel::Off => 0,
         ThinkingLevel::Minimal => 1024,
         ThinkingLevel::Low => base / 4,
         ThinkingLevel::Medium => base / 2,
-        ThinkingLevel::High => base,
+        // `Other` only appears on effort-based (adaptive) models, which
+        // never hit the budget path; treat it like High defensively
+        ThinkingLevel::High | ThinkingLevel::Other(_) => base,
         ThinkingLevel::Xhigh => base * 2,
     }
 }
@@ -1398,18 +1387,18 @@ mod tests {
 
     #[test]
     fn thinking_budget_levels() {
-        assert_eq!(thinking_budget(ThinkingLevel::Off, 8192), 0);
-        assert_eq!(thinking_budget(ThinkingLevel::Minimal, 8192), 1024);
-        assert_eq!(thinking_budget(ThinkingLevel::Low, 8192), 2048);
-        assert_eq!(thinking_budget(ThinkingLevel::Medium, 8192), 4096);
-        assert_eq!(thinking_budget(ThinkingLevel::High, 8192), 8192);
+        assert_eq!(thinking_budget(&ThinkingLevel::Off, 8192), 0);
+        assert_eq!(thinking_budget(&ThinkingLevel::Minimal, 8192), 1024);
+        assert_eq!(thinking_budget(&ThinkingLevel::Low, 8192), 2048);
+        assert_eq!(thinking_budget(&ThinkingLevel::Medium, 8192), 4096);
+        assert_eq!(thinking_budget(&ThinkingLevel::High, 8192), 8192);
     }
 
     #[test]
     fn thinking_budget_respects_minimum() {
         // even with low max_tokens, budget should use base of 4096
-        assert_eq!(thinking_budget(ThinkingLevel::Low, 1024), 1024);
-        assert_eq!(thinking_budget(ThinkingLevel::Medium, 1024), 2048);
+        assert_eq!(thinking_budget(&ThinkingLevel::Low, 1024), 1024);
+        assert_eq!(thinking_budget(&ThinkingLevel::Medium, 1024), 2048);
     }
 
     #[test]
@@ -1886,6 +1875,10 @@ mod tests {
 
     #[test]
     fn opus_4_6_uses_adaptive_thinking_with_effort() {
+        // an effort level we don't model with a typed variant (`max`)
+        // flows through verbatim as `output_config.effort` on an adaptive
+        // model. this is the whole point of the hybrid: max is reachable
+        // without a dedicated enum variant
         let model = Model {
             id: "claude-opus-4-6".into(),
             name: "Claude Opus 4.6".into(),
@@ -1896,7 +1889,7 @@ mod tests {
             ..test_model()
         };
         let options = StreamOptions {
-            thinking: Some(ThinkingLevel::Xhigh),
+            thinking: Some(ThinkingLevel::Other("max".into())),
             ..Default::default()
         };
 
@@ -1979,31 +1972,6 @@ mod tests {
         };
         let options = StreamOptions {
             thinking: Some(ThinkingLevel::High),
-            ..Default::default()
-        };
-
-        let body = build_request_body(&model, &None, &[], &[], &options, false);
-
-        assert!(matches!(
-            body.thinking,
-            Some(ThinkingConfig::Enabled { .. })
-        ));
-        assert_eq!(
-            body.output_config.as_ref().map(|cfg| cfg.effort.as_str()),
-            Some("high")
-        );
-    }
-
-    #[test]
-    fn opus_4_5_does_not_send_max_effort() {
-        let model = Model {
-            id: "claude-opus-4-5".into(),
-            name: "Claude Opus 4.5".into(),
-            reasoning: true,
-            ..test_model()
-        };
-        let options = StreamOptions {
-            thinking: Some(ThinkingLevel::Xhigh),
             ..Default::default()
         };
 

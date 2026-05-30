@@ -128,20 +128,22 @@ pub struct CopySelection {
 /// respond to ctrl+t. unknown / out-of-list current levels reset to
 /// the first supported entry instead of stalling
 #[must_use]
-pub fn next_thinking_level(current: ThinkingLevel, supported: &[ThinkingLevel]) -> ThinkingLevel {
+pub fn next_thinking_level(current: &ThinkingLevel, supported: &[ThinkingLevel]) -> ThinkingLevel {
     if supported.is_empty() {
         return match current.normalize_visible() {
             ThinkingLevel::Off => ThinkingLevel::Low,
             ThinkingLevel::Low => ThinkingLevel::Medium,
             ThinkingLevel::Medium => ThinkingLevel::High,
             ThinkingLevel::High => ThinkingLevel::Xhigh,
-            ThinkingLevel::Xhigh | ThinkingLevel::Minimal => ThinkingLevel::Off,
+            ThinkingLevel::Xhigh | ThinkingLevel::Minimal | ThinkingLevel::Other(_) => {
+                ThinkingLevel::Off
+            }
         };
     }
     let normalised = current.normalize_visible();
-    match supported.iter().position(|&l| l == normalised) {
-        Some(i) => supported[(i + 1) % supported.len()],
-        None => supported[0],
+    match supported.iter().position(|l| *l == normalised) {
+        Some(i) => supported[(i + 1) % supported.len()].clone(),
+        None => supported[0].clone(),
     }
 }
 
@@ -1285,7 +1287,7 @@ impl App {
     /// hardcoded cycle so uncurated models still respond to ctrl+t
     pub fn cycle_thinking_level(&mut self) {
         self.thinking_level =
-            next_thinking_level(self.thinking_level, &self.supported_thinking_levels);
+            next_thinking_level(&self.thinking_level, &self.supported_thinking_levels);
     }
 
     /// open the session picker with the given sessions

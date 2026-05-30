@@ -134,14 +134,8 @@ fn left_spans(app: &App, width: u16) -> Vec<Span<'static>> {
 
     let dim = app.theme.dim;
 
-    let thinking_label = match app.thinking_level.normalize_visible() {
-        ThinkingLevel::Off => "off",
-        ThinkingLevel::Low => "low",
-        ThinkingLevel::Medium => "medium",
-        ThinkingLevel::High => "high",
-        ThinkingLevel::Xhigh => "xhigh",
-        ThinkingLevel::Minimal => unreachable!(),
-    };
+    let normalized = app.thinking_level.normalize_visible();
+    let thinking_label = normalized.effort_name().unwrap_or("off");
 
     let mut b = StatusSpansBuilder::new(&app.theme);
 

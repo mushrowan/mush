@@ -570,9 +570,9 @@ pub fn resolve_thinking(
     thinking_prefs
         .get(cwd, model.id.as_ref())
         .or_else(|| thinking_prefs.last_for_model(model.id.as_ref()))
-        .or(model.default_thinking_level)
-        .or(cfg.thinking)
-        .map(ThinkingLevel::normalize_visible)
+        .or_else(|| model.default_thinking_level.clone())
+        .or_else(|| cfg.thinking.clone())
+        .map(|level| level.normalize_visible())
 }
 
 /// resolve API key for a model: env > config > stored credentials > oauth

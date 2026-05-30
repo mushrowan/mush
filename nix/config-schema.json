@@ -618,15 +618,23 @@
       ]
     },
     "ThinkingLevel": {
-      "enum": [
-        "off",
-        "minimal",
-        "low",
-        "medium",
-        "high",
-        "xhigh"
-      ],
-      "type": "string"
+      "anyOf": [
+        {
+          "enum": [
+            "off",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "any provider-defined effort level we don't model with a typed\nvariant (e.g. anthropic's `max`, or a future `ultra-max`). carries\nthe raw effort name so newly-added upstream levels are supported by\nautodetection without a code change. only appears on effort-based\nmodels, never on the budget-token ladder",
+          "type": "string"
+        }
+      ]
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",

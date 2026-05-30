@@ -967,7 +967,7 @@ pub(super) fn resolve_runtime_model(id: &str, default: &Model) -> Model {
 fn pane_thinking_level(pane_mgr: &PaneManager, pane_id: PaneId) -> ThinkingLevel {
     pane_mgr
         .pane(pane_id)
-        .map(|pane| pane.app.thinking_level)
+        .map(|pane| pane.app.thinking_level.clone())
         .unwrap_or(ThinkingLevel::Off)
 }
 
