@@ -229,9 +229,8 @@ mod tests {
 
     #[test]
     fn render_shows_tab_header_with_active_tab_marked() {
-        // a fresh picker has the All tab active. the header must show
-        // both tabs and indicate which one is active. when the user
-        // toggles, the marker moves to favourites
+        // the header must show both tabs and indicate which one is
+        // active. when the user toggles, the marker moves between them
         let mut picker = ModelPickerState::new(
             vec![model("a", "A", "anthropic")],
             vec!["a".into()],

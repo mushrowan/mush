@@ -1222,6 +1222,8 @@ mod tests {
             favourite_models: Vec::new(),
             favourites_locked: false,
             save_favourite_models: None,
+            recent_models: Vec::new(),
+            save_recent_models: None,
             keymap: Default::default(),
             reload_context: None,
             forbidden_chars: Default::default(),

@@ -1341,9 +1341,13 @@ impl App {
         if models.is_empty() {
             return;
         }
+        let favourites = crate::model_picker::favourites_by_recency(
+            &self.completion.favourite_models,
+            &self.completion.recent_models,
+        );
         let state = crate::model_picker::ModelPickerState::new(
             models,
-            self.completion.favourite_models.clone(),
+            favourites,
             self.completion.favourites_locked,
             show_all,
         );

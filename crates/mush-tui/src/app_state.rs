@@ -44,6 +44,10 @@ pub struct CompletionState {
     pub favourite_models: Vec<String>,
     /// whether favourites are pinned by config.toml
     pub favourites_locked: bool,
+    /// model ids in most-recently-used order (most recent first). a
+    /// model counts as used when a message is actually sent to it, so
+    /// the favourites tab can sort by recency without alt+m churn
+    pub recent_models: Vec<String>,
     /// loaded prompt templates, used for `@name<tab>` expansion.
     /// populated at runtime from user + project prompts directories
     /// (`~/.config/mush/prompts/`, `.mush/prompts/`)

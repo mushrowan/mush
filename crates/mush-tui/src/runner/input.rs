@@ -397,6 +397,7 @@ async fn handle_streaming_key_event(
         }
         AppEvent::UserSubmit { text, images } => {
             submit_streaming_input(pane_mgr, stream_state, text, images).await;
+            record_model_use(pane_mgr, deps.tui_config);
         }
         AppEvent::EditSteering => {
             edit_last_queued_steering(pane_mgr, stream_state).await;
@@ -405,6 +406,23 @@ async fn handle_streaming_key_event(
     }
 
     Ok(LoopAction::Redraw)
+}
+
+/// record the focused pane's model as most-recently-used. called when a
+/// message is actually sent so the favourites picker can sort by recency
+/// without alt+m cycling polluting the order. updates the in-memory list
+/// on both the config and the focused app, then persists via the saver
+fn record_model_use(pane_mgr: &mut PaneManager, tui_config: &mut TuiConfig) {
+    let model_id = pane_mgr.focused().app.model_id.clone();
+    let updated = crate::model_picker::promote_recent_model(&tui_config.recent_models, &model_id);
+    if updated == tui_config.recent_models {
+        return;
+    }
+    tui_config.recent_models = updated.clone();
+    pane_mgr.focused_mut().app.completion.recent_models = updated;
+    if let Some(ref saver) = tui_config.save_recent_models {
+        saver(&tui_config.recent_models);
+    }
 }
 
 pub(super) async fn handle_idle_terminal_events(
@@ -775,6 +793,8 @@ mod tests {
             favourite_models: Vec::new(),
             favourites_locked: false,
             save_favourite_models: None,
+            recent_models: Vec::new(),
+            save_recent_models: None,
             keymap: crate::keybinds::KeyMap::default(),
             reload_context: None,
             forbidden_chars: Default::default(),

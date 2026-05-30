@@ -1492,7 +1492,10 @@ fn toggle_overlay_favourite(app: &mut App) -> Option<AppEvent> {
         app.completion.favourite_models.push(id);
     }
     if let Some(ref mut picker) = app.interaction.model_picker {
-        picker.favourite_models = app.completion.favourite_models.clone();
+        picker.favourite_models = crate::model_picker::favourites_by_recency(
+            &app.completion.favourite_models,
+            &app.completion.recent_models,
+        );
     }
     Some(AppEvent::PersistFavourites)
 }
@@ -3951,20 +3954,21 @@ mod tests {
         let mut app = app_with_models();
         app.completion.favourite_models = vec!["gpt-5".into()];
         app.open_model_picker_overlay();
+        // favourites present, so the picker opens on the favourites tab
         assert_eq!(
             app.interaction.model_picker.as_ref().unwrap().tab,
-            crate::model_picker::ModelPickerTab::All
+            crate::model_picker::ModelPickerTab::Favourites
         );
 
         handle_key(&mut app, key(KeyCode::Tab));
         assert_eq!(
             app.interaction.model_picker.as_ref().unwrap().tab,
-            crate::model_picker::ModelPickerTab::Favourites
+            crate::model_picker::ModelPickerTab::All
         );
         handle_key(&mut app, key(KeyCode::Tab));
         assert_eq!(
             app.interaction.model_picker.as_ref().unwrap().tab,
-            crate::model_picker::ModelPickerTab::All
+            crate::model_picker::ModelPickerTab::Favourites
         );
     }
 

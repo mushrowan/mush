@@ -585,6 +585,42 @@ pub fn resolve_favourites(from_config: &[String], from_disk: Vec<String>) -> (Ve
     }
 }
 
+// recent models persistence (most-recently-used order, most recent first)
+
+fn recent_models_path() -> PathBuf {
+    mush_session::data_dir().join("recent-models.json")
+}
+
+/// load the most-recently-used model list. returns `Vec::new` if the
+/// file doesn't exist or can't be parsed
+pub fn load_recent_models() -> Vec<String> {
+    load_recent_models_from(&recent_models_path())
+}
+
+pub(crate) fn load_recent_models_from(path: &std::path::Path) -> Vec<String> {
+    if !path.exists() {
+        return Vec::new();
+    }
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .unwrap_or_default()
+}
+
+/// persist the most-recently-used model list after it changes
+pub fn save_recent_models(models: &[String]) {
+    save_recent_models_to(&recent_models_path(), models);
+}
+
+pub(crate) fn save_recent_models_to(path: &std::path::Path, models: &[String]) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(models) {
+        let _ = mush_ai::private_io::write_atomic(path, json);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1110,6 +1146,22 @@ strong = "claude-opus-4-7"
         let path = tmp.path().join("favourite-models.json");
         let loaded = load_favourite_models_from(&path);
         assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn recent_models_round_trip_on_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("recent-models.json");
+        let recent = vec!["claude-opus-4-7".to_string(), "gpt-5".to_string()];
+        save_recent_models_to(&path, &recent);
+        assert_eq!(load_recent_models_from(&path), recent);
+    }
+
+    #[test]
+    fn load_recent_models_returns_empty_when_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("recent-models.json");
+        assert!(load_recent_models_from(&path).is_empty());
     }
 
     #[test]

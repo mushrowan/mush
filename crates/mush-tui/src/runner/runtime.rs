@@ -504,6 +504,7 @@ fn build_initial_app(tui_config: &TuiConfig, cwd: &Path) -> App {
 
     app.completion.favourite_models = tui_config.favourite_models.clone();
     app.completion.favourites_locked = tui_config.favourites_locked;
+    app.completion.recent_models = tui_config.recent_models.clone();
 
     app
 }
@@ -592,6 +593,8 @@ mod tests {
             favourite_models: Vec::new(),
             favourites_locked: false,
             save_favourite_models: None,
+            recent_models: Vec::new(),
+            save_recent_models: None,
             keymap: crate::keybinds::KeyMap::default(),
             reload_context: None,
             forbidden_chars: Default::default(),

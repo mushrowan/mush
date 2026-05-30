@@ -5,6 +5,10 @@ use mush_session::ConversationState;
 /// favourites aren't locked by config.toml
 pub type FavouriteModelsSaver = std::sync::Arc<dyn Fn(&[String]) + Send + Sync>;
 
+/// callback to persist the most-recently-used model list. takes the
+/// whole list (most recent first) so the writer can serialise atomically
+pub type RecentModelsSaver = std::sync::Arc<dyn Fn(&[String]) + Send + Sync>;
+
 /// callback to update session title
 pub type TitleUpdater = std::sync::Arc<dyn Fn(String) + Send + Sync>;
 
@@ -144,6 +148,12 @@ pub struct TuiConfig {
     pub favourites_locked: bool,
     /// callback to persist favourites after an imperative toggle
     pub save_favourite_models: Option<FavouriteModelsSaver>,
+    /// model ids in most-recently-used order (most recent first), loaded
+    /// at startup. updated whenever a message is sent to a model so the
+    /// favourites picker can sort by recency
+    pub recent_models: Vec<String>,
+    /// callback to persist the recent-models list after it changes
+    pub save_recent_models: Option<RecentModelsSaver>,
     /// resolved keybind map applied to every new App
     pub keymap: crate::keybinds::KeyMap,
     /// callback fired by /reload to refresh AGENTS.md and templates.

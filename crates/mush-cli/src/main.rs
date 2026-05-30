@@ -605,6 +605,10 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
                 config::save_favourite_models(favs);
             }))
         },
+        recent_models: config::load_recent_models(),
+        save_recent_models: Some(std::sync::Arc::new(|recent: &[String]| {
+            config::save_recent_models(recent);
+        })),
         keymap: {
             let mut km = mush_tui::KeyMap::default();
             let warnings = km.override_scoped(&setup.cfg.keys.scoped());
