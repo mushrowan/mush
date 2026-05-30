@@ -37,7 +37,9 @@ use std::time::SystemTime;
 use serde::Deserialize;
 
 use super::{DiscoveredModel, DiscoveryError, DiscoveryReport, ModelDiscovery};
-use crate::types::{Api, ApiKey, InputModality, Model, ModelCost, Provider, TokenCount};
+use crate::types::{
+    Api, ApiKey, InputModality, Model, ModelCost, Provider, ThinkingLevel, TokenCount,
+};
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const API_VERSION: &str = "2023-06-01";
@@ -136,6 +138,20 @@ fn entry_to_model(entry: AnthropicModelEntry) -> Model {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| entry.id.clone());
 
+    // effort levels are autodetected from the capability so the cycler
+    // walks exactly what the model supports. the API default is `high`
+    // when effort is available; fall back to the first level otherwise
+    let supported_thinking_levels = caps
+        .effort
+        .as_ref()
+        .map(AnthropicEffortCaps::supported_levels)
+        .unwrap_or_default();
+    let default_thinking_level = if supported_thinking_levels.contains(&ThinkingLevel::High) {
+        Some(ThinkingLevel::High)
+    } else {
+        supported_thinking_levels.first().cloned()
+    };
+
     Model {
         id: entry.id.into(),
         name: display_name,
@@ -153,8 +169,8 @@ fn entry_to_model(entry: AnthropicModelEntry) -> Model {
         context_window: TokenCount::new(entry.max_input_tokens.unwrap_or(DEFAULT_CONTEXT_WINDOW)),
         max_output_tokens: TokenCount::new(entry.max_tokens.unwrap_or(DEFAULT_MAX_OUTPUT)),
         supports_adaptive_thinking,
-        supported_thinking_levels: Vec::new(),
-        default_thinking_level: None,
+        supported_thinking_levels,
+        default_thinking_level,
     }
 }
 
@@ -182,6 +198,54 @@ struct AnthropicCapabilities {
     thinking: Option<AnthropicThinkingCaps>,
     #[serde(default)]
     image_input: Option<SupportedFlag>,
+    #[serde(default)]
+    effort: Option<AnthropicEffortCaps>,
+}
+
+/// the `effort` capability: a `supported` flag plus one nested
+/// `{supported}` object per effort level (`low`, `medium`, `high`,
+/// `xhigh`, `max`, ...). the per-level keys are flattened so unknown
+/// future names are captured too
+#[derive(Deserialize, Debug, Default)]
+struct AnthropicEffortCaps {
+    #[serde(default)]
+    supported: bool,
+    #[serde(flatten)]
+    levels: std::collections::HashMap<String, SupportedFlag>,
+}
+
+impl AnthropicEffortCaps {
+    /// canonical cheap→expensive order for the effort levels we know.
+    /// unknown supported levels are appended after, sorted for stable
+    /// output, so a new upstream name still shows up in the cycler
+    const KNOWN_ORDER: &'static [&'static str] = &["low", "medium", "high", "xhigh", "max"];
+
+    /// the supported levels as an ordered ladder, or empty when effort
+    /// isn't supported (the model then uses the budget-token path)
+    fn supported_levels(&self) -> Vec<ThinkingLevel> {
+        if !self.supported {
+            return Vec::new();
+        }
+        let is_on = |name: &str| self.levels.get(name).is_some_and(|f| f.supported);
+        let mut ladder: Vec<ThinkingLevel> = Self::KNOWN_ORDER
+            .iter()
+            .filter(|name| is_on(name))
+            .map(|name| ThinkingLevel::from_effort_str(name))
+            .collect();
+        let mut extra: Vec<&String> = self
+            .levels
+            .iter()
+            .filter(|(name, flag)| flag.supported && !Self::KNOWN_ORDER.contains(&name.as_str()))
+            .map(|(name, _)| name)
+            .collect();
+        extra.sort();
+        ladder.extend(
+            extra
+                .into_iter()
+                .map(|name| ThinkingLevel::from_effort_str(name)),
+        );
+        ladder
+    }
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -229,7 +293,16 @@ mod tests {
                 "enabled":  {"supported": true}
               }
             },
-            "image_input": {"supported": true}
+            "image_input": {"supported": true},
+            "effort": {
+              "supported": true,
+              "low": {"supported": true},
+              "medium": {"supported": true},
+              "high": {"supported": true},
+              "xhigh": {"supported": true},
+              "max": {"supported": true},
+              "ultra": {"supported": false}
+            }
           }
         },
         {
@@ -289,6 +362,36 @@ mod tests {
             haiku.model.max_output_tokens,
             TokenCount::new(DEFAULT_MAX_OUTPUT)
         );
+    }
+
+    #[test]
+    fn parses_effort_capability_into_supported_levels() {
+        // the effort capability is autodetected into the cycler's level
+        // ladder, in canonical cheap→expensive order. known names map to
+        // typed variants; `max` (and any future name) is captured as
+        // Other. unsupported levels are excluded
+        let models = parse_anthropic_models(FULL_FIXTURE).unwrap();
+        let opus = &models[0].model;
+        assert_eq!(
+            opus.supported_thinking_levels,
+            vec![
+                ThinkingLevel::Low,
+                ThinkingLevel::Medium,
+                ThinkingLevel::High,
+                ThinkingLevel::Xhigh,
+                ThinkingLevel::Other("max".into()),
+            ]
+        );
+        assert_eq!(opus.default_thinking_level, Some(ThinkingLevel::High));
+
+        // a model with no effort capability keeps an empty ladder so the
+        // cycler falls back to the legacy budget-token walk
+        let haiku = models
+            .iter()
+            .find(|m| m.model.id.as_str() == "claude-haiku-old")
+            .unwrap();
+        assert!(haiku.model.supported_thinking_levels.is_empty());
+        assert!(haiku.model.default_thinking_level.is_none());
     }
 
     #[test]
