@@ -212,6 +212,22 @@ impl Default for AnthropicBetas {
 }
 
 impl AnthropicBetas {
+    /// drop the 1M context beta when the model can't actually use it.
+    /// the `context-1m-2025-08-07` beta is only legal for models whose
+    /// context window exceeds the standard 200K. sending it for a 200K
+    /// model is rejected with a misleading "long context beta is not yet
+    /// available for this subscription" 400, so gate it on the model's
+    /// discovered context window rather than the account.
+    #[must_use]
+    pub fn gated_for_context_window(&self, context_window: TokenCount) -> Self {
+        const STANDARD_CONTEXT_WINDOW: u64 = 200_000;
+        let mut gated = self.clone();
+        if context_window.get() <= STANDARD_CONTEXT_WINDOW {
+            gated.context_1m = false;
+        }
+        gated
+    }
+
     /// compose the `anthropic-beta` header value for an oauth request.
     /// always includes the persistent flags required for claude-code parity
     /// (identity, oauth, streaming, thinking, caching scope). toggleable flags
@@ -351,5 +367,35 @@ mod tests {
     #[test]
     fn supports_caching_is_false_when_neither_rate_is_priced() {
         assert!(!model_with_cost(0.0, 0.0).supports_caching());
+    }
+
+    #[test]
+    fn gated_betas_drop_1m_for_standard_context_models() {
+        // the long-context beta is illegal for 200K models; sending it
+        // triggers a misleading "not available for this subscription"
+        // 400. gate it on the model's actual context window
+        let betas = AnthropicBetas::default();
+        assert!(betas.context_1m, "default should request 1M");
+        let gated = betas.gated_for_context_window(TokenCount::new(200_000));
+        assert!(!gated.context_1m, "200K model must not send context-1m");
+        // unrelated flags stay untouched
+        assert_eq!(gated.effort, betas.effort);
+        assert_eq!(gated.context_management, betas.context_management);
+    }
+
+    #[test]
+    fn gated_betas_keep_1m_for_long_context_models() {
+        let gated = AnthropicBetas::default().gated_for_context_window(TokenCount::new(1_000_000));
+        assert!(gated.context_1m, "1M model may send context-1m");
+    }
+
+    #[test]
+    fn gated_betas_leave_disabled_1m_off() {
+        let betas = AnthropicBetas {
+            context_1m: false,
+            ..AnthropicBetas::default()
+        };
+        let gated = betas.gated_for_context_window(TokenCount::new(1_000_000));
+        assert!(!gated.context_1m);
     }
 }

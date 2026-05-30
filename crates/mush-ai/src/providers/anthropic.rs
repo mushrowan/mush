@@ -121,7 +121,11 @@ impl ApiProvider for AnthropicProvider {
         headers.insert("anthropic-version", HeaderValue::from_static(API_VERSION));
 
         if is_oauth {
-            let betas = options.anthropic_betas.clone().unwrap_or_default();
+            let betas = options
+                .anthropic_betas
+                .clone()
+                .unwrap_or_default()
+                .gated_for_context_window(model.context_window);
             headers.insert(
                 "anthropic-beta",
                 HeaderValue::from_str(&betas.to_header_value())?,
