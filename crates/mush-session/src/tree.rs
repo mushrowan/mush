@@ -165,37 +165,29 @@ impl SessionTree {
     /// produced by [`SessionTree::build_context`] will collapse to the
     /// summary plus the messages from `first_kept_id` onward.
     ///
-    /// `first_kept_context_index` is an index into the flat context
-    /// (the same shape `build_context` returns), counting Message and
-    /// BranchSummary entries as one each. returns `None` if no entry in
-    /// the current branch corresponds to that index, or if a prior
-    /// `EntryKind::Compaction` is in the branch (nested compactions are
-    /// not yet supported).
+    /// `first_kept_context_index` indexes into the collapsed context
+    /// (exactly what [`SessionTree::build_context`] returns), so it stays
+    /// correct when the branch already holds a prior compaction: the new
+    /// marker folds the earlier summary into itself and keeps the recent
+    /// tail rather than re-expanding already-summarised history. returns
+    /// `None` if the index is out of range or lands on a prior compaction
+    /// summary (index 0 of an already-compacted branch, a no-op).
     pub fn compact_at_leaf(
         &mut self,
         summary: String,
         first_kept_context_index: usize,
     ) -> Option<EntryId> {
-        let branch = self.current_branch();
-        let mut context_idx = 0usize;
-        let mut first_kept_id: Option<EntryId> = None;
-        for entry in &branch {
-            match entry.kind {
-                EntryKind::Message { .. } | EntryKind::BranchSummary { .. } => {
-                    if context_idx == first_kept_context_index {
-                        first_kept_id = Some(entry.id.clone());
-                        break;
-                    }
-                    context_idx += 1;
-                }
-                // nested compactions would require walking the synthetic
-                // summary + kept-message expansion that collect_context
-                // performs. punt on that until we actually need it
-                EntryKind::Compaction { .. } => return None,
+        let first_kept_id = {
+            let context = self.context_entries();
+            let entry = context.get(first_kept_context_index)?;
+            // the leading context entry can be a prior compaction node
+            // (its synthetic summary). that only happens at index 0, which
+            // would summarise nothing, so reject it.
+            if matches!(entry.kind, EntryKind::Compaction { .. }) {
+                return None;
             }
-        }
-        let first_kept_id = first_kept_id?;
-        // re-borrow free of branch
+            entry.id.clone()
+        };
         let parent_id = self.leaf_id.clone();
         let entry = SessionEntry {
             id: EntryId::new(),
@@ -251,75 +243,32 @@ impl SessionTree {
 
     /// count visible context messages without cloning them
     pub fn context_len(&self) -> usize {
-        let branch = self.current_branch();
-
-        let compaction_idx = branch
-            .iter()
-            .rposition(|e| matches!(e.kind, EntryKind::Compaction { .. }));
-
-        let mut count = 0;
-        let start = if let Some(idx) = compaction_idx {
-            if let EntryKind::Compaction { first_kept_id, .. } = &branch[idx].kind {
-                count += 1;
-                if let Some(kept_pos) = branch.iter().position(|e| e.id == *first_kept_id) {
-                    count += branch[kept_pos..idx]
-                        .iter()
-                        .filter(|entry| matches!(entry.kind, EntryKind::Message { .. }))
-                        .count();
-                }
-            }
-            idx + 1
-        } else {
-            0
-        };
-
-        count
-            + branch[start..]
-                .iter()
-                .filter(|entry| {
-                    matches!(
-                        entry.kind,
-                        EntryKind::Message { .. } | EntryKind::BranchSummary { .. }
-                    )
-                })
-                .count()
+        self.context_entries().len()
     }
 
-    fn collect_context(&self, limit: Option<usize>) -> Vec<Message> {
+    /// the branch entries that [`SessionTree::build_context`] turns into
+    /// messages, in order. collapses to the most recent compaction node's
+    /// summary (represented by the compaction entry itself, always first
+    /// when present) followed by the messages kept after it, then the
+    /// live tail. single source of truth for context ordering, shared by
+    /// `build_context`, `context_len`, and `compact_at_leaf` so their
+    /// indices cannot drift.
+    fn context_entries(&self) -> Vec<&SessionEntry> {
         let branch = self.current_branch();
-        let max_messages = branch.len().saturating_add(1);
-        let capacity = limit.map_or(max_messages, |limit| limit.min(max_messages));
-        let mut messages = Vec::with_capacity(capacity);
+        let mut entries: Vec<&SessionEntry> = Vec::with_capacity(branch.len());
 
         let compaction_idx = branch
             .iter()
             .rposition(|e| matches!(e.kind, EntryKind::Compaction { .. }));
 
         let start = if let Some(idx) = compaction_idx {
-            if let EntryKind::Compaction { ref summary, .. } = branch[idx].kind
-                && !push_context_message(
-                    &mut messages,
-                    limit,
-                    Message::User(UserMessage {
-                        content: UserContent::Text(format!(
-                            "The conversation history before this point was compacted \
-                             into the following summary:\n\n<summary>\n{summary}\n</summary>"
-                        )),
-                        timestamp_ms: branch[idx].timestamp,
-                    }),
-                )
-            {
-                return messages;
-            }
-
+            entries.push(branch[idx]);
             if let EntryKind::Compaction { first_kept_id, .. } = &branch[idx].kind
                 && let Some(kept_pos) = branch.iter().position(|e| e.id == *first_kept_id)
             {
-                for entry in &branch[kept_pos..idx] {
-                    if let EntryKind::Message { ref message } = entry.kind
-                        && !push_context_message(&mut messages, limit, message.clone())
-                    {
-                        return messages;
+                for &entry in &branch[kept_pos..idx] {
+                    if matches!(entry.kind, EntryKind::Message { .. }) {
+                        entries.push(entry);
                     }
                 }
             }
@@ -328,21 +277,42 @@ impl SessionTree {
             0
         };
 
-        for entry in &branch[start..] {
-            let next = match &entry.kind {
-                EntryKind::Message { message } => Some(message.clone()),
-                EntryKind::BranchSummary { summary, .. } => Some(Message::User(UserMessage {
+        for &entry in &branch[start..] {
+            if matches!(
+                entry.kind,
+                EntryKind::Message { .. } | EntryKind::BranchSummary { .. }
+            ) {
+                entries.push(entry);
+            }
+        }
+
+        entries
+    }
+
+    fn collect_context(&self, limit: Option<usize>) -> Vec<Message> {
+        let entries = self.context_entries();
+        let capacity = limit.map_or(entries.len(), |limit| limit.min(entries.len()));
+        let mut messages = Vec::with_capacity(capacity);
+
+        for entry in entries {
+            let message = match &entry.kind {
+                EntryKind::Message { message } => message.clone(),
+                EntryKind::BranchSummary { summary, .. } => Message::User(UserMessage {
                     content: UserContent::Text(format!(
                         "Context from a previous conversation branch:\n\n\
                          <branch_summary>\n{summary}\n</branch_summary>"
                     )),
                     timestamp_ms: entry.timestamp,
-                })),
-                EntryKind::Compaction { .. } => None,
+                }),
+                EntryKind::Compaction { summary, .. } => Message::User(UserMessage {
+                    content: UserContent::Text(format!(
+                        "The conversation history before this point was compacted \
+                         into the following summary:\n\n<summary>\n{summary}\n</summary>"
+                    )),
+                    timestamp_ms: entry.timestamp,
+                }),
             };
-            if let Some(message) = next
-                && !push_context_message(&mut messages, limit, message)
-            {
+            if !push_context_message(&mut messages, limit, message) {
                 return messages;
             }
         }
@@ -629,6 +599,81 @@ mod tests {
         } else {
             panic!("expected Compaction kind on new entry");
         }
+    }
+
+    #[test]
+    fn repeated_compaction_collapses_without_reexpanding() {
+        // regression: the second /compact on an already-compacted branch
+        // must keep only the recent messages, not re-expand everything the
+        // first compaction already summarised away. the index passed to
+        // compact_at_leaf is relative to the *collapsed* context that
+        // build_context produces, not the raw root-to-leaf branch.
+        let mut tree = SessionTree::new();
+        for i in 0..20 {
+            if i % 2 == 0 {
+                tree.append_message(user_msg(&format!("q{i}")));
+            } else {
+                tree.append_message(assistant_msg(&format!("a{i}")));
+            }
+        }
+
+        // first compaction: summarise the first 15, keep the last 5
+        tree.compact_at_leaf("first summary".into(), 15)
+            .expect("first compaction should succeed");
+        assert_eq!(tree.build_context().len(), 6, "summary + 5 kept");
+
+        // conversation continues with 10 more messages
+        for i in 20..30 {
+            if i % 2 == 0 {
+                tree.append_message(user_msg(&format!("q{i}")));
+            } else {
+                tree.append_message(assistant_msg(&format!("a{i}")));
+            }
+        }
+        // collapsed context is now first-summary + 5 + 10 = 16
+        assert_eq!(tree.build_context().len(), 16);
+
+        // second compaction: summarise the first 10 of the *collapsed*
+        // context (index 10 = "q24"), keep the last 6
+        tree.compact_at_leaf("second summary".into(), 10)
+            .expect("second compaction should succeed");
+
+        let ctx = tree.build_context();
+        assert_eq!(
+            ctx.len(),
+            7,
+            "second compaction must collapse to summary + 6 kept, not re-expand. got {} messages",
+            ctx.len()
+        );
+
+        let texts: Vec<String> = ctx
+            .iter()
+            .map(|m| match m {
+                Message::User(u) => u.text(),
+                Message::Assistant(a) => a.text(),
+                _ => String::new(),
+            })
+            .collect();
+
+        assert!(
+            texts[0].contains("second summary"),
+            "leading message must be the new summary, got {:?}",
+            texts[0]
+        );
+        // the 6 most recent real messages survive verbatim
+        assert!(
+            texts.iter().any(|t| t == "q24"),
+            "kept window start q24 missing: {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t == "a29"),
+            "kept window end a29 missing: {texts:?}"
+        );
+        // anything the first compaction folded away must stay folded
+        assert!(
+            !texts.iter().any(|t| t == "q0" || t == "a15" || t == "a23"),
+            "summarised history leaked back into context: {texts:?}"
+        );
     }
 
     #[test]
