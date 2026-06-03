@@ -166,39 +166,35 @@ fn redact_headers(headers: &[(&str, &str)]) -> Value {
 
 fn build_request(
     call_id: u64,
-    provider: &str,
-    model: &str,
+    method: &str,
     url: &str,
     headers: &[(&str, &str)],
-    body_json: &str,
+    body: Option<&str>,
 ) -> Value {
     json!({
         "ts_ms": now_ms(),
         "call_id": call_id,
         "kind": "request",
-        "provider": provider,
-        "model": model,
+        "method": method,
         "url": url,
         "headers": redact_headers(headers),
-        "body": redact_body(body_json),
+        "body": body.map(redact_body),
     })
 }
 
 fn build_response(
     call_id: u64,
-    provider: &str,
-    model: &str,
     status: u16,
     headers: &[(&str, &str)],
+    body: Option<&str>,
 ) -> Value {
     json!({
         "ts_ms": now_ms(),
         "call_id": call_id,
         "kind": "response",
-        "provider": provider,
-        "model": model,
         "status": status,
         "headers": redact_headers(headers),
+        "body": body.map(redact_body),
     })
 }
 
@@ -224,35 +220,28 @@ fn build_assembled(call_id: u64, message: &crate::types::AssistantMessage) -> Va
     })
 }
 
-/// record an outgoing llm request with its full (redacted) body
+/// record an outgoing http request with its full (redacted) body
 pub fn log_request(
     call_id: u64,
-    provider: &str,
-    model: &str,
+    method: &str,
     url: &str,
     headers: &[(&str, &str)],
-    body_json: &str,
+    body: Option<&str>,
 ) {
     if !enabled() {
         return;
     }
-    write_record(&build_request(
-        call_id, provider, model, url, headers, body_json,
-    ));
+    write_record(&build_request(call_id, method, url, headers, body));
 }
 
-/// record the response status line and headers for a call
-pub fn log_response(
-    call_id: u64,
-    provider: &str,
-    model: &str,
-    status: u16,
-    headers: &[(&str, &str)],
-) {
+/// record an http response status + headers, with the body when it was
+/// read in full (non-streaming or error responses; streaming bodies
+/// arrive as `sse` records instead)
+pub fn log_response(call_id: u64, status: u16, headers: &[(&str, &str)], body: Option<&str>) {
     if !enabled() {
         return;
     }
-    write_record(&build_response(call_id, provider, model, status, headers));
+    write_record(&build_response(call_id, status, headers, body));
 }
 
 /// record one raw sse event, untruncated
@@ -287,15 +276,14 @@ mod tests {
     fn headers_redact_sensitive_keep_rest() {
         let headers = build_request(
             0,
-            "anthropic",
-            "claude",
+            "POST",
             "https://x/v1/messages",
             &[
                 ("authorization", "Bearer sk-ant-secret-token-value"),
                 ("x-api-key", "sk-secret"),
                 ("anthropic-version", "2023-06-01"),
             ],
-            "{}",
+            Some("{}"),
         );
         let h = &headers["headers"];
         assert_eq!(h["authorization"], REDACTED_HEADER_VALUE);
@@ -319,12 +307,34 @@ mod tests {
     #[test]
     fn request_body_parsed_and_redacted() {
         let body = r#"{"model":"x","api_key":"sk-1234567890ab","messages":[{"role":"user"}]}"#;
-        let rec = build_request(7, "openai", "gpt", "https://x", &[], body);
+        let rec = build_request(7, "POST", "https://x", &[], Some(body));
         assert_eq!(rec["kind"], "request");
         assert_eq!(rec["call_id"], 7);
         assert_eq!(rec["body"]["model"], "x");
         assert_eq!(rec["body"]["api_key"], REDACTED_HEADER_VALUE);
         assert_eq!(rec["body"]["messages"][0]["role"], "user");
+    }
+
+    #[test]
+    fn response_records_error_body_redacted() {
+        let none = build_response(1, 200, &[], None);
+        assert_eq!(none["kind"], "response");
+        assert_eq!(none["status"], 200);
+        assert!(none["body"].is_null(), "success body should be null");
+
+        let err = build_response(
+            1,
+            400,
+            &[],
+            Some(r#"{"error":{"message":"bad token sk-1234567890ab"}}"#),
+        );
+        assert_eq!(err["status"], 400);
+        let msg = err["body"]["error"]["message"].as_str().unwrap();
+        assert!(msg.contains("bad token"), "body lost: {msg}");
+        assert!(
+            msg.contains(REDACTED_HEADER_VALUE),
+            "secret not redacted: {msg}"
+        );
     }
 
     #[test]

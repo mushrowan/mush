@@ -220,7 +220,7 @@ async fn run_validation_and_save(entry_id: &str, key: &str) -> SaveOutcome {
         return SaveOutcome::Failed("row is not an api-key provider".into());
     };
 
-    let client = reqwest::Client::new();
+    let client = mush_ai::http::client();
     let info = match validate_api_key(&client, &provider, key).await {
         Ok(info) => Some(info),
         // no live-validation endpoint registered for this provider -

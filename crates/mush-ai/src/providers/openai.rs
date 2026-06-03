@@ -12,7 +12,7 @@ use crate::stream::StreamEvent;
 use crate::types::*;
 
 pub struct OpenaiCompletionsProvider {
-    pub client: reqwest::Client,
+    pub client: crate::http::HttpClient,
 }
 
 #[async_trait::async_trait]
@@ -51,32 +51,6 @@ impl ApiProvider for OpenaiCompletionsProvider {
         let url = format!("{base_url}/chat/completions");
         let call_id = crate::wire_log::next_call_id();
 
-        if crate::wire_log::enabled()
-            && let Ok(body_json) = serde_json::to_string(&body)
-        {
-            let header_pairs: Vec<(String, String)> = headers
-                .iter()
-                .map(|(name, value)| {
-                    (
-                        name.as_str().to_string(),
-                        value.to_str().unwrap_or("<non-utf8>").to_string(),
-                    )
-                })
-                .collect();
-            let header_refs: Vec<(&str, &str)> = header_pairs
-                .iter()
-                .map(|(k, v)| (k.as_str(), v.as_str()))
-                .collect();
-            crate::wire_log::log_request(
-                call_id,
-                "openai completions",
-                model.id.as_str(),
-                &url,
-                &header_refs,
-                &body_json,
-            );
-        }
-
         tracing::debug!(model = %model.id, %url, "sending openai completions request");
 
         let response = self
@@ -84,17 +58,12 @@ impl ApiProvider for OpenaiCompletionsProvider {
             .post(&url)
             .headers(headers)
             .json(&body)
+            .with_extension(crate::http::WireCallId(call_id))
             .send()
             .await?;
 
-        let response = super::check_response(
-            response,
-            "openai completions",
-            model.id.as_str(),
-            &url,
-            call_id,
-        )
-        .await?;
+        let response =
+            super::check_response(response, "openai completions", model.id.as_str(), &url).await?;
 
         Ok(parse_sse_stream(
             response,

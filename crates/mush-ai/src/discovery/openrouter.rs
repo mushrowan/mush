@@ -47,7 +47,7 @@ const DEFAULT_MAX_OUTPUT: u64 = 16_384;
 
 /// openrouter discovery client
 pub struct OpenRouterDiscovery {
-    client: reqwest::Client,
+    client: crate::http::HttpClient,
     base_url: String,
     /// optional - openrouter `/models` works unauthenticated, but auth
     /// gives access to private/preview models tied to the account
@@ -57,7 +57,7 @@ pub struct OpenRouterDiscovery {
 impl OpenRouterDiscovery {
     #[must_use]
     pub fn new(
-        client: reqwest::Client,
+        client: crate::http::HttpClient,
         base_url: impl Into<String>,
         api_key: Option<ApiKey>,
     ) -> Self {

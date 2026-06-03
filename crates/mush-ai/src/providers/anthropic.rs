@@ -67,7 +67,7 @@ fn from_claude_code_name(name: &str, tools: &[ToolDefinition]) -> String {
 }
 
 pub struct AnthropicProvider {
-    pub client: reqwest::Client,
+    pub client: crate::http::HttpClient,
 }
 
 #[async_trait::async_trait]
@@ -218,14 +218,6 @@ impl ApiProvider for AnthropicProvider {
                 .map(|(k, v)| (k.as_str(), v.as_str()))
                 .collect();
             let _ = crate::request_snapshot::dump("anthropic", &fp, &body_json, &header_refs);
-            crate::wire_log::log_request(
-                call_id,
-                "anthropic",
-                model.id.as_str(),
-                &url,
-                &header_refs,
-                &body_json,
-            );
         }
 
         tracing::debug!(model = %model.id, %url, oauth = is_oauth, "sending anthropic request");
@@ -235,6 +227,7 @@ impl ApiProvider for AnthropicProvider {
             .post(&url)
             .headers(headers.clone())
             .json(&body)
+            .with_extension(crate::http::WireCallId(call_id))
             .send()
             .await?;
 
@@ -260,6 +253,7 @@ impl ApiProvider for AnthropicProvider {
                             .post(&url)
                             .headers(headers)
                             .json(&body)
+                            .with_extension(crate::http::WireCallId(call_id))
                             .send()
                             .await?
                     } else {
@@ -280,7 +274,7 @@ impl ApiProvider for AnthropicProvider {
         };
 
         let response =
-            super::check_response(response, "anthropic", model.id.as_str(), &url, call_id).await?;
+            super::check_response(response, "anthropic", model.id.as_str(), &url).await?;
 
         let sse_stream = parse_sse_stream(
             response,

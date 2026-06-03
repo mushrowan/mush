@@ -51,7 +51,7 @@ const PROVIDER_NAME: &str = "openai-codex";
 
 /// codex discovery client
 pub struct CodexDiscovery {
-    client: reqwest::Client,
+    client: crate::http::HttpClient,
     base_url: String,
     /// chatgpt session access token
     access_token: ApiKey,
@@ -65,7 +65,7 @@ pub struct CodexDiscovery {
 impl CodexDiscovery {
     #[must_use]
     pub fn new(
-        client: reqwest::Client,
+        client: crate::http::HttpClient,
         base_url: impl Into<String>,
         access_token: ApiKey,
         account_id: Option<String>,

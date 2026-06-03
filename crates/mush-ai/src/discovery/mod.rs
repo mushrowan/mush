@@ -63,6 +63,9 @@ pub enum DiscoveryError {
     #[error("http request failed: {0}")]
     Http(#[from] reqwest::Error),
 
+    #[error("http middleware failed: {0}")]
+    Middleware(String),
+
     #[error("authentication failed ({status}): {body}")]
     Auth { status: u16, body: String },
 
@@ -77,6 +80,15 @@ pub enum DiscoveryError {
 
     #[error("invalid header value: {0}")]
     InvalidHeader(#[from] reqwest::header::InvalidHeaderValue),
+}
+
+impl From<reqwest_middleware::Error> for DiscoveryError {
+    fn from(err: reqwest_middleware::Error) -> Self {
+        match err {
+            reqwest_middleware::Error::Reqwest(e) => Self::Http(e),
+            reqwest_middleware::Error::Middleware(e) => Self::Middleware(e.to_string()),
+        }
+    }
 }
 
 /// fetch the list of models a provider currently offers
@@ -95,7 +107,7 @@ pub trait ModelDiscovery: Send + Sync {
 /// returns the response body text on 2xx, an [`DiscoveryError::Auth`] on
 /// 401/403, and [`DiscoveryError::Upstream`] for anything else non-2xx.
 pub(crate) async fn execute_request(
-    request: reqwest::RequestBuilder,
+    request: reqwest_middleware::RequestBuilder,
 ) -> Result<String, DiscoveryError> {
     let resp = request.send().await?;
     let status = resp.status();

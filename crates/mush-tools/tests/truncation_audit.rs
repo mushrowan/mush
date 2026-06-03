@@ -126,7 +126,7 @@ fn audit_per_tool_output_limit_choices() {
 
     let cwd: Arc<std::path::Path> = Arc::from(std::env::temp_dir().as_path());
     let bg = mush_tools::background::BackgroundJobRegistry::new();
-    let http = reqwest::Client::new();
+    let http = mush_ai::http::client();
 
     let cases: Vec<(&str, OutputLimit, Box<dyn AgentTool>)> = vec![
         // tail: bash and bash polling. errors and final results live at

@@ -31,11 +31,23 @@ pub enum OAuthError {
     #[error("http request failed: {0}")]
     Http(#[from] reqwest::Error),
 
+    #[error("http middleware failed: {0}")]
+    Middleware(String),
+
     #[error("failed to read/write credentials: {0}")]
     Io(#[from] std::io::Error),
 
     #[error("failed to parse credentials: {0}")]
     Json(#[from] serde_json::Error),
+}
+
+impl From<reqwest_middleware::Error> for OAuthError {
+    fn from(err: reqwest_middleware::Error) -> Self {
+        match err {
+            reqwest_middleware::Error::Reqwest(e) => Self::Http(e),
+            reqwest_middleware::Error::Middleware(e) => Self::Middleware(e.to_string()),
+        }
+    }
 }
 
 /// info needed to complete the oauth login

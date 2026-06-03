@@ -29,6 +29,9 @@ pub enum ProviderError {
     #[error("request failed: {0}")]
     Request(#[from] reqwest::Error),
 
+    #[error("request middleware failed: {0}")]
+    Middleware(String),
+
     #[error("invalid header value: {0}")]
     InvalidHeader(#[from] reqwest::header::InvalidHeaderValue),
 
@@ -43,6 +46,15 @@ pub enum ProviderError {
 
     #[error("{0}")]
     Other(String),
+}
+
+impl From<reqwest_middleware::Error> for ProviderError {
+    fn from(err: reqwest_middleware::Error) -> Self {
+        match err {
+            reqwest_middleware::Error::Reqwest(e) => Self::Request(e),
+            reqwest_middleware::Error::Middleware(e) => Self::Middleware(e.to_string()),
+        }
+    }
 }
 
 /// max bytes of API error body to include in the error message

@@ -36,11 +36,10 @@ tabled.workspace = true
 pulldown-cmark.workspace = true
 toml.workspace = true
 open.workspace = true
-reqwest.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
 tokio-util.workspace = true
-ratatui-image = { version = "11.0.2", default-features = false, features = [
+ratatui-image = { version = "11.0.3", default-features = false, features = [
   "crossterm",
   "image-defaults",
 ] }

@@ -133,7 +133,7 @@ pub struct TuiConfig {
     /// callback to resolve model ids for runtime compaction-model changes
     pub resolve_model: Option<ModelResolver>,
     /// shared http client for usage polling and other http calls
-    pub http_client: Option<reqwest::Client>,
+    pub http_client: Option<mush_ai::http::HttpClient>,
     /// current session id (updated by /new)
     pub session_id: mush_ai::types::SessionId,
     /// active runtime settings (scope + anthropic betas)

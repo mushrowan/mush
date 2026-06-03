@@ -31,7 +31,7 @@ pub struct AppSetup {
     /// LSP diagnostic injection callback
     pub lsp_diagnostics: Option<mush_agent::DiagnosticCallback>,
     /// shared http client for all network calls
-    pub http_client: reqwest::Client,
+    pub http_client: mush_ai::http::HttpClient,
 }
 
 /// CLI args needed for shared setup (avoids depending on clap struct)
@@ -76,17 +76,19 @@ impl AppSetup {
             clippy::expect_used,
             reason = "reqwest client with default TLS should never fail to build"
         )]
-        let http_client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::limited(10))
-            // give the network 60s to establish a tcp + tls connection.
-            // reqwest defaults to no connect timeout, which lets stalled
-            // proxies hang the agent indefinitely. retry/backoff lives in
-            // the agent loop, so a per-attempt cap is enough here. no
-            // overall request timeout: streaming responses can take many
-            // minutes
-            .connect_timeout(std::time::Duration::from_secs(60))
-            .build()
-            .expect("failed to build http client");
+        let http_client = mush_ai::http::wrap(
+            reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::limited(10))
+                // give the network 60s to establish a tcp + tls connection.
+                // reqwest defaults to no connect timeout, which lets stalled
+                // proxies hang the agent indefinitely. retry/backoff lives in
+                // the agent loop, so a per-attempt cap is enough here. no
+                // overall request timeout: streaming responses can take many
+                // minutes
+                .connect_timeout(std::time::Duration::from_secs(60))
+                .build()
+                .expect("failed to build http client"),
+        );
 
         let mut registry = ApiRegistry::new();
         providers::register_builtins(&mut registry, http_client.clone());
@@ -195,7 +197,7 @@ fn init_builtin_tools(
     cwd: &std::path::Path,
     output_sink: Option<mush_tools::bash::OutputSink>,
     no_tools: bool,
-    http_client: &reqwest::Client,
+    http_client: &mush_ai::http::HttpClient,
     forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars,
 ) -> mush_agent::tool::ToolRegistry {
     if no_tools {

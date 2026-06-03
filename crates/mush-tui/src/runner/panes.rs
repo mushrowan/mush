@@ -180,7 +180,10 @@ pub(super) async fn fork_pane(
                         });
                     let use_patch = tui_config.model.uses_patch_tool();
                     let skip_batch = tui_config.model.supports_native_parallel_calls();
-                    let pane_http = tui_config.http_client.clone().unwrap_or_default();
+                    let pane_http = tui_config
+                        .http_client
+                        .clone()
+                        .unwrap_or_else(mush_ai::http::client);
                     let mut pane_tools = mush_tools::builtin_tools_with_options(
                         Arc::from(info.path.clone()),
                         sink,

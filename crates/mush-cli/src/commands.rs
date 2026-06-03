@@ -318,7 +318,7 @@ pub async fn login(provider_id: Option<String>) -> Result<()> {
     // refresh the discovery cache so the picker reflects whatever
     // models the just-logged-in subscription exposes on next launch
     eprintln!("refreshing model catalogue...");
-    let client = reqwest::Client::new();
+    let client = mush_ai::http::client();
     let summary = mush_ai::discovery::refresh_and_save(client).await;
     eprintln!("model discovery: {}", summary.one_line());
 

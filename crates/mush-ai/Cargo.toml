@@ -11,6 +11,8 @@ futures.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true
 reqwest.workspace = true
+reqwest-middleware.workspace = true
+http.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 schemars.workspace = true
@@ -34,7 +36,7 @@ keyring-core.workspace = true
 # workspace versions; tolerated only because the surface we use is
 # narrow (two free functions). the streaming path stays on our own
 # providers/openai.rs implementation
-openrouter-rs = "0.9"
+openrouter-rs = "0.10"
 
 # platform-specific keyring stores. each only compiles on its target
 # os, so the credentials module conditionally wires them in

@@ -122,7 +122,7 @@ async fn exchange_code_with_redirect(
     .collect::<Vec<_>>()
     .join("&");
 
-    let client = reqwest::Client::new();
+    let client = crate::http::client();
     let response = client
         .post(TOKEN_URL)
         .header("Content-Type", "application/x-www-form-urlencoded")
@@ -158,7 +158,7 @@ async fn refresh_token_impl(refresh_token: &str) -> Result<OAuthCredentials, OAu
     .collect::<Vec<_>>()
     .join("&");
 
-    let client = reqwest::Client::new();
+    let client = crate::http::client();
     let response = client
         .post(TOKEN_URL)
         .header("Content-Type", "application/x-www-form-urlencoded")

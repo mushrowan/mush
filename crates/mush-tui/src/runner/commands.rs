@@ -98,7 +98,10 @@ pub(super) async fn handle_slash_action(
             let pane = pane_mgr.focused_mut();
             let logged_in = complete_login(&mut pane.app, code).await;
             if logged_in {
-                let client = tui_config.http_client.clone().unwrap_or_default();
+                let client = tui_config
+                    .http_client
+                    .clone()
+                    .unwrap_or_else(mush_ai::http::client);
                 pane_mgr.focused_mut().app.status = Some("refreshing models…".into());
                 let summary = mush_ai::discovery::refresh_and_save(client).await;
                 let line = summary.one_line();
@@ -306,7 +309,10 @@ pub(super) async fn handle_slash_action(
             ));
         }
         SlashAction::RefreshModels => {
-            let client = tui_config.http_client.clone().unwrap_or_default();
+            let client = tui_config
+                .http_client
+                .clone()
+                .unwrap_or_else(mush_ai::http::client);
             pane_mgr.focused_mut().app.status = Some("refreshing models…".into());
             let summary = mush_ai::discovery::refresh_and_save(client).await;
             let line = summary.one_line();

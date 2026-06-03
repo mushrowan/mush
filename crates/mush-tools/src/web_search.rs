@@ -39,11 +39,11 @@ const fn default_num_results() -> u32 {
 }
 
 pub struct WebSearchTool {
-    client: reqwest::Client,
+    client: mush_ai::http::HttpClient,
 }
 
 impl WebSearchTool {
-    pub fn new(client: reqwest::Client) -> Self {
+    pub fn new(client: mush_ai::http::HttpClient) -> Self {
         Self { client }
     }
 }
@@ -202,7 +202,7 @@ mod tests {
 
     #[test]
     fn schema_has_required_query() {
-        let tool = WebSearchTool::new(reqwest::Client::new());
+        let tool = WebSearchTool::new(mush_ai::http::client());
         let schema = tool.parameters_schema();
         let required = schema["required"].as_array().unwrap();
         assert!(required.iter().any(|v| v == "query"));

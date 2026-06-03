@@ -35,14 +35,18 @@ const DEFAULT_MAX_OUTPUT: u64 = 16_384;
 
 /// openai api-key discovery client
 pub struct OpenAiDiscovery {
-    client: reqwest::Client,
+    client: crate::http::HttpClient,
     base_url: String,
     api_key: ApiKey,
 }
 
 impl OpenAiDiscovery {
     #[must_use]
-    pub fn new(client: reqwest::Client, base_url: impl Into<String>, api_key: ApiKey) -> Self {
+    pub fn new(
+        client: crate::http::HttpClient,
+        base_url: impl Into<String>,
+        api_key: ApiKey,
+    ) -> Self {
         Self {
             client,
             base_url: base_url.into(),

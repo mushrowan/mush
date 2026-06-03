@@ -2,6 +2,7 @@ pub mod auth;
 pub mod credentials;
 pub mod discovery;
 pub mod env;
+pub mod http;
 pub mod login;
 pub mod models;
 pub mod oauth;

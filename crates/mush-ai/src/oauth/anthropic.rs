@@ -83,7 +83,7 @@ async fn exchange_code_impl(
 ) -> Result<OAuthCredentials, OAuthError> {
     let (code, state) = auth_code.split_once('#').unwrap_or((auth_code, ""));
 
-    let client = reqwest::Client::new();
+    let client = crate::http::client();
     let response = client
         .post(TOKEN_URL)
         .json(&serde_json::json!({
@@ -112,7 +112,7 @@ async fn exchange_code_impl(
 }
 
 async fn refresh_token_impl(refresh_token: &str) -> Result<OAuthCredentials, OAuthError> {
-    let client = reqwest::Client::new();
+    let client = crate::http::client();
     let response = client
         .post(TOKEN_URL)
         .json(&serde_json::json!({

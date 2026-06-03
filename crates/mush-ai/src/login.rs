@@ -289,7 +289,7 @@ pub fn parse_openrouter_auth_key(body: &str) -> Result<KeyInfo, ValidationError>
 /// any other id returns [`ValidationError::Unsupported`]. callers
 /// generally want to gate `store.set` on a successful validation
 pub async fn validate_api_key(
-    client: &reqwest::Client,
+    client: &crate::http::HttpClient,
     provider: &LoginProvider,
     key: &str,
 ) -> Result<KeyInfo, ValidationError> {
@@ -302,7 +302,7 @@ pub async fn validate_api_key(
 }
 
 async fn validate_openrouter(
-    client: &reqwest::Client,
+    client: &crate::http::HttpClient,
     key: &str,
     base_url: &str,
 ) -> Result<KeyInfo, ValidationError> {
@@ -328,7 +328,7 @@ async fn validate_openrouter(
 }
 
 async fn validate_openai(
-    client: &reqwest::Client,
+    client: &crate::http::HttpClient,
     key: &str,
     base_url: &str,
 ) -> Result<KeyInfo, ValidationError> {
@@ -349,7 +349,7 @@ async fn validate_openai(
 }
 
 async fn validate_anthropic(
-    client: &reqwest::Client,
+    client: &crate::http::HttpClient,
     key: &str,
     base_url: &str,
 ) -> Result<KeyInfo, ValidationError> {

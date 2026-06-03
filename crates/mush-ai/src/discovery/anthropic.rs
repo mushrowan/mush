@@ -48,14 +48,18 @@ const DEFAULT_MAX_OUTPUT: u64 = 64_000;
 
 /// anthropic discovery client
 pub struct AnthropicDiscovery {
-    client: reqwest::Client,
+    client: crate::http::HttpClient,
     base_url: String,
     api_key: ApiKey,
 }
 
 impl AnthropicDiscovery {
     #[must_use]
-    pub fn new(client: reqwest::Client, base_url: impl Into<String>, api_key: ApiKey) -> Self {
+    pub fn new(
+        client: crate::http::HttpClient,
+        base_url: impl Into<String>,
+        api_key: ApiKey,
+    ) -> Self {
         Self {
             client,
             base_url: base_url.into(),

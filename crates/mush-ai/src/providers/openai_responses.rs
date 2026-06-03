@@ -18,7 +18,7 @@ const DEFAULT_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api";
 const OPENAI_AUTH_CLAIM_PATH: &str = "https://api.openai.com/auth";
 
 pub struct OpenaiResponsesProvider {
-    pub client: reqwest::Client,
+    pub client: crate::http::HttpClient,
 }
 
 #[async_trait::async_trait]
@@ -53,48 +53,17 @@ impl ApiProvider for OpenaiResponsesProvider {
         let headers = build_headers(&api_key, options, is_codex)?;
         let call_id = crate::wire_log::next_call_id();
 
-        if crate::wire_log::enabled()
-            && let Ok(body_json) = serde_json::to_string(&body)
-        {
-            let header_pairs: Vec<(String, String)> = headers
-                .iter()
-                .map(|(name, value)| {
-                    (
-                        name.as_str().to_string(),
-                        value.to_str().unwrap_or("<non-utf8>").to_string(),
-                    )
-                })
-                .collect();
-            let header_refs: Vec<(&str, &str)> = header_pairs
-                .iter()
-                .map(|(k, v)| (k.as_str(), v.as_str()))
-                .collect();
-            crate::wire_log::log_request(
-                call_id,
-                "openai responses",
-                model.id.as_str(),
-                &url,
-                &header_refs,
-                &body_json,
-            );
-        }
-
         let response = self
             .client
             .post(&url)
             .headers(headers)
             .json(&body)
+            .with_extension(crate::http::WireCallId(call_id))
             .send()
             .await?;
 
-        let response = super::check_response(
-            response,
-            "openai responses",
-            model.id.as_str(),
-            &url,
-            call_id,
-        )
-        .await?;
+        let response =
+            super::check_response(response, "openai responses", model.id.as_str(), &url).await?;
 
         Ok(parse_sse_stream(
             response,

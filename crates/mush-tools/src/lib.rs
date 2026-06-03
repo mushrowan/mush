@@ -44,7 +44,7 @@ pub fn supports_native_parallel_calls(model_id: &str) -> bool {
 }
 
 /// create the full set of built-in tools for a given working directory
-pub fn builtin_tools(cwd: Arc<Path>, http_client: reqwest::Client) -> ToolRegistry {
+pub fn builtin_tools(cwd: Arc<Path>, http_client: mush_ai::http::HttpClient) -> ToolRegistry {
     let mut tools = builtin_tools_with_options(cwd, None, false, http_client, Default::default());
     add_batch_tool(&mut tools);
     tools
@@ -54,7 +54,7 @@ pub fn builtin_tools(cwd: Arc<Path>, http_client: reqwest::Client) -> ToolRegist
 pub fn builtin_tools_with_sink(
     cwd: Arc<Path>,
     output_sink: Option<bash::OutputSink>,
-    http_client: reqwest::Client,
+    http_client: mush_ai::http::HttpClient,
 ) -> ToolRegistry {
     let mut tools =
         builtin_tools_with_options(cwd, output_sink, false, http_client, Default::default());
@@ -76,7 +76,7 @@ pub fn builtin_tools_with_options(
     cwd: Arc<Path>,
     output_sink: Option<bash::OutputSink>,
     use_patch: bool,
-    http_client: reqwest::Client,
+    http_client: mush_ai::http::HttpClient,
     forbidden_chars: forbidden_chars::ForbiddenChars,
 ) -> ToolRegistry {
     let bg_registry = background::BackgroundJobRegistry::new();
@@ -241,8 +241,8 @@ mod tests {
     use super::*;
     use forbidden_chars::ForbiddenChars;
 
-    fn http_client() -> reqwest::Client {
-        reqwest::Client::new()
+    fn http_client() -> mush_ai::http::HttpClient {
+        mush_ai::http::client()
     }
 
     fn registry_with_chars(use_patch: bool, chars: ForbiddenChars) -> ToolRegistry {

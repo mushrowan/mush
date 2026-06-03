@@ -127,7 +127,7 @@ impl DiscoveryRunSummary {
 /// providers are queried sequentially to keep the request budget low and
 /// share the reqwest client. concurrent fetches would be marginally faster
 /// but invite rate limit pile-ups.
-pub async fn run_all_available(client: reqwest::Client) -> DiscoveryRunSummary {
+pub async fn run_all_available(client: crate::http::HttpClient) -> DiscoveryRunSummary {
     let mut results = Vec::new();
 
     // anthropic - api key or oauth token
@@ -230,7 +230,7 @@ fn classify_outcome(
 /// the optional startup spawn.
 ///
 /// returns the summary so the caller can render status-line feedback.
-pub async fn refresh_and_save(client: reqwest::Client) -> DiscoveryRunSummary {
+pub async fn refresh_and_save(client: crate::http::HttpClient) -> DiscoveryRunSummary {
     let summary = tokio::time::timeout(Duration::from_secs(30), run_all_available(client))
         .await
         .unwrap_or_default();

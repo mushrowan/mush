@@ -31,11 +31,11 @@ const fn default_timeout_secs() -> u64 {
 }
 
 pub struct WebFetchTool {
-    client: reqwest::Client,
+    client: mush_ai::http::HttpClient,
 }
 
 impl WebFetchTool {
-    pub fn new(client: reqwest::Client) -> Self {
+    pub fn new(client: mush_ai::http::HttpClient) -> Self {
         Self { client }
     }
 }
@@ -188,7 +188,7 @@ mod tests {
 
     #[test]
     fn schema_has_required_url() {
-        let tool = WebFetchTool::new(reqwest::Client::new());
+        let tool = WebFetchTool::new(mush_ai::http::client());
         let schema = tool.parameters_schema();
         let required = schema["required"].as_array().unwrap();
         assert!(required.iter().any(|v| v == "url"));
@@ -213,7 +213,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_non_http_url() {
-        let tool = WebFetchTool::new(reqwest::Client::new());
+        let tool = WebFetchTool::new(mush_ai::http::client());
         let result = tool
             .execute(serde_json::json!({"url": "ftp://example.com"}))
             .await;

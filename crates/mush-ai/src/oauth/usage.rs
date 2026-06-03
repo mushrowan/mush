@@ -54,7 +54,7 @@ impl OAuthUsage {
 /// cached usage poller with a shared http client
 pub struct UsagePoller {
     cached: Arc<Mutex<Option<CachedResult>>>,
-    client: reqwest::Client,
+    client: crate::http::HttpClient,
 }
 
 enum CachedResult {
@@ -68,7 +68,7 @@ enum CachedResult {
 }
 
 impl UsagePoller {
-    pub fn new(client: reqwest::Client) -> Self {
+    pub fn new(client: crate::http::HttpClient) -> Self {
         Self {
             cached: Arc::new(Mutex::new(None)),
             client,
@@ -288,6 +288,6 @@ mod tests {
 
     #[test]
     fn poller_creates() {
-        let _poller = UsagePoller::new(reqwest::Client::new());
+        let _poller = UsagePoller::new(crate::http::client());
     }
 }

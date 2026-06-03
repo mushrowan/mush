@@ -12,14 +12,13 @@ fn journal_writes_records_to_file() {
     let id = wire_log::next_call_id();
     wire_log::log_request(
         id,
-        "anthropic",
-        "claude",
+        "POST",
         "https://x/v1/messages",
         &[
             ("authorization", "Bearer sk-ant-secret-token-xyz"),
             ("anthropic-version", "2023-06-01"),
         ],
-        r#"{"model":"claude","messages":[{"role":"user","content":"hi"}]}"#,
+        Some(r#"{"model":"claude","messages":[{"role":"user","content":"hi"}]}"#),
     );
     wire_log::log_sse(
         id,
