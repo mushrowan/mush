@@ -15,6 +15,7 @@ pub mod registry;
 pub mod request_snapshot;
 pub mod stream;
 pub mod types;
+pub mod wire_log;
 
 pub use registry::*;
 pub use stream::*;

@@ -51,6 +51,34 @@ impl ApiProvider for OpenaiResponsesProvider {
 
         let url = resolve_url(model, is_codex);
         let headers = build_headers(&api_key, options, is_codex)?;
+        let call_id = crate::wire_log::next_call_id();
+
+        if crate::wire_log::enabled()
+            && let Ok(body_json) = serde_json::to_string(&body)
+        {
+            let header_pairs: Vec<(String, String)> = headers
+                .iter()
+                .map(|(name, value)| {
+                    (
+                        name.as_str().to_string(),
+                        value.to_str().unwrap_or("<non-utf8>").to_string(),
+                    )
+                })
+                .collect();
+            let header_refs: Vec<(&str, &str)> = header_pairs
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            crate::wire_log::log_request(
+                call_id,
+                "openai responses",
+                model.id.as_str(),
+                &url,
+                &header_refs,
+                &body_json,
+            );
+        }
+
         let response = self
             .client
             .post(&url)
@@ -59,14 +87,21 @@ impl ApiProvider for OpenaiResponsesProvider {
             .send()
             .await?;
 
-        let response =
-            super::check_response(response, "openai responses", model.id.as_str(), &url).await?;
+        let response = super::check_response(
+            response,
+            "openai responses",
+            model.id.as_str(),
+            &url,
+            call_id,
+        )
+        .await?;
 
         Ok(parse_sse_stream(
             response,
             model.id.clone(),
             model.provider.clone(),
             model.api,
+            call_id,
         ))
     }
 }
@@ -768,11 +803,12 @@ fn parse_sse_stream(
     model_id: ModelId,
     provider_name: Provider,
     api: Api,
+    call_id: u64,
 ) -> EventStream {
     let processor = OpenAiResponsesProcessor {
         active: ActiveBlocks::new(),
     };
-    super::sse::run_sse_stream(response, model_id, provider_name, api, processor)
+    super::sse::run_sse_stream(response, model_id, provider_name, api, call_id, processor)
 }
 
 fn process_sse_event(

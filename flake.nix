@@ -102,7 +102,9 @@
           export RUST_LOG=''${RUST_LOG:-warn,mush_agent=info,mush_ai=info,mush_tools=info,mush_tui=info,mush_cli=info,mush_ext=info,mush_mcp=info,mush_treesitter=info,mush_tui::resize=info,mush_tui::scroll=debug}
           export MUSH_TRACE=true
           export MUSH_PROFILE_STARTUP=true
+          export MUSH_WIRE_LOG=''${MUSH_WIRE_LOG:-''${XDG_DATA_HOME:-$HOME/.local/share}/mush/wire.jsonl}
           echo "profiling: tracing timeline + startup phases enabled" >&2
+          echo "wire log: $MUSH_WIRE_LOG (full request/response/sse journal)" >&2
           echo "resize/scroll diagnostics: mush_tui::resize=info, mush_tui::scroll=debug" >&2
           echo "trace output: ''${XDG_DATA_HOME:-$HOME/.local/share}/mush/mush-trace-$$.json" >&2
           echo "open traces at https://ui.perfetto.dev" >&2
@@ -172,6 +174,7 @@
           export MUSH_TRACE=true
           export MUSH_PROFILE_STARTUP=true
           export MUSH_TRACE_DIR="$data_dir"
+          export MUSH_WIRE_LOG="$data_dir/wire.jsonl"
           export MUSH_STALL_WATCHDOG=true
           export MUSH_STALL_DIR="$data_dir/stall-dumps"
 
@@ -181,6 +184,7 @@
           echo "resize/scroll diagnostics: mush_tui::resize=trace, mush_tui::scroll=trace" >&2
           echo "output dir: $data_dir" >&2
           echo "log file: ''${XDG_DATA_HOME:-$HOME/.local/share}/mush/mush.log" >&2
+          echo "wire log: $MUSH_WIRE_LOG (full request/response/sse journal)" >&2
           echo "trace dir: $MUSH_TRACE_DIR" >&2
           echo "stall dumps: $MUSH_STALL_DIR" >&2
           echo "" >&2

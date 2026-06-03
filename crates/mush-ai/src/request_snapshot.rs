@@ -187,13 +187,13 @@ const SENSITIVE_JSON_FIELDS: &[&str] = &[
 /// placeholder substituted for sensitive header values in dumps
 pub const REDACTED_HEADER_VALUE: &str = "<redacted>";
 
-fn is_sensitive_header(name: &str) -> bool {
+pub(crate) fn is_sensitive_header(name: &str) -> bool {
     SENSITIVE_HEADERS
         .iter()
         .any(|s| s.eq_ignore_ascii_case(name))
 }
 
-fn is_sensitive_json_field(name: &str) -> bool {
+pub(crate) fn is_sensitive_json_field(name: &str) -> bool {
     let normalised = name.replace(['-', '_'], "").to_ascii_lowercase();
     SENSITIVE_JSON_FIELDS.iter().any(|field| {
         field
@@ -252,7 +252,7 @@ fn redact_secret_word(word: &str) -> String {
     }
 }
 
-fn looks_like_secret(text: &str) -> bool {
+pub(crate) fn looks_like_secret(text: &str) -> bool {
     if text.len() < 12 {
         return false;
     }

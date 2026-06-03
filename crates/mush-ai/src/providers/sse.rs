@@ -196,6 +196,7 @@ pub fn run_sse_stream(
     model_id: ModelId,
     provider_name: Provider,
     api: Api,
+    call_id: u64,
     mut processor: impl SseProcessor,
 ) -> EventStream {
     let label = processor.label();
@@ -209,6 +210,7 @@ pub fn run_sse_stream(
 
         let mut parser = SseParser::new();
         let mut raw_capture: Vec<u8> = Vec::new();
+        let mut sse_seq: u64 = 0;
 
         use futures::TryStreamExt;
         let mut byte_stream = response.bytes_stream();
@@ -245,6 +247,13 @@ pub fn run_sse_stream(
                             data_preview = %safe_preview_text(raw.data.trim(), 240),
                             "{label} sse event"
                         );
+                        crate::wire_log::log_sse(
+                            call_id,
+                            sse_seq,
+                            raw.event.as_deref().unwrap_or("message"),
+                            &raw.data,
+                        );
+                        sse_seq += 1;
                         match processor.process(&raw, &mut output) {
                             ProcessResult::Events(events) => {
                                 for event in events {
@@ -279,6 +288,7 @@ pub fn run_sse_stream(
                     processor.finish(&mut output);
                     output.stop_reason = StopReason::Error;
                     output.error_message = Some(super::format_error_chain(&e));
+                    crate::wire_log::log_assembled(call_id, &output);
                     yield StreamEvent::Error {
                         reason: StopReason::Error,
                         message: output,
@@ -289,6 +299,7 @@ pub fn run_sse_stream(
         }
 
         processor.finish(&mut output);
+        crate::wire_log::log_assembled(call_id, &output);
         yield StreamEvent::Done {
             reason: output.stop_reason,
             message: output,

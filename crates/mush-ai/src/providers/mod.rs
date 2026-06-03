@@ -154,6 +154,7 @@ pub(crate) async fn check_response(
     api_label: &'static str,
     model_id: &str,
     url: &str,
+    call_id: u64,
 ) -> Result<reqwest::Response, crate::registry::ProviderError> {
     let status = response.status();
     let content_type = response
@@ -167,6 +168,24 @@ pub(crate) async fn check_response(
         .keys()
         .map(reqwest::header::HeaderName::as_str)
         .collect();
+
+    if crate::wire_log::enabled() {
+        let header_pairs: Vec<(String, String)> = response
+            .headers()
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.as_str().to_string(),
+                    value.to_str().unwrap_or("<non-utf8>").to_string(),
+                )
+            })
+            .collect();
+        let header_refs: Vec<(&str, &str)> = header_pairs
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        crate::wire_log::log_response(call_id, api_label, model_id, status.as_u16(), &header_refs);
+    }
 
     tracing::debug!(
         model = %model_id,
@@ -292,7 +311,7 @@ mod tests {
             .body(bytes::Bytes::new())
             .unwrap();
         let resp = reqwest::Response::from(http_resp);
-        let result = check_response(resp, "test", "model-1", "http://example.com").await;
+        let result = check_response(resp, "test", "model-1", "http://example.com", 0).await;
         assert!(result.is_ok());
     }
 
@@ -304,7 +323,7 @@ mod tests {
             .body(bytes::Bytes::from(r#"{"error": "bad request"}"#))
             .unwrap();
         let resp = reqwest::Response::from(http_resp);
-        let result = check_response(resp, "test-api", "model-1", "http://example.com").await;
+        let result = check_response(resp, "test-api", "model-1", "http://example.com", 0).await;
         assert!(result.is_err());
         match result.unwrap_err() {
             crate::registry::ProviderError::ApiError { api, status, .. } => {

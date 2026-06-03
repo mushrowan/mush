@@ -164,6 +164,14 @@ impl ApiProvider for AnthropicProvider {
             headers.insert("x-api-key", api_key_hv);
         }
 
+        let base_url = if model.base_url.is_empty() {
+            DEFAULT_BASE_URL
+        } else {
+            &model.base_url
+        };
+        let url = format!("{base_url}/v1/messages");
+        let call_id = crate::wire_log::next_call_id();
+
         // snapshot the outgoing body for cache-bust triage. serialise
         // once here so the fingerprint hashes the exact bytes that
         // sibling sections end up on the wire. kept best-effort: a
@@ -210,14 +218,15 @@ impl ApiProvider for AnthropicProvider {
                 .map(|(k, v)| (k.as_str(), v.as_str()))
                 .collect();
             let _ = crate::request_snapshot::dump("anthropic", &fp, &body_json, &header_refs);
+            crate::wire_log::log_request(
+                call_id,
+                "anthropic",
+                model.id.as_str(),
+                &url,
+                &header_refs,
+                &body_json,
+            );
         }
-
-        let base_url = if model.base_url.is_empty() {
-            DEFAULT_BASE_URL
-        } else {
-            &model.base_url
-        };
-        let url = format!("{base_url}/v1/messages");
 
         tracing::debug!(model = %model.id, %url, oauth = is_oauth, "sending anthropic request");
 
@@ -271,13 +280,14 @@ impl ApiProvider for AnthropicProvider {
         };
 
         let response =
-            super::check_response(response, "anthropic", model.id.as_str(), &url).await?;
+            super::check_response(response, "anthropic", model.id.as_str(), &url, call_id).await?;
 
         let sse_stream = parse_sse_stream(
             response,
             model.id.clone(),
             model.provider.clone(),
             model.api,
+            call_id,
             is_oauth,
             context.tools.clone(),
         );
@@ -1040,6 +1050,7 @@ struct ErrorData {
 }
 
 use super::StreamBlock;
+use super::sse::safe_preview_text;
 
 struct AnthropicProcessor {
     blocks: Vec<StreamBlock>,
@@ -1085,6 +1096,7 @@ fn parse_sse_stream(
     model_id: ModelId,
     provider_name: Provider,
     api: Api,
+    call_id: u64,
     is_oauth: bool,
     tools: Vec<ToolDefinition>,
 ) -> EventStream {
@@ -1093,7 +1105,7 @@ fn parse_sse_stream(
         is_oauth,
         tools,
     };
-    super::sse::run_sse_stream(response, model_id, provider_name, api, processor)
+    super::sse::run_sse_stream(response, model_id, provider_name, api, call_id, processor)
 }
 
 fn process_sse_event(
@@ -1251,8 +1263,23 @@ fn process_sse_event(
                         });
                     }
                     StreamBlock::ToolCall { id, name, args_buf } => {
-                        let arguments = serde_json::from_str(args_buf)
-                            .unwrap_or(serde_json::Value::Object(Default::default()));
+                        let arguments = serde_json::from_str(args_buf).unwrap_or_else(|err| {
+                            // a tool call whose accumulated argument buffer
+                            // doesn't parse is almost always a streaming bug
+                            // (deltas that never landed in args_buf), not a
+                            // model fault. surface it loudly so it isn't
+                            // silently degraded into an empty-args call. the
+                            // full delta sequence lives in the wire journal
+                            tracing::warn!(
+                                tool = %name,
+                                tool_id = %id,
+                                args_len = args_buf.len(),
+                                args_preview = %safe_preview_text(args_buf, 240),
+                                error = %err,
+                                "tool call arguments failed to parse, falling back to empty object"
+                            );
+                            serde_json::Value::Object(Default::default())
+                        });
                         // update the output with final parsed args
                         if let Some(AssistantContentPart::ToolCall(tc)) =
                             output.content.get_mut(content_index)
