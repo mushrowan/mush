@@ -557,10 +557,11 @@ async fn auto_compact(
     };
 
     let context_tokens = pane.app.stats.context_tokens;
-    let context_window = tui_config.model.context_window;
+    let compaction_window = tui_config.model.compaction_window();
     let message_count = pane.conversation.context_len();
 
-    if !mush_session::compact::needs_compaction_at(context_tokens, context_window, message_count) {
+    if !mush_session::compact::needs_compaction_at(context_tokens, compaction_window, message_count)
+    {
         return;
     }
 
@@ -845,7 +846,7 @@ async fn start_stream_for_prompt<'a>(
         conversation
     };
 
-    let context_window = model.context_window;
+    let compaction_window = model.compaction_window();
     let (compact_model, compact_options) = deps
         .config
         .compaction_model
@@ -861,7 +862,7 @@ async fn start_stream_for_prompt<'a>(
         compact_model,
         compact_options,
         do_auto_compact,
-        context_window,
+        compaction_window,
         registry.clone(),
         context_tokens_shared.clone(),
         deps.injections.lifecycle_hooks.clone(),
@@ -995,7 +996,7 @@ fn build_context_transform(
     compact_model: Model,
     compact_options: StreamOptions,
     do_auto_compact: bool,
-    context_window: TokenCount,
+    compaction_window: TokenCount,
     registry: ApiRegistry,
     context_tokens_shared: Arc<std::sync::atomic::AtomicU64>,
     lifecycle_hooks: mush_agent::LifecycleHooks,
@@ -1043,7 +1044,7 @@ fn build_context_transform(
             let compacted = event_handler::auto_compact(
                 msgs,
                 current_tokens,
-                context_window,
+                compaction_window,
                 &registry,
                 &model,
                 &options,
@@ -2306,6 +2307,7 @@ mod tests {
                 cache_write: 0.0,
             },
             context_window: TokenCount::new(128_000),
+            effective_context_window: None,
             max_output_tokens: TokenCount::new(8_192),
             supports_adaptive_thinking: false,
             supported_thinking_levels: Vec::new(),
@@ -2339,6 +2341,7 @@ mod tests {
                 cache_write: 0.0,
             },
             context_window: TokenCount::new(200_000),
+            effective_context_window: None,
             max_output_tokens: TokenCount::new(8_192),
             supports_adaptive_thinking: false,
             supported_thinking_levels: Vec::new(),

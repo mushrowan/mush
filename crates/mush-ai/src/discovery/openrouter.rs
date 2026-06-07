@@ -161,6 +161,7 @@ fn entry_to_model(entry: OpenRouterModelEntry) -> Model {
         input,
         cost,
         context_window: TokenCount::new(context_window),
+        effective_context_window: None,
         max_output_tokens: TokenCount::new(max_output),
         supports_adaptive_thinking: false,
         supported_thinking_levels: Vec::new(),

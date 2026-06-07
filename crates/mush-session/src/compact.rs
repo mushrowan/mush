@@ -1020,6 +1020,7 @@ mod tests {
                 cache_write: 0.0,
             },
             context_window: TokenCount::new(200_000),
+            effective_context_window: None,
             max_output_tokens: TokenCount::new(8192),
             supports_adaptive_thinking: false,
             supported_thinking_levels: Vec::new(),
@@ -1259,6 +1260,30 @@ mod tests {
     }
 
     #[test]
+    fn auto_compaction_keys_off_effective_window_not_displayed() {
+        // gpt-5.5 codex displays a 400k window but the real input ceiling
+        // is 272k. compaction must key off the effective window so it
+        // fires before the provider errors, not at 95% of the marketed
+        // 400k (380k). this guards the wiring of Model::compaction_window
+        // into the auto-compaction decision.
+        let mut model = test_model();
+        model.context_window = TokenCount::new(400_000);
+        model.effective_context_window = Some(TokenCount::new(272_000));
+
+        // 260k is 95.6% of the 272k effective budget (compact) but only
+        // 65% of the 400k displayed window (would not compact)
+        let tokens = TokenCount::new(260_000);
+        assert!(
+            needs_compaction_at(tokens, model.compaction_window(), 20),
+            "must compact against the effective input budget"
+        );
+        assert!(
+            !needs_compaction_at(tokens, model.context_window, 20),
+            "keying off the displayed window would compact too late"
+        );
+    }
+
+    #[test]
     fn compact_skips_orphaned_tool_results() {
         // simulate: user, assistant+tool_use, tool_result, user, assistant
         // with keep=2, naive split would start at the tool_result,
@@ -1336,6 +1361,7 @@ mod tests {
                 cache_write: 0.0,
             },
             context_window: TokenCount::new(200_000),
+            effective_context_window: None,
             max_output_tokens: TokenCount::new(8192),
             supports_adaptive_thinking: false,
             supported_thinking_levels: Vec::new(),
@@ -1583,6 +1609,7 @@ mod tests {
                 cache_write: 0.0,
             },
             context_window: TokenCount::new(400_000),
+            effective_context_window: None,
             max_output_tokens: TokenCount::new(128_000),
             supports_adaptive_thinking: false,
             supported_thinking_levels: Vec::new(),

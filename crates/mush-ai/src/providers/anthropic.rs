@@ -2571,6 +2571,7 @@ mod tests {
                 cache_write: 3.75,
             },
             context_window: TokenCount::new(200_000),
+            effective_context_window: None,
             max_output_tokens: TokenCount::new(16384),
             supports_adaptive_thinking: false,
             supported_thinking_levels: Vec::new(),

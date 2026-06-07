@@ -171,6 +171,7 @@ fn entry_to_model(entry: AnthropicModelEntry) -> Model {
             cache_write: 0.0,
         },
         context_window: TokenCount::new(entry.max_input_tokens.unwrap_or(DEFAULT_CONTEXT_WINDOW)),
+        effective_context_window: None,
         max_output_tokens: TokenCount::new(entry.max_tokens.unwrap_or(DEFAULT_MAX_OUTPUT)),
         supports_adaptive_thinking,
         supported_thinking_levels,

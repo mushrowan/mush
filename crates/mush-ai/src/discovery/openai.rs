@@ -152,6 +152,7 @@ fn entry_to_model(entry: OpenAiModelEntry) -> Model {
             cache_write: 0.0,
         },
         context_window: TokenCount::new(DEFAULT_CONTEXT_WINDOW),
+        effective_context_window: None,
         max_output_tokens: TokenCount::new(DEFAULT_MAX_OUTPUT),
         supports_adaptive_thinking: false,
         supported_thinking_levels: Vec::new(),

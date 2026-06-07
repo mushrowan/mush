@@ -62,6 +62,15 @@ pub struct Model {
     pub input: Vec<InputModality>,
     pub cost: ModelCost,
     pub context_window: TokenCount,
+    /// the input-token budget to compact against, when it differs from
+    /// the displayed [`context_window`]. some provider routes advertise a
+    /// larger total window than the input ceiling they actually honour
+    /// (e.g. gpt-5.5 in codex displays 400K but errors past ~272K input,
+    /// the "272K in + 128K out" split). `None` means "same as
+    /// context_window" - the common case. only set this when a route's
+    /// usable input budget is smaller than its marketed window
+    #[serde(default)]
+    pub effective_context_window: Option<TokenCount>,
     pub max_output_tokens: TokenCount,
     /// when set, the provider should request anthropic's adaptive
     /// thinking mode instead of fixed-budget thinking. only meaningful
@@ -86,6 +95,16 @@ pub struct Model {
 }
 
 impl Model {
+    /// the token budget compaction should target. defaults to the full
+    /// [`context_window`] but falls back to [`effective_context_window`]
+    /// when a route's usable input budget is smaller than its marketed
+    /// window, so auto-compaction fires before the provider's real input
+    /// ceiling rather than after it
+    #[must_use]
+    pub fn compaction_window(&self) -> TokenCount {
+        self.effective_context_window.unwrap_or(self.context_window)
+    }
+
     /// whether this model prefers the patch-based edit tool.
     /// GPT models (except gpt-4 and OSS variants) are trained on the patch format
     pub fn uses_patch_tool(&self) -> bool {
@@ -412,11 +431,34 @@ mod tests {
                 cache_write,
             },
             context_window: TokenCount::new(200_000),
+            effective_context_window: None,
             max_output_tokens: TokenCount::new(8_192),
             supports_adaptive_thinking: false,
             supported_thinking_levels: vec![],
             default_thinking_level: None,
         }
+    }
+
+    #[test]
+    fn compaction_window_falls_back_to_context_window_when_effective_unset() {
+        // most models leave effective_context_window None: the budget we
+        // compact against is just the displayed context window
+        let model = model_with_cost(0.0, 0.0);
+        assert_eq!(model.effective_context_window, None);
+        assert_eq!(model.compaction_window(), TokenCount::new(200_000));
+    }
+
+    #[test]
+    fn compaction_window_prefers_effective_when_set() {
+        // gpt-5.5 codex case: the marketed/displayed window is 400k but
+        // the real input budget before the provider errors is 272k. the
+        // status bar shows context_window; compaction keys off the
+        // smaller effective_context_window so we compact before the
+        // provider's input ceiling rather than after it
+        let mut model = model_with_cost(0.0, 0.0);
+        model.context_window = TokenCount::new(400_000);
+        model.effective_context_window = Some(TokenCount::new(272_000));
+        assert_eq!(model.compaction_window(), TokenCount::new(272_000));
     }
 
     #[test]
