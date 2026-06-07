@@ -191,6 +191,7 @@ pub(super) async fn fork_pane(
                         use_patch,
                         pane_http,
                         tui_config.forbidden_chars.clone(),
+                        None,
                     );
                     if !skip_batch {
                         mush_tools::add_batch_tool(&mut pane_tools);

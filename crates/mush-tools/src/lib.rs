@@ -45,7 +45,8 @@ pub fn supports_native_parallel_calls(model_id: &str) -> bool {
 
 /// create the full set of built-in tools for a given working directory
 pub fn builtin_tools(cwd: Arc<Path>, http_client: mush_ai::http::HttpClient) -> ToolRegistry {
-    let mut tools = builtin_tools_with_options(cwd, None, false, http_client, Default::default());
+    let mut tools =
+        builtin_tools_with_options(cwd, None, false, http_client, Default::default(), None);
     add_batch_tool(&mut tools);
     tools
 }
@@ -56,8 +57,14 @@ pub fn builtin_tools_with_sink(
     output_sink: Option<bash::OutputSink>,
     http_client: mush_ai::http::HttpClient,
 ) -> ToolRegistry {
-    let mut tools =
-        builtin_tools_with_options(cwd, output_sink, false, http_client, Default::default());
+    let mut tools = builtin_tools_with_options(
+        cwd,
+        output_sink,
+        false,
+        http_client,
+        Default::default(),
+        None,
+    );
     add_batch_tool(&mut tools);
     tools
 }
@@ -78,6 +85,7 @@ pub fn builtin_tools_with_options(
     use_patch: bool,
     http_client: mush_ai::http::HttpClient,
     forbidden_chars: forbidden_chars::ForbiddenChars,
+    max_image_bytes: Option<usize>,
 ) -> ToolRegistry {
     let bg_registry = background::BackgroundJobRegistry::new();
 
@@ -91,7 +99,7 @@ pub fn builtin_tools_with_options(
     };
 
     let mut tools: Vec<SharedTool> = vec![
-        Arc::new(read::ReadTool::new(cwd.clone())),
+        Arc::new(read::ReadTool::new(cwd.clone()).with_max_image_bytes(max_image_bytes)),
         bash_tool,
         Arc::new(bash_status::BashStatusTool::new(bg_registry)),
         Arc::new(grep::GrepTool::new(cwd.clone())),
@@ -252,6 +260,7 @@ mod tests {
             use_patch,
             http_client(),
             chars,
+            None,
         )
     }
 
@@ -405,6 +414,7 @@ mod tests {
             false,
             http_client(),
             ForbiddenChars::empty(),
+            None,
         );
         add_batch_tool(&mut registry);
 
@@ -450,6 +460,7 @@ mod tests {
             true,
             http_client(),
             ForbiddenChars::empty(),
+            None,
         );
 
         assert!(registry.get("apply_patch").is_some());
@@ -483,6 +494,7 @@ mod tests {
             false,
             http_client(),
             ForbiddenChars::empty(),
+            None,
         );
         add_batch_tool(&mut registry);
         assert!(registry.get("batch").is_some());

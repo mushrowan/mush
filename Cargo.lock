@@ -2911,6 +2911,7 @@ dependencies = [
  "grep-searcher",
  "htmd",
  "ignore",
+ "image",
  "libc",
  "mush-agent",
  "mush-ai",

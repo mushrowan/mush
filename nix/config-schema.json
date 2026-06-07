@@ -762,6 +762,13 @@
       },
       "description": "LSP integration settings"
     },
+    "max_image_mb": {
+      "default": 5,
+      "description": "images larger than this many megabytes are downscaled and\nre-encoded by the `read` tool before being attached, instead of\nfailing the request (most providers reject oversized images, and\nan oversized copy would otherwise sit in history and fail every\nsubsequent turn). defaults to 5.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
     "max_tokens": {
       "default": null,
       "format": "uint64",

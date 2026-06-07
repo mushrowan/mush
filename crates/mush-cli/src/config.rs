@@ -145,6 +145,17 @@ pub struct Config {
     /// ```
     #[serde(default)]
     pub forbidden_chars: Vec<char>,
+    /// images larger than this many megabytes are downscaled and
+    /// re-encoded by the `read` tool before being attached, instead of
+    /// failing the request (most providers reject oversized images, and
+    /// an oversized copy would otherwise sit in history and fail every
+    /// subsequent turn). defaults to 5.
+    #[serde(default = "default_max_image_mb")]
+    pub max_image_mb: u32,
+}
+
+fn default_max_image_mb() -> u32 {
+    5
 }
 
 fn default_scroll_lines() -> u16 {
@@ -192,6 +203,7 @@ impl Default for Config {
             scroll_lines: default_scroll_lines(),
             keys: mush_tui::KeysConfig::default(),
             forbidden_chars: Vec::new(),
+            max_image_mb: default_max_image_mb(),
         }
     }
 }

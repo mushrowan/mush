@@ -103,6 +103,7 @@ impl AppSetup {
             args.no_tools,
             &http_client,
             mush_tools::forbidden_chars::ForbiddenChars::new(cfg.forbidden_chars.iter().copied()),
+            cfg.max_image_mb,
         );
         if let Some(t) = &mut timer {
             t.phase("builtin tools");
@@ -199,6 +200,7 @@ fn init_builtin_tools(
     no_tools: bool,
     http_client: &mush_ai::http::HttpClient,
     forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars,
+    max_image_mb: u32,
 ) -> mush_agent::tool::ToolRegistry {
     if no_tools {
         return mush_agent::tool::ToolRegistry::new();
@@ -209,6 +211,7 @@ fn init_builtin_tools(
         model.uses_patch_tool(),
         http_client.clone(),
         forbidden_chars,
+        Some(max_image_mb as usize * 1024 * 1024),
     )
 }
 

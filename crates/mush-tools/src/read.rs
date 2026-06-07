@@ -191,11 +191,27 @@ impl ReadArgs {
 
 pub struct ReadTool {
     cwd: Arc<Path>,
+    /// images larger than this (bytes) are downscaled before being
+    /// attached. defaults to [`DEFAULT_MAX_IMAGE_BYTES`]
+    max_image_bytes: usize,
 }
 
 impl ReadTool {
     pub fn new(cwd: Arc<Path>) -> Self {
-        Self { cwd }
+        Self {
+            cwd,
+            max_image_bytes: DEFAULT_MAX_IMAGE_BYTES,
+        }
+    }
+
+    /// override the image size cap (bytes) above which images are
+    /// downscaled. `None` keeps the default
+    #[must_use]
+    pub fn with_max_image_bytes(mut self, max_image_bytes: Option<usize>) -> Self {
+        if let Some(max) = max_image_bytes {
+            self.max_image_bytes = max;
+        }
+        self
     }
 }
 
@@ -306,9 +322,11 @@ impl AgentTool for ReadTool {
 
         let path = resolve_path(&self.cwd, &args.path);
         let json_output = args.output.is_json();
+        let max_image_bytes = self.max_image_bytes;
 
         tokio::task::spawn_blocking(move || {
-            let (result, _lines_read) = read_file(&path, args.offset, args.limit, json_output);
+            let (result, _lines_read) =
+                read_file(&path, args.offset, args.limit, json_output, max_image_bytes);
             result
         })
         .await
@@ -327,6 +345,7 @@ fn read_file(
     offset: Option<usize>,
     limit: Option<usize>,
     json_output: bool,
+    max_image_bytes: usize,
 ) -> (ToolResult, usize) {
     if !path.exists() {
         return (
@@ -344,7 +363,7 @@ fn read_file(
 
     // handle images
     if is_image(path) {
-        return (read_image(path), 0);
+        return (read_image(path, max_image_bytes), 0);
     }
 
     // read text file
@@ -431,8 +450,67 @@ fn read_file(
     }
 }
 
-fn read_image(path: &Path) -> ToolResult {
-    use mush_ai::types::{ImageContent, ToolResultContentPart};
+/// default cap on attachment image size. images larger than this get
+/// downscaled and re-encoded so they fit. most providers reject oversized
+/// images, and an oversized copy would otherwise sit in the conversation
+/// and fail every subsequent request until the user manually rewinds
+const DEFAULT_MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+
+/// smallest longest-side we will downscale to before giving up
+const MIN_IMAGE_DIM: u32 = 64;
+
+/// a re-encoded, size-bounded image plus the metadata used in the note
+struct ResizedImage {
+    bytes: Vec<u8>,
+    mime: mush_ai::types::ImageMimeType,
+    orig_dimensions: (u32, u32),
+    new_dimensions: (u32, u32),
+}
+
+/// downscale and re-encode `data` (as JPEG) until it fits within
+/// `max_bytes`. re-encoding alone often suffices for a large PNG; genuinely
+/// huge images are progressively downscaled. returns an error if the bytes
+/// can't be decoded as an image.
+fn resize_image_to_fit(data: &[u8], max_bytes: usize) -> Result<ResizedImage, String> {
+    use image::ImageEncoder;
+
+    /// jpeg quality for the re-encode. 85 keeps screenshots/diagrams
+    /// legible while shrinking photos hard
+    const QUALITY: u8 = 85;
+
+    let img = image::load_from_memory(data).map_err(|error| error.to_string())?;
+    let orig_dimensions = (img.width(), img.height());
+    let mut current = img;
+
+    loop {
+        // jpeg has no alpha channel; flatten to rgb before encoding
+        let rgb = current.to_rgb8();
+        let (w, h) = rgb.dimensions();
+
+        let mut bytes = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, QUALITY)
+            .write_image(rgb.as_raw(), w, h, image::ExtendedColorType::Rgb8)
+            .map_err(|error| error.to_string())?;
+
+        if bytes.len() <= max_bytes || (w <= MIN_IMAGE_DIM && h <= MIN_IMAGE_DIM) {
+            return Ok(ResizedImage {
+                bytes,
+                mime: mush_ai::types::ImageMimeType::Jpeg,
+                orig_dimensions,
+                new_dimensions: (w, h),
+            });
+        }
+
+        // shrink the longest side by a quarter and retry. resize preserves
+        // aspect ratio, fitting within the box
+        let nw = (w * 3 / 4).max(1);
+        let nh = (h * 3 / 4).max(1);
+        current = current.resize(nw, nh, image::imageops::FilterType::Triangle);
+    }
+}
+
+fn read_image(path: &Path, max_image_bytes: usize) -> ToolResult {
+    use mush_ai::types::{ImageContent, TextContent, ToolResultContentPart};
 
     let data = match std::fs::read(path) {
         Ok(d) => d,
@@ -440,23 +518,79 @@ fn read_image(path: &Path) -> ToolResult {
     };
 
     use base64::Engine;
-    let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
+    let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
 
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("png")
-        .to_lowercase();
-
-    let mime_type = mush_ai::types::ImageMimeType::from_extension(&ext);
-
-    ToolResult {
-        content: vec![ToolResultContentPart::Image(ImageContent {
-            data: encoded,
-            mime_type,
-        })],
-        outcome: mush_ai::types::ToolOutcome::Success,
+    // small enough: attach as-is, preserving the original format
+    if data.len() <= max_image_bytes {
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("png")
+            .to_lowercase();
+        return ToolResult {
+            content: vec![ToolResultContentPart::Image(ImageContent {
+                data: encode(&data),
+                mime_type: mush_ai::types::ImageMimeType::from_extension(&ext),
+            })],
+            outcome: mush_ai::types::ToolOutcome::Success,
+        };
     }
+
+    // too big: downscale so it fits. attaching the oversized image would
+    // make every subsequent request fail (the image sits in history), so
+    // the user would have to manually rewind. shrinking it avoids that
+    let mb = |bytes: usize| bytes as f64 / 1_048_576.0;
+    match resize_image_to_fit(&data, max_image_bytes) {
+        Ok(resized) => {
+            let (ow, oh) = resized.orig_dimensions;
+            let (nw, nh) = resized.new_dimensions;
+            let mut note = format!(
+                "[image resized: original {ow}x{oh} ({:.1} MB) exceeded the {:.0} MB limit, \
+                 downscaled to {nw}x{nh} ({:.1} MB, jpeg)]",
+                mb(data.len()),
+                mb(max_image_bytes),
+                mb(resized.bytes.len()),
+            );
+            if let Some(saved) = write_resized_to_temp(path, &resized.bytes) {
+                note.push_str(&format!("\n[resized copy saved to {}]", saved.display()));
+            }
+            ToolResult {
+                content: vec![
+                    ToolResultContentPart::Text(TextContent { text: note }),
+                    ToolResultContentPart::Image(ImageContent {
+                        data: encode(&resized.bytes),
+                        mime_type: resized.mime,
+                    }),
+                ],
+                outcome: mush_ai::types::ToolOutcome::Success,
+            }
+        }
+        // don't attach the oversized image even on failure, or it'll fail
+        // every future request. surface a note instead
+        Err(e) => ToolResult::error(format!(
+            "image is {:.1} MB, over the {:.0} MB limit, and could not be resized: {e}. \
+             not attached.",
+            mb(data.len()),
+            mb(max_image_bytes),
+        )),
+    }
+}
+
+/// write the resized image to a temp file so the agent can reference it
+/// later. best-effort: returns `None` on failure since the inline
+/// attachment is what actually matters. the filename includes a hash of
+/// the source path so different files don't collide
+fn write_resized_to_temp(original: &Path, bytes: &[u8]) -> Option<std::path::PathBuf> {
+    use std::hash::{Hash, Hasher};
+
+    let stem = original
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("image");
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    original.hash(&mut hasher);
+    let path = std::env::temp_dir().join(format!("mush-resized-{:x}-{stem}.jpg", hasher.finish()));
+    std::fs::write(&path, bytes).ok().map(|()| path)
 }
 
 #[cfg(test)]
@@ -468,6 +602,116 @@ mod tests {
 
     fn temp_dir() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()
+    }
+
+    fn make_png(w: u32, h: u32) -> Vec<u8> {
+        // a high-frequency pattern so it doesn't compress down to nothing,
+        // forcing the resize path to actually downscale
+        let img = image::ImageBuffer::from_fn(w, h, |x, y| {
+            image::Rgb([
+                (x ^ y) as u8,
+                x.wrapping_mul(y) as u8,
+                (x.wrapping_add(y)) as u8,
+            ])
+        });
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        bytes
+    }
+
+    #[test]
+    fn resize_image_shrinks_oversized_to_fit() {
+        let data = make_png(512, 512);
+        let max = 8_000;
+        assert!(
+            data.len() > max,
+            "precondition: test image ({} bytes) must exceed the cap",
+            data.len()
+        );
+        let resized = resize_image_to_fit(&data, max).expect("decodes a valid png");
+        assert!(
+            resized.bytes.len() <= max,
+            "resized to {} bytes, must be <= {max}",
+            resized.bytes.len()
+        );
+        assert_eq!(resized.mime, mush_ai::types::ImageMimeType::Jpeg);
+        assert_eq!(resized.orig_dimensions, (512, 512));
+        assert!(
+            resized.new_dimensions.0 < resized.orig_dimensions.0,
+            "must have downscaled from {:?}, got {:?}",
+            resized.orig_dimensions,
+            resized.new_dimensions
+        );
+    }
+
+    #[test]
+    fn resize_image_errors_on_non_image_bytes() {
+        assert!(resize_image_to_fit(b"this is not an image", 1_000).is_err());
+    }
+
+    fn image_attachment(result: &ToolResult) -> &mush_ai::types::ImageContent {
+        result
+            .content
+            .iter()
+            .find_map(|p| match p {
+                mush_ai::types::ToolResultContentPart::Image(img) => Some(img),
+                _ => None,
+            })
+            .expect("an image attachment")
+    }
+
+    #[test]
+    fn read_file_resizes_oversized_image_and_notes_it() {
+        let dir = temp_dir();
+        let file = dir.path().join("big.png");
+        fs::write(&file, make_png(512, 512)).unwrap();
+
+        let max = 8_000;
+        let (result, _) = read_file(&file, None, None, false, max);
+        assert!(result.outcome.is_success());
+
+        let text = extract_text(&result);
+        assert!(
+            text.contains("resized"),
+            "expected a resize note, got: {text}"
+        );
+
+        use base64::Engine;
+        let img = image_attachment(&result);
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&img.data)
+            .unwrap();
+        assert!(
+            decoded.len() <= max,
+            "attached image {} bytes must be <= {max}",
+            decoded.len()
+        );
+        assert_eq!(img.mime_type, mush_ai::types::ImageMimeType::Jpeg);
+    }
+
+    #[test]
+    fn read_file_attaches_small_image_unchanged() {
+        let dir = temp_dir();
+        let file = dir.path().join("small.png");
+        let data = make_png(16, 16);
+        fs::write(&file, &data).unwrap();
+
+        // a cap far above the tiny image: no resize, attached byte-for-byte
+        let (result, _) = read_file(&file, None, None, false, 10_000_000);
+        assert!(result.outcome.is_success());
+
+        use base64::Engine;
+        let img = image_attachment(&result);
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&img.data)
+            .unwrap();
+        assert_eq!(decoded, data, "small image must be attached unchanged");
+        assert_eq!(img.mime_type, mush_ai::types::ImageMimeType::Png);
     }
 
     #[test]
@@ -543,7 +787,7 @@ mod tests {
         let file = dir.path().join("test.txt");
         fs::write(&file, "line 1\nline 2\nline 3").unwrap();
 
-        let (result, _) = read_file(&file, None, None, false);
+        let (result, _) = read_file(&file, None, None, false, DEFAULT_MAX_IMAGE_BYTES);
         assert!(result.outcome.is_success());
         let text = extract_text(&result);
         // output now has L{n}: prefixes
@@ -557,7 +801,7 @@ mod tests {
         let file = dir.path().join("test.txt");
         fs::write(&file, "line 1\nline 2\nline 3\nline 4").unwrap();
 
-        let (result, _) = read_file(&file, Some(3), None, false);
+        let (result, _) = read_file(&file, Some(3), None, false, DEFAULT_MAX_IMAGE_BYTES);
         let text = extract_text(&result);
         assert!(!text.contains("L1:"));
         assert!(!text.contains("L2:"));
@@ -575,7 +819,7 @@ mod tests {
             .join("\n");
         fs::write(&file, &content).unwrap();
 
-        let (result, _) = read_file(&file, None, Some(5), false);
+        let (result, _) = read_file(&file, None, Some(5), false, DEFAULT_MAX_IMAGE_BYTES);
         let text = extract_text(&result);
         assert!(text.contains("L1: line 1"));
         assert!(text.contains("L5: line 5"));
@@ -586,14 +830,20 @@ mod tests {
 
     #[test]
     fn read_nonexistent_file() {
-        let (result, _) = read_file(Path::new("/nonexistent/file.txt"), None, None, false);
+        let (result, _) = read_file(
+            Path::new("/nonexistent/file.txt"),
+            None,
+            None,
+            false,
+            DEFAULT_MAX_IMAGE_BYTES,
+        );
         assert!(result.outcome.is_error());
     }
 
     #[test]
     fn read_directory_returns_error() {
         let dir = temp_dir();
-        let (result, _) = read_file(dir.path(), None, None, false);
+        let (result, _) = read_file(dir.path(), None, None, false, DEFAULT_MAX_IMAGE_BYTES);
         assert!(result.outcome.is_error());
     }
 
@@ -612,7 +862,7 @@ mod tests {
         let file = dir.path().join("empty.txt");
         fs::write(&file, "").unwrap();
 
-        let (result, _) = read_file(&file, None, None, false);
+        let (result, _) = read_file(&file, None, None, false, DEFAULT_MAX_IMAGE_BYTES);
         let text = extract_text(&result);
         assert!(text.contains("empty file"));
     }
@@ -623,7 +873,7 @@ mod tests {
         let file = dir.path().join("test.txt");
         fs::write(&file, "line 1\nline 2\nline 3").unwrap();
 
-        let (result, _) = read_file(&file, None, None, true);
+        let (result, _) = read_file(&file, None, None, true, DEFAULT_MAX_IMAGE_BYTES);
         let text = extract_text(&result);
         let json: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(json["total_lines"], 3);
@@ -808,7 +1058,7 @@ mod tests {
         let long_line = "x".repeat(1000);
         fs::write(&file, &long_line).unwrap();
 
-        let (result, _) = read_file(&file, None, None, false);
+        let (result, _) = read_file(&file, None, None, false, DEFAULT_MAX_IMAGE_BYTES);
         let text = extract_text(&result);
         // should be capped at MAX_LINE_CHARS (500)
         assert!(text.starts_with("L1: "));
@@ -822,7 +1072,7 @@ mod tests {
         let file = dir.path().join("test.txt");
         fs::write(&file, "line 1\nline 2\nline 3\nline 4").unwrap();
 
-        let (result, _) = read_file(&file, Some(3), None, true);
+        let (result, _) = read_file(&file, Some(3), None, true, DEFAULT_MAX_IMAGE_BYTES);
         let text = extract_text(&result);
         let json: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(json["total_lines"], 4);
@@ -870,7 +1120,7 @@ mod tests {
             .join("\n");
         fs::write(&file, &content).unwrap();
 
-        let (result, _) = read_file(&file, None, None, false);
+        let (result, _) = read_file(&file, None, None, false, DEFAULT_MAX_IMAGE_BYTES);
         let text = extract_text(&result);
 
         let line_count = text.lines().count();
