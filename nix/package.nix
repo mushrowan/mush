@@ -33,6 +33,11 @@
       then {
         # use the profiling cargo profile (release + debug symbols)
         CARGO_PROFILE = "profiling";
+        # frame pointers let the profiler (samply/perf) unwind stacks
+        # through our own code. precompiled std and libc still lack them,
+        # so call graphs degrade once a stack crosses into them, but paths
+        # that stay within mush + its source-built deps unwind correctly.
+        RUSTFLAGS = "-C force-frame-pointers=yes";
       }
       else {}
     );

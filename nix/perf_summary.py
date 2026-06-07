@@ -140,7 +140,7 @@ def render_cpu(data_dir):
     resolvers = build_symbol_resolvers(profile, syms)
 
     self_time = collections.Counter()
-    total = 0
+    total = 0.0
     for thread in profile["threads"]:
         samples = thread["samples"]
         stack_tab = thread["stackTable"]
@@ -148,36 +148,64 @@ def render_cpu(data_dir):
         funcs = thread["funcTable"]
         resources = thread["resourceTable"]
         strings = thread["stringArray"]
-        weights = samples.get("weight") or [1] * samples["length"]
+        n = samples["length"]
+        # weight by cpu time (downweights threads parked in epoll); fall
+        # back to per-sample weight, then to a flat count
+        cpu = samples.get("threadCPUDelta")
+        weight_col = samples.get("weight")
+        frame_sym = {}
 
         def symbol(frame):
+            cached = frame_sym.get(frame)
+            if cached is not None:
+                return cached
             func = frames["func"][frame]
             addr = frames["address"][frame]
             res = funcs["resource"][func]
             lib = resources["lib"][res] if res is not None and res >= 0 else None
             resolver = resolvers.get(lib)
+            name = None
             if resolver is not None and addr is not None and addr >= 0:
-                got = resolver(addr)
-                if got is not None:
-                    return got
-            return strings[funcs["name"][func]]
+                name = resolver(addr)
+            if name is None:
+                name = strings[funcs["name"][func]]
+            frame_sym[frame] = name
+            return name
 
-        for i in range(samples["length"]):
+        for i in range(n):
             stack = samples["stack"][i]
             if stack is None:
                 continue
-            weight = weights[i] or 1
+            if cpu and cpu[i] is not None:
+                weight = cpu[i]
+            elif weight_col and weight_col[i] is not None:
+                weight = weight_col[i]
+            else:
+                weight = 1
+            if weight <= 0:
+                continue
             total += weight
             self_time[symbol(stack_tab["frame"][stack])] += weight
 
     if total == 0:
         print("  no samples\n")
         return
-    print(f"  {total} samples, top self (leaf) functions:")
+
+    print(f"  cpu-weighted samples: {total:.0f}; top self (leaf) functions:")
     for sym, weight in self_time.most_common(25):
-        print(f"    {100 * weight / total:5.1f}%  {sym[:90]}")
-    print("\n  (self time only; call graphs need frame pointers. interactive\n"
-          "   flame graph: nix run .#perf-load)\n")
+        print(f"    {100 * weight / total:5.1f}%  {clip(sym)}")
+    # self time is the sampled instruction pointer, so it needs no stack
+    # unwinding and is the reliable, llm-readable hotspot view. caller
+    # relationships are intentionally not summarised: samply's unwinder
+    # degrades across precompiled std/libc frames (no frame pointers there)
+    # and flattens inline frames, so an automated call tree would mislead.
+    # use the interactive flame graph for call context.
+    print("\n  caller context / call graph: nix run .#perf-load\n")
+
+
+def clip(sym, width=88):
+    return sym if len(sym) <= width else sym[: width - 1] + "\u2026"
+
 
 
 def main():
