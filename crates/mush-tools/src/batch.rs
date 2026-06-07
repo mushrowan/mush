@@ -8,6 +8,7 @@
 //! sequentially in the order they appear to avoid silent conflicts.
 //! all other calls run in parallel.
 
+use mush_agent::exec_context::{self, TOOL_EXEC_ID};
 use mush_agent::tool::{AgentTool, OutputLimit, ToolRegistry, ToolResult, parse_tool_args};
 use mush_agent::tool_grouping;
 use mush_agent::truncation;
@@ -172,6 +173,10 @@ impl AgentTool for BatchTool {
         }
 
         let total = params.tool_calls.len();
+        // the agent loop tagged this task with the batch's exec id; derive a
+        // per-sub-call id from it so each sub-call's live output streams into
+        // its own panel (the tui creates matching panels in start_batch_tool)
+        let batch_id = exec_context::current_exec_id();
 
         let mut results: Vec<CallResult> = if params.sequential {
             // sequential mode: one call at a time, abort remaining on first
@@ -189,7 +194,12 @@ impl AgentTool for BatchTool {
                     ));
                     continue;
                 }
-                let result = run_call(i, call, &self.tools).await;
+                let result = TOOL_EXEC_ID
+                    .scope(
+                        exec_context::batch_sub_exec_id(&batch_id, i),
+                        run_call(i, call, &self.tools),
+                    )
+                    .await;
                 let is_failure = match &result.3 {
                     Err(_) => true,
                     Ok(tr) => tr.outcome.is_error(),
@@ -212,7 +222,10 @@ impl AgentTool for BatchTool {
             tool_grouping::execute_grouped(
                 calls,
                 |(_, call)| tool_grouping::file_path_key(&call.tool, &call.parameters),
-                move |(i, call)| async move { run_call(i, call, tools).await },
+                move |(i, call)| {
+                    let exec_id = exec_context::batch_sub_exec_id(&batch_id, i);
+                    TOOL_EXEC_ID.scope(exec_id, async move { run_call(i, call, tools).await })
+                },
             )
             .await
         };

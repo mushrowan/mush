@@ -1,6 +1,7 @@
 pub mod agent_loop;
 pub mod card;
 pub mod display;
+pub mod exec_context;
 pub mod hooks;
 pub mod ipc;
 pub mod response_cache;

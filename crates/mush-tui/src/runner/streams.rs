@@ -262,18 +262,25 @@ pub(super) async fn answer_confirmation(
 
 pub(super) fn poll_live_tool_output(
     pane_mgr: &mut PaneManager,
-    live: &Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
+    live: &Option<crate::runner::config::LiveToolOutput>,
 ) -> bool {
-    if let Some(live) = live {
-        let app = &mut pane_mgr.focused_mut().app;
-        if let Ok(guard) = live.lock()
-            && let Some(last) = guard.as_ref()
-            && let Some(active) = app.active_tools.last().map(|t| t.tool_call_id.clone())
-        {
-            return app.push_tool_output(&active, last);
-        }
+    let Some(live) = live else {
+        return false;
+    };
+    // drain the per-exec-id lines so the map stays bounded and finished
+    // tools don't leave stale output behind
+    let updates: Vec<(String, String)> = match live.lock() {
+        Ok(mut guard) if !guard.is_empty() => guard.drain().collect(),
+        _ => return false,
+    };
+    // route each line to the focused pane's matching panel (by exec id), so
+    // concurrent tools stream into their own boxes instead of the last one
+    let app = &mut pane_mgr.focused_mut().app;
+    let mut changed = false;
+    for (exec_id, line) in updates {
+        changed |= app.push_tool_output_by_exec_id(&exec_id, &line);
     }
-    false
+    changed
 }
 
 /// track file conflicts in multi-pane mode when tools start/end
@@ -1675,6 +1682,14 @@ mod tests {
         );
     }
 
+    fn live_map(entries: &[(&str, &str)]) -> Option<crate::runner::config::LiveToolOutput> {
+        let map = entries
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        Some(std::sync::Arc::new(std::sync::Mutex::new(map)))
+    }
+
     #[test]
     fn poll_live_tool_output_updates_focused_tool() {
         let pane_id = PaneId::new(1);
@@ -1685,9 +1700,7 @@ mod tests {
             .app
             .start_tool(&tool_call_id, "bash", "cargo test");
 
-        let live = Some(std::sync::Arc::new(std::sync::Mutex::new(Some(
-            "running".to_string(),
-        ))));
+        let live = live_map(&[("tc_live", "running")]);
         assert!(poll_live_tool_output(&mut pane_mgr, &live));
 
         assert_eq!(
@@ -1696,6 +1709,27 @@ mod tests {
                 .as_deref(),
             Some("running")
         );
+    }
+
+    #[test]
+    fn poll_live_tool_output_routes_each_exec_id_to_its_own_panel() {
+        // regression: with several active tools, all live output used to
+        // land in the last panel. each exec id must stream into its own.
+        let mut pane_mgr = PaneManager::new(Pane::new(PaneId::new(1), app()));
+        let a = ToolCallId::from("tc_a");
+        let b = ToolCallId::from("tc_b");
+        pane_mgr.focused_mut().app.start_tool(&a, "bash", "jj st");
+        pane_mgr
+            .focused_mut()
+            .app
+            .start_tool(&b, "bash", "cargo test");
+
+        let live = live_map(&[("tc_a", "jj output"), ("tc_b", "test output")]);
+        assert!(poll_live_tool_output(&mut pane_mgr, &live));
+
+        let tools = &pane_mgr.focused().app.active_tools;
+        assert_eq!(tools[0].live_output.as_deref(), Some("jj output"));
+        assert_eq!(tools[1].live_output.as_deref(), Some("test output"));
     }
 
     #[test]
@@ -1712,9 +1746,7 @@ mod tests {
             .app
             .push_tool_output(&tool_call_id, "running");
 
-        let live = Some(std::sync::Arc::new(std::sync::Mutex::new(Some(
-            "running".to_string(),
-        ))));
+        let live = live_map(&[("tc_live", "running")]);
 
         assert!(!poll_live_tool_output(&mut pane_mgr, &live));
     }

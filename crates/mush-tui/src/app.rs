@@ -569,20 +569,27 @@ impl App {
     pub fn start_batch_tool(
         &mut self,
         tool_call_id: &ToolCallId,
-        summary: &str,
+        _summary: &str,
         sub_calls: &[(String, String)], // (tool_name, summary) per sub-call
     ) {
         self.current_tool_batch += 1;
-        // one active tool state for the live panel
-        self.active_tools.push(ActiveToolState {
-            tool_call_id: tool_call_id.clone(),
-            name: "batch".to_string(),
-            summary: summary.to_string(),
-            live_output: None,
-            status: ToolCallStatus::Running,
-            output: None,
-        });
         self.stream.tool_args.clear();
+        // one live panel per sub-call, keyed by the synthetic exec id the
+        // batch tool tags its sub-calls with, so each sub-call streams its
+        // own output into its own panel instead of all landing in the last
+        for (i, (name, sub_summary)) in sub_calls.iter().enumerate() {
+            self.active_tools.push(ActiveToolState {
+                tool_call_id: ToolCallId::from(mush_agent::exec_context::batch_sub_exec_id(
+                    tool_call_id.as_str(),
+                    i,
+                )),
+                name: name.clone(),
+                summary: sub_summary.clone(),
+                live_output: None,
+                status: ToolCallStatus::Running,
+                output: None,
+            });
+        }
         // individual display entries for message history. target the
         // assistant turn explicitly since queued steering bubbles tail the
         // list and must not receive tool calls
@@ -608,20 +615,43 @@ impl App {
         outcome: mush_ai::types::ToolOutcome,
         output: Option<&str>,
     ) {
-        // mark the active tool with the batch-level outcome so the live
-        // panel reflects a failed batch instead of always showing green
-        if let Some(tool) = self
-            .active_tools
-            .iter_mut()
-            .find(|t| &t.tool_call_id == tool_call_id)
-        {
-            tool.status = ToolCallStatus::from(outcome);
-            tool.output = output.map(truncate_output);
-            tool.live_output = None;
-        }
-        // parse output into per-sub-call sections and update display entries
+        // parse output into per-sub-call sections
         let Some(text) = output else { return };
         let sections = parse_batch_output(text);
+
+        // mark each sub-call's live panel (synthetic exec id) so the active
+        // panel reflects per-sub-call outcomes until it's cleared next turn.
+        // an empty section list means a batch-level failure (e.g. arg parse
+        // error) with no per-call output: surface it on every sub-panel.
+        let batch_error =
+            (sections.is_empty() && !text.trim().is_empty()).then(|| truncate_output(text));
+        for tool in &mut self.active_tools {
+            let Some(idx) = mush_agent::exec_context::batch_sub_index(
+                tool.tool_call_id.as_str(),
+                tool_call_id.as_str(),
+            ) else {
+                continue;
+            };
+            tool.live_output = None;
+            if let Some(ref err) = batch_error {
+                tool.status = ToolCallStatus::from(outcome);
+                tool.output = Some(err.clone());
+            } else if let Some(section) = sections.get(idx) {
+                tool.status = if section.is_error {
+                    ToolCallStatus::Error
+                } else {
+                    ToolCallStatus::Done
+                };
+                tool.output =
+                    (!section.content.is_empty()).then(|| truncate_output(&section.content));
+            } else {
+                tool.status = ToolCallStatus::Error;
+                tool.output = Some("missing result in batch output".into());
+            }
+        }
+
+        // distribute results to the message-history sub-calls (the
+        // persistent display, rendered as boxes once they leave Running)
         if let Some(turn) = self.current_turn_message_mut() {
             // find the running batch sub-calls (they're the last N running entries)
             let running: Vec<usize> = turn
@@ -699,12 +729,20 @@ impl App {
         }
     }
 
-    /// update live output for an active tool
+    /// update live output for an active tool, matched by id
     pub fn push_tool_output(&mut self, tool_call_id: &ToolCallId, output: &str) -> bool {
+        self.push_tool_output_by_exec_id(tool_call_id.as_str(), output)
+    }
+
+    /// update live output for the active tool whose exec id matches. the
+    /// exec id is the tool-call id for top-level calls, or a synthetic
+    /// `{batch_id}#{index}` for batch sub-calls (so concurrent sub-calls
+    /// each stream into their own panel). returns true if the panel changed.
+    pub fn push_tool_output_by_exec_id(&mut self, exec_id: &str, output: &str) -> bool {
         if let Some(tool) = self
             .active_tools
             .iter_mut()
-            .find(|t| &t.tool_call_id == tool_call_id)
+            .find(|t| t.tool_call_id.as_str() == exec_id)
         {
             if tool.live_output.as_deref() == Some(output) {
                 return false;
@@ -1821,9 +1859,13 @@ mod tests {
             ],
         );
 
-        // one active tool for the live panel
-        assert_eq!(app.active_tools.len(), 1);
-        assert_eq!(app.active_tools[0].name, "batch");
+        // one live panel per sub-call, keyed by synthetic exec ids so each
+        // sub-call streams into its own panel
+        assert_eq!(app.active_tools.len(), 3);
+        assert_eq!(app.active_tools[0].name, "read");
+        assert_eq!(app.active_tools[2].name, "bash");
+        assert_eq!(app.active_tools[0].tool_call_id.as_str(), "tc_batch#0");
+        assert_eq!(app.active_tools[2].tool_call_id.as_str(), "tc_batch#2");
         // three display entries in the message
         let tcs = &app.messages.last().unwrap().tool_calls;
         assert_eq!(tcs.len(), 3);
@@ -1834,6 +1876,34 @@ mod tests {
         assert_eq!(tcs[0].batch, tcs[1].batch);
         assert_eq!(tcs[1].batch, tcs[2].batch);
         assert!(tcs.iter().all(|t| t.status == ToolCallStatus::Running));
+    }
+
+    #[test]
+    fn batch_sub_calls_stream_live_output_to_their_own_panels() {
+        // the bug being fixed: parallel sub-calls all dumped their live
+        // output into the last panel. each sub-call's synthetic exec id must
+        // route to its own panel.
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.messages
+            .push(DisplayMessage::new(MessageRole::Assistant, ""));
+        let tc_id = ToolCallId::from("tc_batch");
+        app.start_batch_tool(
+            &tc_id,
+            "2 tool calls",
+            &[
+                ("bash".into(), "jj st".into()),
+                ("bash".into(), "cargo test".into()),
+            ],
+        );
+
+        app.push_tool_output_by_exec_id("tc_batch#0", "jj line");
+        app.push_tool_output_by_exec_id("tc_batch#1", "test line");
+
+        assert_eq!(app.active_tools[0].live_output.as_deref(), Some("jj line"));
+        assert_eq!(
+            app.active_tools[1].live_output.as_deref(),
+            Some("test line")
+        );
     }
 
     #[test]
@@ -1924,12 +1994,10 @@ batch: 1/2 succeeded, 1 failed";
 
     #[test]
     fn batch_end_with_error_outcome_marks_active_panel_error() {
-        // the live tool panel (active_tools) sits above the message history
-        // and shows the batch's current status. previously end_batch_tool
-        // unconditionally set it to Done, so a failed batch still rendered a
-        // green check in the live header even though sub-call entries below
-        // were marked red. the panel should reflect the batch outcome plumbed
-        // through from the event handler
+        // the live tool panels (active_tools) sit above the message history,
+        // one per sub-call. previously a single batch panel was unconditionally
+        // set to Done, so a failed batch still rendered a green check. each
+        // sub-call panel should reflect its own outcome from the parsed output.
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.messages
             .push(DisplayMessage::new(MessageRole::Assistant, ""));
@@ -1946,8 +2014,8 @@ batch: 1/2 succeeded, 1 failed";
         let panel = app
             .active_tools
             .iter()
-            .find(|t| t.tool_call_id == tc_id)
-            .expect("active panel for batch");
+            .find(|t| t.tool_call_id.as_str() == "tc_batch#0")
+            .expect("live panel for sub-call");
         assert_eq!(panel.status, ToolCallStatus::Error);
     }
 
@@ -1969,8 +2037,8 @@ batch: 1/2 succeeded, 1 failed";
         let panel = app
             .active_tools
             .iter()
-            .find(|t| t.tool_call_id == tc_id)
-            .expect("active panel for batch");
+            .find(|t| t.tool_call_id.as_str() == "tc_batch#0")
+            .expect("live panel for sub-call");
         assert_eq!(panel.status, ToolCallStatus::Done);
     }
 

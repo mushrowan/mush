@@ -402,15 +402,18 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
 }
 
 async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
-    // shared state for streaming bash output to the TUI
+    // shared state for streaming bash output to the TUI, keyed by exec id
+    // so concurrent tool calls don't clobber each other's panels
     let terminal_policy_overrides = cli.terminal_policy_overrides();
-    let tool_output_live = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+    let tool_output_live: mush_tui::runner::LiveToolOutput =
+        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     let sink_state = tool_output_live.clone();
-    let output_sink: mush_tools::bash::OutputSink = std::sync::Arc::new(move |line: &str| {
-        if let Ok(mut guard) = sink_state.lock() {
-            *guard = Some(line.to_string());
-        }
-    });
+    let output_sink: mush_tools::bash::OutputSink =
+        std::sync::Arc::new(move |exec_id: &str, line: &str| {
+            if let Ok(mut guard) = sink_state.lock() {
+                guard.insert(exec_id.to_string(), line.to_string());
+            }
+        });
 
     let timer = if cli.profile_startup {
         Some(timing::PhaseTimer::new())

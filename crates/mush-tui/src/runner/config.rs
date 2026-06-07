@@ -12,6 +12,12 @@ pub type RecentModelsSaver = std::sync::Arc<dyn Fn(&[String]) + Send + Sync>;
 /// callback to update session title
 pub type TitleUpdater = std::sync::Arc<dyn Fn(String) + Send + Sync>;
 
+/// shared live tool output: exec id -> latest output line. the bash sink
+/// writes the producing tool's exec id (so concurrent tools stay separate)
+/// and the TUI drains this each frame, routing lines to matching panels.
+pub type LiveToolOutput =
+    std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>;
+
 /// snapshot of all pane conversations for session persistence
 pub struct SessionSnapshot {
     /// session id for this snapshot
@@ -107,8 +113,10 @@ pub struct TuiConfig {
     pub cache_timer: bool,
     /// how to display thinking text (hidden, collapse, expanded)
     pub thinking_display: crate::app::ThinkingDisplay,
-    /// shared live tool output (updated by bash sink, read by TUI)
-    pub tool_output_live: Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
+    /// shared live tool output, keyed by exec id (tool-call id, or a
+    /// `{batch_id}#{index}` for batch sub-calls). updated by bash sinks,
+    /// drained by the TUI each frame and routed to the matching panel.
+    pub tool_output_live: Option<LiveToolOutput>,
     /// callback to get recent log entries (returns last N lines)
     pub log_buffer: Option<std::sync::Arc<dyn Fn(usize) -> Vec<String> + Send + Sync>>,
     /// multi-pane file isolation mode

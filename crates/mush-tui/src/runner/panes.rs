@@ -98,7 +98,7 @@ pub(super) async fn fork_pane(
     pane_mgr: &mut PaneManager,
     tui_config: &TuiConfig,
     bus: &crate::messaging::MessageBus,
-    tool_output_live: &Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
+    tool_output_live: &Option<crate::runner::config::LiveToolOutput>,
 ) {
     let prompt = {
         let app = &mut pane_mgr.focused_mut().app;
@@ -171,11 +171,12 @@ pub(super) async fn fork_pane(
                     let sink: Option<mush_tools::bash::OutputSink> =
                         tool_output_live.as_ref().map(|live| {
                             let live = live.clone();
-                            let sink: mush_tools::bash::OutputSink = Arc::new(move |line: &str| {
-                                if let Ok(mut guard) = live.lock() {
-                                    *guard = Some(line.to_string());
-                                }
-                            });
+                            let sink: mush_tools::bash::OutputSink =
+                                Arc::new(move |exec_id: &str, line: &str| {
+                                    if let Ok(mut guard) = live.lock() {
+                                        guard.insert(exec_id.to_string(), line.to_string());
+                                    }
+                                });
                             sink
                         });
                     let use_patch = tui_config.model.uses_patch_tool();

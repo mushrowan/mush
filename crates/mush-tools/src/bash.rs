@@ -291,7 +291,14 @@ fn has_message_flag(tokens: &[&str]) -> bool {
     })
 }
 
-pub type OutputSink = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
+/// sink for streaming a tool's live output. the first argument is the
+/// exec id of the producing tool call (so the tui can route lines to the
+/// right panel when several tools run concurrently), the second is the line.
+pub type OutputSink = std::sync::Arc<dyn Fn(&str, &str) + Send + Sync>;
+
+/// per-execution sink with the exec id already bound. used internally by
+/// the command runner and its pipe readers, which only deal in lines.
+type LineSink = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
 
 pub struct BashTool {
     cwd: Arc<Path>,
@@ -400,14 +407,27 @@ impl AgentTool for BashTool {
             return self.execute_background(args).await;
         }
 
+        let line_sink = self.line_sink_for_current_exec();
         run_command(
             &self.cwd,
             &args.command,
             args.effective_timeout(),
-            self.output_sink.as_ref(),
+            line_sink.as_ref(),
             args.output.is_json(),
         )
         .await
+    }
+}
+
+impl BashTool {
+    /// bind the current exec id (the tool call being executed on this task)
+    /// to the output sink, producing a line-only sink the runner can use.
+    fn line_sink_for_current_exec(&self) -> Option<LineSink> {
+        self.output_sink.as_ref().map(|sink| {
+            let sink = sink.clone();
+            let exec_id = mush_agent::exec_context::current_exec_id();
+            std::sync::Arc::new(move |line: &str| sink(&exec_id, line)) as LineSink
+        })
     }
 }
 
@@ -566,7 +586,7 @@ async fn run_command(
     cwd: &std::path::Path,
     command: &str,
     timeout_secs: u64,
-    output_sink: Option<&OutputSink>,
+    output_sink: Option<&LineSink>,
     json_output: bool,
 ) -> ToolResult {
     run_command_with_no_output_timeout(
@@ -584,7 +604,7 @@ async fn run_command_with_no_output_timeout(
     cwd: &std::path::Path,
     command: &str,
     timeout_secs: u64,
-    output_sink: Option<&OutputSink>,
+    output_sink: Option<&LineSink>,
     json_output: bool,
     no_output_timeout_secs: u64,
 ) -> ToolResult {
@@ -815,7 +835,7 @@ const fn command_status(exit_code: i32, timed_out: bool) -> CommandStatus {
 /// read a pipe line-by-line, forwarding to sink with throttling
 async fn stream_pipe<R: tokio::io::AsyncRead + Unpin>(
     pipe: Option<R>,
-    sink: Option<OutputSink>,
+    sink: Option<LineSink>,
     has_output: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> String {
     use tokio::io::{AsyncBufReadExt, BufReader};

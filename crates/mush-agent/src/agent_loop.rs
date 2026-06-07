@@ -692,7 +692,14 @@ pub fn agent_loop(
                         |tc: &ToolCall| {
                             crate::tool_grouping::file_path_key(tc.name.as_str(), &tc.arguments)
                         },
-                        move |tc: ToolCall| async move { execute_tool(tools_ref, &tc).await },
+                        move |tc: ToolCall| {
+                            // tag the execution with its tool-call id so streaming
+                            // sinks (bash live output) attribute lines to the right
+                            // panel even when several tools run concurrently
+                            let exec_id = tc.id.to_string();
+                            crate::exec_context::TOOL_EXEC_ID
+                                .scope(exec_id, async move { execute_tool(tools_ref, &tc).await })
+                        },
                     );
                     let results = match config.cancel.as_ref() {
                         Some(token) => tokio::select! {
