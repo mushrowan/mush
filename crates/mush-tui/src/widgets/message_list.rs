@@ -379,10 +379,13 @@ impl Widget for MessageList<'_> {
                     update_cached_height(msg, i, area.width, actual_height, &self.app.render_state);
                 }
             } else {
-                // off-screen: use estimated height as placeholder lines
-                for _ in 0..heights[i] {
-                    lines.push(Line::raw(""));
-                }
+                // off-screen: pad with empty placeholder lines to preserve
+                // document line positions for scroll math. these are never
+                // written to the buffer, so use the non-allocating
+                // `Line::default()` (empty spans) instead of `Line::raw("")`
+                // which heap-allocates a span vec per line. in long sessions
+                // this padding is most of the document and ran every frame.
+                lines.resize_with(lines.len() + heights[i], Line::default);
             }
             msg_line_starts.push((i, start_line));
         }
