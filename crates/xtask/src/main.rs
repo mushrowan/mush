@@ -38,8 +38,7 @@ fn discovery_probe() -> ExitCode {
     };
 
     runtime.block_on(async {
-        let client = reqwest::Client::new();
-        let summary = mush_ai::discovery::refresh_and_save(client).await;
+        let summary = mush_ai::discovery::refresh_and_save(mush_ai::http::client()).await;
         println!("{}", summary.one_line());
 
         for result in &summary.results {
