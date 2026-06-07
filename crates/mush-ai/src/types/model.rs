@@ -63,12 +63,12 @@ pub struct Model {
     pub cost: ModelCost,
     pub context_window: TokenCount,
     /// the input-token budget to compact against, when it differs from
-    /// the displayed [`context_window`]. some provider routes advertise a
-    /// larger total window than the input ceiling they actually honour
-    /// (e.g. gpt-5.5 in codex displays 400K but errors past ~272K input,
-    /// the "272K in + 128K out" split). `None` means "same as
-    /// context_window" - the common case. only set this when a route's
-    /// usable input budget is smaller than its marketed window
+    /// the displayed [`context_window`]. for a route that displays a total
+    /// window larger than the input ceiling it actually honours (an
+    /// "input + output" split), set this to the input ceiling so
+    /// auto-compaction fires before the provider errors while the status
+    /// bar still shows the full window. `None` means "same as
+    /// context_window" - the common case
     #[serde(default)]
     pub effective_context_window: Option<TokenCount>,
     pub max_output_tokens: TokenCount,

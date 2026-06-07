@@ -326,12 +326,13 @@ pub fn openai_codex_models() -> Vec<Model> {
                 cache_read: 0.0,
                 cache_write: 0.0,
             },
-            // codex markets a 400K window (272K input + 128K output).
-            // its /models endpoint only reports the 272K input budget, so
-            // discovery under-reports it. display the full window, but
-            // compact against the 272K input ceiling
-            context_window: TokenCount::new(400_000),
-            effective_context_window: Some(TokenCount::new(272_000)),
+            // codex markets a 400K window but reserves 128K for output, so
+            // the usable input budget is 272K. mush's context gauge measures
+            // input, so show the 272K you can actually fill (codex's /models
+            // reports this same 272K). the 400K total would understate how
+            // full the conversation really is
+            context_window: TokenCount::new(272_000),
+            effective_context_window: None,
             max_output_tokens: TokenCount::new(128_000),
             supports_adaptive_thinking: false,
             supported_thinking_levels: Vec::new(),
@@ -930,23 +931,19 @@ pub fn all_models_with_user() -> Vec<Model> {
     models
 }
 
-/// the override tier consumed by [`crate::discovery::merge`]. these win
-/// over live discovery (see that module's precedence docs).
+/// the override tier consumed by [`crate::discovery::merge`]: the user's
+/// manual `models.json` entries, which win over live discovery (see that
+/// module's precedence docs).
 ///
-/// two kinds of override live here:
-/// - shipped corrections for routes whose upstream `/v1/models` metadata
-///   under-reports the real window. openai and codex `/v1/models` either
-///   omit windows (openai defaults to 128K) or report only the input
-///   budget (codex reports 272K for the 400K gpt-5.5), so the curated
-///   catalogue values must win.
-/// - the user's manual `models.json` entries, appended last so they win
-///   over the shipped corrections too.
+/// only user overrides live here. the shipped catalogue values stay in
+/// the seed tier so discovery can still upgrade them (e.g. anthropic's 1M
+/// beta). a curated entry that needs to beat discovery for a genuinely
+/// under-reported route can be added here later, but we don't ship blanket
+/// window corrections: codex `/models` reports the real usable input
+/// budget (e.g. 272K for gpt-5.5), so overriding it would overstate it.
 #[must_use]
 pub fn model_overrides() -> Vec<Model> {
-    let mut overrides = openai_models();
-    overrides.extend(openai_codex_models());
-    overrides.extend(load_user_models());
-    overrides
+    load_user_models()
 }
 
 /// find a model by provider and id (includes user models)
@@ -1142,6 +1139,21 @@ mod tests {
                 .iter()
                 .all(|m| m.provider == Provider::Custom("openai-codex".into()))
         );
+    }
+
+    #[test]
+    fn gpt_5_5_codex_ships_at_input_budget() {
+        // codex markets gpt-5.5 as 400K but reserves 128K for output, so
+        // the usable input budget (what mush's gauge measures) is 272K.
+        // ship that, not the marketing total, and don't set an effective
+        // window since display and compaction budget are the same here.
+        let gpt55 = openai_codex_models()
+            .into_iter()
+            .find(|m| m.id.as_str() == "gpt-5.5")
+            .expect("gpt-5.5 in codex catalogue");
+        assert_eq!(gpt55.context_window, TokenCount::new(272_000));
+        assert_eq!(gpt55.effective_context_window, None);
+        assert_eq!(gpt55.compaction_window(), TokenCount::new(272_000));
     }
 
     #[test]

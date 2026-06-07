@@ -1261,11 +1261,11 @@ mod tests {
 
     #[test]
     fn auto_compaction_keys_off_effective_window_not_displayed() {
-        // gpt-5.5 codex displays a 400k window but the real input ceiling
-        // is 272k. compaction must key off the effective window so it
-        // fires before the provider errors, not at 95% of the marketed
-        // 400k (380k). this guards the wiring of Model::compaction_window
-        // into the auto-compaction decision.
+        // a route can display a larger total window than the input ceiling
+        // it honours (an input + output split). when effective_context_window
+        // is set, compaction must key off it so it fires before the provider
+        // errors, not at 95% of the larger displayed window. this guards the
+        // wiring of Model::compaction_window into the auto-compaction decision.
         let mut model = test_model();
         model.context_window = TokenCount::new(400_000);
         model.effective_context_window = Some(TokenCount::new(272_000));

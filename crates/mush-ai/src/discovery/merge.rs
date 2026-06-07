@@ -419,39 +419,4 @@ mod tests {
         assert_eq!(merged[0].source, ModelSource::Discovered);
         assert_eq!(merged[0].model.context_window, TokenCount::new(1_000_000));
     }
-
-    #[test]
-    fn gpt55_codex_resolves_to_marketed_window_over_discovery() {
-        // end to end against the real catalogue: even when codex discovery
-        // reports gpt-5.5 at its 272K input budget, the shipped override
-        // surfaces the 400K marketed window for display while keeping the
-        // 272K effective budget for compaction.
-        let mut discovered = Model {
-            provider: Provider::Custom("openai-codex".into()),
-            ..anthropic_model("gpt-5.5", "GPT-5.5", 0.0)
-        };
-        discovered.context_window = TokenCount::new(272_000);
-        let mut cache = DiscoveryCache::default();
-        cache.apply_report(DiscoveryReport {
-            provider: Provider::Custom("openai-codex".into()),
-            fetched_at: SystemTime::UNIX_EPOCH,
-            models: vec![discovered.into()],
-        });
-
-        let merged = merge(
-            crate::models::all_models(),
-            &cache,
-            crate::models::model_overrides(),
-        );
-        let gpt55 = merged
-            .iter()
-            .find(|m| m.model.id.as_str() == "gpt-5.5")
-            .expect("gpt-5.5 present in catalogue");
-        assert_eq!(gpt55.source, ModelSource::Override);
-        assert_eq!(gpt55.model.context_window, TokenCount::new(400_000));
-        assert_eq!(
-            gpt55.model.effective_context_window,
-            Some(TokenCount::new(272_000))
-        );
-    }
 }
