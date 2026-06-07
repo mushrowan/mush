@@ -4,19 +4,26 @@
 //! contains every provider/model mush ships with. discovery adds models
 //! we learnt about from upstream `/v1/models` endpoints.
 //!
-//! merge policy:
-//! - keys are `(provider, model_id)` pairs
-//! - if both have an entry, **most fields come from discovery** (it knows
-//!   the live capabilities). cost is the exception: anthropic and openai
-//!   `/v1/models` don't return pricing, so when the discovered cost is
-//!   zero but the static catalogue knows pricing, the static cost wins.
-//!   openrouter discovery does return pricing, so it overrides as usual.
-//! - discovered-only models surface as new entries with [`ModelSource::Discovered`]
+//! three-tier precedence (highest wins):
+//! 1. **overrides** - user `models.json` plus shipped corrections for
+//!    routes whose upstream metadata is wrong. win over discovery
+//!    wholesale (the override is authoritative), but inherit the
+//!    discovered `raw` payload so provider extras still render.
+//! 2. **discovery** - the live `/v1/models` view. wins over the seed for
+//!    capability fields so upgrades (e.g. anthropic's 1M beta) show up.
+//!    cost is the exception: anthropic and openai `/v1/models` don't
+//!    return pricing, so a zero discovered cost keeps the seed's pricing.
+//! 3. **seed / stale** - the shipped static catalogue, plus
+//!    previously-discovered models absent from the latest fetch.
+//!
+//! provenance:
+//! - discovered-only models surface with [`ModelSource::Discovered`]
 //! - static-only models surface as [`ModelSource::Static`] - they're not
 //!   stale (they may be from a non-discoverable provider like groq)
 //! - models that were discovered before but absent from the latest fetch
 //!   surface with [`ModelSource::DiscoveredStale`]; they remain selectable
 //!   but the picker can highlight them and offer a delete action
+//! - overridden models surface with [`ModelSource::Override`]
 
 use std::collections::BTreeMap;
 
@@ -34,6 +41,11 @@ pub enum ModelSource {
     /// in the cache but absent from the most recent fetch for its
     /// provider. likely deprecated/removed upstream.
     DiscoveredStale,
+    /// a manual or curated override that wins over discovery. covers user
+    /// `models.json` entries and the shipped corrections for routes whose
+    /// upstream metadata is wrong (e.g. gpt-5.5 codex reporting a 272K
+    /// input budget as its whole window when the marketed window is 400K)
+    Override,
 }
 
 /// a model entry in the merged catalogue, paired with provenance.
@@ -47,11 +59,15 @@ pub struct MergedModel {
     pub raw: Option<serde_json::Value>,
 }
 
-/// merge a static catalogue with a discovery cache.
+/// merge a static catalogue with a discovery cache and a set of overrides.
 ///
-/// see module docs for the field-by-field merge policy.
+/// see module docs for the three-tier precedence.
 #[must_use]
-pub fn merge(static_models: Vec<Model>, cache: &DiscoveryCache) -> Vec<MergedModel> {
+pub fn merge(
+    static_models: Vec<Model>,
+    cache: &DiscoveryCache,
+    overrides: Vec<Model>,
+) -> Vec<MergedModel> {
     type Key = (String, String);
     let mut merged: BTreeMap<Key, MergedModel> = BTreeMap::new();
 
@@ -95,6 +111,23 @@ pub fn merge(static_models: Vec<Model>, cache: &DiscoveryCache) -> Vec<MergedMod
         );
     }
 
+    // overlay overrides on top of discovery. the override is
+    // authoritative (full win, including cost), but inherits the
+    // discovered `raw` payload so provider-specific extras (e.g. codex
+    // reasoning levels) still surface in the picker
+    for model in overrides {
+        let key = (model.provider.to_string(), model.id.as_str().to_string());
+        let raw = merged.get(&key).and_then(|existing| existing.raw.clone());
+        merged.insert(
+            key,
+            MergedModel {
+                model,
+                source: ModelSource::Override,
+                raw,
+            },
+        );
+    }
+
     merged.into_values().collect()
 }
 
@@ -123,9 +156,10 @@ fn pick_cost(static_cost: &ModelCost, discovered_cost: &ModelCost) -> ModelCost 
 /// static catalogue wrapped in [`MergedModel`].
 #[must_use]
 pub fn merged_catalogue() -> Vec<MergedModel> {
-    let static_models = crate::models::all_models_with_user();
+    let seed = crate::models::all_models();
+    let overrides = crate::models::model_overrides();
     let cache = DiscoveryCache::load(&super::cache::cache_path()).unwrap_or_default();
-    merge(static_models, &cache)
+    merge(seed, &cache, overrides)
 }
 
 /// helper: extract just the [`Model`]s from a merge result.
@@ -189,7 +223,7 @@ mod tests {
     fn empty_cache_yields_static_only_entries() {
         let static_models = vec![anthropic_model("a", "A", 3.0)];
         let cache = DiscoveryCache::default();
-        let merged = merge(static_models, &cache);
+        let merged = merge(static_models, &cache, vec![]);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].source, ModelSource::Static);
     }
@@ -209,7 +243,7 @@ mod tests {
             models: vec![discovered_a.into()],
         });
 
-        let merged = merge(vec![static_a], &cache);
+        let merged = merge(vec![static_a], &cache, vec![]);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].source, ModelSource::Discovered);
         assert_eq!(merged[0].model.name, "New Name");
@@ -230,7 +264,7 @@ mod tests {
             models: vec![discovered_a.into()],
         });
 
-        let merged = merge(vec![static_a], &cache);
+        let merged = merge(vec![static_a], &cache, vec![]);
         assert_eq!(merged[0].model.cost.input, 3.0);
         assert_eq!(merged[0].model.cost.output, 15.0);
     }
@@ -264,7 +298,7 @@ mod tests {
             models: vec![discovered_a.into()],
         });
 
-        let merged = merge(vec![static_a], &cache);
+        let merged = merge(vec![static_a], &cache, vec![]);
         assert_eq!(merged[0].model.cost.input, 1.0);
         assert_eq!(merged[0].model.cost.output, 5.0);
         assert_eq!(merged[0].model.cost.cache_read, 0.1);
@@ -282,7 +316,7 @@ mod tests {
             c
         };
 
-        let merged = merge(vec![], &cache);
+        let merged = merge(vec![], &cache, vec![]);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].source, ModelSource::Discovered);
         assert_eq!(merged[0].model.id.as_str(), "brand-new");
@@ -308,7 +342,7 @@ mod tests {
             models: vec![anthropic_model("a", "A", 0.0).into()],
         });
 
-        let merged = merge(vec![], &cache);
+        let merged = merge(vec![], &cache, vec![]);
         let by_id: BTreeMap<_, _> = merged
             .iter()
             .map(|m| (m.model.id.as_str().to_string(), m))
@@ -331,7 +365,7 @@ mod tests {
             models: vec![anthropic_model("a", "A", 0.0).into()],
         });
 
-        let merged = merge(vec![groq], &cache);
+        let merged = merge(vec![groq], &cache, vec![]);
         assert_eq!(merged.len(), 2);
         let by_id: BTreeMap<_, _> = merged
             .iter()
@@ -339,5 +373,85 @@ mod tests {
             .collect();
         assert_eq!(by_id["groq-llama"].source, ModelSource::Static);
         assert_eq!(by_id["a"].source, ModelSource::Discovered);
+    }
+
+    #[test]
+    fn override_wins_over_discovery() {
+        // a curated/manual override must beat a live discovered value.
+        // codex reports gpt-5.5's 272K input budget as its whole window;
+        // the override re-asserts the 400K marketed window.
+        let mut discovered = anthropic_model("a", "Discovered", 0.0);
+        discovered.context_window = TokenCount::new(272_000);
+        let mut cache = DiscoveryCache::default();
+        cache.apply_report(DiscoveryReport {
+            provider: Provider::Anthropic,
+            fetched_at: SystemTime::UNIX_EPOCH,
+            models: vec![discovered.into()],
+        });
+
+        let mut override_a = anthropic_model("a", "Override", 0.0);
+        override_a.context_window = TokenCount::new(400_000);
+
+        let merged = merge(vec![], &cache, vec![override_a]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].source, ModelSource::Override);
+        assert_eq!(merged[0].model.name, "Override");
+        assert_eq!(merged[0].model.context_window, TokenCount::new(400_000));
+    }
+
+    #[test]
+    fn non_overridden_models_still_take_discovery_over_seed() {
+        // anthropic's 1M beta is a discovered upgrade over the 200K seed.
+        // models absent from the override set must keep taking discovery's
+        // value, so we don't regress that behaviour by adding the tier.
+        let mut seed = anthropic_model("a", "Seed", 3.0);
+        seed.context_window = TokenCount::new(200_000);
+        let mut discovered = anthropic_model("a", "Discovered", 0.0);
+        discovered.context_window = TokenCount::new(1_000_000);
+        let mut cache = DiscoveryCache::default();
+        cache.apply_report(DiscoveryReport {
+            provider: Provider::Anthropic,
+            fetched_at: SystemTime::UNIX_EPOCH,
+            models: vec![discovered.into()],
+        });
+
+        let merged = merge(vec![seed], &cache, vec![]);
+        assert_eq!(merged[0].source, ModelSource::Discovered);
+        assert_eq!(merged[0].model.context_window, TokenCount::new(1_000_000));
+    }
+
+    #[test]
+    fn gpt55_codex_resolves_to_marketed_window_over_discovery() {
+        // end to end against the real catalogue: even when codex discovery
+        // reports gpt-5.5 at its 272K input budget, the shipped override
+        // surfaces the 400K marketed window for display while keeping the
+        // 272K effective budget for compaction.
+        let mut discovered = Model {
+            provider: Provider::Custom("openai-codex".into()),
+            ..anthropic_model("gpt-5.5", "GPT-5.5", 0.0)
+        };
+        discovered.context_window = TokenCount::new(272_000);
+        let mut cache = DiscoveryCache::default();
+        cache.apply_report(DiscoveryReport {
+            provider: Provider::Custom("openai-codex".into()),
+            fetched_at: SystemTime::UNIX_EPOCH,
+            models: vec![discovered.into()],
+        });
+
+        let merged = merge(
+            crate::models::all_models(),
+            &cache,
+            crate::models::model_overrides(),
+        );
+        let gpt55 = merged
+            .iter()
+            .find(|m| m.model.id.as_str() == "gpt-5.5")
+            .expect("gpt-5.5 present in catalogue");
+        assert_eq!(gpt55.source, ModelSource::Override);
+        assert_eq!(gpt55.model.context_window, TokenCount::new(400_000));
+        assert_eq!(
+            gpt55.model.effective_context_window,
+            Some(TokenCount::new(272_000))
+        );
     }
 }

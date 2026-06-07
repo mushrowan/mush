@@ -313,6 +313,31 @@ pub fn openai_models() -> Vec<Model> {
 pub fn openai_codex_models() -> Vec<Model> {
     vec![
         Model {
+            id: "gpt-5.5".into(),
+            name: "GPT-5.5 (ChatGPT subscription)".into(),
+            api: Api::OpenaiResponses,
+            provider: Provider::Custom("openai-codex".into()),
+            base_url: "https://chatgpt.com/backend-api".into(),
+            reasoning: true,
+            input: vec![InputModality::Text, InputModality::Image],
+            cost: ModelCost {
+                input: 0.0,
+                output: 0.0,
+                cache_read: 0.0,
+                cache_write: 0.0,
+            },
+            // codex markets a 400K window (272K input + 128K output).
+            // its /models endpoint only reports the 272K input budget, so
+            // discovery under-reports it. display the full window, but
+            // compact against the 272K input ceiling
+            context_window: TokenCount::new(400_000),
+            effective_context_window: Some(TokenCount::new(272_000)),
+            max_output_tokens: TokenCount::new(128_000),
+            supports_adaptive_thinking: false,
+            supported_thinking_levels: Vec::new(),
+            default_thinking_level: None,
+        },
+        Model {
             id: "gpt-5.4".into(),
             name: "GPT-5.4 (ChatGPT subscription)".into(),
             api: Api::OpenaiResponses,
@@ -903,6 +928,25 @@ pub fn all_models_with_user() -> Vec<Model> {
     }
 
     models
+}
+
+/// the override tier consumed by [`crate::discovery::merge`]. these win
+/// over live discovery (see that module's precedence docs).
+///
+/// two kinds of override live here:
+/// - shipped corrections for routes whose upstream `/v1/models` metadata
+///   under-reports the real window. openai and codex `/v1/models` either
+///   omit windows (openai defaults to 128K) or report only the input
+///   budget (codex reports 272K for the 400K gpt-5.5), so the curated
+///   catalogue values must win.
+/// - the user's manual `models.json` entries, appended last so they win
+///   over the shipped corrections too.
+#[must_use]
+pub fn model_overrides() -> Vec<Model> {
+    let mut overrides = openai_models();
+    overrides.extend(openai_codex_models());
+    overrides.extend(load_user_models());
+    overrides
 }
 
 /// find a model by provider and id (includes user models)
