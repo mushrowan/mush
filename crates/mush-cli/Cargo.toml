@@ -11,6 +11,12 @@ default = []
 tokio-console = ["dep:console-subscriber"]
 profiling = ["dep:tracing-chrome"]
 
+# cargo-machete can't see through the package/lib name mismatch: the
+# `nixcfg-rs` package provides the `nixcfg` lib, used in config_schema.rs
+# via `nixcfg::emit`. ignore it so the unused-dep check stays clean.
+[package.metadata.cargo-machete]
+ignored = ["nixcfg-rs"]
+
 [[bin]]
 name = "mush"
 path = "src/main.rs"

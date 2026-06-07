@@ -2841,11 +2841,9 @@ dependencies = [
  "globset",
  "mush-agent",
  "mush-ai",
- "mush-session",
  "mush-treesitter",
  "pretty_assertions",
  "tempfile",
- "thiserror 2.0.18",
  "tracing",
 ]
 
