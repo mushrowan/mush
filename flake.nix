@@ -209,20 +209,20 @@
           # close stays fast. the old perf path ran perf record with a dwarf
           # call-graph (~4kb of stack per sample) and then perf report/script
           # synchronously on exit, which took minutes on a long session and
-          # left a truncated perf.data when killed. --unstable-presymbolicate
-          # writes a .syms.json sidecar so the bundle is self-contained: the
-          # summary below resolves a flat self-time table from it, and
-          # .#perf-load opens the profile even after the binary is gc'd.
+          # left a truncated perf.data when killed. the summary below
+          # symbolicates the profile with addr2line against the recorded
+          # binary (samply's --unstable-presymbolicate was observed to map
+          # addresses to wrong symbols, so it is not used).
           set +e
           ${pkgs.samply}/bin/samply record --save-only \
-            --unstable-presymbolicate \
             --rate ''${MUSH_SAMPLY_RATE:-999} \
             -o "$profile" \
             ${craneOutputsProfiling.package}/bin/mush "$@"
           status=$?
           set -e
 
-          ${pkgs.lib.getExe pkgs.python3} ${./nix/perf_summary.py} "$data_dir" > "$data_dir/perf.summary.txt" 2> "$data_dir/perf.summary.stderr" || true
+          MUSH_ADDR2LINE=${pkgs.binutils}/bin/addr2line \
+            ${pkgs.lib.getExe pkgs.python3} ${./nix/perf_summary.py} "$data_dir" > "$data_dir/perf.summary.txt" 2> "$data_dir/perf.summary.stderr" || true
 
           echo "" >&2
           echo "perf bundle saved: $data_dir" >&2

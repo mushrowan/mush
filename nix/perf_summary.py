@@ -9,10 +9,11 @@ every section degrades gracefully if its input is missing or truncated,
 so a killed run still produces a useful summary.
 """
 
-import bisect
 import collections
 import gzip
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -96,32 +97,35 @@ def render_trace(data_dir):
     print()
 
 
-def build_symbol_resolvers(profile, syms):
-    # profile lib index -> fn(relative_address) -> symbol name, via the
-    # samply presymbolicate sidecar (per-lib symbol_table of {rva, size}).
-    string_table = syms["string_table"]
-    by_name = {}
-    for entry in syms["data"]:
-        ordered = sorted(entry["symbol_table"], key=lambda s: s["rva"])
-        starts = [s["rva"] for s in ordered]
-        names = [string_table[s["symbol"]] for s in ordered]
-        exact = {a: string_table[i] for a, i in entry.get("known_addresses", [])}
-        by_name[entry["debug_name"]] = (starts, names, exact)
+def addr2line(binary, addresses, tool):
+    """resolve library-relative addresses to demangled function names.
 
-    resolvers = {}
-    for index, lib in enumerate(profile["libs"]):
-        key = lib.get("debugName") or lib.get("name")
-        if key in by_name:
-            starts, names, exact = by_name[key]
-
-            def resolve(addr, starts=starts, names=names, exact=exact):
-                if addr in exact:
-                    return exact[addr]
-                j = bisect.bisect_right(starts, addr) - 1
-                return names[j] if j >= 0 else None
-
-            resolvers[index] = resolve
-    return resolvers
+    samply's own symbolication (--unstable-presymbolicate sidecar) was
+    observed to map addresses to entirely wrong symbols on this toolchain,
+    so we go straight to the recorded binary with addr2line, which demangles
+    rust v0 names with -C. the frame address is already the library-relative
+    offset addr2line expects.
+    """
+    if not binary or not addresses or not os.path.exists(binary):
+        return {}
+    stdin = "\n".join(f"0x{a:x}" for a in addresses)
+    try:
+        proc = subprocess.run(
+            [tool, "-f", "-C", "-e", binary],
+            input=stdin,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+    except Exception:
+        return {}
+    lines = proc.stdout.splitlines()
+    # addr2line emits two lines per address: the function then file:line
+    return {
+        addr: lines[2 * i].strip()
+        for i, addr in enumerate(addresses)
+        if 2 * i < len(lines)
+    }
 
 
 def render_cpu(data_dir):
@@ -129,17 +133,12 @@ def render_cpu(data_dir):
     if not profile_path.exists():
         return
     section("samply cpu profile")
-    syms_path = data_dir / "profile.json.syms.json"
-    if not syms_path.exists():
-        print("  profile present but not symbolicated\n"
-              "  open it with: nix run .#perf-load\n")
-        return
-
     profile = json.loads(gzip.decompress(profile_path.read_bytes()))
-    syms = json.loads(syms_path.read_text())
-    resolvers = build_symbol_resolvers(profile, syms)
+    libs = profile["libs"]
+    tool = os.environ.get("MUSH_ADDR2LINE", "addr2line")
 
-    self_time = collections.Counter()
+    # accumulate cpu-weighted self time per (lib index, leaf address)
+    weight_by_addr = collections.defaultdict(float)
     total = 0.0
     for thread in profile["threads"]:
         samples = thread["samples"]
@@ -147,32 +146,11 @@ def render_cpu(data_dir):
         frames = thread["frameTable"]
         funcs = thread["funcTable"]
         resources = thread["resourceTable"]
-        strings = thread["stringArray"]
-        n = samples["length"]
-        # weight by cpu time (downweights threads parked in epoll); fall
-        # back to per-sample weight, then to a flat count
+        # weight by cpu time (downweights threads parked in epoll); fall back
+        # to per-sample weight, then to a flat count
         cpu = samples.get("threadCPUDelta")
         weight_col = samples.get("weight")
-        frame_sym = {}
-
-        def symbol(frame):
-            cached = frame_sym.get(frame)
-            if cached is not None:
-                return cached
-            func = frames["func"][frame]
-            addr = frames["address"][frame]
-            res = funcs["resource"][func]
-            lib = resources["lib"][res] if res is not None and res >= 0 else None
-            resolver = resolvers.get(lib)
-            name = None
-            if resolver is not None and addr is not None and addr >= 0:
-                name = resolver(addr)
-            if name is None:
-                name = strings[funcs["name"][func]]
-            frame_sym[frame] = name
-            return name
-
-        for i in range(n):
+        for i in range(samples["length"]):
             stack = samples["stack"][i]
             if stack is None:
                 continue
@@ -185,21 +163,46 @@ def render_cpu(data_dir):
             if weight <= 0:
                 continue
             total += weight
-            self_time[symbol(stack_tab["frame"][stack])] += weight
+            frame = stack_tab["frame"][stack]
+            func = frames["func"][frame]
+            addr = frames["address"][frame]
+            res = funcs["resource"][func]
+            lib = resources["lib"][res] if res is not None and res >= 0 else None
+            weight_by_addr[(lib, addr)] += weight
 
     if total == 0:
         print("  no samples\n")
         return
 
-    print(f"  cpu-weighted samples: {total:.0f}; top self (leaf) functions:")
+    # batch addr2line per binary
+    addrs_by_lib = collections.defaultdict(list)
+    for lib, addr in weight_by_addr:
+        if lib is not None and addr is not None and addr >= 0:
+            addrs_by_lib[lib].append(addr)
+    resolved = {}
+    for lib, addrs in addrs_by_lib.items():
+        info = libs[lib] if 0 <= lib < len(libs) else {}
+        names = addr2line(info.get("path"), addrs, tool)
+        libname = info.get("name", "?")
+        for addr in addrs:
+            name = names.get(addr) or ""
+            if not name or name.startswith("??"):
+                name = f"{libname}+{addr:#x}"
+            resolved[(lib, addr)] = name
+
+    self_time = collections.Counter()
+    for key, weight in weight_by_addr.items():
+        self_time[resolved.get(key, f"unknown+{key[1]:#x}")] += weight
+
+    print(f"  cpu-weighted samples: {total:.0f}; symbolicated via {os.path.basename(tool)}")
+    print("  top self (leaf) functions:")
     for sym, weight in self_time.most_common(25):
         print(f"    {100 * weight / total:5.1f}%  {clip(sym)}")
     # self time is the sampled instruction pointer, so it needs no stack
-    # unwinding and is the reliable, llm-readable hotspot view. caller
-    # relationships are intentionally not summarised: samply's unwinder
-    # degrades across precompiled std/libc frames (no frame pointers there)
-    # and flattens inline frames, so an automated call tree would mislead.
-    # use the interactive flame graph for call context.
+    # unwinding and is the reliable, llm-readable hotspot view. call graphs
+    # are not summarised: samply's unwinder degrades across precompiled
+    # std/libc frames (no frame pointers) and flattens inline frames, so an
+    # automated tree would mislead. use the flame graph for call context.
     print("\n  caller context / call graph: nix run .#perf-load\n")
 
 
