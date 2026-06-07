@@ -209,112 +209,25 @@
           # close stays fast. the old perf path ran perf record with a dwarf
           # call-graph (~4kb of stack per sample) and then perf report/script
           # synchronously on exit, which took minutes on a long session and
-          # left a truncated perf.data when killed.
+          # left a truncated perf.data when killed. --unstable-presymbolicate
+          # writes a .syms.json sidecar so the bundle is self-contained: the
+          # summary below resolves a flat self-time table from it, and
+          # .#perf-load opens the profile even after the binary is gc'd.
           set +e
           ${pkgs.samply}/bin/samply record --save-only \
+            --unstable-presymbolicate \
             --rate ''${MUSH_SAMPLY_RATE:-999} \
             -o "$profile" \
             ${craneOutputsProfiling.package}/bin/mush "$@"
           status=$?
           set -e
 
-          ${pkgs.lib.getExe pkgs.python3} - "$data_dir" <<'PY' > "$data_dir/perf.summary.txt" 2> "$data_dir/perf.summary.stderr" || true
-          import collections
-          import json
-          import sys
-          from pathlib import Path
-
-          data_dir = Path(sys.argv[1])
-          trace = next(data_dir.glob("mush-trace-*.json"), None)
-
-          print("mush profile summary")
-          print(f"bundle: {data_dir}")
-          print()
-
-          stall_dir = data_dir / "stall-dumps"
-          stalls = sorted(stall_dir.glob("mush-stall-*.txt")) if stall_dir.exists() else []
-          print("tui stall dumps (fire on any await over threshold, incl. idle)")
-          if stalls:
-              for path in stalls:
-                  phase = detail = "unknown"
-                  elapsed = "?"
-                  for line in path.read_text(errors="replace").splitlines():
-                      if line.startswith("phase: "):
-                          phase = line[len("phase: "):]
-                      elif line.startswith("detail: "):
-                          detail = line[len("detail: "):]
-                      elif line.startswith("elapsed_ms: "):
-                          elapsed = line[len("elapsed_ms: "):]
-                  print(f"  {path.name}: elapsed={elapsed}ms phase={phase} detail={detail}")
-          else:
-              print("  none found")
-          print()
-
-          if not trace or not trace.exists():
-              print("no chrome trace found")
-              sys.exit(0)
-
-          # the chrome trace is a json array with one object per line; the
-          # last line may be truncated if mush was killed, so parse line by
-          # line and tolerate a bad tail rather than failing the whole summary.
-          draw_reasons = collections.Counter()
-          stacks = collections.defaultdict(list)
-          spans = collections.defaultdict(list)
-          parsed = bad = 0
-          for line in trace.open(errors="replace"):
-              line = line.strip().rstrip(",")
-              if not line or line[0] != "{":
-                  continue
-              try:
-                  event = json.loads(line)
-              except Exception:
-                  bad += 1
-                  continue
-              parsed += 1
-              name = event.get("name", "")
-              cat = event.get("cat", "")
-              args = event.get("args") or {}
-              if name == "draw requested" or cat == "mush_tui::draw_reason":
-                  draw_reasons[args.get("reason", "unknown")] += 1
-              phase = event.get("ph")
-              tid = event.get("tid", 0)
-              if phase == "B":
-                  stacks[tid].append((name, event.get("ts", 0.0)))
-              elif phase == "E" and stacks[tid]:
-                  start_name, start_ts = stacks[tid].pop()
-                  spans[start_name].append(event.get("ts", 0.0) - start_ts)
-
-          print(f"trace events: parsed={parsed} unparsable={bad}")
-          print()
-
-          print("draw reasons")
-          if draw_reasons:
-              for reason, count in draw_reasons.most_common():
-                  print(f"  {count:8d} {reason}")
-          else:
-              print("  none found")
-          print()
-
-          print("trace span timings (wall clock)")
-          for name in ["draw_panes", "llm_stream", "tool_exec", "agent_turn"]:
-              values = sorted(spans.get(name, []))
-              if not values:
-                  continue
-              count = len(values)
-              total = sum(values) / 1000.0
-              def q(frac):
-                  return values[min(count - 1, int(frac * count))] / 1000.0
-              print(
-                  f"  {name:12} n={count:8d} total={total:10.1f}ms "
-                  f"p50={q(0.50):7.3f}ms p90={q(0.90):7.3f}ms "
-                  f"p99={q(0.99):7.3f}ms max={values[-1] / 1000.0:7.3f}ms"
-              )
-          PY
+          ${pkgs.lib.getExe pkgs.python3} ${./nix/perf_summary.py} "$data_dir" > "$data_dir/perf.summary.txt" 2> "$data_dir/perf.summary.stderr" || true
 
           echo "" >&2
           echo "perf bundle saved: $data_dir" >&2
           echo "samply profile: $profile" >&2
-          echo "summary: $data_dir/perf.summary.txt" >&2
+          echo "summary: $data_dir/perf.summary.txt (stalls + trace timings + cpu self-time)" >&2
           echo "open the profile with: nix run .#perf-load" >&2
           echo "             or:       samply load $profile" >&2
           exit "$status"
