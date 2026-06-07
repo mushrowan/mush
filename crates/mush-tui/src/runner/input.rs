@@ -402,6 +402,36 @@ async fn handle_streaming_key_event(
         AppEvent::EditSteering => {
             edit_last_queued_steering(pane_mgr, stream_state).await;
         }
+        AppEvent::SlashCommand { action } => {
+            // a slash command can reach the streaming iteration two ways:
+            // a safe command submitted mid-stream (filtered by
+            // `is_safe_during_stream` in `handle_streaming_keys`), or any
+            // command typed after an abort while the cancelled stream is
+            // still draining out of `agent_streams`. either way it must
+            // run rather than be dropped. mirrors the idle dispatch.
+            let state_changed = handle_slash_action(
+                pane_mgr,
+                action,
+                SlashEnv {
+                    tui_config: deps.tui_config,
+                    thinking_prefs: deps.thinking_prefs,
+                    registry: deps.registry,
+                    message_bus: deps.message_bus,
+                    file_tracker: deps.file_tracker,
+                    lifecycle_hooks: deps.lifecycle_hooks,
+                    cwd: deps.cwd,
+                    pending_prompt: deps.pending_prompt,
+                    pending_compactions: deps.pending_compactions,
+                },
+            )
+            .await;
+            if state_changed && let Some(ref saver) = deps.tui_config.save_session {
+                saver(super::streams::build_session_snapshot(
+                    pane_mgr,
+                    deps.tui_config,
+                ));
+            }
+        }
         _ => {}
     }
 
@@ -671,6 +701,64 @@ mod tests {
         pane
     }
 
+    fn streaming_test_config() -> crate::runner::TuiConfig {
+        crate::runner::TuiConfig {
+            model: mush_ai::models::all_models_with_user()
+                .into_iter()
+                .next()
+                .expect("expected at least one model"),
+            system_prompt: None,
+            options: StreamOptions::default(),
+            max_turns: 32,
+            initial_messages: Vec::new(),
+            initial_panes: Vec::new(),
+            theme: crate::theme::Theme::default(),
+            config_path: None,
+            provider_api_keys: std::collections::HashMap::new(),
+            thinking_prefs: ThinkingPrefs::default(),
+            save_thinking_prefs: None,
+            last_models: crate::runner::LastModels::default(),
+            save_last_models: None,
+            save_session: None,
+            update_title: None,
+            confirm_tools: false,
+            auto_compact: false,
+            auto_fork_compact: false,
+            show_cost: false,
+            show_usage_lines: false,
+            show_token_counters: false,
+            status_bar_config: Default::default(),
+            debug_cache: false,
+            cache_timer: false,
+            thinking_display: crate::app::ThinkingDisplay::Collapse,
+            tool_output_live: None,
+            log_buffer: None,
+            isolation_mode: crate::file_tracker::IsolationMode::None,
+            terminal_policy: crate::terminal_policy::TerminalPolicy::default(),
+            lifecycle_hooks: mush_agent::LifecycleHooks::default(),
+            cwd: std::path::PathBuf::new(),
+            dynamic_system_context: None,
+            file_rules: None,
+            lsp_diagnostics: None,
+            agent_card: None,
+            model_tiers: std::collections::HashMap::new(),
+            compaction_model: None,
+            resolve_model: None,
+            http_client: None,
+            session_id: mush_ai::types::SessionId::new(),
+            settings: Default::default(),
+            scroll_lines: crate::app::DEFAULT_SCROLL_LINES,
+            favourite_models: Vec::new(),
+            favourites_locked: false,
+            save_favourite_models: None,
+            recent_models: Vec::new(),
+            save_recent_models: None,
+            keymap: crate::keybinds::KeyMap::default(),
+            reload_context: None,
+            forbidden_chars: Default::default(),
+        }
+    }
+
     #[test]
     fn apply_resize_resets_scroll_baselines_across_all_panes() {
         // a queued resize event should reset *every* pane's scroll
@@ -744,61 +832,7 @@ mod tests {
                     .expect("expected at least one model"),
             },
         );
-        let mut tui_config = crate::runner::TuiConfig {
-            model: mush_ai::models::all_models_with_user()
-                .into_iter()
-                .next()
-                .expect("expected at least one model"),
-            system_prompt: None,
-            options: StreamOptions::default(),
-            max_turns: 32,
-            initial_messages: Vec::new(),
-            initial_panes: Vec::new(),
-            theme: crate::theme::Theme::default(),
-            config_path: None,
-            provider_api_keys: std::collections::HashMap::new(),
-            thinking_prefs: ThinkingPrefs::default(),
-            save_thinking_prefs: None,
-            last_models: crate::runner::LastModels::default(),
-            save_last_models: None,
-            save_session: None,
-            update_title: None,
-            confirm_tools: false,
-            auto_compact: false,
-            auto_fork_compact: false,
-            show_cost: false,
-            show_usage_lines: false,
-            show_token_counters: false,
-            status_bar_config: Default::default(),
-            debug_cache: false,
-            cache_timer: false,
-            thinking_display: crate::app::ThinkingDisplay::Collapse,
-            tool_output_live: None,
-            log_buffer: None,
-            isolation_mode: crate::file_tracker::IsolationMode::None,
-            terminal_policy: crate::terminal_policy::TerminalPolicy::default(),
-            lifecycle_hooks: mush_agent::LifecycleHooks::default(),
-            cwd: std::path::PathBuf::new(),
-            dynamic_system_context: None,
-            file_rules: None,
-            lsp_diagnostics: None,
-            agent_card: None,
-            model_tiers: std::collections::HashMap::new(),
-            compaction_model: None,
-            resolve_model: None,
-            http_client: None,
-            session_id: mush_ai::types::SessionId::new(),
-            settings: Default::default(),
-            scroll_lines: crate::app::DEFAULT_SCROLL_LINES,
-            favourite_models: Vec::new(),
-            favourites_locked: false,
-            save_favourite_models: None,
-            recent_models: Vec::new(),
-            save_recent_models: None,
-            keymap: crate::keybinds::KeyMap::default(),
-            reload_context: None,
-            forbidden_chars: Default::default(),
-        };
+        let mut tui_config = streaming_test_config();
         let registry = mush_ai::registry::ApiRegistry::new();
         let message_bus = crate::messaging::MessageBus::new();
         let file_tracker = crate::file_tracker::FileTracker::new(std::path::PathBuf::new());
@@ -835,6 +869,68 @@ mod tests {
 
         assert!(matches!(action, LoopAction::Redraw));
         assert_eq!(pane_mgr.focused().app.input.text, "h");
+    }
+
+    #[tokio::test]
+    async fn slash_command_runs_during_streaming_iteration() {
+        // regression: aborting a turn flips `app.stream.active` to false,
+        // but the aborted agent stream can linger in `agent_streams` (the
+        // loop only observes cancellation before the next turn/tool), so
+        // the runner keeps driving the *streaming* iteration. `handle_key`
+        // then routes via the idle keymap (stream.active is false) and
+        // emits an `AppEvent::SlashCommand`, which the streaming key
+        // handler used to silently drop. typing `/compact` (or any slash
+        // command) right after an abort therefore did nothing. `/cost`
+        // stands in here as a cheap, synchronous, observable command.
+        let mut pane_mgr = PaneManager::new(Pane::new(
+            PaneId::new(1),
+            App::new("test".into(), TokenCount::new(200_000)),
+        ));
+        pane_mgr.focused_mut().app.stream.active = false;
+        assert!(!pane_mgr.focused().app.interaction.show_cost);
+        pane_mgr.focused_mut().app.input.text = "/cost".into();
+        pane_mgr.focused_mut().app.input.cursor = "/cost".len();
+
+        let mut stream_state = StreamState::new();
+        let mut tui_config = streaming_test_config();
+        let registry = mush_ai::registry::ApiRegistry::new();
+        let message_bus = crate::messaging::MessageBus::new();
+        let file_tracker = crate::file_tracker::FileTracker::new(std::path::PathBuf::new());
+        let lifecycle_hooks = mush_agent::LifecycleHooks::default();
+        let mut pending_prompt = None;
+        let mut pending_compactions = std::collections::HashMap::new();
+        let delegation_queue = crate::delegate::new_queue();
+        let image_picker = None;
+        let size_cache = Rc::new(CachedSizeState::default());
+        let mut deps = InputDeps {
+            tui_config: &mut tui_config,
+            thinking_prefs: &mut ThinkingPrefs::default(),
+            thinking_saver: &None,
+            registry: &registry,
+            message_bus: &message_bus,
+            file_tracker: &file_tracker,
+            lifecycle_hooks: &lifecycle_hooks,
+            cwd: std::path::Path::new(""),
+            pending_prompt: &mut pending_prompt,
+            pending_compactions: &mut pending_compactions,
+            delegation_queue: &delegation_queue,
+            image_picker: &image_picker,
+            size_cache: &size_cache,
+        };
+
+        handle_streaming_key_event(
+            &mut pane_mgr,
+            &mut stream_state,
+            &mut deps,
+            key(KeyCode::Enter),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            pane_mgr.focused().app.interaction.show_cost,
+            "a slash command entered during a streaming iteration must execute, not be dropped"
+        );
     }
 
     #[test]
