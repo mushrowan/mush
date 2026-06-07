@@ -1,12 +1,59 @@
 use std::hint::black_box;
 
-use criterion::{Criterion, Throughput, criterion_group, criterion_main};
-use mush_ai::types::ImageMimeType;
-use mush_tui::app::{IMAGE_PLACEHOLDER, InputBuffer, PendingImage};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use mush_ai::types::{ImageMimeType, TokenCount};
+use mush_tui::app::{
+    App, DisplayMessage, IMAGE_PLACEHOLDER, InputBuffer, MessageRole, PendingImage,
+};
 use mush_tui::markdown;
 use mush_tui::theme::Theme;
 use mush_tui::ui;
 use mush_tui::widgets::input_box::benchmark_build_input_layout;
+use mush_tui::widgets::message_list::MessageList;
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::widgets::Widget;
+
+/// renders a full `MessageList` into a fixed viewport while the conversation
+/// length grows. the viewport (visible rows) is constant, so any growth with
+/// message count exposes per-frame work that scales with total scrollback
+/// rather than what's on screen (off-screen placeholder lines, full-history
+/// passes). this is the long-session regime where users notice lag.
+fn bench_message_list_scaling(c: &mut Criterion) {
+    let mut group = c.benchmark_group("message_list_scaling");
+    let area = Rect::new(0, 0, 100, 40);
+
+    for &count in &[16usize, 64, 256, 1024] {
+        let app = conversation_app(count);
+        let mut buf = Buffer::empty(area);
+        group.throughput(Throughput::Elements(count as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, _| {
+            b.iter(|| {
+                MessageList::new(black_box(&app)).render(area, &mut buf);
+                black_box(&buf);
+            })
+        });
+    }
+    group.finish();
+}
+
+fn conversation_app(message_count: usize) -> App {
+    let mut app = App::new("bench-model".into(), TokenCount::new(200_000));
+    let user = "summarise the performance tradeoffs in the render path";
+    let assistant = "## summary\n\nthe hot path builds a `Vec<Line>` per frame, with \
+        **bold** and `inline code` spans plus a fenced block:\n\n\
+        ```rust\nfn render(buf: &mut Buffer) {\n    set_line(buf, line);\n}\n```\n\n\
+        that covers wrapping, span allocation and width lookups.";
+    for i in 0..message_count {
+        let (role, content) = if i % 2 == 0 {
+            (MessageRole::User, user.to_string())
+        } else {
+            (MessageRole::Assistant, assistant.to_string())
+        };
+        app.messages.push(DisplayMessage::new(role, content));
+    }
+    app
+}
 
 fn bench_markdown(c: &mut Criterion) {
     let source = markdown_fixture();
@@ -135,6 +182,7 @@ fn input_fixture() -> (String, Vec<PendingImage>) {
 
 criterion_group!(
     benches,
+    bench_message_list_scaling,
     bench_markdown,
     bench_code_blocks,
     bench_input_layout
