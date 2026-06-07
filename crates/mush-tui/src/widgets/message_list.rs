@@ -4165,6 +4165,40 @@ mod tests {
     }
 
     #[test]
+    fn direct_render_caches_code_block_highlight() {
+        // mirrors the render_loop example: render the widget directly,
+        // repeatedly, with a stable code-block conversation. highlighting
+        // must happen once, not per frame.
+        crate::markdown::reset_highlight_code_block_call_count();
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        for _ in 0..4 {
+            app.messages.push(DisplayMessage::new(
+                MessageRole::Assistant,
+                "## summary\n\n```rust\nfn main() {\n    let x = 42;\n}\n```\n",
+            ));
+        }
+        let area = Rect::new(0, 0, 100, 40);
+        let mut buf = Buffer::empty(area);
+        crate::markdown::reset_render_call_count();
+        MessageList::new(&app).render(area, &mut buf);
+        let first = crate::markdown::highlight_code_block_call_count();
+        let first_parse = crate::markdown::render_call_count();
+        for _ in 0..5 {
+            MessageList::new(&app).render(area, &mut buf);
+        }
+        let after = crate::markdown::highlight_code_block_call_count();
+        let after_parse = crate::markdown::render_call_count();
+        assert_eq!(
+            first, after,
+            "re-highlighted across renders: {first} -> {after}"
+        );
+        assert_eq!(
+            first_parse, after_parse,
+            "re-parsed markdown across renders: {first_parse} -> {after_parse}"
+        );
+    }
+
+    #[test]
     fn offscreen_messages_skip_markdown_render() {
         // with viewport-aware rendering, messages above the visible area
         // should not trigger markdown rendering or indent_line allocations
