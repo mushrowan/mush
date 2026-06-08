@@ -111,7 +111,7 @@ struct BashArgs {
     /// explicit timeout override (seconds). when omitted, defaults depend on
     /// background mode: foreground = DEFAULT_TIMEOUT_SECS, background =
     /// BACKGROUND_DEFAULT_TIMEOUT_SECS. the UI-facing default is still 120
-    #[serde(default)]
+    #[serde(default, deserialize_with = "mush_agent::de::opt_uint")]
     timeout: Option<u64>,
     #[serde(default)]
     output: BashOutput,

@@ -15,7 +15,10 @@ struct StatusArgs {
     job_id: String,
     /// how long to wait for the job to finish before returning
     /// current status (default 30s, set to 0 for instant check)
-    #[serde(default = "default_poll_timeout")]
+    #[serde(
+        default = "default_poll_timeout",
+        deserialize_with = "mush_agent::de::uint"
+    )]
     timeout: u64,
 }
 

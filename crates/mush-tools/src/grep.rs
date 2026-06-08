@@ -46,13 +46,15 @@ struct GrepArgs {
     case_sensitive: bool,
     #[serde(default)]
     whole_word: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "mush_agent::de::uint")]
     context_before: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "mush_agent::de::uint")]
     context_after: u64,
     #[serde(default)]
     output: GrepOutput,
+    #[serde(default, deserialize_with = "mush_agent::de::opt_uint")]
     max_results: Option<usize>,
+    #[serde(default, deserialize_with = "mush_agent::de::opt_uint")]
     top_n: Option<usize>,
 }
 

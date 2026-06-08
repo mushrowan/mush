@@ -1,5 +1,6 @@
 pub mod agent_loop;
 pub mod card;
+pub mod de;
 pub mod display;
 pub mod exec_context;
 pub mod hooks;

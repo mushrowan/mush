@@ -20,8 +20,11 @@ struct EditArgs {
     old_text: String,
     #[serde(rename = "newText")]
     new_text: String,
+    #[serde(default, deserialize_with = "mush_agent::de::opt_uint")]
     expected_matches: Option<usize>,
+    #[serde(default, deserialize_with = "mush_agent::de::opt_uint")]
     start_line: Option<usize>,
+    #[serde(default, deserialize_with = "mush_agent::de::opt_uint")]
     end_line: Option<usize>,
 }
 
@@ -1223,6 +1226,32 @@ mod tests {
         })));
         assert!(result.outcome.is_error());
         assert!(extract_text(&result).contains("must be >="));
+    }
+
+    #[test]
+    fn edit_accepts_stringified_line_numbers() {
+        // models stringify integer args; the edit tool must accept
+        // start_line/end_line as numeric strings rather than reject them
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        fs::write(&path, "let x = 1;\nlet x = 1;\nlet x = 1;\n").unwrap();
+
+        let tool = super::EditTool::new(dir.path().into());
+        let result = futures::executor::block_on(tool.execute(serde_json::json!({
+            "path": path.to_str().unwrap(),
+            "oldText": "let x = 1;",
+            "newText": "let x = 9;",
+            "start_line": "2",
+            "end_line": "2",
+        })));
+        assert!(
+            result.outcome.is_success(),
+            "got: {}",
+            extract_text(&result)
+        );
+        let content = fs::read_to_string(&path).unwrap();
+        // only line 2 should be replaced
+        assert_eq!(content, "let x = 1;\nlet x = 9;\nlet x = 1;\n");
     }
 
     #[test]

@@ -47,12 +47,19 @@ impl ReadOutput {
 struct ReadArgs {
     #[serde(alias = "file_path")]
     path: String,
+    #[serde(default, deserialize_with = "mush_agent::de::opt_uint")]
     offset: Option<usize>,
+    #[serde(default, deserialize_with = "mush_agent::de::opt_uint")]
     limit: Option<usize>,
+    #[serde(default, deserialize_with = "mush_agent::de::opt_uint")]
     start_line: Option<usize>,
+    #[serde(default, deserialize_with = "mush_agent::de::opt_uint")]
     end_line: Option<usize>,
+    #[serde(default, deserialize_with = "mush_agent::de::opt_uint")]
     around_line: Option<usize>,
+    #[serde(default, deserialize_with = "mush_agent::de::opt_uint")]
     context_before: Option<usize>,
+    #[serde(default, deserialize_with = "mush_agent::de::opt_uint")]
     context_after: Option<usize>,
     #[serde(default)]
     output: ReadOutput,
@@ -927,6 +934,37 @@ mod tests {
             }))
             .await;
         let text = extract_text(&result);
+        assert!(text.contains("L5: line 5"));
+        assert!(text.contains("L8: line 8"));
+        assert!(!text.contains("L4:"));
+        assert!(!text.contains("L9:"));
+    }
+
+    #[tokio::test]
+    async fn read_accepts_stringified_line_numbers() {
+        // tool-calling models routinely emit integer args as JSON strings
+        // (e.g. "5" instead of 5), especially for fields the anthropic
+        // schema omits but the description advertises. the read tool must
+        // accept those rather than reject with "invalid type: string,
+        // expected usize"
+        let dir = temp_dir();
+        let file = dir.path().join("test.txt");
+        let content: String = (1..=20)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&file, &content).unwrap();
+
+        let tool = super::ReadTool::new(dir.path().into());
+        let result = tool
+            .execute(serde_json::json!({
+                "path": file.to_str().unwrap(),
+                "start_line": "5",
+                "end_line": "8",
+            }))
+            .await;
+        let text = extract_text(&result);
+        assert!(result.outcome.is_success(), "expected success: {text}");
         assert!(text.contains("L5: line 5"));
         assert!(text.contains("L8: line 8"));
         assert!(!text.contains("L4:"));

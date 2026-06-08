@@ -19,6 +19,7 @@ struct RepoMapArgs {
     path: Option<String>,
     /// optional cap on number of files emitted (default: as many as fit
     /// the budget)
+    #[serde(default, deserialize_with = "mush_agent::de::opt_uint")]
     limit: Option<usize>,
     /// emit one line per file with no symbols (great for "list every
     /// file under crates/foo")
@@ -26,7 +27,10 @@ struct RepoMapArgs {
     summary_only: bool,
     /// seconds to wait for a lazy repo map build to finish before returning
     /// a still-building status
-    #[serde(default = "default_wait_timeout_secs")]
+    #[serde(
+        default = "default_wait_timeout_secs",
+        deserialize_with = "mush_agent::de::uint"
+    )]
     wait_timeout: u64,
 }
 
