@@ -237,6 +237,21 @@ impl AgentTool for ReadTool {
          When start_line and offset are both set, offset is a relative line skip from start_line."
     }
 
+    fn description_for(&self, api: Api) -> &str {
+        match api {
+            // anthropic sees claude code's reduced schema (file_path +
+            // offset + limit only, see parameters_schema_for), so the prose
+            // must not advertise span fields the model can't pass: it
+            // reaches for them anyway and stringifies the line numbers
+            Api::AnthropicMessages => {
+                "Read a file's contents with 1-indexed line numbers. Supports text files and \
+                 images (jpg, png, gif, webp). Images are returned as attachments. Use offset \
+                 to start reading from a given line and limit to cap how many lines are read."
+            }
+            _ => self.description(),
+        }
+    }
+
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -768,6 +783,24 @@ mod tests {
             .and_then(|p| p.as_object())
             .unwrap();
         assert!(props.contains_key("path"));
+    }
+
+    #[test]
+    fn anthropic_description_omits_span_fields() {
+        // anthropic's reduced schema only exposes file_path/offset/limit,
+        // so the prose must not advertise span fields the model can't pass,
+        // otherwise it reaches for them and stringifies the line numbers
+        let tool = ReadTool::new(Arc::from(Path::new("/tmp")));
+        let anthropic = tool.description_for(Api::AnthropicMessages);
+        assert!(!anthropic.contains("start_line"), "got: {anthropic}");
+        assert!(!anthropic.contains("end_line"));
+        assert!(!anthropic.contains("around_line"));
+        // other apis and the canonical description still document them
+        assert!(
+            tool.description_for(Api::OpenaiCompletions)
+                .contains("start_line")
+        );
+        assert!(tool.description().contains("start_line"));
     }
 
     #[tokio::test]

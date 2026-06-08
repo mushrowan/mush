@@ -215,6 +215,9 @@ impl mush_agent::tool::AgentTool for ForbiddenCharsGuard {
     fn description(&self) -> &str {
         self.inner.description()
     }
+    fn description_for(&self, api: mush_ai::types::Api) -> &str {
+        self.inner.description_for(api)
+    }
     fn parameters_schema(&self) -> serde_json::Value {
         augment_schema(self.inner.parameters_schema())
     }

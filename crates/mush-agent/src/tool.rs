@@ -86,6 +86,14 @@ pub trait AgentTool: Send + Sync {
         self.parameters_schema()
     }
 
+    /// per-provider description override. defaults to [`description`].
+    /// override alongside [`parameters_schema_for`] when a provider sees a
+    /// reduced schema: the prose shouldn't advertise fields the model
+    /// can't pass, or it gets lured into emitting them anyway
+    fn description_for(&self, _api: Api) -> &str {
+        self.description()
+    }
+
     /// execute the tool with the given arguments
     async fn execute(&self, args: serde_json::Value) -> ToolResult;
 

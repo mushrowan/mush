@@ -347,7 +347,7 @@ pub fn agent_loop(
                 let tool_defs: Vec<ToolDefinition> = config.tools.iter()
                     .map(|t| ToolDefinition {
                         name: t.name().to_string(),
-                        description: t.description().to_string(),
+                        description: t.description_for(config.model.api).to_string(),
                         parameters: t.parameters_schema_for(config.model.api),
                     }).collect();
 
