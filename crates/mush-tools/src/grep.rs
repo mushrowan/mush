@@ -239,7 +239,7 @@ fn run_search(
     // collect files to search
     let files = match collect_files(cwd, search_path, include) {
         Ok(f) => f,
-        Err(e) => return ToolResult::error(format!("failed to walk directory: {e}")),
+        Err(e) => return ToolResult::error(e.to_string()),
     };
 
     if files.is_empty() {
@@ -277,6 +277,15 @@ fn collect_files(
         return Ok(vec![search_path.to_path_buf()]);
     }
 
+    // a missing root is a real error worth reporting clearly, unlike the
+    // transient per-entry failures we skip during the walk below
+    if !search_path.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("path not found: {}", search_path.display()),
+        ));
+    }
+
     let mut walk = WalkBuilder::new(search_path);
     walk.hidden(true).git_ignore(true).parents(true);
 
@@ -294,7 +303,17 @@ fn collect_files(
 
     let mut files = Vec::new();
     for entry in walk.build() {
-        let entry = entry.map_err(io::Error::other)?;
+        // skip entries the walker couldn't read (permission denied, broken
+        // symlinks, paths that vanished mid-walk) rather than aborting the
+        // whole search. matches ripgrep and our own find/glob tools. log at
+        // debug so the skipped paths are recoverable from mush.log
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::debug!(%error, "grep: skipping unreadable entry");
+                continue;
+            }
+        };
         if !entry.file_type().is_some_and(|ft| ft.is_file()) {
             continue;
         }
@@ -584,6 +603,69 @@ mod tests {
             .await;
         let text = extract_text(&result);
         assert!(text.contains("No matches"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn grep_skips_unreadable_dir_instead_of_aborting() {
+        // a single unreadable subdirectory (permission denied, broken
+        // symlink, or a path that vanished mid-walk) must not abort the
+        // whole search. ripgrep skips bad entries and keeps going, so
+        // should we, otherwise grep fails with "failed to walk directory"
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir();
+        fs::write(dir.path().join("good.txt"), "needle here").unwrap();
+        let locked = dir.path().join("locked");
+        fs::create_dir(&locked).unwrap();
+        fs::write(locked.join("inner.txt"), "needle hidden").unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+
+        // under root, permissions are ignored so the walk never errors and
+        // this regression can't be exercised. detect that and skip
+        if fs::read_dir(&locked).is_ok() {
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
+
+        let tool = GrepTool::new(dir.path().into());
+        let result = tool
+            .execute(serde_json::json!({
+                "pattern": "needle",
+                "path": dir.path().to_str().unwrap()
+            }))
+            .await;
+
+        // restore perms so the tempdir can be cleaned up on drop
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let text = extract_text(&result);
+        assert!(
+            !text.contains("failed to walk directory"),
+            "walk should skip the unreadable dir, not abort: {text}"
+        );
+        assert!(
+            text.contains("good.txt") && text.contains("needle here"),
+            "should still find the readable file: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn grep_missing_path_reports_not_found() {
+        // a typo'd or missing search path should say so clearly, not a
+        // misleading "No matches found" or a raw walk error
+        let dir = temp_dir();
+        let missing = dir.path().join("does-not-exist");
+        let tool = GrepTool::new(dir.path().into());
+        let result = tool
+            .execute(serde_json::json!({
+                "pattern": "needle",
+                "path": missing.to_str().unwrap()
+            }))
+            .await;
+        assert!(result.outcome.is_error(), "missing path should be an error");
+        let text = extract_text(&result);
+        assert!(text.contains("path not found"), "{text}");
     }
 
     #[tokio::test]
