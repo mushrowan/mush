@@ -111,61 +111,6 @@
           echo "" >&2
           exec ${craneOutputsProfiling.package}/bin/mush "$@"
         '';
-        packages.samply = pkgs.writeShellScriptBin "mush-samply" ''
-          data_dir="''${XDG_DATA_HOME:-$HOME/.local/share}/mush/profiles"
-          mkdir -p "$data_dir"
-          out="$data_dir/mush-$(date +%Y%m%d-%H%M%S).json.gz"
-
-          # samply's child-exit path can leave the terminal in a weird
-          # state: raw mode still on, mouse tracking still reporting,
-          # alt-screen not restored, or escape codes echoed literally.
-          # this happens whether mush exits cleanly, panics, or gets
-          # killed by samply on ctrl+c.
-          #
-          # guarantee cleanup on every exit path (normal, error, signal)
-          # via an EXIT trap so the user's shell is always usable afterwards
-          restore_terminal() {
-            # disable mouse tracking modes that mush enabled
-            printf '\e[?1002l\e[?1003l\e[?1006l' >&2 2>/dev/null || true
-            # pop keyboard enhancement flags (kitty protocol)
-            printf '\e[<u' >&2 2>/dev/null || true
-            # disable bracketed paste and focus change reporting
-            printf '\e[?2004l\e[?1004l' >&2 2>/dev/null || true
-            # leave alt screen, show cursor, reset styling
-            printf '\e[?1049l\e[?25h\e[0m' >&2 2>/dev/null || true
-            # restore default cursor shape
-            printf '\e[0 q' >&2 2>/dev/null || true
-            # drop raw mode + echo as a belt-and-braces for any leftover
-            # tty state (harmless no-op if stdin isn't a tty)
-            stty sane 2>/dev/null || true
-          }
-          trap restore_terminal EXIT INT TERM
-
-          echo "sampling profiler: cpu flamegraph via samply" >&2
-          echo "recording to: $out" >&2
-          echo "" >&2
-          ${pkgs.samply}/bin/samply record --save-only -o "$out" \
-            ${craneOutputsProfiling.package}/bin/mush "$@"
-          echo "" >&2
-          echo "profile saved: $out" >&2
-          echo "open it with: nix run .#samply-load -- $out" >&2
-          echo "or manually:  samply load $out" >&2
-        '';
-        packages.samply-load = pkgs.writeShellScriptBin "mush-samply-load" ''
-          data_dir="''${XDG_DATA_HOME:-$HOME/.local/share}/mush/profiles"
-          if [ -n "$1" ]; then
-            target="$1"
-          else
-            target=$(ls -t "$data_dir"/mush-*.json.gz 2>/dev/null | head -n 1)
-            if [ -z "$target" ]; then
-              echo "no saved profiles in $data_dir" >&2
-              echo "record one first with: nix run .#samply" >&2
-              exit 1
-            fi
-            echo "loading latest: $target" >&2
-          fi
-          exec ${pkgs.samply}/bin/samply load "$target"
-        '';
         packages.perf = pkgs.writeShellScriptBin "mush-perf" ''
           data_dir="''${XDG_DATA_HOME:-$HOME/.local/share}/mush/profiles/perf-$(date +%Y%m%d-%H%M%S)"
           mkdir -p "$data_dir"
@@ -179,13 +124,13 @@
           export MUSH_STALL_DIR="$data_dir/stall-dumps"
 
           profile="$data_dir/profile.json.gz"
+          samply_stderr="$data_dir/samply.stderr.log"
           printf '%s\n' "${craneOutputsProfiling.package}/bin/mush $*" > "$data_dir/command.txt"
 
           # a TUI sampled under a profiler can be left with raw mode on,
           # mouse tracking still reporting, or the alt screen not restored,
           # on any exit path (clean, panic, ctrl+c). restore the terminal
-          # unconditionally so the shell stays usable afterwards. same
-          # guard as the samply wrapper.
+          # unconditionally so the shell stays usable afterwards.
           restore_terminal() {
             printf '\e[?1002l\e[?1003l\e[?1006l' >&2 2>/dev/null || true
             printf '\e[<u' >&2 2>/dev/null || true
@@ -213,11 +158,19 @@
           # symbolicates the profile with addr2line against the recorded
           # binary (samply's --unstable-presymbolicate was observed to map
           # addresses to wrong symbols, so it is not used).
+          #
+          # samply (really its framehop unwinder) logs diagnostics like
+          # "Now we have two modules at the same start address" to stderr.
+          # mush draws its TUI to stdout, so that noise prints over the alt
+          # screen and garbles it. send samply's stderr to a file in the
+          # bundle instead. mush's own logs go to mush.log, not stderr, so
+          # the only thing captured is samply diagnostics plus any final
+          # panic/eyre report, surfaced after the run below.
           set +e
           ${pkgs.samply}/bin/samply record --save-only \
             --rate ''${MUSH_SAMPLY_RATE:-999} \
             -o "$profile" \
-            ${craneOutputsProfiling.package}/bin/mush "$@"
+            ${craneOutputsProfiling.package}/bin/mush "$@" 2> "$samply_stderr"
           status=$?
           set -e
 
@@ -230,6 +183,14 @@
           echo "summary: $data_dir/perf.summary.txt (stalls + trace timings + cpu self-time)" >&2
           echo "open the profile with: nix run .#perf-load" >&2
           echo "             or:       samply load $profile" >&2
+
+          # the framehop unwinder noise sits in the captured stderr. surface
+          # only the non-noise lines (a panic or eyre report) so they aren't
+          # lost behind the redirect, and point at the full file
+          if [ -s "$samply_stderr" ]; then
+            grep -vE 'two modules at the same start address|Lost [0-9]+ events' "$samply_stderr" >&2 || true
+            echo "samply stderr (incl. unwinder noise): $samply_stderr" >&2
+          fi
           exit "$status"
         '';
         packages.perf-load = pkgs.writeShellScriptBin "mush-perf-load" ''
