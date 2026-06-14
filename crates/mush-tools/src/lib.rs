@@ -23,6 +23,9 @@ use std::sync::Arc;
 
 use mush_agent::tool::{SharedTool, ToolRegistry};
 
+/// default timeout in seconds for foreground tools that wait for work to finish.
+pub const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 120;
+
 /// whether a model id should use the codex patch format instead of edit + write.
 /// GPT models (except gpt-4 and oss variants) are trained on the patch format
 /// and produce better edits with it.

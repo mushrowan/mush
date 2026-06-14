@@ -7,8 +7,6 @@ use std::sync::Arc;
 use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
 use serde::Deserialize;
 
-const DEFAULT_TIMEOUT_SECS: u64 = 120;
-
 /// foreground commands are capped at 10 minutes. for longer tasks
 /// (builds, test suites), use background: true which has no cap
 const MAX_FOREGROUND_TIMEOUT_SECS: u64 = 600;
@@ -109,8 +107,8 @@ impl BashOutput {
 struct BashArgs {
     command: String,
     /// explicit timeout override (seconds). when omitted, defaults depend on
-    /// background mode: foreground = DEFAULT_TIMEOUT_SECS, background =
-    /// BACKGROUND_DEFAULT_TIMEOUT_SECS. the UI-facing default is still 120
+    /// background mode: foreground = crate::DEFAULT_TOOL_TIMEOUT_SECS,
+    /// background = BACKGROUND_DEFAULT_TIMEOUT_SECS
     #[serde(default, deserialize_with = "mush_agent::de::opt_uint")]
     timeout: Option<u64>,
     #[serde(default)]
@@ -132,14 +130,14 @@ impl BashArgs {
     ///
     /// background jobs without an explicit value get a generous half-hour
     /// so typical nix builds and big test runs finish well before the
-    /// inner `tokio::time::timeout` fires. foreground commands keep the
-    /// 120s default and get hard-capped at 10 minutes.
+    /// inner `tokio::time::timeout` fires. foreground commands keep the shared
+    /// tool timeout default and get hard-capped at 10 minutes.
     fn effective_timeout(&self) -> u64 {
         if self.background {
             self.timeout.unwrap_or(BACKGROUND_DEFAULT_TIMEOUT_SECS)
         } else {
             self.timeout
-                .unwrap_or(DEFAULT_TIMEOUT_SECS)
+                .unwrap_or(crate::DEFAULT_TOOL_TIMEOUT_SECS)
                 .min(MAX_FOREGROUND_TIMEOUT_SECS)
         }
     }
@@ -373,7 +371,11 @@ impl AgentTool for BashTool {
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "timeout in seconds (optional, default 120)"
+                    "description": format!(
+                        "timeout in seconds (optional, default {})",
+                        crate::DEFAULT_TOOL_TIMEOUT_SECS
+                    ),
+                    "default": crate::DEFAULT_TOOL_TIMEOUT_SECS
                 },
                 "output": {
                     "type": "string",
@@ -1312,7 +1314,17 @@ mod tests {
             "command": "echo hi"
         }))
         .unwrap();
-        assert_eq!(args.effective_timeout(), DEFAULT_TIMEOUT_SECS);
+        assert_eq!(args.effective_timeout(), crate::DEFAULT_TOOL_TIMEOUT_SECS);
+    }
+
+    #[test]
+    fn bash_schema_declares_shared_timeout_default() {
+        let tool = BashTool::new(Arc::from(Path::new(".")));
+        let schema = tool.parameters_schema();
+        assert_eq!(
+            schema["properties"]["timeout"]["default"],
+            crate::DEFAULT_TOOL_TIMEOUT_SECS
+        );
     }
 
     #[test]

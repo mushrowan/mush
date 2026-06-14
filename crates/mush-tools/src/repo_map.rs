@@ -35,7 +35,7 @@ struct RepoMapArgs {
 }
 
 const fn default_wait_timeout_secs() -> u64 {
-    120
+    crate::DEFAULT_TOOL_TIMEOUT_SECS
 }
 
 #[derive(Clone)]
@@ -208,9 +208,12 @@ impl AgentTool for RepoMapTool {
                     "default": false
                 },
                 "wait_timeout": {
-                    "description": "seconds to wait for a lazy repo map build to finish before returning a still-building status (default 120, 0 for instant check)",
+                    "description": format!(
+                        "seconds to wait for a lazy repo map build to finish before returning a still-building status (default {}, 0 for instant check)",
+                        crate::DEFAULT_TOOL_TIMEOUT_SECS
+                    ),
                     "type": "integer",
-                    "default": 120
+                    "default": crate::DEFAULT_TOOL_TIMEOUT_SECS
                 }
             }
         })
@@ -329,6 +332,16 @@ mod tests {
                 ),
             ],
         }
+    }
+
+    #[test]
+    fn repo_map_schema_uses_shared_wait_timeout_default() {
+        let tool = make_tool(sample_map());
+        let schema = tool.parameters_schema();
+        assert_eq!(
+            schema["properties"]["wait_timeout"]["default"],
+            crate::DEFAULT_TOOL_TIMEOUT_SECS
+        );
     }
 
     #[tokio::test]
