@@ -15,6 +15,24 @@ use crate::app::{
 use crate::app_state::CachedHeight;
 use crate::widgets::shimmer::shimmer_spans;
 
+#[cfg(test)]
+thread_local! {
+    static LAST_MATERIALISED_LINE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn record_materialised_line_count(count: usize) {
+    LAST_MATERIALISED_LINE_COUNT.with(|cell| cell.set(count));
+}
+
+#[cfg(test)]
+fn last_materialised_line_count() -> usize {
+    LAST_MATERIALISED_LINE_COUNT.with(std::cell::Cell::get)
+}
+
+#[cfg(not(test))]
+fn record_materialised_line_count(_count: usize) {}
+
 /// horizontal padding cells reserved around message body content.
 ///
 /// the left side is the indent span (`" "`) prepended by `indent_line`.
@@ -185,9 +203,82 @@ impl<'a> MessageList<'a> {
 /// so we can overlay it directly after the main line pass
 struct DeferredCacheRender {
     msg_idx: usize,
-    /// position in the flat lines vec (before padding)
+    /// absolute document line where the cached lines begin (before padding)
     start_line: usize,
     line_count: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MaterialisedLineSegment {
+    doc_start: usize,
+    line_start: usize,
+    line_count: usize,
+}
+
+impl MaterialisedLineSegment {
+    fn line_for_doc(self, doc_line: usize) -> Option<usize> {
+        let offset = doc_line.checked_sub(self.doc_start)?;
+        (offset < self.line_count).then_some(self.line_start + offset)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MessageLayoutEntry {
+    msg_idx: usize,
+    start: usize,
+    height: usize,
+}
+
+impl MessageLayoutEntry {
+    fn end(self) -> usize {
+        self.start + self.height
+    }
+}
+
+#[derive(Debug)]
+struct MessageLayoutIndex {
+    entries: Vec<MessageLayoutEntry>,
+    total_height: usize,
+}
+
+impl MessageLayoutIndex {
+    fn build(app: &App, width: u16) -> Self {
+        let mut entries = Vec::with_capacity(app.messages.len());
+        let mut total_height = 0usize;
+
+        for (msg_idx, msg) in app.messages.iter().enumerate() {
+            if msg.queued {
+                continue;
+            }
+            let height = estimate_message_height(msg, msg_idx, width, &app.render_state);
+            entries.push(MessageLayoutEntry {
+                msg_idx,
+                start: total_height,
+                height,
+            });
+            total_height += height;
+        }
+
+        Self {
+            entries,
+            total_height,
+        }
+    }
+
+    fn visible_entry_range(
+        &self,
+        render_start: usize,
+        render_end: usize,
+    ) -> std::ops::Range<usize> {
+        if render_start >= render_end {
+            return 0..0;
+        }
+        let start = self
+            .entries
+            .partition_point(|entry| entry.end() <= render_start);
+        let end = start + self.entries[start..].partition_point(|entry| entry.start < render_end);
+        start..end
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -268,9 +359,9 @@ impl Widget for MessageList<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let mut lines: Vec<Line<'_>> = Vec::new();
         let mut image_placeholders: Vec<ImagePlaceholder> = Vec::new();
-        // track where each message starts in the lines vec
-        let mut msg_line_starts: Vec<(usize, usize)> = Vec::new();
         let mut deferred_renders: Vec<DeferredCacheRender> = Vec::new();
+        let mut materialised_segments: Vec<MaterialisedLineSegment> = Vec::new();
+        let mut message_ranges: Vec<crate::app::MessageRowRange> = Vec::new();
 
         let in_scroll_mode = self.app.interaction.mode == crate::app::AppMode::Scroll;
         let selection_range = self.app.selection_range();
@@ -279,19 +370,8 @@ impl Widget for MessageList<'_> {
         // virtual scrolling: estimate per-message heights and determine
         // which messages overlap the viewport so we can skip expensive
         // markdown rendering and indent_line for off-screen messages
-        let heights: Vec<usize> = self
-            .app
-            .messages
-            .iter()
-            .enumerate()
-            .map(|(i, msg)| {
-                if msg.queued {
-                    return 0;
-                }
-                estimate_message_height(msg, i, area.width, &self.app.render_state)
-            })
-            .collect();
-        let estimated_total: usize = heights.iter().sum();
+        let layout_index = MessageLayoutIndex::build(self.app, area.width);
+        let estimated_total = layout_index.total_height;
         // estimate trailing content height (streaming + tool args +
         // queued) so the viewport calc matches the real scroll target.
         // without this, `should_render` uses a shorter doc than the
@@ -331,64 +411,82 @@ impl Widget for MessageList<'_> {
         let render_start = scroll_from_top.saturating_sub(margin);
         let render_end = (scroll_from_top + vis_h + margin).min(estimated_total);
 
-        let mut cumulative = 0;
-        let mut should_render = vec![false; self.app.messages.len()];
-        for (i, &h) in heights.iter().enumerate() {
-            let msg_end = cumulative + h;
-            if h > 0 && msg_end > render_start && cumulative < render_end {
-                should_render[i] = true;
-            }
-            cumulative = msg_end;
-        }
-
-        for (i, msg) in self.app.messages.iter().enumerate() {
+        let mut visible_height_delta = 0isize;
+        for entry in
+            &layout_index.entries[layout_index.visible_entry_range(render_start, render_end)]
+        {
+            let Some(msg) = self.app.messages.get(entry.msg_idx) else {
+                continue;
+            };
             if msg.queued {
                 continue; // rendered after streaming content
             }
+            let msg_start = offset_usize(entry.start, visible_height_delta);
+            let estimated_height = entry.height;
             let start_line = lines.len();
 
-            if should_render[i] {
-                let in_selection =
-                    selection_range.is_some_and(|(start, end)| i >= start && i <= end);
-                let sel = SelectionHint {
-                    selected: in_scroll_mode
-                        && (self.app.navigation.selected_message == Some(i) || in_selection),
-                    is_cursor: in_scroll_mode && self.app.navigation.selected_message == Some(i),
-                    has_visual: self.app.has_selection(),
-                };
-                render_message(
-                    self.app,
-                    msg,
-                    i,
-                    &mut lines,
-                    sel,
-                    &mut image_placeholders,
-                    &mut deferred_renders,
-                    area.width,
-                    selected_block_info,
-                );
-                lines.push(Line::raw(""));
+            let image_start = image_placeholders.len();
+            let deferred_start = deferred_renders.len();
+            let in_selection = selection_range
+                .is_some_and(|(start, end)| entry.msg_idx >= start && entry.msg_idx <= end);
+            let sel = SelectionHint {
+                selected: in_scroll_mode
+                    && (self.app.navigation.selected_message == Some(entry.msg_idx)
+                        || in_selection),
+                is_cursor: in_scroll_mode
+                    && self.app.navigation.selected_message == Some(entry.msg_idx),
+                has_visual: self.app.has_selection(),
+            };
+            render_message(
+                self.app,
+                msg,
+                entry.msg_idx,
+                &mut lines,
+                sel,
+                &mut image_placeholders,
+                &mut deferred_renders,
+                area.width,
+                selected_block_info,
+            );
+            lines.push(Line::raw(""));
 
-                // correct the height_cache with the actual rendered height.
-                // the cache may hold a stale estimate from count_estimated_lines
-                // (which counts raw markdown chars). updating here ensures the
-                // cache converges after one render, preventing persistent gaps
-                // in virtual scrolling placeholders
-                let actual_height = lines.len() - start_line;
-                if actual_height != heights[i] {
-                    update_cached_height(msg, i, area.width, actual_height, &self.app.render_state);
-                }
-            } else {
-                // off-screen: pad with empty placeholder lines to preserve
-                // document line positions for scroll math. these are never
-                // written to the buffer, so use the non-allocating
-                // `Line::default()` (empty spans) instead of `Line::raw("")`
-                // which heap-allocates a span vec per line. in long sessions
-                // this padding is most of the document and ran every frame.
-                lines.resize_with(lines.len() + heights[i], Line::default);
+            // correct the height_cache with the actual rendered height.
+            // the cache may hold a stale estimate from count_estimated_lines
+            // (which counts raw markdown chars). updating here ensures the
+            // cache converges after one render.
+            let actual_height = lines.len() - start_line;
+            absolutise_render_metadata(
+                msg_start,
+                start_line,
+                &mut image_placeholders[image_start..],
+                &mut deferred_renders[deferred_start..],
+            );
+            materialised_segments.push(MaterialisedLineSegment {
+                doc_start: msg_start,
+                line_start: start_line,
+                line_count: actual_height,
+            });
+            if actual_height != estimated_height {
+                update_cached_height(
+                    msg,
+                    entry.msg_idx,
+                    area.width,
+                    actual_height,
+                    &self.app.render_state,
+                );
             }
-            msg_line_starts.push((i, start_line));
+            visible_height_delta += actual_height as isize - estimated_height as isize;
+            message_ranges.push(crate::app::MessageRowRange {
+                msg_idx: entry.msg_idx,
+                start: clamp_usize_to_u16(msg_start),
+                end: clamp_usize_to_u16(msg_start + actual_height),
+            });
         }
+
+        let trailing_doc_start = offset_usize(estimated_total, visible_height_delta);
+        let trailing_line_start = lines.len();
+        let trailing_image_start = image_placeholders.len();
+        let trailing_deferred_start = deferred_renders.len();
 
         // streaming content
         if self.app.stream.active {
@@ -486,25 +584,38 @@ impl Widget for MessageList<'_> {
             );
             lines.push(Line::raw(""));
         }
+        let trailing_line_count = lines.len() - trailing_line_start;
+        if trailing_line_count > 0 {
+            absolutise_render_metadata(
+                trailing_doc_start,
+                trailing_line_start,
+                &mut image_placeholders[trailing_image_start..],
+                &mut deferred_renders[trailing_deferred_start..],
+            );
+            materialised_segments.push(MaterialisedLineSegment {
+                doc_start: trailing_doc_start,
+                line_start: trailing_line_start,
+                line_count: trailing_line_count,
+            });
+        }
+        record_materialised_line_count(lines.len());
 
         // pre-compute y positions for image placeholders before moving lines
         // into Text. since indent_line and wrap_text pre-wrap all lines to fit
         // within area.width, each line occupies exactly one row
         let w = area.width as usize;
-        let img_y_positions: Vec<u16> = if !image_placeholders.is_empty() && w > 0 {
-            image_placeholders
-                .iter()
-                .map(|ph| ph.line_idx as u16)
-                .collect()
+        let img_y_positions: Vec<usize> = if !image_placeholders.is_empty() && w > 0 {
+            image_placeholders.iter().map(|ph| ph.line_idx).collect()
         } else {
             Vec::new()
         };
 
         // bottom-anchor: when content is shorter than the viewport,
         // pad with empty lines so messages sit near the input box.
-        // since indent_line pre-wraps to content_width, each line fits
-        // within area.width so lines.len() equals the wrapped count
-        let content_lines = lines.len().min(u16::MAX as usize) as u16;
+        // line materialisation is virtualised, so use the full document
+        // height rather than the materialised line vec length.
+        let content_doc_len = trailing_doc_start + trailing_line_count;
+        let content_lines = clamp_usize_to_u16(content_doc_len);
         let visible = area.height;
 
         let padding = if content_lines < visible {
@@ -513,25 +624,18 @@ impl Widget for MessageList<'_> {
             0
         };
 
-        // compute per-message wrapped-line ranges for mouse hit testing
-        // (done before padding/scroll so we work with original line indices).
-        // all lines are pre-wrapped so each raw line index maps 1:1 to a row
-        if !msg_line_starts.is_empty() && w > 0 {
-            let total_raw = lines.len();
-            let mut ranges = Vec::with_capacity(msg_line_starts.len());
-            for (idx, &(msg_idx, start)) in msg_line_starts.iter().enumerate() {
-                let end_raw = if idx + 1 < msg_line_starts.len() {
-                    msg_line_starts[idx + 1].1
-                } else {
-                    total_raw
-                };
-                ranges.push(crate::app::MessageRowRange {
-                    msg_idx,
-                    start: padding as u16 + start as u16,
-                    end: padding as u16 + end_raw as u16,
-                });
+        // compute per-message wrapped-line ranges for mouse hit testing.
+        // ranges are absolute document rows, not offsets into `lines`, so
+        // off-screen messages do not need placeholder rows materialised.
+        if !message_ranges.is_empty() && w > 0 {
+            if padding > 0 {
+                let padding_u16 = clamp_usize_to_u16(padding);
+                for range in &mut message_ranges {
+                    range.start = range.start.saturating_add(padding_u16);
+                    range.end = range.end.saturating_add(padding_u16);
+                }
             }
-            *self.app.render_state.message_row_ranges.borrow_mut() = ranges;
+            *self.app.render_state.message_row_ranges.borrow_mut() = message_ranges;
         } else {
             self.app
                 .render_state
@@ -589,7 +693,7 @@ impl Widget for MessageList<'_> {
             let padding_i = padding as i32;
             let visible_i = visible as i32;
             for (i, ph) in image_placeholders.iter().enumerate() {
-                let y_before = img_y_positions[i] as i32;
+                let y_before = img_y_positions[i].min(i32::MAX as usize) as i32;
                 // placeholder line_idx now points directly at the first body
                 // row, so no +1 offset
                 let doc_top = padding_i + y_before;
@@ -634,10 +738,13 @@ impl Widget for MessageList<'_> {
             if doc_y < padding {
                 continue; // blank padding row, buffer is already empty
             }
-            let line_idx = doc_y - padding;
-            if line_idx >= lines.len() {
-                break;
-            }
+            let doc_line = doc_y - padding;
+            let Some(line_idx) = materialised_segments
+                .iter()
+                .find_map(|segment| segment.line_for_doc(doc_line))
+            else {
+                continue;
+            };
             buf.set_line(
                 area.x,
                 area.y + screen_y as u16,
@@ -680,6 +787,32 @@ impl Widget for MessageList<'_> {
                 &self.app.render_state.message_row_ranges.borrow(),
             );
         }
+    }
+}
+
+fn clamp_usize_to_u16(value: usize) -> u16 {
+    value.min(u16::MAX as usize) as u16
+}
+
+fn offset_usize(value: usize, delta: isize) -> usize {
+    if delta >= 0 {
+        value.saturating_add(delta as usize)
+    } else {
+        value.saturating_sub(delta.unsigned_abs())
+    }
+}
+
+fn absolutise_render_metadata(
+    doc_start: usize,
+    line_start: usize,
+    image_placeholders: &mut [ImagePlaceholder],
+    deferred_renders: &mut [DeferredCacheRender],
+) {
+    for placeholder in image_placeholders {
+        placeholder.line_idx = doc_start + placeholder.line_idx.saturating_sub(line_start);
+    }
+    for deferred in deferred_renders {
+        deferred.start_line = doc_start + deferred.start_line.saturating_sub(line_start);
     }
 }
 
@@ -2750,6 +2883,27 @@ mod tests {
         assert!(
             first_content_line < 5,
             "content should start near top, but first content at line {first_content_line}"
+        );
+    }
+
+    #[test]
+    fn long_offscreen_scrollback_does_not_materialise_placeholder_lines() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        for i in 0..1000 {
+            app.messages.push(DisplayMessage::new(
+                MessageRole::Assistant,
+                format!("message number {i}"),
+            ));
+        }
+
+        let buf = render_app(&app, 80, 20);
+        let content = buffer_to_string(&buf);
+        let materialised = last_materialised_line_count();
+
+        assert!(content.contains("message number 999"));
+        assert!(
+            materialised <= 80,
+            "render should only materialise the visible window plus margin, got {materialised} lines"
         );
     }
 
