@@ -480,6 +480,9 @@ fn stalled_snapshot(
     if elapsed < threshold || state.last_dumped_iteration == state.loop_iteration {
         return None;
     }
+    if is_idle_event_wait(&state) {
+        return None;
+    }
     state.last_dumped_iteration = state.loop_iteration;
     Some(StallSnapshot {
         phase: state.phase.clone(),
@@ -490,6 +493,10 @@ fn stalled_snapshot(
         active_streams: state.active_streams,
         active_tools: state.active_tools.clone(),
     })
+}
+
+fn is_idle_event_wait(state: &WatchdogState) -> bool {
+    state.phase == "waiting_for_event" && state.active_streams == 0 && state.active_tools.is_empty()
 }
 
 /// run after restore_terminal_state. if raw mode is still reporting
@@ -661,6 +668,46 @@ mod tests {
 
         state.lock().unwrap().loop_iteration = 10;
         assert!(stalled_snapshot(&state, Duration::from_secs(2)).is_some());
+    }
+
+    #[test]
+    fn stalled_snapshot_ignores_idle_event_waits() {
+        let state = Arc::new(Mutex::new(WatchdogState {
+            last_progress: Instant::now() - Duration::from_secs(30),
+            phase: "waiting_for_event".into(),
+            detail: "parked before select/input handling".into(),
+            loop_iteration: 9,
+            draw_count: 4,
+            active_streams: 0,
+            active_tools: Vec::new(),
+            last_dumped_iteration: u64::MAX,
+            stop: false,
+        }));
+
+        assert!(
+            stalled_snapshot(&state, Duration::from_secs(2)).is_none(),
+            "normal event-loop parking should not produce a stall dump"
+        );
+    }
+
+    #[test]
+    fn stalled_snapshot_reports_waits_with_active_work() {
+        let state = Arc::new(Mutex::new(WatchdogState {
+            last_progress: Instant::now() - Duration::from_secs(30),
+            phase: "waiting_for_event".into(),
+            detail: "streaming select".into(),
+            loop_iteration: 9,
+            draw_count: 4,
+            active_streams: 1,
+            active_tools: Vec::new(),
+            last_dumped_iteration: u64::MAX,
+            stop: false,
+        }));
+
+        assert!(
+            stalled_snapshot(&state, Duration::from_secs(2)).is_some(),
+            "active streams should still be reported if the loop stops making progress"
+        );
     }
 
     #[test]

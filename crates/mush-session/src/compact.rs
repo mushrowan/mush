@@ -532,6 +532,62 @@ pub fn needs_compaction_at(
         && context_tokens.exceeds_fraction(context_window, COMPACTION_THRESHOLD, 100)
 }
 
+/// check whether compaction is needed for the current payload.
+///
+/// `context_tokens` is the api-reported input count from the last
+/// successful call, so it may be unavailable or stale after restoring a
+/// session. use the larger of the provider count and current estimate.
+/// callers that can track estimated growth since the last provider count
+/// should use [`needs_compaction_for_estimated_payload`] instead.
+pub fn needs_compaction_for_messages(
+    context_tokens: TokenCount,
+    context_window: TokenCount,
+    messages: &[Message],
+) -> bool {
+    let estimated = TokenCount::new(estimate_tokens(messages) as u64);
+    needs_compaction_at(
+        context_tokens.max(estimated),
+        context_window,
+        messages.len(),
+    )
+}
+
+/// check compaction for a payload when the caller knows the rough token
+/// estimate that corresponded to `context_tokens`.
+///
+/// this catches growth since the last api call without double-counting the
+/// whole prompt: `context_tokens` is treated as the previous true provider
+/// count, and only estimated tokens beyond `baseline_estimated_tokens` are
+/// added to it. the full estimate still acts as a floor for restored sessions
+/// that have no useful API count yet.
+pub fn needs_compaction_for_estimated_payload(
+    context_tokens: TokenCount,
+    baseline_estimated_tokens: TokenCount,
+    current_estimated_tokens: TokenCount,
+    context_window: TokenCount,
+    message_count: usize,
+) -> bool {
+    let effective_tokens = compaction_tokens_for_estimated_payload(
+        context_tokens,
+        baseline_estimated_tokens,
+        current_estimated_tokens,
+    );
+    needs_compaction_at(effective_tokens, context_window, message_count)
+}
+
+/// provider token count adjusted by estimated growth since that count
+/// was measured.
+pub fn compaction_tokens_for_estimated_payload(
+    context_tokens: TokenCount,
+    baseline_estimated_tokens: TokenCount,
+    current_estimated_tokens: TokenCount,
+) -> TokenCount {
+    let estimated_growth = current_estimated_tokens - baseline_estimated_tokens;
+    let lag_adjusted_tokens =
+        TokenCount::new(context_tokens.get().saturating_add(estimated_growth.get()));
+    lag_adjusted_tokens.max(current_estimated_tokens)
+}
+
 /// result of the auto_compact escalation
 #[derive(Debug)]
 pub struct AutoCompactResult {
@@ -560,7 +616,7 @@ pub async fn auto_compact(
     model: &Model,
     options: &StreamOptions,
 ) -> AutoCompactResult {
-    if !needs_compaction_at(context_tokens, context_window, messages.len()) {
+    if !needs_compaction_for_messages(context_tokens, context_window, &messages) {
         return AutoCompactResult {
             messages,
             masked_count: 0,
@@ -1374,6 +1430,33 @@ mod tests {
             TokenCount::new(10_000),
             8,
         ));
+    }
+
+    #[test]
+    fn needs_compaction_accounts_for_unsent_growth() {
+        let mut messages = Vec::new();
+        for i in 0..20 {
+            messages.push(user_msg(&format!("small {i}")));
+        }
+        messages.push(user_msg(&"x".repeat(16_000))); // rough estimate: 4000 tokens
+
+        let context_window = TokenCount::new(10_000);
+        let previous_api_tokens = TokenCount::new(6_000);
+
+        let before_new_payload = TokenCount::new(estimate_tokens(&messages[..20]) as u64);
+        let after_new_payload = TokenCount::new(estimate_tokens(&messages) as u64);
+
+        assert!(needs_compaction_for_estimated_payload(
+            previous_api_tokens,
+            before_new_payload,
+            after_new_payload,
+            context_window,
+            messages.len()
+        ));
+        assert!(
+            !needs_compaction_at(previous_api_tokens, context_window, messages.len()),
+            "old api-token-only trigger misses the newly appended payload"
+        );
     }
 
     #[test]

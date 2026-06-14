@@ -558,10 +558,13 @@ async fn auto_compact(
 
     let context_tokens = pane.app.stats.context_tokens;
     let compaction_window = tui_config.model.compaction_window();
-    let message_count = pane.conversation.context_len();
 
-    if !mush_session::compact::needs_compaction_at(context_tokens, compaction_window, message_count)
-    {
+    let messages = pane.conversation.context();
+    if !mush_session::compact::needs_compaction_for_messages(
+        context_tokens,
+        compaction_window,
+        &messages,
+    ) {
         return;
     }
 
@@ -571,7 +574,6 @@ async fn auto_compact(
     )]
     let pane = pane_mgr.pane_mut(pane_id).expect("pane exists after check");
 
-    let messages = pane.conversation.context();
     let (compact_model, compact_options) = tui_config
         .compaction_model
         .as_ref()
@@ -876,6 +878,7 @@ async fn start_stream_for_prompt<'a>(
         .pane(pane_id)
         .map(|pane| pane.app.stats.context_tokens.get())
         .unwrap_or(0);
+    let initial_estimated_tokens = estimated_tokens_u64(&conversation_snapshot);
     let context_tokens_shared = Arc::new(std::sync::atomic::AtomicU64::new(initial_ctx));
     let transform = build_context_transform(
         compact_model,
@@ -884,6 +887,7 @@ async fn start_stream_for_prompt<'a>(
         compaction_window,
         registry.clone(),
         context_tokens_shared.clone(),
+        initial_estimated_tokens,
         deps.injections.lifecycle_hooks.clone(),
         deps.injections.cwd.clone().unwrap_or_default(),
     );
@@ -1018,6 +1022,7 @@ fn build_context_transform(
     compaction_window: TokenCount,
     registry: ApiRegistry,
     context_tokens_shared: Arc<std::sync::atomic::AtomicU64>,
+    initial_estimated_tokens: u64,
     lifecycle_hooks: mush_agent::LifecycleHooks,
     cwd: std::path::PathBuf,
 ) -> Option<mush_agent::TransformFn> {
@@ -1025,6 +1030,8 @@ fn build_context_transform(
         return None;
     }
     let ctx_tokens_for_transform = context_tokens_shared;
+    let baseline_estimated_tokens =
+        Arc::new(std::sync::atomic::AtomicU64::new(initial_estimated_tokens));
     #[expect(clippy::type_complexity)]
     let compaction_cache: std::sync::Arc<tokio::sync::Mutex<Option<(usize, Vec<Message>)>>> =
         std::sync::Arc::new(tokio::sync::Mutex::new(None));
@@ -1038,6 +1045,7 @@ fn build_context_transform(
         let options = compact_options.clone();
         let cache = compaction_cache.clone();
         let ctx_tokens = ctx_tokens_for_transform.clone();
+        let baseline_estimated_tokens = baseline_estimated_tokens.clone();
         let hooks = hooks.clone();
         let cwd = cwd.clone();
         let registry = registry.clone();
@@ -1060,17 +1068,39 @@ fn build_context_transform(
             };
 
             let pre_len = msgs.len();
-            let compacted = event_handler::auto_compact(
-                msgs,
-                current_tokens,
+            let current_estimated_tokens = TokenCount::new(estimated_tokens_u64(&msgs));
+            let baseline_tokens = TokenCount::new(
+                baseline_estimated_tokens.load(std::sync::atomic::Ordering::Relaxed),
+            );
+            let effective_compaction_tokens =
+                mush_session::compact::compaction_tokens_for_estimated_payload(
+                    current_tokens,
+                    baseline_tokens,
+                    current_estimated_tokens,
+                );
+            let compacted = if mush_session::compact::needs_compaction_at(
+                effective_compaction_tokens,
                 compaction_window,
-                &registry,
-                &model,
-                &options,
-                Some(&hooks),
-                Some(cwd.as_path()),
-            )
-            .await;
+                msgs.len(),
+            ) {
+                event_handler::auto_compact(
+                    msgs,
+                    effective_compaction_tokens,
+                    compaction_window,
+                    &registry,
+                    &model,
+                    &options,
+                    Some(&hooks),
+                    Some(cwd.as_path()),
+                )
+                .await
+            } else {
+                msgs
+            };
+            baseline_estimated_tokens.store(
+                estimated_tokens_u64(&compacted),
+                std::sync::atomic::Ordering::Relaxed,
+            );
             let mut fresh_compaction = false;
             let mut replayed_cached_compaction = false;
             if compacted.len() < pre_len {
@@ -1089,6 +1119,12 @@ fn build_context_transform(
             }
         })
     }))
+}
+
+fn estimated_tokens_u64(messages: &[Message]) -> u64 {
+    mush_session::compact::estimate_tokens(messages)
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 fn build_steering_callback(
@@ -1321,6 +1357,78 @@ mod tests {
 
     fn app() -> App {
         App::new(ModelId::from("test-model"), TokenCount::new(4096))
+    }
+
+    fn user_msg(text: impl Into<String>) -> Message {
+        Message::User(UserMessage {
+            content: UserContent::Text(text.into()),
+            timestamp_ms: Timestamp::zero(),
+        })
+    }
+
+    #[tokio::test]
+    async fn context_transform_compacts_after_unsent_payload_growth() {
+        let model = models::all_models_with_user().into_iter().next().unwrap();
+        let context_tokens = Arc::new(std::sync::atomic::AtomicU64::new(6_000));
+        let transform = build_context_transform(
+            model,
+            StreamOptions::default(),
+            true,
+            TokenCount::new(10_000),
+            ApiRegistry::new(),
+            context_tokens,
+            0,
+            mush_agent::LifecycleHooks::default(),
+            std::path::PathBuf::from("/tmp"),
+        )
+        .expect("auto-compaction enabled should build a transform");
+
+        let baseline: Vec<Message> = (0..20).map(|i| user_msg(format!("small {i}"))).collect();
+        assert!(matches!(
+            transform(&baseline).await,
+            mush_agent::ContextTransformResult::Unchanged
+        ));
+
+        let mut grown = baseline;
+        grown.push(user_msg("x".repeat(16_000)));
+
+        match transform(&grown).await {
+            mush_agent::ContextTransformResult::Updated(compacted) => {
+                assert!(
+                    compacted.len() < grown.len(),
+                    "unsent payload growth should force compaction before the next provider call"
+                );
+            }
+            other => panic!("expected compaction update, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn context_transform_does_not_double_count_initial_payload_estimate() {
+        let model = models::all_models_with_user().into_iter().next().unwrap();
+        let context_tokens = Arc::new(std::sync::atomic::AtomicU64::new(9_000));
+        let messages: Vec<Message> = (0..20)
+            .map(|i| user_msg(format!("small {i}: {}", "x".repeat(120))))
+            .collect();
+        let transform = build_context_transform(
+            model,
+            StreamOptions::default(),
+            true,
+            TokenCount::new(10_000),
+            ApiRegistry::new(),
+            context_tokens,
+            estimated_tokens_u64(&messages),
+            mush_agent::LifecycleHooks::default(),
+            std::path::PathBuf::from("/tmp"),
+        )
+        .expect("auto-compaction enabled should build a transform");
+
+        match transform(&messages).await {
+            mush_agent::ContextTransformResult::Unchanged => {}
+            other => {
+                panic!("expected unchanged context without new estimated growth, got {other:?}")
+            }
+        }
     }
 
     #[tokio::test]

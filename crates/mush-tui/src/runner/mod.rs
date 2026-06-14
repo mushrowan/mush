@@ -197,8 +197,8 @@ pub async fn run_tui(
             &agent_streams,
             loop_iteration,
             draw_count,
-            "run_loop_iteration",
-            "before select/input handling",
+            "waiting_for_event",
+            "parked before select/input handling",
         );
         let action = run_loop_iteration(
             &mut agent_streams,
