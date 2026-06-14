@@ -895,7 +895,7 @@ async fn execute_tool(tools: &ToolRegistry, tool_call: &ToolCall) -> ToolResult 
             if result.outcome.is_error() {
                 tracing::warn!(tool = %tool_call.name, "tool returned error");
             }
-            crate::truncation::apply(result, limit)
+            crate::truncation::apply_for_tool(result, limit, Some(tool_call.name.as_str()))
         }
         None => {
             tracing::error!(tool = %tool_call.name, "tool not found");

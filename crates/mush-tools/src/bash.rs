@@ -340,8 +340,7 @@ impl AgentTool for BashTool {
     fn description(&self) -> &str {
         "Execute a bash command in the current working directory. Returns stdout and stderr. \
          Output is truncated to the last 2000 lines or 50KB (whichever is hit first). \
-         If truncated, full output is saved to a temp file you can read with the Read tool \
-         (offset/limit) or search with the Grep tool. \
+         If truncated, the full output is saved and the tool result includes the path. \
          Do not pre-truncate with `| head` / `| tail` / `| grep` when reading help text or \
          unfamiliar command output - truncation is automatic and the full output stays \
          recoverable, but `| head` discards everything past the cut before it reaches us. \

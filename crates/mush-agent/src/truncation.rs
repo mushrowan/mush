@@ -1,7 +1,7 @@
 //! tool output truncation with file spillover
 //!
 //! when a tool result exceeds the max size, the full output is saved to a file
-//! and the model gets a truncated preview with instructions to use grep/read.
+//! and the model gets a truncated preview with a recovery hint.
 //! each tool declares its own `OutputLimit` via the trait method, so the agent
 //! loop picks the right strategy automatically.
 
@@ -89,18 +89,41 @@ pub fn cleanup() {
 
 /// apply truncation based on the tool's declared output limit
 pub fn apply(result: ToolResult, limit: OutputLimit) -> ToolResult {
+    apply_for_tool(result, limit, None)
+}
+
+/// apply truncation with tool-specific recovery guidance.
+pub fn apply_for_tool(
+    result: ToolResult,
+    limit: OutputLimit,
+    tool_name: Option<&str>,
+) -> ToolResult {
     match limit {
-        OutputLimit::Head => truncate(result, MAX_LINES, MAX_BYTES, OutputLimit::Head),
-        OutputLimit::Tail => truncate(result, MAX_LINES, MAX_BYTES, OutputLimit::Tail),
+        OutputLimit::Head => {
+            truncate_for_tool(result, MAX_LINES, MAX_BYTES, OutputLimit::Head, tool_name)
+        }
+        OutputLimit::Tail => {
+            truncate_for_tool(result, MAX_LINES, MAX_BYTES, OutputLimit::Tail, tool_name)
+        }
     }
 }
 
 /// truncate with explicit options
 pub fn truncate(
+    result: ToolResult,
+    max_lines: usize,
+    max_bytes: usize,
+    direction: OutputLimit,
+) -> ToolResult {
+    truncate_for_tool(result, max_lines, max_bytes, direction, None)
+}
+
+fn truncate_for_tool(
     mut result: ToolResult,
     max_lines: usize,
     max_bytes: usize,
     direction: OutputLimit,
+    tool_name: Option<&str>,
 ) -> ToolResult {
     let full_text: String = result
         .content
@@ -150,7 +173,7 @@ pub fn truncate(
             } else {
                 kept.join("\n")
             };
-            let hint = actionable_hint(&saved_path);
+            let hint = actionable_hint(&saved_path, tool_name);
             format!("[…{omitted} lines truncated ({total} total). {hint}]\n\n{preview}")
         }
         OutputLimit::Tail => {
@@ -163,7 +186,7 @@ pub fn truncate(
             } else {
                 kept.join("\n")
             };
-            let hint = actionable_hint(&saved_path);
+            let hint = actionable_hint(&saved_path, tool_name);
             format!("[{omitted} lines truncated… ({total} total). {hint}]\n\n{preview}")
         }
     };
@@ -220,14 +243,20 @@ fn collect_tail<'a>(lines: &[&'a str], max_lines: usize, max_bytes: usize) -> (V
     (kept, false)
 }
 
-/// actionable hint telling the model what to do with truncated output
-fn actionable_hint(saved_path: &Option<PathBuf>) -> String {
+fn actionable_hint(saved_path: &Option<PathBuf>, tool_name: Option<&str>) -> String {
+    if tool_name == Some("read") {
+        return match saved_path {
+            Some(path) => format!(
+                "Use the Read tool with offset/limit to view more of the original file. Full output: {}",
+                path.display()
+            ),
+            None => "Use the Read tool with offset/limit to view more of the original file.".into(),
+        };
+    }
+
     match saved_path {
-        Some(path) => format!(
-            "Use the Grep tool to search or the Read tool with offset/limit to view sections. Do not use bash cat on this file. Full output: {}",
-            path.display()
-        ),
-        None => "Use the Grep tool to search or the Read tool with offset/limit to view sections. Do not use bash cat on this file.".into(),
+        Some(path) => format!("Full output: {}", path.display()),
+        None => "Full output could not be saved.".into(),
     }
 }
 
@@ -378,7 +407,7 @@ mod tests {
                     &t[..t.len().min(80)]
                 );
                 assert!(
-                    t.contains("Use the Grep tool to search"),
+                    t.contains("Full output:"),
                     "{direction:?} top hint missing recovery action"
                 );
                 assert!(
@@ -387,6 +416,44 @@ mod tests {
                 );
             });
         }
+    }
+
+    #[test]
+    fn non_read_hint_points_to_saved_output_without_search_tools() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("MUSH_DATA_DIR", tmp.path());
+        }
+
+        let out = apply_for_tool(
+            ToolResult::text(make_lines(5000)),
+            OutputLimit::Tail,
+            Some("bash"),
+        );
+
+        assert_text(&out, |t| {
+            assert!(t.contains("Full output:"), "saved path missing: {t}");
+            assert!(
+                !t.contains("Grep tool") && !t.contains("Read tool"),
+                "non-read tools should not suggest search/read recovery: {t}"
+            );
+        });
+    }
+
+    #[test]
+    fn read_hint_uses_read_offset_recovery() {
+        let out = apply_for_tool(
+            ToolResult::text(make_lines(5000)),
+            OutputLimit::Head,
+            Some("read"),
+        );
+
+        assert_text(&out, |t| {
+            assert!(
+                t.contains("Use the Read tool with offset/limit"),
+                "read output should suggest read offsets: {t}"
+            );
+        });
     }
 
     #[test]
@@ -408,11 +475,7 @@ mod tests {
     // output. if the hint gets mangled or cut, agents loop forever trying to
     // bash cat the saved file (which re-truncates, saving to another file, etc)
 
-    const EXPECTED_HINT_FRAGMENTS: &[&str] = &[
-        "Use the Grep tool to search",
-        "the Read tool with offset/limit",
-        "Do not use bash cat",
-    ];
+    const EXPECTED_HINT_FRAGMENTS: &[&str] = &["Full output:"];
 
     #[test]
     fn hint_survives_head_truncation() {

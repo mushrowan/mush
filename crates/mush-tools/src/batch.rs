@@ -244,7 +244,11 @@ impl AgentTool for BatchTool {
                     } else {
                         success_count += 1;
                     }
-                    truncation::apply(result.clone(), limit.unwrap_or(OutputLimit::Head))
+                    truncation::apply_for_tool(
+                        result.clone(),
+                        limit.unwrap_or(OutputLimit::Head),
+                        Some(tool_name.as_str()),
+                    )
                 }
                 Err(error) => {
                     error_count += 1;
@@ -440,7 +444,7 @@ mod tests {
         };
         assert!(text.contains("batch: 1/1 succeeded, 0 failed"));
         assert!(text.contains("lines truncated"));
-        assert!(text.contains("Use the Grep tool to search"));
+        assert!(text.contains("Full output:"));
         assert!(text.contains("line 0"));
         // LargeTool declares Head, so the tail is dropped (matches what
         // a standalone Head tool would produce: that's the contract this

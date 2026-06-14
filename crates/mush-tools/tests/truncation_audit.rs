@@ -231,10 +231,6 @@ fn audit_central_head_truncation() {
         "total preserved"
     );
     assert!(
-        text.contains("Use the Grep tool to search or the Read tool with offset/limit"),
-        "recovery action present"
-    );
-    assert!(
         text.contains("Full output: <DATA_DIR>/tool-output/tool_<TS>.txt"),
         "saved path present and deterministic"
     );
@@ -306,17 +302,11 @@ fn audit_central_extreme_budget_keeps_hint_intact() {
             truncation::truncate(ToolResult::text(big.clone()), 1, usize::MAX, direction)
         });
         let text = mask_saved_path(&extract_text(&out));
-        for fragment in [
-            "Use the Grep tool to search",
-            "the Read tool with offset/limit",
-            "Do not use bash cat",
-            "Full output: <DATA_DIR>/tool-output/tool_<TS>.txt",
-        ] {
-            assert!(
-                text.contains(fragment),
-                "{direction:?} extreme budget dropped fragment {fragment:?}\n--- got ---\n{text}"
-            );
-        }
+        let fragment = "Full output: <DATA_DIR>/tool-output/tool_<TS>.txt";
+        assert!(
+            text.contains(fragment),
+            "{direction:?} extreme budget dropped fragment {fragment:?}\n--- got ---\n{text}"
+        );
     }
 }
 
