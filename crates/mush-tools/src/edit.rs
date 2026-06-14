@@ -1199,37 +1199,41 @@ mod tests {
         assert_eq!(content, "let x = 1;\nlet y = 2;\nlet x = 99;\nlet z = 3;\n");
     }
 
-    #[test]
-    fn edit_invalid_line_range_errors() {
+    #[tokio::test]
+    async fn edit_invalid_line_range_errors() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.txt");
         fs::write(&path, "hello\nworld\n").unwrap();
 
         let tool = super::EditTool::new(dir.path().into());
         // end_line without start_line - tested via tool execute
-        let result = futures::executor::block_on(tool.execute(serde_json::json!({
-            "path": path.to_str().unwrap(),
-            "oldText": "hello",
-            "newText": "hi",
-            "end_line": 5,
-        })));
+        let result = tool
+            .execute(serde_json::json!({
+                "path": path.to_str().unwrap(),
+                "oldText": "hello",
+                "newText": "hi",
+                "end_line": 5,
+            }))
+            .await;
         assert!(result.outcome.is_error());
         assert!(extract_text(&result).contains("requires start_line"));
 
         // end < start
-        let result = futures::executor::block_on(tool.execute(serde_json::json!({
-            "path": path.to_str().unwrap(),
-            "oldText": "hello",
-            "newText": "hi",
-            "start_line": 5,
-            "end_line": 2,
-        })));
+        let result = tool
+            .execute(serde_json::json!({
+                "path": path.to_str().unwrap(),
+                "oldText": "hello",
+                "newText": "hi",
+                "start_line": 5,
+                "end_line": 2,
+            }))
+            .await;
         assert!(result.outcome.is_error());
         assert!(extract_text(&result).contains("must be >="));
     }
 
-    #[test]
-    fn edit_accepts_stringified_line_numbers() {
+    #[tokio::test]
+    async fn edit_accepts_stringified_line_numbers() {
         // models stringify integer args; the edit tool must accept
         // start_line/end_line as numeric strings rather than reject them
         let dir = tempfile::tempdir().unwrap();
@@ -1237,13 +1241,15 @@ mod tests {
         fs::write(&path, "let x = 1;\nlet x = 1;\nlet x = 1;\n").unwrap();
 
         let tool = super::EditTool::new(dir.path().into());
-        let result = futures::executor::block_on(tool.execute(serde_json::json!({
-            "path": path.to_str().unwrap(),
-            "oldText": "let x = 1;",
-            "newText": "let x = 9;",
-            "start_line": "2",
-            "end_line": "2",
-        })));
+        let result = tool
+            .execute(serde_json::json!({
+                "path": path.to_str().unwrap(),
+                "oldText": "let x = 1;",
+                "newText": "let x = 9;",
+                "start_line": "2",
+                "end_line": "2",
+            }))
+            .await;
         assert!(
             result.outcome.is_success(),
             "got: {}",
