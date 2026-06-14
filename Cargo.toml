@@ -90,9 +90,7 @@ miette = { version = "7", features = ["fancy"] }
 color-eyre = "0.6"
 
 # tui
-# TODO: switch back to crates.io ratatui as soon as the buffer diff
-# performance fixes from upstream main are released.
-ratatui = { git = "https://github.com/ratatui/ratatui", features = [
+ratatui = { version = "0.30.1", features = [
   "unstable-rendered-line-info",
   "scrolling-regions",
 ] }
@@ -164,12 +162,3 @@ strip = "none"
 [workspace.lints.clippy]
 unwrap_used = "deny"
 expect_used = "deny"
-
-[patch.crates-io]
-ratatui = { git = "https://github.com/ratatui/ratatui" }
-ratatui-core = { git = "https://github.com/ratatui/ratatui" }
-ratatui-crossterm = { git = "https://github.com/ratatui/ratatui" }
-ratatui-macros = { git = "https://github.com/ratatui/ratatui" }
-ratatui-termion = { git = "https://github.com/ratatui/ratatui" }
-ratatui-termwiz = { git = "https://github.com/ratatui/ratatui" }
-ratatui-widgets = { git = "https://github.com/ratatui/ratatui" }

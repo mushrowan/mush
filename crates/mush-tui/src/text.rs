@@ -3,22 +3,32 @@
 //! keep width-aware truncation logic here so display code stays declarative
 //! and consistent about what "truncated" looks like
 
-/// truncate `s` to at most `max_chars` grapheme-ish units
-/// (counted by `chars()`), appending `…` when truncation happened.
-/// the resulting string has at most `max_chars` scalar chars, with the
-/// final char being `…` on truncation. returns an owned string in both
-/// cases for simple call sites
+/// truncate `s` to at most `max_width` terminal cells, appending `…`
+/// when truncation happened. returns an owned string in both cases for
+/// simple call sites
 ///
-/// panics if `max_chars == 0` because there's no room for even the `…`
+/// panics if `max_width == 0` because there's no room for even the `…`
 #[must_use]
-pub fn truncate_with_ellipsis(s: &str, max_chars: usize) -> String {
-    assert!(max_chars > 0, "max_chars must leave room for ellipsis");
-    if s.chars().count() > max_chars {
-        let prefix: String = s.chars().take(max_chars - 1).collect();
-        format!("{prefix}…")
-    } else {
-        s.to_string()
+pub fn truncate_with_ellipsis(s: &str, max_width: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+    assert!(max_width > 0, "max_width must leave room for ellipsis");
+    if UnicodeWidthStr::width(s) <= max_width {
+        return s.to_string();
     }
+
+    let budget = max_width.saturating_sub(1);
+    let mut width = 0usize;
+    let mut prefix = String::with_capacity(s.len());
+    for ch in s.chars() {
+        let ch_width = ch.width().unwrap_or(0);
+        if width + ch_width > budget {
+            break;
+        }
+        width += ch_width;
+        prefix.push(ch);
+    }
+    format!("{prefix}…")
 }
 
 #[cfg(test)]
@@ -40,12 +50,24 @@ mod tests {
     }
 
     #[test]
-    fn unicode_input_truncates_by_char_count() {
-        // four chars: café🍓 (e-acute + emoji)
+    fn unicode_input_truncates_by_display_width() {
         let s = "café🍓🍓🍓🍓";
         let out = truncate_with_ellipsis(s, 4);
-        assert_eq!(out.chars().count(), 4);
+        assert_eq!(out, "caf…");
+        assert_eq!(unicode_width::UnicodeWidthStr::width(out.as_str()), 4);
         assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn wide_unicode_truncates_by_display_width() {
+        let out = truncate_with_ellipsis("abcdefg🍓", 8);
+        assert_eq!(out, "abcdefg…");
+        assert_eq!(unicode_width::UnicodeWidthStr::width(out.as_str()), 8);
+    }
+
+    #[test]
+    fn wide_unicode_exact_boundary_preserved() {
+        assert_eq!(truncate_with_ellipsis("abcdef🍓", 8), "abcdef🍓");
     }
 
     #[test]

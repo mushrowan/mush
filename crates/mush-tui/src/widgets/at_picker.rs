@@ -51,7 +51,8 @@ pub fn render(frame: &mut Frame, picker: &AtPickerState, input_area: Rect, theme
         };
         let prefix = if is_selected { "▸ " } else { "  " };
         let name_text = format!("@{}", template.name);
-        let pad = 16usize.saturating_sub(name_text.len() + prefix.len());
+        let pad = 16usize
+            .saturating_sub(Span::raw(prefix).width() + Span::raw(name_text.as_str()).width());
 
         lines.push(Line::from(vec![
             Span::styled(prefix, name_style),
@@ -110,6 +111,17 @@ mod tests {
         s
     }
 
+    fn first_symbol_x(buf: &Buffer, symbol: &str) -> Option<u16> {
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                if buf[(x, y)].symbol() == symbol {
+                    return Some(x);
+                }
+            }
+        }
+        None
+    }
+
     #[test]
     fn picker_shows_selected_marker_on_active_row() {
         let picker = AtPickerState {
@@ -138,6 +150,23 @@ mod tests {
         assert!(
             !unmarked.contains('▸'),
             "non-selected rows must not show ▸, got {unmarked:?}"
+        );
+    }
+
+    #[test]
+    fn picker_aligns_description_after_wide_template_name() {
+        let picker = AtPickerState {
+            matches: vec![template("🍓")],
+            selected: 0,
+            trigger_start: 0,
+            trigger_end: 2,
+        };
+        let buf = render_picker(&picker, 60, 5);
+
+        assert_eq!(
+            first_symbol_x(&buf, "d"),
+            Some(18),
+            "description should start 16 cells after the inner row starts"
         );
     }
 }
