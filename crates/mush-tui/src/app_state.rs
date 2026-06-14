@@ -16,6 +16,86 @@ use crate::model_picker::ModelPickerState;
 use crate::session_picker::SessionPickerState;
 use crate::slash_menu::{ModelCompletion, SlashCommand, SlashMenuState, TabState};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionRecoveryAction {
+    Retry,
+    Fallback,
+    Cancel,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompactionRecoveryOption {
+    pub label: String,
+    pub description: String,
+    pub action: CompactionRecoveryAction,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompactionRecoveryState {
+    pub reason: String,
+    pub selected: usize,
+    pub options: Vec<CompactionRecoveryOption>,
+    pub failure: mush_session::compact::CompactionFailureReport,
+    pub tokens_before: usize,
+    pub model_id: String,
+}
+
+impl CompactionRecoveryState {
+    #[must_use]
+    pub fn new(
+        failure: mush_session::compact::CompactionFailureReport,
+        tokens_before: usize,
+        model_id: String,
+    ) -> Self {
+        let reason = failure.reason().to_string();
+        Self {
+            reason,
+            selected: 0,
+            options: vec![
+                CompactionRecoveryOption {
+                    label: "try again".into(),
+                    description: "retry the LLM summary request with the same compacted messages"
+                        .into(),
+                    action: CompactionRecoveryAction::Retry,
+                },
+                CompactionRecoveryOption {
+                    label: "fallback (structured summary + raw appendix)".into(),
+                    description: "use a local structured summary with a raw-message appendix"
+                        .into(),
+                    action: CompactionRecoveryAction::Fallback,
+                },
+                CompactionRecoveryOption {
+                    label: "cancel compaction".into(),
+                    description: "leave the conversation un-compacted".into(),
+                    action: CompactionRecoveryAction::Cancel,
+                },
+            ],
+            failure,
+            tokens_before,
+            model_id,
+        }
+    }
+
+    pub fn move_down(&mut self) {
+        if self.options.is_empty() {
+            return;
+        }
+        self.selected = (self.selected + 1) % self.options.len();
+    }
+
+    pub fn move_up(&mut self) {
+        if self.options.is_empty() {
+            return;
+        }
+        self.selected = (self.selected + self.options.len() - 1) % self.options.len();
+    }
+
+    #[must_use]
+    pub fn selected_action(&self) -> Option<CompactionRecoveryAction> {
+        self.options.get(self.selected).map(|option| option.action)
+    }
+}
+
 /// state for the conversation search popup
 #[derive(Debug, Clone, Default)]
 pub struct SearchState {
@@ -161,6 +241,9 @@ pub struct InteractionState {
     /// slot editor state, populated when an expanded template contains
     /// `$1`/`$2`/`$@` placeholders. presence implies `mode == SlotEdit`
     pub slot_edit: Option<SlotEditState>,
+    /// recovery prompt shown when LLM compaction fails before falling
+    /// back. presence implies `mode == CompactionRecovery`
+    pub compaction_recovery: Option<CompactionRecoveryState>,
 }
 
 impl Default for InteractionState {
@@ -179,6 +262,7 @@ impl Default for InteractionState {
             status_bar: StatusBarConfig::default(),
             at_picker: None,
             slot_edit: None,
+            compaction_recovery: None,
         }
     }
 }

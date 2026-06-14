@@ -599,7 +599,26 @@ async fn auto_compact(
     let pane = pane_mgr
         .pane_mut(pane_id)
         .expect("pane exists after compact");
-    crate::slash::apply_compaction_result(&mut pane.app, &mut pane.conversation, result);
+    match result {
+        crate::slash::CompactionTaskResult::Applied(result) => {
+            crate::slash::apply_applied_compaction(&mut pane.app, &mut pane.conversation, result);
+        }
+        crate::slash::CompactionTaskResult::Failed {
+            failure,
+            tokens_before,
+            model_id,
+        } => {
+            let applied = crate::slash::fallback_applied_compaction(
+                failure,
+                tokens_before,
+                model_id,
+                Some(&tui_config.lifecycle_hooks),
+                Some(&tui_config.cwd),
+            )
+            .await;
+            crate::slash::apply_applied_compaction(&mut pane.app, &mut pane.conversation, applied);
+        }
+    }
 }
 
 pub(super) async fn abort_focused_stream(

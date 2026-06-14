@@ -27,14 +27,22 @@ pub fn extract_fresh_summary(messages: &[Message]) -> Option<String> {
 /// minimum messages before compaction is worthwhile
 pub const MIN_MESSAGES_FOR_COMPACTION: usize = 4;
 
-/// owned result of a backgrounded compaction task. carries every value
-/// the synchronous finisher needs so the LLM call can run on a
-/// `tokio::spawn` task without borrowing from app/conversation/runtime.
-pub struct CompactionTaskResult {
+/// owned result of a backgrounded compaction task.
+pub enum CompactionTaskResult {
+    Applied(AppliedCompaction),
+    Failed {
+        failure: mush_session::compact::CompactionFailureReport,
+        tokens_before: usize,
+        model_id: String,
+    },
+}
+
+/// values needed to apply a successful compaction.
+pub struct AppliedCompaction {
     /// flat compacted message list, used as a last-resort fallback when
     /// the tree-native `compact_at_leaf` path can't find the boundary
     pub messages: Vec<Message>,
-    /// raw summary text produced by the LLM (or the structured fallback).
+    /// raw summary text produced by the LLM or the structured fallback.
     /// `apply_compaction_result` writes this into the new tree
     /// `EntryKind::Compaction` node so `collect_context` can synthesise
     /// the visible summary message
@@ -89,15 +97,22 @@ pub fn start_compaction(
             context_budget,
         )
         .await;
-        CompactionTaskResult {
-            messages: run.messages,
-            summary: run.summary,
-            tokens_before: run.tokens_before,
-            tokens_after: run.tokens_after,
-            summarised_count: run.summarised_count,
-            before_count,
-            model_id,
-            diagnostics: run.diagnostics,
+        match run {
+            RunCompactionResult::Applied(applied) => {
+                CompactionTaskResult::Applied(AppliedCompaction {
+                    before_count,
+                    model_id,
+                    ..applied
+                })
+            }
+            RunCompactionResult::Failed {
+                failure,
+                tokens_before,
+            } => CompactionTaskResult::Failed {
+                failure,
+                tokens_before,
+                model_id,
+            },
         }
     })
 }
@@ -119,6 +134,17 @@ pub fn apply_compaction_result(
     app: &mut App,
     conversation: &mut ConversationState,
     result: CompactionTaskResult,
+) {
+    let CompactionTaskResult::Applied(result) = result else {
+        return;
+    };
+    apply_applied_compaction(app, conversation, result);
+}
+
+pub fn apply_applied_compaction(
+    app: &mut App,
+    conversation: &mut ConversationState,
+    result: AppliedCompaction,
 ) {
     app.compacting = false;
     let summary_body = extract_fresh_summary(&result.messages);
@@ -195,20 +221,51 @@ pub async fn handle_compact(
         app.push_system_message("compaction task failed");
         return;
     };
-    apply_compaction_result(app, conversation, result);
+    match result {
+        CompactionTaskResult::Applied(result) => {
+            apply_applied_compaction(app, conversation, result)
+        }
+        CompactionTaskResult::Failed {
+            failure,
+            tokens_before,
+            model_id,
+        } => {
+            let applied =
+                fallback_applied_compaction(failure, tokens_before, model_id, lifecycle_hooks, cwd)
+                    .await;
+            apply_applied_compaction(app, conversation, applied);
+        }
+    }
+}
+
+pub async fn fallback_applied_compaction(
+    failure: mush_session::compact::CompactionFailureReport,
+    tokens_before: usize,
+    model_id: String,
+    lifecycle_hooks: Option<&mush_agent::LifecycleHooks>,
+    cwd: Option<&std::path::Path>,
+) -> AppliedCompaction {
+    let before_count = failure.original_messages().len();
+    let result = failure.into_fallback_result();
+    build_applied_compaction(
+        result,
+        tokens_before,
+        before_count,
+        model_id,
+        lifecycle_hooks,
+        cwd,
+    )
+    .await
 }
 
 /// shared compaction + hook logic for /compact and the auto-compaction
 /// path triggered when context approaches the model's window
-pub struct RunCompactionResult {
-    pub messages: Vec<Message>,
-    /// raw summary text from the LLM call (or the structured fallback);
-    /// empty when no compaction happened (e.g. conversation too short)
-    pub summary: String,
-    pub tokens_before: usize,
-    pub tokens_after: usize,
-    pub summarised_count: usize,
-    pub diagnostics: mush_session::compact::CompactionDiagnostics,
+pub enum RunCompactionResult {
+    Applied(AppliedCompaction),
+    Failed {
+        failure: mush_session::compact::CompactionFailureReport,
+        tokens_before: usize,
+    },
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -224,9 +281,51 @@ pub async fn run_compaction(
     use mush_session::compact;
 
     let tokens_before = compact::estimate_tokens(&messages);
-    let result =
-        compact::llm_compact(messages, registry, model, options, Some(10), context_budget).await;
+    let result = match compact::try_llm_compact(
+        messages,
+        registry,
+        model,
+        options,
+        Some(10),
+        context_budget,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(failure) => {
+            return RunCompactionResult::Failed {
+                failure,
+                tokens_before,
+            };
+        }
+    };
+
+    RunCompactionResult::Applied(
+        build_applied_compaction(
+            result,
+            tokens_before,
+            0,
+            String::new(),
+            lifecycle_hooks,
+            cwd,
+        )
+        .await,
+    )
+}
+
+async fn build_applied_compaction(
+    result: mush_session::compact::CompactionResult,
+    tokens_before: usize,
+    before_count: usize,
+    model_id: String,
+    lifecycle_hooks: Option<&mush_agent::LifecycleHooks>,
+    cwd: Option<&std::path::Path>,
+) -> AppliedCompaction {
+    use mush_session::compact;
+
     let summary = result.summary.clone();
+    let summarised_count = result.summarised_count;
+    let diagnostics = result.diagnostics;
     let mut compacted = result.messages;
 
     if let Some(hooks) = lifecycle_hooks
@@ -257,13 +356,15 @@ pub async fn run_compaction(
     }
 
     let tokens_after = compact::estimate_tokens(&compacted);
-    RunCompactionResult {
+    AppliedCompaction {
         messages: compacted,
         summary,
         tokens_before,
         tokens_after,
-        summarised_count: result.summarised_count,
-        diagnostics: result.diagnostics,
+        summarised_count,
+        before_count,
+        model_id,
+        diagnostics,
     }
 }
 
@@ -275,6 +376,39 @@ mod tests {
         Api, AssistantContentPart, AssistantMessage, Provider, TextContent, Timestamp, TokenCount,
         Usage, UserContent, UserMessage,
     };
+
+    struct SummaryProvider;
+
+    #[async_trait::async_trait]
+    impl mush_ai::registry::ApiProvider for SummaryProvider {
+        fn api(&self) -> Api {
+            Api::AnthropicMessages
+        }
+
+        async fn stream(
+            &self,
+            model: &Model,
+            _context: &mush_ai::registry::LlmContext,
+            _options: &StreamOptions,
+        ) -> Result<mush_ai::registry::EventStream, mush_ai::registry::ProviderError> {
+            let message = AssistantMessage::builder()
+                .model(model.id.clone())
+                .provider(model.provider.clone())
+                .api(model.api)
+                .timestamp_ms(Timestamp::zero())
+                .build();
+            Ok(Box::pin(futures::stream::iter(vec![
+                mush_ai::stream::StreamEvent::TextDelta {
+                    content_index: 0,
+                    delta: "successful summary".into(),
+                },
+                mush_ai::stream::StreamEvent::Done {
+                    reason: StopReason::Stop,
+                    message,
+                },
+            ])))
+        }
+    }
 
     fn test_model() -> Model {
         mush_ai::models::all_models_with_user()
@@ -331,8 +465,11 @@ mod tests {
         let mut conversation = ConversationState::from_messages(msgs);
 
         let mut app = App::new(test_model().id, TokenCount::new(200_000));
-        let registry = ApiRegistry::new();
-        let model = test_model();
+        let mut registry = ApiRegistry::new();
+        registry.register(Box::new(SummaryProvider));
+        let mut model = test_model();
+        model.api = Api::AnthropicMessages;
+        model.provider = Provider::Anthropic;
         let options = StreamOptions::default();
 
         handle_compact(
@@ -375,7 +512,8 @@ mod tests {
         }
         let mut conversation = ConversationState::from_messages(msgs);
         let mut app = App::new(test_model().id, TokenCount::new(200_000));
-        let registry = ApiRegistry::new();
+        let mut registry = ApiRegistry::new();
+        registry.register(Box::new(SummaryProvider));
         let model = test_model();
         let options = StreamOptions::default();
 
@@ -469,9 +607,12 @@ mod tests {
         let conversation = ConversationState::from_messages(msgs.clone());
 
         let mut app = App::new(test_model().id, TokenCount::new(200_000));
-        let model = test_model();
+        let mut model = test_model();
+        model.api = Api::AnthropicMessages;
+        model.provider = Provider::Anthropic;
         let options = StreamOptions::default();
-        let registry = ApiRegistry::new();
+        let mut registry = ApiRegistry::new();
+        registry.register(Box::new(SummaryProvider));
 
         let task = start_compaction(
             conversation.context(),
@@ -505,7 +646,7 @@ mod tests {
             assistant_msg("answer", 10),
         ]);
         let mut app = App::new(test_model().id, TokenCount::new(200_000));
-        let result = CompactionTaskResult {
+        let result = CompactionTaskResult::Applied(AppliedCompaction {
             messages: conversation.context(),
             summary: String::new(),
             tokens_before: 100,
@@ -519,7 +660,7 @@ mod tests {
                 trimmed_messages: 0,
                 fallback_reason: None,
             },
-        };
+        });
 
         apply_compaction_result(&mut app, &mut conversation, result);
 

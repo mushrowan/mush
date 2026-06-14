@@ -291,17 +291,40 @@ impl RunnerRuntime {
                     continue;
                 }
             };
-            let Some(pane) = self.pane_mgr.pane_mut(pane_id) else {
-                continue;
-            };
-            crate::slash::apply_compaction_result(&mut pane.app, &mut pane.conversation, result);
-            // replay anything the user submitted while compaction
-            // was running. multiple submits collapse into one combined
-            // user turn so the agent sees a coherent prompt rather
-            // than firing N back-to-back turns
-            replay_compaction_inputs(pane);
+            self.handle_compaction_task_result(pane_id, result);
         }
         true
+    }
+
+    pub(super) fn handle_compaction_task_result(
+        &mut self,
+        pane_id: PaneId,
+        result: crate::slash::CompactionTaskResult,
+    ) {
+        let Some(pane) = self.pane_mgr.pane_mut(pane_id) else {
+            return;
+        };
+        match result {
+            crate::slash::CompactionTaskResult::Applied(result) => {
+                crate::slash::apply_applied_compaction(
+                    &mut pane.app,
+                    &mut pane.conversation,
+                    result,
+                );
+                // replay anything the user submitted while compaction
+                // was running. multiple submits collapse into one combined
+                // user turn so the agent sees a coherent prompt rather
+                // than firing N back-to-back turns
+                replay_compaction_inputs(pane);
+            }
+            crate::slash::CompactionTaskResult::Failed {
+                failure,
+                tokens_before,
+                model_id,
+            } => pane
+                .app
+                .open_compaction_recovery(failure, tokens_before, model_id),
+        }
     }
 
     pub(super) fn notify_cache_state(&mut self, enabled: bool) {
@@ -381,7 +404,7 @@ fn spawn_usage_poller(
 /// message (texts joined with blank lines, images concatenated in
 /// order) so the agent sees one coherent prompt instead of being
 /// pinged repeatedly. no-op when nothing was queued.
-fn replay_compaction_inputs(pane: &mut Pane) {
+pub(super) fn replay_compaction_inputs(pane: &mut Pane) {
     let drained = pane.drain_compaction_inputs();
     if drained.is_empty() {
         return;
@@ -811,6 +834,169 @@ mod tests {
             RunnerRuntime::from_pane(Pane::new(PaneId::new(1), app), ThinkingPrefs::default());
 
         assert_eq!(runtime.active_tool_labels(), vec!["bash: cargo test"]);
+    }
+
+    #[test]
+    fn compaction_failure_opens_recovery_prompt() {
+        let app = App::new("test".into(), TokenCount::new(200_000));
+        let mut runtime =
+            RunnerRuntime::from_pane(Pane::new(PaneId::new(1), app), ThinkingPrefs::default());
+        let original = vec![user_message("hello"), assistant_message("hi")];
+        let diagnostics = mush_session::compact::CompactionDiagnostics {
+            model_id: "test".into(),
+            retries: 1,
+            trimmed_messages: 0,
+            fallback_reason: Some("request failed: ephemeral api key rejected".into()),
+        };
+        let failed = crate::slash::CompactionTaskResult::Failed {
+            failure: mush_session::compact::CompactionFailureReport::new(
+                original,
+                Some(1),
+                "request failed: ephemeral api key rejected".into(),
+                diagnostics,
+            ),
+            tokens_before: 10,
+            model_id: "test".into(),
+        };
+
+        runtime.handle_compaction_task_result(PaneId::new(1), failed);
+
+        let app = &runtime.pane_mgr.focused().app;
+        assert_eq!(
+            app.interaction.mode,
+            crate::app::AppMode::CompactionRecovery
+        );
+        let prompt = app
+            .interaction
+            .compaction_recovery
+            .as_ref()
+            .expect("recovery prompt should be open");
+        assert_eq!(prompt.options.len(), 3);
+        assert!(
+            prompt
+                .options
+                .iter()
+                .any(|option| option.label == "try again")
+        );
+        assert!(prompt.options.iter().any(|option| {
+            option.label.starts_with("fallback")
+                && option.description.contains("structured summary")
+        }));
+        assert!(
+            prompt
+                .options
+                .iter()
+                .any(|option| option.label == "cancel compaction")
+        );
+        assert!(
+            prompt
+                .reason
+                .contains("request failed: ephemeral api key rejected")
+        );
+    }
+
+    #[test]
+    fn fallback_recovery_applies_summary_and_replays_queued_input() {
+        let app = App::new("test".into(), TokenCount::new(200_000));
+        let mut pane = Pane::new(PaneId::new(1), app);
+        pane.queue_input_during_compaction("queued thought".into(), vec![]);
+        pane.app.open_compaction_recovery(
+            failure_report(vec![
+                user_message("old question"),
+                assistant_message("old answer"),
+                user_message("recent question"),
+            ]),
+            100,
+            "test".into(),
+        );
+        let mut runtime = RunnerRuntime::from_pane(pane, ThinkingPrefs::default());
+
+        let recovery = runtime
+            .pane_mgr
+            .focused_mut()
+            .app
+            .interaction
+            .compaction_recovery
+            .take()
+            .expect("recovery prompt");
+        let result = recovery.failure.into_fallback_result();
+        let applied = crate::slash::AppliedCompaction {
+            tokens_after: mush_session::compact::estimate_tokens(&result.messages),
+            messages: result.messages,
+            summary: result.summary,
+            tokens_before: recovery.tokens_before,
+            summarised_count: result.summarised_count,
+            before_count: 3,
+            model_id: recovery.model_id,
+            diagnostics: result.diagnostics,
+        };
+        {
+            let pane = runtime.pane_mgr.focused_mut();
+            crate::slash::apply_applied_compaction(&mut pane.app, &mut pane.conversation, applied);
+            replay_compaction_inputs(pane);
+        }
+
+        let pane = runtime.pane_mgr.focused();
+        assert!(pane.conversation.context_len() < 3);
+        assert!(pane.app.stream.active, "queued input should replay");
+        assert_eq!(
+            pane.pending_prompt
+                .as_ref()
+                .map(|prompt| prompt.text.as_str()),
+            Some("queued thought")
+        );
+    }
+
+    #[test]
+    fn cancel_recovery_replays_queued_input_without_compacting() {
+        let app = App::new("test".into(), TokenCount::new(200_000));
+        let mut pane = Pane::new(PaneId::new(1), app);
+        pane.conversation = ConversationState::from_messages(vec![
+            user_message("old question"),
+            assistant_message("old answer"),
+        ]);
+        pane.queue_input_during_compaction("queued thought".into(), vec![]);
+        pane.app.open_compaction_recovery(
+            failure_report(pane.conversation.context()),
+            100,
+            "test".into(),
+        );
+        let mut runtime = RunnerRuntime::from_pane(pane, ThinkingPrefs::default());
+
+        runtime
+            .pane_mgr
+            .focused_mut()
+            .app
+            .close_compaction_recovery();
+        {
+            let pane = runtime.pane_mgr.focused_mut();
+            pane.app.compacting = false;
+            replay_compaction_inputs(pane);
+        }
+
+        let pane = runtime.pane_mgr.focused();
+        assert_eq!(pane.conversation.context_len(), 2);
+        assert!(pane.app.stream.active, "queued input should replay");
+        assert_eq!(
+            pane.pending_prompt
+                .as_ref()
+                .map(|prompt| prompt.text.as_str()),
+            Some("queued thought")
+        );
+    }
+
+    fn failure_report(messages: Vec<Message>) -> mush_session::compact::CompactionFailureReport {
+        mush_session::compact::CompactionFailureReport::new(
+            messages,
+            Some(1),
+            "request failed: ephemeral api key rejected".into(),
+            mush_session::compact::CompactionDiagnostics {
+                model_id: "test".into(),
+                retries: 1,
+                trimmed_messages: 0,
+                fallback_reason: Some("request failed: ephemeral api key rejected".into()),
+            },
+        )
     }
 
     #[test]

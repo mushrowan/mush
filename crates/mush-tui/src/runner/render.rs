@@ -175,6 +175,9 @@ pub(super) fn draw_panes(
         if let Some(ref menu) = focused_app.settings_menu {
             widgets::settings_menu::render(frame, menu, settings, &focused_app.theme);
         }
+        if let Some(ref recovery) = focused_app.interaction.compaction_recovery {
+            widgets::compaction_recovery::render(frame, recovery, &focused_app.theme);
+        }
         if let Some(ref menu) = focused_app.completion.slash_menu {
             let input_h = crate::ui::input_height(&focused_app.input, focused_area.width);
             let tools_h = crate::widgets::tool_panels::tool_panels_height(

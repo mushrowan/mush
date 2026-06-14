@@ -8,7 +8,8 @@ use mush_session::SessionMeta;
 
 pub use crate::app_event::{AppEvent, AppMode};
 pub use crate::app_state::{
-    CachedStatusBar, CompletionState, InteractionState, NavigationState, RenderState, SearchState,
+    CachedStatusBar, CompactionRecoveryAction, CompactionRecoveryState, CompletionState,
+    InteractionState, NavigationState, RenderState, SearchState,
 };
 pub use crate::batch_output::{
     BatchSection, parse_batch_output, truncate_output, truncate_output_large,
@@ -1427,6 +1428,27 @@ impl App {
     /// close the login picker overlay
     pub fn close_login_picker(&mut self) {
         self.interaction.login_picker = None;
+        self.interaction.mode = AppMode::Normal;
+    }
+
+    pub fn open_compaction_recovery(
+        &mut self,
+        failure: mush_session::compact::CompactionFailureReport,
+        tokens_before: usize,
+        model_id: String,
+    ) {
+        self.compacting = false;
+        self.status = Some("compaction needs input".into());
+        self.interaction.compaction_recovery = Some(CompactionRecoveryState::new(
+            failure,
+            tokens_before,
+            model_id,
+        ));
+        self.interaction.mode = AppMode::CompactionRecovery;
+    }
+
+    pub fn close_compaction_recovery(&mut self) {
+        self.interaction.compaction_recovery = None;
         self.interaction.mode = AppMode::Normal;
     }
 

@@ -1,5 +1,6 @@
 pub mod ansi;
 pub mod at_picker;
+pub mod compaction_recovery;
 pub mod diff;
 pub mod input_box;
 pub mod login_entry_popup;

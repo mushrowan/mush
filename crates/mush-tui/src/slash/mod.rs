@@ -11,8 +11,9 @@ use thiserror::Error;
 // re-export commonly used items so callers can keep using `slash::handle` etc
 pub use commands::{expand_template, handle, handle_export, rebuild_display};
 pub use compaction::{
-    CompactionTaskResult, MIN_MESSAGES_FOR_COMPACTION, PendingCompaction, apply_compaction_result,
-    extract_fresh_summary, handle_compact, run_compaction, start_compaction,
+    AppliedCompaction, CompactionTaskResult, MIN_MESSAGES_FOR_COMPACTION, PendingCompaction,
+    apply_applied_compaction, apply_compaction_result, extract_fresh_summary,
+    fallback_applied_compaction, handle_compact, run_compaction, start_compaction,
 };
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]

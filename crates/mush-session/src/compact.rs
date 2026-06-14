@@ -65,6 +65,96 @@ pub struct CompactionDiagnostics {
     pub fallback_reason: Option<String>,
 }
 
+/// recoverable failure from an LLM compaction attempt.
+///
+/// carries enough context for the UI to ask the user whether to retry,
+/// apply the local structured fallback, or cancel without losing the
+/// original message list.
+#[derive(Debug, Clone)]
+pub struct CompactionFailureReport {
+    messages: Vec<Message>,
+    keep_recent: Option<usize>,
+    context_budget: Option<TokenCount>,
+    reason: String,
+    diagnostics: CompactionDiagnostics,
+}
+
+impl CompactionFailureReport {
+    #[must_use]
+    pub fn new(
+        messages: Vec<Message>,
+        keep_recent: Option<usize>,
+        reason: String,
+        mut diagnostics: CompactionDiagnostics,
+    ) -> Self {
+        if diagnostics.fallback_reason.is_none() {
+            diagnostics.fallback_reason = Some(reason.clone());
+        }
+        Self {
+            messages,
+            keep_recent,
+            context_budget: None,
+            reason,
+            diagnostics,
+        }
+    }
+
+    #[must_use]
+    pub fn with_context_budget(mut self, context_budget: Option<TokenCount>) -> Self {
+        self.context_budget = context_budget;
+        self
+    }
+
+    #[must_use]
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+
+    #[must_use]
+    pub fn original_messages(&self) -> &[Message] {
+        &self.messages
+    }
+
+    #[must_use]
+    pub fn keep_recent(&self) -> Option<usize> {
+        self.keep_recent
+    }
+
+    #[must_use]
+    pub fn context_budget(&self) -> Option<TokenCount> {
+        self.context_budget
+    }
+
+    #[must_use]
+    pub fn diagnostics(&self) -> &CompactionDiagnostics {
+        &self.diagnostics
+    }
+
+    #[must_use]
+    pub fn into_fallback_result(self) -> CompactionResult {
+        let keep = self.keep_recent.unwrap_or(DEFAULT_KEEP_RECENT);
+        if self.messages.len() <= keep {
+            return CompactionResult {
+                summarised_count: 0,
+                summary: String::new(),
+                messages: self.messages,
+                diagnostics: self.diagnostics,
+            };
+        }
+
+        let split_at = self.messages.len() - keep;
+        let summary = fallback_summary_from_reason(
+            &self.messages[..split_at],
+            &self.messages[split_at..],
+            self.diagnostics.trimmed_messages,
+            &self.reason,
+        );
+        let mut result = compact_with_summary(self.messages, &summary, self.keep_recent);
+        result.diagnostics = self.diagnostics;
+        result
+    }
+}
+
 impl CompactionDiagnostics {
     #[must_use]
     pub fn status_note(&self) -> Option<String> {
@@ -531,10 +621,38 @@ pub async fn llm_compact(
     keep_recent: Option<usize>,
     context_budget: Option<TokenCount>,
 ) -> CompactionResult {
+    match try_llm_compact(
+        messages,
+        registry,
+        model,
+        options,
+        keep_recent,
+        context_budget,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(failure) => failure.into_fallback_result(),
+    }
+}
+
+/// compact messages using an LLM to generate the summary.
+///
+/// unlike [`llm_compact`], this does not apply the structured fallback
+/// automatically. callers can surface [`CompactionFailureReport`] to a UI
+/// and let the user decide whether to retry, fall back, or cancel.
+pub async fn try_llm_compact(
+    messages: Vec<Message>,
+    registry: &ApiRegistry,
+    model: &Model,
+    options: &StreamOptions,
+    keep_recent: Option<usize>,
+    context_budget: Option<TokenCount>,
+) -> Result<CompactionResult, CompactionFailureReport> {
     let keep = keep_recent.unwrap_or(DEFAULT_KEEP_RECENT);
 
     if messages.len() <= keep {
-        return CompactionResult {
+        return Ok(CompactionResult {
             summarised_count: 0,
             summary: String::new(),
             messages,
@@ -542,12 +660,10 @@ pub async fn llm_compact(
                 model_id: model.id.to_string(),
                 ..CompactionDiagnostics::default()
             },
-        };
+        });
     }
 
     let split_at = messages.len() - keep;
-    let old_messages = &messages[..split_at];
-    let recent_messages = &messages[split_at..];
 
     let compact_options = compaction_stream_options(model, options);
     let mut old_start = 0;
@@ -556,8 +672,8 @@ pub async fn llm_compact(
         ..CompactionDiagnostics::default()
     };
     let summary = loop {
-        let old_slice = &old_messages[old_start..];
-        let context = compaction_context(old_slice, recent_messages, context_budget);
+        let old_slice = &messages[..split_at][old_start..];
+        let context = compaction_context(old_slice, &messages[split_at..], context_budget);
 
         match call_for_text(registry, model, &context, &compact_options).await {
             Ok(outcome) => {
@@ -579,20 +695,21 @@ pub async fn llm_compact(
             Err(error) => {
                 diagnostics.retries += error.retries;
                 diagnostics.fallback_reason = Some(error.failure.to_string());
-                tracing::warn!(error = %error.failure, "LLM compaction failed, using structured fallback");
-                break fallback_summary_from_messages(
-                    old_messages,
-                    recent_messages,
-                    old_start,
-                    &error.failure,
-                );
+                tracing::warn!(error = %error.failure, "LLM compaction failed, awaiting recovery decision");
+                return Err(CompactionFailureReport::new(
+                    messages,
+                    keep_recent,
+                    error.failure.to_string(),
+                    diagnostics,
+                )
+                .with_context_budget(context_budget));
             }
         }
     };
 
     let mut result = compact_with_summary(messages, &summary, keep_recent);
     result.diagnostics = diagnostics;
-    result
+    Ok(result)
 }
 
 fn compaction_context(
@@ -625,16 +742,16 @@ fn compaction_context(
     }
 }
 
-fn fallback_summary_from_messages(
+fn fallback_summary_from_reason(
     old_messages: &[Message],
     recent_messages: &[Message],
     dropped_messages: usize,
-    error: &CompactionFailure,
+    reason: &str,
 ) -> String {
     let mut out = format!(
         "{FALLBACK_SUMMARY_HEADING}\n\n\
          ## Compaction fallback reason\n\n\
-         LLM summarisation failed: {error}\n"
+         LLM summarisation failed: {reason}\n"
     );
 
     if dropped_messages > 0 {
@@ -1384,6 +1501,32 @@ mod tests {
         assert_eq!(result.summarised_count, 15);
         assert_eq!(result.messages.len(), 6); // 1 summary + 5 kept
         assert!(result.summary.contains("Summary of earlier conversation"));
+    }
+
+    #[tokio::test]
+    async fn try_llm_compact_returns_recoverable_failure_without_fallback() {
+        let registry = ApiRegistry::new();
+        let model = test_model();
+        let options = StreamOptions::default();
+        let msgs: Vec<Message> = (0..20)
+            .map(|i| {
+                if i % 2 == 0 {
+                    user_msg(&format!("question {i}"))
+                } else {
+                    assistant_msg(&format!("answer {i}"))
+                }
+            })
+            .collect();
+
+        let outcome = try_llm_compact(msgs, &registry, &model, &options, Some(5), None).await;
+        let Err(failure) = outcome else {
+            panic!("expected recoverable compaction failure")
+        };
+
+        assert!(failure.reason().contains("no provider registered"));
+        assert_eq!(failure.original_messages().len(), 20);
+        assert_eq!(failure.keep_recent(), Some(5));
+        assert_eq!(failure.diagnostics().model_id, model.id.to_string());
     }
 
     #[tokio::test]

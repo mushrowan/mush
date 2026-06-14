@@ -61,6 +61,10 @@ pub enum AppEvent {
         /// secret stops living on the picker buffer
         key: String,
     },
+    /// user selected a recovery action after LLM compaction failed
+    CompactionRecoverySelected {
+        action: crate::app_state::CompactionRecoveryAction,
+    },
 }
 
 /// which UI mode the app is in
@@ -93,4 +97,6 @@ pub enum AppMode {
     Search,
     /// settings overlay: j/k navigate, space/enter toggle, esc close
     Settings,
+    /// select what to do after LLM compaction failed
+    CompactionRecovery,
 }

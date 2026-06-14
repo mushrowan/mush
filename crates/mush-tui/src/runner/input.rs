@@ -178,7 +178,88 @@ async fn handle_common_app_event(
             .await;
             Some(LoopAction::Redraw)
         }
+        AppEvent::CompactionRecoverySelected { action } => {
+            handle_compaction_recovery_action(pane_mgr, deps, *action).await;
+            Some(LoopAction::Redraw)
+        }
         _ => None,
+    }
+}
+
+async fn handle_compaction_recovery_action(
+    pane_mgr: &mut PaneManager,
+    deps: &mut InputDeps<'_>,
+    action: crate::app_state::CompactionRecoveryAction,
+) {
+    let pane_id = pane_mgr.focused().id;
+    let Some(recovery) = pane_mgr
+        .focused_mut()
+        .app
+        .interaction
+        .compaction_recovery
+        .take()
+    else {
+        pane_mgr.focused_mut().app.interaction.mode = app::AppMode::Normal;
+        return;
+    };
+    pane_mgr.focused_mut().app.interaction.mode = app::AppMode::Normal;
+
+    match action {
+        crate::app_state::CompactionRecoveryAction::Retry => {
+            if deps.pending_compactions.contains_key(&pane_id) {
+                pane_mgr
+                    .focused_mut()
+                    .app
+                    .push_system_message("compaction already in progress on this pane");
+                return;
+            }
+            let (compact_model, compact_options) = deps
+                .tui_config
+                .compaction_model
+                .as_ref()
+                .map(|(model, options)| (model.clone(), options.clone()))
+                .unwrap_or_else(|| {
+                    let pane = pane_mgr.focused();
+                    let model = super::streams::resolve_runtime_model(
+                        pane.app.model_id.as_str(),
+                        &deps.tui_config.model,
+                    );
+                    (model, deps.tui_config.options.clone())
+                });
+            pane_mgr.focused_mut().app.status = Some("retrying compaction…".into());
+            pane_mgr.focused_mut().app.compacting = true;
+            let task = crate::slash::start_compaction(
+                recovery.failure.original_messages().to_vec(),
+                compact_model,
+                compact_options,
+                deps.registry.clone(),
+                Some(deps.lifecycle_hooks.clone()),
+                Some(deps.cwd.to_path_buf()),
+                recovery.failure.context_budget(),
+            );
+            deps.pending_compactions
+                .insert(pane_id, crate::slash::PendingCompaction { task });
+        }
+        crate::app_state::CompactionRecoveryAction::Fallback => {
+            let applied = crate::slash::fallback_applied_compaction(
+                recovery.failure,
+                recovery.tokens_before,
+                recovery.model_id,
+                Some(deps.lifecycle_hooks),
+                Some(deps.cwd),
+            )
+            .await;
+            let pane = pane_mgr.focused_mut();
+            crate::slash::apply_applied_compaction(&mut pane.app, &mut pane.conversation, applied);
+            super::runtime::replay_compaction_inputs(pane);
+        }
+        crate::app_state::CompactionRecoveryAction::Cancel => {
+            let pane = pane_mgr.focused_mut();
+            pane.app.compacting = false;
+            pane.app.status = Some("compaction cancelled".into());
+            pane.app.push_system_message("compaction cancelled");
+            super::runtime::replay_compaction_inputs(pane);
+        }
     }
 }
 

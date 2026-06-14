@@ -73,6 +73,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     if app.interaction.mode == AppMode::Settings {
         return handle_settings_menu_key(app, key);
     }
+    if app.interaction.mode == AppMode::CompactionRecovery {
+        return handle_compaction_recovery_key(app, key);
+    }
 
     // 2. global bindings
     //
@@ -840,6 +843,33 @@ fn handle_settings_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         .matches_in(KeyScope::Settings, Action::SelectOrSpace, key)
     {
         return Some(AppEvent::SettingsToggleSelected);
+    }
+    None
+}
+
+fn handle_compaction_recovery_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
+    use crate::keybinds::Action;
+
+    let Some(recovery) = app.interaction.compaction_recovery.as_mut() else {
+        app.interaction.mode = AppMode::Normal;
+        return None;
+    };
+    if app.keymap.matches(Action::QuitOrAbort, key) || app.keymap.matches(Action::Cancel, key) {
+        return Some(AppEvent::CompactionRecoverySelected {
+            action: crate::app_state::CompactionRecoveryAction::Cancel,
+        });
+    }
+    if app.keymap.matches(Action::NextItem, key) {
+        recovery.move_down();
+        return None;
+    }
+    if app.keymap.matches(Action::PreviousItem, key) {
+        recovery.move_up();
+        return None;
+    }
+    if app.keymap.matches(Action::Confirm, key) || app.keymap.matches(Action::SelectOrSpace, key) {
+        let action = recovery.selected_action()?;
+        return Some(AppEvent::CompactionRecoverySelected { action });
     }
     None
 }
