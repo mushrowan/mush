@@ -354,7 +354,9 @@ impl AgentTool for BashTool {
          Commands like `jj commit`, `git commit` or `crontab -e` without an explicit -m/--message \
          will fail fast because EDITOR is set to `false` in the child environment - always pass \
          the message explicitly on the command line. \
-         Commands that produce no output for 240s are killed automatically."
+         If a foreground command exceeds its timeout and background jobs are available, it is \
+         moved to the background instead of killed. Commands that produce no output for 240s \
+         before any longer foreground timeout are killed automatically."
     }
 
     fn output_limit(&self) -> mush_agent::tool::OutputLimit {
@@ -372,7 +374,7 @@ impl AgentTool for BashTool {
                 "timeout": {
                     "type": "integer",
                     "description": format!(
-                        "timeout in seconds (optional, default {})",
+                        "timeout in seconds (optional, default {}). foreground commands that exceed this continue in the background when possible",
                         crate::DEFAULT_TOOL_TIMEOUT_SECS
                     ),
                     "default": crate::DEFAULT_TOOL_TIMEOUT_SECS
@@ -410,14 +412,29 @@ impl AgentTool for BashTool {
         }
 
         let line_sink = self.line_sink_for_current_exec();
-        run_command(
-            &self.cwd,
-            &args.command,
-            args.effective_timeout(),
-            line_sink.as_ref(),
-            args.output.is_json(),
-        )
-        .await
+        match self.bg_registry.as_ref() {
+            Some(registry) => {
+                run_command_with_timeout_adoption(
+                    &self.cwd,
+                    &args.command,
+                    args.effective_timeout(),
+                    line_sink.as_ref(),
+                    args.output.is_json(),
+                    Some(registry),
+                )
+                .await
+            }
+            None => {
+                run_command(
+                    &self.cwd,
+                    &args.command,
+                    args.effective_timeout(),
+                    line_sink.as_ref(),
+                    args.output.is_json(),
+                )
+                .await
+            }
+        }
     }
 }
 
@@ -591,17 +608,31 @@ async fn run_command(
     output_sink: Option<&LineSink>,
     json_output: bool,
 ) -> ToolResult {
-    run_command_with_no_output_timeout(
+    run_command_with_timeout_adoption(cwd, command, timeout_secs, output_sink, json_output, None)
+        .await
+}
+
+async fn run_command_with_timeout_adoption(
+    cwd: &std::path::Path,
+    command: &str,
+    timeout_secs: u64,
+    output_sink: Option<&LineSink>,
+    json_output: bool,
+    timeout_adoption: Option<&crate::background::BackgroundJobRegistry>,
+) -> ToolResult {
+    run_command_with_no_output_timeout_and_adoption(
         cwd,
         command,
         timeout_secs,
         output_sink,
         json_output,
         NO_OUTPUT_TIMEOUT_SECS,
+        timeout_adoption,
     )
     .await
 }
 
+#[cfg(test)]
 async fn run_command_with_no_output_timeout(
     cwd: &std::path::Path,
     command: &str,
@@ -609,6 +640,27 @@ async fn run_command_with_no_output_timeout(
     output_sink: Option<&LineSink>,
     json_output: bool,
     no_output_timeout_secs: u64,
+) -> ToolResult {
+    run_command_with_no_output_timeout_and_adoption(
+        cwd,
+        command,
+        timeout_secs,
+        output_sink,
+        json_output,
+        no_output_timeout_secs,
+        None,
+    )
+    .await
+}
+
+async fn run_command_with_no_output_timeout_and_adoption(
+    cwd: &std::path::Path,
+    command: &str,
+    timeout_secs: u64,
+    output_sink: Option<&LineSink>,
+    json_output: bool,
+    no_output_timeout_secs: u64,
+    timeout_adoption: Option<&crate::background::BackgroundJobRegistry>,
 ) -> ToolResult {
     let mut cmd = tokio::process::Command::new("bash");
     cmd.arg("-c")
@@ -701,6 +753,25 @@ async fn run_command_with_no_output_timeout(
             ToolResult::error(format!("command failed: {e}"))
         }
         WaitResult::TimedOut => {
+            let duration = started.elapsed();
+            if let Some(registry) = timeout_adoption {
+                return continue_in_background_after_timeout(
+                    registry,
+                    cwd,
+                    command,
+                    timeout_secs,
+                    TimedOutCommand {
+                        child,
+                        pg_guard,
+                        stdout_handle,
+                        stderr_handle,
+                        duration,
+                    },
+                    json_output,
+                )
+                .await;
+            }
+
             // kill the whole group (bash + cargo + tail + ...) so the
             // stdout pipe drains and stdout_handle.await returns. killing
             // only bash leaves descendants holding the write end, which
@@ -708,7 +779,6 @@ async fn run_command_with_no_output_timeout(
             pg_guard.kill_now();
             let stdout = stdout_handle.await.unwrap_or_default();
             let stderr = stderr_handle.await.unwrap_or_default();
-            let duration = started.elapsed();
             if json_output {
                 return format_result(stdout, stderr, -1, true, duration, true);
             }
@@ -729,6 +799,98 @@ async fn run_command_with_no_output_timeout(
                  or check that the command works in non-interactive mode"
             ))
         }
+    }
+}
+
+struct TimedOutCommand {
+    child: tokio::process::Child,
+    pg_guard: ProcessGroupKillOnDrop,
+    stdout_handle: tokio::task::JoinHandle<String>,
+    stderr_handle: tokio::task::JoinHandle<String>,
+    duration: std::time::Duration,
+}
+
+async fn continue_in_background_after_timeout(
+    registry: &crate::background::BackgroundJobRegistry,
+    cwd: &std::path::Path,
+    command: &str,
+    timeout_secs: u64,
+    running: TimedOutCommand,
+    json_output: bool,
+) -> ToolResult {
+    let id = registry.next_id();
+    let duration = running.duration;
+    let state = crate::background::JobState {
+        id: id.clone(),
+        command: command.to_string(),
+        status: crate::background::JobStatus::Running,
+        stdout: String::new(),
+        stderr: String::new(),
+        stdout_consumed_bytes: 0,
+        stderr_consumed_bytes: 0,
+        started: std::time::Instant::now() - duration,
+        finished: None,
+        cwd: Arc::from(cwd),
+    };
+    let handle = registry.insert(state).await;
+
+    tokio::spawn(async move {
+        let TimedOutCommand {
+            mut child,
+            mut pg_guard,
+            stdout_handle,
+            stderr_handle,
+            ..
+        } = running;
+        let status = child.wait().await;
+        pg_guard.disarm();
+
+        let stdout = stdout_handle.await.unwrap_or_default();
+        let stderr = stderr_handle.await.unwrap_or_default();
+
+        let mut state = handle.write().await;
+        state.stdout = stdout;
+        state.stderr = stderr;
+        match status {
+            Ok(status) => state.finish(crate::background::JobStatus::Done {
+                exit_code: status.code().unwrap_or(-1),
+            }),
+            Err(error) => state.finish(crate::background::JobStatus::Failed(format!(
+                "command failed: {error}"
+            ))),
+        }
+    });
+
+    format_backgrounded_timeout_result(&id, command, timeout_secs, duration, json_output)
+}
+
+fn format_backgrounded_timeout_result(
+    id: &str,
+    command: &str,
+    timeout_secs: u64,
+    duration: std::time::Duration,
+    json_output: bool,
+) -> ToolResult {
+    let duration_secs = (duration.as_secs_f32() * 10.0).round() / 10.0;
+    let message = format!(
+        "exceeded tool timeout after {timeout_secs}s, continuing in the background. check bash_status with job_id: {id} to monitor"
+    );
+
+    if json_output {
+        let json = serde_json::json!({
+            "job_id": id,
+            "status": "backgrounded",
+            "command": command,
+            "timed_out": true,
+            "timeout_seconds": timeout_secs,
+            "duration_seconds": duration_secs,
+            "message": message,
+        });
+        ToolResult::text(json.to_string())
+    } else {
+        ToolResult::text(format!(
+            "Exit code: pending\nStatus: backgrounded\nDuration: {duration_secs}s\n\n{message}"
+        ))
     }
 }
 
@@ -1250,6 +1412,63 @@ mod tests {
         assert!(
             state.stdout.contains("background_done"),
             "should capture output: {}",
+            state.stdout
+        );
+    }
+
+    #[tokio::test]
+    async fn foreground_timeout_continues_in_background() {
+        let registry = crate::background::BackgroundJobRegistry::new();
+        let tool = BashTool::new(std::env::current_dir().unwrap().into())
+            .with_background_registry(registry.clone());
+
+        let result = tool
+            .execute(serde_json::json!({
+                "command": "sleep 2; echo foreground_done",
+                "timeout": 1
+            }))
+            .await;
+        let text = extract_text(&result);
+
+        assert!(
+            result.outcome.is_success(),
+            "foreground timeout should become a background job: {text}"
+        );
+        assert!(
+            text.contains("exceeded tool timeout") && text.contains("bg_0"),
+            "result should explain how to poll the background job: {text}"
+        );
+
+        let handle = registry
+            .get("bg_0")
+            .await
+            .expect("timed-out foreground command should be registered");
+
+        let mut finished = false;
+        for _ in 0..10 {
+            {
+                let state = handle.read().await;
+                if !state.status.is_running() {
+                    finished = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        }
+
+        let state = handle.read().await;
+        assert!(
+            finished,
+            "backgrounded command should finish: {:?}",
+            state.status
+        );
+        assert_eq!(
+            state.status,
+            crate::background::JobStatus::Done { exit_code: 0 }
+        );
+        assert!(
+            state.stdout.contains("foreground_done"),
+            "background job should retain command output: {}",
             state.stdout
         );
     }
