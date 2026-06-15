@@ -512,7 +512,8 @@ mod tests {
         );
 
         // align to a non-native model brings batch back
-        let openrouter_glm = model_with_id("z-ai/glm-4.6");
+        let mut openrouter_glm = model_with_id("z-ai/glm-4.6");
+        openrouter_glm.provider = mush_ai::types::Provider::OpenRouter;
         assert!(!openrouter_glm.supports_native_parallel_calls());
         align_for_model(&mut registry, &openrouter_glm, cwd, ForbiddenChars::empty());
         assert!(

@@ -52,6 +52,19 @@ const CLAUDE_CODE_TOOLS: &[&str] = &[
     "WebSearch",
 ];
 
+const CLAUDE_CODE_CAPTURE_TOOL_ORDER: &[&str] = &[
+    "Agent",
+    "AskUserQuestion",
+    "Bash",
+    "Edit",
+    "Read",
+    "ScheduleWakeup",
+    "Skill",
+    "ToolSearch",
+    "Workflow",
+    "Write",
+];
+
 /// convert tool name to claude code canonical casing if it matches (case-insensitive)
 fn to_claude_code_name(name: &str) -> String {
     let normalised = super::normalize_tool_name(name);
@@ -60,6 +73,13 @@ fn to_claude_code_name(name: &str) -> String {
         .find(|t| t.to_lowercase() == normalised)
         .map(|t| t.to_string())
         .unwrap_or_else(|| name.to_string())
+}
+
+fn claude_code_capture_tool_order(name: &str) -> Option<usize> {
+    let normalised = super::normalize_tool_name(name);
+    CLAUDE_CODE_CAPTURE_TOOL_ORDER
+        .iter()
+        .position(|tool| super::normalize_tool_name(tool) == normalised)
 }
 
 /// convert claude code tool name back to our tool name using the tool definitions
@@ -503,25 +523,7 @@ fn build_request_body(
     };
     let converted_messages = convert_messages(messages, is_oauth, cache_control.clone(), trimming);
 
-    let converted_tools = if tools.is_empty() {
-        None
-    } else {
-        Some(
-            tools
-                .iter()
-                .map(|t| RequestTool {
-                    name: if is_oauth {
-                        to_claude_code_name(&t.name)
-                    } else {
-                        t.name.clone()
-                    },
-                    description: t.description.clone(),
-                    input_schema: t.parameters.clone(),
-                    eager_input_streaming: is_oauth.then_some(true),
-                })
-                .collect(),
-        )
-    };
+    let converted_tools = convert_tools(tools, is_oauth);
 
     let thinking = match &options.thinking {
         Some(level) if *level != ThinkingLevel::Off && model.reasoning => {
@@ -603,6 +605,43 @@ fn build_request_body(
         diagnostics,
         stream: true,
     }
+}
+
+fn convert_tools(tools: &[ToolDefinition], is_oauth: bool) -> Option<Vec<RequestTool>> {
+    if tools.is_empty() {
+        return None;
+    }
+
+    let mut converted: Vec<(usize, Option<usize>, RequestTool)> = tools
+        .iter()
+        .enumerate()
+        .map(|(index, tool)| {
+            let name = if is_oauth {
+                to_claude_code_name(&tool.name)
+            } else {
+                tool.name.clone()
+            };
+            (
+                index,
+                is_oauth
+                    .then(|| claude_code_capture_tool_order(&name))
+                    .flatten(),
+                RequestTool {
+                    name,
+                    description: tool.description.clone(),
+                    input_schema: tool.parameters.clone(),
+                    eager_input_streaming: is_oauth.then_some(true),
+                },
+            )
+        })
+        .collect();
+
+    if is_oauth {
+        converted
+            .sort_by_key(|(index, capture_order, _)| (capture_order.unwrap_or(usize::MAX), *index));
+    }
+
+    Some(converted.into_iter().map(|(_, _, tool)| tool).collect())
 }
 
 fn claude_code_metadata(options: &StreamOptions) -> RequestMetadata {
@@ -2932,6 +2971,57 @@ mod tests {
             serde_json::json!({"type": "direct"})
         );
         assert_eq!(json["messages"][1]["content"][0]["content"], "hi");
+    }
+
+    #[test]
+    fn oauth_tools_are_sorted_like_claude_code_capture() {
+        let model = test_model();
+        let options = StreamOptions::default();
+        let tools = vec![
+            ToolDefinition {
+                name: "write".into(),
+                description: "write files".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+            ToolDefinition {
+                name: "read".into(),
+                description: "read files".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+            ToolDefinition {
+                name: "skill".into(),
+                description: "load skills".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+            ToolDefinition {
+                name: "bash".into(),
+                description: "run shell commands".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+            ToolDefinition {
+                name: "repo_map".into(),
+                description: "show repo map".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+            ToolDefinition {
+                name: "edit".into(),
+                description: "edit files".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+        ];
+
+        let body = build_request_body(&model, &None, &[], &tools, &options, true);
+        let names: Vec<_> = body
+            .tools
+            .unwrap()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+
+        assert_eq!(
+            names,
+            vec!["Bash", "Edit", "Read", "Skill", "Write", "repo_map"]
+        );
     }
 
     #[test]

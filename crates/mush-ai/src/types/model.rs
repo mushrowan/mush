@@ -126,7 +126,8 @@ impl Model {
     /// OpenAI responses API and reasoning models support this
     pub fn supports_native_parallel_calls(&self) -> bool {
         let id = self.id.as_str();
-        id.contains("gpt-")
+        self.provider == Provider::Anthropic
+            || id.contains("gpt-")
             || id.contains("codex")
             || id.starts_with("o1")
             || id.starts_with("o3")
@@ -477,6 +478,14 @@ mod tests {
     #[test]
     fn supports_caching_is_false_when_neither_rate_is_priced() {
         assert!(!model_with_cost(0.0, 0.0).supports_caching());
+    }
+
+    #[test]
+    fn anthropic_models_support_native_parallel_calls() {
+        let model = model_with_cost(0.0, 0.0);
+        assert_eq!(model.provider, Provider::Anthropic);
+        assert_eq!(model.api, Api::AnthropicMessages);
+        assert!(model.supports_native_parallel_calls());
     }
 
     #[test]
