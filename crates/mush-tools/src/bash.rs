@@ -143,6 +143,15 @@ impl BashArgs {
     }
 }
 
+fn command_with_direnv(command: &str) -> String {
+    format!(
+        r#"if command -v direnv >/dev/null 2>&1; then
+  eval "$(DIRENV_LOG_FORMAT= direnv export bash)"
+fi
+{command}"#
+    )
+}
+
 /// sender for streaming partial output lines from bash
 /// detect a command pattern that would hang waiting on `$EDITOR` in
 /// non-interactive use, and return a helpful error explaining how to
@@ -355,7 +364,9 @@ impl AgentTool for BashTool {
          the message explicitly on the command line. \
          If a foreground command exceeds its timeout and background jobs are available, it is \
          moved to the background instead of killed. Commands that produce no output for 240s \
-         before any longer foreground timeout are killed automatically."
+         before any longer foreground timeout are killed automatically. \
+         Bash loads direnv environment exports for the current working directory when direnv is \
+         installed and the directory is allowed."
     }
 
     fn output_limit(&self) -> mush_agent::tool::OutputLimit {
@@ -508,8 +519,9 @@ async fn run_background_command(
     timeout_secs: u64,
 ) {
     let mut cmd = tokio::process::Command::new("bash");
+    let wrapped_command = command_with_direnv(command);
     cmd.arg("-c")
-        .arg(command)
+        .arg(wrapped_command)
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -662,8 +674,9 @@ async fn run_command_with_no_output_timeout_and_adoption(
     timeout_adoption: Option<&crate::background::BackgroundJobRegistry>,
 ) -> ToolResult {
     let mut cmd = tokio::process::Command::new("bash");
+    let wrapped_command = command_with_direnv(command);
     cmd.arg("-c")
-        .arg(command)
+        .arg(wrapped_command)
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1180,6 +1193,83 @@ mod tests {
         assert!(
             text.contains("editor=false"),
             "expected EDITOR=false in child env, got {text}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn run_command_loads_direnv_environment() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join(".envrc"),
+            "export MUSH_DIRENV_TEST=loaded\n",
+        )
+        .unwrap();
+
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let direnv = bin.join("direnv");
+        let original_path = std::env::var_os("PATH");
+        let bash = original_path
+            .as_deref()
+            .and_then(|path| {
+                std::env::split_paths(path)
+                    .map(|dir| dir.join("bash"))
+                    .find(|candidate| candidate.is_file())
+            })
+            .expect("bash must be present in PATH for bash tool tests");
+        std::fs::write(
+            &direnv,
+            format!(
+                r#"#!{}
+if [ "$1" = export ] && [ "$2" = bash ]; then
+  printf 'export MUSH_DIRENV_TEST=loaded\n'
+  exit 0
+fi
+exit 64
+"#,
+                bash.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&direnv).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+        std::fs::set_permissions(&direnv, permissions).unwrap();
+
+        let path = match &original_path {
+            Some(original) => format!("{}:{}", bin.display(), original.to_string_lossy()),
+            None => bin.display().to_string(),
+        };
+        // safety: nextest runs each test in a separate process, and this
+        // test does not spawn other rust threads while mutating the process
+        // environment before launching the child command.
+        unsafe {
+            std::env::set_var("PATH", path);
+        }
+
+        let result = run_command(
+            tmp.path(),
+            "printf '%s' \"$MUSH_DIRENV_TEST\"",
+            10,
+            None,
+            false,
+        )
+        .await;
+
+        // safety: see the set_var safety note above.
+        unsafe {
+            if let Some(original) = original_path {
+                std::env::set_var("PATH", original);
+            } else {
+                std::env::remove_var("PATH");
+            }
+        }
+
+        assert!(result.outcome.is_success());
+        let text = extract_text(&result);
+        assert!(
+            text.contains("loaded"),
+            "expected bash command to inherit direnv exports, got {text}"
         );
     }
 
