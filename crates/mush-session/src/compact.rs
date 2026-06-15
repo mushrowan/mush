@@ -212,6 +212,10 @@ fn message_char_count(msg: &Message) -> usize {
                 AssistantContentPart::ToolCall(tc) => {
                     tc.name.as_str().len() + tc.arguments.to_string().len()
                 }
+                AssistantContentPart::ServerToolUse(server_tool) => {
+                    server_tool.name.as_str().len() + server_tool.input.to_string().len()
+                }
+                AssistantContentPart::AdvisorToolResult(result) => result.content.to_string().len(),
             })
             .sum(),
         Message::ToolResult(tr) => tr

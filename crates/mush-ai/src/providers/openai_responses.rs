@@ -1080,6 +1080,7 @@ fn finish_block(
                 arguments,
             });
         }
+        StreamBlock::ServerSideTranscript => {}
     }
 }
 

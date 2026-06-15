@@ -133,6 +133,7 @@ pub(crate) enum StreamBlock {
         name: String,
         args_buf: String,
     },
+    ServerSideTranscript,
 }
 
 /// map an effort level to an openai-style reasoning effort string.

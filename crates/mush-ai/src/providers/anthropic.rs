@@ -952,6 +952,17 @@ impl MessageVisitor for AnthropicVisitor {
                     }
                     Some(block)
                 }
+                AssistantContentPart::ServerToolUse(server_tool) => Some(serde_json::json!({
+                    "type": "server_tool_use",
+                    "id": server_tool.id.as_str(),
+                    "name": server_tool.name.as_str(),
+                    "input": server_tool.input,
+                })),
+                AssistantContentPart::AdvisorToolResult(result) => Some(serde_json::json!({
+                    "type": "advisor_tool_result",
+                    "tool_use_id": result.tool_use_id.as_str(),
+                    "content": result.content,
+                })),
             })
             .collect();
 
@@ -1294,6 +1305,18 @@ enum ContentBlockData {
     },
     #[serde(rename = "tool_use")]
     ToolUse { id: String, name: String },
+    #[serde(rename = "server_tool_use")]
+    ServerToolUse {
+        id: String,
+        name: String,
+        #[serde(default)]
+        input: serde_json::Value,
+    },
+    #[serde(rename = "advisor_tool_result")]
+    AdvisorToolResult {
+        tool_use_id: String,
+        content: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -1469,6 +1492,28 @@ fn process_sse_event(
                         }));
                     events.push(StreamEvent::ToolCallStart { content_index });
                 }
+                ContentBlockData::ServerToolUse { id, name, input } => {
+                    blocks.push(StreamBlock::ServerSideTranscript);
+                    output
+                        .content
+                        .push(AssistantContentPart::ServerToolUse(ServerToolUse {
+                            id: ToolCallId::from(id),
+                            name: ToolName::from(name),
+                            input,
+                        }));
+                }
+                ContentBlockData::AdvisorToolResult {
+                    tool_use_id,
+                    content,
+                } => {
+                    blocks.push(StreamBlock::ServerSideTranscript);
+                    output.content.push(AssistantContentPart::AdvisorToolResult(
+                        AdvisorToolResult {
+                            tool_use_id: ToolCallId::from(tool_use_id),
+                            content,
+                        },
+                    ));
+                }
             }
         }
         SseEvent::ContentBlockDelta { index: _, delta } => {
@@ -1575,6 +1620,7 @@ fn process_sse_event(
                             arguments,
                         });
                     }
+                    StreamBlock::ServerSideTranscript => {}
                 }
             }
         }
@@ -2571,6 +2617,136 @@ mod tests {
             }
             other => panic!("expected ToolCallEnd, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn process_advisor_server_tool_blocks_preserves_content() {
+        let mut output = test_output();
+        let mut blocks = Vec::new();
+
+        let server_tool_start: SseEvent = serde_json::from_value(serde_json::json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {
+                "type": "server_tool_use",
+                "id": "srvtoolu_01advisor",
+                "name": "advisor",
+                "input": {}
+            }
+        }))
+        .expect("server tool use event parses");
+        let events = process_sse_event(server_tool_start, &mut output, &mut blocks, true, &[]);
+        assert!(
+            events.is_empty(),
+            "server-side tools are not client tool calls"
+        );
+
+        let events = process_sse_event(
+            SseEvent::ContentBlockStop { index: 0 },
+            &mut output,
+            &mut blocks,
+            true,
+            &[],
+        );
+        assert!(events.is_empty(), "server-side tool close should be quiet");
+
+        let advisor_result_start: SseEvent = serde_json::from_value(serde_json::json!({
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {
+                "type": "advisor_tool_result",
+                "tool_use_id": "srvtoolu_01advisor",
+                "content": {
+                    "type": "advisor_result",
+                    "text": "prefer a bounded worker pool"
+                }
+            }
+        }))
+        .expect("advisor result event parses");
+        let events = process_sse_event(advisor_result_start, &mut output, &mut blocks, true, &[]);
+        assert!(events.is_empty(), "advisor results are transcript blocks");
+
+        let events = process_sse_event(
+            SseEvent::ContentBlockStop { index: 1 },
+            &mut output,
+            &mut blocks,
+            true,
+            &[],
+        );
+        assert!(events.is_empty(), "advisor result close should be quiet");
+
+        assert_eq!(
+            serde_json::to_value(&output.content).unwrap(),
+            serde_json::json!([
+                {
+                    "type": "server_tool_use",
+                    "id": "srvtoolu_01advisor",
+                    "name": "advisor",
+                    "input": {}
+                },
+                {
+                    "type": "advisor_tool_result",
+                    "tool_use_id": "srvtoolu_01advisor",
+                    "content": {
+                        "type": "advisor_result",
+                        "text": "prefer a bounded worker pool"
+                    }
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_assistant_preserves_advisor_server_tool_blocks() {
+        let content: Vec<AssistantContentPart> = serde_json::from_value(serde_json::json!([
+            {
+                "type": "server_tool_use",
+                "id": "srvtoolu_01advisor",
+                "name": "advisor",
+                "input": {}
+            },
+            {
+                "type": "advisor_tool_result",
+                "tool_use_id": "srvtoolu_01advisor",
+                "content": {
+                    "type": "advisor_result",
+                    "text": "prefer a bounded worker pool"
+                }
+            }
+        ]))
+        .expect("advisor blocks deserialize");
+        let messages = vec![Message::Assistant(
+            AssistantMessage::builder()
+                .content(content)
+                .model("claude-opus-4-8".into())
+                .provider(Provider::Anthropic)
+                .api(Api::AnthropicMessages)
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )];
+
+        let converted = convert_messages(&messages, true, None, ToolResultTrimming::SlidingWindow);
+
+        assert_eq!(converted.len(), 1);
+        assert_eq!(
+            converted[0].content,
+            serde_json::json!([
+                {
+                    "type": "server_tool_use",
+                    "id": "srvtoolu_01advisor",
+                    "name": "advisor",
+                    "input": {}
+                },
+                {
+                    "type": "advisor_tool_result",
+                    "tool_use_id": "srvtoolu_01advisor",
+                    "content": {
+                        "type": "advisor_result",
+                        "text": "prefer a bounded worker pool"
+                    }
+                }
+            ])
+        );
     }
 
     #[test]

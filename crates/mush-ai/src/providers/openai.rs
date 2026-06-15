@@ -657,6 +657,7 @@ fn finish_block_events(
                 arguments,
             });
         }
+        StreamBlock::ServerSideTranscript => {}
     }
     Some(content_index)
 }

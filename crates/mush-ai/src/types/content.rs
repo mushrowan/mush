@@ -167,6 +167,19 @@ pub struct ToolCall {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ServerToolUse {
+    pub id: ToolCallId,
+    pub name: ToolName,
+    pub input: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AdvisorToolResult {
+    pub tool_use_id: ToolCallId,
+    pub content: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum UserContent {
     Text(String),
@@ -204,6 +217,8 @@ pub enum AssistantContentPart {
     Text(TextContent),
     Thinking(ThinkingContent),
     ToolCall(ToolCall),
+    ServerToolUse(ServerToolUse),
+    AdvisorToolResult(AdvisorToolResult),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
