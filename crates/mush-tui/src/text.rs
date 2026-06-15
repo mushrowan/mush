@@ -10,10 +10,10 @@
 /// panics if `max_width == 0` because there's no room for even the `…`
 #[must_use]
 pub fn truncate_with_ellipsis(s: &str, max_width: usize) -> String {
-    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    use ratatui::buffer::CellWidth;
 
     assert!(max_width > 0, "max_width must leave room for ellipsis");
-    if UnicodeWidthStr::width(s) <= max_width {
+    if usize::from(s.cell_width()) <= max_width {
         return s.to_string();
     }
 
@@ -21,7 +21,8 @@ pub fn truncate_with_ellipsis(s: &str, max_width: usize) -> String {
     let mut width = 0usize;
     let mut prefix = String::with_capacity(s.len());
     for ch in s.chars() {
-        let ch_width = ch.width().unwrap_or(0);
+        let mut buf = [0; 4];
+        let ch_width = usize::from(ch.encode_utf8(&mut buf).cell_width());
         if width + ch_width > budget {
             break;
         }
@@ -68,6 +69,12 @@ mod tests {
     #[test]
     fn wide_unicode_exact_boundary_preserved() {
         assert_eq!(truncate_with_ellipsis("abcdef🍓", 8), "abcdef🍓");
+    }
+
+    #[test]
+    fn halfwidth_dakuten_uses_terminal_cell_width() {
+        let s = "abcｶﾞ";
+        assert_eq!(truncate_with_ellipsis(s, 4), "abc…");
     }
 
     #[test]
