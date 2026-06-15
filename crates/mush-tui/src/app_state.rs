@@ -314,6 +314,7 @@ pub struct CachedStatusBar {
     pub width: u16,
     pub spans: Vec<ratatui::text::Span<'static>>,
     pub right_text: String,
+    pub cache_timer_text: Option<String>,
     pub confirm: Option<String>,
     pub height: u16,
 }

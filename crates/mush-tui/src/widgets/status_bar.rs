@@ -1,6 +1,6 @@
 //! status bar widget - model info, cost, token usage
 
-use ratatui::buffer::Buffer;
+use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::layout::{Constraint, HorizontalAlignment, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget, Wrap};
@@ -127,8 +127,13 @@ impl StatusSpansBuilder {
     }
 }
 
+struct LeftStatus {
+    spans: Vec<Span<'static>>,
+    cache_timer_text: Option<String>,
+}
+
 /// build the left-side info spans
-fn left_spans(app: &App, width: u16) -> Vec<Span<'static>> {
+fn left_status(app: &App, width: u16) -> LeftStatus {
     #[cfg(test)]
     LEFT_SPANS_CALLS.with(|c| c.set(c.get() + 1));
 
@@ -138,6 +143,7 @@ fn left_spans(app: &App, width: u16) -> Vec<Span<'static>> {
     let thinking_label = normalized.effort_name().unwrap_or("off");
 
     let mut b = StatusSpansBuilder::new(&app.theme);
+    let mut cache_timer_text = None;
 
     // first section: pane indicator (if multi-pane) + model. these
     // sit together with no divider between them so the indicator
@@ -222,25 +228,11 @@ fn left_spans(app: &App, width: u16) -> Vec<Span<'static>> {
             }
         };
 
-        // append cache countdown when active
-        let cache_suffix = match (cache_tiers, cache_remaining) {
-            (Some(tiers), _) => format!(" {tiers}"),
-            (_, Some(r)) if r > 0 => {
-                let mins = r / 60;
-                let secs = r % 60;
-                format!(" {mins}:{secs:02}")
-            }
-            (_, Some(0)) => {
-                // show "cold" briefly then fade out
-                let elapsed = app.cache.elapsed_secs().unwrap_or(0);
-                if elapsed < (app.cache.ttl_secs as u64) + crate::app::CACHE_COLD_DISPLAY_SECS {
-                    " cold".into()
-                } else {
-                    String::new()
-                }
-            }
-            _ => String::new(),
-        };
+        let CacheSuffix {
+            display: cache_suffix,
+            ticking,
+        } = cache_suffix_for_app(app, cache_tiers, cache_remaining);
+        cache_timer_text = ticking;
 
         b.section_break();
         b.push_inline(Span::styled(
@@ -337,7 +329,60 @@ fn left_spans(app: &App, width: u16) -> Vec<Span<'static>> {
         b.push_inline(Span::styled(alert.clone(), app.theme.alert));
     }
 
-    b.into_spans()
+    LeftStatus {
+        spans: b.into_spans(),
+        cache_timer_text,
+    }
+}
+
+#[cfg(test)]
+fn left_spans(app: &App, width: u16) -> Vec<Span<'static>> {
+    left_status(app, width).spans
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CacheSuffix {
+    display: String,
+    ticking: Option<String>,
+}
+
+fn cache_suffix_for_app(
+    app: &crate::app::App,
+    cache_tiers: Option<String>,
+    cache_remaining: Option<u16>,
+) -> CacheSuffix {
+    match (cache_tiers, cache_remaining) {
+        (Some(tiers), _) => CacheSuffix {
+            display: format!(" {tiers}"),
+            ticking: Some(tiers),
+        },
+        (_, Some(r)) if r > 0 => {
+            let mins = r / 60;
+            let secs = r % 60;
+            let timer = format!("{mins}:{secs:02}");
+            CacheSuffix {
+                display: format!(" {timer}"),
+                ticking: Some(timer),
+            }
+        }
+        (_, Some(0)) => {
+            let elapsed = app.cache.elapsed_secs().unwrap_or(0);
+            let display =
+                if elapsed < (app.cache.ttl_secs as u64) + crate::app::CACHE_COLD_DISPLAY_SECS {
+                    " cold".into()
+                } else {
+                    String::new()
+                };
+            CacheSuffix {
+                display,
+                ticking: None,
+            }
+        }
+        _ => CacheSuffix {
+            display: String::new(),
+            ticking: None,
+        },
+    }
 }
 
 fn scroll_selection_label(app: &crate::app::App) -> String {
@@ -407,7 +452,9 @@ fn ensure_status_bar_cache(app: &App, width: u16) {
         }
     }
 
-    let spans = left_spans(app, width);
+    let left_status = left_status(app, width);
+    let spans = left_status.spans;
+    let cache_timer_text = left_status.cache_timer_text;
     // trailing space on the right side matches the leading space on the
     // left (`Span::styled(" ", dim)` in left_spans) so the whole bar has
     // symmetric 1-col padding instead of flush-right cwd
@@ -434,6 +481,7 @@ fn ensure_status_bar_cache(app: &App, width: u16) {
         width,
         spans,
         right_text,
+        cache_timer_text,
         confirm,
         height,
     });
@@ -494,6 +542,7 @@ impl Widget for StatusBar<'_> {
         let left_paragraph =
             Paragraph::new(Line::from(data.spans.clone())).wrap(Wrap { trim: false });
         left_paragraph.render(left_area, buf);
+        mark_cache_timer_cells(data.cache_timer_text.as_deref(), left_area, buf);
 
         // right: right-align cwd on the first line of the right column
         if right_width > 0 {
@@ -512,6 +561,39 @@ impl Widget for StatusBar<'_> {
                 Span::styled(text, self.app.theme.confirm),
             ]))
             .render(conf_area, buf);
+        }
+    }
+}
+
+fn mark_cache_timer_cells(timer: Option<&str>, area: Rect, buf: &mut Buffer) {
+    let Some(timer) = timer else {
+        return;
+    };
+    mark_text_cells(area, buf, timer, CellDiffOption::AlwaysUpdate);
+}
+
+fn mark_text_cells(area: Rect, buf: &mut Buffer, needle: &str, diff_option: CellDiffOption) {
+    if needle.is_empty() {
+        return;
+    }
+    let symbols: Vec<String> = needle.chars().map(|ch| ch.to_string()).collect();
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            if x as usize + symbols.len() > area.right() as usize {
+                break;
+            }
+            if symbols
+                .iter()
+                .enumerate()
+                .all(|(offset, symbol)| buf[(x + offset as u16, y)].symbol() == symbol)
+            {
+                for offset in 0..symbols.len() {
+                    if let Some(cell) = buf.cell_mut((x + offset as u16, y)) {
+                        cell.set_diff_option(diff_option);
+                    }
+                }
+                return;
+            }
         }
     }
 }
@@ -775,6 +857,36 @@ mod tests {
     }
 
     #[test]
+    fn status_bar_marks_cache_countdown_cells_always_update() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.cache.ttl_secs = 300;
+        app.stats.context_tokens = TokenCount::new(10_000);
+        app.cache.refresh();
+        let buf = render_status(&app, 120, 1);
+
+        let context_x = find_symbol_sequence_x(&buf, &["1", "0", "k", "/", "2", "0", "0", "k"])
+            .expect("expected context segment");
+        for x in context_x..context_x + 8 {
+            assert_eq!(
+                buf[(x, 0)].diff_option,
+                ratatui::buffer::CellDiffOption::None,
+                "static context cell at x={x} should use normal diffing"
+            );
+        }
+
+        let timer_x = find_symbol_sequence_x(&buf, &["1", "0", "k", "/", "2", "0", "0", "k", " "])
+            .expect("expected cache timer suffix")
+            + 9;
+        for x in timer_x..timer_x + 4 {
+            assert_eq!(
+                buf[(x, 0)].diff_option,
+                ratatui::buffer::CellDiffOption::AlwaysUpdate,
+                "cache countdown cell at x={x} should force updates"
+            );
+        }
+    }
+
+    #[test]
     fn status_bar_shows_short_and_long_cache_tiers_for_hour_claude_cache() {
         let mut app = App::new("claude-sonnet-4".into(), TokenCount::new(200_000));
         app.cache.ttl_secs = 3600;
@@ -1025,6 +1137,23 @@ mod tests {
             s.push('\n');
         }
         s
+    }
+
+    fn find_symbol_sequence_x(buf: &Buffer, symbols: &[&str]) -> Option<u16> {
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                let fits = x as usize + symbols.len() <= buf.area.width as usize;
+                if fits
+                    && symbols
+                        .iter()
+                        .enumerate()
+                        .all(|(offset, symbol)| buf[(x + offset as u16, y)].symbol() == *symbol)
+                {
+                    return Some(x);
+                }
+            }
+        }
+        None
     }
 
     #[test]
