@@ -749,7 +749,7 @@ advisor = true
         // unspecified fields keep their defaults
         assert!(config.settings.anthropic_betas.effort);
         assert!(config.settings.anthropic_betas.context_management);
-        assert!(!config.settings.anthropic_betas.advanced_tool_use);
+        assert!(config.settings.anthropic_betas.advanced_tool_use);
     }
 
     #[test]

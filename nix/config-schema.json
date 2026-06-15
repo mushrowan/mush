@@ -1,15 +1,15 @@
 {
   "$defs": {
     "AnthropicBetas": {
-      "description": "anthropic beta flags enabled via the `anthropic-beta` header on oauth\nrequests. api-key users don't typically need these; they're claude-code\nparity flags for oauth sessions.\n\ndefaults follow the policy agreed with mush's primary user:\n- `context_1m`, `effort`, `context_management` default to `true`\n- `redact_thinking`, `advisor`, `advanced_tool_use` default to `false`",
+      "description": "anthropic beta flags enabled via the `anthropic-beta` header on oauth\nrequests. api-key users don't typically need these; they're claude-code\nparity flags for oauth sessions.\n\ndefaults follow the policy agreed with mush's primary user:\n- `context_1m`, `effort`, `context_management` default to `true`\n- `redact_thinking`, `advisor`, `advanced_tool_use` default to `true`",
       "properties": {
         "advanced_tool_use": {
-          "default": false,
+          "default": true,
           "description": "`advanced-tool-use-2025-11-20` - advanced tool-use features",
           "type": "boolean"
         },
         "advisor": {
-          "default": false,
+          "default": true,
           "description": "`advisor-tool-2026-03-01` - claude-code advisor tool support",
           "type": "boolean"
         },
@@ -29,7 +29,7 @@
           "type": "boolean"
         },
         "redact_thinking": {
-          "default": false,
+          "default": true,
           "description": "`redact-thinking-2026-02-12` - allows thinking redaction in responses",
           "type": "boolean"
         }
@@ -398,12 +398,12 @@
         "anthropic_betas": {
           "$ref": "#/$defs/AnthropicBetas",
           "default": {
-            "advanced_tool_use": false,
-            "advisor": false,
+            "advanced_tool_use": true,
+            "advisor": true,
             "context_1m": true,
             "context_management": true,
             "effort": true,
-            "redact_thinking": false
+            "redact_thinking": true
           },
           "description": "anthropic oauth beta flag toggles"
         },
@@ -830,12 +830,12 @@
       "$ref": "#/$defs/Settings",
       "default": {
         "anthropic_betas": {
-          "advanced_tool_use": false,
-          "advisor": false,
+          "advanced_tool_use": true,
+          "advisor": true,
           "context_1m": true,
           "context_management": true,
           "effort": true,
-          "redact_thinking": false
+          "redact_thinking": true
         },
         "scope": "session"
       },

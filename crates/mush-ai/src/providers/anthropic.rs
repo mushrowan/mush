@@ -3,8 +3,11 @@
 //! streams responses via SSE from the anthropic messages endpoint.
 //! supports extended thinking, tool use, and image inputs.
 
+use std::path::PathBuf;
+
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::env::anthropic_api_key;
 use crate::registry::{ApiProvider, EventStream, LlmContext, ProviderError, ToolDefinition};
@@ -17,7 +20,10 @@ const ANTHROPIC_DIRECT_API: &str = "api.anthropic.com";
 /// full `user-agent` value sent on oauth requests. bump the version when
 /// matching a newer claude-code release; keeping it close to upstream helps
 /// with any rate-limit or fingerprint-based treatment
-const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/2.1.111";
+const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/2.1.170 (external, cli)";
+const CLAUDE_CODE_BILLING_HEADER: &str =
+    "x-anthropic-billing-header: cc_version=2.1.170.c6b; cc_entrypoint=cli; cch=00000;";
+const CLAUDE_CODE_MAX_OUTPUT_TOKENS: u64 = 64_000;
 
 // stealth mode: mimic claude code's identity for oauth
 const CLAUDE_CODE_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
@@ -117,7 +123,14 @@ impl ApiProvider for AnthropicProvider {
 
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
+        headers.insert(
+            ACCEPT,
+            HeaderValue::from_static(if is_oauth {
+                "application/json"
+            } else {
+                "text/event-stream"
+            }),
+        );
         headers.insert("anthropic-version", HeaderValue::from_static(API_VERSION));
 
         if is_oauth {
@@ -140,6 +153,24 @@ impl ApiProvider for AnthropicProvider {
                 "anthropic-dangerous-direct-browser-access",
                 HeaderValue::from_static("true"),
             );
+            headers.insert(
+                "x-client-request-id",
+                HeaderValue::from_str(&random_uuid_v4())?,
+            );
+            headers.insert("x-stainless-arch", HeaderValue::from_static("x64"));
+            headers.insert("x-stainless-lang", HeaderValue::from_static("js"));
+            headers.insert("x-stainless-os", HeaderValue::from_static("Linux"));
+            headers.insert(
+                "x-stainless-package-version",
+                HeaderValue::from_static("0.94.0"),
+            );
+            headers.insert("x-stainless-retry-count", HeaderValue::from_static("0"));
+            headers.insert("x-stainless-runtime", HeaderValue::from_static("node"));
+            headers.insert(
+                "x-stainless-runtime-version",
+                HeaderValue::from_static("v24.3.0"),
+            );
+            headers.insert("x-stainless-timeout", HeaderValue::from_static("600"));
             // include session id for anthropic-side diagnostic correlation.
             // format isn't validated by the server but we mirror claude code
             if let Some(sid) = &options.session_id
@@ -170,6 +201,11 @@ impl ApiProvider for AnthropicProvider {
             &model.base_url
         };
         let url = format!("{base_url}/v1/messages");
+        let url = if is_oauth {
+            format!("{url}?beta=true")
+        } else {
+            url
+        };
         let call_id = crate::wire_log::next_call_id();
 
         // snapshot the outgoing body for cache-bust triage. serialise
@@ -249,6 +285,7 @@ impl ApiProvider for AnthropicProvider {
                             hv.set_sensitive(true);
                             headers.insert("authorization", hv);
                         }
+                        headers.insert("x-stainless-retry-count", HeaderValue::from_static("1"));
                         self.client
                             .post(&url)
                             .headers(headers)
@@ -296,20 +333,24 @@ impl ApiProvider for AnthropicProvider {
 struct RequestBody {
     model: String,
     messages: Vec<RequestMessage>,
-    max_tokens: u64,
-    stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     system: Option<Vec<SystemBlock>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<RequestTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    metadata: Option<RequestMetadata>,
+    max_tokens: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<ThinkingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    context_management: Option<ContextManagement>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     output_config: Option<OutputConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    cache_control: Option<CacheControl>,
+    diagnostics: Option<Diagnostics>,
+    stream: bool,
 }
 
 #[derive(Serialize)]
@@ -343,6 +384,7 @@ enum ThinkingConfig {
     Adaptive {
         #[serde(rename = "type")]
         config_type: String,
+        #[serde(skip_serializing_if = "String::is_empty")]
         display: String,
     },
 }
@@ -358,11 +400,35 @@ struct RequestTool {
     name: String,
     description: String,
     input_schema: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    eager_input_streaming: Option<bool>,
 }
 
 #[derive(Serialize)]
 struct OutputConfig {
     effort: String,
+}
+
+#[derive(Serialize)]
+struct RequestMetadata {
+    user_id: String,
+}
+
+#[derive(Serialize)]
+struct ContextManagement {
+    edits: Vec<ContextManagementEdit>,
+}
+
+#[derive(Serialize)]
+struct ContextManagementEdit {
+    #[serde(rename = "type")]
+    edit_type: &'static str,
+    keep: &'static str,
+}
+
+#[derive(Serialize)]
+struct Diagnostics {
+    previous_message_id: Option<String>,
 }
 
 fn build_request_body(
@@ -373,31 +439,47 @@ fn build_request_body(
     options: &StreamOptions,
     is_oauth: bool,
 ) -> RequestBody {
-    let max_tokens = TokenCount::new(super::effective_max_output_tokens(model, options));
+    let max_tokens = TokenCount::new(if is_oauth {
+        options
+            .max_tokens
+            .map_or(CLAUDE_CODE_MAX_OUTPUT_TOKENS, TokenCount::get)
+    } else {
+        super::effective_max_output_tokens(model, options)
+    });
     let cache_control =
         anthropic_cache_control(model.base_url.as_str(), options.cache_retention, is_oauth);
 
-    // system blocks get scope:"global" on oauth so the system prompt cache
-    // is shared across sessions (mirroring claude code behaviour)
-    let system_cache_control = cache_control.clone().map(|mut cc| {
+    let global_system_cache_control = cache_control.clone().map(|mut cc| {
         if is_oauth {
             cc.scope = Some("global".into());
         }
         cc
     });
 
-    // oauth requires claude code identity as first system block
+    let user_system_cache_control = if is_oauth {
+        global_system_cache_control.clone()
+    } else {
+        cache_control.clone()
+    };
+
     let system = if is_oauth {
-        let mut blocks = vec![SystemBlock {
-            block_type: "text".into(),
-            text: CLAUDE_CODE_IDENTITY.into(),
-            cache_control: system_cache_control.clone(),
-        }];
+        let mut blocks = vec![
+            SystemBlock {
+                block_type: "text".into(),
+                text: CLAUDE_CODE_BILLING_HEADER.into(),
+                cache_control: None,
+            },
+            SystemBlock {
+                block_type: "text".into(),
+                text: CLAUDE_CODE_IDENTITY.into(),
+                cache_control: None,
+            },
+        ];
         if let Some(prompt) = system_prompt {
             blocks.push(SystemBlock {
                 block_type: "text".into(),
                 text: prompt.clone(),
-                cache_control: system_cache_control.clone(),
+                cache_control: user_system_cache_control.clone(),
             });
         }
         Some(blocks)
@@ -406,7 +488,7 @@ fn build_request_body(
             vec![SystemBlock {
                 block_type: "text".into(),
                 text: prompt.clone(),
-                cache_control: system_cache_control.clone(),
+                cache_control: user_system_cache_control.clone(),
             }]
         })
     };
@@ -435,6 +517,7 @@ fn build_request_body(
                     },
                     description: t.description.clone(),
                     input_schema: t.parameters.clone(),
+                    eager_input_streaming: is_oauth.then_some(true),
                 })
                 .collect(),
         )
@@ -445,7 +528,11 @@ fn build_request_body(
             if model.supports_adaptive_thinking && !options.force_budget_thinking {
                 Some(ThinkingConfig::Adaptive {
                     config_type: "adaptive".into(),
-                    display: "summarized".into(),
+                    display: if is_oauth {
+                        String::new()
+                    } else {
+                        "summarized".into()
+                    },
                 })
             } else {
                 let budget = thinking_budget(level, max_tokens.get());
@@ -488,18 +575,136 @@ fn build_request_body(
             max_tokens.get()
         };
 
+    let metadata = is_oauth.then(|| claude_code_metadata(options));
+    let context_management = (is_oauth && thinking.is_some()).then_some(ContextManagement {
+        edits: vec![ContextManagementEdit {
+            edit_type: "clear_thinking_20251015",
+            keep: "all",
+        }],
+    });
+    let diagnostics = is_oauth.then(|| Diagnostics {
+        previous_message_id: messages.iter().rev().find_map(|message| match message {
+            Message::Assistant(assistant) => assistant.generation_id.clone(),
+            _ => None,
+        }),
+    });
+
     RequestBody {
         model: model.id.to_string(),
         messages: converted_messages,
-        max_tokens: effective_max_tokens,
-        stream: true,
         system,
         tools: converted_tools,
+        metadata,
+        max_tokens: effective_max_tokens,
         temperature,
         thinking,
+        context_management,
         output_config,
-        cache_control,
+        diagnostics,
+        stream: true,
     }
+}
+
+fn claude_code_metadata(options: &StreamOptions) -> RequestMetadata {
+    #[derive(Serialize)]
+    struct UserId {
+        device_id: String,
+        account_uuid: String,
+        session_id: String,
+    }
+
+    let user_id = UserId {
+        device_id: claude_code_device_id(),
+        account_uuid: options.account_id.clone().unwrap_or_default(),
+        session_id: options
+            .session_id
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_default(),
+    };
+
+    RequestMetadata {
+        user_id: serde_json::to_string(&user_id).unwrap_or_else(|_| "{}".into()),
+    }
+}
+
+fn claude_code_device_id() -> String {
+    let path = claude_code_device_id_path();
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        let id = existing.trim();
+        if is_hex_len(id, 64) {
+            return id.to_string();
+        }
+    }
+
+    let id = lower_hex(&random_bytes::<32>());
+    let _ = crate::private_io::write_atomic(&path, &id);
+    id
+}
+
+fn claude_code_device_id_path() -> PathBuf {
+    data_dir().join("claude-code-device-id")
+}
+
+fn data_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("MUSH_DATA_DIR") {
+        PathBuf::from(dir)
+    } else if let Some(data) = std::env::var_os("XDG_DATA_HOME") {
+        PathBuf::from(data).join("mush")
+    } else if let Some(home) = std::env::var_os("HOME") {
+        PathBuf::from(home).join(".local/share/mush")
+    } else {
+        PathBuf::from(".mush")
+    }
+}
+
+fn random_uuid_v4() -> String {
+    let mut bytes = random_bytes::<16>();
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex = lower_hex(&bytes);
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
+}
+
+fn random_bytes<const N: usize>() -> [u8; N] {
+    let mut bytes = [0u8; N];
+    if getrandom::fill(&mut bytes).is_ok() {
+        return bytes;
+    }
+
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let seed = format!(
+        "{}:{}:{}",
+        Timestamp::now().as_ms(),
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let digest = Sha256::digest(seed.as_bytes());
+    let len = N.min(digest.len());
+    bytes[..len].copy_from_slice(&digest[..len]);
+    bytes
+}
+
+fn lower_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn is_hex_len(value: &str, len: usize) -> bool {
+    value.len() == len && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn anthropic_cache_control(
@@ -698,12 +903,16 @@ impl MessageVisitor for AnthropicVisitor {
                         tc.name.as_str().to_string()
                     };
                     let id = anthropic_tool_id(tc.id.as_str());
-                    Some(serde_json::json!({
+                    let mut block = serde_json::json!({
                         "type": "tool_use",
                         "id": id,
                         "name": name,
                         "input": tc.arguments,
-                    }))
+                    });
+                    if is_oauth && let Some(obj) = block.as_object_mut() {
+                        obj.insert("caller".into(), serde_json::json!({"type": "direct"}));
+                    }
+                    Some(block)
                 }
             })
             .collect();
@@ -717,27 +926,32 @@ impl MessageVisitor for AnthropicVisitor {
     }
 
     fn on_tool_result(&mut self, tr: &ToolResultMessage, is_old_turn: bool) {
-        let content_blocks: Vec<serde_json::Value> = tr
-            .content
-            .iter()
-            .map(|part| match part {
-                ToolResultContentPart::Text(t) => {
-                    let text = maybe_trim_tool_output(&t.text, is_old_turn, self.trimming);
-                    serde_json::json!({
-                        "type": "text",
-                        "text": text,
+        let content_blocks: serde_json::Value = if self.is_oauth {
+            claude_code_tool_result_content(tr, is_old_turn, self.trimming)
+        } else {
+            serde_json::Value::Array(
+                tr.content
+                    .iter()
+                    .map(|part| match part {
+                        ToolResultContentPart::Text(t) => {
+                            let text = maybe_trim_tool_output(&t.text, is_old_turn, self.trimming);
+                            serde_json::json!({
+                                "type": "text",
+                                "text": text,
+                            })
+                        }
+                        ToolResultContentPart::Image(img) => serde_json::json!({
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": img.mime_type,
+                                "data": img.data,
+                            }
+                        }),
                     })
-                }
-                ToolResultContentPart::Image(img) => serde_json::json!({
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": img.mime_type,
-                        "data": img.data,
-                    }
-                }),
-            })
-            .collect();
+                    .collect(),
+            )
+        };
 
         let content = serde_json::json!([{
             "type": "tool_result",
@@ -749,6 +963,37 @@ impl MessageVisitor for AnthropicVisitor {
             role: "user".into(),
             content,
         });
+    }
+}
+
+fn claude_code_tool_result_content(
+    tr: &ToolResultMessage,
+    is_old_turn: bool,
+    trimming: ToolResultTrimming,
+) -> serde_json::Value {
+    let parts: Vec<serde_json::Value> = tr
+        .content
+        .iter()
+        .map(|part| match part {
+            ToolResultContentPart::Text(t) => {
+                let text = maybe_trim_tool_output(&t.text, is_old_turn, trimming);
+                serde_json::Value::String(text)
+            }
+            ToolResultContentPart::Image(img) => serde_json::json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": img.mime_type,
+                    "data": img.data,
+                }
+            }),
+        })
+        .collect();
+
+    match parts.as_slice() {
+        [] => serde_json::Value::String(String::new()),
+        [single] => single.clone(),
+        _ => serde_json::Value::Array(parts),
     }
 }
 
@@ -974,6 +1219,8 @@ enum SseEvent {
 
 #[derive(Debug, Deserialize)]
 struct MessageStartData {
+    #[serde(default)]
+    id: Option<String>,
     usage: Option<UsageData>,
 }
 
@@ -1113,6 +1360,9 @@ fn process_sse_event(
 
     match event {
         SseEvent::MessageStart { message } => {
+            if let Some(id) = message.id {
+                output.generation_id = Some(id);
+            }
             if let Some(usage) = message.usage {
                 output.usage.input_tokens = TokenCount::new(usage.input_tokens);
                 output.usage.output_tokens = TokenCount::new(usage.output_tokens);
@@ -1399,10 +1649,9 @@ mod tests {
         assert!(header.contains("context-1m-2025-08-07"));
         assert!(header.contains("effort-2025-11-24"));
         assert!(header.contains("context-management-2025-06-27"));
-        // off by default per spec
-        assert!(!header.contains("redact-thinking-2026-02-12"));
-        assert!(!header.contains("advisor-tool-2026-03-01"));
-        assert!(!header.contains("advanced-tool-use-2025-11-20"));
+        assert!(header.contains("redact-thinking-2026-02-12"));
+        assert!(header.contains("advisor-tool-2026-03-01"));
+        assert!(header.contains("advanced-tool-use-2025-11-20"));
     }
 
     #[test]
@@ -2067,6 +2316,7 @@ mod tests {
     fn process_message_start_event() {
         let event = SseEvent::MessageStart {
             message: MessageStartData {
+                id: None,
                 usage: Some(UsageData {
                     input_tokens: 100,
                     output_tokens: 0,
@@ -2084,6 +2334,28 @@ mod tests {
         assert!(matches!(events[0], StreamEvent::Start { .. }));
         assert_eq!(output.usage.input_tokens, TokenCount::new(100));
         assert_eq!(output.usage.cache_read_tokens, TokenCount::new(50));
+    }
+
+    #[test]
+    fn process_message_start_preserves_message_id() {
+        let event = SseEvent::MessageStart {
+            message: MessageStartData {
+                id: Some("msg_01previous".into()),
+                usage: None,
+            },
+        };
+
+        let mut output = test_output();
+        let mut blocks = Vec::new();
+        let events = process_sse_event(event, &mut output, &mut blocks, true, &[]);
+
+        assert_eq!(output.generation_id.as_deref(), Some("msg_01previous"));
+        match &events[0] {
+            StreamEvent::Start { partial } => {
+                assert_eq!(partial.generation_id.as_deref(), Some("msg_01previous"));
+            }
+            other => panic!("expected Start, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2280,9 +2552,10 @@ mod tests {
         let options = StreamOptions::default();
         let body = build_request_body(&model, &Some("be helpful".into()), &[], &[], &options, true);
         let system = body.system.unwrap();
-        assert_eq!(system.len(), 2);
-        assert!(system[0].text.contains("Claude Code"));
-        assert_eq!(system[1].text, "be helpful");
+        assert_eq!(system.len(), 3);
+        assert!(system[0].text.starts_with("x-anthropic-billing-header:"));
+        assert!(system[1].text.contains("Claude Code"));
+        assert_eq!(system[2].text, "be helpful");
     }
 
     #[test]
@@ -2338,9 +2611,8 @@ mod tests {
         let system = Some("you are helpful".to_string());
         let body = build_request_body(&test_model(), &system, &[], &[], &options, true);
         let system_blocks = body.system.unwrap();
-        // oauth adds identity block + system prompt = 2 blocks
-        assert_eq!(system_blocks.len(), 2);
-        let cc = system_blocks[1].cache_control.as_ref().unwrap();
+        assert_eq!(system_blocks.len(), 3);
+        let cc = system_blocks[2].cache_control.as_ref().unwrap();
         assert_eq!(cc.scope.as_deref(), Some("global"));
         assert_eq!(cc.ttl.as_deref(), Some("1h"));
     }
@@ -2548,6 +2820,118 @@ mod tests {
         let body = build_request_body(&model, &None, &[], &tools, &options, true);
         let tools = body.tools.unwrap();
         assert_eq!(tools[0].name, "Read");
+    }
+
+    #[test]
+    fn oauth_body_matches_claude_code_capture_shape() {
+        let model = Model {
+            id: "claude-opus-4-8".into(),
+            name: "Claude Opus 4.8".into(),
+            reasoning: true,
+            context_window: TokenCount::new(1_000_000),
+            max_output_tokens: TokenCount::new(64_000),
+            supports_adaptive_thinking: true,
+            supported_thinking_levels: vec![ThinkingLevel::High],
+            ..test_model()
+        };
+        let options = StreamOptions {
+            thinking: Some(ThinkingLevel::High),
+            session_id: Some("099eaa52-339e-4f1b-adc9-38a451168a7e".into()),
+            account_id: Some("0f47b1d2-dec7-41a4-bd49-4d34f0b8f360".into()),
+            ..Default::default()
+        };
+        let messages = vec![
+            Message::Assistant(
+                AssistantMessage::builder()
+                    .content(vec![AssistantContentPart::ToolCall(ToolCall {
+                        id: "toolu_01abc".into(),
+                        name: "bash".into(),
+                        arguments: serde_json::json!({"command": "echo hi"}),
+                    })])
+                    .model("claude-opus-4-8".into())
+                    .provider(Provider::Anthropic)
+                    .api(Api::AnthropicMessages)
+                    .stop_reason(StopReason::ToolUse)
+                    .timestamp_ms(Timestamp::zero())
+                    .generation_id("msg_01previous")
+                    .build(),
+            ),
+            Message::ToolResult(ToolResultMessage {
+                tool_call_id: "toolu_01abc".into(),
+                tool_name: "bash".into(),
+                content: vec![ToolResultContentPart::Text(TextContent {
+                    text: "hi".into(),
+                })],
+                outcome: ToolOutcome::Success,
+                timestamp_ms: Timestamp::zero(),
+            }),
+        ];
+        let tools = vec![ToolDefinition {
+            name: "bash".into(),
+            description: "run shell commands".into(),
+            parameters: serde_json::json!({"type": "object"}),
+        }];
+
+        let body = build_request_body(
+            &model,
+            &Some("be helpful".into()),
+            &messages,
+            &tools,
+            &options,
+            true,
+        );
+        let json = serde_json::to_value(&body).unwrap();
+
+        assert!(
+            json.get("cache_control").is_none(),
+            "claude-code keeps cache_control on blocks, not the request root: {json}"
+        );
+        assert_eq!(json["thinking"], serde_json::json!({"type": "adaptive"}));
+        assert_eq!(
+            json["context_management"],
+            serde_json::json!({"edits": [{"type": "clear_thinking_20251015", "keep": "all"}]})
+        );
+        assert_eq!(
+            json["diagnostics"],
+            serde_json::json!({"previous_message_id": "msg_01previous"})
+        );
+
+        let user_id: serde_json::Value =
+            serde_json::from_str(json["metadata"]["user_id"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            user_id["account_uuid"],
+            "0f47b1d2-dec7-41a4-bd49-4d34f0b8f360"
+        );
+        assert_eq!(
+            user_id["session_id"],
+            "099eaa52-339e-4f1b-adc9-38a451168a7e"
+        );
+        let device_id = user_id["device_id"].as_str().unwrap();
+        assert_eq!(device_id.len(), 64);
+        assert!(device_id.chars().all(|c| c.is_ascii_hexdigit()));
+
+        let system = json["system"].as_array().unwrap();
+        assert_eq!(system.len(), 3);
+        assert_eq!(
+            system[0]["text"],
+            "x-anthropic-billing-header: cc_version=2.1.170.c6b; cc_entrypoint=cli; cch=00000;"
+        );
+        assert!(system[0].get("cache_control").is_none());
+        assert_eq!(system[1]["text"], CLAUDE_CODE_IDENTITY);
+        assert!(system[1].get("cache_control").is_none());
+        assert_eq!(system[2]["text"], "be helpful");
+        assert_eq!(
+            system[2]["cache_control"],
+            serde_json::json!({"type": "ephemeral", "ttl": "1h", "scope": "global"})
+        );
+
+        assert_eq!(json["tools"][0]["name"], "Bash");
+        assert_eq!(json["tools"][0]["eager_input_streaming"], true);
+        assert_eq!(
+            json["messages"][0]["content"][0]["caller"],
+            serde_json::json!({"type": "direct"})
+        );
+        assert_eq!(json["messages"][1]["content"][0]["content"], "hi");
     }
 
     #[test]

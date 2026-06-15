@@ -223,7 +223,7 @@ pub struct StreamOptions {
 ///
 /// defaults follow the policy agreed with mush's primary user:
 /// - `context_1m`, `effort`, `context_management` default to `true`
-/// - `redact_thinking`, `advisor`, `advanced_tool_use` default to `false`
+/// - `redact_thinking`, `advisor`, `advanced_tool_use` default to `true`
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct AnthropicBetas {
@@ -247,9 +247,9 @@ impl Default for AnthropicBetas {
             context_1m: true,
             effort: true,
             context_management: true,
-            redact_thinking: false,
-            advisor: false,
-            advanced_tool_use: false,
+            redact_thinking: true,
+            advisor: true,
+            advanced_tool_use: true,
         }
     }
 }
@@ -277,31 +277,34 @@ impl AnthropicBetas {
     /// are appended based on `self`.
     #[must_use]
     pub fn to_header_value(&self) -> String {
-        let mut betas: Vec<&'static str> = vec![
-            "claude-code-20250219",
-            "oauth-2025-04-20",
-            "fine-grained-tool-streaming-2025-05-14",
-            "interleaved-thinking-2025-05-14",
-            "prompt-caching-scope-2026-01-05",
-        ];
+        let mut betas: Vec<&'static str> = vec!["claude-code-20250219", "oauth-2025-04-20"];
         if self.context_1m {
             betas.push("context-1m-2025-08-07");
         }
-        if self.effort {
-            betas.push("effort-2025-11-24");
+        betas.push("interleaved-thinking-2025-05-14");
+        if self.redact_thinking {
+            betas.push("redact-thinking-2026-02-12");
         }
         if self.context_management {
             betas.push("context-management-2025-06-27");
         }
-        if self.redact_thinking {
-            betas.push("redact-thinking-2026-02-12");
-        }
+        betas.extend([
+            "prompt-caching-scope-2026-01-05",
+            "mid-conversation-system-2026-04-07",
+        ]);
         if self.advisor {
             betas.push("advisor-tool-2026-03-01");
         }
         if self.advanced_tool_use {
             betas.push("advanced-tool-use-2025-11-20");
         }
+        if self.effort {
+            betas.push("effort-2025-11-24");
+        }
+        betas.extend([
+            "extended-cache-ttl-2025-04-11",
+            "cache-diagnosis-2026-04-07",
+        ]);
         betas.join(",")
     }
 }
