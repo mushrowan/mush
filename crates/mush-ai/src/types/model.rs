@@ -198,12 +198,67 @@ impl ThinkingLevel {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EffortLevel {
+    Minimal,
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    #[serde(untagged)]
+    Other(String),
+}
+
+impl EffortLevel {
+    #[must_use]
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Xhigh => "xhigh",
+            Self::Other(name) => name.as_str(),
+        }
+    }
+
+    #[must_use]
+    pub fn from_effort_str(effort: &str) -> Option<Self> {
+        match effort.trim().to_ascii_lowercase().as_str() {
+            "off" | "none" => None,
+            "minimal" => Some(Self::Minimal),
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            "xhigh" => Some(Self::Xhigh),
+            other => Some(Self::Other(other.to_string())),
+        }
+    }
+}
+
+impl ThinkingLevel {
+    #[must_use]
+    pub fn effort_level(&self) -> Option<EffortLevel> {
+        match self {
+            ThinkingLevel::Off => None,
+            ThinkingLevel::Minimal => Some(EffortLevel::Minimal),
+            ThinkingLevel::Low => Some(EffortLevel::Low),
+            ThinkingLevel::Medium => Some(EffortLevel::Medium),
+            ThinkingLevel::High => Some(EffortLevel::High),
+            ThinkingLevel::Xhigh => Some(EffortLevel::Xhigh),
+            ThinkingLevel::Other(name) => Some(EffortLevel::Other(name.clone())),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct StreamOptions {
     pub temperature: Option<Temperature>,
     pub max_tokens: Option<TokenCount>,
     pub api_key: Option<ApiKey>,
     pub thinking: Option<ThinkingLevel>,
+    pub effort: Option<EffortLevel>,
     /// stable session identifier for provider-side prompt caching
     pub session_id: Option<SessionId>,
     /// optional account id for providers that need account-scoped headers

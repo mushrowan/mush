@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use mush_ai::types::ThinkingLevel;
+use mush_ai::types::{EffortLevel, ThinkingLevel};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -53,6 +53,7 @@ pub struct Config {
     #[serde(default, deserialize_with = "deserialise_thinking")]
     #[schemars(with = "Option<ThinkingConfigWire>")]
     pub thinking: Option<ThinkingLevel>,
+    pub effort: Option<EffortLevel>,
     pub max_tokens: Option<u64>,
     pub max_turns: Option<usize>,
     pub cache_retention: Option<mush_ai::types::CacheRetention>,
@@ -171,6 +172,7 @@ impl Default for Config {
         Self {
             model: None,
             thinking: None,
+            effort: None,
             max_tokens: None,
             max_turns: None,
             cache_retention: None,

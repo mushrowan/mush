@@ -553,10 +553,9 @@ fn build_request_body(
     // open top (xhigh/max/Other) is clamped to `high`, which every
     // effort-capable anthropic model accepts. `Off` yields no name
     let output_config = if model.reasoning {
-        options
-            .thinking
+        super::requested_effort(options)
             .as_ref()
-            .and_then(|level| anthropic_effort(level, &model.supported_thinking_levels))
+            .and_then(|effort| anthropic_effort(effort, &model.supported_thinking_levels))
             .map(|effort| OutputConfig { effort })
     } else {
         None
@@ -772,18 +771,18 @@ fn anthropic_cache_control(
     })
 }
 
-/// the `output_config.effort` value for a request. uses the level's own
+/// the `output_config.effort` value for a request. uses the effort's own
 /// wire name when the model advertises an effort ladder (the cycler then
 /// only offers supported levels, so the value is always legal). without
 /// that metadata we can't know the model's ceiling, so the open top
 /// (`xhigh`/`max`/`Other`) is clamped to `high`, which every
-/// effort-capable anthropic model accepts. `Off` yields `None`.
-fn anthropic_effort(level: &ThinkingLevel, supported: &[ThinkingLevel]) -> Option<String> {
-    let name = level.effort_name()?;
+/// effort-capable anthropic model accepts.
+fn anthropic_effort(effort: &EffortLevel, supported: &[ThinkingLevel]) -> Option<String> {
+    let name = effort.name();
     if supported.is_empty() {
-        let clamped = match level {
-            ThinkingLevel::Minimal | ThinkingLevel::Low => "low",
-            ThinkingLevel::Medium => "medium",
+        let clamped = match effort {
+            EffortLevel::Minimal | EffortLevel::Low => "low",
+            EffortLevel::Medium => "medium",
             _ => "high",
         };
         return Some(clamped.to_string());
@@ -2234,6 +2233,34 @@ mod tests {
         assert_eq!(
             body.output_config.as_ref().map(|cfg| cfg.effort.as_str()),
             Some("max")
+        );
+    }
+
+    #[test]
+    fn adaptive_thinking_effort_can_differ_from_thinking_level() {
+        let model = Model {
+            id: "claude-opus-4-8".into(),
+            name: "Claude Opus 4.8".into(),
+            reasoning: true,
+            supports_adaptive_thinking: true,
+            supported_thinking_levels: vec![ThinkingLevel::Low, ThinkingLevel::High],
+            ..test_model()
+        };
+        let options = StreamOptions {
+            thinking: Some(ThinkingLevel::High),
+            effort: Some(EffortLevel::Low),
+            ..Default::default()
+        };
+
+        let body = build_request_body(&model, &None, &[], &[], &options, true);
+
+        assert!(matches!(
+            body.thinking,
+            Some(ThinkingConfig::Adaptive { .. })
+        ));
+        assert_eq!(
+            body.output_config.as_ref().map(|cfg| cfg.effort.as_str()),
+            Some("low")
         );
     }
 

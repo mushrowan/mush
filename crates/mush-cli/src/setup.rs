@@ -130,14 +130,7 @@ impl AppSetup {
 
         let thinking_prefs = config::load_thinking_prefs();
         let thinking_level = resolve_thinking(args.thinking, &model, &thinking_prefs, &cwd, &cfg);
-        let mut options = StreamOptions {
-            thinking: thinking_level,
-            max_tokens: args.max_tokens.or(cfg.max_tokens).map(TokenCount::new),
-            cache_retention: cfg.cache_retention,
-            anthropic_betas: Some(cfg.settings.anthropic_betas.clone()),
-            force_budget_thinking: cfg.force_budget_thinking,
-            ..Default::default()
-        };
+        let mut options = stream_options_from_config(&cfg, thinking_level, args.max_tokens);
         resolve_api_key(&mut options, &model, &cfg).await;
 
         let compaction_model = init_compaction_model(&cfg, &model, &options).await;
@@ -580,6 +573,22 @@ pub fn resolve_thinking(
         .map(|level| level.normalize_visible())
 }
 
+pub fn stream_options_from_config(
+    cfg: &config::Config,
+    thinking: Option<ThinkingLevel>,
+    max_tokens_override: Option<u64>,
+) -> StreamOptions {
+    StreamOptions {
+        thinking,
+        effort: cfg.effort.clone(),
+        max_tokens: max_tokens_override.or(cfg.max_tokens).map(TokenCount::new),
+        cache_retention: cfg.cache_retention,
+        anthropic_betas: Some(cfg.settings.anthropic_betas.clone()),
+        force_budget_thinking: cfg.force_budget_thinking,
+        ..Default::default()
+    }
+}
+
 /// resolve API key for a model: env > config > stored credentials > oauth
 pub async fn resolve_api_key(options: &mut StreamOptions, model: &Model, cfg: &config::Config) {
     if options.api_key.is_some() {
@@ -939,6 +948,21 @@ mod tests {
             resolve_thinking(false, &model, &prefs, dir.path(), &cfg),
             Some(ThinkingLevel::Low)
         );
+    }
+
+    #[test]
+    fn config_effort_is_independent_from_config_thinking() {
+        let cfg: config::Config = toml::from_str(
+            r#"
+thinking = "high"
+effort = "low"
+"#,
+        )
+        .unwrap();
+        let options = stream_options_from_config(&cfg, Some(ThinkingLevel::High), None);
+
+        assert_eq!(options.effort, Some(mush_ai::types::EffortLevel::Low));
+        assert_eq!(options.thinking, Some(ThinkingLevel::High));
     }
 
     #[test]

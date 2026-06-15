@@ -105,6 +105,23 @@
       ],
       "type": "string"
     },
+    "EffortLevel": {
+      "anyOf": [
+        {
+          "enum": [
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
     "HookEntry": {
       "description": "a single hook entry in config",
       "properties": {
@@ -695,6 +712,17 @@
       "default": false,
       "description": "use dynamic meta-tools for MCP instead of loading all schemas (default false)",
       "type": "boolean"
+    },
+    "effort": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EffortLevel"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     },
     "favourite_models": {
       "default": [],

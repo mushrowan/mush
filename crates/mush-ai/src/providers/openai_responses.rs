@@ -163,10 +163,9 @@ fn build_request_body(
         )
     };
 
-    let reasoning_effort = options
-        .thinking
+    let reasoning_effort = super::requested_effort(options)
         .as_ref()
-        .and_then(|level| super::openai_reasoning_effort(model, level));
+        .and_then(|effort| super::openai_reasoning_effort(model, effort));
 
     let reasoning = reasoning_effort.map(|effort| RequestReasoning {
         effort,
