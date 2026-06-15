@@ -5,6 +5,7 @@
 //! module parses that format into structured events and renders them as
 //! either inline or side-by-side rows depending on available width.
 
+use ratatui::buffer::CellWidth;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use similar::{ChangeTag, TextDiff};
@@ -70,12 +71,23 @@ fn is_truncation_footer(line: &str) -> bool {
     (trimmed.starts_with('…') || trimmed.starts_with("...")) && trimmed.contains("more line")
 }
 
-/// truncate `text` so its unicode display width is at most `max`,
+fn display_width(text: &str) -> usize {
+    usize::from(text.cell_width())
+}
+
+fn char_display_width(ch: char) -> usize {
+    if ch.is_control() {
+        return 0;
+    }
+    let mut buf = [0; 4];
+    usize::from(ch.encode_utf8(&mut buf).cell_width())
+}
+
+/// truncate `text` so its terminal display width is at most `max`,
 /// appending `…` if truncation happened. returns the original string when
 /// it already fits
 fn truncate_display(text: &str, max: usize) -> String {
-    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
-    if UnicodeWidthStr::width(text) <= max {
+    if display_width(text) <= max {
         return text.to_string();
     }
     // need to truncate: reserve 1 col for the ellipsis
@@ -83,7 +95,7 @@ fn truncate_display(text: &str, max: usize) -> String {
     let mut width = 0usize;
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
-        let cw = ch.width().unwrap_or(0);
+        let cw = char_display_width(ch);
         if width + cw > budget {
             break;
         }
@@ -97,9 +109,8 @@ fn truncate_display(text: &str, max: usize) -> String {
 /// render a styled cell of fixed display width, padding with spaces
 /// that carry the same style so backgrounds extend to the edge
 fn cell<'a>(text: String, width: usize, style: Style) -> Vec<Span<'a>> {
-    use unicode_width::UnicodeWidthStr;
     let truncated = truncate_display(&text, width);
-    let used = UnicodeWidthStr::width(truncated.as_str());
+    let used = display_width(truncated.as_str());
     let pad = width.saturating_sub(used);
     vec![
         Span::styled(truncated, style),
@@ -116,10 +127,9 @@ pub(crate) fn fit_spans(
     width: usize,
     pad_style: Style,
 ) -> Vec<Span<'static>> {
-    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
     let total: usize = spans
         .iter()
-        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+        .map(|s| display_width(s.content.as_ref()))
         .sum();
     if total <= width {
         let mut out = spans;
@@ -134,7 +144,7 @@ pub(crate) fn fit_spans(
     let mut out: Vec<Span<'static>> = Vec::new();
     let mut used = 0usize;
     for span in spans {
-        let span_width = UnicodeWidthStr::width(span.content.as_ref());
+        let span_width = display_width(span.content.as_ref());
         if used + span_width <= budget {
             used += span_width;
             out.push(span);
@@ -146,7 +156,7 @@ pub(crate) fn fit_spans(
         let mut taken = String::new();
         let mut taken_width = 0usize;
         for ch in span.content.chars() {
-            let cw = ch.width().unwrap_or(0);
+            let cw = char_display_width(ch);
             if taken_width + cw > remaining {
                 break;
             }
@@ -708,6 +718,18 @@ mod tests {
         // `│` is 1 col wide
         let result = truncate_display("a│b│c│d", 4);
         assert!(result.ends_with(ELLIPSIS));
+    }
+
+    #[test]
+    fn truncate_display_uses_terminal_cell_width_for_halfwidth_dakuten() {
+        assert_eq!(truncate_display("abcｶﾞ", 4), "abc…");
+    }
+
+    #[test]
+    fn fit_spans_uses_terminal_cell_width_for_halfwidth_dakuten() {
+        let fitted = fit_spans(vec![Span::raw("abcｶﾞ")], 4, Style::default());
+        let rendered: String = fitted.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(rendered, "abc…");
     }
 
     #[test]
