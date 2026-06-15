@@ -1061,11 +1061,11 @@ fn render_user_message_box<'a>(
         } else {
             " attachments "
         };
-        let title_chars = title.chars().count();
+        let title_width = text_cell_width(title);
         let mut top = String::from("┌");
         for (i, cw) in cell_widths.iter().enumerate() {
-            let run = if i == 0 && *cw >= title_chars + 2 {
-                let dash_count = cw.saturating_sub(title_chars + 1);
+            let run = if i == 0 && *cw >= title_width + 2 {
+                let dash_count = cw.saturating_sub(title_width + 1);
                 format!("─{title}{}", "─".repeat(dash_count))
             } else {
                 "─".repeat(*cw)
@@ -1131,7 +1131,7 @@ fn render_user_message_box<'a>(
     let content_width = inner.saturating_sub(2); // minus 1 space left + 1 space right
     for line in msg.content.lines() {
         for wrapped in wrap_text(line, content_width) {
-            let pad = content_width.saturating_sub(wrapped.chars().count());
+            let pad = content_width.saturating_sub(text_cell_width(&wrapped));
             let padded = format!(" {wrapped}{} ", " ".repeat(pad));
             lines.push(Line::from(vec![
                 Span::styled("│", border_style),
@@ -1237,8 +1237,8 @@ fn height_fingerprint(msg: &DisplayMessage, width: u16, height: usize) -> Cached
 
 /// cheap height estimate for viewport culling.
 /// uses a per-message cache keyed by O(1) byte-length fingerprint
-/// to avoid re-scanning content with chars().count() every frame.
-/// falls back to the indented cache or character-count estimation on miss.
+/// to avoid re-measuring content every frame. falls back to the indented
+/// cache or terminal-cell-width estimation on miss.
 /// result includes the trailing separator line.
 fn estimate_message_height(
     msg: &DisplayMessage,
@@ -1425,8 +1425,8 @@ fn count_estimated_lines(text: &str, width: usize) -> usize {
     }
     text.lines()
         .map(|line| {
-            let chars = line.chars().count();
-            if chars == 0 { 1 } else { chars.div_ceil(width) }
+            let cells = text_cell_width(line);
+            if cells == 0 { 1 } else { cells.div_ceil(width) }
         })
         .sum::<usize>()
         .max(1)
@@ -1561,8 +1561,8 @@ const BASH_OUTPUT_WRAP_WIDTH: usize = 88;
 /// caller should clamp to available space
 fn natural_single_box_width(tc: &DisplayToolCall) -> usize {
     // "┌─ icon name ─┐" = corner(2) + icon+spaces(3) + name + space(1) + fill(1) + corner(1)
-    let title_w = usize::from(tc.name.as_str().cell_width()) + 8;
-    let summary_w = usize::from(tc.summary.as_str().cell_width()) + 4;
+    let title_w = text_cell_width(&tc.name) + 8;
+    let summary_w = text_cell_width(&tc.summary) + 4;
     let output_w = tc
         .output_preview
         .as_deref()
@@ -1587,12 +1587,35 @@ fn natural_single_box_width(tc: &DisplayToolCall) -> usize {
 }
 
 fn boxed_preview_width(line: &str, tool_name: &str) -> usize {
-    let width = usize::from(line.cell_width());
+    let width = text_cell_width(line);
     if tool_name.eq_ignore_ascii_case("bash") {
         width.max(BASH_OUTPUT_WRAP_WIDTH)
     } else {
         width
     }
+}
+
+fn text_cell_width(text: &str) -> usize {
+    usize::from(text.cell_width())
+}
+
+fn char_cell_width(ch: char) -> usize {
+    if ch.is_control() {
+        return 0;
+    }
+    let mut buf = [0; 4];
+    text_cell_width(ch.encode_utf8(&mut buf))
+}
+
+fn spans_cell_width(spans: &[Span<'_>]) -> usize {
+    spans
+        .iter()
+        .map(|span| text_cell_width(span.content.as_ref()))
+        .sum()
+}
+
+fn line_cell_width(line: &Line<'_>) -> usize {
+    spans_cell_width(&line.spans)
 }
 
 /// compute a grid shape (rows, cols) for laying out `n` panels across
@@ -1821,9 +1844,9 @@ fn render_single_tool_box(
 
     // title: " ✓ name "
     let title_text = format!(" {icon} {} ", tc.name);
-    let title_chars = title_text.chars().count();
+    let title_width = text_cell_width(&title_text);
     // ┌─ + title + ─...─ + ┐  (width total)
-    let fill = width.saturating_sub(title_chars + 3); // 3 = ┌─ + ┐
+    let fill = width.saturating_sub(title_width + 3); // 3 = ┌─ + ┐
 
     // top border
     let indent = Span::raw(" ".repeat(BOX_INDENT));
@@ -2014,9 +2037,9 @@ fn render_side_by_side_boxes(
         let border = Style::default().fg(colour);
         let corner = if i == 0 { "┌─" } else { "┬─" };
         let title = format!(" {icon} {} ", tc.name);
-        let title_chars = title.chars().count();
+        let title_width = text_cell_width(&title);
         let pw = panel_inner + if i < remainder { 1 } else { 0 };
-        let fill = pw.saturating_sub(title_chars + 1); // 1 for the ─ after corner
+        let fill = pw.saturating_sub(title_width + 1); // 1 for the ─ after corner
 
         top_spans.push(Span::styled(corner, border));
         top_spans.push(Span::styled(
@@ -2079,7 +2102,7 @@ fn render_side_by_side_boxes(
 
             let text = content.get(row).map(|s| s.as_str()).unwrap_or("");
             let style = diff_line_style(text, theme);
-            let used = text.chars().count() + 1; // +1 for leading space
+            let used = text_cell_width(text) + 1; // +1 for leading space
             let pad = pw.saturating_sub(used);
             spans.push(Span::styled(format!(" {text}"), style));
             spans.push(Span::raw(" ".repeat(pad)));
@@ -2117,7 +2140,7 @@ fn push_box_content_line<'a>(
     lines: &mut Vec<Line<'a>>,
 ) {
     for wrapped in wrap_text(text, inner_width) {
-        let pad = inner_width.saturating_sub(wrapped.chars().count());
+        let pad = inner_width.saturating_sub(text_cell_width(&wrapped));
         lines.push(Line::from(vec![
             indent.clone(),
             Span::styled("│ ", border),
@@ -2142,7 +2165,7 @@ fn push_highlighted_box_line<'a>(
     ctx: &ToolHighlightCtx<'_>,
     lines: &mut Vec<Line<'a>>,
 ) {
-    if unicode_width::UnicodeWidthStr::width(text) > inner_width {
+    if text_cell_width(text) > inner_width {
         push_box_content_line(
             text,
             inner_width,
@@ -2208,7 +2231,7 @@ fn append_span_wrapped(
     let style = span.style;
     let mut chunk = String::new();
     for ch in span.content.chars() {
-        let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        let ch_width = char_cell_width(ch);
         if *current_width + ch_width > width && *current_width > 0 {
             flush_styled_chunk(&mut chunk, style, current);
             rows.push(std::mem::take(current));
@@ -2328,8 +2351,8 @@ fn push_read_content_line<'a>(
 
     // gutter: right-aligned line number followed by 2 spaces of separation
     let gutter = format!("{:>w$}  ", n, w = ctx.gutter_width);
-    let gutter_chars = gutter.chars().count();
-    let remaining_width = inner_width.saturating_sub(gutter_chars);
+    let gutter_width = text_cell_width(&gutter);
+    let remaining_width = inner_width.saturating_sub(gutter_width);
 
     // build content spans via syntect (bg-free, keeps terminal bg) or plain
     let content_spans: Vec<Span<'static>> = ctx
@@ -2338,11 +2361,7 @@ fn push_read_content_line<'a>(
         .unwrap_or_else(|| vec![Span::raw(content.to_string())]);
 
     // measure content width so we can pad the tail
-    use unicode_width::UnicodeWidthStr;
-    let content_width: usize = content_spans
-        .iter()
-        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
-        .sum();
+    let content_width = spans_cell_width(&content_spans);
 
     // if content overflows the remaining width, fall back to wrapping
     // without syntax highlighting (simpler and rare for read previews)
@@ -2382,7 +2401,7 @@ fn indent_line<'a>(line: Line<'a>, content_width: usize) -> Vec<Line<'a>> {
         spans.extend(line.spans);
         return vec![Line::from(spans).style(line_style)];
     }
-    if line.width() <= content_width {
+    if line_cell_width(&line) <= content_width {
         let mut spans = vec![Span::raw(" ")];
         spans.extend(line.spans);
         return vec![Line::from(spans).style(line_style)];
@@ -2396,7 +2415,7 @@ fn indent_line<'a>(line: Line<'a>, content_width: usize) -> Vec<Line<'a>> {
         .flat_map(|span| {
             let style = span.style;
             span.content.chars().map(move |ch| {
-                let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
+                let w = char_cell_width(ch);
                 (ch, style, w)
             })
         })
@@ -2482,57 +2501,52 @@ fn strip_row(row: &[(char, Style, usize)]) -> Vec<(char, Style)> {
     row[..end].iter().map(|(c, s, _)| (*c, *s)).collect()
 }
 
-/// wrap text to fit within `width` chars, breaking at spaces first,
-/// then character-wise for words longer than the width
+/// wrap text to fit within `width` terminal cells, breaking at spaces first,
+/// then cell-wise for words longer than the width
 fn wrap_text(text: &str, width: usize) -> Vec<String> {
     if width == 0 || text.is_empty() {
         return vec![text.to_string()];
     }
-    if text.chars().count() <= width {
+    if text_cell_width(text) <= width {
         return vec![text.to_string()];
     }
 
     let mut lines = Vec::new();
     let mut current = String::new();
-    let mut current_len: usize = 0;
+    let mut current_width: usize = 0;
 
     for word in text.split(' ') {
-        let word_len = word.chars().count();
+        let word_width = text_cell_width(word);
 
-        if word_len > width {
+        if word_width > width {
             // push current line first
             if !current.is_empty() {
                 lines.push(std::mem::take(&mut current));
-                current_len = 0;
+                current_width = 0;
             }
-            // character-wrap the long word
-            let mut remaining = word;
-            while !remaining.is_empty() {
-                let end = remaining
-                    .char_indices()
-                    .nth(width)
-                    .map_or(remaining.len(), |(i, _)| i);
-                let chunk = &remaining[..end];
-                remaining = &remaining[end..];
-                if remaining.is_empty() {
+            // cell-wrap the long word
+            let chunks = split_word_by_cell_width(word, width);
+            let last_index = chunks.len().saturating_sub(1);
+            for (index, chunk) in chunks.into_iter().enumerate() {
+                if index == last_index {
                     // last chunk becomes current line so next word can join
-                    current = chunk.to_string();
-                    current_len = chunk.chars().count();
+                    current_width = text_cell_width(&chunk);
+                    current = chunk;
                 } else {
-                    lines.push(chunk.to_string());
+                    lines.push(chunk);
                 }
             }
         } else if current.is_empty() {
             current = word.to_string();
-            current_len = word_len;
-        } else if current_len + 1 + word_len <= width {
+            current_width = word_width;
+        } else if current_width + 1 + word_width <= width {
             current.push(' ');
             current.push_str(word);
-            current_len += 1 + word_len;
+            current_width += 1 + word_width;
         } else {
             lines.push(std::mem::take(&mut current));
             current = word.to_string();
-            current_len = word_len;
+            current_width = word_width;
         }
     }
     if !current.is_empty() {
@@ -2542,6 +2556,28 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
         lines.push(String::new());
     }
     lines
+}
+
+fn split_word_by_cell_width(word: &str, width: usize) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0usize;
+    for ch in word.chars() {
+        let ch_width = char_cell_width(ch);
+        if current_width + ch_width > width && !current.is_empty() {
+            chunks.push(std::mem::take(&mut current));
+            current_width = 0;
+        }
+        current.push(ch);
+        current_width += ch_width;
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    if chunks.is_empty() {
+        chunks.push(String::new());
+    }
+    chunks
 }
 
 /// get icon and colour for a completed tool call
@@ -2927,6 +2963,23 @@ mod tests {
         assert!(content.contains('╰'), "missing rounded bottom-left corner");
         assert!(content.contains('╯'), "missing rounded bottom-right corner");
         assert!(content.contains("hi clob"));
+    }
+
+    #[test]
+    fn user_message_box_pads_wide_chars_by_cells() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.push_user_message("界".repeat(12));
+
+        let buf = render_app(&app, 28, 8);
+        let content = buffer_to_string(&buf);
+        let top_y = find_buffer_row(&buf, |line| line.contains('╭'));
+        let body_y = find_buffer_row(&buf, |line| line.contains('界'));
+
+        assert_eq!(
+            right_edge_cell(&buf, body_y),
+            right_edge_cell(&buf, top_y),
+            "body row should align with border by terminal cells:\n{content}"
+        );
     }
 
     #[test]
@@ -3606,6 +3659,44 @@ mod tests {
     }
 
     #[test]
+    fn side_by_side_boxes_pad_wide_chars_by_cells() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        let output = "界".repeat(18);
+        app.messages.push(DisplayMessage {
+            tool_calls: vec![
+                crate::app::DisplayToolCall {
+                    name: "bash".into(),
+                    summary: "first".into(),
+                    status: ToolCallStatus::Done,
+                    output_preview: Some(output.clone()),
+                    image_data: None,
+                    batch: 1,
+                },
+                crate::app::DisplayToolCall {
+                    name: "bash".into(),
+                    summary: "second".into(),
+                    status: ToolCallStatus::Done,
+                    output_preview: Some("ok".into()),
+                    image_data: None,
+                    batch: 1,
+                },
+            ],
+            ..DisplayMessage::new(MessageRole::Assistant, "running")
+        });
+
+        let buf = render_app(&app, 80, 16);
+        let content = buffer_to_string(&buf);
+        let top_y = find_buffer_row(&buf, |line| line.trim_start().starts_with('┌'));
+        let body_y = find_buffer_row(&buf, |line| line.contains('界'));
+
+        assert_eq!(
+            right_edge_cell(&buf, body_y),
+            right_edge_cell(&buf, top_y),
+            "side-by-side body row should align with border by terminal cells:\n{content}"
+        );
+    }
+
+    #[test]
     fn selected_code_block_gets_highlight() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.messages.push(DisplayMessage::new(
@@ -3764,6 +3855,16 @@ mod tests {
     }
 
     #[test]
+    fn wrap_text_uses_terminal_cell_width_for_wide_chars() {
+        assert_eq!(wrap_text("界界界", 4), vec!["界界", "界"]);
+    }
+
+    #[test]
+    fn count_estimated_lines_uses_terminal_cell_width_for_wide_chars() {
+        assert_eq!(count_estimated_lines("界界界", 4), 2);
+    }
+
+    #[test]
     fn tool_box_wraps_long_summary() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         let long_path = "/home/user/dev/mush/crates/mush-tui/src/widgets/message_list.rs";
@@ -3875,6 +3976,33 @@ mod tests {
         assert!(
             content.lines().any(|row| row.matches("ｶﾞ").count() == 4),
             "halfwidth dakuten output should fit on one row, got:\n{content}"
+        );
+    }
+
+    #[test]
+    fn read_tool_box_pads_halfwidth_dakuten_by_cells() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.messages.push(DisplayMessage {
+            tool_calls: vec![crate::app::DisplayToolCall {
+                name: "read".into(),
+                summary: "src/lib.rs".into(),
+                status: ToolCallStatus::Done,
+                output_preview: Some(format!("L1: {}", "abcｶﾞ".repeat(4))),
+                image_data: None,
+                batch: 1,
+            }],
+            ..DisplayMessage::new(MessageRole::Assistant, "")
+        });
+
+        let buf = render_app(&app, 80, 12);
+        let content = buffer_to_string(&buf);
+        let top_y = find_buffer_row(&buf, |line| line.trim_start().starts_with('┌'));
+        let body_y = find_buffer_row(&buf, |line| line.contains("abcｶﾞ"));
+
+        assert_eq!(
+            right_edge_cell(&buf, body_y),
+            right_edge_cell(&buf, top_y),
+            "read tool body row should align with border by terminal cells:\n{content}"
         );
     }
 
@@ -4215,6 +4343,43 @@ mod tests {
             !content.contains("lot more output that should wrap…"),
             "long highlighted bash output should wrap rather than use an inline ellipsis: {content}"
         );
+    }
+
+    #[test]
+    fn highlighted_tool_box_wraps_halfwidth_dakuten_by_cells() {
+        let line = "abcｶﾞ".repeat(4);
+        let rows = wrap_styled_spans(vec![Span::raw(line)], 15, Style::default());
+        let rendered: Vec<String> = rows
+            .iter()
+            .map(|row| row.iter().map(|span| span.content.as_ref()).collect())
+            .collect();
+
+        assert_eq!(
+            rendered,
+            vec!["abcｶﾞabcｶﾞabcｶﾞ", "abcｶﾞ"],
+            "halfwidth dakuten text should wrap by terminal cells"
+        );
+    }
+
+    fn find_buffer_row(buf: &Buffer, predicate: impl Fn(&str) -> bool) -> u16 {
+        (0..buf.area.height)
+            .find(|&y| predicate(&buffer_row(buf, y)))
+            .expect("buffer row present")
+    }
+
+    fn right_edge_cell(buf: &Buffer, y: u16) -> u16 {
+        (0..buf.area.width)
+            .rev()
+            .find(|&x| !buf[(x, y)].symbol().trim().is_empty())
+            .expect("row has non-empty cell")
+    }
+
+    fn buffer_row(buf: &Buffer, y: u16) -> String {
+        let mut row = String::new();
+        for x in 0..buf.area.width {
+            row.push_str(buf[(x, y)].symbol());
+        }
+        row
     }
 
     /// helper: convert buffer to string for assertions
