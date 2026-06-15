@@ -1,10 +1,9 @@
 //! status bar widget - model info, cost, token usage
 
-use ratatui::buffer::{Buffer, CellDiffOption};
+use ratatui::buffer::{Buffer, CellDiffOption, CellWidth};
 use ratatui::layout::{Constraint, HorizontalAlignment, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget, Wrap};
-use unicode_width::UnicodeWidthStr;
 
 use mush_ai::types::{Dollars, ThinkingLevel, TokenCount};
 
@@ -466,7 +465,7 @@ fn ensure_status_bar_cache(app: &App, width: u16) {
     let confirm = confirm_text(app);
 
     let left_width: usize = spans.iter().map(|s| s.width()).sum();
-    let right_width = UnicodeWidthStr::width(right_text.as_str());
+    let right_width = usize::from(right_text.as_str().cell_width());
     let total = left_width + 2 + right_width;
     let wraps = total > width as usize;
     let height = if confirm.is_some() {
@@ -532,8 +531,7 @@ impl Widget for StatusBar<'_> {
         // split main into left (wrapping content) and right (cwd, single line).
         // right column has fixed width = cwd display width + 1 space gap, shrinks if needed.
         // `…` (from truncate_path) and any unicode path components use display width
-        let right_width =
-            (UnicodeWidthStr::width(data.right_text.as_str()) as u16 + 1).min(main.width / 2);
+        let right_width = (data.right_text.as_str().cell_width() + 1).min(main.width / 2);
         let [left_area, right_area] =
             Layout::horizontal([Constraint::Min(1), Constraint::Length(right_width)]).areas(main);
 
@@ -803,6 +801,36 @@ mod tests {
             height, 1,
             "expected 1 line when content fits by display width \
              (display={display_width}, bytes={byte_length}, width={width})"
+        );
+    }
+
+    #[test]
+    fn status_bar_cwd_uses_terminal_cell_width_for_halfwidth_dakuten() {
+        use ratatui::buffer::CellWidth;
+
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.cwd = "abcｶﾞ".repeat(4);
+
+        let right_text = format!("{} ", truncate_path(&app.cwd, 30));
+        let ratatui_width = usize::from(right_text.as_str().cell_width());
+        let unicode_width = unicode_width::UnicodeWidthStr::width(right_text.as_str());
+        assert!(
+            ratatui_width > unicode_width,
+            "test cwd must expose a width-model difference: ratatui={ratatui_width}, unicode={unicode_width}"
+        );
+
+        let left_width: usize = left_spans(&app, 200).iter().map(|s| s.width()).sum();
+        let width = (left_width + 2 + unicode_width) as u16;
+        assert_eq!(
+            status_bar_height(&app, width),
+            2,
+            "status bar should wrap when cwd fits only under unicode-width counting"
+        );
+
+        let content = buffer_to_string(&render_status(&app, 60, 1));
+        assert!(
+            content.lines().any(|row| row.matches("ｶﾞ").count() == 4),
+            "right cwd should keep every halfwidth dakuten pair visible, got:\n{content}"
         );
     }
 
