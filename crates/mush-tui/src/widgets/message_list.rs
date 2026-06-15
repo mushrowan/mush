@@ -1,13 +1,11 @@
 //! message list widget - renders conversation history
 
-use ratatui::buffer::{Buffer, CellDiffOption};
+use mush_ai::types::TokenCount;
+use ratatui::buffer::{Buffer, CellDiffOption, CellWidth};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Widget;
-use unicode_width::UnicodeWidthStr;
-
-use mush_ai::types::TokenCount;
 
 use crate::app::{
     App, DisplayMessage, DisplayToolCall, ImageRenderArea, MessageRole, ToolCallStatus,
@@ -1563,8 +1561,8 @@ const BASH_OUTPUT_WRAP_WIDTH: usize = 88;
 /// caller should clamp to available space
 fn natural_single_box_width(tc: &DisplayToolCall) -> usize {
     // "┌─ icon name ─┐" = corner(2) + icon+spaces(3) + name + space(1) + fill(1) + corner(1)
-    let title_w = UnicodeWidthStr::width(tc.name.as_str()) + 8;
-    let summary_w = UnicodeWidthStr::width(tc.summary.as_str()) + 4;
+    let title_w = usize::from(tc.name.as_str().cell_width()) + 8;
+    let summary_w = usize::from(tc.summary.as_str().cell_width()) + 4;
     let output_w = tc
         .output_preview
         .as_deref()
@@ -1589,7 +1587,7 @@ fn natural_single_box_width(tc: &DisplayToolCall) -> usize {
 }
 
 fn boxed_preview_width(line: &str, tool_name: &str) -> usize {
-    let width = UnicodeWidthStr::width(line);
+    let width = usize::from(line.cell_width());
     if tool_name.eq_ignore_ascii_case("bash") {
         width.max(BASH_OUTPUT_WRAP_WIDTH)
     } else {
@@ -3853,6 +3851,30 @@ mod tests {
         assert!(
             box_width >= 38,
             "expected clamped-wide box, got {box_width}"
+        );
+    }
+
+    #[test]
+    fn completed_tool_box_sizes_output_with_halfwidth_dakuten_by_cells() {
+        let output = "abcｶﾞ".repeat(4);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.messages.push(DisplayMessage {
+            tool_calls: vec![crate::app::DisplayToolCall {
+                name: "noop".into(),
+                summary: "ok".into(),
+                status: ToolCallStatus::Done,
+                output_preview: Some(output.clone()),
+                image_data: None,
+                batch: 1,
+            }],
+            ..DisplayMessage::new(MessageRole::Assistant, "")
+        });
+
+        let content = buffer_to_string(&render_app(&app, 80, 12));
+
+        assert!(
+            content.lines().any(|row| row.matches("ｶﾞ").count() == 4),
+            "halfwidth dakuten output should fit on one row, got:\n{content}"
         );
     }
 
