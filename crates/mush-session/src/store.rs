@@ -25,6 +25,18 @@ pub struct SessionStore {
     base_dir: PathBuf,
 }
 
+#[derive(Debug, Clone)]
+pub struct SessionListReport {
+    pub sessions: Vec<SessionMeta>,
+    pub ignored: Vec<IgnoredSessionFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IgnoredSessionFile {
+    pub path: PathBuf,
+    pub reason: String,
+}
+
 impl SessionStore {
     /// create a store using the default data directory
     pub fn default_dir() -> PathBuf {
@@ -67,19 +79,28 @@ impl SessionStore {
 
     /// list all session metadata (without loading full messages)
     pub fn list(&self) -> Result<Vec<SessionMeta>, StoreError> {
+        Ok(self.list_report()?.sessions)
+    }
+
+    pub fn list_report(&self) -> Result<SessionListReport, StoreError> {
         self.init()?;
         let mut sessions = Vec::new();
+        let mut ignored = Vec::new();
 
         for path in self.list_paths()? {
             match load_meta(&path) {
                 Ok(meta) => sessions.push(meta),
-                Err(_) => continue, // skip corrupt files
+                Err(error) => ignored.push(IgnoredSessionFile {
+                    path,
+                    reason: ignored_session_reason(&error),
+                }),
             }
         }
 
         // sort by updated_at descending (most recent first)
         sessions.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
-        Ok(sessions)
+        ignored.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(SessionListReport { sessions, ignored })
     }
 
     /// enumerate session file paths without parsing them. cheap
@@ -107,6 +128,20 @@ impl SessionStore {
             std::fs::remove_file(path)?;
         }
         Ok(())
+    }
+}
+
+fn ignored_session_reason(error: &StoreError) -> String {
+    match error {
+        StoreError::Io(error) => {
+            if error.kind() == std::io::ErrorKind::UnexpectedEof {
+                "zero-byte or truncated session file".into()
+            } else {
+                error.to_string()
+            }
+        }
+        StoreError::Json(error) if error.is_eof() => "zero-byte or truncated session file".into(),
+        other => other.to_string(),
     }
 }
 
@@ -264,6 +299,29 @@ mod tests {
 
         let list = store.list().unwrap();
         assert_eq!(list.len(), 2);
+    }
+
+    #[test]
+    fn list_report_includes_corrupt_and_empty_files() {
+        let (dir, store) = temp_store();
+        let good = Session::new("model-a", "/tmp");
+        store.save(&good).unwrap();
+
+        let sessions_dir = dir.path().join("sessions");
+        mush_ai::private_io::write_atomic(&sessions_dir.join("corrupt.json"), "not json").unwrap();
+        mush_ai::private_io::write_atomic(&sessions_dir.join("empty.json"), "").unwrap();
+
+        let report = store.list_report().unwrap();
+
+        assert_eq!(report.sessions.len(), 1);
+        assert_eq!(report.sessions[0].id, good.meta.id);
+        assert_eq!(report.ignored.len(), 2);
+        assert!(report.ignored.iter().any(|ignored| {
+            ignored.path.ends_with("corrupt.json") && ignored.reason.contains("json error")
+        }));
+        assert!(report.ignored.iter().any(|ignored| {
+            ignored.path.ends_with("empty.json") && ignored.reason.contains("zero-byte")
+        }));
     }
 
     #[test]
