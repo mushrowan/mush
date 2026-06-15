@@ -2,18 +2,21 @@
 
 use std::cell::Ref;
 
-use ratatui::buffer::Buffer;
+use ratatui::buffer::{Buffer, CellWidth};
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Padding, Paragraph, Widget};
-use unicode_width::UnicodeWidthChar;
 
 use crate::app::{App, InputBuffer, PendingImage};
 
 /// display width of a char (0 for control chars, 2 for CJK/emoji, 1 otherwise)
 fn char_width(ch: char) -> usize {
-    ch.width().unwrap_or(0)
+    if ch.is_control() {
+        return 0;
+    }
+    let mut buf = [0; 4];
+    usize::from(ch.encode_utf8(&mut buf).cell_width())
 }
 
 /// expanded input with image placeholders replaced by display tokens
@@ -650,6 +653,17 @@ mod tests {
         // col = 2 (prompt "> ") + 2 (display width of "a¬") = 4
         // x = border(1) + 4 = 5
         assert_eq!(x, 5);
+    }
+
+    #[test]
+    fn cursor_position_uses_terminal_cell_width_for_halfwidth_dakuten() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.input.text = "abcｶﾞ".into();
+        app.input.cursor = app.input.text.len();
+        let input_box = InputBox::new(&app);
+        let area = Rect::new(0, 10, 40, 3);
+        let (x, _y) = input_box.cursor_position(area);
+        assert_eq!(x, 8);
     }
 
     #[test]
