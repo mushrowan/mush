@@ -5,6 +5,7 @@
 //! markdown parser, just enough for readable agent output.
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use ratatui::buffer::CellWidth;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use std::sync::LazyLock;
@@ -668,14 +669,14 @@ fn render_plain_code_block(code_lines: &[String]) -> Vec<Line<'static>> {
 fn code_block_width(code_lines: &[String], lang: &str) -> usize {
     let content_width = code_lines
         .iter()
-        .map(|line| unicode_width::UnicodeWidthStr::width(line.as_str()))
+        .map(|line| usize::from(line.as_str().cell_width()))
         .max()
         .unwrap_or(0);
-    content_width.max(lang.len()).max(1)
+    content_width.max(usize::from(lang.cell_width())).max(1)
 }
 
 fn pad_code_line(line: &str, width: usize) -> String {
-    let line_width = unicode_width::UnicodeWidthStr::width(line);
+    let line_width = usize::from(line.cell_width());
     format!("{line}{}", " ".repeat(width.saturating_sub(line_width)))
 }
 
@@ -699,7 +700,10 @@ fn highlight_code_block(
         Span::styled("┌─ ", ui_theme.horizontal_rule),
         Span::styled(syntax.name.to_string(), ui_theme.inline_code),
         Span::styled(
-            format!(" {}┐", "─".repeat(width.saturating_sub(syntax.name.len()))),
+            format!(
+                " {}┐",
+                "─".repeat(width.saturating_sub(usize::from(syntax.name.cell_width())))
+            ),
             ui_theme.horizontal_rule,
         ),
     ]));
@@ -720,7 +724,7 @@ fn highlight_code_block(
                     }
                     spans.push(Span::styled(text, syntect_to_style(style)));
                 }
-                let line_width = unicode_width::UnicodeWidthStr::width(code_line.as_str());
+                let line_width = usize::from(code_line.as_str().cell_width());
                 if width > line_width {
                     spans.push(Span::raw(" ".repeat(width - line_width)));
                 }
@@ -1033,6 +1037,17 @@ mod tests {
         assert_eq!(text.lines.len(), 4);
         assert!(text.lines[2].to_string().contains("hello world"));
         assert_eq!(highlight_code_block_call_count(), 0);
+    }
+
+    #[test]
+    fn plain_code_block_uses_terminal_cell_width_for_halfwidth_dakuten() {
+        use ratatui::buffer::CellWidth;
+
+        let text = render("```\nabcｶﾞ\n```", &t());
+        let border_width = text.lines[1].to_string().cell_width();
+        let content_width = text.lines[2].to_string().cell_width();
+
+        assert_eq!(content_width, border_width);
     }
 
     #[test]
