@@ -24,6 +24,9 @@ const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/2.1.170 (external, cli)";
 const CLAUDE_CODE_BILLING_HEADER: &str =
     "x-anthropic-billing-header: cc_version=2.1.170.c6b; cc_entrypoint=cli; cch=00000;";
 const CLAUDE_CODE_MAX_OUTPUT_TOKENS: u64 = 64_000;
+const ADVISOR_TOOL_TYPE: &str = "advisor_20260301";
+const ADVISOR_TOOL_NAME: &str = "advisor";
+const DEFAULT_ADVISOR_MODEL: &str = "claude-opus-4-8";
 
 // stealth mode: mimic claude code's identity for oauth
 const CLAUDE_CODE_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
@@ -416,12 +419,21 @@ struct RequestMessage {
 }
 
 #[derive(Serialize)]
-struct RequestTool {
-    name: String,
-    description: String,
-    input_schema: serde_json::Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    eager_input_streaming: Option<bool>,
+#[serde(untagged)]
+enum RequestTool {
+    Client {
+        name: String,
+        description: String,
+        input_schema: serde_json::Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        eager_input_streaming: Option<bool>,
+    },
+    Advisor {
+        #[serde(rename = "type")]
+        tool_type: &'static str,
+        name: &'static str,
+        model: &'static str,
+    },
 }
 
 #[derive(Serialize)]
@@ -523,7 +535,11 @@ fn build_request_body(
     };
     let converted_messages = convert_messages(messages, is_oauth, cache_control.clone(), trimming);
 
-    let converted_tools = convert_tools(tools, is_oauth);
+    let converted_tools = convert_tools(
+        tools,
+        is_oauth,
+        oauth_advisor_model(model, messages, tools, options, is_oauth),
+    );
 
     let thinking = match &options.thinking {
         Some(level) if *level != ThinkingLevel::Off && model.reasoning => {
@@ -606,9 +622,13 @@ fn build_request_body(
     }
 }
 
-fn convert_tools(tools: &[ToolDefinition], is_oauth: bool) -> Option<Vec<RequestTool>> {
-    if tools.is_empty() {
-        return None;
+fn convert_tools(
+    tools: &[ToolDefinition],
+    is_oauth: bool,
+    advisor_model: Option<&'static str>,
+) -> Option<Vec<RequestTool>> {
+    if tools.is_empty() && advisor_model.is_none() {
+        return is_oauth.then(Vec::new);
     }
 
     let mut converted: Vec<(usize, Option<usize>, RequestTool)> = tools
@@ -625,7 +645,7 @@ fn convert_tools(tools: &[ToolDefinition], is_oauth: bool) -> Option<Vec<Request
                 is_oauth
                     .then(|| claude_code_capture_tool_order(&name))
                     .flatten(),
-                RequestTool {
+                RequestTool::Client {
                     name,
                     description: tool.description.clone(),
                     input_schema: tool.parameters.clone(),
@@ -635,12 +655,88 @@ fn convert_tools(tools: &[ToolDefinition], is_oauth: bool) -> Option<Vec<Request
         })
         .collect();
 
+    if let Some(model) = advisor_model {
+        converted.push((
+            usize::MAX,
+            None,
+            RequestTool::Advisor {
+                tool_type: ADVISOR_TOOL_TYPE,
+                name: ADVISOR_TOOL_NAME,
+                model,
+            },
+        ));
+    }
+
     if is_oauth {
         converted
             .sort_by_key(|(index, capture_order, _)| (capture_order.unwrap_or(usize::MAX), *index));
     }
 
     Some(converted.into_iter().map(|(_, _, tool)| tool).collect())
+}
+
+fn oauth_advisor_model(
+    model: &Model,
+    messages: &[Message],
+    tools: &[ToolDefinition],
+    options: &StreamOptions,
+    is_oauth: bool,
+) -> Option<&'static str> {
+    if !is_oauth {
+        return None;
+    }
+    let betas = options.anthropic_betas.clone().unwrap_or_default();
+    if !betas.advisor {
+        return None;
+    }
+    let has_advisor_transcript = messages_contain_advisor_blocks(messages);
+    if !has_advisor_transcript && !should_offer_advisor(model, tools, options) {
+        return None;
+    }
+    advisor_model_for_executor(&model.id)
+}
+
+fn should_offer_advisor(model: &Model, tools: &[ToolDefinition], options: &StreamOptions) -> bool {
+    !tools.is_empty()
+        && is_lower_cost_advisor_executor(&model.id)
+        && matches!(
+            super::requested_effort(options),
+            Some(EffortLevel::High | EffortLevel::Xhigh | EffortLevel::Other(_))
+        )
+}
+
+fn is_lower_cost_advisor_executor(model_id: &str) -> bool {
+    matches!(
+        model_id,
+        "claude-haiku-4-5" | "claude-haiku-4-5-20251001" | "claude-sonnet-4-6"
+    )
+}
+
+fn messages_contain_advisor_blocks(messages: &[Message]) -> bool {
+    messages.iter().any(|message| match message {
+        Message::Assistant(assistant) => assistant.content.iter().any(|part| {
+            matches!(
+                part,
+                AssistantContentPart::ServerToolUse(ServerToolUse { name, .. })
+                    if name.as_str() == ADVISOR_TOOL_NAME
+            ) || matches!(part, AssistantContentPart::AdvisorToolResult(_))
+        }),
+        _ => false,
+    })
+}
+
+fn advisor_model_for_executor(model_id: &str) -> Option<&'static str> {
+    match model_id {
+        "claude-haiku-4-5"
+        | "claude-haiku-4-5-20251001"
+        | "claude-sonnet-4-6"
+        | "claude-opus-4-6"
+        | "claude-opus-4-7"
+        | "claude-opus-4-8" => Some(DEFAULT_ADVISOR_MODEL),
+        "claude-fable-5" => Some("claude-fable-5"),
+        "claude-mythos-5" => Some("claude-mythos-5"),
+        _ => None,
+    }
 }
 
 fn claude_code_metadata(options: &StreamOptions) -> RequestMetadata {
@@ -3061,7 +3157,7 @@ mod tests {
         }];
         let body = build_request_body(&model, &None, &[], &tools, &options, true);
         let tools = body.tools.unwrap();
-        assert_eq!(tools[0].name, "Read");
+        assert_eq!(serde_json::to_value(&tools[0]).unwrap()["name"], "Read");
     }
 
     #[test]
@@ -3218,13 +3314,189 @@ mod tests {
             .tools
             .unwrap()
             .into_iter()
-            .map(|tool| tool.name)
+            .map(|tool| serde_json::to_value(tool).unwrap()["name"].clone())
             .collect();
 
         assert_eq!(
             names,
-            vec!["Bash", "Edit", "Read", "Skill", "Write", "repo_map"]
+            vec![
+                serde_json::json!("Bash"),
+                serde_json::json!("Edit"),
+                serde_json::json!("Read"),
+                serde_json::json!("Skill"),
+                serde_json::json!("Write"),
+                serde_json::json!("repo_map")
+            ]
         );
+    }
+
+    #[test]
+    fn oauth_advisor_beta_adds_native_advisor_tool() {
+        let model = Model {
+            id: "claude-sonnet-4-6".into(),
+            name: "Claude Sonnet 4.6".into(),
+            ..test_model()
+        };
+        let options = StreamOptions {
+            thinking: Some(ThinkingLevel::High),
+            ..Default::default()
+        };
+        let tools = vec![ToolDefinition {
+            name: "bash".into(),
+            description: "run shell commands".into(),
+            parameters: serde_json::json!({"type": "object"}),
+        }];
+
+        let body = build_request_body(&model, &None, &[], &tools, &options, true);
+        let tools = serde_json::to_value(body.tools.unwrap()).unwrap();
+
+        assert_eq!(
+            tools,
+            serde_json::json!([
+                {
+                    "name": "Bash",
+                    "description": "run shell commands",
+                    "input_schema": {"type": "object"},
+                    "eager_input_streaming": true
+                },
+                {
+                    "type": "advisor_20260301",
+                    "name": "advisor",
+                    "model": "claude-opus-4-8"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn oauth_advisor_tool_is_not_added_to_opus_capture_shape() {
+        let model = Model {
+            id: "claude-opus-4-8".into(),
+            name: "Claude Opus 4.8".into(),
+            ..test_model()
+        };
+        let options = StreamOptions::default();
+        let tools = vec![ToolDefinition {
+            name: "bash".into(),
+            description: "run shell commands".into(),
+            parameters: serde_json::json!({"type": "object"}),
+        }];
+
+        let body = build_request_body(&model, &None, &[], &tools, &options, true);
+        let tools = serde_json::to_value(body.tools.unwrap()).unwrap();
+
+        assert_eq!(tools.as_array().unwrap().len(), 1);
+        assert_eq!(tools[0]["name"], "Bash");
+    }
+
+    #[test]
+    fn oauth_advisor_transcript_keeps_native_advisor_tool() {
+        let model = Model {
+            id: "claude-opus-4-8".into(),
+            name: "Claude Opus 4.8".into(),
+            ..test_model()
+        };
+        let content: Vec<AssistantContentPart> = serde_json::from_value(serde_json::json!([
+            {
+                "type": "server_tool_use",
+                "id": "srvtoolu_01advisor",
+                "name": "advisor",
+                "input": {}
+            },
+            {
+                "type": "advisor_tool_result",
+                "tool_use_id": "srvtoolu_01advisor",
+                "content": {
+                    "type": "advisor_result",
+                    "text": "prefer a bounded worker pool"
+                }
+            }
+        ]))
+        .expect("advisor blocks deserialize");
+        let messages = vec![Message::Assistant(
+            AssistantMessage::builder()
+                .content(content)
+                .model("claude-opus-4-8".into())
+                .provider(Provider::Anthropic)
+                .api(Api::AnthropicMessages)
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )];
+
+        let body = build_request_body(
+            &model,
+            &None,
+            &messages,
+            &[],
+            &StreamOptions::default(),
+            true,
+        );
+        let tools = serde_json::to_value(body.tools.unwrap()).unwrap();
+
+        assert_eq!(
+            tools,
+            serde_json::json!([
+                {
+                    "type": "advisor_20260301",
+                    "name": "advisor",
+                    "model": "claude-opus-4-8"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn oauth_empty_tool_catalogue_stays_empty() {
+        let model = Model {
+            id: "claude-haiku-4-5-20251001".into(),
+            name: "Claude Haiku 4.5".into(),
+            ..test_model()
+        };
+
+        let body = build_request_body(&model, &None, &[], &[], &StreamOptions::default(), true);
+        let tools = serde_json::to_value(body.tools.unwrap()).unwrap();
+
+        assert_eq!(tools, serde_json::json!([]));
+    }
+
+    #[test]
+    fn advisor_tool_respects_beta_toggle_and_oauth_mode() {
+        let model = Model {
+            id: "claude-sonnet-4-6".into(),
+            name: "Claude Sonnet 4.6".into(),
+            ..test_model()
+        };
+        let options = StreamOptions {
+            anthropic_betas: Some(AnthropicBetas {
+                advisor: false,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let tools = vec![ToolDefinition {
+            name: "bash".into(),
+            description: "run shell commands".into(),
+            parameters: serde_json::json!({"type": "object"}),
+        }];
+
+        let disabled = build_request_body(&model, &None, &[], &tools, &options, true);
+        let disabled_names: Vec<_> = disabled
+            .tools
+            .unwrap()
+            .into_iter()
+            .map(|tool| serde_json::to_value(tool).unwrap()["name"].clone())
+            .collect();
+        assert_eq!(disabled_names, vec![serde_json::json!("Bash")]);
+
+        let direct =
+            build_request_body(&model, &None, &[], &tools, &StreamOptions::default(), false);
+        let direct_names: Vec<_> = direct
+            .tools
+            .unwrap()
+            .into_iter()
+            .map(|tool| serde_json::to_value(tool).unwrap()["name"].clone())
+            .collect();
+        assert_eq!(direct_names, vec![serde_json::json!("bash")]);
     }
 
     #[test]
