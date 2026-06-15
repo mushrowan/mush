@@ -306,12 +306,13 @@ mod tests {
 
     #[test]
     fn request_body_parsed_and_redacted() {
-        let body = r#"{"model":"x","api_key":"sk-1234567890ab","messages":[{"role":"user"}]}"#;
+        let body = r#"{"model":"x","api_key":"sk-1234567890ab","access_token":"plain-access-token-value","messages":[{"role":"user"}]}"#;
         let rec = build_request(7, "POST", "https://x", &[], Some(body));
         assert_eq!(rec["kind"], "request");
         assert_eq!(rec["call_id"], 7);
         assert_eq!(rec["body"]["model"], "x");
         assert_eq!(rec["body"]["api_key"], REDACTED_HEADER_VALUE);
+        assert_eq!(rec["body"]["access_token"], REDACTED_HEADER_VALUE);
         assert_eq!(rec["body"]["messages"][0]["role"], "user");
     }
 

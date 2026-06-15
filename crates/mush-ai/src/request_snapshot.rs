@@ -171,6 +171,7 @@ const SENSITIVE_HEADERS: &[&str] = &[
 ];
 
 const SENSITIVE_JSON_FIELDS: &[&str] = &[
+    "access_token",
     "api_key",
     "apikey",
     "authorization",
@@ -457,6 +458,7 @@ mod tests {
         let fp = RequestFingerprint::from_json_sections("[]", "[]", "[]");
         let body = serde_json::json!({
             "api_key": "sk-body-field-secret-123",
+            "access_token": "plain-access-token-value",
             "messages": [{
                 "role": "user",
                 "content": "please use Bearer sk-inline-secret-456 and token sk-ant-oat-inline-789"
@@ -474,6 +476,10 @@ mod tests {
         assert!(
             !dump_text.contains("sk-body-field-secret-123"),
             "api key leaked: {dump_text}"
+        );
+        assert!(
+            !dump_text.contains("plain-access-token-value"),
+            "access token leaked: {dump_text}"
         );
         assert!(
             !dump_text.contains("sk-inline-secret-456"),
