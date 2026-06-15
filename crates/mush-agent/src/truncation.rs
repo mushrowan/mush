@@ -255,7 +255,10 @@ fn actionable_hint(saved_path: &Option<PathBuf>, tool_name: Option<&str>) -> Str
     }
 
     match saved_path {
-        Some(path) => format!("Full output: {}", path.display()),
+        Some(path) => format!(
+            "Full output: {}. Read the saved file to inspect omitted output.",
+            path.display()
+        ),
         None => "Full output could not be saved.".into(),
     }
 }
@@ -425,8 +428,10 @@ mod tests {
             std::env::set_var("MUSH_DATA_DIR", tmp.path());
         }
 
-        let out = apply_for_tool(
-            ToolResult::text(make_lines(5000)),
+        let out = truncate_for_tool(
+            ToolResult::text(make_lines(10)),
+            3,
+            usize::MAX,
             OutputLimit::Tail,
             Some("bash"),
         );
@@ -436,6 +441,29 @@ mod tests {
             assert!(
                 !t.contains("Grep tool") && !t.contains("Read tool"),
                 "non-read tools should not suggest search/read recovery: {t}"
+            );
+        });
+    }
+
+    #[test]
+    fn non_read_hint_explains_saved_file_recovery() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("MUSH_DATA_DIR", tmp.path());
+        }
+
+        let out = truncate_for_tool(
+            ToolResult::text(make_lines(10)),
+            3,
+            usize::MAX,
+            OutputLimit::Tail,
+            Some("bash"),
+        );
+
+        assert_text(&out, |t| {
+            assert!(
+                t.contains("Read the saved file"),
+                "bash truncation hint should explain how to recover output: {t}"
             );
         });
     }
