@@ -20,6 +20,16 @@ struct StatusArgs {
         deserialize_with = "mush_agent::de::uint"
     )]
     timeout: u64,
+    #[serde(default)]
+    action: StatusAction,
+}
+
+#[derive(Default, Deserialize, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+enum StatusAction {
+    #[default]
+    Poll,
+    Kill,
 }
 
 const fn default_poll_timeout() -> u64 {
@@ -49,6 +59,7 @@ impl AgentTool for BashStatusTool {
          The timeout is only how long this poll waits, not the job timeout. If it expires \
          while the job is still running, this tool returns a successful running status. \
          Use timeout to wait up to N seconds for the job to finish (default 30s, 0 for instant check). \
+         Use action=kill to stop a running background job by id. \
          Each poll keeps the API cache warm during long-running commands."
     }
 
@@ -63,6 +74,12 @@ impl AgentTool for BashStatusTool {
                 "timeout": {
                     "type": "integer",
                     "description": "seconds this poll waits for completion (default 30, 0 for instant check). this does not kill the job; expiry returns running status"
+                },
+                "action": {
+                    "type": "string",
+                    "description": "action to perform: poll for status or kill the running background job",
+                    "enum": ["poll", "kill"],
+                    "default": "poll"
                 }
             },
             "required": ["job_id"]
@@ -89,6 +106,18 @@ impl AgentTool for BashStatusTool {
                 return ToolResult::error(format!("no background job with id: {}", args.job_id));
             }
         };
+
+        if matches!(args.action, StatusAction::Kill) {
+            {
+                let mut state = handle.write().await;
+                if state.status.is_running() {
+                    state.finish(JobStatus::Killed);
+                }
+            }
+            self.registry.kill(&args.job_id).await;
+            let mut state = handle.write().await;
+            return format_job_result(&mut state);
+        }
 
         // poll with timeout: check periodically until done or timeout
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(args.timeout);
@@ -127,6 +156,7 @@ fn format_job_result(state: &mut crate::background::JobState) -> ToolResult {
         JobStatus::Done { exit_code } if *exit_code == 0 => (BackgroundStatus::Done, *exit_code),
         JobStatus::Done { exit_code } => (BackgroundStatus::Failed, *exit_code),
         JobStatus::TimedOut => (BackgroundStatus::TimedOut, -1),
+        JobStatus::Killed => (BackgroundStatus::Killed, -1),
         JobStatus::Failed(e) => {
             return ToolResult::error(format!("background job {} failed: {e}", state.id));
         }
@@ -143,7 +173,7 @@ fn format_job_result(state: &mut crate::background::JobState) -> ToolResult {
         status.as_str()
     );
 
-    if exit_code != 0 {
+    if status.is_error() {
         ToolResult {
             content: vec![mush_ai::types::ToolResultContentPart::Text(
                 mush_ai::types::TextContent {
@@ -201,6 +231,7 @@ enum BackgroundStatus {
     Done,
     Failed,
     TimedOut,
+    Killed,
 }
 
 impl BackgroundStatus {
@@ -209,7 +240,12 @@ impl BackgroundStatus {
             Self::Done => "done",
             Self::Failed => "failed",
             Self::TimedOut => "timed_out",
+            Self::Killed => "killed",
         }
+    }
+
+    const fn is_error(self) -> bool {
+        matches!(self, Self::Failed | Self::TimedOut)
     }
 }
 
@@ -498,6 +534,77 @@ mod tests {
         assert!(
             text.contains("poll timed out, job still running"),
             "should not phrase poll expiry like a command failure: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn kill_action_marks_running_job_killed() {
+        let registry = make_registry();
+        registry
+            .insert(crate::background::JobState {
+                id: "bg_0".into(),
+                command: "sleep 100".into(),
+                status: JobStatus::Running,
+                stdout: "partial\n".into(),
+                stderr: String::new(),
+                stdout_consumed_bytes: 0,
+                stderr_consumed_bytes: 0,
+                started: std::time::Instant::now(),
+                finished: None,
+                cwd: std::sync::Arc::from(std::path::Path::new(".")),
+            })
+            .await;
+
+        let tool = BashStatusTool::new(registry.clone());
+        let result = tool
+            .execute(serde_json::json!({
+                "job_id": "bg_0",
+                "action": "kill"
+            }))
+            .await;
+        let text = extract_text(&result);
+
+        assert!(result.outcome.is_success(), "kill should succeed: {text}");
+        assert!(text.contains("killed"), "should report killed: {text}");
+        let handle = registry.get("bg_0").await.unwrap();
+        let state = handle.read().await;
+        assert!(
+            !state.status.is_running(),
+            "killed job must not count as running"
+        );
+    }
+
+    #[tokio::test]
+    async fn kill_action_stops_spawned_background_process() {
+        let tmp = tempfile::tempdir().unwrap();
+        let marker = tmp.path().join("survived");
+        let marker_str = marker.display().to_string();
+        let registry = make_registry();
+        let bash = crate::bash::BashTool::new(std::env::current_dir().unwrap().into())
+            .with_background_registry(registry.clone());
+        let status = BashStatusTool::new(registry.clone());
+
+        let started = bash
+            .execute(serde_json::json!({
+                "command": format!("sleep 3 && touch {marker_str}"),
+                "background": true
+            }))
+            .await;
+        assert!(started.outcome.is_success());
+
+        let killed = status
+            .execute(serde_json::json!({
+                "job_id": "bg_0",
+                "action": "kill"
+            }))
+            .await;
+        let text = extract_text(&killed);
+        assert!(killed.outcome.is_success(), "kill should succeed: {text}");
+
+        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+        assert!(
+            !marker.exists(),
+            "background child should have been killed before it touched the marker"
         );
     }
 

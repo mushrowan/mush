@@ -11,12 +11,6 @@ use serde::Deserialize;
 /// (builds, test suites), use background: true which has no cap
 const MAX_FOREGROUND_TIMEOUT_SECS: u64 = 600;
 
-/// background jobs without an explicit timeout default to this much
-/// wall clock before they get killed. matches the registry's expiry
-/// so a caller using only `bash_status` polling is guaranteed to see
-/// the final state before the job record is reaped
-const BACKGROUND_DEFAULT_TIMEOUT_SECS: u64 = 30 * 60;
-
 /// if a foreground command produces zero bytes of output for this long,
 /// kill it. catches servers, daemons, and commands that hang waiting
 /// for a TTY (e.g. jj split, jj describe without -m)
@@ -106,9 +100,8 @@ impl BashOutput {
 #[serde(deny_unknown_fields)]
 struct BashArgs {
     command: String,
-    /// explicit timeout override (seconds). when omitted, defaults depend on
-    /// background mode: foreground = crate::DEFAULT_TOOL_TIMEOUT_SECS,
-    /// background = BACKGROUND_DEFAULT_TIMEOUT_SECS
+    /// explicit timeout override for foreground commands (seconds).
+    /// background jobs ignore this and run until completion or explicit kill
     #[serde(default, deserialize_with = "mush_agent::de::opt_uint")]
     timeout: Option<u64>,
     #[serde(default)]
@@ -128,18 +121,12 @@ struct BashArgs {
 impl BashArgs {
     /// effective timeout.
     ///
-    /// background jobs without an explicit value get a generous half-hour
-    /// so typical nix builds and big test runs finish well before the
-    /// inner `tokio::time::timeout` fires. foreground commands keep the shared
-    /// tool timeout default and get hard-capped at 10 minutes.
+    /// foreground command timeout. background commands ignore timeout and
+    /// run until they complete or are killed through bash_status.
     fn effective_timeout(&self) -> u64 {
-        if self.background {
-            self.timeout.unwrap_or(BACKGROUND_DEFAULT_TIMEOUT_SECS)
-        } else {
-            self.timeout
-                .unwrap_or(crate::DEFAULT_TOOL_TIMEOUT_SECS)
-                .min(MAX_FOREGROUND_TIMEOUT_SECS)
-        }
+        self.timeout
+            .unwrap_or(crate::DEFAULT_TOOL_TIMEOUT_SECS)
+            .min(MAX_FOREGROUND_TIMEOUT_SECS)
     }
 }
 
@@ -353,9 +340,10 @@ impl AgentTool for BashTool {
          Do not pre-truncate with `| head` / `| tail` / `| grep` when reading help text or \
          unfamiliar command output - truncation is automatic and the full output stays \
          recoverable, but `| head` discards everything past the cut before it reaches us. \
-         Optionally provide a timeout in seconds. \
+         Optionally provide a timeout in seconds for foreground commands. \
          For long-running commands (builds, test suites), set background: true to run \
          asynchronously and poll with bash_status to avoid cache busting. \
+         Background jobs are not killed by timeout; use bash_status action=kill to stop one. \
          For searching file contents, use the Grep tool instead of running grep or rg via bash. \
          For locating files, use the Find or Glob tools instead of running find via bash. \
          Do not run interactive commands (e.g. vim, python REPL, less) as stdin is not available. \
@@ -384,7 +372,7 @@ impl AgentTool for BashTool {
                 "timeout": {
                     "type": "integer",
                     "description": format!(
-                        "timeout in seconds (optional, default {}). foreground commands that exceed this continue in the background when possible",
+                        "foreground timeout in seconds (optional, default {}). background jobs ignore timeout and run until completion or explicit bash_status kill",
                         crate::DEFAULT_TOOL_TIMEOUT_SECS
                     ),
                     "default": crate::DEFAULT_TOOL_TIMEOUT_SECS
@@ -396,7 +384,7 @@ impl AgentTool for BashTool {
                 },
                 "background": {
                     "type": "boolean",
-                    "description": "run in background, return job id immediately. poll with bash_status tool. use for commands >2min to keep cache warm"
+                    "description": "run in background, return job id immediately. poll with bash_status tool. use for commands >2min to keep cache warm. kill explicitly through bash_status if needed"
                 },
                 "concurrent": {
                     "type": "boolean",
@@ -490,14 +478,17 @@ impl BashTool {
         };
 
         let handle = registry.insert(state).await;
-        let timeout_secs = args.effective_timeout();
         let command = args.command.clone();
         let cwd = self.cwd.clone();
+        let registry = registry.clone();
+        let task_id = id.clone();
+        let (spawn_ready_tx, spawn_ready_rx) = tokio::sync::oneshot::channel();
 
         // spawn the command in a background task
         tokio::spawn(async move {
-            run_background_command(handle, &cwd, &command, timeout_secs).await;
+            run_background_command(handle, registry, task_id, &cwd, &command, spawn_ready_tx).await;
         });
+        let _ = spawn_ready_rx.await;
 
         let json = serde_json::json!({
             "job_id": id,
@@ -514,9 +505,11 @@ impl BashTool {
 /// run a command and stream output into a shared job state
 async fn run_background_command(
     handle: std::sync::Arc<tokio::sync::RwLock<crate::background::JobState>>,
+    registry: crate::background::BackgroundJobRegistry,
+    job_id: String,
     cwd: &std::path::Path,
     command: &str,
-    timeout_secs: u64,
+    spawn_ready: tokio::sync::oneshot::Sender<()>,
 ) {
     let mut cmd = tokio::process::Command::new("bash");
     let wrapped_command = command_with_direnv(command);
@@ -542,6 +535,7 @@ async fn run_background_command(
             state.finish(crate::background::JobStatus::Failed(format!(
                 "failed to spawn: {e}"
             )));
+            let _ = spawn_ready.send(());
             return;
         }
     };
@@ -550,53 +544,32 @@ async fn run_background_command(
     // pane close, agent shutdown) so nothing is left running in the
     // background after the registry drops the job.
     let mut pg_guard = ProcessGroupKillOnDrop::new(&child);
+    if let Some(kill_handle) = crate::background::JobKillHandle::from_child(&child) {
+        registry.set_kill_handle(&job_id, kill_handle).await;
+    }
+    let _ = spawn_ready.send(());
 
-    let timeout = tokio::time::Duration::from_secs(timeout_secs);
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
 
     let stdout_handle = tokio::spawn(stream_pipe(stdout_pipe, None, None));
     let stderr_handle = tokio::spawn(stream_pipe(stderr_pipe, None, None));
 
-    let status = match tokio::time::timeout(timeout, child.wait()).await {
-        Ok(Ok(status)) => status,
-        Ok(Err(e)) => {
+    let status = match child.wait().await {
+        Ok(status) => status,
+        Err(e) => {
             pg_guard.disarm();
             let stdout = stdout_handle.await.unwrap_or_default();
             let stderr = stderr_handle.await.unwrap_or_default();
             let mut state = handle.write().await;
             state.stdout = stdout;
             state.stderr = stderr;
-            state.finish(crate::background::JobStatus::Failed(format!(
-                "command failed: {e}"
-            )));
-            return;
-        }
-        Err(_) => {
-            // timeout fired. the child might have exited at the same instant,
-            // so try_wait first: if it reaped naturally, prefer the real exit
-            // code over TimedOut so the agent doesn't see spurious timeouts
-            // on long-but-finite builds that land right on the boundary
-            let reaped = child.try_wait().ok().flatten();
-            if reaped.is_some() {
-                pg_guard.disarm();
-            } else {
-                // kill the whole group so descendants release the pipes
-                // and the stream handles can drain to EOF
-                pg_guard.kill_now();
+            if state.status.is_running() {
+                state.finish(crate::background::JobStatus::Failed(format!(
+                    "command failed: {e}"
+                )));
             }
-            let stdout = stdout_handle.await.unwrap_or_default();
-            let stderr = stderr_handle.await.unwrap_or_default();
-            let mut state = handle.write().await;
-            state.stdout = stdout;
-            state.stderr = stderr;
-            let status = match reaped {
-                Some(status) => crate::background::JobStatus::Done {
-                    exit_code: status.code().unwrap_or(-1),
-                },
-                None => crate::background::JobStatus::TimedOut,
-            };
-            state.finish(status);
+            registry.clear_kill_handle(&job_id).await;
             return;
         }
     };
@@ -609,7 +582,11 @@ async fn run_background_command(
     let mut state = handle.write().await;
     state.stdout = stdout;
     state.stderr = stderr;
-    state.finish(crate::background::JobStatus::Done { exit_code });
+    if state.status.is_running() {
+        state.finish(crate::background::JobStatus::Done { exit_code });
+    }
+    drop(state);
+    registry.clear_kill_handle(&job_id).await;
 }
 
 async fn run_command(
@@ -832,6 +809,7 @@ async fn continue_in_background_after_timeout(
 ) -> ToolResult {
     let id = registry.next_id();
     let duration = running.duration;
+    let kill_handle = crate::background::JobKillHandle::from_child(&running.child);
     let state = crate::background::JobState {
         id: id.clone(),
         command: command.to_string(),
@@ -845,6 +823,11 @@ async fn continue_in_background_after_timeout(
         cwd: Arc::from(cwd),
     };
     let handle = registry.insert(state).await;
+    if let Some(kill_handle) = kill_handle {
+        registry.set_kill_handle(&id, kill_handle).await;
+    }
+    let registry_for_task = registry.clone();
+    let id_for_task = id.clone();
 
     tokio::spawn(async move {
         let TimedOutCommand {
@@ -863,14 +846,18 @@ async fn continue_in_background_after_timeout(
         let mut state = handle.write().await;
         state.stdout = stdout;
         state.stderr = stderr;
-        match status {
-            Ok(status) => state.finish(crate::background::JobStatus::Done {
-                exit_code: status.code().unwrap_or(-1),
-            }),
-            Err(error) => state.finish(crate::background::JobStatus::Failed(format!(
-                "command failed: {error}"
-            ))),
+        if state.status.is_running() {
+            match status {
+                Ok(status) => state.finish(crate::background::JobStatus::Done {
+                    exit_code: status.code().unwrap_or(-1),
+                }),
+                Err(error) => state.finish(crate::background::JobStatus::Failed(format!(
+                    "command failed: {error}"
+                ))),
+            }
         }
+        drop(state);
+        registry_for_task.clear_kill_handle(&id_for_task).await;
     });
 
     format_backgrounded_timeout_result(&id, command, timeout_secs, duration, json_output)
@@ -1506,6 +1493,37 @@ exit 64
     }
 
     #[tokio::test]
+    async fn background_job_is_not_killed_by_tool_timeout() {
+        let registry = crate::background::BackgroundJobRegistry::new();
+        let tool = BashTool::new(std::env::current_dir().unwrap().into())
+            .with_background_registry(registry.clone());
+
+        let result = tool
+            .execute(serde_json::json!({
+                "command": "sleep 2; echo background_survived",
+                "background": true,
+                "timeout": 1
+            }))
+            .await;
+        assert!(result.outcome.is_success());
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(2_500)).await;
+
+        let handle = registry.get("bg_0").await.unwrap();
+        let state = handle.read().await;
+        assert_eq!(
+            state.status,
+            crate::background::JobStatus::Done { exit_code: 0 },
+            "background jobs should run until natural completion unless explicitly killed"
+        );
+        assert!(
+            state.stdout.contains("background_survived"),
+            "background job should not be killed at the tool timeout boundary: {}",
+            state.stdout
+        );
+    }
+
+    #[tokio::test]
     async fn foreground_timeout_continues_in_background() {
         let registry = crate::background::BackgroundJobRegistry::new();
         let tool = BashTool::new(std::env::current_dir().unwrap().into())
@@ -1633,50 +1651,6 @@ exit 64
             schema["properties"]["timeout"]["default"],
             crate::DEFAULT_TOOL_TIMEOUT_SECS
         );
-    }
-
-    #[test]
-    fn background_timeout_not_capped() {
-        // background jobs use their own timeout without the foreground cap
-        let args: BashArgs = serde_json::from_value(serde_json::json!({
-            "command": "nix build",
-            "timeout": 3600,
-            "background": true
-        }))
-        .unwrap();
-        assert_eq!(args.effective_timeout(), 3600);
-    }
-
-    #[test]
-    fn background_timeout_defaults_to_thirty_minutes_when_unset() {
-        // regression: an unset timeout used to inherit the 120s foreground
-        // default, which killed nix builds / long test runs around the 2
-        // minute mark and reported them as TimedOut. background jobs must
-        // default to a generous wall-clock so bash_status polling observes
-        // natural completion
-        let args: BashArgs = serde_json::from_value(serde_json::json!({
-            "command": "nix build",
-            "background": true
-        }))
-        .unwrap();
-        assert_eq!(args.effective_timeout(), BACKGROUND_DEFAULT_TIMEOUT_SECS);
-        assert!(
-            args.effective_timeout() >= 30 * 60,
-            "background default should give nix builds and big test runs enough room to finish"
-        );
-    }
-
-    #[test]
-    fn background_timeout_explicit_override_honoured() {
-        // when the agent knows the job is quick it can still shorten the
-        // timeout explicitly
-        let args: BashArgs = serde_json::from_value(serde_json::json!({
-            "command": "sleep 5",
-            "background": true,
-            "timeout": 10
-        }))
-        .unwrap();
-        assert_eq!(args.effective_timeout(), 10);
     }
 
     #[tokio::test]

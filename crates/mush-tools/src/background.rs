@@ -13,7 +13,7 @@ use tokio::sync::RwLock;
 /// hard cap on concurrent background jobs regardless of flags
 const MAX_CONCURRENT_JOBS: usize = 3;
 
-/// jobs older than this are reaped automatically
+/// finished jobs older than this are reaped automatically
 const JOB_EXPIRY_SECS: u64 = 30 * 60;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,6 +21,7 @@ pub enum JobStatus {
     Running,
     Done { exit_code: i32 },
     TimedOut,
+    Killed,
     Failed(String),
 }
 
@@ -80,13 +81,38 @@ impl JobState {
 #[derive(Debug, Clone)]
 pub struct BackgroundJobRegistry {
     jobs: Arc<RwLock<HashMap<String, Arc<RwLock<JobState>>>>>,
+    kill_handles: Arc<RwLock<HashMap<String, JobKillHandle>>>,
     counter: Arc<std::sync::atomic::AtomicU64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct JobKillHandle {
+    process_group_id: i32,
+}
+
+impl JobKillHandle {
+    pub fn from_child(child: &tokio::process::Child) -> Option<Self> {
+        child.id().map(|pid| Self {
+            process_group_id: pid as i32,
+        })
+    }
+
+    pub fn kill(self) {
+        #[cfg(unix)]
+        unsafe {
+            // SAFETY: negating the process group id targets the whole group.
+            // the id came from a freshly spawned child, and SIGKILL has no
+            // additional safety preconditions.
+            libc::kill(-self.process_group_id, libc::SIGKILL);
+        }
+    }
 }
 
 impl BackgroundJobRegistry {
     pub fn new() -> Self {
         Self {
             jobs: Arc::new(RwLock::new(HashMap::new())),
+            kill_handles: Arc::new(RwLock::new(HashMap::new())),
             counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
@@ -151,6 +177,27 @@ impl BackgroundJobRegistry {
         handle
     }
 
+    pub async fn set_kill_handle(&self, id: &str, kill_handle: JobKillHandle) {
+        self.kill_handles
+            .write()
+            .await
+            .insert(id.to_string(), kill_handle);
+    }
+
+    pub async fn kill(&self, id: &str) -> bool {
+        let kill_handle = self.kill_handles.write().await.remove(id);
+        if let Some(kill_handle) = kill_handle {
+            kill_handle.kill();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub async fn clear_kill_handle(&self, id: &str) {
+        self.kill_handles.write().await.remove(id);
+    }
+
     /// get a job's shared state by id
     pub async fn get(&self, id: &str) -> Option<Arc<RwLock<JobState>>> {
         self.jobs.read().await.get(id).cloned()
@@ -162,7 +209,10 @@ impl BackgroundJobRegistry {
         jobs.retain(|_, job_handle| {
             // we can't await inside retain, so use try_read
             if let Ok(state) = job_handle.try_read() {
-                state.started.elapsed().as_secs() < JOB_EXPIRY_SECS
+                state.status.is_running()
+                    || state
+                        .finished
+                        .is_none_or(|finished| finished.elapsed().as_secs() < JOB_EXPIRY_SECS)
             } else {
                 true // keep jobs we can't read (they're being written to)
             }
