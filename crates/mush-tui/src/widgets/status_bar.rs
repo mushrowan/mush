@@ -464,7 +464,7 @@ fn ensure_status_bar_cache(app: &App, width: u16) {
     };
     let confirm = confirm_text(app);
 
-    let left_width: usize = spans.iter().map(|s| s.width()).sum();
+    let left_width = spans_cell_width(&spans);
     let right_width = usize::from(right_text.as_str().cell_width());
     let total = left_width + 2 + right_width;
     let wraps = total > width as usize;
@@ -484,6 +484,13 @@ fn ensure_status_bar_cache(app: &App, width: u16) {
         confirm,
         height,
     });
+}
+
+fn spans_cell_width(spans: &[Span<'_>]) -> usize {
+    spans
+        .iter()
+        .map(|span| usize::from(span.content.as_ref().cell_width()))
+        .sum()
 }
 
 /// calculate how many lines the status bar needs (1 or 2, +1 for confirm prompt).
@@ -785,7 +792,7 @@ mod tests {
         app.cwd = "~".into();
 
         let spans = left_spans(&app, 200);
-        let display_width: usize = spans.iter().map(|s| s.width()).sum();
+        let display_width = spans_cell_width(&spans);
         let byte_length: usize = spans.iter().map(|s| s.content.len()).sum();
         assert!(
             display_width < byte_length,
@@ -819,7 +826,7 @@ mod tests {
             "test cwd must expose a width-model difference: ratatui={ratatui_width}, unicode={unicode_width}"
         );
 
-        let left_width: usize = left_spans(&app, 200).iter().map(|s| s.width()).sum();
+        let left_width = spans_cell_width(&left_spans(&app, 200));
         let width = (left_width + 2 + unicode_width) as u16;
         assert_eq!(
             status_bar_height(&app, width),
@@ -831,6 +838,28 @@ mod tests {
         assert!(
             content.lines().any(|row| row.matches("ｶﾞ").count() == 4),
             "right cwd should keep every halfwidth dakuten pair visible, got:\n{content}"
+        );
+    }
+
+    #[test]
+    fn status_bar_left_side_uses_terminal_cell_width_for_halfwidth_dakuten() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.interaction.status_bar.show_cwd = false;
+        app.status = Some("abcｶﾞ".repeat(4));
+
+        let spans = left_spans(&app, 200);
+        let ratatui_width = spans_cell_width(&spans);
+        let unicode_width: usize = spans.iter().map(|s| s.width()).sum();
+        assert!(
+            ratatui_width > unicode_width,
+            "test status must expose a width-model difference: ratatui={ratatui_width}, unicode={unicode_width}"
+        );
+
+        let width = (unicode_width + 2) as u16;
+        assert_eq!(
+            status_bar_height(&app, width),
+            2,
+            "status bar should wrap when the left status fits only under unicode-width counting"
         );
     }
 
