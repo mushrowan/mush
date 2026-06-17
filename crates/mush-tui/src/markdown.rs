@@ -539,9 +539,27 @@ fn render_records_with_tabled(records: Vec<Vec<String>>, width: Option<usize>) -
         return render_records_as_list(records);
     }
 
+    let Some(width) = width else {
+        return render_records_with_tabled_width(&records, None);
+    };
+
+    let mut wrap_width = width;
+    loop {
+        let rendered = render_records_with_tabled_width(&records, Some(wrap_width));
+        let rendered_width = rendered_table_cell_width(&rendered);
+        if rendered_width <= width || wrap_width <= 1 {
+            return rendered;
+        }
+
+        let overflow = rendered_width - width;
+        wrap_width = wrap_width.saturating_sub(overflow.max(1)).max(1);
+    }
+}
+
+fn render_records_with_tabled_width(records: &[Vec<String>], width: Option<usize>) -> String {
     let mut builder = Builder::new();
     for record in records {
-        builder.push_record(record);
+        builder.push_record(record.iter().cloned());
     }
     let mut table = builder.build();
     table.with(TableStyle::sharp());
@@ -557,6 +575,14 @@ fn render_records_with_tabled(records: Vec<Vec<String>>, width: Option<usize>) -
         );
     }
     table.to_string()
+}
+
+fn rendered_table_cell_width(table: &str) -> usize {
+    table
+        .lines()
+        .map(|line| usize::from(line.cell_width()))
+        .max()
+        .unwrap_or(0)
 }
 
 fn render_records_as_list(records: Vec<Vec<String>>) -> String {
@@ -888,6 +914,10 @@ mod tests {
 
     fn t() -> Theme {
         Theme::default()
+    }
+
+    fn rendered_width(line: &Line<'_>) -> u16 {
+        line.to_string().as_str().cell_width()
     }
 
     #[test]
@@ -1252,7 +1282,7 @@ done.";
         let text = render_with_width(source, &t(), Some(28));
 
         for line in &text.lines {
-            let width = unicode_width::UnicodeWidthStr::width(line.to_string().as_str());
+            let width = rendered_width(line);
             assert!(width <= 28, "line exceeded width 28: {line:?}");
         }
         assert!(
@@ -1271,7 +1301,21 @@ done.";
         let text = render_with_width(source, &t(), Some(30));
 
         for line in &text.lines {
-            let width = unicode_width::UnicodeWidthStr::width(line.to_string().as_str());
+            let width = rendered_width(line);
+            assert!(width <= 30, "line exceeded width 30: {line:?}");
+        }
+    }
+
+    #[test]
+    fn table_wraps_halfwidth_dakuten_to_requested_cell_width() {
+        let source = "\
+| Name | Notes |
+|------|-------|
+| Ada  | abcｶﾞabcｶﾞabcｶﾞabcｶﾞabcｶﾞabcｶﾞabcｶﾞ |";
+        let text = render_with_width(source, &t(), Some(30));
+
+        for line in &text.lines {
+            let width = rendered_width(line);
             assert!(width <= 30, "line exceeded width 30: {line:?}");
         }
     }
