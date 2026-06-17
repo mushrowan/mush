@@ -1496,7 +1496,7 @@ fn render_streaming_markdown_cached(app: &App, source: &str, width: usize) -> Te
 
 /// truncate a rendered Text to at most `max_chars` visible characters
 fn truncate_text(text: Text<'static>, max_chars: usize) -> Text<'static> {
-    let total: usize = text.lines.iter().map(|l| l.width()).sum();
+    let total: usize = text.lines.iter().map(rendered_line_char_count).sum();
     if total <= max_chars {
         return text;
     }
@@ -1507,18 +1507,18 @@ fn truncate_text(text: Text<'static>, max_chars: usize) -> Text<'static> {
         if remaining == 0 {
             break;
         }
-        let line_w = line.width();
-        if line_w <= remaining {
-            remaining -= line_w;
+        let line_chars = rendered_line_char_count(&line);
+        if line_chars <= remaining {
+            remaining -= line_chars;
             result.push(line);
         } else {
             // truncate this line's spans to fit
             let mut spans = Vec::new();
             let mut left = remaining;
             for span in line.spans {
-                let sw = span.width();
-                if sw <= left {
-                    left -= sw;
+                let span_chars = span.content.chars().count();
+                if span_chars <= left {
+                    left -= span_chars;
                     spans.push(span);
                 } else if left > 0 {
                     let truncated: String = span.content.chars().take(left).collect();
@@ -1533,6 +1533,13 @@ fn truncate_text(text: Text<'static>, max_chars: usize) -> Text<'static> {
         }
     }
     Text::from(result)
+}
+
+fn rendered_line_char_count(line: &Line<'_>) -> usize {
+    line.spans
+        .iter()
+        .map(|span| span.content.chars().count())
+        .sum()
 }
 
 // -- bordered tool boxes for completed tool calls --
@@ -4361,6 +4368,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn truncate_text_reveals_by_chars_after_halfwidth_dakuten() {
+        let text = Text::from(Line::raw("ｶﾞx"));
+
+        let truncated = truncate_text(text, 2);
+
+        assert_eq!(plain_text(&truncated), "ｶﾞ");
+    }
+
+    #[test]
+    fn truncate_text_reveals_by_chars_across_span_boundary_after_wide_char() {
+        let text = Text::from(Line::from(vec![Span::raw("界"), Span::raw("ab")]));
+
+        let truncated = truncate_text(text, 2);
+
+        assert_eq!(plain_text(&truncated), "界a");
+    }
+
     fn find_buffer_row(buf: &Buffer, predicate: impl Fn(&str) -> bool) -> u16 {
         (0..buf.area.height)
             .find(|&y| predicate(&buffer_row(buf, y)))
@@ -4380,6 +4405,16 @@ mod tests {
             row.push_str(buf[(x, y)].symbol());
         }
         row
+    }
+
+    fn plain_text(text: &Text<'_>) -> String {
+        let mut out = String::new();
+        for line in &text.lines {
+            for span in &line.spans {
+                out.push_str(&span.content);
+            }
+        }
+        out
     }
 
     /// helper: convert buffer to string for assertions
