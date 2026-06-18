@@ -1116,29 +1116,33 @@ fn claude_code_tool_result_content(
     is_old_turn: bool,
     trimming: ToolResultTrimming,
 ) -> serde_json::Value {
-    let parts: Vec<serde_json::Value> = tr
-        .content
-        .iter()
-        .map(|part| match part {
-            ToolResultContentPart::Text(t) => {
-                let text = maybe_trim_tool_output(&t.text, is_old_turn, trimming);
-                serde_json::Value::String(text)
-            }
-            ToolResultContentPart::Image(img) => serde_json::json!({
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": img.mime_type,
-                    "data": img.data,
-                }
-            }),
-        })
-        .collect();
-
-    match parts.as_slice() {
+    match tr.content.as_slice() {
         [] => serde_json::Value::String(String::new()),
-        [single] => single.clone(),
-        _ => serde_json::Value::Array(parts),
+        [ToolResultContentPart::Text(text)] => {
+            serde_json::Value::String(maybe_trim_tool_output(&text.text, is_old_turn, trimming))
+        }
+        parts => serde_json::Value::Array(
+            parts
+                .iter()
+                .map(|part| match part {
+                    ToolResultContentPart::Text(t) => {
+                        let text = maybe_trim_tool_output(&t.text, is_old_turn, trimming);
+                        serde_json::json!({
+                            "type": "text",
+                            "text": text,
+                        })
+                    }
+                    ToolResultContentPart::Image(img) => serde_json::json!({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": img.mime_type,
+                            "data": img.data,
+                        }
+                    }),
+                })
+                .collect(),
+        ),
     }
 }
 
@@ -1945,6 +1949,50 @@ mod tests {
         let content = &converted[1].content;
         assert_eq!(content[0]["type"], "tool_result");
         assert_eq!(content[0]["tool_use_id"], "tc_123");
+    }
+
+    #[test]
+    fn oauth_tool_result_text_parts_are_content_blocks() {
+        let messages = vec![
+            Message::Assistant(
+                AssistantMessage::builder()
+                    .content(vec![AssistantContentPart::ToolCall(ToolCall {
+                        id: "tc_123".into(),
+                        name: "read".into(),
+                        arguments: serde_json::json!({"path": "foo.rs"}),
+                    })])
+                    .model("test".into())
+                    .provider(Provider::Custom("test".into()))
+                    .api(Api::AnthropicMessages)
+                    .stop_reason(StopReason::ToolUse)
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            ),
+            Message::ToolResult(ToolResultMessage {
+                tool_call_id: "tc_123".into(),
+                tool_name: "read".into(),
+                content: vec![
+                    ToolResultContentPart::Text(TextContent {
+                        text: "first".into(),
+                    }),
+                    ToolResultContentPart::Text(TextContent {
+                        text: "second".into(),
+                    }),
+                ],
+                outcome: ToolOutcome::Success,
+                timestamp_ms: Timestamp::zero(),
+            }),
+        ];
+
+        let converted = convert_messages(&messages, true, None, ToolResultTrimming::SlidingWindow);
+
+        assert_eq!(
+            converted[1].content[0]["content"],
+            serde_json::json!([
+                {"type": "text", "text": "first"},
+                {"type": "text", "text": "second"},
+            ])
+        );
     }
 
     #[test]
