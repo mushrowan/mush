@@ -151,6 +151,38 @@ fn bust_reason_unexplained_when_config_stable() {
 }
 
 #[test]
+fn provider_managed_context_shrink_does_not_alarm_as_cache_bust() {
+    let prev = Usage {
+        input_tokens: TokenCount::new(2_255),
+        output_tokens: TokenCount::new(250),
+        cache_read_tokens: TokenCount::new(47_751),
+        cache_write_tokens: TokenCount::ZERO,
+    };
+    let curr = Usage {
+        input_tokens: TokenCount::new(3_274),
+        output_tokens: TokenCount::new(309),
+        cache_read_tokens: TokenCount::new(10_880),
+        cache_write_tokens: TokenCount::new(11_063),
+    };
+    let cfg = CallConfig {
+        model_id: "claude-opus-4-8".into(),
+        thinking_level: "High".into(),
+        effort: None,
+        context_management: ContextManagementMode::ProviderManaged,
+        messages_prefix_fingerprint: Some(0xCAFE),
+    };
+
+    let anomalies = detect_cache_anomalies(Some(&prev), &curr, Some(&cfg), Some(&cfg));
+
+    assert!(
+        !anomalies
+            .iter()
+            .any(|a| matches!(a, CacheAnomaly::CacheBust { .. })),
+        "server-side context cleanup should not be reported as a cache bust: {anomalies:?}"
+    );
+}
+
+#[test]
 fn bust_reason_history_reshaped_when_prefix_changes() {
     // same model/thinking/effort between calls, but the messages_prefix
     // fingerprint differs: someone mutated the conversation history

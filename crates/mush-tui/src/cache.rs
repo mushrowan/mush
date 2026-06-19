@@ -397,11 +397,18 @@ pub fn detect_cache_anomalies(
     let read_dropped = prev_read > 0 && curr_read * 4 < prev_read; // dropped by >75%
     let write_spiked = curr.cache_write_tokens > prev.cache_write_tokens;
 
+    let provider_context_shrank = curr_ctx < prev_ctx
+        && prev_mode != ContextManagementMode::LocalMonotonic
+        && curr_mode != ContextManagementMode::LocalMonotonic;
+
     if prev_was_cached && read_dropped && write_spiked {
         let reason = match (prev_config, curr_config) {
             (Some(p), Some(c)) => CallConfig::classify_change(p, c),
             _ => BustReason::Unexplained,
         };
+        if provider_context_shrank && reason == BustReason::Unexplained {
+            return anomalies;
+        }
         anomalies.push(CacheAnomaly::CacheBust {
             prev_cache_read: prev.cache_read_tokens,
             curr_cache_read: curr.cache_read_tokens,

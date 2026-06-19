@@ -74,10 +74,16 @@ fn preview_for_tool(name: &str, output: &str) -> String {
     }
 }
 
-fn context_management_mode_for_model_id(model_id: &str) -> ContextManagementMode {
+fn context_management_mode_for_model_id(
+    model_id: &str,
+    request_used_context_management: Option<bool>,
+) -> ContextManagementMode {
     if model_id.contains("codex") {
         ContextManagementMode::SessionManaged
-    } else if model_id.contains("gpt-") || model_id.starts_with('o') {
+    } else if (model_id.contains("claude-") && request_used_context_management.unwrap_or(false))
+        || model_id.contains("gpt-")
+        || model_id.starts_with('o')
+    {
         ContextManagementMode::ProviderManaged
     } else {
         ContextManagementMode::LocalMonotonic
@@ -787,7 +793,10 @@ impl App {
                 // effort is derived from (model, thinking_level) today; a
                 // standalone effort field will land with the effort enum split
                 effort: None,
-                context_management: context_management_mode_for_model_id(self.model_id.as_str()),
+                context_management: context_management_mode_for_model_id(
+                    self.model_id.as_str(),
+                    mush_ai::request_snapshot::last_used_context_management(),
+                ),
                 // populated below from the most recent request snapshot
                 // taken by the provider (anthropic-only today)
                 messages_prefix_fingerprint:
@@ -1493,6 +1502,22 @@ mod tests {
         assert!(!app.stream.active);
         assert!(app.input.text.is_empty());
         assert_eq!(app.input.cursor, 0);
+    }
+
+    #[test]
+    fn anthropic_models_use_provider_managed_context_for_cache_detection() {
+        assert_eq!(
+            context_management_mode_for_model_id("claude-opus-4-8", Some(true)),
+            ContextManagementMode::ProviderManaged
+        );
+        assert_eq!(
+            context_management_mode_for_model_id("claude-opus-4-8", Some(false)),
+            ContextManagementMode::LocalMonotonic
+        );
+        assert_eq!(
+            context_management_mode_for_model_id("local-model", Some(true)),
+            ContextManagementMode::LocalMonotonic
+        );
     }
 
     #[test]

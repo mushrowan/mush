@@ -145,6 +145,10 @@ static SNAPSHOT_SEQ: AtomicU64 = AtomicU64::new(0);
 static LAST_MESSAGES_PREFIX: AtomicU64 = AtomicU64::new(0);
 static LAST_MESSAGES_PREFIX_SET: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+static LAST_USED_CONTEXT_MANAGEMENT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static LAST_USED_CONTEXT_MANAGEMENT_SET: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// read the most recent `messages_prefix` fingerprint published by
 /// [`dump`]. returns `None` before the first dump of the process
@@ -152,6 +156,17 @@ static LAST_MESSAGES_PREFIX_SET: std::sync::atomic::AtomicBool =
 pub fn last_messages_prefix_fingerprint() -> Option<u64> {
     if LAST_MESSAGES_PREFIX_SET.load(Ordering::Relaxed) {
         Some(LAST_MESSAGES_PREFIX.load(Ordering::Relaxed))
+    } else {
+        None
+    }
+}
+
+/// whether the most recent dumped request included provider-side context
+/// management. returns `None` before the first dump of the process
+#[must_use]
+pub fn last_used_context_management() -> Option<bool> {
+    if LAST_USED_CONTEXT_MANAGEMENT_SET.load(Ordering::Relaxed) {
+        Some(LAST_USED_CONTEXT_MANAGEMENT.load(Ordering::Relaxed))
     } else {
         None
     }
@@ -211,6 +226,13 @@ fn redact_snapshot_body(body_json: &str) -> serde_json::Value {
         }
         Err(_) => serde_json::Value::String(redact_secret_text(body_json)),
     }
+}
+
+fn body_uses_context_management(body_json: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body_json)
+        .ok()
+        .and_then(|body| body.get("context_management").cloned())
+        .is_some_and(|context_management| !context_management.is_null())
 }
 
 fn redact_json_value(value: &mut serde_json::Value, field_name: Option<&str>) {
@@ -312,6 +334,8 @@ pub fn dump_in(
         })
         .collect();
 
+    let uses_context_management = body_uses_context_management(body_json);
+
     // embed fingerprint as a sibling top-level field by wrapping the
     // body in a small envelope. keeps the file valid json while making
     // the fingerprint trivially greppable
@@ -336,6 +360,8 @@ pub fn dump_in(
             // safely durable
             LAST_MESSAGES_PREFIX.store(fingerprint.messages_prefix, Ordering::Relaxed);
             LAST_MESSAGES_PREFIX_SET.store(true, Ordering::Relaxed);
+            LAST_USED_CONTEXT_MANAGEMENT.store(uses_context_management, Ordering::Relaxed);
+            LAST_USED_CONTEXT_MANAGEMENT_SET.store(true, Ordering::Relaxed);
             prune_old_snapshots(dir, provider);
             Some(path)
         }
@@ -610,6 +636,25 @@ mod tests {
             Some(fp.messages_prefix),
             "dump should publish the prefix fingerprint atomically"
         );
+    }
+
+    #[test]
+    fn dump_publishes_context_management_presence() {
+        let dir = tempfile::tempdir().unwrap();
+        let fp = RequestFingerprint::from_json_sections("[]", "[]", "[]");
+
+        dump_in(
+            dir.path(),
+            "anthropic",
+            &fp,
+            r#"{"model":"test","context_management":{"edits":[]}}"#,
+            &[],
+        )
+        .expect("dump succeeds");
+        assert_eq!(last_used_context_management(), Some(true));
+
+        dump_in(dir.path(), "anthropic", &fp, r#"{"model":"test"}"#, &[]).expect("dump succeeds");
+        assert_eq!(last_used_context_management(), Some(false));
     }
 
     #[test]
