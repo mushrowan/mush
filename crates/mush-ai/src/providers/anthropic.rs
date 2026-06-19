@@ -27,6 +27,10 @@ const CLAUDE_CODE_MAX_OUTPUT_TOKENS: u64 = 64_000;
 const ADVISOR_TOOL_TYPE: &str = "advisor_20260301";
 const ADVISOR_TOOL_NAME: &str = "advisor";
 const DEFAULT_ADVISOR_MODEL: &str = "claude-opus-4-8";
+const THINKING_TURNS_TO_KEEP: u64 = 2;
+const TOOL_USES_TO_KEEP: u64 = 5;
+const TOOL_CLEAR_TRIGGER_INPUT_TOKENS: u64 = 50_000;
+const TOOL_CLEAR_AT_LEAST_INPUT_TOKENS: u64 = 10_000;
 
 // stealth mode: mimic claude code's identity for oauth
 const CLAUDE_CODE_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
@@ -455,7 +459,18 @@ struct ContextManagement {
 struct ContextManagementEdit {
     #[serde(rename = "type")]
     edit_type: &'static str,
-    keep: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trigger: Option<ContextManagementQuantity>,
+    keep: ContextManagementQuantity,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    clear_at_least: Option<ContextManagementQuantity>,
+}
+
+#[derive(Serialize)]
+struct ContextManagementQuantity {
+    #[serde(rename = "type")]
+    quantity_type: &'static str,
+    value: u64,
 }
 
 #[derive(Serialize)]
@@ -593,12 +608,7 @@ fn build_request_body(
         };
 
     let metadata = is_oauth.then(|| claude_code_metadata(options));
-    let context_management = (is_oauth && thinking.is_some()).then_some(ContextManagement {
-        edits: vec![ContextManagementEdit {
-            edit_type: "clear_thinking_20251015",
-            keep: "all",
-        }],
-    });
+    let context_management = oauth_context_management(model, options, is_oauth, thinking.is_some());
     let diagnostics = is_oauth.then(|| Diagnostics {
         previous_message_id: messages.iter().rev().find_map(|message| match message {
             Message::Assistant(assistant) => assistant.generation_id.clone(),
@@ -620,6 +630,52 @@ fn build_request_body(
         diagnostics,
         stream: true,
     }
+}
+
+fn oauth_context_management(
+    model: &Model,
+    options: &StreamOptions,
+    is_oauth: bool,
+    has_thinking: bool,
+) -> Option<ContextManagement> {
+    let betas = options
+        .anthropic_betas
+        .clone()
+        .unwrap_or_default()
+        .gated_for_context_window(model.context_window);
+    if !is_oauth || !betas.context_management {
+        return None;
+    }
+
+    let mut edits = Vec::new();
+    if has_thinking {
+        edits.push(ContextManagementEdit {
+            edit_type: "clear_thinking_20251015",
+            trigger: None,
+            keep: ContextManagementQuantity {
+                quantity_type: "thinking_turns",
+                value: THINKING_TURNS_TO_KEEP,
+            },
+            clear_at_least: None,
+        });
+    }
+    edits.push(ContextManagementEdit {
+        edit_type: "clear_tool_uses_20250919",
+        trigger: Some(ContextManagementQuantity {
+            quantity_type: "input_tokens",
+            value: TOOL_CLEAR_TRIGGER_INPUT_TOKENS,
+        }),
+        keep: ContextManagementQuantity {
+            quantity_type: "tool_uses",
+            value: TOOL_USES_TO_KEEP,
+        },
+        clear_at_least: Some(ContextManagementQuantity {
+            quantity_type: "input_tokens",
+            value: TOOL_CLEAR_AT_LEAST_INPUT_TOKENS,
+        }),
+    });
+
+    Some(ContextManagement { edits })
 }
 
 fn convert_tools(
@@ -2390,6 +2446,30 @@ mod tests {
     }
 
     #[test]
+    fn oauth_context_management_bounds_thinking_and_clears_tools() {
+        let model = Model {
+            id: "claude-opus-4-8".into(),
+            name: "Claude Opus 4.8".into(),
+            reasoning: true,
+            supports_adaptive_thinking: true,
+            supported_thinking_levels: vec![ThinkingLevel::High],
+            ..test_model()
+        };
+        let options = StreamOptions {
+            thinking: Some(ThinkingLevel::High),
+            ..Default::default()
+        };
+
+        let body = build_request_body(&model, &None, &[], &[], &options, true);
+        let json = serde_json::to_value(&body).unwrap();
+
+        assert_eq!(
+            json["context_management"],
+            expected_bounded_context_management()
+        );
+    }
+
+    #[test]
     fn opus_4_6_uses_adaptive_thinking_with_effort() {
         // an effort level we don't model with a typed variant (`max`)
         // flows through verbatim as `output_config.effort` on an adaptive
@@ -3275,7 +3355,7 @@ mod tests {
         assert_eq!(json["thinking"], serde_json::json!({"type": "adaptive"}));
         assert_eq!(
             json["context_management"],
-            serde_json::json!({"edits": [{"type": "clear_thinking_20251015", "keep": "all"}]})
+            expected_bounded_context_management()
         );
         assert_eq!(
             json["diagnostics"],
@@ -3550,6 +3630,23 @@ mod tests {
     #[test]
     fn benchmark_tool_call_deltas_returns_payload_size() {
         assert_eq!(benchmark_tool_call_deltas(8, 1024), 1024);
+    }
+
+    fn expected_bounded_context_management() -> serde_json::Value {
+        serde_json::json!({
+            "edits": [
+                {
+                    "type": "clear_thinking_20251015",
+                    "keep": {"type": "thinking_turns", "value": 2},
+                },
+                {
+                    "type": "clear_tool_uses_20250919",
+                    "trigger": {"type": "input_tokens", "value": 50_000},
+                    "keep": {"type": "tool_uses", "value": 5},
+                    "clear_at_least": {"type": "input_tokens", "value": 10_000},
+                },
+            ]
+        })
     }
 
     fn test_model() -> Model {
