@@ -20,7 +20,7 @@ const ANTHROPIC_DIRECT_API: &str = "api.anthropic.com";
 /// full `user-agent` value sent on oauth requests. bump the version when
 /// matching a newer claude-code release; keeping it close to upstream helps
 /// with any rate-limit or fingerprint-based treatment
-const CLAUDE_CLI_USER_AGENT: &str = "claude-code/2.1.177";
+const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/2.1.177 (external, cli)";
 const CLAUDE_CODE_BILLING_HEADER: &str =
     "x-anthropic-billing-header: cc_version=2.1.177.154; cc_entrypoint=cli; cch=00000;";
 const CLAUDE_CODE_MAX_OUTPUT_TOKENS: u64 = 64_000;
@@ -3014,6 +3014,11 @@ mod tests {
         assert_eq!(from_claude_code_name("WebFetch", &tools), "web_fetch");
         assert_eq!(from_claude_code_name("WebSearch", &tools), "web_search");
         assert_eq!(from_claude_code_name("Unknown", &tools), "Unknown");
+    }
+
+    #[test]
+    fn oauth_user_agent_matches_claude_code_capture() {
+        assert_eq!(CLAUDE_CLI_USER_AGENT, "claude-cli/2.1.177 (external, cli)");
     }
 
     #[test]
