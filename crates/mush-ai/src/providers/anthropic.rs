@@ -20,9 +20,9 @@ const ANTHROPIC_DIRECT_API: &str = "api.anthropic.com";
 /// full `user-agent` value sent on oauth requests. bump the version when
 /// matching a newer claude-code release; keeping it close to upstream helps
 /// with any rate-limit or fingerprint-based treatment
-const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/2.1.170 (external, cli)";
+const CLAUDE_CLI_USER_AGENT: &str = "claude-code/2.1.177";
 const CLAUDE_CODE_BILLING_HEADER: &str =
-    "x-anthropic-billing-header: cc_version=2.1.170.c6b; cc_entrypoint=cli; cch=00000;";
+    "x-anthropic-billing-header: cc_version=2.1.177.154; cc_entrypoint=cli; cch=00000;";
 const CLAUDE_CODE_MAX_OUTPUT_TOKENS: u64 = 64_000;
 const ADVISOR_TOOL_TYPE: &str = "advisor_20260301";
 const ADVISOR_TOOL_NAME: &str = "advisor";
@@ -964,7 +964,7 @@ fn convert_messages(
 ) -> Vec<RequestMessage> {
     let converted = convert_messages_raw(messages, is_oauth, trimming);
     let mut fixed = fix_orphaned_tool_calls(converted);
-    apply_cache_control_to_last_user_message(&mut fixed, cache_control);
+    apply_cache_control_to_last_cacheable_message(&mut fixed, cache_control);
     fixed
 }
 
@@ -994,7 +994,7 @@ struct AnthropicVisitor {
 impl MessageVisitor for AnthropicVisitor {
     fn on_user(&mut self, user: &UserMessage) {
         // always emit as a content block array, never a bare JSON string.
-        // apply_cache_control_to_last_user_message inserts a cache_control
+        // apply_cache_control_to_last_cacheable_message inserts a cache_control
         // field into the last block of the target message. if we emitted
         // text as a string here, that function would have to wrap it in an
         // array, then when cache_control moves to a newer message on the
@@ -1315,17 +1315,17 @@ fn fix_orphaned_tool_calls(messages: Vec<RequestMessage>) -> Vec<RequestMessage>
     result
 }
 
-/// apply cache control to the last user text message (not tool_results).
-/// tool_result messages are also role="user" in anthropic format, but placing
-/// cache_control on them causes prefix invalidation: each new tool_result moves
-/// the marker, changing the serialised content of the previous holder. by targeting
-/// only actual user text messages, the cache_control position stays stable within
-/// an agent turn's tool-call loop.
+/// apply cache control to the last cacheable message content block.
+///
+/// anthropic only looks back 20 content blocks from each breakpoint when
+/// finding prior cache writes. keeping the message breakpoint on the
+/// original user text during a long tool loop strands the cache entry outside
+/// that window, so the marker must move forward as the conversation grows.
 ///
 /// user text content is always emitted as a content block array by
 /// convert_messages_raw, so this only needs the Array arm. the String arm
 /// is kept as a defensive fallback but should never trigger in practice
-fn apply_cache_control_to_last_user_message(
+fn apply_cache_control_to_last_cacheable_message(
     messages: &mut [RequestMessage],
     cache_control: Option<CacheControl>,
 ) {
@@ -1333,41 +1333,45 @@ fn apply_cache_control_to_last_user_message(
         return;
     };
 
-    let is_tool_result_msg = |msg: &RequestMessage| {
-        msg.content.as_array().is_some_and(|blocks| {
-            blocks
-                .iter()
-                .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
-        })
-    };
-
-    let Some(last_user) = messages
-        .iter_mut()
-        .rfind(|m| m.role == "user" && !is_tool_result_msg(m))
-    else {
+    let Ok(cache_json) = serde_json::to_value(cache) else {
         return;
     };
 
-    match &mut last_user.content {
-        serde_json::Value::Array(blocks) => {
-            if let Some(last) = blocks.last_mut()
-                && let Some(obj) = last.as_object_mut()
-                && let Ok(cache_json) = serde_json::to_value(cache)
-            {
-                obj.insert("cache_control".into(), cache_json);
+    for message in messages.iter_mut().rev() {
+        match &mut message.content {
+            serde_json::Value::Array(blocks) => {
+                if let Some(obj) = blocks.iter_mut().rev().find_map(|block| {
+                    let obj = block.as_object_mut()?;
+                    is_cacheable_message_block(obj).then_some(obj)
+                }) {
+                    obj.insert("cache_control".into(), cache_json);
+                    return;
+                }
             }
+            // defensive: convert_messages_raw always emits arrays for user text,
+            // but if something upstream changes, wrap rather than silently skip
+            serde_json::Value::String(text) if !text.trim().is_empty() => {
+                let text = std::mem::take(text);
+                message.content = serde_json::json!([{
+                    "type": "text",
+                    "text": text,
+                    "cache_control": cache_json,
+                }]);
+                return;
+            }
+            _ => {}
         }
-        // defensive: convert_messages_raw always emits arrays for user text,
-        // but if something upstream changes, wrap rather than silently skip
-        serde_json::Value::String(text) => {
-            let text = std::mem::take(text);
-            last_user.content = serde_json::json!([{
-                "type": "text",
-                "text": text,
-                "cache_control": cache,
-            }]);
-        }
-        _ => {}
+    }
+}
+
+fn is_cacheable_message_block(obj: &serde_json::Map<String, serde_json::Value>) -> bool {
+    match obj.get("type").and_then(|kind| kind.as_str()) {
+        Some("thinking" | "redacted_thinking") | None => false,
+        Some("text") => obj
+            .get("text")
+            .and_then(|text| text.as_str())
+            .is_some_and(|text| !text.is_empty()),
+        Some(_) => true,
     }
 }
 
@@ -3191,11 +3195,10 @@ mod tests {
     }
 
     #[test]
-    fn cache_control_on_user_text_not_tool_result() {
-        // when tool_results follow a user message, cache_control must stay on the
-        // user text message, not jump to the tool_result. otherwise the user message
-        // content changes between requests (loses cache_control), invalidating the
-        // entire cached prefix
+    fn cache_control_on_recent_tool_result_block() {
+        // tool_result messages are role="user" in anthropic format, but
+        // cache_control belongs on the top-level tool_result object, not
+        // inside its nested content payload.
         let cache = Some(CacheControl {
             control_type: "ephemeral".into(),
             ttl: None,
@@ -3233,9 +3236,6 @@ mod tests {
 
         let converted = convert_messages(&messages, false, cache, ToolResultTrimming::Preserve);
 
-        // user text message (index 0) should have cache_control.
-        // content is always an array of blocks; cache_control is added
-        // as a field on the last block
         let has_cc_on_user = match &converted[0].content {
             serde_json::Value::Array(blocks) => blocks
                 .first()
@@ -3243,18 +3243,77 @@ mod tests {
             _ => false,
         };
         assert!(
-            has_cc_on_user,
-            "cache_control should be on the user text message, not the tool_result"
+            !has_cc_on_user,
+            "cache_control should move to the latest cacheable block"
         );
 
-        // tool_result (index 2) should NOT have cache_control
-        let has_cc_on_tr = match &converted[2].content {
-            serde_json::Value::Array(blocks) => {
-                blocks.iter().any(|b| b.get("cache_control").is_some())
-            }
+        let tool_result = &converted[2].content.as_array().unwrap()[0];
+        assert_eq!(tool_result["type"], "tool_result");
+        assert_eq!(tool_result["cache_control"]["type"], "ephemeral");
+
+        let nested_content_has_cache_control = match &tool_result["content"] {
+            serde_json::Value::Array(blocks) => blocks
+                .iter()
+                .any(|block| block.get("cache_control").is_some()),
             _ => false,
         };
-        assert!(!has_cc_on_tr, "tool_result should not have cache_control");
+        assert!(
+            !nested_content_has_cache_control,
+            "tool_result content sub-blocks must not carry cache_control"
+        );
+    }
+
+    #[test]
+    fn cache_control_moves_to_recent_tool_result_in_long_tool_loop() {
+        let cache = Some(CacheControl {
+            control_type: "ephemeral".into(),
+            ttl: None,
+            scope: None,
+        });
+        let mut messages = vec![Message::User(UserMessage {
+            content: UserContent::Text("do the thing".into()),
+            timestamp_ms: Timestamp::zero(),
+        })];
+
+        for i in 0..25 {
+            let id = format!("tc_{i}");
+            messages.push(Message::Assistant(
+                AssistantMessage::builder()
+                    .content(vec![AssistantContentPart::ToolCall(ToolCall {
+                        id: id.clone().into(),
+                        name: "bash".into(),
+                        arguments: serde_json::json!({"command": "true"}),
+                    })])
+                    .model("test".into())
+                    .provider(Provider::Custom("test".into()))
+                    .api(Api::AnthropicMessages)
+                    .stop_reason(StopReason::ToolUse)
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            ));
+            messages.push(Message::ToolResult(ToolResultMessage {
+                tool_call_id: id.into(),
+                tool_name: "bash".into(),
+                content: vec![ToolResultContentPart::Text(TextContent {
+                    text: "ok".into(),
+                })],
+                outcome: ToolOutcome::Success,
+                timestamp_ms: Timestamp::zero(),
+            }));
+        }
+
+        let converted = convert_messages(&messages, false, cache, ToolResultTrimming::Preserve);
+        let first_user_blocks = converted[0].content.as_array().unwrap();
+        let latest_blocks = converted.last().unwrap().content.as_array().unwrap();
+
+        assert!(
+            first_user_blocks
+                .iter()
+                .all(|block| block.get("cache_control").is_none()),
+            "cache_control should move forward rather than stay on the stale user text"
+        );
+        assert_eq!(latest_blocks[0]["type"], "tool_result");
+        assert_eq!(latest_blocks[0]["cache_control"]["type"], "ephemeral");
     }
 
     #[test]
@@ -3378,10 +3437,7 @@ mod tests {
 
         let system = json["system"].as_array().unwrap();
         assert_eq!(system.len(), 3);
-        assert_eq!(
-            system[0]["text"],
-            "x-anthropic-billing-header: cc_version=2.1.170.c6b; cc_entrypoint=cli; cch=00000;"
-        );
+        assert_eq!(system[0]["text"], CLAUDE_CODE_BILLING_HEADER);
         assert!(system[0].get("cache_control").is_none());
         assert_eq!(system[1]["text"], CLAUDE_CODE_IDENTITY);
         assert!(system[1].get("cache_control").is_none());
