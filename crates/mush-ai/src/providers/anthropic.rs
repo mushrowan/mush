@@ -27,10 +27,6 @@ const CLAUDE_CODE_MAX_OUTPUT_TOKENS: u64 = 64_000;
 const ADVISOR_TOOL_TYPE: &str = "advisor_20260301";
 const ADVISOR_TOOL_NAME: &str = "advisor";
 const DEFAULT_ADVISOR_MODEL: &str = "claude-opus-4-8";
-const THINKING_TURNS_TO_KEEP: u64 = 2;
-const TOOL_USES_TO_KEEP: u64 = 5;
-const TOOL_CLEAR_TRIGGER_INPUT_TOKENS: u64 = 50_000;
-const TOOL_CLEAR_AT_LEAST_INPUT_TOKENS: u64 = 10_000;
 
 // stealth mode: mimic claude code's identity for oauth
 const CLAUDE_CODE_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
@@ -459,18 +455,7 @@ struct ContextManagement {
 struct ContextManagementEdit {
     #[serde(rename = "type")]
     edit_type: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    trigger: Option<ContextManagementQuantity>,
-    keep: ContextManagementQuantity,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    clear_at_least: Option<ContextManagementQuantity>,
-}
-
-#[derive(Serialize)]
-struct ContextManagementQuantity {
-    #[serde(rename = "type")]
-    quantity_type: &'static str,
-    value: u64,
+    keep: &'static str,
 }
 
 #[derive(Serialize)]
@@ -647,33 +632,14 @@ fn oauth_context_management(
         return None;
     }
 
-    let mut edits = Vec::new();
-    if has_thinking {
-        edits.push(ContextManagementEdit {
-            edit_type: "clear_thinking_20251015",
-            trigger: None,
-            keep: ContextManagementQuantity {
-                quantity_type: "thinking_turns",
-                value: THINKING_TURNS_TO_KEEP,
-            },
-            clear_at_least: None,
-        });
+    if !has_thinking {
+        return None;
     }
-    edits.push(ContextManagementEdit {
-        edit_type: "clear_tool_uses_20250919",
-        trigger: Some(ContextManagementQuantity {
-            quantity_type: "input_tokens",
-            value: TOOL_CLEAR_TRIGGER_INPUT_TOKENS,
-        }),
-        keep: ContextManagementQuantity {
-            quantity_type: "tool_uses",
-            value: TOOL_USES_TO_KEEP,
-        },
-        clear_at_least: Some(ContextManagementQuantity {
-            quantity_type: "input_tokens",
-            value: TOOL_CLEAR_AT_LEAST_INPUT_TOKENS,
-        }),
-    });
+
+    let edits = vec![ContextManagementEdit {
+        edit_type: "clear_thinking_20251015",
+        keep: "all",
+    }];
 
     Some(ContextManagement { edits })
 }
@@ -2450,7 +2416,7 @@ mod tests {
     }
 
     #[test]
-    fn oauth_context_management_bounds_thinking_and_clears_tools() {
+    fn oauth_context_management_matches_claude_code_keep_all() {
         let model = Model {
             id: "claude-opus-4-8".into(),
             name: "Claude Opus 4.8".into(),
@@ -2469,7 +2435,7 @@ mod tests {
 
         assert_eq!(
             json["context_management"],
-            expected_bounded_context_management()
+            expected_claude_code_context_management()
         );
     }
 
@@ -3419,7 +3385,7 @@ mod tests {
         assert_eq!(json["thinking"], serde_json::json!({"type": "adaptive"}));
         assert_eq!(
             json["context_management"],
-            expected_bounded_context_management()
+            expected_claude_code_context_management()
         );
         assert_eq!(
             json["diagnostics"],
@@ -3693,18 +3659,12 @@ mod tests {
         assert_eq!(benchmark_tool_call_deltas(8, 1024), 1024);
     }
 
-    fn expected_bounded_context_management() -> serde_json::Value {
+    fn expected_claude_code_context_management() -> serde_json::Value {
         serde_json::json!({
             "edits": [
                 {
                     "type": "clear_thinking_20251015",
-                    "keep": {"type": "thinking_turns", "value": 2},
-                },
-                {
-                    "type": "clear_tool_uses_20250919",
-                    "trigger": {"type": "input_tokens", "value": 50_000},
-                    "keep": {"type": "tool_uses", "value": 5},
-                    "clear_at_least": {"type": "input_tokens", "value": 10_000},
+                    "keep": "all",
                 },
             ]
         })
