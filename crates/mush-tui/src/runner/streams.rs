@@ -579,6 +579,12 @@ async fn auto_compact(
         .as_ref()
         .map(|(m, o)| (m.clone(), o.clone()))
         .unwrap_or_else(|| (tui_config.model.clone(), tui_config.options.clone()));
+    let compact_options = crate::event_handler::resolve_auth_into_options(
+        &compact_model,
+        compact_options,
+        &tui_config.provider_api_keys,
+    )
+    .await;
 
     let task = crate::slash::start_compaction(
         messages,
@@ -873,6 +879,12 @@ async fn start_stream_for_prompt<'a>(
         .compaction_model
         .clone()
         .unwrap_or_else(|| (model.clone(), deps.config.options.clone()));
+    let compact_options = crate::event_handler::resolve_auth_into_options(
+        &compact_model,
+        compact_options,
+        &deps.config.provider_api_keys,
+    )
+    .await;
     let do_auto_compact = deps.config.auto_compact;
     let initial_ctx = pane_mgr
         .pane(pane_id)

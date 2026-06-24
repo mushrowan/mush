@@ -69,6 +69,12 @@ pub(super) async fn handle_slash_action(
                                 );
                                 (m, tui_config.options.clone())
                             });
+                        let compact_options = crate::event_handler::resolve_auth_into_options(
+                            &compact_model,
+                            compact_options,
+                            &tui_config.provider_api_keys,
+                        )
+                        .await;
                         pane.app.status = Some("compacting…".into());
                         pane.app.compacting = true;
                         let task = slash::start_compaction(

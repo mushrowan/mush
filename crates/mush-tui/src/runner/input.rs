@@ -226,6 +226,12 @@ async fn handle_compaction_recovery_action(
                     );
                     (model, deps.tui_config.options.clone())
                 });
+            let compact_options = crate::event_handler::resolve_auth_into_options(
+                &compact_model,
+                compact_options,
+                &deps.tui_config.provider_api_keys,
+            )
+            .await;
             pane_mgr.focused_mut().app.status = Some("retrying compaction…".into());
             pane_mgr.focused_mut().app.compacting = true;
             let task = crate::slash::start_compaction(

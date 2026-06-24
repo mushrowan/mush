@@ -226,6 +226,65 @@ pub async fn resolve_auth_for_model(
     (resolved.api_key, resolved.account_id)
 }
 
+pub async fn resolve_auth_into_options(
+    model: &Model,
+    mut options: StreamOptions,
+    provider_api_keys: &std::collections::HashMap<String, mush_ai::ApiKey>,
+) -> StreamOptions {
+    let (api_key, account_id) = resolve_auth_for_model(model, provider_api_keys).await;
+    options.api_key = api_key;
+    options.account_id = account_id;
+    options
+}
+
+#[cfg(test)]
+mod auth_tests {
+    use super::*;
+
+    fn custom_model(provider: &str) -> Model {
+        Model {
+            id: format!("{provider}/model").into(),
+            name: "test model".into(),
+            api: Api::OpenaiResponses,
+            provider: Provider::Custom(provider.into()),
+            base_url: "https://example.invalid".into(),
+            reasoning: false,
+            input: vec![InputModality::Text],
+            cost: ModelCost {
+                input: 0.0,
+                output: 0.0,
+                cache_read: 0.0,
+                cache_write: 0.0,
+            },
+            context_window: TokenCount::new(128_000),
+            effective_context_window: None,
+            max_output_tokens: TokenCount::new(4096),
+            supports_adaptive_thinking: false,
+            supported_thinking_levels: Vec::new(),
+            default_thinking_level: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_auth_into_options_replaces_stale_key_for_compaction() {
+        let provider = "compaction-auth-test-provider";
+        let model = custom_model(provider);
+        let fresh_key = ApiKey::new("fresh-compaction-key").unwrap();
+        let mut provider_api_keys = std::collections::HashMap::new();
+        provider_api_keys.insert(provider.into(), fresh_key.clone());
+        let stale_options = StreamOptions {
+            api_key: Some(ApiKey::new("stale-startup-key").unwrap()),
+            account_id: Some("stale-account".into()),
+            ..StreamOptions::default()
+        };
+
+        let options = resolve_auth_into_options(&model, stale_options, &provider_api_keys).await;
+
+        assert_eq!(options.api_key, Some(fresh_key));
+        assert_eq!(options.account_id, None);
+    }
+}
+
 /// compact messages when approaching context limit.
 /// `context_tokens` is the actual API-reported input token count from the last call.
 ///
