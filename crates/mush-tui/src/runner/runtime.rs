@@ -267,7 +267,7 @@ impl RunnerRuntime {
     /// at least one task completed (so the caller can force a redraw).
     /// tasks for panes that were closed during the compaction are
     /// silently dropped.
-    pub(super) async fn poll_pending_compactions(&mut self) -> bool {
+    pub(super) async fn poll_pending_compactions(&mut self, tui_config: &TuiConfig) -> bool {
         let finished: Vec<PaneId> = self
             .pending_compactions
             .iter()
@@ -291,7 +291,7 @@ impl RunnerRuntime {
                     continue;
                 }
             };
-            self.handle_compaction_task_result(pane_id, result);
+            self.handle_compaction_task_result(pane_id, result, tui_config);
         }
         true
     }
@@ -300,30 +300,44 @@ impl RunnerRuntime {
         &mut self,
         pane_id: PaneId,
         result: crate::slash::CompactionTaskResult,
+        tui_config: &TuiConfig,
     ) {
-        let Some(pane) = self.pane_mgr.pane_mut(pane_id) else {
-            return;
-        };
-        match result {
-            crate::slash::CompactionTaskResult::Applied(result) => {
-                crate::slash::apply_applied_compaction(
-                    &mut pane.app,
-                    &mut pane.conversation,
-                    result,
-                );
-                // replay anything the user submitted while compaction
-                // was running. multiple submits collapse into one combined
-                // user turn so the agent sees a coherent prompt rather
-                // than firing N back-to-back turns
-                replay_compaction_inputs(pane);
+        let applied = {
+            let Some(pane) = self.pane_mgr.pane_mut(pane_id) else {
+                return;
+            };
+            match result {
+                crate::slash::CompactionTaskResult::Applied(result) => {
+                    crate::slash::apply_applied_compaction(
+                        &mut pane.app,
+                        &mut pane.conversation,
+                        result,
+                    );
+                    // replay anything the user submitted while compaction
+                    // was running. multiple submits collapse into one combined
+                    // user turn so the agent sees a coherent prompt rather
+                    // than firing N back-to-back turns
+                    replay_compaction_inputs(pane);
+                    true
+                }
+                crate::slash::CompactionTaskResult::Failed {
+                    failure,
+                    tokens_before,
+                    model_id,
+                } => {
+                    pane.app
+                        .open_compaction_recovery(failure, tokens_before, model_id);
+                    false
+                }
             }
-            crate::slash::CompactionTaskResult::Failed {
-                failure,
-                tokens_before,
-                model_id,
-            } => pane
-                .app
-                .open_compaction_recovery(failure, tokens_before, model_id),
+        };
+
+        // a successful compaction rewrites the LLM context but, unlike a
+        // normal agent turn, isn't followed by an AgentEnd save. without
+        // persisting here the collapsed history is lost if the user quits
+        // before the next agent turn
+        if applied && let Some(saver) = &tui_config.save_session {
+            saver(streams::build_session_snapshot(&self.pane_mgr, tui_config));
         }
     }
 
@@ -837,6 +851,62 @@ mod tests {
     }
 
     #[test]
+    fn applied_compaction_persists_session() {
+        // a successful background `/compact` rewrites the LLM context but
+        // isn't followed by an agent turn, so handle_compaction_task_result
+        // must persist the session itself. otherwise the collapsed history
+        // is lost when the user quits before the next turn (and on resume
+        // the compaction "disappears")
+        use std::sync::{Arc, Mutex};
+
+        let mut msgs = Vec::new();
+        for i in 0..12 {
+            msgs.push(user_message(&format!("q {i}")));
+            msgs.push(assistant_message(&format!("a {i}")));
+        }
+        let app = App::new("test".into(), TokenCount::new(200_000));
+        let mut pane = Pane::new(PaneId::new(1), app);
+        pane.conversation = ConversationState::from_messages(msgs);
+        let mut runtime = RunnerRuntime::from_pane(pane, ThinkingPrefs::default());
+
+        let saved: Arc<Mutex<Option<crate::runner::SessionSnapshot>>> = Arc::new(Mutex::new(None));
+        let saved_clone = saved.clone();
+        let mut config = test_config();
+        config.save_session = Some(Arc::new(move |snapshot| {
+            *saved_clone.lock().unwrap() = Some(snapshot);
+        }));
+
+        let context = runtime.pane_mgr.focused().conversation.context();
+        let applied = crate::slash::AppliedCompaction {
+            messages: context,
+            summary: "summary of earlier turns".into(),
+            tokens_before: 100,
+            tokens_after: 50,
+            summarised_count: 14,
+            before_count: 24,
+            model_id: "test".into(),
+            diagnostics: mush_session::compact::CompactionDiagnostics::default(),
+        };
+        let result = crate::slash::CompactionTaskResult::Applied(applied);
+
+        runtime.handle_compaction_task_result(PaneId::new(1), result, &config);
+
+        let snapshot = saved
+            .lock()
+            .unwrap()
+            .take()
+            .expect("session must be saved after a successful compaction");
+        let has_compaction =
+            snapshot.primary.tree().entries().iter().any(|entry| {
+                matches!(entry.kind, mush_session::tree::EntryKind::Compaction { .. })
+            });
+        assert!(
+            has_compaction,
+            "persisted snapshot must contain the compaction node"
+        );
+    }
+
+    #[test]
     fn compaction_failure_opens_recovery_prompt() {
         let app = App::new("test".into(), TokenCount::new(200_000));
         let mut runtime =
@@ -859,7 +929,7 @@ mod tests {
             model_id: "test".into(),
         };
 
-        runtime.handle_compaction_task_result(PaneId::new(1), failed);
+        runtime.handle_compaction_task_result(PaneId::new(1), failed, &test_config());
 
         let app = &runtime.pane_mgr.focused().app;
         assert_eq!(

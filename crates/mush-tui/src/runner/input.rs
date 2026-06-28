@@ -258,6 +258,15 @@ async fn handle_compaction_recovery_action(
             let pane = pane_mgr.focused_mut();
             crate::slash::apply_applied_compaction(&mut pane.app, &mut pane.conversation, applied);
             super::runtime::replay_compaction_inputs(pane);
+            // persist the recovered compaction immediately, same reason as
+            // the background `/compact` path: nothing else saves it before
+            // the user might quit
+            if let Some(saver) = &deps.tui_config.save_session {
+                saver(super::streams::build_session_snapshot(
+                    pane_mgr,
+                    deps.tui_config,
+                ));
+            }
         }
         crate::app_state::CompactionRecoveryAction::Cancel => {
             let pane = pane_mgr.focused_mut();
