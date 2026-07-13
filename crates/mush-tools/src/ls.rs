@@ -129,9 +129,14 @@ fn list_dir(path: &Path) -> ToolResult {
             ""
         };
 
-        let size = meta
-            .as_ref()
-            .map_or_else(|| "?".to_string(), |m| format_size(m.len()));
+        // a directory's reported length is a filesystem block count, not a
+        // content size, so show a placeholder rather than a misleading number
+        let size = if ft.as_ref().is_some_and(|t| t.is_dir()) {
+            "-".to_string()
+        } else {
+            meta.as_ref()
+                .map_or_else(|| "?".to_string(), |m| format_size(m.len()))
+        };
         lines.push(format!("{size}  {name}{type_indicator}"));
     }
 
@@ -189,21 +194,27 @@ mod tests {
     }
 
     #[test]
-    fn list_directory_keeps_sizes_aligned_without_leading_indent() {
+    fn list_directory_shows_dir_placeholder_and_file_byte_size() {
+        // a directory's `len()` is a filesystem-dependent block count, not
+        // meaningful content size, so directories render a `-` placeholder
+        // while files show their real byte size
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir(dir.path().join("src")).unwrap();
         fs::write(dir.path().join("a.txt"), "hello").unwrap();
 
         let result = list_dir(dir.path());
         let text = extract_text(&result);
-        let lines: Vec<&str> = text.lines().collect();
         assert!(
-            lines.iter().all(|line| !line.starts_with(' ')),
-            "got: {text}"
+            text.lines().all(|line| !line.starts_with(' ')),
+            "no leading indent, got: {text}"
         );
         assert!(
-            text.lines().any(|line| line.ends_with("B  src/")),
-            "got: {text}"
+            text.lines().any(|line| line == "-  src/"),
+            "dir shows placeholder, got: {text}"
+        );
+        assert!(
+            text.lines().any(|line| line == "5B  a.txt"),
+            "file shows byte size, got: {text}"
         );
     }
 
