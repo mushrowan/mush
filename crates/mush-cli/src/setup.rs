@@ -605,7 +605,8 @@ pub async fn resolve_api_key(options: &mut StreamOptions, model: &Model, cfg: &c
     options.account_id = resolved.account_id;
 }
 
-/// pick the default model based on per-cwd memory then available auth
+/// pick the default model based on per-cwd memory, then the model last
+/// used anywhere, then available auth
 pub fn default_model_id(cfg: &config::Config, cwd: &std::path::Path) -> String {
     if let Some(model) = &cfg.model {
         return model.clone();
@@ -616,6 +617,17 @@ pub fn default_model_id(cfg: &config::Config, cwd: &std::path::Path) -> String {
         && mush_ai::discovery::resolve_model_by_id(model).is_some()
     {
         return model.to_string();
+    }
+
+    // no memory for this cwd yet: inherit the model last used anywhere
+    // rather than dropping straight to a hardcoded default. the recent
+    // list is most-recent first, so the first resolvable entry is the
+    // freshest still-valid choice.
+    if let Some(model) = config::load_recent_models()
+        .iter()
+        .find(|id| mush_ai::discovery::resolve_model_by_id(id).is_some())
+    {
+        return model.clone();
     }
 
     let oauth_store = mush_ai::oauth::load_credentials().unwrap_or_default();
@@ -862,6 +874,26 @@ mod tests {
         let cfg: config::Config = toml::from_str("").unwrap();
 
         assert_eq!(default_model_id(&cfg, dir.path()), "claude-opus-4-7");
+    }
+
+    #[test]
+    fn falls_back_to_most_recent_model_when_cwd_has_none() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let _guard = EnvGuard::set(&[
+            ("MUSH_CONFIG_DIR", Some(path)),
+            ("MUSH_DATA_DIR", Some(path)),
+            ("ANTHROPIC_API_KEY", Some("sk-ant-test")),
+            ("ANTHROPIC_OAUTH_TOKEN", None),
+        ]);
+
+        // a fresh cwd with no recorded model should inherit the model
+        // last used anywhere rather than the hardcoded opus default
+        config::save_recent_models(&["claude-opus-4-6".to_string()]);
+
+        let cfg: config::Config = toml::from_str("").unwrap();
+        assert_eq!(default_model_id(&cfg, dir.path()), "claude-opus-4-6");
     }
 
     #[test]
