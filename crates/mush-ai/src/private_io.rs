@@ -49,6 +49,7 @@ fn atomic_write_with_temp_path(
     std::fs::create_dir_all(parent)?;
 
     let result = write_temp_file(temp_path, contents, private)
+        .and_then(|()| preserve_existing_mode(path, temp_path, private))
         .and_then(|()| std::fs::rename(temp_path, path))
         .and_then(|()| sync_parent_dir(parent));
 
@@ -63,6 +64,25 @@ fn parent_dir(path: &Path) -> &Path {
     match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
+    }
+}
+
+/// copy the destination's existing mode onto the freshly written temp file
+/// so overwriting a file does not reset its permissions. private writes keep
+/// their locked-down 0o600 mode and are left untouched.
+fn preserve_existing_mode(dest: &Path, temp_path: &Path, private: bool) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        if !private && let Ok(meta) = std::fs::metadata(dest) {
+            std::fs::set_permissions(temp_path, meta.permissions())?;
+        }
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = (dest, temp_path, private);
+        Ok(())
     }
 }
 
@@ -189,6 +209,23 @@ mod tests {
         write_atomic(&path, b"scope = 'global'\n").unwrap();
 
         assert_eq!(std::fs::read(&path).unwrap(), b"scope = 'global'\n");
+    }
+
+    #[test]
+    fn write_atomic_preserves_existing_file_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("script.sh");
+        std::fs::write(&path, b"#!/bin/sh\necho old\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        write_atomic(&path, b"#!/bin/sh\necho new\n").unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o755,
+            "overwriting an executable file must preserve its mode, got {mode:o}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"#!/bin/sh\necho new\n");
     }
 
     #[test]
