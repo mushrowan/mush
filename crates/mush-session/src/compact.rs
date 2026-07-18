@@ -701,6 +701,11 @@ pub async fn llm_compact(
 /// unlike [`llm_compact`], this does not apply the structured fallback
 /// automatically. callers can surface [`CompactionFailureReport`] to a UI
 /// and let the user decide whether to retry, fall back, or cancel.
+// the failure report intentionally carries the full message list (plus
+// diagnostics) so the UI can retry or fall back without losing context. the
+// Ok variant is comparably large, so boxing only the error would just add a
+// cold-path allocation without shrinking the Result.
+#[allow(clippy::result_large_err)]
 pub async fn try_llm_compact(
     messages: Vec<Message>,
     registry: &ApiRegistry,

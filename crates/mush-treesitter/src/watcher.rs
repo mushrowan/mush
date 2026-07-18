@@ -101,8 +101,8 @@ impl RepoMapWatcher {
                 guard.incr_map = Some(incr_map);
 
                 // process any events that arrived during the build
-                let changed: Vec<PathBuf> = guard.pending_changed.drain(..).collect();
-                let removed: Vec<PathBuf> = guard.pending_removed.drain(..).collect();
+                let changed: Vec<PathBuf> = std::mem::take(&mut guard.pending_changed);
+                let removed: Vec<PathBuf> = std::mem::take(&mut guard.pending_removed);
                 if (!changed.is_empty() || !removed.is_empty())
                     && let Some(ref mut incr) = guard.incr_map
                 {
@@ -128,8 +128,8 @@ impl RepoMapWatcher {
                 while debounce_rx.try_recv().is_ok() {}
 
                 let mut guard = state_clone.lock().unwrap_or_else(|e| e.into_inner());
-                let changed: Vec<PathBuf> = guard.pending_changed.drain(..).collect();
-                let removed: Vec<PathBuf> = guard.pending_removed.drain(..).collect();
+                let changed: Vec<PathBuf> = std::mem::take(&mut guard.pending_changed);
+                let removed: Vec<PathBuf> = std::mem::take(&mut guard.pending_removed);
 
                 if changed.is_empty() && removed.is_empty() {
                     continue;
