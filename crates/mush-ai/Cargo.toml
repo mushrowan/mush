@@ -36,7 +36,7 @@ keyring-core.workspace = true
 # workspace versions; tolerated only because the surface we use is
 # narrow (two free functions). the streaming path stays on our own
 # providers/openai.rs implementation
-openrouter-rs = "0.10"
+openrouter-rs = "0.12"
 
 # platform-specific keyring stores. each only compiles on its target
 # os, so the credentials module conditionally wires them in

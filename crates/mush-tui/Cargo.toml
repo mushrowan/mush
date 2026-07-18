@@ -39,7 +39,7 @@ open.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
 tokio-util.workspace = true
-ratatui-image = { version = "11.0.4", default-features = false, features = [
+ratatui-image = { version = "11.0.6", default-features = false, features = [
   "crossterm",
   "image-defaults",
 ] }

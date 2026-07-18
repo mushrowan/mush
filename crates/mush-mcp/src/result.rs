@@ -1,7 +1,7 @@
 //! shared MCP result conversion
 
 use mush_agent::tool::ToolResult;
-use rmcp::model::{CallToolResult, RawContent};
+use rmcp::model::CallToolResult;
 
 /// convert an MCP `CallToolResult` into an agent `ToolResult`
 pub fn convert_call_result(result: CallToolResult) -> ToolResult {
@@ -9,10 +9,7 @@ pub fn convert_call_result(result: CallToolResult) -> ToolResult {
     let text: String = result
         .content
         .iter()
-        .filter_map(|c| match &c.raw {
-            RawContent::Text(t) => Some(t.text.as_str()),
-            _ => None,
-        })
+        .filter_map(|c| c.as_text().map(|t| t.text.as_str()))
         .collect::<Vec<_>>()
         .join("\n");
 
