@@ -759,8 +759,6 @@
       "default": [],
       "description": "characters that are forbidden in file edits/writes and bash\ncommands. `write`, `edit`, and `apply_patch` reject content\ncontaining any of these; `bash` rejects commands containing them\ntoo. each entry must be exactly one char (Unicode scalar). the\nmodel can pass `allow_forbidden_chars: true` on a single call to\nbypass when the char is genuinely required (verbatim quoting, or\nsedding the char out of a file).\n\nexample:\n```toml\nforbidden_chars = [\"—\", \"–\", \";\"]\n```",
       "items": {
-        "maxLength": 1,
-        "minLength": 1,
         "type": "string"
       },
       "type": "array"

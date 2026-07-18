@@ -145,7 +145,12 @@ pub struct Config {
     /// ```toml
     /// forbidden_chars = ["—", "–", ";"]
     /// ```
+    // schema renders as a plain string array rather than char (maxLength 1):
+    // nixcfg turns the length bound into a byte-length check, which rejects
+    // multibyte single chars like an em dash. serde still parses each entry
+    // into a `char`, so multi-char strings are rejected at load instead.
     #[serde(default)]
+    #[schemars(with = "Vec<String>")]
     pub forbidden_chars: Vec<char>,
     /// whole classes of characters to forbid in file edits/writes and bash
     /// commands, for cases where listing every codepoint is impractical.
