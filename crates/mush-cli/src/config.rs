@@ -133,12 +133,13 @@ pub struct Config {
     /// `[keys.normal]` and `[keys.model_picker]`.
     #[serde(default)]
     pub keys: mush_tui::KeysConfig,
-    /// characters that are forbidden in file edits/writes. tools that
-    /// produce text output (`write`, `edit`) reject content containing
-    /// any of these characters. each entry must be exactly one char
-    /// (Unicode scalar). the model can pass `allow_forbidden_chars:
-    /// true` on a single call to bypass when the forbidden char is
-    /// genuinely required (verbatim quoting, etc).
+    /// characters that are forbidden in file edits/writes and bash
+    /// commands. `write`, `edit`, and `apply_patch` reject content
+    /// containing any of these; `bash` rejects commands containing them
+    /// too. each entry must be exactly one char (Unicode scalar). the
+    /// model can pass `allow_forbidden_chars: true` on a single call to
+    /// bypass when the char is genuinely required (verbatim quoting, or
+    /// sedding the char out of a file).
     ///
     /// example:
     /// ```toml
@@ -146,6 +147,16 @@ pub struct Config {
     /// ```
     #[serde(default)]
     pub forbidden_chars: Vec<char>,
+    /// whole classes of characters to forbid in file edits/writes and bash
+    /// commands, for cases where listing every codepoint is impractical.
+    /// supported values: `emoji`, `arrows`. combines with `forbidden_chars`.
+    ///
+    /// example:
+    /// ```toml
+    /// forbidden_char_classes = ["emoji", "arrows"]
+    /// ```
+    #[serde(default)]
+    pub forbidden_char_classes: Vec<mush_tools::forbidden_chars::CharClass>,
     /// images larger than this many megabytes are downscaled and
     /// re-encoded by the `read` tool before being attached, instead of
     /// failing the request (most providers reject oversized images, and
@@ -205,6 +216,7 @@ impl Default for Config {
             scroll_lines: default_scroll_lines(),
             keys: mush_tui::KeysConfig::default(),
             forbidden_chars: Vec::new(),
+            forbidden_char_classes: Vec::new(),
             max_image_mb: default_max_image_mb(),
         }
     }

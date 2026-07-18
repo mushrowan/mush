@@ -105,6 +105,21 @@
       ],
       "type": "string"
     },
+    "CharClass": {
+      "description": "a class of characters to forbid wholesale, for cases where listing\nevery codepoint by hand is impractical (emoji, arrow glyphs).\ncombine with the explicit `chars` set in [`ForbiddenChars`].",
+      "oneOf": [
+        {
+          "const": "emoji",
+          "description": "pictographic emoji. matches `Emoji=YES | Emoji_Component=YES` but\nexcludes ASCII (the `0-9`, `#`, `*` keycap bases carry `Emoji=YES`\nyet are ordinary code), so real source is never rejected.",
+          "type": "string"
+        },
+        {
+          "const": "arrows",
+          "description": "arrow glyphs from the Unicode arrow blocks (`→ ← ↑ ↓ ⇒ ⬆` etc).\nthe ASCII `->` is unaffected.",
+          "type": "string"
+        }
+      ]
+    },
     "EffortLevel": {
       "anyOf": [
         {
@@ -732,9 +747,17 @@
       },
       "type": "array"
     },
+    "forbidden_char_classes": {
+      "default": [],
+      "description": "whole classes of characters to forbid in file edits/writes and bash\ncommands, for cases where listing every codepoint is impractical.\nsupported values: `emoji`, `arrows`. combines with `forbidden_chars`.\n\nexample:\n```toml\nforbidden_char_classes = [\"emoji\", \"arrows\"]\n```",
+      "items": {
+        "$ref": "#/$defs/CharClass"
+      },
+      "type": "array"
+    },
     "forbidden_chars": {
       "default": [],
-      "description": "characters that are forbidden in file edits/writes. tools that\nproduce text output (`write`, `edit`) reject content containing\nany of these characters. each entry must be exactly one char\n(Unicode scalar). the model can pass `allow_forbidden_chars:\ntrue` on a single call to bypass when the forbidden char is\ngenuinely required (verbatim quoting, etc).\n\nexample:\n```toml\nforbidden_chars = [\"—\", \"–\", \";\"]\n```",
+      "description": "characters that are forbidden in file edits/writes and bash\ncommands. `write`, `edit`, and `apply_patch` reject content\ncontaining any of these; `bash` rejects commands containing them\ntoo. each entry must be exactly one char (Unicode scalar). the\nmodel can pass `allow_forbidden_chars: true` on a single call to\nbypass when the char is genuinely required (verbatim quoting, or\nsedding the char out of a file).\n\nexample:\n```toml\nforbidden_chars = [\"—\", \"–\", \";\"]\n```",
       "items": {
         "maxLength": 1,
         "minLength": 1,

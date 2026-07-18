@@ -102,7 +102,10 @@ impl AppSetup {
             args.output_sink,
             args.no_tools,
             &http_client,
-            mush_tools::forbidden_chars::ForbiddenChars::new(cfg.forbidden_chars.iter().copied()),
+            mush_tools::forbidden_chars::ForbiddenChars::with_classes(
+                cfg.forbidden_chars.iter().copied(),
+                cfg.forbidden_char_classes.iter().copied(),
+            ),
             cfg.max_image_mb,
         );
         if let Some(t) = &mut timer {
@@ -1082,5 +1085,22 @@ effort = "low"
             result.is_err(),
             "multi-char string should fail to parse as char"
         );
+    }
+
+    #[test]
+    fn forbidden_char_classes_parse_from_toml() {
+        use mush_tools::forbidden_chars::CharClass;
+        let cfg: config::Config =
+            toml::from_str(r#"forbidden_char_classes = ["emoji", "arrows"]"#).unwrap();
+        assert_eq!(
+            cfg.forbidden_char_classes,
+            vec![CharClass::Emoji, CharClass::Arrows]
+        );
+    }
+
+    #[test]
+    fn forbidden_char_classes_default_to_empty() {
+        let cfg: config::Config = toml::from_str("").unwrap();
+        assert!(cfg.forbidden_char_classes.is_empty());
     }
 }
