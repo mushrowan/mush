@@ -66,7 +66,9 @@ pub(super) struct RunnerServices {
 const USAGE_POLL_TICK: std::time::Duration = std::time::Duration::from_secs(60);
 
 pub enum DiscoveryUpdate {
-    Refreshed(String),
+    /// startup discovery finished. reload the model catalogue for the
+    /// pickers. the summary line is only logged, not shown in the ui.
+    Refreshed,
 }
 
 pub(super) struct RunnerRuntime {
@@ -201,14 +203,10 @@ impl RunnerRuntime {
         let mut changed = false;
         while let Ok(update) = rx.try_recv() {
             match update {
-                DiscoveryUpdate::Refreshed(line) => {
+                DiscoveryUpdate::Refreshed => {
                     for pane in self.pane_mgr.panes_mut() {
                         crate::input::reload_model_completions(&mut pane.app);
                     }
-                    self.pane_mgr
-                        .focused_mut()
-                        .app
-                        .push_system_message(format!("model discovery: {line}"));
                     changed = true;
                 }
             }
@@ -1118,7 +1116,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_discovery_updates_reloads_models_and_posts_message() {
+    fn apply_discovery_updates_reloads_models_without_posting_message() {
         let mut config = test_config();
         let (mut runtime, _) = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1128,17 +1126,16 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         runtime.install_discovery_updates(rx);
 
-        tx.send(DiscoveryUpdate::Refreshed(
-            "7 models from openai-codex".into(),
-        ))
-        .unwrap();
+        tx.send(DiscoveryUpdate::Refreshed).unwrap();
 
         assert!(runtime.apply_discovery_updates());
         let app = &runtime.pane_mgr.focused().app;
-        assert!(app.messages.iter().any(|m| {
-            m.content
-                .contains("model discovery: 7 models from openai-codex")
-        }));
+        assert!(
+            !app.messages
+                .iter()
+                .any(|m| m.content.contains("model discovery")),
+            "startup discovery must not post a system message"
+        );
         assert!(!app.completion.model_completions.is_empty());
     }
 }

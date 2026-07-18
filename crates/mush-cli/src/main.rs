@@ -645,9 +645,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
             "{}",
             summary.one_line()
         );
-        let _ = discovery_tx.send(mush_tui::runner::DiscoveryUpdate::Refreshed(
-            summary.one_line(),
-        ));
+        let _ = discovery_tx.send(mush_tui::runner::DiscoveryUpdate::Refreshed);
     });
 
     mush_tui::run_tui(
