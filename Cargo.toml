@@ -95,6 +95,10 @@ ratatui = { version = "0.30.1", features = [
   "scrolling-regions",
 ] }
 unicode-width = "0.2"
+# emoji character property lookup for the forbidden-chars "emoji" class
+unicode-properties = { version = "0.1.4", default-features = false, features = [
+  "emoji",
+] }
 crossterm = { version = "0.29", features = ["osc52"] }
 
 # parses bash/cargo/eza/jj style ANSI SGR escapes out of tool output and

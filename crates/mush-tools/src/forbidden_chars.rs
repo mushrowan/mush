@@ -20,6 +20,56 @@ use std::sync::Arc;
 
 use thiserror::Error;
 
+/// a class of characters to forbid wholesale, for cases where listing
+/// every codepoint by hand is impractical (emoji, arrow glyphs).
+/// combine with the explicit `chars` set in [`ForbiddenChars`].
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CharClass {
+    /// pictographic emoji. matches `Emoji=YES | Emoji_Component=YES` but
+    /// excludes ASCII (the `0-9`, `#`, `*` keycap bases carry `Emoji=YES`
+    /// yet are ordinary code), so real source is never rejected.
+    Emoji,
+    /// arrow glyphs from the Unicode arrow blocks (`→ ← ↑ ↓ ⇒ ⬆` etc).
+    /// the ASCII `->` is unaffected.
+    Arrows,
+}
+
+impl CharClass {
+    fn matches(self, ch: char) -> bool {
+        match self {
+            Self::Emoji => is_emoji(ch),
+            Self::Arrows => is_arrow(ch),
+        }
+    }
+
+    /// short human name used in the violation message.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Emoji => "emoji",
+            Self::Arrows => "arrow",
+        }
+    }
+}
+
+fn is_emoji(ch: char) -> bool {
+    use unicode_properties::UnicodeEmoji;
+    !ch.is_ascii() && ch.is_emoji_char_or_emoji_component()
+}
+
+fn is_arrow(ch: char) -> bool {
+    matches!(ch,
+        '\u{2190}'..='\u{21FF}'   // Arrows
+        | '\u{2794}'..='\u{27BF}' // Dingbats (heavy/curved arrows)
+        | '\u{27F0}'..='\u{27FF}' // Supplemental Arrows-A
+        | '\u{2900}'..='\u{297F}' // Supplemental Arrows-B
+        | '\u{2B05}'..='\u{2B07}' // black left/up/down arrows
+        | '\u{2B95}'              // black rightwards arrow
+    )
+}
+
 /// validator for a configured set of forbidden characters.
 ///
 /// cheap to clone (internally `Arc`-shared). pass into tool
@@ -27,13 +77,23 @@ use thiserror::Error;
 #[derive(Debug, Clone)]
 pub struct ForbiddenChars {
     chars: Arc<HashSet<char>>,
+    classes: Arc<Vec<CharClass>>,
 }
 
 impl ForbiddenChars {
     /// build from an iterator of forbidden characters.
     pub fn new(chars: impl IntoIterator<Item = char>) -> Self {
+        Self::with_classes(chars, std::iter::empty())
+    }
+
+    /// build from explicit characters plus whole character classes.
+    pub fn with_classes(
+        chars: impl IntoIterator<Item = char>,
+        classes: impl IntoIterator<Item = CharClass>,
+    ) -> Self {
         Self {
             chars: Arc::new(chars.into_iter().collect()),
+            classes: Arc::new(classes.into_iter().collect()),
         }
     }
 
@@ -45,7 +105,7 @@ impl ForbiddenChars {
     /// whether the validator has anything to enforce. tools can short-
     /// circuit the scan when this is true.
     pub fn is_empty(&self) -> bool {
-        self.chars.is_empty()
+        self.chars.is_empty() && self.classes.is_empty()
     }
 
     /// scan `content` for the first forbidden character.
@@ -54,17 +114,27 @@ impl ForbiddenChars {
     /// (chars), not bytes, so the position lines up with what an
     /// end-user / model sees in an editor.
     pub fn check(&self, content: &str) -> Result<(), ForbiddenCharError> {
-        if self.chars.is_empty() {
+        if self.is_empty() {
             return Ok(());
         }
         let mut line: usize = 1;
         let mut col: usize = 1;
         for ch in content.chars() {
-            if self.chars.contains(&ch) {
+            let violation = if self.chars.contains(&ch) {
+                Some(None)
+            } else {
+                self.classes
+                    .iter()
+                    .copied()
+                    .find(|c| c.matches(ch))
+                    .map(Some)
+            };
+            if let Some(class) = violation {
                 return Err(ForbiddenCharError {
                     ch,
                     line,
                     column: col,
+                    class,
                 });
             }
             if ch == '\n' {
@@ -87,14 +157,25 @@ impl Default for ForbiddenChars {
 /// a forbidden character was found at a specific location.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error(
-    "forbidden character {} (U+{:04X}) at line {line}, column {column}. \
+    "forbidden character {} (U+{:04X}) at line {line}, column {column}{}. \
      remove or replace it, or set `allow_forbidden_chars: true` to bypass",
-    fmt_char(*.ch), *.ch as u32
+    fmt_char(*.ch), *.ch as u32, class_suffix(*.class)
 )]
 pub struct ForbiddenCharError {
     pub ch: char,
     pub line: usize,
     pub column: usize,
+    /// which class matched, or `None` when the char was listed explicitly.
+    pub class: Option<CharClass>,
+}
+
+/// describe a class match so the model knows it hit a whole category
+/// rather than a single configured char.
+fn class_suffix(class: Option<CharClass>) -> String {
+    match class {
+        Some(c) => format!(" (matches the forbidden {} class)", c.label()),
+        None => String::new(),
+    }
 }
 
 /// render a char in a way that's unambiguous in error messages: visible
@@ -145,10 +226,25 @@ pub const ALLOW_FORBIDDEN_CHARS_KEY: &str = "allow_forbidden_chars";
 /// [`ForbiddenCharsGuard::maybe_wrap`] which returns the inner tool
 /// untouched in that case so callers don't pay the wrapper tax for
 /// the no-config common case.
+/// whether the per-call bypass is advertised in the tool schema.
+///
+/// `write`/`edit`/`apply_patch` advertise it so the model has a
+/// documented escape hatch. `bash` keeps it [`Hidden`](Self::Hidden):
+/// the field still works and is named in the rejection message, but it
+/// is deliberately left out of the advertised schema so the model only
+/// reaches for it after a genuine block (e.g. the user asking it to
+/// `sed` a forbidden char out of a file).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BypassVisibility {
+    Advertised,
+    Hidden,
+}
+
 pub struct ForbiddenCharsGuard {
     inner: mush_agent::tool::SharedTool,
     chars: ForbiddenChars,
     extractor: ContentExtractor,
+    visibility: BypassVisibility,
 }
 
 impl ForbiddenCharsGuard {
@@ -156,11 +252,13 @@ impl ForbiddenCharsGuard {
         inner: mush_agent::tool::SharedTool,
         chars: ForbiddenChars,
         extractor: ContentExtractor,
+        visibility: BypassVisibility,
     ) -> Self {
         Self {
             inner,
             chars,
             extractor,
+            visibility,
         }
     }
 
@@ -171,11 +269,21 @@ impl ForbiddenCharsGuard {
         inner: mush_agent::tool::SharedTool,
         chars: ForbiddenChars,
         extractor: ContentExtractor,
+        visibility: BypassVisibility,
     ) -> mush_agent::tool::SharedTool {
         if chars.is_empty() {
             inner
         } else {
-            std::sync::Arc::new(Self::new(inner, chars, extractor))
+            std::sync::Arc::new(Self::new(inner, chars, extractor, visibility))
+        }
+    }
+
+    /// augment the schema with the bypass knob only when advertised.
+    /// hidden guards return the inner schema untouched.
+    fn maybe_augment(&self, schema: serde_json::Value) -> serde_json::Value {
+        match self.visibility {
+            BypassVisibility::Advertised => augment_schema(schema),
+            BypassVisibility::Hidden => schema,
         }
     }
 }
@@ -219,10 +327,10 @@ impl mush_agent::tool::AgentTool for ForbiddenCharsGuard {
         self.inner.description_for(api)
     }
     fn parameters_schema(&self) -> serde_json::Value {
-        augment_schema(self.inner.parameters_schema())
+        self.maybe_augment(self.inner.parameters_schema())
     }
     fn parameters_schema_for(&self, api: mush_ai::types::Api) -> serde_json::Value {
-        augment_schema(self.inner.parameters_schema_for(api))
+        self.maybe_augment(self.inner.parameters_schema_for(api))
     }
     fn output_limit(&self) -> mush_agent::tool::OutputLimit {
         self.inner.output_limit()
@@ -258,6 +366,43 @@ mod tests {
         let fc = ForbiddenChars::empty();
         assert!(fc.is_empty());
         assert!(fc.check("anything goes — even em dashes;").is_ok());
+    }
+
+    #[test]
+    fn emoji_class_blocks_pictographic_but_not_ascii_code() {
+        let fc = ForbiddenChars::with_classes([], [CharClass::Emoji]);
+        assert!(!fc.is_empty(), "a class alone is not empty");
+        assert!(fc.check("ship it 🚀").is_err());
+        assert!(fc.check("done ✅").is_err());
+        // Emoji=YES technically covers ASCII digits, '#', '*' (keycap bases);
+        // ordinary code must still pass
+        assert!(fc.check("let x = 12; a[3] = *p; # note").is_ok());
+    }
+
+    #[test]
+    fn arrows_class_blocks_arrow_glyphs_not_ascii_arrow() {
+        let fc = ForbiddenChars::with_classes([], [CharClass::Arrows]);
+        assert!(fc.check("a → b").is_err());
+        assert!(fc.check("x ⇒ y").is_err());
+        assert!(fc.check("closure |a| -> b").is_ok());
+    }
+
+    #[test]
+    fn explicit_chars_and_classes_combine() {
+        let fc = ForbiddenChars::with_classes(['—'], [CharClass::Emoji]);
+        assert!(fc.check("em — dash").is_err());
+        assert!(fc.check("party 🎉").is_err());
+        assert!(fc.check("clean ascii text").is_ok());
+    }
+
+    #[test]
+    fn class_violation_names_the_class_in_the_error() {
+        let fc = ForbiddenChars::with_classes([], [CharClass::Emoji]);
+        let msg = fc.check("oops 🔥").unwrap_err().to_string();
+        assert!(
+            msg.contains("emoji"),
+            "expected class name in message: {msg}"
+        );
     }
 
     #[test]
@@ -390,7 +535,12 @@ mod tests {
     fn record_with_guard(chars: ForbiddenChars) -> (Arc<RecordingTool>, ForbiddenCharsGuard) {
         let inner = Arc::new(RecordingTool::new());
         let shared: SharedTool = inner.clone();
-        let guard = ForbiddenCharsGuard::new(shared, chars, content_extractor());
+        let guard = ForbiddenCharsGuard::new(
+            shared,
+            chars,
+            content_extractor(),
+            BypassVisibility::Advertised,
+        );
         (inner, guard)
     }
 
@@ -457,7 +607,12 @@ mod tests {
                 })
                 .unwrap_or_default()
         });
-        let guard = ForbiddenCharsGuard::new(inner, ForbiddenChars::new(['—']), multi);
+        let guard = ForbiddenCharsGuard::new(
+            inner,
+            ForbiddenChars::new(['—']),
+            multi,
+            BypassVisibility::Advertised,
+        );
         let result = guard
             .execute(serde_json::json!({"lines": ["clean", "with — em dash", "also clean"]}))
             .await;
@@ -470,8 +625,12 @@ mod tests {
     #[test]
     fn guard_schema_injects_allow_forbidden_chars() {
         let inner: SharedTool = Arc::new(RecordingTool::new());
-        let guard =
-            ForbiddenCharsGuard::new(inner, ForbiddenChars::new(['—']), content_extractor());
+        let guard = ForbiddenCharsGuard::new(
+            inner,
+            ForbiddenChars::new(['—']),
+            content_extractor(),
+            BypassVisibility::Advertised,
+        );
         let schema = guard.parameters_schema();
         assert_eq!(
             schema["properties"]["allow_forbidden_chars"]["type"],
@@ -481,14 +640,55 @@ mod tests {
         assert_eq!(schema["properties"]["content"]["type"], "string");
     }
 
+    #[tokio::test]
+    async fn hidden_guard_omits_schema_knob_but_still_enforces_and_bypasses() {
+        // bash uses a hidden guard: the bypass field must not appear in the
+        // advertised schema, yet the guard still blocks forbidden content and
+        // still honours the bypass flag when passed
+        let inner: SharedTool = Arc::new(RecordingTool::new());
+        let guard = ForbiddenCharsGuard::new(
+            inner.clone(),
+            ForbiddenChars::new(['—']),
+            content_extractor(),
+            BypassVisibility::Hidden,
+        );
+        assert!(
+            guard.parameters_schema()["properties"]["allow_forbidden_chars"].is_null(),
+            "hidden guard must not advertise the bypass field"
+        );
+        // still enforces, and the rejection message names the hidden field
+        let blocked = guard
+            .execute(serde_json::json!({"content": "no — dash"}))
+            .await;
+        assert!(
+            !blocked.outcome.is_success(),
+            "hidden guard must still block"
+        );
+        // still bypassable via the undocumented field
+        let allowed = guard
+            .execute(serde_json::json!({
+                "content": "with — em dash",
+                "allow_forbidden_chars": true,
+            }))
+            .await;
+        assert!(
+            allowed.outcome.is_success(),
+            "hidden bypass must still work"
+        );
+    }
+
     #[test]
     fn maybe_wrap_returns_inner_unchanged_when_chars_empty() {
         // tests don't have a way to compare SharedTool identity directly,
         // so verify behaviourally: inner schema lacks the override knob
         // when the validator is empty, and would have it after wrapping
         let inner: SharedTool = Arc::new(RecordingTool::new());
-        let wrapped =
-            ForbiddenCharsGuard::maybe_wrap(inner, ForbiddenChars::empty(), content_extractor());
+        let wrapped = ForbiddenCharsGuard::maybe_wrap(
+            inner,
+            ForbiddenChars::empty(),
+            content_extractor(),
+            BypassVisibility::Advertised,
+        );
         assert!(
             wrapped.parameters_schema()["properties"]["allow_forbidden_chars"].is_null(),
             "empty validator should not augment the schema"
@@ -498,8 +698,12 @@ mod tests {
     #[test]
     fn maybe_wrap_wraps_when_chars_configured() {
         let inner: SharedTool = Arc::new(RecordingTool::new());
-        let wrapped =
-            ForbiddenCharsGuard::maybe_wrap(inner, ForbiddenChars::new(['—']), content_extractor());
+        let wrapped = ForbiddenCharsGuard::maybe_wrap(
+            inner,
+            ForbiddenChars::new(['—']),
+            content_extractor(),
+            BypassVisibility::Advertised,
+        );
         assert_eq!(
             wrapped.parameters_schema()["properties"]["allow_forbidden_chars"]["type"],
             "boolean"
@@ -513,6 +717,7 @@ mod tests {
             inner.clone(),
             ForbiddenChars::new(['—']),
             content_extractor(),
+            BypassVisibility::Advertised,
         );
         assert_eq!(guard.name(), inner.name());
         assert_eq!(guard.label(), inner.label());

@@ -103,7 +103,16 @@ pub fn builtin_tools_with_options(
 
     let mut tools: Vec<SharedTool> = vec![
         Arc::new(read::ReadTool::new(cwd.clone()).with_max_image_bytes(max_image_bytes)),
-        bash_tool,
+        // bash is guarded too, but with a hidden bypass: forbidden chars in a
+        // command are refused, yet `allow_forbidden_chars` stays out of the
+        // advertised schema so the model only reaches for it after a real block
+        // (e.g. the user asking it to sed a forbidden char out of a file)
+        forbidden_chars::ForbiddenCharsGuard::maybe_wrap(
+            bash_tool,
+            forbidden_chars.clone(),
+            bash_content_extractor(),
+            forbidden_chars::BypassVisibility::Hidden,
+        ),
         Arc::new(bash_status::BashStatusTool::new(bg_registry)),
         Arc::new(grep::GrepTool::new(cwd.clone())),
         Arc::new(find::FindTool::new(cwd.clone())),
@@ -120,6 +129,7 @@ pub fn builtin_tools_with_options(
             apply,
             forbidden_chars,
             apply_patch_content_extractor(),
+            forbidden_chars::BypassVisibility::Advertised,
         ));
     } else {
         let write: SharedTool = Arc::new(write::WriteTool::new(cwd.clone()));
@@ -127,16 +137,28 @@ pub fn builtin_tools_with_options(
             write,
             forbidden_chars.clone(),
             write_content_extractor(),
+            forbidden_chars::BypassVisibility::Advertised,
         ));
         let edit: SharedTool = Arc::new(edit::EditTool::new(cwd));
         tools.push(forbidden_chars::ForbiddenCharsGuard::maybe_wrap(
             edit,
             forbidden_chars,
             edit_content_extractor(),
+            forbidden_chars::BypassVisibility::Advertised,
         ));
     }
 
     ToolRegistry::from_shared(tools)
+}
+
+/// extract the command payload from a `bash` call's args
+fn bash_content_extractor() -> forbidden_chars::ContentExtractor {
+    Arc::new(|args: &serde_json::Value| {
+        args.get("command")
+            .and_then(|v| v.as_str())
+            .map(|s| vec![s.to_string()])
+            .unwrap_or_default()
+    })
 }
 
 /// extract the content payload from a `write` call's args
@@ -226,6 +248,7 @@ pub fn align_for_model(
             apply,
             forbidden_chars,
             apply_patch_content_extractor(),
+            forbidden_chars::BypassVisibility::Advertised,
         ));
     } else {
         let write: SharedTool = Arc::new(write::WriteTool::new(cwd.clone()));
@@ -233,12 +256,14 @@ pub fn align_for_model(
             write,
             forbidden_chars.clone(),
             write_content_extractor(),
+            forbidden_chars::BypassVisibility::Advertised,
         ));
         let edit: SharedTool = Arc::new(edit::EditTool::new(cwd));
         registry.register_shared(forbidden_chars::ForbiddenCharsGuard::maybe_wrap(
             edit,
             forbidden_chars,
             edit_content_extractor(),
+            forbidden_chars::BypassVisibility::Advertised,
         ));
     }
 
@@ -374,6 +399,41 @@ mod tests {
         assert_eq!(
             schema["properties"]["allow_forbidden_chars"]["type"], "boolean",
             "apply_patch schema should expose the override knob when the validator is configured"
+        );
+    }
+
+    #[tokio::test]
+    async fn bash_is_guarded_but_hides_the_bypass_knob() {
+        let registry = registry_with_chars(false, ForbiddenChars::new(['—']));
+        let bash = registry.get("bash").expect("bash tool registered");
+        // unlike write/edit, bash must NOT advertise the bypass in its schema
+        assert!(
+            bash.parameters_schema()["properties"]["allow_forbidden_chars"].is_null(),
+            "bash must keep the bypass field hidden from the schema"
+        );
+        // but a forbidden char in the command is still refused
+        let blocked = bash
+            .execute(serde_json::json!({"command": "echo — dash"}))
+            .await;
+        assert!(
+            !blocked.outcome.is_success(),
+            "bash should block a forbidden char in the command"
+        );
+    }
+
+    #[tokio::test]
+    async fn bash_hidden_bypass_lets_forbidden_command_run() {
+        let registry = registry_with_chars(false, ForbiddenChars::new(['—']));
+        let bash = registry.get("bash").expect("bash tool registered");
+        let result = bash
+            .execute(serde_json::json!({
+                "command": "printf %s '—'",
+                "allow_forbidden_chars": true,
+            }))
+            .await;
+        assert!(
+            result.outcome.is_success(),
+            "the hidden bypass should let a forbidden-char command through"
         );
     }
 
