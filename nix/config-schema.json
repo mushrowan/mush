@@ -83,6 +83,180 @@
       },
       "type": "object"
     },
+    "Base24Palette": {
+      "description": "a base16 / base24 colour scheme. `base00`-`base0F` is the base16 set;\n`base10`-`base17` are the base24 additions (darker bgs + bright accents).\nevery field is optional so partial or base16-only schemes work. values\nare hex (`#rrggbb`), the same syntax the per-role overrides accept.",
+      "properties": {
+        "base00": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base01": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base02": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base03": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base04": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base05": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base06": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base07": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base08": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base09": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base0A": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base0B": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base0C": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base0D": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base0E": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base0F": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base10": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base11": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base12": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base13": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base14": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base15": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base16": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base17": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "BindingSource": {
       "anyOf": [
         {
@@ -655,6 +829,36 @@
             "null"
           ]
         },
+        "palette": {
+          "$ref": "#/$defs/Base24Palette",
+          "default": {
+            "base00": null,
+            "base01": null,
+            "base02": null,
+            "base03": null,
+            "base04": null,
+            "base05": null,
+            "base06": null,
+            "base07": null,
+            "base08": null,
+            "base09": null,
+            "base0A": null,
+            "base0B": null,
+            "base0C": null,
+            "base0D": null,
+            "base0E": null,
+            "base0F": null,
+            "base10": null,
+            "base11": null,
+            "base12": null,
+            "base13": null,
+            "base14": null,
+            "base15": null,
+            "base16": null,
+            "base17": null
+          },
+          "description": "a base16 / base24 palette applied before the per-role overrides above."
+        },
         "status": {
           "default": null,
           "type": [
@@ -1057,6 +1261,32 @@
         "border": null,
         "code": null,
         "heading": null,
+        "palette": {
+          "base00": null,
+          "base01": null,
+          "base02": null,
+          "base03": null,
+          "base04": null,
+          "base05": null,
+          "base06": null,
+          "base07": null,
+          "base08": null,
+          "base09": null,
+          "base0A": null,
+          "base0B": null,
+          "base0C": null,
+          "base0D": null,
+          "base0E": null,
+          "base0F": null,
+          "base10": null,
+          "base11": null,
+          "base12": null,
+          "base13": null,
+          "base14": null,
+          "base15": null,
+          "base16": null,
+          "base17": null
+        },
         "status": null,
         "system": null,
         "thinking": null,

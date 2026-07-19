@@ -428,6 +428,10 @@ impl Theme {
     pub fn from_config(config: &ThemeConfig) -> Self {
         let mut theme = Self::default();
 
+        // a base16/base24 palette sets the whole scheme; explicit per-role
+        // overrides below take priority over it
+        apply_palette(&mut theme, &config.palette);
+
         if let Some(c) = config.user.as_deref().and_then(parse_colour) {
             theme.user_label = Style::default().fg(c).add_modifier(Modifier::BOLD);
         }
@@ -469,6 +473,120 @@ impl Theme {
     }
 }
 
+/// a base16 / base24 colour scheme. `base00`-`base0F` is the base16 set;
+/// `base10`-`base17` are the base24 additions (darker bgs + bright accents).
+/// every field is optional so partial or base16-only schemes work. values
+/// are hex (`#rrggbb`), the same syntax the per-role overrides accept.
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize, schemars::JsonSchema)]
+#[serde(default)]
+// field names mirror the base16/base24 spec exactly (base00..base17 with
+// uppercase hex), so config keys match schemes copied from the ecosystem
+#[allow(non_snake_case)]
+pub struct Base24Palette {
+    pub base00: Option<String>,
+    pub base01: Option<String>,
+    pub base02: Option<String>,
+    pub base03: Option<String>,
+    pub base04: Option<String>,
+    pub base05: Option<String>,
+    pub base06: Option<String>,
+    pub base07: Option<String>,
+    pub base08: Option<String>,
+    pub base09: Option<String>,
+    pub base0A: Option<String>,
+    pub base0B: Option<String>,
+    pub base0C: Option<String>,
+    pub base0D: Option<String>,
+    pub base0E: Option<String>,
+    pub base0F: Option<String>,
+    pub base10: Option<String>,
+    pub base11: Option<String>,
+    pub base12: Option<String>,
+    pub base13: Option<String>,
+    pub base14: Option<String>,
+    pub base15: Option<String>,
+    pub base16: Option<String>,
+    pub base17: Option<String>,
+}
+
+/// map a base16/base24 palette onto the semantic theme styles. only bases
+/// that are set take effect, and per-role overrides in [`ThemeConfig`] are
+/// applied afterwards so they win. the mapping follows the conventional
+/// base16 role assignments (08 red, 0A yellow, 0B green, 0C cyan, 0D blue,
+/// 0E magenta; 00-07 the mono ramp).
+fn apply_palette(theme: &mut Theme, p: &Base24Palette) {
+    let c = |v: &Option<String>| v.as_deref().and_then(parse_colour);
+    let fg = |col: Color| Style::default().fg(col);
+    let fg_bold = |col: Color| Style::default().fg(col).add_modifier(Modifier::BOLD);
+
+    if let Some(col) = c(&p.base0D) {
+        theme.user_label = fg_bold(col);
+        theme.status_model = fg(col);
+        theme.input_border_active = fg(col);
+        theme.link = fg(col).add_modifier(Modifier::UNDERLINED);
+        theme.picker_title = fg_bold(col);
+        theme.tab_active = fg_bold(col);
+        theme.search_border = fg(col);
+        theme.pane_separator_active = fg(col);
+    }
+    if let Some(col) = c(&p.base0B) {
+        theme.assistant_label = fg_bold(col);
+        theme.tool_done = fg(col);
+        theme.diff_added = fg(col);
+        theme.diff_added_intra = fg(col);
+        theme.context_ok = fg(col);
+    }
+    if let Some(col) = c(&p.base08) {
+        theme.tool_error = fg(col);
+        theme.diff_removed = fg(col);
+        theme.diff_removed_intra = fg(col);
+        theme.context_danger = fg(col);
+    }
+    if let Some(col) = c(&p.base0A) {
+        theme.tool_running = fg(col);
+        theme.list_bullet = fg(col);
+        theme.selection_marker = fg(col);
+        theme.search_match = fg_bold(col);
+        theme.context_warn = fg(col);
+        theme.scroll_indicator = fg(col);
+        theme.tab_busy = fg(col);
+    }
+    if let Some(col) = c(&p.base0C) {
+        theme.code_block = fg(col);
+        theme.inline_code = fg(col);
+    }
+    if let Some(col) = c(&p.base0E) {
+        theme.heading = fg_bold(col);
+        theme.heading_h3 = fg_bold(col);
+    }
+    if let Some(col) = c(&p.base03) {
+        theme.thinking = fg(col);
+        theme.thinking_label = fg(col);
+        theme.system_label = fg(col);
+        theme.dim = fg(col);
+        theme.usage = fg(col);
+        theme.status_dim = fg(col);
+        theme.scroll_hint = fg(col);
+        theme.horizontal_rule = fg(col);
+        theme.input_border = fg(col);
+        theme.pane_separator = fg(col);
+        theme.context_cold = fg(col);
+    }
+    if let Some(col) = c(&p.base05) {
+        theme.tool_output = fg(col);
+        theme.bold = fg(col).add_modifier(Modifier::BOLD);
+        theme.italic = fg(col).add_modifier(Modifier::ITALIC);
+    }
+    if let Some(col) = c(&p.base02) {
+        theme.block_highlight_bg = col;
+        theme.menu_selected_bg = col;
+        theme.picker_selected = Style::default().bg(col);
+    }
+    if let Some(col) = c(&p.base01) {
+        theme.user_msg_bg = Style::default().bg(col);
+    }
+}
+
 /// serialisable theme config (subset of colours)
 #[derive(Debug, Default, Deserialize, serde::Serialize, schemars::JsonSchema)]
 #[serde(default)]
@@ -484,6 +602,9 @@ pub struct ThemeConfig {
     pub tool_error: Option<String>,
     pub status: Option<String>,
     pub border: Option<String>,
+    /// a base16 / base24 palette applied before the per-role overrides above.
+    #[serde(default)]
+    pub palette: Base24Palette,
 }
 
 /// parse a colour string into a ratatui Color
@@ -602,6 +723,51 @@ mod tests {
         assert_eq!(theme.user_label.fg, Some(Color::Green));
         assert_eq!(theme.assistant_label.fg, Some(Color::Blue));
         assert_eq!(theme.tool_error.fg, Some(Color::Red));
+    }
+
+    #[test]
+    fn palette_maps_accents_to_semantic_styles() {
+        let config = ThemeConfig {
+            palette: Base24Palette {
+                base08: Some("#ff0000".into()),
+                base0B: Some("#00ff00".into()),
+                base0D: Some("#0000ff".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let theme = Theme::from_config(&config);
+        assert_eq!(theme.tool_error.fg, Some(Color::Rgb(255, 0, 0)));
+        assert_eq!(theme.tool_done.fg, Some(Color::Rgb(0, 255, 0)));
+        assert_eq!(theme.user_label.fg, Some(Color::Rgb(0, 0, 255)));
+    }
+
+    #[test]
+    fn per_role_override_wins_over_palette() {
+        let config = ThemeConfig {
+            user: Some("#abcdef".into()),
+            palette: Base24Palette {
+                base0D: Some("#0000ff".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let theme = Theme::from_config(&config);
+        assert_eq!(theme.user_label.fg, Some(Color::Rgb(0xab, 0xcd, 0xef)));
+    }
+
+    #[test]
+    fn base16_only_palette_themes_accents() {
+        // a scheme setting only base00-0F (no base24 extras) still applies
+        let config = ThemeConfig {
+            palette: Base24Palette {
+                base0A: Some("#ffff00".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let theme = Theme::from_config(&config);
+        assert_eq!(theme.tool_running.fg, Some(Color::Rgb(255, 255, 0)));
     }
 
     #[test]
