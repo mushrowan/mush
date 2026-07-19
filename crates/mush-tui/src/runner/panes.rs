@@ -192,6 +192,10 @@ pub(super) async fn fork_pane(
                         pane_http,
                         tui_config.forbidden_chars.clone(),
                         None,
+                        // delegated panes use the default (exa) search provider
+                        // for now; TuiConfig doesn't carry the web_search config
+                        // yet. revisit if pane search needs the searx instance.
+                        Default::default(),
                     );
                     if !skip_batch {
                         mush_tools::add_batch_tool(&mut pane_tools);

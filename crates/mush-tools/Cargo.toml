@@ -21,6 +21,7 @@ thiserror.workspace = true
 async-trait.workspace = true
 unicode-properties.workspace = true
 schemars.workspace = true
+urlencoding.workspace = true
 htmd = "0.5.4"
 similar.workspace = true
 globset = "0.4"

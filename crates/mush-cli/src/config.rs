@@ -169,6 +169,9 @@ pub struct Config {
     /// subsequent turn). defaults to 5.
     #[serde(default = "default_max_image_mb")]
     pub max_image_mb: u32,
+    /// web search provider config (exa default, optional searx instance).
+    #[serde(default)]
+    pub web_search: mush_tools::web_search::WebSearchConfig,
 }
 
 fn default_max_image_mb() -> u32 {
@@ -223,6 +226,7 @@ impl Default for Config {
             forbidden_chars: Vec::new(),
             forbidden_char_classes: Vec::new(),
             max_image_mb: default_max_image_mb(),
+            web_search: mush_tools::web_search::WebSearchConfig::default(),
         }
     }
 }

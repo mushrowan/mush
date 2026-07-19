@@ -48,8 +48,15 @@ pub fn supports_native_parallel_calls(model_id: &str) -> bool {
 
 /// create the full set of built-in tools for a given working directory
 pub fn builtin_tools(cwd: Arc<Path>, http_client: mush_ai::http::HttpClient) -> ToolRegistry {
-    let mut tools =
-        builtin_tools_with_options(cwd, None, false, http_client, Default::default(), None);
+    let mut tools = builtin_tools_with_options(
+        cwd,
+        None,
+        false,
+        http_client,
+        Default::default(),
+        None,
+        Default::default(),
+    );
     add_batch_tool(&mut tools);
     tools
 }
@@ -67,6 +74,7 @@ pub fn builtin_tools_with_sink(
         http_client,
         Default::default(),
         None,
+        Default::default(),
     );
     add_batch_tool(&mut tools);
     tools
@@ -82,6 +90,7 @@ pub fn builtin_tools_with_sink(
 ///
 /// does NOT include the batch tool. call `add_batch_tool` after registering
 /// all additional tools (skill, MCP, LSP) so batch can access them all.
+#[allow(clippy::too_many_arguments)]
 pub fn builtin_tools_with_options(
     cwd: Arc<Path>,
     output_sink: Option<bash::OutputSink>,
@@ -89,6 +98,7 @@ pub fn builtin_tools_with_options(
     http_client: mush_ai::http::HttpClient,
     forbidden_chars: forbidden_chars::ForbiddenChars,
     max_image_bytes: Option<usize>,
+    web_search: web_search::WebSearchConfig,
 ) -> ToolRegistry {
     let bg_registry = background::BackgroundJobRegistry::new();
 
@@ -118,7 +128,10 @@ pub fn builtin_tools_with_options(
         Arc::new(find::FindTool::new(cwd.clone())),
         Arc::new(glob::GlobTool::new(cwd.clone())),
         Arc::new(ls::LsTool::new(cwd.clone())),
-        Arc::new(web_search::WebSearchTool::new(http_client.clone())),
+        Arc::new(web_search::WebSearchTool::with_config(
+            http_client.clone(),
+            &web_search,
+        )),
         Arc::new(web_fetch::WebFetchTool::new(http_client.clone())),
         Arc::new(notify_user::NotifyUserTool::new()),
     ];
@@ -289,6 +302,7 @@ mod tests {
             http_client(),
             chars,
             None,
+            Default::default(),
         )
     }
 
@@ -478,6 +492,7 @@ mod tests {
             http_client(),
             ForbiddenChars::empty(),
             None,
+            Default::default(),
         );
         add_batch_tool(&mut registry);
 
@@ -524,6 +539,7 @@ mod tests {
             http_client(),
             ForbiddenChars::empty(),
             None,
+            Default::default(),
         );
 
         assert!(registry.get("apply_patch").is_some());
@@ -558,6 +574,7 @@ mod tests {
             http_client(),
             ForbiddenChars::empty(),
             None,
+            Default::default(),
         );
         add_batch_tool(&mut registry);
         assert!(registry.get("batch").is_some());

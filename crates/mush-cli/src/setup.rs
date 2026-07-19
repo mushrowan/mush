@@ -107,6 +107,7 @@ impl AppSetup {
                 cfg.forbidden_char_classes.iter().copied(),
             ),
             cfg.max_image_mb,
+            cfg.web_search.clone(),
         );
         if let Some(t) = &mut timer {
             t.phase("builtin tools");
@@ -189,6 +190,7 @@ impl AppSetup {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn init_builtin_tools(
     model: &Model,
     cwd: &std::path::Path,
@@ -197,6 +199,7 @@ fn init_builtin_tools(
     http_client: &mush_ai::http::HttpClient,
     forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars,
     max_image_mb: u32,
+    web_search: mush_tools::web_search::WebSearchConfig,
 ) -> mush_agent::tool::ToolRegistry {
     if no_tools {
         return mush_agent::tool::ToolRegistry::new();
@@ -208,6 +211,7 @@ fn init_builtin_tools(
         http_client.clone(),
         forbidden_chars,
         Some(max_image_mb as usize * 1024 * 1024),
+        web_search,
     )
 }
 

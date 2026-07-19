@@ -424,6 +424,95 @@
       },
       "type": "object"
     },
+    "SearchAuth": {
+      "description": "auth to attach to a provider request.",
+      "oneOf": [
+        {
+          "description": "HTTP basic auth.",
+          "properties": {
+            "password": {
+              "type": "string"
+            },
+            "type": {
+              "const": "basic",
+              "type": "string"
+            },
+            "username": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "username",
+            "password"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "`Authorization: Bearer <token>`.",
+          "properties": {
+            "token": {
+              "type": "string"
+            },
+            "type": {
+              "const": "bearer",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "token"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "an arbitrary header, e.g. an api key.",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "type": {
+              "const": "header",
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "name",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SearxConfig": {
+      "description": "SearXNG instance configuration.",
+      "properties": {
+        "auth": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SearchAuth"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "optional auth sent with each query, for a locked-down instance."
+        },
+        "base_url": {
+          "description": "base url of the instance, e.g. `https://sear.example.com`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "base_url"
+      ],
+      "type": "object"
+    },
     "Settings": {
       "description": "session settings with scope control.\n`scope` determines where runtime changes (via `/settings`) get persisted",
       "properties": {
@@ -667,6 +756,32 @@
           "type": "string"
         }
       ]
+    },
+    "WebSearchConfig": {
+      "description": "web search configuration: which providers exist and which is default.",
+      "properties": {
+        "default_provider": {
+          "default": null,
+          "description": "provider id used when the model doesn't pass `provider`. defaults to\nthe only configured provider (exa unless a searx instance is set).\nset to `searx` to make a configured instance the default.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "searx": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SearxConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "a SearXNG instance to search against. when set, `searx` becomes a\nselectable provider alongside exa."
+        }
+      },
+      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -966,6 +1081,14 @@
       "$ref": "#/$defs/ThinkingDisplay",
       "default": "expanded",
       "description": "how to display thinking text (hidden, collapse, expanded)"
+    },
+    "web_search": {
+      "$ref": "#/$defs/WebSearchConfig",
+      "default": {
+        "default_provider": null,
+        "searx": null
+      },
+      "description": "web search provider config (exa default, optional searx instance)."
     }
   },
   "title": "Config",
