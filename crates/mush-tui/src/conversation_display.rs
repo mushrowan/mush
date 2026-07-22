@@ -179,6 +179,30 @@ pub fn accumulate_session_stats(app: &mut App, conversation: &[Message]) {
             app.stats.update(&assistant.usage, None);
         }
     }
+
+    // a compacted context's kept tail carries assistant usage recorded
+    // against the pre-compaction (larger) context. leaving context_tokens
+    // and prev_usage at those stale values makes the status bar report the
+    // pre-compaction size after resume, as if the compaction never
+    // happened, and trips a false ContextDecrease on the next call. treat
+    // it like a fresh compaction: the current size is an estimate of the
+    // collapsed messages, with no live baseline to diff against.
+    if context_is_compacted(conversation) {
+        let estimate = mush_session::compact::estimate_tokens(conversation);
+        app.stats
+            .reset_live_state(mush_ai::types::TokenCount::new(estimate as u64));
+    }
+}
+
+/// whether a resumed context has a compaction summary in it. its leading
+/// message is the synthetic summary emitted by
+/// `mush_session::SessionTree::build_context`, so the recorded usage of
+/// any assistant kept after it no longer matches the collapsed context.
+fn context_is_compacted(conversation: &[Message]) -> bool {
+    conversation.iter().any(|message| match message {
+        Message::User(user) => extract_compaction_summary(&user.text()).is_some(),
+        _ => false,
+    })
 }
 
 fn apply_tool_result(
@@ -475,6 +499,86 @@ mod tests {
         );
         assert_eq!(app.messages[1].role, MessageRole::User);
         assert_eq!(app.messages[1].content, "next user turn after compaction");
+    }
+
+    fn assistant_with_input_tokens(text: &str, input_tokens: u64) -> Message {
+        let model = test_model();
+        Message::Assistant(
+            AssistantMessage::builder()
+                .content(vec![AssistantContentPart::Text(TextContent {
+                    text: text.into(),
+                })])
+                .model(model.id)
+                .provider(Provider::Anthropic)
+                .api(Api::AnthropicMessages)
+                .usage(Usage {
+                    input_tokens: TokenCount::new(input_tokens),
+                    output_tokens: TokenCount::new(5),
+                    cache_read_tokens: TokenCount::ZERO,
+                    cache_write_tokens: TokenCount::ZERO,
+                })
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )
+    }
+
+    fn compaction_summary_message(body: &str) -> Message {
+        Message::User(UserMessage {
+            content: UserContent::Text(format!(
+                "{}\n\n<summary>\n{body}\n</summary>",
+                mush_session::COMPACTION_SUMMARY_PREFIX
+            )),
+            timestamp_ms: Timestamp::zero(),
+        })
+    }
+
+    /// resuming a compacted session must not report the pre-compaction
+    /// context size. the kept tail carries assistant usage recorded
+    /// against the (large) pre-compaction context, so naively replaying
+    /// that usage leaves `context_tokens` at the old size and the status
+    /// bar looks like the compaction was undone. a compacted resume is
+    /// treated like a fresh compaction: the context size is an estimate
+    /// of the collapsed messages and the live baseline is cleared.
+    #[test]
+    fn resume_of_compacted_session_uses_collapsed_context_size() {
+        let mut app = app();
+        let conversation = vec![
+            compaction_summary_message("earlier turns"),
+            assistant_with_input_tokens("recent answer", 45_000),
+        ];
+
+        accumulate_session_stats(&mut app, &conversation);
+
+        let estimate = mush_session::compact::estimate_tokens(&conversation);
+        assert_eq!(
+            app.stats.context_tokens,
+            TokenCount::new(estimate as u64),
+            "compacted resume must show the collapsed estimate, not the pre-compaction size"
+        );
+        assert!(
+            app.stats.prev_usage().is_none(),
+            "compacted resume must clear prev_usage so the next call does not trip a false ContextDecrease"
+        );
+        // cumulative totals are still reconstructed
+        assert!(app.stats.total_tokens > TokenCount::ZERO);
+    }
+
+    /// a normal (uncompacted) resume keeps reporting the last call's real
+    /// input token count as the current context size, which is more
+    /// accurate than a char estimate. the compaction-aware reset must not
+    /// fire here.
+    #[test]
+    fn resume_of_uncompacted_session_keeps_last_call_context_size() {
+        let mut app = app();
+        let conversation = vec![
+            user_message("hello"),
+            assistant_with_input_tokens("hi", 1234),
+        ];
+
+        accumulate_session_stats(&mut app, &conversation);
+
+        assert_eq!(app.stats.context_tokens, TokenCount::new(1234));
+        assert!(app.stats.prev_usage().is_some());
     }
 
     #[tokio::test]
