@@ -5,6 +5,7 @@
 
 use mush_ai::types::*;
 use mush_session::SessionMeta;
+use std::rc::Rc;
 
 pub use crate::app_event::{AppEvent, AppMode};
 pub use crate::app_state::{
@@ -34,16 +35,25 @@ use crate::slash_menu::{TabState, filter_command_matches};
 #[cfg(test)]
 thread_local! {
     static BLOCKS_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static BLOCKS_COMPUTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
 pub(crate) fn reset_blocks_call_count() {
     BLOCKS_CALLS.with(|calls| calls.set(0));
+    BLOCKS_COMPUTES.with(|calls| calls.set(0));
 }
 
 #[cfg(test)]
 pub(crate) fn blocks_call_count() -> usize {
     BLOCKS_CALLS.with(std::cell::Cell::get)
+}
+
+/// number of times the block list was actually recomputed (cache miss),
+/// as opposed to served from the cache. drives the caching regression test
+#[cfg(test)]
+pub(crate) fn blocks_compute_count() -> usize {
+    BLOCKS_COMPUTES.with(std::cell::Cell::get)
 }
 
 /// target cadence for streaming text and shimmer updates.
@@ -1158,9 +1168,40 @@ impl App {
     /// blocks are returned in document order across messages. used by
     /// scroll-mode block navigation (j/k cycles through these) and the
     /// y-yank action (copies the selected block's content).
-    pub fn blocks(&self) -> Vec<Block> {
+    pub fn blocks(&self) -> Rc<Vec<Block>> {
         #[cfg(test)]
         BLOCKS_CALLS.with(|calls| calls.set(calls.get() + 1));
+
+        let fingerprint = self.blocks_fingerprint();
+        if let Some((key, blocks)) = self.render_state.blocks_cache.borrow().as_ref()
+            && *key == fingerprint
+        {
+            return Rc::clone(blocks);
+        }
+
+        let blocks = Rc::new(self.compute_blocks());
+        *self.render_state.blocks_cache.borrow_mut() = Some((fingerprint, Rc::clone(&blocks)));
+        blocks
+    }
+
+    /// cheap O(n) fingerprint of the message contents that feed `blocks()`.
+    /// block structure depends only on each message's `content`, which is
+    /// write-once except for the streaming tail, so hashing the per-message
+    /// content lengths is a sufficient invalidation key (mirrors the
+    /// byte-length keys the height and content-hash caches already use)
+    fn blocks_fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::hash::DefaultHasher::new();
+        self.messages.len().hash(&mut hasher);
+        for msg in &self.messages {
+            msg.content.len().hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    fn compute_blocks(&self) -> Vec<Block> {
+        #[cfg(test)]
+        BLOCKS_COMPUTES.with(|calls| calls.set(calls.get() + 1));
 
         let mut blocks = Vec::new();
         for (msg_idx, msg) in self.messages.iter().enumerate() {
@@ -3206,7 +3247,7 @@ batch: 1/2 succeeded, 1 failed";
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0].content, "first user line");
         assert_eq!(blocks[1].content, "second user line");
-        for b in &blocks {
+        for b in blocks.iter() {
             assert_eq!(b.msg_idx, 0);
         }
     }
@@ -3243,6 +3284,41 @@ batch: 1/2 succeeded, 1 failed";
         assert_eq!(blocks[0].msg_idx, 0);
         assert_eq!(blocks[1].msg_idx, 1);
         assert_eq!(blocks[2].msg_idx, 2);
+    }
+
+    #[test]
+    fn blocks_are_cached_until_messages_change() {
+        // block scroll mode rebuilds the block list every frame and every
+        // j/k keypress. recomputing it over the whole scrollback each time
+        // is O(total content), so the list is cached and only rebuilt when
+        // the messages actually change.
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.messages
+            .push(DisplayMessage::new(MessageRole::User, "one\n\ntwo"));
+        app.messages.push(DisplayMessage::new(
+            MessageRole::Assistant,
+            "```rust\nx\n```",
+        ));
+
+        reset_blocks_call_count();
+        let first = app.blocks();
+        let second = app.blocks();
+        assert_eq!(first, second);
+        assert_eq!(
+            blocks_compute_count(),
+            1,
+            "repeated blocks() calls with unchanged messages must reuse the cache"
+        );
+
+        // appending a message invalidates the cache
+        app.messages
+            .push(DisplayMessage::new(MessageRole::User, "three"));
+        let _ = app.blocks();
+        assert_eq!(
+            blocks_compute_count(),
+            2,
+            "blocks() must recompute after the messages change"
+        );
     }
 
     #[test]

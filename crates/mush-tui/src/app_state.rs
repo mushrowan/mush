@@ -2,13 +2,14 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use mush_ai::types::ToolCallId;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Text};
 use serde::{Deserialize, Serialize};
 
-use crate::app::ScrollUnit;
+use crate::app::{Block, ScrollUnit};
 use crate::app_event::AppMode;
 use crate::display_types::{ImageRenderArea, MessageRowRange};
 use crate::login_picker::LoginPickerState;
@@ -386,6 +387,11 @@ pub struct RenderState {
     /// `StatusBar::render` and `Ui::cursor_position` callers share the
     /// same built spans instead of rebuilding with ~10 format! calls
     pub status_bar_cache: RefCell<Option<CachedStatusBar>>,
+    /// cached scroll-mode block list keyed by a cheap fingerprint of the
+    /// messages (count + per-message content lengths). block scroll mode
+    /// rebuilds this every frame and every j/k keypress, so caching keeps
+    /// review of a long scrollback from going O(total content) per frame
+    pub blocks_cache: RefCell<Option<(u64, Rc<Vec<Block>>)>>,
 }
 
 impl RenderState {
@@ -409,6 +415,7 @@ impl RenderState {
             scroll_baseline_vis: Cell::new(0),
             scroll_compensation: Cell::new(0),
             status_bar_cache: RefCell::new(None),
+            blocks_cache: RefCell::new(None),
         }
     }
 }

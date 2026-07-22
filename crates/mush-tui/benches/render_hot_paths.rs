@@ -60,6 +60,22 @@ fn conversation_app(message_count: usize) -> App {
     app
 }
 
+/// extracts navigable blocks across a growing conversation. block scroll
+/// mode (the default in scroll mode) rebuilds this on every frame and
+/// every j/k keypress, so any per-call cost scales with total scrollback
+/// while the user is just reviewing history.
+fn bench_blocks_scaling(c: &mut Criterion) {
+    let mut group = c.benchmark_group("blocks_scaling");
+    for &count in &[16usize, 64, 256, 1024] {
+        let app = conversation_app(count);
+        group.throughput(Throughput::Elements(count as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, _| {
+            b.iter(|| black_box(black_box(&app).blocks()))
+        });
+    }
+    group.finish();
+}
+
 fn bench_markdown(c: &mut Criterion) {
     let source = markdown_fixture();
     let theme = Theme::default();
@@ -188,6 +204,7 @@ fn input_fixture() -> (String, Vec<PendingImage>) {
 criterion_group!(
     benches,
     bench_message_list_scaling,
+    bench_blocks_scaling,
     bench_markdown,
     bench_code_blocks,
     bench_input_layout

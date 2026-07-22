@@ -294,63 +294,19 @@ impl SelectedBlockInfo {
         }
 
         let selected_block = app.navigation.selected_block?;
-        let mut global_idx = 0usize;
-        for (msg_idx, msg) in app.messages.iter().enumerate() {
-            let block_count = count_blocks(&msg.content);
-            if selected_block < global_idx + block_count {
-                return Some(Self {
-                    msg_idx,
-                    block_idx_in_msg: selected_block - global_idx,
-                });
-            }
-            global_idx += block_count;
-        }
-
-        None
+        // map the global block index onto its message using the cached
+        // block list. blocks belonging to one message are contiguous, so
+        // the within-message index is the offset from that message's first
+        // block. shares `App::blocks` so navigation and highlight agree on
+        // one segmentation instead of rescanning every message each frame
+        let blocks = app.blocks();
+        let msg_idx = blocks.get(selected_block)?.msg_idx;
+        let first = blocks.iter().position(|b| b.msg_idx == msg_idx)?;
+        Some(Self {
+            msg_idx,
+            block_idx_in_msg: selected_block - first,
+        })
     }
-}
-
-fn count_blocks(source: &str) -> usize {
-    let mut count = 0usize;
-    let mut in_fence = false;
-    let mut fence_has_content = false;
-    let mut para_has_content = false;
-
-    for raw_line in source.lines() {
-        if raw_line.starts_with("```") {
-            if in_fence {
-                if fence_has_content {
-                    count += 1;
-                }
-                fence_has_content = false;
-                in_fence = false;
-            } else {
-                if para_has_content {
-                    count += 1;
-                    para_has_content = false;
-                }
-                in_fence = true;
-            }
-            continue;
-        }
-
-        if in_fence {
-            fence_has_content = true;
-        } else if raw_line.trim().is_empty() {
-            if para_has_content {
-                count += 1;
-                para_has_content = false;
-            }
-        } else {
-            para_has_content = true;
-        }
-    }
-
-    if para_has_content || (in_fence && fence_has_content) {
-        count += 1;
-    }
-
-    count
 }
 
 impl Widget for MessageList<'_> {
