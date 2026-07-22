@@ -100,6 +100,29 @@ fn push_context_message(
     }
 }
 
+/// render a single entry as the message it contributes to a conversation
+/// view. real messages pass through; branch and compaction markers become
+/// their synthetic summary user messages
+fn entry_to_message(entry: &SessionEntry) -> Message {
+    match &entry.kind {
+        EntryKind::Message { message } => message.clone(),
+        EntryKind::BranchSummary { summary, .. } => Message::User(UserMessage {
+            content: UserContent::Text(format!(
+                "Context from a previous conversation branch:\n\n\
+                 <branch_summary>\n{summary}\n</branch_summary>"
+            )),
+            timestamp_ms: entry.timestamp,
+        }),
+        EntryKind::Compaction { summary, .. } => Message::User(UserMessage {
+            content: UserContent::Text(format!(
+                "The conversation history before this point was compacted \
+                 into the following summary:\n\n<summary>\n{summary}\n</summary>"
+            )),
+            timestamp_ms: entry.timestamp,
+        }),
+    }
+}
+
 impl SessionTree {
     pub fn new() -> Self {
         Self {
@@ -241,6 +264,18 @@ impl SessionTree {
         self.collect_context(Some(limit))
     }
 
+    /// build the full branch as messages for display, without collapsing
+    /// compacted history. every entry from root to leaf is rendered, so
+    /// resumed sessions show their whole scrollback while the LLM context
+    /// (from [`SessionTree::build_context`]) stays collapsed. compaction
+    /// and branch markers render as their synthetic summary messages
+    pub fn build_display_history(&self) -> Vec<Message> {
+        self.current_branch()
+            .into_iter()
+            .map(entry_to_message)
+            .collect()
+    }
+
     /// count visible context messages without cloning them
     pub fn context_len(&self) -> usize {
         self.context_entries().len()
@@ -295,24 +330,7 @@ impl SessionTree {
         let mut messages = Vec::with_capacity(capacity);
 
         for entry in entries {
-            let message = match &entry.kind {
-                EntryKind::Message { message } => message.clone(),
-                EntryKind::BranchSummary { summary, .. } => Message::User(UserMessage {
-                    content: UserContent::Text(format!(
-                        "Context from a previous conversation branch:\n\n\
-                         <branch_summary>\n{summary}\n</branch_summary>"
-                    )),
-                    timestamp_ms: entry.timestamp,
-                }),
-                EntryKind::Compaction { summary, .. } => Message::User(UserMessage {
-                    content: UserContent::Text(format!(
-                        "The conversation history before this point was compacted \
-                         into the following summary:\n\n<summary>\n{summary}\n</summary>"
-                    )),
-                    timestamp_ms: entry.timestamp,
-                }),
-            };
-            if !push_context_message(&mut messages, limit, message) {
+            if !push_context_message(&mut messages, limit, entry_to_message(entry)) {
                 return messages;
             }
         }
@@ -673,6 +691,40 @@ mod tests {
         assert!(
             !texts.iter().any(|t| t == "q0" || t == "a15" || t == "a23"),
             "summarised history leaked back into context: {texts:?}"
+        );
+    }
+
+    fn text_of(m: &Message) -> String {
+        match m {
+            Message::User(u) => u.text(),
+            Message::Assistant(a) => a.text(),
+            _ => String::new(),
+        }
+    }
+
+    #[test]
+    fn build_display_history_keeps_pre_compaction_messages_and_banner() {
+        let mut tree = SessionTree::new();
+        tree.append_message(user_msg("q1"));
+        tree.append_message(assistant_msg("a1"));
+        tree.append_message(user_msg("q2"));
+        tree.append_message(assistant_msg("a2"));
+        tree.append_message(user_msg("q3"));
+        tree.append_message(assistant_msg("a3"));
+        tree.compact_at_leaf("summary".into(), 4)
+            .expect("compaction applies");
+
+        // the LLM context collapses to summary + last two messages
+        assert_eq!(tree.build_context().len(), 3);
+
+        // the display history keeps every original message plus a banner
+        let history = tree.build_display_history();
+        assert_eq!(history.len(), 7, "6 originals + 1 compaction banner");
+        assert_eq!(text_of(&history[0]), "q1");
+        assert_eq!(text_of(&history[5]), "a3");
+        assert!(
+            text_of(&history[6]).contains("compacted into the following summary"),
+            "the compaction banner should follow the pre-compaction messages"
         );
     }
 

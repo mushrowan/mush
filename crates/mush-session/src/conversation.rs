@@ -53,6 +53,12 @@ impl ConversationState {
         self.tree.build_context()
     }
 
+    /// full branch history for display, without collapsing compacted
+    /// entries. see [`SessionTree::build_display_history`]
+    pub fn display_history(&self) -> Vec<Message> {
+        self.tree.build_display_history()
+    }
+
     pub fn context_prefix(&self, limit: usize) -> Vec<Message> {
         self.tree.build_context_prefix(limit)
     }
