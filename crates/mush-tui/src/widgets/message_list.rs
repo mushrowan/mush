@@ -4732,6 +4732,67 @@ mod tests {
     }
 
     #[test]
+    fn scroll_down_after_content_growth_steps_by_scroll_lines() {
+        // repro: sit a few lines above the bottom, let a long message land
+        // (the viewport stays pinned via compensation), then press j once.
+        // scroll_offset alone would hit 0 and snap the viewport to the
+        // real bottom, skipping everything that arrived in between
+        const STEP: u16 = 3;
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.scroll_lines = STEP;
+        app.navigation.scroll_unit = crate::app::ScrollUnit::Message;
+        app.interaction.mode = crate::app::AppMode::Scroll;
+
+        for i in 0..30 {
+            app.messages.push(DisplayMessage::new(
+                MessageRole::Assistant,
+                format!("message {i}"),
+            ));
+        }
+        render_app(&app, 60, 20);
+
+        app.scroll_offset = STEP;
+        render_app(&app, 60, 20);
+        let pinned = app.render_state.render_scroll.get();
+        assert!(pinned > 0, "should be scrolled up");
+
+        let long_body = (0..50)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        app.messages
+            .push(DisplayMessage::new(MessageRole::Assistant, long_body));
+        render_app(&app, 60, 20);
+        assert_eq!(
+            pinned,
+            app.render_state.render_scroll.get(),
+            "viewport stays pinned while content grows"
+        );
+        let growth = app.render_state.scroll_compensation.get();
+        assert!(growth > STEP as isize, "content should have grown a lot");
+
+        let j = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('j'),
+            crossterm::event::KeyModifiers::NONE,
+        );
+        crate::input::handle_key(&mut app, j);
+        render_app(&app, 60, 20);
+
+        assert_eq!(
+            app.render_state.render_scroll.get(),
+            pinned + STEP,
+            "one j should move down exactly scroll_lines, not jump to the bottom"
+        );
+        // the offset started STEP lines above the bottom and `growth` lines
+        // landed below it, so stepping STEP down leaves `growth` to go
+        assert_eq!(
+            app.scroll_offset as isize, growth,
+            "scroll_offset should absorb the growth so it stays true \
+             lines-from-bottom"
+        );
+    }
+
+    #[test]
     fn scroll_compensation_resets_at_bottom() {
         // when user scrolls back to bottom (scroll_offset=0), compensation
         // should reset so future scrolling starts fresh
@@ -4807,7 +4868,7 @@ mod tests {
 
         // press j: scroll_offset decreases
         let prev_offset = app.scroll_offset;
-        app.scroll_offset = app.scroll_offset.saturating_sub(app.scroll_lines);
+        app.scroll_down(app.scroll_lines);
         assert!(
             app.scroll_offset < prev_offset,
             "j should reduce scroll_offset; if equal, scroll_lines is 0 - check test setup"
@@ -5026,7 +5087,7 @@ mod tests {
 
         // press k once: scroll should move by scroll_lines, not be
         // swallowed by stale baseline_vis compensation
-        app.scroll_offset = app.scroll_offset.saturating_add(app.scroll_lines);
+        app.scroll_up(app.scroll_lines);
         render_app(&app, 60, 28);
         let scroll_after_k = app.render_state.render_scroll.get();
 
@@ -5074,7 +5135,7 @@ mod tests {
         render_app(&app, 60, 28);
         let scroll_after_grow = app.render_state.render_scroll.get();
 
-        app.scroll_offset = app.scroll_offset.saturating_add(app.scroll_lines);
+        app.scroll_up(app.scroll_lines);
         render_app(&app, 60, 28);
         let scroll_after_k = app.render_state.render_scroll.get();
 
@@ -5126,7 +5187,7 @@ mod tests {
         let scroll_before_j = app.render_state.render_scroll.get();
 
         // press j: scroll_offset goes 5 → 2
-        app.scroll_offset = app.scroll_offset.saturating_sub(app.scroll_lines);
+        app.scroll_down(app.scroll_lines);
         render_app(&app, 60, 28);
         let scroll_after_j = app.render_state.render_scroll.get();
 

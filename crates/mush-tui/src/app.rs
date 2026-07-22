@@ -982,6 +982,49 @@ impl App {
         self.navigation.has_unread = false;
     }
 
+    /// fold the renderer's pinning compensation into `scroll_offset` so
+    /// it means "lines above the bottom of the current content" again,
+    /// and re-pin the baseline to the last rendered frame.
+    ///
+    /// while the user sits scrolled up the renderer holds the viewport
+    /// still by adding `total_lines - baseline` on top of the offset
+    /// rather than touching `scroll_offset` itself. a scroll keypress
+    /// has to move relative to what is on screen, so absorb that
+    /// compensation first. without this, content that arrived while
+    /// scrolled up is invisible to the offset arithmetic and the first
+    /// press that drives the offset to 0 snaps to the real bottom
+    fn absorb_scroll_compensation(&mut self) {
+        let compensation = self.render_state.scroll_compensation.get();
+        if self.scroll_offset == 0 || compensation == 0 {
+            return;
+        }
+        let absorbed = (self.scroll_offset as isize + compensation).clamp(0, u16::MAX as isize);
+        self.scroll_offset = absorbed as u16;
+        self.render_state
+            .scroll_baseline
+            .set(self.render_state.prev_content_lines.get());
+        self.render_state
+            .scroll_baseline_vis
+            .set(self.render_state.visible_area_height.get());
+        self.render_state.scroll_compensation.set(0);
+    }
+
+    /// scroll `lines` towards older content
+    pub fn scroll_up(&mut self, lines: u16) {
+        self.absorb_scroll_compensation();
+        self.scroll_offset = self.scroll_offset.saturating_add(lines);
+    }
+
+    /// scroll `lines` towards newer content, clearing the unread
+    /// indicator once the bottom is reached
+    pub fn scroll_down(&mut self, lines: u16) {
+        self.absorb_scroll_compensation();
+        self.scroll_offset = self.scroll_offset.saturating_sub(lines);
+        if self.scroll_offset == 0 {
+            self.navigation.has_unread = false;
+        }
+    }
+
     /// jump to the top of the conversation. used after a manual /compact
     /// so the freshly generated summary (pushed at index 0) is the first
     /// thing the user sees, instead of leaving them at the bottom looking

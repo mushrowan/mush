@@ -144,17 +144,14 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         .keymap
         .matches(crate::keybinds::Action::ScrollPageUp, key)
     {
-        app.scroll_offset = app.scroll_offset.saturating_add(10);
+        app.scroll_up(10);
         return Some(AppEvent::ScrollUp(10));
     }
     if app
         .keymap
         .matches(crate::keybinds::Action::ScrollPageDown, key)
     {
-        app.scroll_offset = app.scroll_offset.saturating_sub(10);
-        if app.scroll_offset == 0 {
-            app.navigation.has_unread = false;
-        }
+        app.scroll_down(10);
         return Some(AppEvent::ScrollDown(10));
     }
 
@@ -999,16 +996,10 @@ fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             {
                 app.navigation.selected_block = Some(sel + 1);
                 app.navigation.selected_message = Some(blocks[sel + 1].msg_idx);
-                app.scroll_offset = app.scroll_offset.saturating_sub(scroll_lines);
-                if app.scroll_offset == 0 {
-                    app.navigation.has_unread = false;
-                }
+                app.scroll_down(scroll_lines);
             }
         } else {
-            app.scroll_offset = app.scroll_offset.saturating_sub(scroll_lines);
-            if app.scroll_offset == 0 {
-                app.navigation.has_unread = false;
-            }
+            app.scroll_down(scroll_lines);
             if let Some(sel) = app.navigation.selected_message
                 && sel + 1 < app.messages.len()
                 && app.is_message_visible(sel + 1)
@@ -1038,10 +1029,10 @@ fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
                 let new_sel = sel.saturating_sub(1);
                 app.navigation.selected_block = Some(new_sel);
                 app.navigation.selected_message = Some(blocks[new_sel].msg_idx);
-                app.scroll_offset = app.scroll_offset.saturating_add(scroll_lines);
+                app.scroll_up(scroll_lines);
             }
         } else {
-            app.scroll_offset = app.scroll_offset.saturating_add(scroll_lines);
+            app.scroll_up(scroll_lines);
             if let Some(sel) = app.navigation.selected_message {
                 let target = sel.saturating_sub(1);
                 if target != sel && app.is_message_visible(target) {

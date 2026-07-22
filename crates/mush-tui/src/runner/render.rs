@@ -233,17 +233,14 @@ pub(super) fn handle_mouse(app: &mut App, mouse: MouseEvent) {
             if app.input.is_mouse_over(mouse.column, mouse.row) {
                 app.input.scroll_by(-(SCROLL_LINES as i16));
             } else {
-                app.scroll_offset = app.scroll_offset.saturating_add(SCROLL_LINES);
+                app.scroll_up(SCROLL_LINES);
             }
         }
         MouseEventKind::ScrollDown => {
             if app.input.is_mouse_over(mouse.column, mouse.row) {
                 app.input.scroll_by(SCROLL_LINES as i16);
             } else {
-                app.scroll_offset = app.scroll_offset.saturating_sub(SCROLL_LINES);
-                if app.scroll_offset == 0 {
-                    app.navigation.has_unread = false;
-                }
+                app.scroll_down(SCROLL_LINES);
             }
         }
         MouseEventKind::Down(crossterm::event::MouseButton::Left) => {

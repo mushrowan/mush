@@ -377,10 +377,12 @@ pub struct RenderState {
     /// viewport would shift unless we add `(baseline_vis - vis)` into
     /// the compensation. paired with `scroll_baseline`, reset together
     pub scroll_baseline_vis: Cell<u16>,
-    /// scroll compensation (in lines) exposed for the status bar
-    /// and tests. derived post-render as `total_content_lines -
-    /// scroll_baseline` while scrolled up, otherwise 0. signed so
-    /// shrinkage past the baseline is handled correctly
+    /// scroll compensation (in lines) derived post-render as
+    /// `total_content_lines - scroll_baseline` while scrolled up,
+    /// otherwise 0. signed so shrinkage past the baseline is handled
+    /// correctly. read by the status bar and folded back into
+    /// `scroll_offset` by `App::scroll_up`/`scroll_down` so a keypress
+    /// moves relative to what is on screen
     pub scroll_compensation: Cell<isize>,
     /// per-frame status bar cache. cleared at the start of each frame so
     /// stale stats never leak. within a frame all `status_bar_height`,
