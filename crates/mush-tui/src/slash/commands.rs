@@ -1182,7 +1182,7 @@ mod tests {
             system_prompt: None,
             options: StreamOptions::default(),
             max_turns: 32,
-            initial_messages: vec![],
+            initial_conversation: Default::default(),
             initial_panes: vec![],
             theme: crate::theme::Theme::default(),
             config_path: None,

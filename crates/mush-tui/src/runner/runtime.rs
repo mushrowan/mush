@@ -110,7 +110,10 @@ impl RunnerRuntime {
     pub(super) async fn new(tui_config: &mut TuiConfig) -> (Self, RunnerServices) {
         let cwd = std::env::current_dir().unwrap_or_default();
         let mut app = build_initial_app(tui_config, &cwd);
-        let conversation = replay_initial_messages(&mut app, &tui_config.initial_messages);
+        let conversation = replay_conversation(
+            &mut app,
+            std::mem::take(&mut tui_config.initial_conversation),
+        );
         let mut pane_mgr =
             PaneManager::new(Pane::with_conversation(PaneId::new(1), app, conversation));
 
@@ -125,8 +128,7 @@ impl RunnerRuntime {
             let pane_id = pane_mgr.next_id();
             let mut pane_app = build_initial_app(tui_config, &cwd);
             pane_app.model_id = pane_snapshot.model_id.into();
-            let pane_conversation =
-                replay_initial_messages(&mut pane_app, &pane_snapshot.conversation.context());
+            let pane_conversation = replay_conversation(&mut pane_app, pane_snapshot.conversation);
             let mut pane = Pane::with_conversation(pane_id, pane_app, pane_conversation);
             pane.label = pane_snapshot.label;
             pane.inbox = Some(message_bus.register(pane_id));
@@ -545,18 +547,20 @@ fn build_initial_app(tui_config: &TuiConfig, cwd: &Path) -> App {
     app
 }
 
-fn replay_initial_messages(app: &mut App, initial_messages: &[Message]) -> ConversationState {
-    if initial_messages.is_empty() {
-        return ConversationState::new();
+fn replay_conversation(app: &mut App, conversation: ConversationState) -> ConversationState {
+    if conversation.is_empty() {
+        return conversation;
     }
 
-    crate::conversation_display::rebuild_display(app, initial_messages);
-    crate::conversation_display::accumulate_session_stats(app, initial_messages);
-    app.status = Some(format!(
-        "resumed session ({} messages)",
-        initial_messages.len()
-    ));
-    ConversationState::from_messages(initial_messages.to_vec())
+    // render the full branch (whole scrollback), but reconstruct stats
+    // from the collapsed context so the token counters match what the LLM
+    // actually sees. the tree is returned intact so `/branch` and `/tree`
+    // still work after resume
+    let history = conversation.display_history();
+    crate::conversation_display::rebuild_display(app, &history);
+    crate::conversation_display::accumulate_session_stats(app, &conversation.context());
+    app.status = Some(format!("resumed session ({} messages)", history.len()));
+    conversation
 }
 
 #[cfg(test)]
@@ -588,7 +592,7 @@ mod tests {
                 ..StreamOptions::default()
             },
             max_turns: 32,
-            initial_messages: vec![],
+            initial_conversation: Default::default(),
             initial_panes: vec![],
             theme: crate::theme::Theme::default(),
             config_path: None,
@@ -736,17 +740,69 @@ mod tests {
     }
 
     #[test]
-    fn replay_initial_messages_restores_display_and_stats() {
+    fn replay_conversation_restores_display_and_stats() {
+        use mush_session::ConversationState;
+
         let config = test_config();
         let mut app = build_initial_app(&config, Path::new("."));
-        let initial_messages = vec![user_message("hello"), assistant_message("hi there")];
+        let messages = vec![user_message("hello"), assistant_message("hi there")];
+        let source = ConversationState::from_messages(messages.clone());
 
-        let conversation = replay_initial_messages(&mut app, &initial_messages);
+        let conversation = replay_conversation(&mut app, source);
 
-        assert_eq!(conversation.context(), initial_messages);
+        assert_eq!(conversation.context(), messages);
         assert_eq!(app.messages.len(), 2);
         assert!(app.stats.total_tokens > TokenCount::ZERO);
         assert_eq!(app.status.as_deref(), Some("resumed session (2 messages)"));
+    }
+
+    /// resuming a compacted session restores the full pre-compaction
+    /// scrollback (not just the collapsed summary) while keeping the LLM
+    /// context collapsed and the tree navigable. previously resume rebuilt
+    /// everything from `session.context()`, so the scrollback vanished and
+    /// `/branch` / `/tree` could not reach pre-compaction state.
+    #[test]
+    fn replay_conversation_restores_full_scrollback_after_compaction() {
+        use mush_session::ConversationState;
+
+        let mut source = ConversationState::new();
+        for i in 0..12u64 {
+            source.append_message(user_message(&format!("question {i}")));
+            source.append_message(assistant_message(&format!("answer {i}")));
+        }
+        source
+            .compact_at_leaf("EARLIER SUMMARY".into(), 14)
+            .expect("compaction applies");
+        let collapsed_len = source.context().len();
+
+        let config = test_config();
+        let mut app = build_initial_app(&config, Path::new("."));
+        let resumed = replay_conversation(&mut app, source);
+
+        // LLM context stays collapsed
+        assert_eq!(resumed.context().len(), collapsed_len);
+        // display restores the whole scrollback (24 messages + banner)
+        assert!(
+            app.messages.len() > collapsed_len,
+            "resume must restore the full scrollback, got {} display rows vs {collapsed_len} collapsed",
+            app.messages.len()
+        );
+        assert!(
+            app.messages
+                .iter()
+                .any(|m| m.role == crate::app::MessageRole::System
+                    && m.content.contains("compacted summary")),
+            "the compaction banner should be shown"
+        );
+        // the tree survives so /branch and /tree still work
+        assert!(
+            resumed
+                .tree()
+                .entries()
+                .iter()
+                .any(|e| matches!(e.kind, mush_session::tree::EntryKind::Compaction { .. })),
+            "the compaction node must survive resume"
+        );
     }
 
     #[test]

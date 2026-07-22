@@ -1,4 +1,4 @@
-use mush_ai::types::{Message, Model, StreamOptions};
+use mush_ai::types::{Model, StreamOptions};
 use mush_session::ConversationState;
 
 /// callback to persist the imperative favourites list. only called when
@@ -69,8 +69,11 @@ pub struct TuiConfig {
     pub system_prompt: Option<String>,
     pub options: StreamOptions,
     pub max_turns: usize,
-    /// initial conversation history (for session resume)
-    pub initial_messages: Vec<Message>,
+    /// initial conversation to restore (for session resume). the full
+    /// tree is kept so the display shows the whole scrollback and
+    /// `/branch` / `/tree` still work, while the LLM context stays
+    /// collapsed via `ConversationState::context`
+    pub initial_conversation: ConversationState,
     /// additional panes to restore (for multi-pane session resume)
     pub initial_panes: Vec<PaneSnapshot>,
     /// colour theme

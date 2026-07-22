@@ -462,7 +462,6 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
     } else {
         Session::new(setup.model.id.as_str(), &cwd_str)
     };
-    let initial_messages = session.context();
     let initial_panes: Vec<mush_tui::PaneSnapshot> = session
         .panes
         .iter()
@@ -510,7 +509,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         system_prompt: Some(system_prompt),
         options: setup.options,
         max_turns: setup.max_turns,
-        initial_messages,
+        initial_conversation: session.conversation,
         initial_panes,
         theme,
         config_path: if config_file.exists() {
