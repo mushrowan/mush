@@ -459,18 +459,22 @@ impl KeyMap {
 
     #[must_use]
     pub fn binding_in(&self, scope: KeyScope, action: Action) -> Option<&Binding> {
+        self.binding_in_exact(scope, action).or_else(|| {
+            if scope == KeyScope::Shared {
+                None
+            } else {
+                self.binding_in_exact(KeyScope::Shared, action)
+            }
+        })
+    }
+
+    /// binding registered for exactly this scope, with no fallback to
+    /// `Shared`. only the defaults dump and its guard need this
+    #[must_use]
+    pub(crate) fn binding_in_exact(&self, scope: KeyScope, action: Action) -> Option<&Binding> {
         self.bindings
             .get(&scope)
             .and_then(|bindings| bindings.get(&action))
-            .or_else(|| {
-                if scope == KeyScope::Shared {
-                    None
-                } else {
-                    self.bindings
-                        .get(&KeyScope::Shared)
-                        .and_then(|bindings| bindings.get(&action))
-                }
-            })
     }
 
     /// does the key event fire the given action?
@@ -573,437 +577,386 @@ const fn default_scope_for_action(action: Action) -> KeyScope {
     }
 }
 
+/// one key combination in the defaults table
+type DefaultCombo = (KeyCode, KeyModifiers);
+
+/// one row of the defaults table: which action fires in which scope, and
+/// on which combinations
+type DefaultBinding = (KeyScope, Action, &'static [DefaultCombo]);
+
+/// the default keybindings, as data. the whole table is walked once at
+/// construction, so adding a binding means adding a row
+const DEFAULT_BINDINGS: &[DefaultBinding] = &[
+    // edit_steering: alt-k always, plus up / ctrl-k as aliases for when
+    // the input is empty (the empty check lives at the call site, not in
+    // the binding itself)
+    (
+        KeyScope::Normal,
+        Action::EditSteering,
+        &[
+            (KeyCode::Char('k'), KeyModifiers::ALT),
+            (KeyCode::Up, KeyModifiers::NONE),
+            (KeyCode::Char('k'), KeyModifiers::CONTROL),
+        ],
+    ),
+    (
+        KeyScope::Shared,
+        Action::Cancel,
+        &[
+            (KeyCode::Esc, KeyModifiers::NONE),
+            (KeyCode::Char('['), KeyModifiers::CONTROL),
+        ],
+    ),
+    (
+        KeyScope::Normal,
+        Action::CycleFavourite,
+        &[(KeyCode::Char('m'), KeyModifiers::ALT)],
+    ),
+    // crossterm delivers shift-m as KeyCode::Char('M') with the ALT
+    // modifier set (no explicit SHIFT), so that's how the binding must be
+    // declared to match incoming events
+    (
+        KeyScope::Normal,
+        Action::CycleFavouriteBackward,
+        &[(KeyCode::Char('M'), KeyModifiers::ALT)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::EnterSearch,
+        &[(KeyCode::Char('f'), KeyModifiers::CONTROL)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::EnterScroll,
+        &[(KeyCode::Char('s'), KeyModifiers::CONTROL)],
+    ),
+    // shift+End: jump the message log to the bottom without touching the
+    // stream. plain End is line-end in the input editor; ctrl+End isn't
+    // reliably delivered across terminals
+    (
+        KeyScope::Shared,
+        Action::JumpToBottom,
+        &[(KeyCode::End, KeyModifiers::SHIFT)],
+    ),
+    (
+        KeyScope::Shared,
+        Action::QuitOrAbort,
+        &[(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+    ),
+    (
+        KeyScope::Shared,
+        Action::ScrollPageUp,
+        &[(KeyCode::PageUp, KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Shared,
+        Action::ScrollPageDown,
+        &[(KeyCode::PageDown, KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Shared,
+        Action::Confirm,
+        &[(KeyCode::Enter, KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Shared,
+        Action::SelectOrSpace,
+        &[
+            (KeyCode::Enter, KeyModifiers::NONE),
+            (KeyCode::Char(' '), KeyModifiers::NONE),
+        ],
+    ),
+    (
+        KeyScope::Shared,
+        Action::NextItem,
+        &[
+            (KeyCode::Tab, KeyModifiers::NONE),
+            (KeyCode::Down, KeyModifiers::NONE),
+            (KeyCode::Char('j'), KeyModifiers::NONE),
+            (KeyCode::Char('j'), KeyModifiers::CONTROL),
+            (KeyCode::Char('n'), KeyModifiers::CONTROL),
+        ],
+    ),
+    (
+        KeyScope::Shared,
+        Action::PreviousItem,
+        &[
+            (KeyCode::BackTab, KeyModifiers::NONE),
+            (KeyCode::BackTab, KeyModifiers::SHIFT),
+            (KeyCode::Tab, KeyModifiers::SHIFT),
+            (KeyCode::Up, KeyModifiers::NONE),
+            (KeyCode::Char('k'), KeyModifiers::NONE),
+            (KeyCode::Char('k'), KeyModifiers::CONTROL),
+            (KeyCode::Char('p'), KeyModifiers::CONTROL),
+        ],
+    ),
+    (
+        KeyScope::SessionPicker,
+        Action::NextItem,
+        &[
+            (KeyCode::Down, KeyModifiers::NONE),
+            (KeyCode::Char('j'), KeyModifiers::CONTROL),
+        ],
+    ),
+    (
+        KeyScope::SessionPicker,
+        Action::PreviousItem,
+        &[
+            (KeyCode::Up, KeyModifiers::NONE),
+            (KeyCode::Char('k'), KeyModifiers::CONTROL),
+        ],
+    ),
+    (
+        KeyScope::SessionPicker,
+        Action::SessionPickerToggleScope,
+        &[(KeyCode::Tab, KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::ModelPicker,
+        Action::NextItem,
+        &[
+            (KeyCode::Down, KeyModifiers::NONE),
+            (KeyCode::Char('j'), KeyModifiers::CONTROL),
+        ],
+    ),
+    (
+        KeyScope::ModelPicker,
+        Action::PreviousItem,
+        &[
+            (KeyCode::Up, KeyModifiers::NONE),
+            (KeyCode::Char('k'), KeyModifiers::CONTROL),
+        ],
+    ),
+    (
+        KeyScope::Shared,
+        Action::NavigateTop,
+        &[
+            (KeyCode::Home, KeyModifiers::NONE),
+            (KeyCode::Char('g'), KeyModifiers::NONE),
+        ],
+    ),
+    (
+        KeyScope::Shared,
+        Action::NavigateBottom,
+        &[
+            (KeyCode::End, KeyModifiers::NONE),
+            (KeyCode::Char('G'), KeyModifiers::SHIFT),
+        ],
+    ),
+    (
+        KeyScope::Scroll,
+        Action::ToggleBlockMode,
+        &[(KeyCode::Char('b'), KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Scroll,
+        Action::ToggleVisualSelection,
+        &[(KeyCode::Char('v'), KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Scroll,
+        Action::CopySelection,
+        &[(KeyCode::Char('y'), KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::CycleThinkingLevel,
+        &[(KeyCode::Char('t'), KeyModifiers::CONTROL)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::PasteImage,
+        &[(KeyCode::Char('v'), KeyModifiers::CONTROL)],
+    ),
+    (
+        KeyScope::Edit,
+        Action::DeleteWordBackward,
+        &[
+            (KeyCode::Backspace, KeyModifiers::CONTROL),
+            (KeyCode::Backspace, KeyModifiers::ALT),
+            (KeyCode::Char('w'), KeyModifiers::CONTROL),
+        ],
+    ),
+    (
+        KeyScope::Edit,
+        Action::DeleteWordForward,
+        &[(KeyCode::Char('d'), KeyModifiers::ALT)],
+    ),
+    (
+        KeyScope::Edit,
+        Action::DeleteCharOrQuit,
+        &[(KeyCode::Char('d'), KeyModifiers::CONTROL)],
+    ),
+    (
+        KeyScope::Edit,
+        Action::DeleteToStart,
+        &[(KeyCode::Char('u'), KeyModifiers::CONTROL)],
+    ),
+    (
+        KeyScope::Edit,
+        Action::DeleteToEnd,
+        &[(KeyCode::Char('k'), KeyModifiers::CONTROL)],
+    ),
+    (
+        KeyScope::Edit,
+        Action::CursorWordLeft,
+        &[
+            (KeyCode::Left, KeyModifiers::ALT),
+            (KeyCode::Left, KeyModifiers::CONTROL),
+            (KeyCode::Char('b'), KeyModifiers::ALT),
+        ],
+    ),
+    (
+        KeyScope::Edit,
+        Action::CursorLeft,
+        &[
+            (KeyCode::Left, KeyModifiers::NONE),
+            (KeyCode::Char('b'), KeyModifiers::CONTROL),
+        ],
+    ),
+    (
+        KeyScope::Edit,
+        Action::CursorRight,
+        &[(KeyCode::Right, KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Edit,
+        Action::CursorWordRight,
+        &[
+            (KeyCode::Right, KeyModifiers::ALT),
+            (KeyCode::Right, KeyModifiers::CONTROL),
+            (KeyCode::Char('f'), KeyModifiers::ALT),
+        ],
+    ),
+    (
+        KeyScope::Edit,
+        Action::CursorLineStart,
+        &[
+            (KeyCode::Home, KeyModifiers::NONE),
+            (KeyCode::Char('a'), KeyModifiers::CONTROL),
+        ],
+    ),
+    (
+        KeyScope::Edit,
+        Action::CursorLineEnd,
+        &[
+            (KeyCode::End, KeyModifiers::NONE),
+            (KeyCode::Char('e'), KeyModifiers::CONTROL),
+        ],
+    ),
+    (
+        KeyScope::Normal,
+        Action::InsertNewline,
+        &[
+            (KeyCode::Enter, KeyModifiers::ALT),
+            (KeyCode::Enter, KeyModifiers::SHIFT),
+            (KeyCode::Char('j'), KeyModifiers::CONTROL),
+        ],
+    ),
+    (
+        KeyScope::ModelPicker,
+        Action::ModelPickerToggleFavourite,
+        &[(KeyCode::Char('f'), KeyModifiers::CONTROL)],
+    ),
+    (
+        KeyScope::ModelPicker,
+        Action::ModelPickerDeleteSelectedStale,
+        &[(KeyCode::Char('d'), KeyModifiers::CONTROL)],
+    ),
+    (
+        KeyScope::ModelPicker,
+        Action::ModelPickerDeleteAllStale,
+        &[
+            (
+                KeyCode::Char('D'),
+                KeyModifiers::CONTROL.union(KeyModifiers::SHIFT),
+            ),
+            (KeyCode::Char('d'), KeyModifiers::ALT),
+        ],
+    ),
+    (
+        KeyScope::Pane,
+        Action::SplitPane,
+        &[(
+            KeyCode::Enter,
+            KeyModifiers::CONTROL.union(KeyModifiers::SHIFT),
+        )],
+    ),
+    (
+        KeyScope::Pane,
+        Action::FocusNextPane,
+        &[(KeyCode::Tab, KeyModifiers::CONTROL)],
+    ),
+    (
+        KeyScope::Pane,
+        Action::FocusPrevPane,
+        &[
+            (KeyCode::BackTab, KeyModifiers::CONTROL),
+            (
+                KeyCode::BackTab,
+                KeyModifiers::CONTROL.union(KeyModifiers::SHIFT),
+            ),
+        ],
+    ),
+    (
+        KeyScope::Pane,
+        Action::ResizePaneRight,
+        &[(
+            KeyCode::Right,
+            KeyModifiers::CONTROL.union(KeyModifiers::SHIFT),
+        )],
+    ),
+    (
+        KeyScope::Pane,
+        Action::ResizePaneLeft,
+        &[(
+            KeyCode::Left,
+            KeyModifiers::CONTROL.union(KeyModifiers::SHIFT),
+        )],
+    ),
+];
+
+/// alt+1 .. alt+9 focus panes 1 .. 9. generated rather than listed so the
+/// digit and the action can't drift apart
+const PANE_FOCUS_ACTIONS: &[(char, Action)] = &[
+    ('1', Action::FocusPane1),
+    ('2', Action::FocusPane2),
+    ('3', Action::FocusPane3),
+    ('4', Action::FocusPane4),
+    ('5', Action::FocusPane5),
+    ('6', Action::FocusPane6),
+    ('7', Action::FocusPane7),
+    ('8', Action::FocusPane8),
+    ('9', Action::FocusPane9),
+];
+
 impl Default for KeyMap {
     fn default() -> Self {
         let mut bindings: HashMap<KeyScope, HashMap<Action, Binding>> = HashMap::new();
+        let mut bind = |scope: KeyScope, action: Action, combos: Vec<KeyCombination>| {
+            bindings
+                .entry(scope)
+                .or_default()
+                .insert(action, Binding(combos));
+        };
 
-        macro_rules! bind {
-            ($scope:expr, $action:expr, $binding:expr $(,)?) => {
-                bindings
-                    .entry($scope)
-                    .or_default()
-                    .insert($action, $binding);
-            };
+        for (scope, action, combos) in DEFAULT_BINDINGS {
+            let combos = combos
+                .iter()
+                .map(|(code, modifiers)| KeyCombination::new(*code, *modifiers))
+                .collect();
+            bind(*scope, *action, combos);
         }
-
-        // edit_steering: alt-k always, plus up / ctrl-k as aliases for
-        // when the input is empty (the empty check lives at the call
-        // site, not in the binding itself)
-        bind!(
-            KeyScope::Normal,
-            Action::EditSteering,
-            Binding(vec![
-                KeyCombination::new(KeyCode::Char('k'), KeyModifiers::ALT),
-                KeyCombination::new(KeyCode::Up, KeyModifiers::NONE),
-                KeyCombination::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
-            ]),
-        );
-
-        bind!(
-            KeyScope::Shared,
-            Action::Cancel,
-            Binding(vec![
-                KeyCombination::new(KeyCode::Esc, KeyModifiers::NONE),
-                KeyCombination::new(KeyCode::Char('['), KeyModifiers::CONTROL),
-            ]),
-        );
-
-        bind!(
-            KeyScope::Normal,
-            Action::CycleFavourite,
-            Binding::single(KeyCombination::new(KeyCode::Char('m'), KeyModifiers::ALT)),
-        );
-
-        // note: crossterm delivers shift-m as KeyCode::Char('M') with
-        // the ALT modifier set (no explicit SHIFT), so that's how the
-        // binding must be declared to match incoming events
-        bind!(
-            KeyScope::Normal,
-            Action::CycleFavouriteBackward,
-            Binding::single(KeyCombination::new(KeyCode::Char('M'), KeyModifiers::ALT)),
-        );
-
-        bind!(
-            KeyScope::Normal,
-            Action::EnterSearch,
-            Binding::single(KeyCombination::new(
-                KeyCode::Char('f'),
-                KeyModifiers::CONTROL,
-            )),
-        );
-
-        bind!(
-            KeyScope::Normal,
-            Action::EnterScroll,
-            Binding::single(KeyCombination::new(
-                KeyCode::Char('s'),
-                KeyModifiers::CONTROL,
-            )),
-        );
-
-        // shift+End: jump the message log to the bottom without touching
-        // the stream. plain End is line-end in the input editor; ctrl+End
-        // isn't reliably delivered across terminals
-        bind!(
-            KeyScope::Shared,
-            Action::JumpToBottom,
-            Binding::single(KeyCombination::new(KeyCode::End, KeyModifiers::SHIFT)),
-        );
-
-        bind!(
-            KeyScope::Shared,
-            Action::QuitOrAbort,
-            Binding::single(KeyCombination::new(
-                KeyCode::Char('c'),
-                KeyModifiers::CONTROL,
-            )),
-        );
-
-        bind!(
-            KeyScope::Shared,
-            Action::ScrollPageUp,
-            Binding::single(KeyCombination::new(KeyCode::PageUp, KeyModifiers::NONE)),
-        );
-
-        bind!(
-            KeyScope::Shared,
-            Action::ScrollPageDown,
-            Binding::single(KeyCombination::new(KeyCode::PageDown, KeyModifiers::NONE)),
-        );
-
-        bind!(
-            KeyScope::Shared,
-            Action::Confirm,
-            Binding::single(KeyCombination::new(KeyCode::Enter, KeyModifiers::NONE)),
-        );
-
-        bind!(
-            KeyScope::Shared,
-            Action::SelectOrSpace,
-            Binding(vec![
-                KeyCombination::new(KeyCode::Enter, KeyModifiers::NONE),
-                KeyCombination::new(KeyCode::Char(' '), KeyModifiers::NONE),
-            ]),
-        );
-
-        bind!(
-            KeyScope::Shared,
-            Action::NextItem,
-            Binding(vec![
-                KeyCombination::new(KeyCode::Tab, KeyModifiers::NONE),
-                KeyCombination::new(KeyCode::Down, KeyModifiers::NONE),
-                KeyCombination::new(KeyCode::Char('j'), KeyModifiers::NONE),
-                KeyCombination::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
-                KeyCombination::new(KeyCode::Char('n'), KeyModifiers::CONTROL),
-            ]),
-        );
-
-        bind!(
-            KeyScope::Shared,
-            Action::PreviousItem,
-            Binding(vec![
-                KeyCombination::new(KeyCode::BackTab, KeyModifiers::NONE),
-                KeyCombination::new(KeyCode::BackTab, KeyModifiers::SHIFT),
-                KeyCombination::new(KeyCode::Tab, KeyModifiers::SHIFT),
-                KeyCombination::new(KeyCode::Up, KeyModifiers::NONE),
-                KeyCombination::new(KeyCode::Char('k'), KeyModifiers::NONE),
-                KeyCombination::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
-                KeyCombination::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
-            ]),
-        );
-
-        bind!(
-            KeyScope::SessionPicker,
-            Action::NextItem,
-            Binding(vec![
-                KeyCombination::new(KeyCode::Down, KeyModifiers::NONE),
-                KeyCombination::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
-            ]),
-        );
-
-        bind!(
-            KeyScope::SessionPicker,
-            Action::PreviousItem,
-            Binding(vec![
-                KeyCombination::new(KeyCode::Up, KeyModifiers::NONE),
-                KeyCombination::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
-            ]),
-        );
-
-        bind!(
-            KeyScope::SessionPicker,
-            Action::SessionPickerToggleScope,
-            Binding(vec![KeyCombination::new(KeyCode::Tab, KeyModifiers::NONE)]),
-        );
-
-        bind!(
-            KeyScope::ModelPicker,
-            Action::NextItem,
-            Binding(vec![
-                KeyCombination::new(KeyCode::Down, KeyModifiers::NONE),
-                KeyCombination::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
-            ]),
-        );
-
-        bind!(
-            KeyScope::ModelPicker,
-            Action::PreviousItem,
-            Binding(vec![
-                KeyCombination::new(KeyCode::Up, KeyModifiers::NONE),
-                KeyCombination::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
-            ]),
-        );
-
-        bind!(
-            KeyScope::Shared,
-            Action::NavigateTop,
-            Binding(vec![
-                KeyCombination::new(KeyCode::Home, KeyModifiers::NONE),
-                KeyCombination::new(KeyCode::Char('g'), KeyModifiers::NONE),
-            ]),
-        );
-
-        bind!(
-            KeyScope::Shared,
-            Action::NavigateBottom,
-            Binding(vec![
-                KeyCombination::new(KeyCode::End, KeyModifiers::NONE),
-                KeyCombination::new(KeyCode::Char('G'), KeyModifiers::SHIFT),
-            ]),
-        );
-
-        bind!(
-            KeyScope::Scroll,
-            Action::ToggleBlockMode,
-            Binding::single(KeyCombination::new(KeyCode::Char('b'), KeyModifiers::NONE)),
-        );
-
-        bind!(
-            KeyScope::Scroll,
-            Action::ToggleVisualSelection,
-            Binding::single(KeyCombination::new(KeyCode::Char('v'), KeyModifiers::NONE)),
-        );
-
-        bind!(
-            KeyScope::Scroll,
-            Action::CopySelection,
-            Binding::single(KeyCombination::new(KeyCode::Char('y'), KeyModifiers::NONE)),
-        );
-
-        bind!(
-            KeyScope::Normal,
-            Action::CycleThinkingLevel,
-            Binding::single(KeyCombination::new(
-                KeyCode::Char('t'),
-                KeyModifiers::CONTROL,
-            )),
-        );
-
-        bind!(
-            KeyScope::Normal,
-            Action::PasteImage,
-            Binding::single(KeyCombination::new(
-                KeyCode::Char('v'),
-                KeyModifiers::CONTROL,
-            )),
-        );
-
-        bind!(
-            KeyScope::Edit,
-            Action::DeleteWordBackward,
-            Binding(vec![
-                KeyCombination::new(KeyCode::Backspace, KeyModifiers::CONTROL),
-                KeyCombination::new(KeyCode::Backspace, KeyModifiers::ALT),
-                KeyCombination::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
-            ]),
-        );
-
-        bind!(
-            KeyScope::Edit,
-            Action::DeleteWordForward,
-            Binding::single(KeyCombination::new(KeyCode::Char('d'), KeyModifiers::ALT)),
-        );
-
-        bind!(
-            KeyScope::Edit,
-            Action::DeleteCharOrQuit,
-            Binding::single(KeyCombination::new(
-                KeyCode::Char('d'),
-                KeyModifiers::CONTROL,
-            )),
-        );
-
-        bind!(
-            KeyScope::Edit,
-            Action::DeleteToStart,
-            Binding::single(KeyCombination::new(
-                KeyCode::Char('u'),
-                KeyModifiers::CONTROL,
-            )),
-        );
-
-        bind!(
-            KeyScope::Edit,
-            Action::DeleteToEnd,
-            Binding::single(KeyCombination::new(
-                KeyCode::Char('k'),
-                KeyModifiers::CONTROL,
-            )),
-        );
-
-        bind!(
-            KeyScope::Edit,
-            Action::CursorWordLeft,
-            Binding(vec![
-                KeyCombination::new(KeyCode::Left, KeyModifiers::ALT),
-                KeyCombination::new(KeyCode::Left, KeyModifiers::CONTROL),
-                KeyCombination::new(KeyCode::Char('b'), KeyModifiers::ALT),
-            ]),
-        );
-
-        bind!(
-            KeyScope::Edit,
-            Action::CursorLeft,
-            Binding(vec![
-                KeyCombination::new(KeyCode::Left, KeyModifiers::NONE),
-                KeyCombination::new(KeyCode::Char('b'), KeyModifiers::CONTROL),
-            ]),
-        );
-
-        bind!(
-            KeyScope::Edit,
-            Action::CursorRight,
-            Binding::single(KeyCombination::new(KeyCode::Right, KeyModifiers::NONE)),
-        );
-
-        bind!(
-            KeyScope::Edit,
-            Action::CursorWordRight,
-            Binding(vec![
-                KeyCombination::new(KeyCode::Right, KeyModifiers::ALT),
-                KeyCombination::new(KeyCode::Right, KeyModifiers::CONTROL),
-                KeyCombination::new(KeyCode::Char('f'), KeyModifiers::ALT),
-            ]),
-        );
-
-        bind!(
-            KeyScope::Edit,
-            Action::CursorLineStart,
-            Binding(vec![
-                KeyCombination::new(KeyCode::Home, KeyModifiers::NONE),
-                KeyCombination::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
-            ]),
-        );
-
-        bind!(
-            KeyScope::Edit,
-            Action::CursorLineEnd,
-            Binding(vec![
-                KeyCombination::new(KeyCode::End, KeyModifiers::NONE),
-                KeyCombination::new(KeyCode::Char('e'), KeyModifiers::CONTROL),
-            ]),
-        );
-
-        bind!(
-            KeyScope::Normal,
-            Action::InsertNewline,
-            Binding(vec![
-                KeyCombination::new(KeyCode::Enter, KeyModifiers::ALT),
-                KeyCombination::new(KeyCode::Enter, KeyModifiers::SHIFT),
-                KeyCombination::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
-            ]),
-        );
-
-        bind!(
-            KeyScope::ModelPicker,
-            Action::ModelPickerToggleFavourite,
-            Binding::single(KeyCombination::new(
-                KeyCode::Char('f'),
-                KeyModifiers::CONTROL,
-            )),
-        );
-
-        bind!(
-            KeyScope::ModelPicker,
-            Action::ModelPickerDeleteSelectedStale,
-            Binding::single(KeyCombination::new(
-                KeyCode::Char('d'),
-                KeyModifiers::CONTROL,
-            )),
-        );
-
-        bind!(
-            KeyScope::ModelPicker,
-            Action::ModelPickerDeleteAllStale,
-            Binding(vec![
-                KeyCombination::new(
-                    KeyCode::Char('D'),
-                    KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-                ),
-                KeyCombination::new(KeyCode::Char('d'), KeyModifiers::ALT),
-            ]),
-        );
-
-        bind!(
-            KeyScope::Pane,
-            Action::SplitPane,
-            Binding::single(KeyCombination::new(
-                KeyCode::Enter,
-                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-            )),
-        );
-        bind!(
-            KeyScope::Pane,
-            Action::FocusNextPane,
-            Binding::single(KeyCombination::new(KeyCode::Tab, KeyModifiers::CONTROL)),
-        );
-        bind!(
-            KeyScope::Pane,
-            Action::FocusPrevPane,
-            Binding(vec![
-                KeyCombination::new(KeyCode::BackTab, KeyModifiers::CONTROL),
-                KeyCombination::new(
-                    KeyCode::BackTab,
-                    KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-                ),
-            ]),
-        );
-        for (key_char, action) in [
-            ('1', Action::FocusPane1),
-            ('2', Action::FocusPane2),
-            ('3', Action::FocusPane3),
-            ('4', Action::FocusPane4),
-            ('5', Action::FocusPane5),
-            ('6', Action::FocusPane6),
-            ('7', Action::FocusPane7),
-            ('8', Action::FocusPane8),
-            ('9', Action::FocusPane9),
-        ] {
-            bind!(
+        for (digit, action) in PANE_FOCUS_ACTIONS {
+            bind(
                 KeyScope::Pane,
-                action,
-                Binding::single(KeyCombination::new(
-                    KeyCode::Char(key_char),
-                    KeyModifiers::ALT
-                )),
+                *action,
+                vec![KeyCombination::new(
+                    KeyCode::Char(*digit),
+                    KeyModifiers::ALT,
+                )],
             );
         }
-        bind!(
-            KeyScope::Pane,
-            Action::ResizePaneRight,
-            Binding::single(KeyCombination::new(
-                KeyCode::Right,
-                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-            )),
-        );
-        bind!(
-            KeyScope::Pane,
-            Action::ResizePaneLeft,
-            Binding::single(KeyCombination::new(
-                KeyCode::Left,
-                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-            )),
-        );
 
         Self { bindings }
     }
@@ -1435,5 +1388,48 @@ mod tests {
                 "config key {key} should be snake_case"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod default_table_snapshot {
+    use super::*;
+
+    /// every default binding, flattened and sorted, as one string.
+    /// used as a characterisation guard when the defaults table changes
+    /// shape: the dump has to stay byte-identical
+    fn dump(map: &KeyMap) -> String {
+        let mut rows: Vec<String> = Vec::new();
+        for scope in KeyScope::ALL {
+            for action in Action::ALL {
+                if let Some(binding) = map.binding_in_exact(*scope, *action) {
+                    let combos: Vec<String> = binding
+                        .0
+                        .iter()
+                        .map(|c| c.normalized().to_string())
+                        .collect();
+                    rows.push(format!(
+                        "{}::{} = {}",
+                        scope.config_key(),
+                        action.config_key(),
+                        combos.join(" | ")
+                    ));
+                }
+            }
+        }
+        rows.sort();
+        rows.join("\n")
+    }
+
+    #[test]
+    fn default_bindings_are_unchanged() {
+        let dump = dump(&KeyMap::default());
+        let expected = include_str!("keybinds/default_bindings.txt");
+        assert_eq!(
+            dump.trim(),
+            expected.trim(),
+            "default bindings changed. if deliberate, regenerate \
+             src/keybinds/default_bindings.txt from this dump"
+        );
     }
 }
