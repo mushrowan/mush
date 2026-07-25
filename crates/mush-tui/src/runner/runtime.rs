@@ -485,6 +485,7 @@ fn watch_config(
 
 fn build_initial_app(tui_config: &TuiConfig, cwd: &Path) -> App {
     let mut app = App::new(tui_config.model.id.clone(), tui_config.model.context_window);
+    tui_config.seed_app(&mut app);
     app.thinking_level = tui_config
         .options
         .thinking
@@ -492,18 +493,6 @@ fn build_initial_app(tui_config: &TuiConfig, cwd: &Path) -> App {
         .unwrap_or(ThinkingLevel::Off)
         .normalize_visible();
     app.supported_thinking_levels = tui_config.model.supported_thinking_levels.clone();
-    app.thinking_display = tui_config.thinking_display;
-    app.interaction.show_cost = tui_config.show_cost;
-    app.interaction.show_usage_lines = tui_config.show_usage_lines;
-    app.interaction.show_token_counters = tui_config.show_token_counters;
-    app.interaction.status_bar = tui_config.status_bar_config.clone();
-    app.keymap = tui_config.keymap.clone();
-    app.theme = tui_config.theme.clone();
-    app.scroll_lines = tui_config.scroll_lines;
-    app.compaction_model_id = tui_config
-        .compaction_model
-        .as_ref()
-        .map(|(model, _)| model.id.clone());
     app.cache.seed_for_model(
         &tui_config.model,
         &tui_config.options,
@@ -540,10 +529,6 @@ fn build_initial_app(tui_config: &TuiConfig, cwd: &Path) -> App {
             .push(crate::slash_menu::model_completion_from_merged(&entry));
     }
 
-    app.completion.favourite_models = tui_config.favourite_models.clone();
-    app.completion.favourites_locked = tui_config.favourites_locked;
-    app.completion.recent_models = tui_config.recent_models.clone();
-
     app
 }
 
@@ -565,14 +550,14 @@ fn replay_conversation(app: &mut App, conversation: ConversationState) -> Conver
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+
     use std::sync::mpsc;
 
     use super::*;
-    use crate::runner::LastModels;
+
     use mush_ai::types::{
-        Api, AssistantContentPart, AssistantMessage, Provider, StreamOptions, TextContent,
-        Timestamp, TokenCount, Usage, UserContent, UserMessage,
+        Api, AssistantContentPart, AssistantMessage, Provider, TextContent, Timestamp, TokenCount,
+        Usage, UserContent, UserMessage,
     };
 
     fn test_model() -> mush_ai::types::Model {
@@ -583,62 +568,12 @@ mod tests {
     }
 
     fn test_config() -> TuiConfig {
-        let model = test_model();
-        TuiConfig {
-            model,
-            system_prompt: None,
-            options: StreamOptions {
-                thinking: Some(ThinkingLevel::Medium),
-                ..StreamOptions::default()
-            },
-            max_turns: 32,
-            initial_conversation: Default::default(),
-            initial_panes: vec![],
-            theme: crate::theme::Theme::default(),
-            config_path: None,
-            provider_api_keys: HashMap::new(),
-            thinking_prefs: ThinkingPrefs::default(),
-            save_thinking_prefs: None,
-            last_models: LastModels::default(),
-            save_last_models: None,
-            save_session: None,
-            update_title: None,
-            confirm_tools: false,
-            auto_compact: false,
-            auto_fork_compact: false,
-            show_cost: true,
-            show_usage_lines: false,
-            show_token_counters: false,
-            status_bar_config: Default::default(),
-            debug_cache: false,
-            cache_timer: true,
-            thinking_display: crate::app::ThinkingDisplay::Collapse,
-            tool_output_live: None,
-            log_buffer: None,
-            isolation_mode: crate::file_tracker::IsolationMode::None,
-            terminal_policy: crate::terminal_policy::TerminalPolicy::default(),
-            lifecycle_hooks: mush_agent::LifecycleHooks::default(),
-            cwd: std::path::PathBuf::from("/tmp"),
-            dynamic_system_context: None,
-            file_rules: None,
-            lsp_diagnostics: None,
-            agent_card: None,
-            model_tiers: HashMap::new(),
-            compaction_model: None,
-            resolve_model: None,
-            http_client: None,
-            session_id: mush_ai::types::SessionId::new(),
-            settings: Default::default(),
-            scroll_lines: crate::app::DEFAULT_SCROLL_LINES,
-            favourite_models: Vec::new(),
-            favourites_locked: false,
-            save_favourite_models: None,
-            recent_models: Vec::new(),
-            save_recent_models: None,
-            keymap: crate::keybinds::KeyMap::default(),
-            reload_context: None,
-            forbidden_chars: Default::default(),
-        }
+        let mut config = TuiConfig::for_test();
+        config.model = test_model();
+        config.options.thinking = Some(ThinkingLevel::Medium);
+        config.show_cost = true;
+        config.cache_timer = true;
+        config
     }
 
     fn user_message(text: &str) -> Message {

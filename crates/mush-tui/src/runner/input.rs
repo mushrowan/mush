@@ -775,7 +775,7 @@ mod tests {
     use crate::pane::{Pane, PaneId, PaneManager};
     use crate::runner::caching_backend::CachedSizeState;
     use crossterm::event::{KeyEvent, KeyEventState, KeyModifiers};
-    use mush_ai::types::{StreamOptions, TokenCount};
+    use mush_ai::types::TokenCount;
     use std::rc::Rc;
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -798,61 +798,7 @@ mod tests {
     }
 
     fn streaming_test_config() -> crate::runner::TuiConfig {
-        crate::runner::TuiConfig {
-            model: mush_ai::models::all_models_with_user()
-                .into_iter()
-                .next()
-                .expect("expected at least one model"),
-            system_prompt: None,
-            options: StreamOptions::default(),
-            max_turns: 32,
-            initial_conversation: Default::default(),
-            initial_panes: Vec::new(),
-            theme: crate::theme::Theme::default(),
-            config_path: None,
-            provider_api_keys: std::collections::HashMap::new(),
-            thinking_prefs: ThinkingPrefs::default(),
-            save_thinking_prefs: None,
-            last_models: crate::runner::LastModels::default(),
-            save_last_models: None,
-            save_session: None,
-            update_title: None,
-            confirm_tools: false,
-            auto_compact: false,
-            auto_fork_compact: false,
-            show_cost: false,
-            show_usage_lines: false,
-            show_token_counters: false,
-            status_bar_config: Default::default(),
-            debug_cache: false,
-            cache_timer: false,
-            thinking_display: crate::app::ThinkingDisplay::Collapse,
-            tool_output_live: None,
-            log_buffer: None,
-            isolation_mode: crate::file_tracker::IsolationMode::None,
-            terminal_policy: crate::terminal_policy::TerminalPolicy::default(),
-            lifecycle_hooks: mush_agent::LifecycleHooks::default(),
-            cwd: std::path::PathBuf::new(),
-            dynamic_system_context: None,
-            file_rules: None,
-            lsp_diagnostics: None,
-            agent_card: None,
-            model_tiers: std::collections::HashMap::new(),
-            compaction_model: None,
-            resolve_model: None,
-            http_client: None,
-            session_id: mush_ai::types::SessionId::new(),
-            settings: Default::default(),
-            scroll_lines: crate::app::DEFAULT_SCROLL_LINES,
-            favourite_models: Vec::new(),
-            favourites_locked: false,
-            save_favourite_models: None,
-            recent_models: Vec::new(),
-            save_recent_models: None,
-            keymap: crate::keybinds::KeyMap::default(),
-            reload_context: None,
-            forbidden_chars: Default::default(),
-        }
+        crate::runner::TuiConfig::for_test()
     }
 
     #[test]

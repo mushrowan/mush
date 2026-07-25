@@ -140,21 +140,14 @@ pub(super) async fn fork_pane(
 
     let new_id = pane_mgr.next_id();
     let mut new_app = App::new(model_id.clone(), context_window);
+    tui_config.seed_app(&mut new_app);
     new_app.messages = display_msgs;
     new_app.thinking_level = thinking_level;
     new_app.thinking_display = thinking_display;
     new_app.completion.completions = completions;
     new_app.completion.slash_commands = slash_commands;
     new_app.completion.model_completions = model_completions;
-    new_app.completion.favourite_models = tui_config.favourite_models.clone();
-    new_app.completion.favourites_locked = tui_config.favourites_locked;
-    new_app.completion.recent_models = tui_config.recent_models.clone();
     new_app.cwd = cwd.clone();
-    new_app.interaction.show_cost = tui_config.show_cost;
-    new_app.interaction.show_usage_lines = tui_config.show_usage_lines;
-    new_app.interaction.show_token_counters = tui_config.show_token_counters;
-    new_app.interaction.status_bar = tui_config.status_bar_config.clone();
-    new_app.keymap = tui_config.keymap.clone();
     new_app.cache.seed_for_model(
         &tui_config.model,
         &tui_config.options,
@@ -349,6 +342,7 @@ pub(super) fn process_delegations(
 /// create a fresh App inheriting display settings from a parent pane
 fn app_from_parent(parent: &crate::pane::Pane, tui_config: &TuiConfig) -> App {
     let mut app = App::new(parent.app.model_id.clone(), parent.app.stats.context_window);
+    tui_config.seed_app(&mut app);
     app.thinking_level = parent.app.thinking_level.clone();
     app.thinking_display = parent.app.thinking_display;
     app.completion.completions = parent.app.completion.completions.clone();
@@ -358,15 +352,6 @@ fn app_from_parent(parent: &crate::pane::Pane, tui_config: &TuiConfig) -> App {
     app.completion.favourites_locked = parent.app.completion.favourites_locked;
     app.completion.recent_models = parent.app.completion.recent_models.clone();
     app.cwd = parent.app.cwd.clone();
-    app.interaction.show_cost = tui_config.show_cost;
-    app.interaction.show_usage_lines = tui_config.show_usage_lines;
-    app.interaction.show_token_counters = tui_config.show_token_counters;
-    app.interaction.status_bar = tui_config.status_bar_config.clone();
-    app.keymap = tui_config.keymap.clone();
-    app.compaction_model_id = tui_config
-        .compaction_model
-        .as_ref()
-        .map(|(model, _)| model.id.clone());
     app
 }
 
@@ -515,62 +500,11 @@ mod tests {
             model: None,
         });
 
-        let model = mush_ai::models::all_models_with_user()
+        let _model = mush_ai::models::all_models_with_user()
             .into_iter()
             .next()
             .unwrap();
-        let tui_config = super::TuiConfig {
-            model,
-            system_prompt: None,
-            options: mush_ai::types::StreamOptions::default(),
-            max_turns: 32,
-            initial_conversation: Default::default(),
-            initial_panes: vec![],
-            theme: crate::theme::Theme::default(),
-            config_path: None,
-            provider_api_keys: std::collections::HashMap::new(),
-            thinking_prefs: super::super::ThinkingPrefs::default(),
-            save_thinking_prefs: None,
-            last_models: super::super::LastModels::default(),
-            save_last_models: None,
-            save_session: None,
-            update_title: None,
-            confirm_tools: false,
-            auto_compact: false,
-            auto_fork_compact: false,
-            show_cost: false,
-            show_usage_lines: false,
-            show_token_counters: false,
-            status_bar_config: Default::default(),
-            debug_cache: false,
-            cache_timer: false,
-            thinking_display: crate::app::ThinkingDisplay::Collapse,
-            tool_output_live: None,
-            log_buffer: None,
-            isolation_mode: crate::file_tracker::IsolationMode::None,
-            terminal_policy: crate::terminal_policy::TerminalPolicy::default(),
-            lifecycle_hooks: mush_agent::LifecycleHooks::default(),
-            cwd: std::path::PathBuf::from("/tmp"),
-            dynamic_system_context: None,
-            file_rules: None,
-            lsp_diagnostics: None,
-            agent_card: None,
-            model_tiers: std::collections::HashMap::new(),
-            compaction_model: None,
-            resolve_model: None,
-            http_client: None,
-            session_id: mush_ai::types::SessionId::new(),
-            settings: Default::default(),
-            scroll_lines: crate::app::DEFAULT_SCROLL_LINES,
-            favourite_models: Vec::new(),
-            favourites_locked: false,
-            save_favourite_models: None,
-            recent_models: Vec::new(),
-            save_recent_models: None,
-            keymap: crate::keybinds::KeyMap::default(),
-            reload_context: None,
-            forbidden_chars: Default::default(),
-        };
+        let tui_config = TuiConfig::for_test();
 
         process_delegations(&mut pane_mgr, &tui_config, &bus, &queue);
 
@@ -582,6 +516,33 @@ mod tests {
             .expect("delegation info should be set");
         assert_eq!(del.from_pane, PaneId::new(1));
         assert_eq!(del.task_id, "del-test");
+    }
+
+    #[tokio::test]
+    async fn forked_pane_inherits_display_config_from_tui_config() {
+        // a forked pane is a full pane: it has to render with the
+        // configured theme and scroll at the configured step, not fall
+        // back to App::new's defaults
+        let mut pane_mgr = PaneManager::new(Pane::new(PaneId::new(1), app()));
+        let bus = crate::messaging::MessageBus::new();
+        bus.register(PaneId::new(1));
+
+        let mut tui_config = TuiConfig::for_test();
+        tui_config.theme = crate::theme::Theme::light();
+        tui_config.scroll_lines = 7;
+        tui_config.show_cost = true;
+
+        fork_pane(&mut pane_mgr, &tui_config, &bus, &None).await;
+
+        assert_eq!(pane_mgr.pane_count(), 2);
+        let forked = &pane_mgr.panes()[1].app;
+        assert_eq!(forked.scroll_lines, 7, "scroll_lines should be inherited");
+        assert_eq!(
+            forked.theme.user_label,
+            crate::theme::Theme::light().user_label,
+            "theme should be inherited"
+        );
+        assert!(forked.interaction.show_cost, "toggles should be inherited");
     }
 
     #[test]

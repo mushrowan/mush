@@ -1150,7 +1150,7 @@ pub fn handle_export(app: &mut App, conversation: &ConversationState, args: &str
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+
     use std::sync::Arc;
 
     #[test]
@@ -1229,59 +1229,10 @@ mod tests {
     }
 
     fn test_tui_config(resolve: Option<crate::runner::ModelResolver>) -> TuiConfig {
-        let model = test_model("active-model");
-        TuiConfig {
-            model,
-            system_prompt: None,
-            options: StreamOptions::default(),
-            max_turns: 32,
-            initial_conversation: Default::default(),
-            initial_panes: vec![],
-            theme: crate::theme::Theme::default(),
-            config_path: None,
-            provider_api_keys: HashMap::new(),
-            thinking_prefs: Default::default(),
-            save_thinking_prefs: None,
-            last_models: Default::default(),
-            save_last_models: None,
-            save_session: None,
-            update_title: None,
-            confirm_tools: false,
-            auto_compact: false,
-            auto_fork_compact: false,
-            show_cost: false,
-            show_usage_lines: false,
-            show_token_counters: false,
-            status_bar_config: Default::default(),
-            debug_cache: false,
-            cache_timer: false,
-            thinking_display: Default::default(),
-            tool_output_live: None,
-            log_buffer: None,
-            isolation_mode: crate::file_tracker::IsolationMode::None,
-            terminal_policy: crate::terminal_policy::TerminalPolicy::default(),
-            lifecycle_hooks: Default::default(),
-            cwd: std::path::PathBuf::from("/tmp"),
-            dynamic_system_context: None,
-            file_rules: None,
-            lsp_diagnostics: None,
-            agent_card: None,
-            model_tiers: HashMap::new(),
-            compaction_model: None,
-            resolve_model: resolve,
-            http_client: None,
-            session_id: SessionId::new(),
-            settings: Default::default(),
-            scroll_lines: crate::app::DEFAULT_SCROLL_LINES,
-            favourite_models: Vec::new(),
-            favourites_locked: false,
-            save_favourite_models: None,
-            recent_models: Vec::new(),
-            save_recent_models: None,
-            keymap: Default::default(),
-            reload_context: None,
-            forbidden_chars: Default::default(),
-        }
+        let mut config = TuiConfig::for_test();
+        config.model = test_model("active-model");
+        config.resolve_model = resolve;
+        config
     }
 
     #[test]

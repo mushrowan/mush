@@ -211,4 +211,91 @@ impl TuiConfig {
             (model.clone(), options)
         })
     }
+
+    /// apply every config-derived field to an `App`, so panes created
+    /// after startup (fork, delegation) look like the first one.
+    ///
+    /// leaves conversation-derived state alone: messages, model id,
+    /// thinking level and completions belong to whoever built the app
+    pub(crate) fn seed_app(&self, app: &mut crate::app::App) {
+        app.thinking_display = self.thinking_display;
+        app.theme = self.theme.clone();
+        app.scroll_lines = self.scroll_lines;
+        app.keymap = self.keymap.clone();
+        app.interaction.show_cost = self.show_cost;
+        app.interaction.show_usage_lines = self.show_usage_lines;
+        app.interaction.show_token_counters = self.show_token_counters;
+        app.interaction.status_bar = self.status_bar_config.clone();
+        app.completion.favourite_models = self.favourite_models.clone();
+        app.completion.favourites_locked = self.favourites_locked;
+        app.completion.recent_models = self.recent_models.clone();
+        app.compaction_model_id = self
+            .compaction_model
+            .as_ref()
+            .map(|(model, _)| model.id.clone());
+    }
+}
+
+#[cfg(test)]
+impl TuiConfig {
+    /// minimal config for tests: the first known model, every toggle off
+    /// and every host callback absent. tests that care about a field set
+    /// it explicitly after construction
+    pub(crate) fn for_test() -> Self {
+        Self {
+            model: mush_ai::models::all_models_with_user()
+                .into_iter()
+                .next()
+                .expect("builtin model catalogue is never empty"),
+            system_prompt: None,
+            options: StreamOptions::default(),
+            max_turns: 32,
+            initial_conversation: ConversationState::default(),
+            initial_panes: Vec::new(),
+            theme: crate::theme::Theme::default(),
+            config_path: None,
+            provider_api_keys: std::collections::HashMap::new(),
+            thinking_prefs: super::ThinkingPrefs::default(),
+            save_thinking_prefs: None,
+            last_models: super::LastModels::default(),
+            save_last_models: None,
+            save_session: None,
+            update_title: None,
+            confirm_tools: false,
+            auto_compact: false,
+            auto_fork_compact: false,
+            show_cost: false,
+            show_usage_lines: false,
+            show_token_counters: false,
+            status_bar_config: crate::app_state::StatusBarConfig::default(),
+            debug_cache: false,
+            cache_timer: false,
+            thinking_display: crate::app::ThinkingDisplay::Collapse,
+            tool_output_live: None,
+            log_buffer: None,
+            isolation_mode: crate::file_tracker::IsolationMode::None,
+            terminal_policy: crate::terminal_policy::TerminalPolicy::default(),
+            lifecycle_hooks: mush_agent::LifecycleHooks::default(),
+            cwd: std::path::PathBuf::from("/tmp"),
+            dynamic_system_context: None,
+            file_rules: None,
+            lsp_diagnostics: None,
+            agent_card: None,
+            model_tiers: std::collections::HashMap::new(),
+            compaction_model: None,
+            resolve_model: None,
+            http_client: None,
+            session_id: mush_ai::types::SessionId::new(),
+            settings: crate::settings::ScopedSettings::default(),
+            scroll_lines: crate::app::DEFAULT_SCROLL_LINES,
+            favourite_models: Vec::new(),
+            favourites_locked: false,
+            save_favourite_models: None,
+            recent_models: Vec::new(),
+            save_recent_models: None,
+            keymap: crate::keybinds::KeyMap::default(),
+            reload_context: None,
+            forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars::default(),
+        }
+    }
 }
