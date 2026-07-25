@@ -1411,12 +1411,12 @@ mod default_table_snapshot {
     #[test]
     fn default_bindings_are_unchanged() {
         let dump = dump(&KeyMap::default());
-        let expected = include_str!("keybinds/default_bindings.txt");
+        let expected = include_str!("snapshots/default_keybindings.txt");
         assert_eq!(
             dump.trim(),
             expected.trim(),
             "default bindings changed. if deliberate, regenerate \
-             src/keybinds/default_bindings.txt from this dump"
+             src/snapshots/default_keybindings.txt from this dump"
         );
     }
 }

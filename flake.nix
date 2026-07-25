@@ -68,15 +68,18 @@
 
         craneLib = (inputs.crane.mkLib pkgs).overrideToolchain rustToolchainFor;
 
-        # crane's default filter strips non-rust files. include the
-        # `tests/fixtures/` paths so integration tests can `include_str!`
-        # vendored JSON fixtures (e.g. the openrouter openapi spec used
-        # by the drift test)
+        # crane's default filter strips non-rust files. two kinds of data
+        # file have to survive it:
+        #   - `tests/fixtures/` for integration tests that `include_str!`
+        #     vendored JSON (the openrouter openapi spec, etc)
+        #   - `snapshots/` for characterisation guards that assert a dump
+        #     stays byte-identical (the default keybindings table)
         src = pkgs.lib.cleanSourceWith {
           src = ./.;
           name = "source";
           filter = path: type:
             (builtins.match ".*tests/fixtures/.*" path != null)
+            || (builtins.match ".*/snapshots/.*" path != null)
             || (craneLib.filterCargoSources path type);
         };
 
