@@ -5,10 +5,9 @@
 //! persisted to ~/.config/mush/oauth.json.
 
 pub mod anthropic;
+pub mod callback_server;
 pub mod openai_codex;
-pub mod openai_codex_server;
 pub mod openrouter;
-pub mod openrouter_callback_server;
 mod pkce;
 mod store;
 pub mod usage;

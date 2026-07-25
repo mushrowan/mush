@@ -21,10 +21,12 @@
 use super::{
     AuthPrompt, OAuthCredentials, OAuthError, OAuthProvider, PkceChallenge, generate_pkce,
 };
-use crate::oauth::openrouter_callback_server::OpenRouterCallbackServer;
+use crate::oauth::callback_server::{CallbackConfig, CallbackServer};
 
 const AUTHORIZE_URL: &str = "https://openrouter.ai/auth";
 const API_BASE_URL: &str = "https://openrouter.ai/api/v1";
+const CALLBACK_PATH: &str = "/auth/callback";
+const CALLBACK_PORT: u16 = 1456;
 const DEFAULT_REDIRECT_URI: &str = "http://localhost:1456/auth/callback";
 
 pub struct OpenRouterOAuth;
@@ -124,16 +126,16 @@ fn build_auth_url(callback_url: &str, pkce: &PkceChallenge) -> String {
 pub struct OpenRouterLoginSession {
     pub auth_url: String,
     pkce: PkceChallenge,
-    server: OpenRouterCallbackServer,
+    server: CallbackServer,
 }
 
 impl OpenRouterLoginSession {
     /// bind the local callback server and prepare the auth url
     pub async fn start() -> Result<Self, OAuthError> {
         let pkce = generate_pkce()?;
-        let server = OpenRouterCallbackServer::bind().await?;
-        let redirect_uri = server.redirect_uri();
-        let auth_url = build_auth_url(&redirect_uri, &pkce);
+        let server =
+            CallbackServer::bind(CallbackConfig::new(CALLBACK_PATH, CALLBACK_PORT)).await?;
+        let auth_url = build_auth_url(&server.redirect_uri(), &pkce);
         Ok(Self {
             auth_url,
             pkce,
@@ -154,11 +156,7 @@ impl OpenRouterLoginSession {
         let pkce = self.pkce;
         let (params, writer) = self.server.await_callback().await?;
 
-        if let Some(error) = params.error {
-            let detail = params
-                .error_description
-                .map(|d| format!("{error}: {d}"))
-                .unwrap_or(error);
+        if let Some(detail) = params.error_detail() {
             let _ = writer.write_error(&detail).await;
             return Err(OAuthError::TokenExchange(detail));
         }

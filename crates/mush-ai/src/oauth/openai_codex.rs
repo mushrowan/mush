@@ -7,11 +7,13 @@ use serde::Deserialize;
 use super::{
     AuthPrompt, OAuthCredentials, OAuthError, OAuthProvider, PkceChallenge, generate_pkce,
 };
-use crate::oauth::openai_codex_server::CodexCallbackServer;
+use crate::oauth::callback_server::{CallbackConfig, CallbackServer};
 
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
 const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+const CALLBACK_PATH: &str = "/auth/callback";
+const CALLBACK_PORT: u16 = 1455;
 const REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
 const SCOPE: &str = "openid profile email offline_access";
 const CLAIM_PATH: &str = "https://api.openai.com/auth";
@@ -294,7 +296,8 @@ fn timestamp_ms() -> u64 {
 /// for the browser callback and complete the token exchange.
 pub struct CodexLoginSession {
     pub auth_url: String,
-    server: CodexCallbackServer,
+    pkce: PkceChallenge,
+    server: CallbackServer,
 }
 
 impl CodexLoginSession {
@@ -302,23 +305,25 @@ impl CodexLoginSession {
     pub async fn start() -> Result<Self, OAuthError> {
         let pkce = generate_pkce()?;
         let state = pkce.verifier.clone();
-        let server = CodexCallbackServer::bind(pkce, state).await?;
-        let redirect_uri = server.redirect_uri();
-        let auth_url = build_auth_url_with_redirect(server.pkce(), &redirect_uri, server.state());
-        Ok(Self { auth_url, server })
+        let server = CallbackServer::bind(
+            CallbackConfig::new(CALLBACK_PATH, CALLBACK_PORT).expecting_state(state.clone()),
+        )
+        .await?;
+        let auth_url = build_auth_url_with_redirect(&pkce, &server.redirect_uri(), &state);
+        Ok(Self {
+            auth_url,
+            pkce,
+            server,
+        })
     }
 
     /// wait for the browser callback, exchange the code for tokens
     pub async fn await_credentials(self) -> Result<OAuthCredentials, OAuthError> {
         let redirect_uri = self.server.redirect_uri();
-        let verifier = self.server.pkce().verifier.clone();
+        let verifier = self.pkce.verifier;
         let (params, writer) = self.server.await_callback().await?;
 
-        if let Some(error) = params.error {
-            let detail = params
-                .error_description
-                .map(|d| format!("{error}: {d}"))
-                .unwrap_or(error);
+        if let Some(detail) = params.error_detail() {
             let _ = writer.write_error(&detail).await;
             return Err(OAuthError::TokenExchange(detail));
         }
