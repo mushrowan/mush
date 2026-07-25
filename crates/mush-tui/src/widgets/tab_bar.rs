@@ -71,6 +71,7 @@ mod tests {
     use super::*;
     use crate::app::App;
     use crate::pane::{Pane, PaneId};
+    use crate::test_support::{buffer_to_string, render_to_buffer};
     use mush_ai::types::TokenCount;
 
     fn test_pane(id: u32) -> Pane {
@@ -84,12 +85,8 @@ mod tests {
     fn renders_focused_marker() {
         let mut mgr = PaneManager::new(test_pane(1));
         mgr.add_pane(test_pane(2));
-        let area = Rect::new(0, 0, 40, 1);
-        let mut buf = Buffer::empty(area);
-        TabBar::new(&mgr).render(area, &mut buf);
-        let content: String = (0..area.width)
-            .map(|x| buf[(x, 0)].symbol().to_string())
-            .collect();
+        let buf = render_to_buffer(TabBar::new(&mgr), 40, 1);
+        let content = buffer_to_string(&buf);
         assert!(content.contains("1:1*"));
         assert!(content.contains("2:2"));
         assert!(!content.contains("2:2*"));
@@ -101,12 +98,8 @@ mod tests {
         let mut p2 = test_pane(2);
         p2.app.stream.active = true;
         mgr.add_pane(p2);
-        let area = Rect::new(0, 0, 40, 1);
-        let mut buf = Buffer::empty(area);
-        TabBar::new(&mgr).render(area, &mut buf);
-        let content: String = (0..area.width)
-            .map(|x| buf[(x, 0)].symbol().to_string())
-            .collect();
+        let buf = render_to_buffer(TabBar::new(&mgr), 40, 1);
+        let content = buffer_to_string(&buf);
         assert!(content.contains('…'));
     }
 }

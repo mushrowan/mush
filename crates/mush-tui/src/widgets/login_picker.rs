@@ -165,9 +165,10 @@ fn render_list(frame: &mut Frame, picker: &LoginPickerState, list_area: Rect, th
 mod tests {
     use super::*;
     use crate::login_picker::LoginEntry;
+    use crate::test_support::buffer_to_string;
+    use crate::test_support::draw_to_buffer;
     use mush_ai::login::{LoginMethod, LoginSource};
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
+
     use ratatui::buffer::Buffer;
 
     fn oauth_entry(id: &str, name: &str, source: Option<LoginSource>) -> LoginEntry {
@@ -198,25 +199,7 @@ mod tests {
 
     fn render_to_buffer(picker: &LoginPickerState, width: u16, height: u16) -> Buffer {
         let theme = Theme::default();
-        let backend = TestBackend::new(width, height);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| {
-                render(frame, picker, &theme);
-            })
-            .unwrap();
-        terminal.backend().buffer().clone()
-    }
-
-    fn buffer_to_string(buf: &Buffer) -> String {
-        let mut s = String::new();
-        for y in 0..buf.area.height {
-            for x in 0..buf.area.width {
-                s.push_str(buf[(x, y)].symbol());
-            }
-            s.push('\n');
-        }
-        s
+        draw_to_buffer(width, height, |frame| render(frame, picker, &theme))
     }
 
     #[test]

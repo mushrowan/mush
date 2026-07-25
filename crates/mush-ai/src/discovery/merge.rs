@@ -193,30 +193,24 @@ mod tests {
 
     use super::*;
     use crate::discovery::DiscoveryReport;
-    use crate::types::{Api, InputModality, ModelCost, Provider, TokenCount};
+    use crate::types::{Api, ModelCost, Provider, TokenCount};
 
     fn anthropic_model(id: &str, name: &str, cost_input: f64) -> Model {
-        Model {
-            id: id.into(),
-            name: name.into(),
-            api: Api::AnthropicMessages,
-            provider: Provider::Anthropic,
-            base_url: "https://api.anthropic.com".into(),
-            reasoning: false,
-            input: vec![InputModality::Text],
-            cost: ModelCost {
+        Model::builder()
+            .id(id.into())
+            .name(name.into())
+            .api(Api::AnthropicMessages)
+            .provider(Provider::Anthropic)
+            .base_url("https://api.anthropic.com".into())
+            .context_window(TokenCount::new(200_000))
+            .max_output_tokens(TokenCount::new(64_000))
+            .cost(ModelCost {
                 input: cost_input,
                 output: cost_input * 5.0,
                 cache_read: 0.0,
                 cache_write: 0.0,
-            },
-            context_window: TokenCount::new(200_000),
-            effective_context_window: None,
-            max_output_tokens: TokenCount::new(64_000),
-            supports_adaptive_thinking: false,
-            supported_thinking_levels: Vec::new(),
-            default_thinking_level: None,
-        }
+            })
+            .build()
     }
 
     #[test]

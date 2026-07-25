@@ -69,6 +69,7 @@ pub fn render(frame: &mut Frame, menu: &SlashMenuState, input_area: Rect, theme:
 #[cfg(test)]
 mod tests {
     use crate::slash_menu::{SlashCommand, SlashMenuState};
+    use crate::test_support::buffer_to_string;
     use crate::theme::Theme;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -85,17 +86,6 @@ mod tests {
             })
             .unwrap();
         terminal.backend().buffer().clone()
-    }
-
-    fn buffer_to_string(buf: &Buffer) -> String {
-        let mut s = String::new();
-        for y in 0..buf.area.height {
-            for x in 0..buf.area.width {
-                s.push_str(buf[(x, y)].symbol());
-            }
-            s.push('\n');
-        }
-        s
     }
 
     #[test]

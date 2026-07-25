@@ -3671,27 +3671,22 @@ mod tests {
     }
 
     fn test_model() -> Model {
-        Model {
-            id: "claude-sonnet-4-20250514".into(),
-            name: "Claude Sonnet 4".into(),
-            api: Api::AnthropicMessages,
-            provider: Provider::Anthropic,
-            base_url: DEFAULT_BASE_URL.into(),
-            reasoning: false,
-            input: vec![InputModality::Text, InputModality::Image],
-            cost: ModelCost {
+        Model::builder()
+            .id("claude-sonnet-4-20250514".into())
+            .name("Claude Sonnet 4".into())
+            .api(Api::AnthropicMessages)
+            .provider(Provider::Anthropic)
+            .base_url(DEFAULT_BASE_URL.into())
+            .context_window(TokenCount::new(200_000))
+            .max_output_tokens(TokenCount::new(16384))
+            .input(vec![InputModality::Text, InputModality::Image])
+            .cost(ModelCost {
                 input: 3.0,
                 output: 15.0,
                 cache_read: 0.3,
                 cache_write: 3.75,
-            },
-            context_window: TokenCount::new(200_000),
-            effective_context_window: None,
-            max_output_tokens: TokenCount::new(16384),
-            supports_adaptive_thinking: false,
-            supported_thinking_levels: Vec::new(),
-            default_thinking_level: None,
-        }
+            })
+            .build()
     }
 
     /// build a conversation with enough turns for the sliding window boundary

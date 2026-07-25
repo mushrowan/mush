@@ -34,6 +34,8 @@ pub mod slash_menu;
 pub mod streaming;
 pub mod syntax;
 pub mod terminal_policy;
+#[cfg(test)]
+mod test_support;
 pub mod text;
 pub mod theme;
 pub mod ui;

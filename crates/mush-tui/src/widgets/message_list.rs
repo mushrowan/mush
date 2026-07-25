@@ -2694,6 +2694,7 @@ fn apply_message_highlight(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::buffer_to_string;
     use mush_ai::types::{Dollars, Usage};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -4371,19 +4372,6 @@ mod tests {
             }
         }
         out
-    }
-
-    /// helper: convert buffer to string for assertions
-    fn buffer_to_string(buf: &Buffer) -> String {
-        let mut s = String::new();
-        for y in 0..buf.area.height {
-            for x in 0..buf.area.width {
-                let cell = &buf[(x, y)];
-                s.push_str(cell.symbol());
-            }
-            s.push('\n');
-        }
-        s
     }
 
     #[test]

@@ -690,32 +690,25 @@ fn cache_bust_dir() -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mush_ai::types::{
-        Api, BaseUrl, InputModality, ModelCost, ModelId, Provider, StreamOptions, TokenCount,
-    };
+    use mush_ai::types::{Api, BaseUrl, ModelCost, ModelId, Provider, StreamOptions, TokenCount};
 
     fn openrouter_model_with_caching() -> Model {
-        Model {
-            id: ModelId::from("anthropic/claude-sonnet-4.5"),
-            name: "test".into(),
-            api: Api::AnthropicMessages,
-            provider: Provider::OpenRouter,
-            base_url: BaseUrl::from("https://openrouter.ai/api/v1"),
-            reasoning: false,
-            input: vec![InputModality::Text],
-            cost: ModelCost {
+        Model::builder()
+            .id(ModelId::from("anthropic/claude-sonnet-4.5"))
+            .name("test".into())
+            .api(Api::AnthropicMessages)
+            .provider(Provider::OpenRouter)
+            .base_url(BaseUrl::from("https://openrouter.ai/api/v1"))
+            .context_window(TokenCount::new(200_000))
+            .max_output_tokens(TokenCount::new(8_192))
+            .supported_thinking_levels(vec![])
+            .cost(ModelCost {
                 input: 3.0,
                 output: 15.0,
                 cache_read: 0.3,
                 cache_write: 3.75,
-            },
-            context_window: TokenCount::new(200_000),
-            effective_context_window: None,
-            max_output_tokens: TokenCount::new(8_192),
-            supports_adaptive_thinking: false,
-            supported_thinking_levels: vec![],
-            default_thinking_level: None,
-        }
+            })
+            .build()
     }
 
     #[test]

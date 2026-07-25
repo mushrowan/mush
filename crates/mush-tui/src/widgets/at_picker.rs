@@ -72,6 +72,7 @@ pub fn render(frame: &mut Frame, picker: &AtPickerState, input_area: Rect, theme
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::buffer_to_string;
     use mush_ext::{PromptTemplate, TemplateSource};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -98,17 +99,6 @@ mod tests {
             })
             .unwrap();
         terminal.backend().buffer().clone()
-    }
-
-    fn buffer_to_string(buf: &Buffer) -> String {
-        let mut s = String::new();
-        for y in 0..buf.area.height {
-            for x in 0..buf.area.width {
-                s.push_str(buf[(x, y)].symbol());
-            }
-            s.push('\n');
-        }
-        s
     }
 
     fn first_symbol_x(buf: &Buffer, symbol: &str) -> Option<u16> {

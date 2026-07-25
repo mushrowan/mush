@@ -1175,27 +1175,22 @@ mod tests {
     }
 
     fn test_model() -> Model {
-        Model {
-            id: "anthropic/claude-sonnet-4".into(),
-            name: "Claude Sonnet 4 (OpenRouter)".into(),
-            api: Api::OpenaiCompletions,
-            provider: Provider::OpenRouter,
-            base_url: "https://openrouter.ai/api/v1".into(),
-            reasoning: false,
-            input: vec![InputModality::Text, InputModality::Image],
-            cost: ModelCost {
+        Model::builder()
+            .id("anthropic/claude-sonnet-4".into())
+            .name("Claude Sonnet 4 (OpenRouter)".into())
+            .api(Api::OpenaiCompletions)
+            .provider(Provider::OpenRouter)
+            .base_url("https://openrouter.ai/api/v1".into())
+            .context_window(TokenCount::new(200_000))
+            .max_output_tokens(TokenCount::new(16384))
+            .input(vec![InputModality::Text, InputModality::Image])
+            .cost(ModelCost {
                 input: 3.0,
                 output: 15.0,
                 cache_read: 0.3,
                 cache_write: 3.75,
-            },
-            context_window: TokenCount::new(200_000),
-            effective_context_window: None,
-            max_output_tokens: TokenCount::new(16384),
-            supports_adaptive_thinking: false,
-            supported_thinking_levels: Vec::new(),
-            default_thinking_level: None,
-        }
+            })
+            .build()
     }
 
     fn test_output() -> AssistantMessage {

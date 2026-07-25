@@ -1536,27 +1536,15 @@ mod tests {
         // with an empty registry, the LLM call will fail and it should
         // fall back to structured compaction
         let registry = ApiRegistry::new();
-        let model = Model {
-            id: "test".into(),
-            name: "test".into(),
-            api: Api::AnthropicMessages,
-            provider: Provider::Anthropic,
-            base_url: "https://api.anthropic.com".into(),
-            reasoning: false,
-            input: vec![InputModality::Text],
-            cost: ModelCost {
-                input: 0.0,
-                output: 0.0,
-                cache_read: 0.0,
-                cache_write: 0.0,
-            },
-            context_window: TokenCount::new(200_000),
-            effective_context_window: None,
-            max_output_tokens: TokenCount::new(8192),
-            supports_adaptive_thinking: false,
-            supported_thinking_levels: Vec::new(),
-            default_thinking_level: None,
-        };
+        let model = Model::builder()
+            .id("test".into())
+            .name("test".into())
+            .api(Api::AnthropicMessages)
+            .provider(Provider::Anthropic)
+            .base_url("https://api.anthropic.com".into())
+            .context_window(TokenCount::new(200_000))
+            .max_output_tokens(TokenCount::new(8192))
+            .build();
         let options = StreamOptions::default();
 
         let msgs: Vec<Message> = (0..20)
@@ -1810,27 +1798,16 @@ mod tests {
 
     #[test]
     fn compaction_options_request_low_reasoning_for_reasoning_models() {
-        let model = Model {
-            id: "openai/gpt-5.4-nano".into(),
-            name: "GPT 5.4 Nano".into(),
-            api: Api::OpenaiCompletions,
-            provider: Provider::OpenRouter,
-            base_url: "https://openrouter.ai/api/v1".into(),
-            reasoning: true,
-            input: vec![InputModality::Text],
-            cost: ModelCost {
-                input: 0.0,
-                output: 0.0,
-                cache_read: 0.0,
-                cache_write: 0.0,
-            },
-            context_window: TokenCount::new(400_000),
-            effective_context_window: None,
-            max_output_tokens: TokenCount::new(128_000),
-            supports_adaptive_thinking: false,
-            supported_thinking_levels: Vec::new(),
-            default_thinking_level: None,
-        };
+        let model = Model::builder()
+            .id("openai/gpt-5.4-nano".into())
+            .name("GPT 5.4 Nano".into())
+            .api(Api::OpenaiCompletions)
+            .provider(Provider::OpenRouter)
+            .base_url("https://openrouter.ai/api/v1".into())
+            .context_window(TokenCount::new(400_000))
+            .max_output_tokens(TokenCount::new(128_000))
+            .reasoning(true)
+            .build();
         let options = StreamOptions {
             thinking: None,
             ..StreamOptions::default()

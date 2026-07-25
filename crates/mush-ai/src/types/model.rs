@@ -32,7 +32,7 @@ impl std::fmt::Display for Provider {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ModelCost {
     /// cost per million input tokens
     pub input: f64,
@@ -51,15 +51,18 @@ pub enum InputModality {
     Image,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, bon::Builder)]
 pub struct Model {
     pub id: ModelId,
     pub name: String,
     pub api: Api,
     pub provider: Provider,
     pub base_url: BaseUrl,
+    #[builder(default)]
     pub reasoning: bool,
+    #[builder(default = vec![InputModality::Text])]
     pub input: Vec<InputModality>,
+    #[builder(default)]
     pub cost: ModelCost,
     pub context_window: TokenCount,
     /// the input-token budget to compact against, when it differs from
@@ -77,6 +80,7 @@ pub struct Model {
     /// when [`reasoning`] is true. older anthropic models and
     /// non-anthropic models leave this `false`
     #[serde(default)]
+    #[builder(default)]
     pub supports_adaptive_thinking: bool,
     /// the ordered set of thinking levels this model accepts (cheap →
     /// expensive). drives the `ctrl+t` cycler so users can only land
@@ -86,6 +90,7 @@ pub struct Model {
     /// (Off → Low → Medium → High → Xhigh) since we haven't curated
     /// a list for this model yet
     #[serde(default)]
+    #[builder(default)]
     pub supported_thinking_levels: Vec<ThinkingLevel>,
     /// the model's recommended starting level. applied on the first
     /// switch to this model when the user has no per-cwd override.

@@ -938,27 +938,15 @@ mod tests {
     }
 
     fn test_model() -> Model {
-        Model {
-            id: "test".into(),
-            name: "test".into(),
-            api: Api::AnthropicMessages,
-            provider: Provider::Anthropic,
-            base_url: "https://api.anthropic.com".into(),
-            reasoning: false,
-            input: vec![InputModality::Text],
-            cost: ModelCost {
-                input: 0.0,
-                output: 0.0,
-                cache_read: 0.0,
-                cache_write: 0.0,
-            },
-            context_window: TokenCount::new(200_000),
-            effective_context_window: None,
-            max_output_tokens: TokenCount::new(8192),
-            supports_adaptive_thinking: false,
-            supported_thinking_levels: Vec::new(),
-            default_thinking_level: None,
-        }
+        Model::builder()
+            .id("test".into())
+            .name("test".into())
+            .api(Api::AnthropicMessages)
+            .provider(Provider::Anthropic)
+            .base_url("https://api.anthropic.com".into())
+            .context_window(TokenCount::new(200_000))
+            .max_output_tokens(TokenCount::new(8192))
+            .build()
     }
 
     #[test]

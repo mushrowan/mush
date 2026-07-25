@@ -1205,27 +1205,15 @@ mod tests {
     }
 
     fn test_model(id: &str) -> Model {
-        Model {
-            id: id.into(),
-            name: id.into(),
-            api: Api::AnthropicMessages,
-            provider: Provider::Anthropic,
-            base_url: "https://api.anthropic.com".into(),
-            reasoning: false,
-            input: vec![InputModality::Text],
-            cost: ModelCost {
-                input: 0.0,
-                output: 0.0,
-                cache_read: 0.0,
-                cache_write: 0.0,
-            },
-            context_window: TokenCount::new(200_000),
-            effective_context_window: None,
-            max_output_tokens: TokenCount::new(8192),
-            supports_adaptive_thinking: false,
-            supported_thinking_levels: Vec::new(),
-            default_thinking_level: None,
-        }
+        Model::builder()
+            .id(id.into())
+            .name(id.into())
+            .api(Api::AnthropicMessages)
+            .provider(Provider::Anthropic)
+            .base_url("https://api.anthropic.com".into())
+            .context_window(TokenCount::new(200_000))
+            .max_output_tokens(TokenCount::new(8192))
+            .build()
     }
 
     fn test_tui_config(resolve: Option<crate::runner::ModelResolver>) -> TuiConfig {

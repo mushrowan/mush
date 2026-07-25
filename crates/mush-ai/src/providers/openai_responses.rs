@@ -1177,27 +1177,17 @@ mod tests {
 
     #[test]
     fn resolve_standard_url() {
-        let model = Model {
-            id: "gpt-5.2".into(),
-            name: "GPT-5.2".into(),
-            api: Api::OpenaiResponses,
-            provider: Provider::Custom("openai".into()),
-            base_url: "https://api.openai.com/v1".into(),
-            reasoning: true,
-            input: vec![InputModality::Text, InputModality::Image],
-            cost: ModelCost {
-                input: 0.0,
-                output: 0.0,
-                cache_read: 0.0,
-                cache_write: 0.0,
-            },
-            context_window: TokenCount::new(200_000),
-            effective_context_window: None,
-            max_output_tokens: TokenCount::new(32768),
-            supports_adaptive_thinking: false,
-            supported_thinking_levels: Vec::new(),
-            default_thinking_level: None,
-        };
+        let model = Model::builder()
+            .id("gpt-5.2".into())
+            .name("GPT-5.2".into())
+            .api(Api::OpenaiResponses)
+            .provider(Provider::Custom("openai".into()))
+            .base_url("https://api.openai.com/v1".into())
+            .context_window(TokenCount::new(200_000))
+            .max_output_tokens(TokenCount::new(32768))
+            .reasoning(true)
+            .input(vec![InputModality::Text, InputModality::Image])
+            .build();
 
         assert_eq!(
             resolve_url(&model, false),
@@ -1207,27 +1197,16 @@ mod tests {
 
     #[test]
     fn resolve_codex_url() {
-        let model = Model {
-            id: "gpt-5.2-codex".into(),
-            name: "GPT-5.2 Codex".into(),
-            api: Api::OpenaiResponses,
-            provider: Provider::Custom("openai-codex".into()),
-            base_url: "https://chatgpt.com/backend-api".into(),
-            reasoning: true,
-            input: vec![InputModality::Text],
-            cost: ModelCost {
-                input: 0.0,
-                output: 0.0,
-                cache_read: 0.0,
-                cache_write: 0.0,
-            },
-            context_window: TokenCount::new(200_000),
-            effective_context_window: None,
-            max_output_tokens: TokenCount::new(32768),
-            supports_adaptive_thinking: false,
-            supported_thinking_levels: Vec::new(),
-            default_thinking_level: None,
-        };
+        let model = Model::builder()
+            .id("gpt-5.2-codex".into())
+            .name("GPT-5.2 Codex".into())
+            .api(Api::OpenaiResponses)
+            .provider(Provider::Custom("openai-codex".into()))
+            .base_url("https://chatgpt.com/backend-api".into())
+            .context_window(TokenCount::new(200_000))
+            .max_output_tokens(TokenCount::new(32768))
+            .reasoning(true)
+            .build();
 
         assert_eq!(
             resolve_url(&model, true),
@@ -1285,27 +1264,16 @@ mod tests {
 
     #[test]
     fn build_body_respects_cache_retention() {
-        let model = Model {
-            id: "gpt-5.2".into(),
-            name: "GPT-5.2".into(),
-            api: Api::OpenaiResponses,
-            provider: Provider::Custom("openai".into()),
-            base_url: "https://api.openai.com/v1".into(),
-            reasoning: true,
-            input: vec![InputModality::Text],
-            cost: ModelCost {
-                input: 0.0,
-                output: 0.0,
-                cache_read: 0.0,
-                cache_write: 0.0,
-            },
-            context_window: TokenCount::new(200_000),
-            effective_context_window: None,
-            max_output_tokens: TokenCount::new(32768),
-            supports_adaptive_thinking: false,
-            supported_thinking_levels: Vec::new(),
-            default_thinking_level: None,
-        };
+        let model = Model::builder()
+            .id("gpt-5.2".into())
+            .name("GPT-5.2".into())
+            .api(Api::OpenaiResponses)
+            .provider(Provider::Custom("openai".into()))
+            .base_url("https://api.openai.com/v1".into())
+            .context_window(TokenCount::new(200_000))
+            .max_output_tokens(TokenCount::new(32768))
+            .reasoning(true)
+            .build();
 
         let options = StreamOptions {
             cache_retention: Some(CacheRetention::Long),
@@ -1548,27 +1516,16 @@ mod tests {
 
     #[test]
     fn non_codex_omits_instructions_field() {
-        let model = Model {
-            id: "gpt-5.2".into(),
-            name: "GPT-5.2".into(),
-            api: Api::OpenaiResponses,
-            provider: Provider::Custom("openai".into()),
-            base_url: "https://api.openai.com/v1".into(),
-            reasoning: true,
-            input: vec![InputModality::Text],
-            cost: ModelCost {
-                input: 0.0,
-                output: 0.0,
-                cache_read: 0.0,
-                cache_write: 0.0,
-            },
-            context_window: TokenCount::new(200_000),
-            effective_context_window: None,
-            max_output_tokens: TokenCount::new(32768),
-            supports_adaptive_thinking: false,
-            supported_thinking_levels: Vec::new(),
-            default_thinking_level: None,
-        };
+        let model = Model::builder()
+            .id("gpt-5.2".into())
+            .name("GPT-5.2".into())
+            .api(Api::OpenaiResponses)
+            .provider(Provider::Custom("openai".into()))
+            .base_url("https://api.openai.com/v1".into())
+            .context_window(TokenCount::new(200_000))
+            .max_output_tokens(TokenCount::new(32768))
+            .reasoning(true)
+            .build();
         let prompt = Some("you are a coding assistant".into());
         let options = StreamOptions::default();
 
@@ -1581,27 +1538,16 @@ mod tests {
 
     #[test]
     fn gpt_5_4_preserves_xhigh_reasoning_effort() {
-        let model = Model {
-            id: "gpt-5.4".into(),
-            name: "GPT-5.4".into(),
-            api: Api::OpenaiResponses,
-            provider: Provider::Custom("openai-codex".into()),
-            base_url: "https://chatgpt.com/backend-api".into(),
-            reasoning: true,
-            input: vec![InputModality::Text],
-            cost: ModelCost {
-                input: 0.0,
-                output: 0.0,
-                cache_read: 0.0,
-                cache_write: 0.0,
-            },
-            context_window: TokenCount::new(1_050_000),
-            effective_context_window: None,
-            max_output_tokens: TokenCount::new(128_000),
-            supports_adaptive_thinking: false,
-            supported_thinking_levels: Vec::new(),
-            default_thinking_level: None,
-        };
+        let model = Model::builder()
+            .id("gpt-5.4".into())
+            .name("GPT-5.4".into())
+            .api(Api::OpenaiResponses)
+            .provider(Provider::Custom("openai-codex".into()))
+            .base_url("https://chatgpt.com/backend-api".into())
+            .context_window(TokenCount::new(1_050_000))
+            .max_output_tokens(TokenCount::new(128_000))
+            .reasoning(true)
+            .build();
         let options = StreamOptions {
             thinking: Some(ThinkingLevel::Xhigh),
             ..Default::default()

@@ -187,8 +187,9 @@ fn render_model_list(frame: &mut Frame, picker: &ModelPickerState, list_area: Re
 mod tests {
     use super::*;
     use crate::slash_menu::ModelCompletion;
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
+    use crate::test_support::buffer_to_string;
+    use crate::test_support::draw_to_buffer;
+
     use ratatui::buffer::Buffer;
 
     fn model(id: &str, name: &str, provider: &str) -> ModelCompletion {
@@ -206,25 +207,7 @@ mod tests {
 
     fn render_to_buffer(picker: &ModelPickerState, width: u16, height: u16) -> Buffer {
         let theme = Theme::default();
-        let backend = TestBackend::new(width, height);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| {
-                render(frame, picker, &theme);
-            })
-            .unwrap();
-        terminal.backend().buffer().clone()
-    }
-
-    fn buffer_to_string(buf: &Buffer) -> String {
-        let mut s = String::new();
-        for y in 0..buf.area.height {
-            for x in 0..buf.area.width {
-                s.push_str(buf[(x, y)].symbol());
-            }
-            s.push('\n');
-        }
-        s
+        draw_to_buffer(width, height, |frame| render(frame, picker, &theme))
     }
 
     #[test]
