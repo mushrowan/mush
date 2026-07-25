@@ -104,22 +104,12 @@ pub(super) async fn handle_slash_action(
             let pane = pane_mgr.focused_mut();
             let logged_in = complete_login(&mut pane.app, code).await;
             if logged_in {
-                let client = tui_config
-                    .http_client
-                    .clone()
-                    .unwrap_or_else(mush_ai::http::client);
-                pane_mgr.focused_mut().app.status = Some("refreshing models…".into());
-                let summary = mush_ai::discovery::refresh_and_save(client).await;
-                let line = summary.one_line();
-                for pane in pane_mgr.panes_mut() {
-                    crate::input::reload_model_completions(&mut pane.app);
-                }
-                pane_mgr
-                    .focused_mut()
-                    .app
-                    .push_system_message(format!("model discovery: {line}"));
-                pane_mgr.focused_mut().app.status = None;
+                refresh_models_after_login(pane_mgr, tui_config).await;
             }
+        }
+        SlashAction::Login { provider } => {
+            let pane = pane_mgr.focused_mut();
+            slash::handle_login_start(&mut pane.app, tui_config, provider.as_deref()).await;
         }
         SlashAction::Credits => {
             handle_credits(pane_mgr.focused_mut(), tui_config).await;
@@ -486,23 +476,7 @@ pub(super) async fn complete_login(app: &mut crate::app::App, code: String) -> b
 
     match provider.exchange_code(trimmed, &pending.pkce).await {
         Ok(creds) => {
-            let mut store = oauth::load_credentials().unwrap_or_default();
-            store.providers.insert(pending.provider_id.clone(), creds);
-            match oauth::save_credentials(&store) {
-                Ok(()) => {
-                    app.push_system_message(format!(
-                        "✓ logged in to {} (credentials saved)",
-                        pending.provider_name
-                    ));
-                    true
-                }
-                Err(e) => {
-                    app.push_system_message(format!(
-                        "logged in but saving credentials failed: {e}"
-                    ));
-                    false
-                }
-            }
+            save_login_credentials(app, &pending.provider_id, &pending.provider_name, creds)
         }
         Err(e) => {
             app.push_system_message(format!("oauth login failed: {e}"));
@@ -511,6 +485,100 @@ pub(super) async fn complete_login(app: &mut crate::app::App, code: String) -> b
             false
         }
     }
+}
+
+/// persist freshly exchanged oauth credentials and report the outcome in
+/// the pane. returns whether the save succeeded, which is also the
+/// signal to refresh the model catalogue
+fn save_login_credentials(
+    app: &mut crate::app::App,
+    provider_id: &str,
+    provider_name: &str,
+    creds: mush_ai::oauth::OAuthCredentials,
+) -> bool {
+    use mush_ai::oauth;
+
+    let mut store = oauth::load_credentials().unwrap_or_default();
+    store.providers.insert(provider_id.to_string(), creds);
+    match oauth::save_credentials(&store) {
+        Ok(()) => {
+            app.push_system_message(format!(
+                "✓ logged in to {provider_name} (credentials saved)"
+            ));
+            true
+        }
+        Err(e) => {
+            app.push_system_message(format!("logged in but saving credentials failed: {e}"));
+            false
+        }
+    }
+}
+
+/// pull the model catalogue again after a successful login so any models
+/// the fresh subscription unlocks show up in the picker straight away
+pub(super) async fn refresh_models_after_login(pane_mgr: &mut PaneManager, tui_config: &TuiConfig) {
+    let client = tui_config
+        .http_client
+        .clone()
+        .unwrap_or_else(mush_ai::http::client);
+    pane_mgr.focused_mut().app.status = Some("refreshing models…".into());
+    let summary = mush_ai::discovery::refresh_and_save(client).await;
+    let line = summary.one_line();
+    for pane in pane_mgr.panes_mut() {
+        crate::input::reload_model_completions(&mut pane.app);
+    }
+    pane_mgr
+        .focused_mut()
+        .app
+        .push_system_message(format!("model discovery: {line}"));
+    pane_mgr.focused_mut().app.status = None;
+}
+
+/// what a single drain pass settled
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct DrainedLogins {
+    /// credentials landed, so the model catalogue is worth refreshing
+    pub saved: bool,
+    /// a flow finished either way, so the pane needs a redraw
+    pub settled: bool,
+}
+
+/// take the outcome of any finished browser login, save its credentials
+/// and report it in the pane that started the flow
+pub(super) fn drain_finished_browser_logins(pane_mgr: &mut PaneManager) -> DrainedLogins {
+    let mut drained = DrainedLogins::default();
+    for pane in pane_mgr.panes_mut() {
+        let Some(mut pending) = pane.app.pending_browser_login.take() else {
+            continue;
+        };
+        let Some(outcome) = pending.poll() else {
+            // still waiting on the browser, put it back untouched
+            pane.app.pending_browser_login = Some(pending);
+            continue;
+        };
+        drained.settled = true;
+        match outcome {
+            Ok(creds) => {
+                drained.saved |= save_login_credentials(
+                    &mut pane.app,
+                    &pending.provider_id,
+                    &pending.provider_name,
+                    creds,
+                );
+            }
+            Err(reason) => {
+                pane.app.push_system_message(format!(
+                    "{} login failed: {reason}\nrun /login to try again",
+                    pending.provider_name
+                ));
+            }
+        }
+        pane.app.status = None;
+        if let Some(picker) = pane.app.interaction.login_picker.as_mut() {
+            picker.rebuild_sources();
+        }
+    }
+    drained
 }
 
 /// resolve openrouter credentials and fetch the account's credit
@@ -613,8 +681,106 @@ async fn handle_endpoints(
 mod tests {
     use super::*;
     use crate::app::{App, SlashCommand};
+    use crate::browser_login::PendingBrowserLogin;
     use crate::pane::{Pane, PaneId, PaneManager};
+    use mush_ai::oauth::OAuthCredentials;
     use mush_ai::types::{ModelId, TokenCount};
+
+    fn credentials() -> OAuthCredentials {
+        OAuthCredentials {
+            access_token: "access-token".into(),
+            refresh_token: "refresh-token".into(),
+            expires_at: u64::MAX,
+            account_id: Some("acct_1".into()),
+        }
+    }
+
+    fn pane_manager() -> PaneManager {
+        let app = App::new(ModelId::from("test"), TokenCount::new(1024));
+        PaneManager::new(Pane::new(PaneId::new(1), app))
+    }
+
+    /// drain once the spawned flow has an outcome to report
+    async fn drain_when_settled(pane_mgr: &mut PaneManager) -> DrainedLogins {
+        for _ in 0..100 {
+            let drained = drain_finished_browser_logins(pane_mgr);
+            if drained.settled {
+                return drained;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("login never settled");
+    }
+
+    #[tokio::test]
+    async fn a_finished_browser_login_saves_credentials_without_login_complete() {
+        // the whole point of the browser flow: the user authorises and
+        // mush picks the credentials up on its own
+        let dir = tempfile::tempdir().unwrap();
+        // SAFETY: nextest runs each test in its own process
+        unsafe { std::env::set_var("MUSH_CONFIG_DIR", dir.path()) };
+
+        let mut pane_mgr = pane_manager();
+        pane_mgr.focused_mut().app.pending_browser_login = Some(PendingBrowserLogin::spawn(
+            "anthropic",
+            "Anthropic (Claude Pro/Max)",
+            async { Ok(credentials()) },
+        ));
+        let drained = drain_when_settled(&mut pane_mgr).await;
+        assert!(drained.saved, "credentials should be saved");
+
+        let stored = mush_ai::oauth::load_credentials().expect("load credentials");
+        assert_eq!(
+            stored.providers["anthropic"].access_token, "access-token",
+            "credentials should land in the oauth store"
+        );
+        assert!(
+            pane_mgr.focused().app.pending_browser_login.is_none(),
+            "the finished flow should be cleared"
+        );
+        let messages = pane_mgr
+            .focused()
+            .app
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .clone();
+        assert!(
+            messages.contains("Anthropic"),
+            "the pane should say which provider logged in, got {messages:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_browser_login_reports_the_reason_and_offers_the_paste_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        // SAFETY: nextest runs each test in its own process
+        unsafe { std::env::set_var("MUSH_CONFIG_DIR", dir.path()) };
+
+        let mut pane_mgr = pane_manager();
+        pane_mgr.focused_mut().app.pending_browser_login = Some(PendingBrowserLogin::spawn(
+            "anthropic",
+            "Anthropic (Claude Pro/Max)",
+            async { Err(mush_ai::oauth::OAuthError::TokenExchange("nope".into())) },
+        ));
+        let drained = drain_when_settled(&mut pane_mgr).await;
+        assert!(!drained.saved, "a failure must not trigger a model refresh");
+        assert!(pane_mgr.focused().app.pending_browser_login.is_none());
+        let message = pane_mgr
+            .focused()
+            .app
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .clone();
+        assert!(message.contains("nope"), "got {message:?}");
+        assert!(
+            message.contains("/login"),
+            "should point at retrying, got {message:?}"
+        );
+    }
 
     fn template(name: &str, description: &str) -> mush_ext::PromptTemplate {
         mush_ext::PromptTemplate {

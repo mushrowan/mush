@@ -217,9 +217,13 @@ pub struct App {
     /// provider id that produced `oauth_usage`.
     /// prevents stale claude usage bars showing while a codex/openai pane is active
     pub oauth_usage_provider: Option<String>,
-    /// in-progress oauth flow started via /login.
+    /// in-progress paste-the-code oauth flow started via /login when no
+    /// loopback callback server could be bound.
     /// consumed when /login-complete fires with the authorization code
     pub pending_oauth: Option<PendingOAuth>,
+    /// browser oauth flow waiting on its loopback callback. the runner
+    /// drains this each frame, so no /login-complete is needed
+    pub pending_browser_login: Option<crate::browser_login::PendingBrowserLogin>,
     /// state for the /settings floating menu (only populated when
     /// interaction.mode == AppMode::Settings)
     pub settings_menu: Option<crate::settings::SettingsMenuState>,
@@ -289,6 +293,7 @@ impl App {
             oauth_usage: None,
             oauth_usage_provider: None,
             pending_oauth: None,
+            pending_browser_login: None,
             settings_menu: None,
             theme: crate::theme::Theme::default(),
             scroll_lines: DEFAULT_SCROLL_LINES,

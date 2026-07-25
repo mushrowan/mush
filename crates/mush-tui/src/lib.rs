@@ -3,6 +3,7 @@ pub mod app_event;
 pub mod app_state;
 pub mod at_template;
 pub mod batch_output;
+pub mod browser_login;
 pub mod cache;
 pub mod clipboard;
 pub mod config_watcher;

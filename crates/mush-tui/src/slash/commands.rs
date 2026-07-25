@@ -56,7 +56,9 @@ pub fn handle(
             );
             help.push_str("  /settings show - print current settings state\n");
             help.push_str("  /login [p]     - oauth + api-key login picker (or pass id to skip)\n");
-            help.push_str("  /login-complete <code> - finish the oauth flow with the code\n");
+            help.push_str(
+                "  /login-complete <code> - finish a paste-the-code oauth flow (fallback)\n",
+            );
             help.push_str("  /close         - close focused pane\n");
             help.push_str("  /broadcast msg - send a message to all panes\n");
             help.push_str("  /lock <path>   - lock a file for this pane\n");
@@ -301,8 +303,9 @@ pub fn handle(
             handle_compaction_model(app, tui_config, model_id.as_deref());
             None
         }
-        SlashAction::Login { provider } => {
-            handle_login_start(app, tui_config, provider.as_deref());
+        SlashAction::Login { provider: _ } => {
+            // async: the runner starts the browser handshake (or the
+            // paste fallback) once this returns
             None
         }
         SlashAction::LoginComplete { code: _ } => {
@@ -839,10 +842,14 @@ fn apply_beta_toggle(betas: &mut mush_ai::types::AnthropicBetas, field: &str, va
 /// kick off an oauth login flow in-TUI. when no provider id is given,
 /// opens the centred login picker overlay so the user can pick (or log
 /// out). with an explicit oauth provider id (`anthropic`, `openai-codex`)
-/// jumps straight into the oauth handshake. with a known login-row id
+/// starts the browser handshake. with a known login-row id
 /// (`openrouter`, etc) opens the picker so the user can complete the
 /// flow there
-fn handle_login_start(app: &mut App, tui_config: &TuiConfig, provider_id_opt: Option<&str>) {
+pub(crate) async fn handle_login_start(
+    app: &mut App,
+    tui_config: &TuiConfig,
+    provider_id_opt: Option<&str>,
+) {
     use mush_ai::oauth;
 
     let Some(provider_id) = provider_id_opt.map(str::to_string) else {
@@ -872,6 +879,51 @@ fn handle_login_start(app: &mut App, tui_config: &TuiConfig, provider_id_opt: Op
         return;
     };
 
+    match provider.begin_browser_login().await {
+        Ok(login) => start_browser_login(app, provider.as_ref(), login),
+        Err(e) => {
+            tracing::warn!(%provider_id, %e, "loopback oauth login unavailable");
+            start_paste_login(app, provider.as_ref(), &provider_id);
+        }
+    }
+}
+
+/// open the browser and leave the loopback callback waiting. the runner
+/// picks the credentials up as soon as the provider redirects back, so
+/// there is nothing for the user to paste
+fn start_browser_login(
+    app: &mut App,
+    provider: &dyn mush_ai::oauth::OAuthProvider,
+    login: mush_ai::oauth::BrowserLogin,
+) {
+    let opened = open::that_detached(&login.auth_url).is_ok();
+    let open_note = if opened {
+        "opened in your browser, finish signing in there"
+    } else {
+        "copy the URL above into your browser to sign in"
+    };
+    app.push_system_message(format!(
+        "oauth login: {name}\n\n{url}\n\n{open_note}",
+        name = provider.name(),
+        url = login.auth_url,
+    ));
+    app.status = Some(format!("waiting for {} sign-in…", provider.name()));
+    app.pending_oauth = None;
+    app.pending_browser_login = Some(crate::browser_login::PendingBrowserLogin::spawn(
+        provider.id(),
+        provider.name(),
+        login.await_credentials(),
+    ));
+}
+
+/// fallback for hosts where no browser can reach the loopback server
+/// (no port to bind, or the browser lives on another machine): show the
+/// url and wait for `/login-complete <code>`
+fn start_paste_login(
+    app: &mut App,
+    provider: &dyn mush_ai::oauth::OAuthProvider,
+    provider_id: &str,
+) {
     let (prompt, pkce) = match provider.begin_login() {
         Ok(v) => v,
         Err(e) => {
@@ -894,8 +946,9 @@ fn handle_login_start(app: &mut App, tui_config: &TuiConfig, provider_id_opt: Op
         instructions = prompt.instructions,
     ));
 
+    app.pending_browser_login = None;
     app.pending_oauth = Some(crate::app::PendingOAuth {
-        provider_id,
+        provider_id: provider_id.to_string(),
         provider_name: provider.name().to_string(),
         pkce,
     });

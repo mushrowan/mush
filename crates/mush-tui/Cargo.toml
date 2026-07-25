@@ -51,6 +51,8 @@ libc = "0.2"
 
 [dev-dependencies]
 criterion.workspace = true
+# start_paused test clocks for the oauth browser-login timeout
+tokio = { workspace = true, features = ["test-util"] }
 pretty_assertions.workspace = true
 tempfile.workspace = true
 

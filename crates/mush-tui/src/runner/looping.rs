@@ -7,6 +7,7 @@ use mush_ai::registry::ApiRegistry;
 use crate::event_handler;
 
 use super::TuiConfig;
+use super::commands::{drain_finished_browser_logins, refresh_models_after_login};
 use super::input::{
     InputDeps, LoopAction, handle_idle_terminal_events, handle_streaming_terminal_events,
 };
@@ -185,6 +186,10 @@ async fn handle_streaming_iteration(
                 tick_changed = true;
                 trace_draw_reason("session_picker");
             }
+            if drain_browser_logins(&mut runtime.pane_mgr, tui_config).await {
+                tick_changed = true;
+                trace_draw_reason("browser_login");
+            }
             drain_inboxes(&mut runtime.pane_mgr, stream_state).await;
             stream_state.save_dirty_session(&runtime.pane_mgr, tui_config);
 
@@ -323,6 +328,26 @@ fn tool_exec_may_touch_tty(tool_name: &str) -> bool {
     tool_name == "bash"
 }
 
+/// settle any oauth browser login whose callback has arrived, refreshing
+/// the model catalogue when one landed. returns whether anything changed
+async fn drain_browser_logins(
+    pane_mgr: &mut crate::pane::PaneManager,
+    tui_config: &TuiConfig,
+) -> bool {
+    let has_pending = pane_mgr
+        .panes()
+        .iter()
+        .any(|pane| pane.app.pending_browser_login.is_some());
+    if !has_pending {
+        return false;
+    }
+    let drained = drain_finished_browser_logins(pane_mgr);
+    if drained.saved {
+        refresh_models_after_login(pane_mgr, tui_config).await;
+    }
+    drained.settled
+}
+
 /// pull any freshly-loaded session metadata into each pane's picker
 /// state. the /sessions slash command kicks off a thread that parses
 /// session files off the event loop; the results land here on the next
@@ -350,6 +375,7 @@ async fn handle_idle_iteration(
     drain_inboxes(&mut runtime.pane_mgr, stream_state).await;
     stream_state.save_dirty_session(&runtime.pane_mgr, tui_config);
     let picker_changed = drain_session_picker(&mut runtime.pane_mgr);
+    let login_changed = drain_browser_logins(&mut runtime.pane_mgr, tui_config).await;
 
     let (pane_mgr, mut deps) = input_parts(
         runtime,
@@ -360,7 +386,7 @@ async fn handle_idle_iteration(
         size_cache,
     );
     let action = handle_idle_terminal_events(pane_mgr, &mut deps).await?;
-    if matches!(action, LoopAction::Continue) && picker_changed {
+    if matches!(action, LoopAction::Continue) && (picker_changed || login_changed) {
         Ok(LoopAction::Redraw)
     } else {
         Ok(action)
