@@ -6,9 +6,7 @@
 //!
 //! supports both structured (no LLM) and LLM-based summarisation.
 
-use futures::StreamExt;
 use mush_ai::registry::{ApiRegistry, LlmContext, is_retryable_stream_error_message};
-use mush_ai::stream::StreamEvent;
 use mush_ai::types::*;
 
 /// how many recent messages to keep uncompacted
@@ -1080,39 +1078,10 @@ struct CompactionError {
     retries: u32,
 }
 
-async fn collect_text(
-    mut stream: mush_ai::registry::EventStream,
-) -> Result<String, CompactionFailure> {
-    let mut text = String::new();
-    while let Some(event) = stream.next().await {
-        match event {
-            StreamEvent::TextDelta { delta, .. } => text.push_str(&delta),
-            StreamEvent::Done { reason, message } => {
-                if reason == StopReason::Error || message.stop_reason == StopReason::Error {
-                    return Err(CompactionFailure::Stream(
-                        message
-                            .error_message
-                            .unwrap_or_else(|| "stream ended with error".into()),
-                    ));
-                }
-                break;
-            }
-            StreamEvent::Error { message, .. } => {
-                return Err(CompactionFailure::Stream(
-                    message
-                        .error_message
-                        .unwrap_or_else(|| "stream emitted error".into()),
-                ));
-            }
-            _ => {}
-        }
-    }
-
-    if text.is_empty() {
-        Err(CompactionFailure::EmptyResponse)
-    } else {
-        Ok(text)
-    }
+async fn collect_text(stream: mush_ai::registry::EventStream) -> Result<String, CompactionFailure> {
+    mush_ai::oneshot::collect_stream_text(stream)
+        .await
+        .map_err(CompactionFailure::from)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -1123,6 +1092,17 @@ enum CompactionFailure {
     Stream(String),
     #[error("stream completed without text")]
     EmptyResponse,
+}
+
+impl From<mush_ai::oneshot::OneshotError> for CompactionFailure {
+    fn from(error: mush_ai::oneshot::OneshotError) -> Self {
+        use mush_ai::oneshot::OneshotError;
+        match error {
+            OneshotError::Request(message) => Self::Request(message),
+            OneshotError::Stream(message) => Self::Stream(message),
+            OneshotError::EmptyResponse => Self::EmptyResponse,
+        }
+    }
 }
 
 impl CompactionFailure {
@@ -1158,6 +1138,7 @@ impl CompactionFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mush_ai::stream::StreamEvent;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},

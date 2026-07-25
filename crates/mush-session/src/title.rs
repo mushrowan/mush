@@ -1,9 +1,8 @@
 //! LLM-based session title generation
 
-use futures::StreamExt;
 use mush_ai::Model;
+use mush_ai::oneshot;
 use mush_ai::registry::{ApiRegistry, LlmContext};
-use mush_ai::stream::StreamEvent;
 use mush_ai::types::*;
 
 const TITLE_PROMPT: &str = "\
@@ -30,22 +29,17 @@ pub async fn generate_title(
         tools: vec![],
     };
 
-    let mut stream = registry.stream(model, &context, options).await.ok()?;
-
-    let mut title = String::new();
-    while let Some(event) = stream.next().await {
-        if let StreamEvent::TextDelta { delta, .. } = event {
-            title.push_str(&delta);
+    let title = match oneshot::collect_text(registry, model, &context, options).await {
+        Ok(text) => text,
+        Err(error) => {
+            tracing::debug!(%error, "session title generation failed");
+            return None;
         }
-    }
-
-    let title = title.trim().to_string();
-    if title.is_empty() {
-        return None;
-    }
+    };
 
     // clean up: remove quotes, trailing punctuation
     let title = title
+        .trim()
         .trim_matches('"')
         .trim_matches('\'')
         .trim_end_matches('.')

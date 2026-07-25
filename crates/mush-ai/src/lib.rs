@@ -6,6 +6,7 @@ pub mod http;
 pub mod login;
 pub mod models;
 pub mod oauth;
+pub mod oneshot;
 pub mod openrouter_coverage;
 pub mod openrouter_credits;
 pub mod openrouter_endpoints;
