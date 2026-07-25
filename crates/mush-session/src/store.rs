@@ -18,6 +18,14 @@ pub enum StoreError {
 
     #[error("session not found: {0}")]
     NotFound(String),
+
+    #[error("'{prefix}' matches {} sessions, be more specific", matches.len())]
+    #[diagnostic(help("candidates: {}", matches.join(", ")))]
+    AmbiguousId {
+        prefix: String,
+        /// ids that share the prefix, for the caller to list
+        matches: Vec<String>,
+    },
 }
 
 /// file-based session store
@@ -75,6 +83,35 @@ impl SessionStore {
         let json = std::fs::read_to_string(path)?;
         let session: Session = serde_json::from_str(&json)?;
         Ok(session)
+    }
+
+    /// resolve a user-supplied id or id prefix to exactly one session.
+    ///
+    /// an exact id match always wins, so a session whose id is a prefix of
+    /// another is still reachable. otherwise the prefix has to identify a
+    /// single session, and ambiguity is reported with the candidates so
+    /// the caller can list them
+    pub fn resolve(&self, prefix: &str) -> Result<SessionMeta, StoreError> {
+        let sessions = self.list()?;
+        if let Some(exact) = sessions.iter().find(|s| s.id.as_str() == prefix) {
+            return Ok(exact.clone());
+        }
+        let mut matches = sessions
+            .into_iter()
+            .filter(|s| s.id.as_str().starts_with(prefix));
+        let Some(first) = matches.next() else {
+            return Err(StoreError::NotFound(prefix.to_string()));
+        };
+        let rest: Vec<SessionMeta> = matches.collect();
+        if rest.is_empty() {
+            return Ok(first);
+        }
+        let mut ids = vec![first.id.to_string()];
+        ids.extend(rest.iter().map(|s| s.id.to_string()));
+        Err(StoreError::AmbiguousId {
+            prefix: prefix.to_string(),
+            matches: ids,
+        })
     }
 
     /// list all session metadata (without loading full messages)
@@ -183,6 +220,47 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = SessionStore::new(dir.path().join("sessions"));
         (dir, store)
+    }
+
+    #[test]
+    fn resolve_accepts_an_unambiguous_id_prefix() {
+        // every entry point that takes a session id from a human accepts
+        // a prefix, so the store owns that lookup rather than each caller
+        let (_dir, store) = temp_store();
+        let mut session = Session::new("test-model", "/tmp");
+        session.meta.id = SessionId::from("abc123def456");
+        store.save(&session).unwrap();
+
+        let resolved = store.resolve("abc1").expect("prefix should resolve");
+        assert_eq!(resolved.id, session.meta.id);
+
+        let exact = store.resolve("abc123def456").expect("full id resolves");
+        assert_eq!(exact.id, session.meta.id);
+    }
+
+    #[test]
+    fn resolve_reports_no_match_and_ambiguity_separately() {
+        let (_dir, store) = temp_store();
+        for id in ["dup-one", "dup-two"] {
+            let mut session = Session::new("test-model", "/tmp");
+            session.meta.id = SessionId::from(id);
+            store.save(&session).unwrap();
+        }
+
+        let missing = store.resolve("nope").expect_err("should not match");
+        assert!(
+            matches!(missing, StoreError::NotFound(_)),
+            "got {missing:?}"
+        );
+
+        let ambiguous = store.resolve("dup-").expect_err("should be ambiguous");
+        match ambiguous {
+            StoreError::AmbiguousId { prefix, matches } => {
+                assert_eq!(prefix, "dup-");
+                assert_eq!(matches.len(), 2);
+            }
+            other => panic!("expected AmbiguousId, got {other:?}"),
+        }
     }
 
     #[test]

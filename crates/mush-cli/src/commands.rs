@@ -51,33 +51,15 @@ pub fn list_sessions() -> Result<()> {
 
 pub fn delete_session(id: &str) -> Result<()> {
     let store = SessionStore::new(SessionStore::default_dir());
-    let sessions = store
-        .list()
-        .map_err(|e| eyre!("failed to list sessions: {e}"))?;
-
-    let matches: Vec<_> = sessions.iter().filter(|s| s.id.starts_with(id)).collect();
-
-    match matches.len() {
-        0 => Err(eyre!("no session matching '{id}'")),
-        1 => {
-            let session = matches[0];
-            let title = session.title.as_deref().unwrap_or("(untitled)");
-            store
-                .delete(&session.id)
-                .map_err(|e| eyre!("failed to delete: {e}"))?;
-            eprintln!("\x1b[32m✓ deleted session: {title}\x1b[0m");
-            Ok(())
-        }
-        n => {
-            eprintln!("'{id}' matches {n} sessions:");
-            for s in matches {
-                let title = s.title.as_deref().unwrap_or("(untitled)");
-                let id = short_id(&s.id);
-                eprintln!("  {id} - {title}");
-            }
-            Err(eyre!("ambiguous prefix, be more specific"))
-        }
-    }
+    let session = store
+        .resolve(id)
+        .map_err(|e| eyre!("failed to resolve session: {e}"))?;
+    let title = session.title.as_deref().unwrap_or("(untitled)");
+    store
+        .delete(&session.id)
+        .map_err(|e| eyre!("failed to delete: {e}"))?;
+    eprintln!("\x1b[32m✓ deleted session: {title}\x1b[0m");
+    Ok(())
 }
 
 pub fn open_config() -> Result<()> {

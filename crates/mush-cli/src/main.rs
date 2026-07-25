@@ -178,6 +178,17 @@ async fn main() -> Result<()> {
     }
 }
 
+/// load the session a `--resume` argument points at. accepts a full id
+/// or any unambiguous prefix, the same way `mush sessions delete` does
+fn resume_session(store: &SessionStore, id_or_prefix: &str) -> Result<Session> {
+    let meta = store
+        .resolve(id_or_prefix)
+        .map_err(|e| eyre!("failed to resolve session: {e}"))?;
+    store
+        .load(&meta.id)
+        .map_err(|e| eyre!("failed to load session: {e}"))
+}
+
 async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
     let timer = if cli.profile_startup {
         Some(timing::PhaseTimer::new())
@@ -205,10 +216,7 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
     let cwd_str = setup.cwd.display().to_string();
     let store = SessionStore::new(SessionStore::default_dir());
     let mut session = if let Some(ref id) = cli.resume {
-        let sid = mush_session::SessionId::from(id.clone());
-        store
-            .load(&sid)
-            .map_err(|e| eyre!("failed to load session: {e}"))?
+        resume_session(&store, id)?
     } else {
         Session::new(setup.model.id.as_str(), &cwd_str)
     };
@@ -441,24 +449,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
     let cwd_str = setup.cwd.display().to_string();
     let session = if let Some(ref resume_id) = cli.resume {
         let store = SessionStore::new(SessionStore::default_dir());
-        let sessions = store
-            .list()
-            .map_err(|e| eyre!("failed to list sessions: {e}"))?;
-        let matches: Vec<_> = sessions
-            .iter()
-            .filter(|s| s.id.starts_with(resume_id.as_str()))
-            .collect();
-        match matches.len() {
-            0 => return Err(eyre!("no session matching '{resume_id}'")),
-            1 => store
-                .load(&matches[0].id)
-                .map_err(|e| eyre!("failed to load session: {e}"))?,
-            n => {
-                return Err(eyre!(
-                    "'{resume_id}' matches {n} sessions, be more specific"
-                ));
-            }
-        }
+        resume_session(&store, resume_id)?
     } else {
         Session::new(setup.model.id.as_str(), &cwd_str)
     };
