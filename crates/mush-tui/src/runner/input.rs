@@ -53,7 +53,7 @@ pub(super) struct InputDeps<'a> {
     /// handle to the Terminal backend's size cache so resize events
     /// can invalidate it (ratatui's autoresize will then pick up the
     /// new dimensions on the next frame)
-    pub size_cache: &'a std::rc::Rc<super::caching_backend::CachedSizeState>,
+    pub size_cache: &'a std::rc::Rc<super::size_cached_backend::CachedSizeState>,
 }
 
 fn confirmation_answer(code: KeyCode) -> Option<bool> {
@@ -377,7 +377,7 @@ fn budget_suffix(
 /// swallowed by stale `baseline_vis` values. used by every code path
 /// that observes a `crossterm::event::Event::Resize`
 pub(super) fn apply_resize(
-    size_cache: &std::rc::Rc<super::caching_backend::CachedSizeState>,
+    size_cache: &std::rc::Rc<super::size_cached_backend::CachedSizeState>,
     pane_mgr: &mut PaneManager,
 ) {
     size_cache.invalidate();
@@ -756,7 +756,7 @@ async fn paste_clipboard_image(app: &mut App) {
 mod tests {
     use super::*;
     use crate::pane::{Pane, PaneId, PaneManager};
-    use crate::runner::caching_backend::CachedSizeState;
+    use crate::runner::size_cached_backend::CachedSizeState;
     use crossterm::event::{KeyEvent, KeyEventState, KeyModifiers};
     use mush_ai::types::TokenCount;
     use std::rc::Rc;

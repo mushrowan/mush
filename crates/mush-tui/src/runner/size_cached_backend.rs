@@ -7,10 +7,10 @@
 //! profiling showed this accounted for ~3% of main-thread samples
 //! with the `File::open` alone at ~2.4%.
 //!
-//! [`CachingBackend`] forwards every call to its inner backend except
+//! [`SizeCachedBackend`] forwards every call to its inner backend except
 //! `size()` and `window_size()`, which are memoised. actual terminal
 //! resizes invalidate the cache via the handle returned by
-//! [`CachingBackend::cache_handle`]. there are two invalidation paths:
+//! [`SizeCachedBackend::cache_handle`]. there are two invalidation paths:
 //!
 //! 1. the `Event::Resize` arm of the main event loop calls
 //!    [`CachedSizeState::invalidate`] directly. this is enough when the
@@ -35,7 +35,7 @@ use ratatui::layout::{Position, Size};
 const SIZE_CACHE_TTL: Duration = Duration::from_millis(250);
 
 /// spawn a background task that flips `flag` to true on every
-/// `SIGWINCH`. wired into [`CachingBackend`] so a real os-level resize
+/// `SIGWINCH`. wired into [`SizeCachedBackend`] so a real os-level resize
 /// can never be hidden by a streaming burst starving the event loop's
 /// `Event::Resize` processing.
 ///
@@ -70,7 +70,7 @@ pub(super) fn spawn_sigwinch_listener(_flag: Arc<AtomicBool>) -> tokio::task::Jo
     tokio::spawn(async {})
 }
 
-/// shared cache slot for [`CachingBackend`].
+/// shared cache slot for [`SizeCachedBackend`].
 ///
 /// held by the backend itself and by any invalidation site (typically
 /// the event loop). interior mutability is enough because all access
@@ -141,12 +141,12 @@ impl CachedSizeState {
 
 /// wrapper around a ratatui [`Backend`] that memoises `size()` and
 /// `window_size()` until explicitly invalidated.
-pub struct CachingBackend<B> {
+pub struct SizeCachedBackend<B> {
     inner: B,
     state: Rc<CachedSizeState>,
 }
 
-impl<B> CachingBackend<B> {
+impl<B> SizeCachedBackend<B> {
     pub fn new(inner: B) -> Self {
         Self {
             inner,
@@ -160,7 +160,7 @@ impl<B> CachingBackend<B> {
     }
 }
 
-impl<B: Backend> Backend for CachingBackend<B> {
+impl<B: Backend> Backend for SizeCachedBackend<B> {
     type Error = B::Error;
 
     fn draw<'a, I>(&mut self, content: I) -> Result<(), Self::Error>
@@ -337,7 +337,7 @@ mod tests {
     #[test]
     fn size_cached_across_calls() {
         let inner = CountingBackend::new(80, 25);
-        let backend = CachingBackend::new(inner);
+        let backend = SizeCachedBackend::new(inner);
 
         let first = backend.size().unwrap();
         let second = backend.size().unwrap();
@@ -356,7 +356,7 @@ mod tests {
     #[test]
     fn stale_size_cache_forces_refresh_without_resize_event() {
         let inner = CountingBackend::new(80, 25);
-        let backend = CachingBackend::new(inner);
+        let backend = SizeCachedBackend::new(inner);
         let handle = backend.cache_handle();
 
         let _ = backend.size().unwrap();
@@ -375,7 +375,7 @@ mod tests {
     #[test]
     fn invalidate_forces_refresh() {
         let inner = CountingBackend::new(80, 25);
-        let backend = CachingBackend::new(inner);
+        let backend = SizeCachedBackend::new(inner);
         let handle = backend.cache_handle();
 
         let _ = backend.size().unwrap();
@@ -398,7 +398,7 @@ mod tests {
     #[test]
     fn window_size_caches_and_syncs_size() {
         let inner = CountingBackend::new(80, 25);
-        let mut backend = CachingBackend::new(inner);
+        let mut backend = SizeCachedBackend::new(inner);
 
         let _ = backend.window_size().unwrap();
         let _ = backend.window_size().unwrap();
@@ -417,7 +417,7 @@ mod tests {
     #[test]
     fn mark_resize_pending_forces_size_refresh() {
         let inner = CountingBackend::new(80, 25);
-        let backend = CachingBackend::new(inner);
+        let backend = SizeCachedBackend::new(inner);
         let flag = backend.cache_handle().resize_pending_flag();
 
         let _ = backend.size().unwrap();
@@ -440,7 +440,7 @@ mod tests {
     #[test]
     fn mark_resize_pending_forces_window_size_refresh() {
         let inner = CountingBackend::new(80, 25);
-        let mut backend = CachingBackend::new(inner);
+        let mut backend = SizeCachedBackend::new(inner);
         let flag = backend.cache_handle().resize_pending_flag();
 
         let _ = backend.window_size().unwrap();

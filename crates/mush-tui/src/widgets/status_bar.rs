@@ -433,7 +433,11 @@ fn cache_warning_display_for_app(app: &crate::app::App) -> Option<String> {
             None
         };
 
-    crate::cache::cache_warning_display(&provider, retention.as_ref(), app.cache.elapsed_secs())
+    crate::prompt_cache::cache_warning_display(
+        &provider,
+        retention.as_ref(),
+        app.cache.elapsed_secs(),
+    )
 }
 
 /// ensure `app.render_state.status_bar_cache` is populated for `width`.

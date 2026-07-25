@@ -5,7 +5,6 @@ use std::io;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
-mod caching_backend;
 mod commands;
 mod config;
 mod diag;
@@ -15,6 +14,7 @@ mod looping;
 mod panes;
 mod render;
 mod runtime;
+mod size_cached_backend;
 mod streams;
 mod terminal;
 mod thinking_prefs;
@@ -22,7 +22,6 @@ mod thinking_prefs;
 use mush_agent::tool::ToolRegistry;
 use mush_ai::registry::ApiRegistry;
 
-use self::caching_backend::{CachingBackend, spawn_sigwinch_listener};
 pub use self::config::{
     LiveToolOutput, ModelResolver, PaneSnapshot, ReloadCallback, ReloadedContext, SessionSaver,
     SessionSnapshot, TitleUpdater, TuiConfig,
@@ -33,6 +32,7 @@ use self::looping::run_loop_iteration;
 use self::render::draw_panes;
 pub use self::runtime::DiscoveryUpdate;
 use self::runtime::RunnerRuntime;
+use self::size_cached_backend::{SizeCachedBackend, spawn_sigwinch_listener};
 use self::streams::{
     AgentStreams, StreamConfig, StreamDeps, StreamState, new_agent_streams, start_pending_streams,
 };
@@ -88,7 +88,7 @@ pub async fn run_tui(
     ));
     install_panic_cleanup_hook();
 
-    let backend = CachingBackend::new(CrosstermBackend::new(io::stdout()));
+    let backend = SizeCachedBackend::new(CrosstermBackend::new(io::stdout()));
     let size_cache = backend.cache_handle();
     // listen for SIGWINCH off the main event loop so a fast-streaming
     // burst can't starve `Event::Resize` processing and leave the size

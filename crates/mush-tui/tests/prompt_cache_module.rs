@@ -1,5 +1,5 @@
 use mush_ai::types::{CacheRetention, Provider, TokenCount, Usage};
-use mush_tui::cache::{
+use mush_tui::prompt_cache::{
     BustReason, CACHE_COLD_DISPLAY_SECS, CACHE_WARN_SECS, CacheAnomaly, CacheBustDiagnostic,
     CacheTimer, CallConfig, ContextManagementMode, TokenStats, cache_ttl_secs,
     detect_cache_anomalies, dump_cache_bust_diagnostic_in,

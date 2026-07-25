@@ -10,11 +10,11 @@ use crate::pane::{LayoutMode, PaneManager};
 use crate::ui::Ui;
 use crate::widgets;
 
-use super::caching_backend::CachingBackend;
+use super::size_cached_backend::SizeCachedBackend;
 
 #[tracing::instrument(name = "draw_panes", skip_all)]
 pub(super) fn draw_panes(
-    terminal: &mut Terminal<CachingBackend<CrosstermBackend<io::Stdout>>>,
+    terminal: &mut Terminal<SizeCachedBackend<CrosstermBackend<io::Stdout>>>,
     pane_mgr: &mut PaneManager,
     image_picker: &Option<ratatui_image::picker::Picker>,
     settings: &crate::settings::ScopedSettings,
@@ -163,6 +163,8 @@ pub(super) fn draw_panes(
             frame.set_cursor_position((cx, cy));
         }
 
+        // centred overlays paint over the whole focused area, the two
+        // input-anchored ones need the same layout the pane just used
         if let Some(ref picker) = focused_app.interaction.session_picker {
             widgets::session_picker::render(frame, picker, &focused_app.theme);
         }
@@ -178,36 +180,35 @@ pub(super) fn draw_panes(
         if let Some(ref recovery) = focused_app.interaction.compaction_recovery {
             widgets::compaction_recovery::render(frame, recovery, &focused_app.theme);
         }
-        if let Some(ref menu) = focused_app.completion.slash_menu {
-            let input_h = crate::ui::input_height(&focused_app.input, focused_area.width);
-            let tools_h = crate::widgets::tool_panels::tool_panels_height(
-                &focused_app.active_tools,
-                focused_area.width,
-            );
-            let status_h = if is_multi {
-                0
-            } else {
-                crate::widgets::status_bar::status_bar_height(focused_app, focused_area.width)
-            };
-            let regions = crate::ui::layout(focused_area, input_h, tools_h, status_h);
-            widgets::slash_menu::render(frame, menu, regions.input, &focused_app.theme);
-        }
-        if let Some(ref picker) = focused_app.interaction.at_picker {
-            let input_h = crate::ui::input_height(&focused_app.input, focused_area.width);
-            let tools_h = crate::widgets::tool_panels::tool_panels_height(
-                &focused_app.active_tools,
-                focused_area.width,
-            );
-            let status_h = if is_multi {
-                0
-            } else {
-                crate::widgets::status_bar::status_bar_height(focused_app, focused_area.width)
-            };
-            let regions = crate::ui::layout(focused_area, input_h, tools_h, status_h);
-            widgets::at_picker::render(frame, picker, regions.input, &focused_app.theme);
+
+        let needs_input_anchor = focused_app.completion.slash_menu.is_some()
+            || focused_app.interaction.at_picker.is_some();
+        if needs_input_anchor {
+            let input_area = input_region(focused_app, focused_area, is_multi);
+            if let Some(ref menu) = focused_app.completion.slash_menu {
+                widgets::slash_menu::render(frame, menu, input_area, &focused_app.theme);
+            }
+            if let Some(ref picker) = focused_app.interaction.at_picker {
+                widgets::at_picker::render(frame, picker, input_area, &focused_app.theme);
+            }
         }
     })?;
     Ok(())
+}
+
+/// the input box's rect inside a pane, recomputed the same way the pane
+/// itself laid out. overlays anchored to the input (slash menu, at
+/// picker) need it, and getting it wrong floats them over the wrong row
+fn input_region(app: &App, pane_area: Rect, is_multi: bool) -> Rect {
+    let input_h = crate::ui::input_height(&app.input, pane_area.width);
+    let tools_h =
+        crate::widgets::tool_panels::tool_panels_height(&app.active_tools, pane_area.width);
+    let status_h = if is_multi {
+        0
+    } else {
+        crate::widgets::status_bar::status_bar_height(app, pane_area.width)
+    };
+    crate::ui::layout(pane_area, input_h, tools_h, status_h).input
 }
 
 pub(super) fn clear_for_first_frame<B: Backend>(

@@ -29,7 +29,7 @@ pub(super) async fn run_loop_iteration(
     tui_config: &mut TuiConfig,
     registry: &ApiRegistry,
     image_picker: &Option<ratatui_image::picker::Picker>,
-    size_cache: &std::rc::Rc<super::caching_backend::CachedSizeState>,
+    size_cache: &std::rc::Rc<super::size_cached_backend::CachedSizeState>,
     last_redraw: std::time::Instant,
 ) -> io::Result<LoopAction> {
     if agent_streams.is_empty() {
@@ -65,7 +65,7 @@ fn input_parts<'a>(
     tui_config: &'a mut TuiConfig,
     registry: &'a ApiRegistry,
     image_picker: &'a Option<ratatui_image::picker::Picker>,
-    size_cache: &'a std::rc::Rc<super::caching_backend::CachedSizeState>,
+    size_cache: &'a std::rc::Rc<super::size_cached_backend::CachedSizeState>,
 ) -> (&'a mut crate::pane::PaneManager, InputDeps<'a>) {
     let RunnerRuntime {
         pane_mgr,
@@ -106,7 +106,7 @@ async fn handle_streaming_iteration(
     tui_config: &mut TuiConfig,
     registry: &ApiRegistry,
     image_picker: &Option<ratatui_image::picker::Picker>,
-    size_cache: &std::rc::Rc<super::caching_backend::CachedSizeState>,
+    size_cache: &std::rc::Rc<super::size_cached_backend::CachedSizeState>,
     last_redraw: std::time::Instant,
 ) -> io::Result<LoopAction> {
     let tick = tokio::time::sleep(ANIMATION_FRAME_INTERVAL);
@@ -370,7 +370,7 @@ async fn handle_idle_iteration(
     tui_config: &mut TuiConfig,
     registry: &ApiRegistry,
     image_picker: &Option<ratatui_image::picker::Picker>,
-    size_cache: &std::rc::Rc<super::caching_backend::CachedSizeState>,
+    size_cache: &std::rc::Rc<super::size_cached_backend::CachedSizeState>,
 ) -> io::Result<LoopAction> {
     drain_inboxes(&mut runtime.pane_mgr, stream_state).await;
     stream_state.save_dirty_session(&runtime.pane_mgr, tui_config);

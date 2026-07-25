@@ -351,7 +351,9 @@ mod tests {
 }
 
 pub(super) fn cleanup(
-    terminal: &mut Terminal<super::caching_backend::CachingBackend<CrosstermBackend<io::Stdout>>>,
+    terminal: &mut Terminal<
+        super::size_cached_backend::SizeCachedBackend<CrosstermBackend<io::Stdout>>,
+    >,
 ) -> io::Result<()> {
     restore_terminal_state();
     terminal.show_cursor()?;

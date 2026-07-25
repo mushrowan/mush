@@ -15,17 +15,17 @@ pub use crate::app_state::{
 pub use crate::batch_output::{
     BatchSection, parse_batch_output, truncate_output, truncate_output_large,
 };
-pub use crate::cache::{
-    BustReason, CACHE_COLD_DISPLAY_SECS, CACHE_WARN_SECS, CacheAnomaly, CacheBustDiagnostic,
-    CacheTimer, CallConfig, ContextManagementMode, TokenStats, cache_ttl_secs,
-    cache_warning_display, detect_cache_anomalies, direct_route_serving_provider,
-    dump_cache_bust_diagnostic, resolve_cache_ttl_secs,
-};
 pub use crate::display_types::{
     ActiveToolState, Block, BlockKind, CodeBlock, DisplayMessage, DisplayToolCall, ImageRenderArea,
     MessageRole, MessageRowRange, ToolCallStatus,
 };
 pub use crate::input_buffer::{IMAGE_PLACEHOLDER, InputBuffer, PendingImage};
+pub use crate::prompt_cache::{
+    BustReason, CACHE_COLD_DISPLAY_SECS, CACHE_WARN_SECS, CacheAnomaly, CacheBustDiagnostic,
+    CacheTimer, CallConfig, ContextManagementMode, TokenStats, cache_ttl_secs,
+    cache_warning_display, detect_cache_anomalies, direct_route_serving_provider,
+    dump_cache_bust_diagnostic, resolve_cache_ttl_secs,
+};
 pub use crate::session_picker::{SessionPickerState, SessionScope, filtered_sessions};
 pub use crate::slash_menu::{ModelCompletion, SlashCommand, SlashMenuState};
 pub use crate::streaming::StreamingState;
