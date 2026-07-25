@@ -309,30 +309,35 @@ impl SelectedBlockInfo {
     }
 }
 
-impl Widget for MessageList<'_> {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        let mut lines: Vec<Line<'_>> = Vec::new();
-        let mut image_placeholders: Vec<ImagePlaceholder> = Vec::new();
-        let mut deferred_renders: Vec<DeferredCacheRender> = Vec::new();
-        let mut materialised_segments: Vec<MaterialisedLineSegment> = Vec::new();
-        let mut message_ranges: Vec<crate::app::MessageRowRange> = Vec::new();
+/// what the virtual-scroll pass decided before any line is materialised
+struct Viewport {
+    /// per-message height index for the whole document
+    layout_index: MessageLayoutIndex,
+    /// estimated height of the message list alone, excluding trailing content
+    estimated_total: usize,
+    /// scroll baseline captured (or held) for this frame
+    baseline: usize,
+    /// viewport height at the moment the baseline was captured
+    baseline_vis: u16,
+    /// document row range worth materialising: the viewport plus a
+    /// viewport of margin either side
+    render_start: usize,
+    render_end: usize,
+}
 
-        let in_scroll_mode = self.app.interaction.mode == crate::app::AppMode::Scroll;
-        let selection_range = self.app.selection_range();
-        let selected_block_info = SelectedBlockInfo::for_app(self.app);
-
-        // virtual scrolling: estimate per-message heights and determine
-        // which messages overlap the viewport so we can skip expensive
-        // markdown rendering and indent_line for off-screen messages
-        let layout_index = MessageLayoutIndex::build(self.app, area.width);
+impl Viewport {
+    /// estimate per-message heights and work out which document rows
+    /// overlap the viewport, so off-screen messages skip markdown
+    /// rendering and `indent_line` entirely
+    fn compute(app: &App, area: Rect) -> Self {
+        let layout_index = MessageLayoutIndex::build(app, area.width);
         let estimated_total = layout_index.total_height;
-        // estimate trailing content height (streaming + tool args +
-        // queued) so the viewport calc matches the real scroll target.
-        // without this, `should_render` uses a shorter doc than the
-        // actual rendered lines and messages in the visible region get
-        // marked as off-screen, leaving blank placeholder rows
-        let trailing_estimate =
-            estimate_trailing_height(self.app, area.width, &self.app.render_state);
+        // include trailing content (streaming, tool args, queued) in the
+        // estimate so the viewport calc matches the real scroll target.
+        // without it the visible range is computed against a shorter
+        // document and on-screen messages get marked off-screen, leaving
+        // blank placeholder rows
+        let trailing_estimate = estimate_trailing_height(app, area.width, &app.render_state);
         let total_estimate = estimated_total + trailing_estimate;
 
         // keep the viewport pinned to a stable content line while scrolled
@@ -340,313 +345,216 @@ impl Widget for MessageList<'_> {
         // shrinks below, effective_offset has to follow along by the same
         // amount for max_scroll - effective_offset to stay constant.
         //
-        // we snapshot the actual total line count the first frame the user
-        // scrolls up from the bottom, then compensation = (current total) -
-        // baseline. applied as effective_offset = scroll_offset + compensation,
-        // scroll_from_top = baseline - visible - scroll_offset: the current
-        // total cancels out, which is why the preview pass (using estimate)
-        // and final pass (using actual) still agree even when those two
-        // disagree. the previous delta-accumulator approach accumulated any
-        // estimate/actual divergence (code fences, headings, elided `**`
-        // markers) into effective_offset and the viewport drifted by that
-        // error each frame: the shake.
-        let (baseline, baseline_vis) = update_scroll_baseline(self.app, area.height);
+        // the baseline is the actual total line count snapshotted on the
+        // first frame the user scrolled up, so compensation = current total
+        // - baseline. with effective_offset = scroll_offset + compensation,
+        // scroll_from_top = baseline - visible - scroll_offset and the
+        // current total cancels out. that is why the preview pass (using
+        // the estimate) and the final pass (using actuals) agree even when
+        // the two totals disagree, and it is what stops estimate/actual
+        // divergence (code fences, headings, elided `**` markers) from
+        // accumulating into a per-frame drift
+        let (baseline, baseline_vis) = update_scroll_baseline(app, area.height);
         let preview_compensation =
             scroll_compensation(baseline, baseline_vis, total_estimate, area.height);
-        let effective_offset =
-            clamped_effective_offset(self.app.scroll_offset, preview_compensation);
+        let effective_offset = clamped_effective_offset(app.scroll_offset, preview_compensation);
 
         let vis_h = area.height as usize;
-        let max_scroll = total_estimate.saturating_sub(vis_h);
-        let scroll_from_top = max_scroll.saturating_sub(effective_offset);
-
-        // render messages within the viewport plus one viewport of margin
+        let scroll_from_top = total_estimate
+            .saturating_sub(vis_h)
+            .saturating_sub(effective_offset);
         let margin = vis_h;
-        let render_start = scroll_from_top.saturating_sub(margin);
-        let render_end = (scroll_from_top + vis_h + margin).min(estimated_total);
 
-        let mut visible_height_delta = 0isize;
-        for entry in
-            &layout_index.entries[layout_index.visible_entry_range(render_start, render_end)]
-        {
-            let Some(msg) = self.app.messages.get(entry.msg_idx) else {
-                continue;
-            };
-            if msg.queued {
-                continue; // rendered after streaming content
-            }
-            let msg_start = offset_usize(entry.start, visible_height_delta);
-            let estimated_height = entry.height;
-            let start_line = lines.len();
-
-            let image_start = image_placeholders.len();
-            let deferred_start = deferred_renders.len();
-            let in_selection = selection_range
-                .is_some_and(|(start, end)| entry.msg_idx >= start && entry.msg_idx <= end);
-            let sel = SelectionHint {
-                selected: in_scroll_mode
-                    && (self.app.navigation.selected_message == Some(entry.msg_idx)
-                        || in_selection),
-                is_cursor: in_scroll_mode
-                    && self.app.navigation.selected_message == Some(entry.msg_idx),
-                has_visual: self.app.has_selection(),
-            };
-            render_message(
-                self.app,
-                msg,
-                entry.msg_idx,
-                &mut lines,
-                sel,
-                &mut image_placeholders,
-                &mut deferred_renders,
-                area.width,
-                selected_block_info,
-            );
-            lines.push(Line::raw(""));
-
-            // correct the height_cache with the actual rendered height.
-            // the cache may hold a stale estimate from count_estimated_lines
-            // (which counts raw markdown chars). updating here ensures the
-            // cache converges after one render.
-            let actual_height = lines.len() - start_line;
-            absolutise_render_metadata(
-                msg_start,
-                start_line,
-                &mut image_placeholders[image_start..],
-                &mut deferred_renders[deferred_start..],
-            );
-            materialised_segments.push(MaterialisedLineSegment {
-                doc_start: msg_start,
-                line_start: start_line,
-                line_count: actual_height,
-            });
-            if actual_height != estimated_height {
-                update_cached_height(
-                    msg,
-                    entry.msg_idx,
-                    area.width,
-                    actual_height,
-                    &self.app.render_state,
-                );
-            }
-            visible_height_delta += actual_height as isize - estimated_height as isize;
-            message_ranges.push(crate::app::MessageRowRange {
-                msg_idx: entry.msg_idx,
-                start: clamp_usize_to_u16(msg_start),
-                end: clamp_usize_to_u16(msg_start + actual_height),
-            });
-        }
-
-        let trailing_doc_start = offset_usize(estimated_total, visible_height_delta);
-        let trailing_line_start = lines.len();
-        let trailing_image_start = image_placeholders.len();
-        let trailing_deferred_start = deferred_renders.len();
-
-        // streaming content
-        if self.app.stream.active {
-            let dim = self.app.theme.dim;
-            let stream_content_width = message_content_width(area.width as usize);
-
-            if !self.app.stream.thinking.is_empty()
-                && self.app.thinking_display != crate::app::ThinkingDisplay::Hidden
-            {
-                let mut spans = vec![Span::raw(" ")];
-                spans.extend(shimmer_spans(
-                    " thinking",
-                    &self.app.theme.shimmer,
-                    self.app.shimmer_phase(),
-                    dim,
-                ));
-                lines.push(Line::from(spans));
-                let visible_thinking = self.app.visible_streaming_thinking();
-                let strip = common_leading_space(visible_thinking);
-                for text_line in visible_thinking.lines() {
-                    let body = drop_leading_spaces(text_line, strip);
-                    let styled = Line::styled(body.to_string(), self.app.theme.thinking);
-                    lines.extend(indent_line(styled, stream_content_width));
-                }
-                lines.push(Line::raw(""));
-            }
-            if !self.app.stream.text.is_empty() {
-                let visible_text = self.app.visible_streaming_text();
-                let md_text =
-                    render_streaming_markdown_cached(self.app, visible_text, stream_content_width);
-                for line in md_text.lines {
-                    lines.extend(indent_line(line, stream_content_width));
-                }
-            }
-            if self.app.stream.text.is_empty() && self.app.stream.thinking.is_empty() {
-                let mut spans = vec![Span::raw(" ")];
-                spans.extend(shimmer_spans(
-                    " working",
-                    &self.app.theme.shimmer,
-                    self.app.shimmer_phase(),
-                    dim,
-                ));
-                lines.push(Line::from(spans));
-            }
-        }
-
-        // streaming tool args (model is building tool call, not yet executing)
-        if self.app.active_tools.is_empty() && !self.app.stream.tool_args.is_empty() {
-            // show a truncated preview of the args being built
-            let preview = truncate_line(&self.app.stream.tool_args, 60);
-            lines.push(Line::from(vec![
-                Span::raw(" "),
-                Span::styled(" building ", self.app.theme.dim),
-                Span::styled(preview, self.app.theme.dim),
-            ]));
-        }
-
-        // backgrounded /compact run: drop a single busy-label row
-        // so the chat shows live progress without an inline system
-        // message that would persist forever in scrollback
-        if self.app.compacting {
-            let dim = self.app.theme.dim;
-            let mut spans = vec![Span::raw(" ")];
-            spans.extend(shimmer_spans(
-                " compacting…",
-                &self.app.theme.shimmer,
-                self.app.shimmer_phase(),
-                dim,
-            ));
-            lines.push(Line::from(spans));
-        }
-
-        // queued (steering) messages always appear at the bottom
-        for (i, msg) in self.app.messages.iter().enumerate() {
-            if !msg.queued {
-                continue;
-            }
-            let in_selection = selection_range.is_some_and(|(start, end)| i >= start && i <= end);
-            let sel = SelectionHint {
-                selected: in_scroll_mode
-                    && (self.app.navigation.selected_message == Some(i) || in_selection),
-                is_cursor: in_scroll_mode && self.app.navigation.selected_message == Some(i),
-                has_visual: self.app.has_selection(),
-            };
-            render_message(
-                self.app,
-                msg,
-                i,
-                &mut lines,
-                sel,
-                &mut image_placeholders,
-                &mut deferred_renders,
-                area.width,
-                selected_block_info,
-            );
-            lines.push(Line::raw(""));
-        }
-        let trailing_line_count = lines.len() - trailing_line_start;
-        if trailing_line_count > 0 {
-            absolutise_render_metadata(
-                trailing_doc_start,
-                trailing_line_start,
-                &mut image_placeholders[trailing_image_start..],
-                &mut deferred_renders[trailing_deferred_start..],
-            );
-            materialised_segments.push(MaterialisedLineSegment {
-                doc_start: trailing_doc_start,
-                line_start: trailing_line_start,
-                line_count: trailing_line_count,
-            });
-        }
-        record_materialised_line_count(lines.len());
-
-        // pre-compute y positions for image placeholders before moving lines
-        // into Text. since indent_line and wrap_text pre-wrap all lines to fit
-        // within area.width, each line occupies exactly one row
-        let w = area.width as usize;
-        let img_y_positions: Vec<usize> = if !image_placeholders.is_empty() && w > 0 {
-            image_placeholders.iter().map(|ph| ph.line_idx).collect()
-        } else {
-            Vec::new()
-        };
-
-        // bottom-anchor: when content is shorter than the viewport,
-        // pad with empty lines so messages sit near the input box.
-        // line materialisation is virtualised, so use the full document
-        // height rather than the materialised line vec length.
-        let content_doc_len = trailing_doc_start + trailing_line_count;
-        let content_lines = clamp_usize_to_u16(content_doc_len);
-        let visible = area.height;
-
-        let padding = if content_lines < visible {
-            (visible - content_lines) as usize
-        } else {
-            0
-        };
-
-        // compute per-message wrapped-line ranges for mouse hit testing.
-        // ranges are absolute document rows, not offsets into `lines`, so
-        // off-screen messages do not need placeholder rows materialised.
-        if !message_ranges.is_empty() && w > 0 {
-            if padding > 0 {
-                let padding_u16 = clamp_usize_to_u16(padding);
-                for range in &mut message_ranges {
-                    range.start = range.start.saturating_add(padding_u16);
-                    range.end = range.end.saturating_add(padding_u16);
-                }
-            }
-            *self.app.render_state.message_row_ranges.borrow_mut() = message_ranges;
-        } else {
-            self.app
-                .render_state
-                .message_row_ranges
-                .borrow_mut()
-                .clear();
-        }
-
-        let total_lines = content_lines + padding as u16;
-        let max_scroll = total_lines.saturating_sub(visible);
-
-        // recompute with this frame's actual total. preview above used the
-        // estimate, which is fine for virtual-scroll decisions (thanks to
-        // the baseline anchor the preview scroll_from_top equals the final
-        // scroll by construction), but the final scroll must reflect actual
-        // line counts so buffer writes land at the right rows
-        let total_lines_usize = total_lines as usize;
-        let compensation = scroll_compensation(baseline, baseline_vis, total_lines_usize, visible);
-        let effective_offset_final = clamped_effective_offset(self.app.scroll_offset, compensation);
-        let effective_offset_u16 = effective_offset_final.min(u16::MAX as usize) as u16;
-        let scroll = max_scroll.saturating_sub(effective_offset_u16);
-
-        // persist for next frame + status bar
-        self.app
-            .render_state
-            .prev_content_lines
-            .set(total_lines_usize);
-        self.app.render_state.scroll_compensation.set(compensation);
-
-        // expose scroll geometry for the status bar
-        self.app.render_state.total_content_lines.set(total_lines);
-        self.app.render_state.visible_area_height.set(visible);
-        self.app.render_state.message_area.set(area);
-        self.app.render_state.render_scroll.set(scroll);
-        tracing::trace!(
-            target: "mush_tui::scroll",
-            scroll_offset = self.app.scroll_offset,
-            effective_offset = effective_offset_final,
-            render_scroll = scroll,
-            max_scroll,
-            total_lines = total_lines_usize,
-            visible,
+        Self {
+            layout_index,
+            estimated_total,
             baseline,
             baseline_vis,
-            compensation,
-            area_w = area.width,
-            area_h = area.height,
-            "frame settled"
-        );
+            render_start: scroll_from_top.saturating_sub(margin),
+            render_end: (scroll_from_top + vis_h + margin).min(estimated_total),
+        }
+    }
+}
 
+/// where the frame's content ends up on screen once actual line counts
+/// are known
+struct FrameGeometry {
+    /// blank rows inserted above the content so a short conversation sits
+    /// near the input box rather than the top of the pane
+    padding: usize,
+    /// first document row to paint, i.e. what ratatui would call the
+    /// paragraph scroll
+    scroll: u16,
+    /// height of the message area this frame
+    visible: u16,
+}
+
+/// resolve the frame's scroll position against the actual materialised
+/// line count, publish the geometry other widgets read, and hand back
+/// what the paint pass needs.
+///
+/// the preview pass in [`Viewport::compute`] used estimated heights, which
+/// is fine for deciding what to materialise. the final scroll has to use
+/// actual counts so buffer writes land on the right rows
+fn settle_geometry(
+    app: &App,
+    area: Rect,
+    viewport: &Viewport,
+    content_doc_len: usize,
+    mut message_ranges: Vec<crate::app::MessageRowRange>,
+) -> FrameGeometry {
+    let content_lines = clamp_usize_to_u16(content_doc_len);
+    let visible = area.height;
+    let padding = if content_lines < visible {
+        (visible - content_lines) as usize
+    } else {
+        0
+    };
+
+    // per-message wrapped-line ranges for mouse hit testing. ranges are
+    // absolute document rows, not offsets into the materialised lines, so
+    // off-screen messages need no placeholder rows
+    if !message_ranges.is_empty() && area.width > 0 {
+        if padding > 0 {
+            let padding_u16 = clamp_usize_to_u16(padding);
+            for range in &mut message_ranges {
+                range.start = range.start.saturating_add(padding_u16);
+                range.end = range.end.saturating_add(padding_u16);
+            }
+        }
+        *app.render_state.message_row_ranges.borrow_mut() = message_ranges;
+    } else {
+        app.render_state.message_row_ranges.borrow_mut().clear();
+    }
+
+    let total_lines = content_lines + padding as u16;
+    let max_scroll = total_lines.saturating_sub(visible);
+    let total_lines_usize = total_lines as usize;
+    let compensation = scroll_compensation(
+        viewport.baseline,
+        viewport.baseline_vis,
+        total_lines_usize,
+        visible,
+    );
+    let effective_offset = clamped_effective_offset(app.scroll_offset, compensation);
+    let scroll = max_scroll.saturating_sub(effective_offset.min(u16::MAX as usize) as u16);
+
+    app.render_state.prev_content_lines.set(total_lines_usize);
+    app.render_state.scroll_compensation.set(compensation);
+    app.render_state.total_content_lines.set(total_lines);
+    app.render_state.visible_area_height.set(visible);
+    app.render_state.message_area.set(area);
+    app.render_state.render_scroll.set(scroll);
+    tracing::trace!(
+        target: "mush_tui::scroll",
+        scroll_offset = app.scroll_offset,
+        effective_offset,
+        render_scroll = scroll,
+        max_scroll,
+        total_lines = total_lines_usize,
+        visible,
+        baseline = viewport.baseline,
+        baseline_vis = viewport.baseline_vis,
+        compensation,
+        area_w = area.width,
+        area_h = area.height,
+        "frame settled"
+    );
+
+    FrameGeometry {
+        padding,
+        scroll,
+        visible,
+    }
+}
+
+/// the selection state both materialisation passes need, resolved once per
+/// frame instead of per message
+struct SelectionContext {
+    in_scroll_mode: bool,
+    range: Option<(usize, usize)>,
+    selected_block: Option<SelectedBlockInfo>,
+    has_visual: bool,
+    cursor: Option<usize>,
+}
+
+impl SelectionContext {
+    fn for_app(app: &App) -> Self {
+        Self {
+            in_scroll_mode: app.interaction.mode == crate::app::AppMode::Scroll,
+            range: app.selection_range(),
+            selected_block: SelectedBlockInfo::for_app(app),
+            has_visual: app.has_selection(),
+            cursor: app.navigation.selected_message,
+        }
+    }
+
+    /// how message `msg_idx` should be highlighted this frame
+    fn hint(&self, msg_idx: usize) -> SelectionHint {
+        let in_range = self
+            .range
+            .is_some_and(|(start, end)| msg_idx >= start && msg_idx <= end);
+        let is_cursor = self.cursor == Some(msg_idx);
+        SelectionHint {
+            selected: self.in_scroll_mode && (is_cursor || in_range),
+            is_cursor: self.in_scroll_mode && is_cursor,
+            has_visual: self.has_visual,
+        }
+    }
+}
+
+/// line buffers and per-message metadata accumulated while materialising a
+/// frame. the body pass fills it, the trailing pass appends, the paint pass
+/// reads it
+struct FrameLines<'a> {
+    lines: Vec<Line<'a>>,
+    images: Vec<ImagePlaceholder>,
+    deferred: Vec<DeferredCacheRender>,
+    segments: Vec<MaterialisedLineSegment>,
+    ranges: Vec<crate::app::MessageRowRange>,
+}
+
+impl FrameLines<'_> {
+    fn new() -> Self {
+        Self {
+            lines: Vec::new(),
+            images: Vec::new(),
+            deferred: Vec::new(),
+            segments: Vec::new(),
+            ranges: Vec::new(),
+        }
+    }
+}
+
+impl MessageList<'_> {
+    /// write the materialised lines into the buffer, place any images, and
+    /// overlay the selection highlight.
+    ///
+    /// bypasses ratatui's `Paragraph` on purpose: lines are already wrapped
+    /// to the content width by `indent_line`, so Paragraph's LineTruncator
+    /// would re-grapheme-scan text that already fits. profiling put that at
+    /// ~40% of main-thread CPU in long sessions
+    fn paint(
+        &self,
+        buf: &mut Buffer,
+        area: Rect,
+        frame: &FrameLines<'_>,
+        geometry: &FrameGeometry,
+        sel_ctx: &SelectionContext,
+        img_y_positions: &[usize],
+    ) {
+        let FrameGeometry {
+            padding,
+            scroll,
+            visible,
+        } = *geometry;
         // compute image render areas based on scroll position
         let mut render_areas = Vec::new();
-        if !image_placeholders.is_empty() && area.width > 0 {
+        if !frame.images.is_empty() && area.width > 0 {
             let scroll_i = scroll as i32;
             let padding_i = padding as i32;
             let visible_i = visible as i32;
-            for (i, ph) in image_placeholders.iter().enumerate() {
+            for (i, ph) in frame.images.iter().enumerate() {
                 let y_before = img_y_positions[i].min(i32::MAX as usize) as i32;
                 // placeholder line_idx now points directly at the first body
                 // row, so no +1 offset
@@ -693,7 +601,8 @@ impl Widget for MessageList<'_> {
                 continue; // blank padding row, buffer is already empty
             }
             let doc_line = doc_y - padding;
-            let Some(line_idx) = materialised_segments
+            let Some(line_idx) = frame
+                .segments
                 .iter()
                 .find_map(|segment| segment.line_for_doc(doc_line))
             else {
@@ -702,7 +611,7 @@ impl Widget for MessageList<'_> {
             buf.set_line(
                 area.x,
                 area.y + screen_y as u16,
-                &lines[line_idx],
+                &frame.lines[line_idx],
                 area.width,
             );
         }
@@ -711,11 +620,11 @@ impl Widget for MessageList<'_> {
         // during the lines build, cached content was replaced with empty
         // placeholders to avoid deep-cloning Line vecs. now we borrow
         // from the indented_cache and write directly, zero clones
-        if !deferred_renders.is_empty() {
+        if !frame.deferred.is_empty() {
             let scroll_usize = scroll as usize;
             let visible_usize = area.height as usize;
             let cache = self.app.render_state.indented_cache.borrow();
-            for dc in &deferred_renders {
+            for dc in &frame.deferred {
                 if let Some(Some((_, _, cached_lines))) = cache.get(dc.msg_idx) {
                     let doc_y = padding + dc.start_line;
                     let doc_end = doc_y + dc.line_count;
@@ -732,7 +641,9 @@ impl Widget for MessageList<'_> {
         // user can see exactly what `y` will copy. block-mode highlighting is
         // still handled inline during line building (styled spans) because it
         // needs to colour only the code-block portion of a message.
-        if in_scroll_mode && self.app.navigation.scroll_unit != crate::app::ScrollUnit::Block {
+        if sel_ctx.in_scroll_mode
+            && self.app.navigation.scroll_unit != crate::app::ScrollUnit::Block
+        {
             apply_message_highlight(
                 self.app,
                 buf,
@@ -741,6 +652,225 @@ impl Widget for MessageList<'_> {
                 &self.app.render_state.message_row_ranges.borrow(),
             );
         }
+    }
+
+    /// materialise everything below the message list: in-flight assistant
+    /// text and thinking, the tool-args preview, the compaction label, and
+    /// any queued steering messages
+    fn materialise_trailing(
+        &self,
+        area: Rect,
+        sel_ctx: &SelectionContext,
+        frame: &mut FrameLines<'_>,
+    ) {
+        // streaming content
+        if self.app.stream.active {
+            let dim = self.app.theme.dim;
+            let stream_content_width = message_content_width(area.width as usize);
+
+            if !self.app.stream.thinking.is_empty()
+                && self.app.thinking_display != crate::app::ThinkingDisplay::Hidden
+            {
+                let mut spans = vec![Span::raw(" ")];
+                spans.extend(shimmer_spans(
+                    " thinking",
+                    &self.app.theme.shimmer,
+                    self.app.shimmer_phase(),
+                    dim,
+                ));
+                frame.lines.push(Line::from(spans));
+                let visible_thinking = self.app.visible_streaming_thinking();
+                let strip = common_leading_space(visible_thinking);
+                for text_line in visible_thinking.lines() {
+                    let body = drop_leading_spaces(text_line, strip);
+                    let styled = Line::styled(body.to_string(), self.app.theme.thinking);
+                    frame
+                        .lines
+                        .extend(indent_line(styled, stream_content_width));
+                }
+                frame.lines.push(Line::raw(""));
+            }
+            if !self.app.stream.text.is_empty() {
+                let visible_text = self.app.visible_streaming_text();
+                let md_text =
+                    render_streaming_markdown_cached(self.app, visible_text, stream_content_width);
+                for line in md_text.lines {
+                    frame.lines.extend(indent_line(line, stream_content_width));
+                }
+            }
+            if self.app.stream.text.is_empty() && self.app.stream.thinking.is_empty() {
+                let mut spans = vec![Span::raw(" ")];
+                spans.extend(shimmer_spans(
+                    " working",
+                    &self.app.theme.shimmer,
+                    self.app.shimmer_phase(),
+                    dim,
+                ));
+                frame.lines.push(Line::from(spans));
+            }
+        }
+
+        // streaming tool args (model is building tool call, not yet executing)
+        if self.app.active_tools.is_empty() && !self.app.stream.tool_args.is_empty() {
+            // show a truncated preview of the args being built
+            let preview = truncate_line(&self.app.stream.tool_args, 60);
+            frame.lines.push(Line::from(vec![
+                Span::raw(" "),
+                Span::styled(" building ", self.app.theme.dim),
+                Span::styled(preview, self.app.theme.dim),
+            ]));
+        }
+
+        // backgrounded /compact run: drop a single busy-label row
+        // so the chat shows live progress without an inline system
+        // message that would persist forever in scrollback
+        if self.app.compacting {
+            let dim = self.app.theme.dim;
+            let mut spans = vec![Span::raw(" ")];
+            spans.extend(shimmer_spans(
+                " compacting…",
+                &self.app.theme.shimmer,
+                self.app.shimmer_phase(),
+                dim,
+            ));
+            frame.lines.push(Line::from(spans));
+        }
+
+        // queued (steering) messages always appear at the bottom
+        for (i, msg) in self.app.messages.iter().enumerate() {
+            if !msg.queued {
+                continue;
+            }
+            let sel = sel_ctx.hint(i);
+            render_message(
+                self.app,
+                msg,
+                i,
+                &mut frame.lines,
+                sel,
+                &mut frame.images,
+                &mut frame.deferred,
+                area.width,
+                sel_ctx.selected_block,
+            );
+            frame.lines.push(Line::raw(""));
+        }
+    }
+}
+
+impl Widget for MessageList<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        let sel_ctx = SelectionContext::for_app(self.app);
+        let viewport = Viewport::compute(self.app, area);
+        let mut frame = FrameLines::new();
+
+        // body: every stored message overlapping the render window
+        let layout_index = &viewport.layout_index;
+        let (render_start, render_end) = (viewport.render_start, viewport.render_end);
+        let mut visible_height_delta = 0isize;
+        for entry in
+            &layout_index.entries[layout_index.visible_entry_range(render_start, render_end)]
+        {
+            let Some(msg) = self.app.messages.get(entry.msg_idx) else {
+                continue;
+            };
+            if msg.queued {
+                continue; // rendered after streaming content
+            }
+            let msg_start = offset_usize(entry.start, visible_height_delta);
+            let estimated_height = entry.height;
+            let start_line = frame.lines.len();
+
+            let image_start = frame.images.len();
+            let deferred_start = frame.deferred.len();
+            let sel = sel_ctx.hint(entry.msg_idx);
+            render_message(
+                self.app,
+                msg,
+                entry.msg_idx,
+                &mut frame.lines,
+                sel,
+                &mut frame.images,
+                &mut frame.deferred,
+                area.width,
+                sel_ctx.selected_block,
+            );
+            frame.lines.push(Line::raw(""));
+
+            // correct the height_cache with the actual rendered height.
+            // the cache may hold a stale estimate from count_estimated_lines
+            // (which counts raw markdown chars). updating here ensures the
+            // cache converges after one render.
+            let actual_height = frame.lines.len() - start_line;
+            absolutise_render_metadata(
+                msg_start,
+                start_line,
+                &mut frame.images[image_start..],
+                &mut frame.deferred[deferred_start..],
+            );
+            frame.segments.push(MaterialisedLineSegment {
+                doc_start: msg_start,
+                line_start: start_line,
+                line_count: actual_height,
+            });
+            if actual_height != estimated_height {
+                update_cached_height(
+                    msg,
+                    entry.msg_idx,
+                    area.width,
+                    actual_height,
+                    &self.app.render_state,
+                );
+            }
+            visible_height_delta += actual_height as isize - estimated_height as isize;
+            frame.ranges.push(crate::app::MessageRowRange {
+                msg_idx: entry.msg_idx,
+                start: clamp_usize_to_u16(msg_start),
+                end: clamp_usize_to_u16(msg_start + actual_height),
+            });
+        }
+
+        // trailing: streaming content and queued messages, positioned after
+        // the last stored message
+        let trailing_doc_start = offset_usize(viewport.estimated_total, visible_height_delta);
+        let trailing_line_start = frame.lines.len();
+        let trailing_image_start = frame.images.len();
+        let trailing_deferred_start = frame.deferred.len();
+        self.materialise_trailing(area, &sel_ctx, &mut frame);
+        let trailing_line_count = frame.lines.len() - trailing_line_start;
+        if trailing_line_count > 0 {
+            absolutise_render_metadata(
+                trailing_doc_start,
+                trailing_line_start,
+                &mut frame.images[trailing_image_start..],
+                &mut frame.deferred[trailing_deferred_start..],
+            );
+            frame.segments.push(MaterialisedLineSegment {
+                doc_start: trailing_doc_start,
+                line_start: trailing_line_start,
+                line_count: trailing_line_count,
+            });
+        }
+        record_materialised_line_count(frame.lines.len());
+
+        // pre-compute y positions for image placeholders before moving lines
+        // into Text. since indent_line and wrap_text pre-wrap all lines to fit
+        // within area.width, each line occupies exactly one row
+        let w = area.width as usize;
+        let img_y_positions: Vec<usize> = if !frame.images.is_empty() && w > 0 {
+            frame.images.iter().map(|ph| ph.line_idx).collect()
+        } else {
+            Vec::new()
+        };
+
+        let geometry = settle_geometry(
+            self.app,
+            area,
+            &viewport,
+            trailing_doc_start + trailing_line_count,
+            std::mem::take(&mut frame.ranges),
+        );
+        self.paint(buf, area, &frame, &geometry, &sel_ctx, &img_y_positions);
     }
 }
 
