@@ -192,7 +192,7 @@ mod tests {
     #[test]
     fn deserialises_old_flat_shape_as_error() {
         // even older `{model_id: level}` shape (pre per-dir migration)
-        // also fails to load — the schema has only ever moved forward
+        // also fails to load, the schema has only ever moved forward
         let old = r#"{"gpt-5":"high","claude-opus-4-7":"medium"}"#;
         assert!(serde_json::from_str::<ThinkingPrefs>(old).is_err());
     }

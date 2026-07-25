@@ -820,8 +820,7 @@ mod tests {
         assert!(last.contains('}'));
     }
 
-    // -- intra-line word-level highlighting --
-
+    // intra-line word-level highlighting
     #[test]
     fn paired_change_spans_marks_changed_tokens() {
         let theme = Theme::dark();
@@ -923,8 +922,7 @@ mod tests {
         }
     }
 
-    // -- outer line style (Prefix vs Highlight) --
-
+    // outer line style (Prefix vs Highlight)
     #[test]
     fn theme_default_uses_highlight_diff_line_style() {
         let theme = Theme::dark();
@@ -980,8 +978,7 @@ mod tests {
         }
     }
 
-    // -- syntax highlighting in diff --
-
+    // syntax highlighting in diff
     #[test]
     fn render_diff_with_lang_highlights_equal_tokens_in_paired_lines() {
         let theme = Theme::dark();

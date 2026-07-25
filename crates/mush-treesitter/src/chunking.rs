@@ -142,8 +142,7 @@ fn chunk_parsed(
     chunks
 }
 
-// -- helpers --
-
+// helpers
 /// everything before the first non-import symbol (imports, module decls, etc)
 fn extract_preamble(lines: &[&str], symbols: &[SymbolInfo]) -> String {
     let first_def_line = symbols
@@ -354,8 +353,7 @@ mod tests {
         ChunkOptions::default()
     }
 
-    // -- text fallback tests --
-
+    // text fallback tests
     #[test]
     fn chunk_text_small_file() {
         let text = "hello world\nthis is a test";
@@ -389,8 +387,7 @@ mod tests {
         assert!(chunks.is_empty());
     }
 
-    // -- AST chunking tests --
-
+    // AST chunking tests
     #[test]
     fn chunk_rust_file_by_symbols() {
         let dir = tempfile::tempdir().unwrap();

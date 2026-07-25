@@ -128,19 +128,6 @@ pub fn any_char(key: KeyEvent) -> Option<char> {
 }
 
 #[must_use]
-pub fn control_non_alt_char(key: KeyEvent) -> Option<char> {
-    match key.code {
-        KeyCode::Char(ch)
-            if key.modifiers.contains(KeyModifiers::CONTROL)
-                && !key.modifiers.contains(KeyModifiers::ALT) =>
-        {
-            Some(ch)
-        }
-        _ => None,
-    }
-}
-
-#[must_use]
 pub fn has_alt(key: KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::ALT)
 }

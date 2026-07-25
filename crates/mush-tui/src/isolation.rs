@@ -130,8 +130,7 @@ fn ensure_success(output: Output, action: &'static str) -> Result<Output, Isolat
     }
 }
 
-// -- worktree operations --
-
+// worktree operations
 fn worktree_dir(repo_root: &Path) -> PathBuf {
     repo_root.join(".mush").join("worktrees")
 }
@@ -297,8 +296,7 @@ pub async fn cleanup_stale_worktrees(repo_root: &Path) -> usize {
     cleaned
 }
 
-// -- jj operations --
-
+// jj operations
 pub async fn create_jj_change(repo_root: &Path) -> Result<JjChangeInfo, IsolationError> {
     let output = {
         let mut command = tokio::process::Command::new("jj");

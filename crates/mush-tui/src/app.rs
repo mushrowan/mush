@@ -3405,8 +3405,7 @@ batch: 1/2 succeeded, 1 failed";
         assert_eq!(buf.cursor, 3);
     }
 
-    // -- cache anomaly detection tests --
-
+    // cache anomaly detection tests
     #[test]
     fn detect_context_decrease() {
         let prev = Usage {

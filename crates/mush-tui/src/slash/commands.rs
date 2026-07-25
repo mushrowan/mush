@@ -858,9 +858,9 @@ pub(crate) async fn handle_login_start(
     };
 
     let Some(provider) = oauth::get_provider(&provider_id) else {
-        // not an oauth provider id. fall back to opening the picker so
-        // the user can pick from the full catalogue (covers
-        // `/login openrouter` etc which used to fail outright)
+        // not an oauth provider id. open the picker so the user can pick
+        // from the full catalogue, which is what `/login openrouter` and
+        // friends want
         if mush_ai::login::list_providers()
             .iter()
             .any(|p| p.id == provider_id)

@@ -289,10 +289,10 @@ fn collect_files(
     let mut walk = WalkBuilder::new(search_path);
     walk.hidden(true).git_ignore(true).parents(true);
 
-    // post-filter on include glob. we used to use OverrideBuilder here but
-    // `!*` also excluded directories, which broke recursion. the `globset`
-    // approach below filters files by basename and cost-effectively skips
-    // nothing else
+    // post-filter on the include glob with `globset` rather than the
+    // walker's OverrideBuilder: an override of `!*` also excludes
+    // directories, which stops recursion dead. this matches on basename
+    // and leaves the walk alone
     let include_matcher = include
         .map(|glob| {
             globset::Glob::new(glob)

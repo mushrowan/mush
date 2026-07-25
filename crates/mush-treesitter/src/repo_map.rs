@@ -893,8 +893,7 @@ impl Server {
         assert!((ranks[1] - ranks[2]).abs() < 1e-10);
     }
 
-    // -- incremental repo map tests --
-
+    // incremental repo map tests
     #[test]
     fn incremental_matches_full_build() {
         let dir = tempfile::tempdir().unwrap();

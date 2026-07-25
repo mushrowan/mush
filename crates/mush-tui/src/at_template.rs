@@ -159,8 +159,8 @@ pub fn strip_placeholders(content: &str) -> (String, Vec<usize>) {
     let mut prev_end = 0usize;
     for placeholder in &placeholders {
         clean.push_str(&content[prev_end..placeholder.start]);
-        // slot lands at the current end of `clean`, where the placeholder
-        // used to be after stripping all earlier ones
+        // the slot sits at the current end of `clean`: the placeholder's
+        // position once every earlier placeholder has been stripped
         slots.push(clean.len());
         prev_end = placeholder.start + placeholder.len;
     }

@@ -38,18 +38,6 @@ impl std::fmt::Display for IsolationMode {
     }
 }
 
-/// auto-detect which isolation modes are available in the cwd
-pub fn available_modes(cwd: &Path) -> Vec<IsolationMode> {
-    let mut modes = vec![IsolationMode::None];
-    if cwd.join(".jj").is_dir() {
-        modes.push(IsolationMode::Jj);
-    }
-    if cwd.join(".git").is_dir() || cwd.join(".jj").is_dir() {
-        modes.push(IsolationMode::Worktree);
-    }
-    modes
-}
-
 /// detected conflict: multiple panes modified the same file
 #[derive(Debug, Clone)]
 pub struct Conflict {

@@ -1301,7 +1301,7 @@ fn handle_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             None
         }
         _ if app.keymap.matches(crate::keybinds::Action::Confirm, key) => {
-            // select session — return a slash command that the runner handles
+            // select session, return a slash command that the runner handles
             if let Some(meta) = app.selected_session() {
                 let id = meta.id.to_string();
                 app.close_session_picker();
@@ -4130,7 +4130,7 @@ mod tests {
         let mut app = app_with_one_stale_row();
         app.open_model_picker_overlay();
 
-        // selected is 0 (fresh) — ctrl+d should toast and not arm
+        // selected is 0 (fresh), ctrl+d should toast and not arm
         handle_key(&mut app, ctrl(KeyCode::Char('d')));
         let picker = app.interaction.model_picker.as_ref().unwrap();
         assert!(picker.confirm_delete.is_none());

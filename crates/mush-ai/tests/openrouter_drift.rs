@@ -1,7 +1,7 @@
 //! drift coverage for openrouter's public discovery endpoints.
 //!
 //! `/models/{author}/{slug}/endpoints` is unauthenticated and returns
-//! the per-provider endpoint catalogue for a model — including
+//! the per-provider endpoint catalogue for a model, including
 //! pricing (prompt/completion/cache), provider tags, supported
 //! parameters, uptime, and whether the endpoint supports implicit
 //! caching. several of these fields are stripped by the openrouter-rs
@@ -82,7 +82,7 @@ const ENDPOINT_ITEM_FIELDS: &[FieldStatus] = &[
     FieldStatus::Consumed("context_length"),
     FieldStatus::Consumed("supported_parameters"),
     FieldStatus::Consumed("pricing"),
-    // direct cache signal — the headline field this drift test exists for
+    // direct cache signal, the headline field this drift test exists for
     FieldStatus::Consumed("supports_implicit_caching"),
     // metadata we know about, deliberately unsurfaced
     FieldStatus::Ignored("name"),
@@ -104,7 +104,7 @@ const ENDPOINT_ITEM_FIELDS: &[FieldStatus] = &[
 const ENDPOINT_PRICING_FIELDS: &[FieldStatus] = &[
     FieldStatus::Consumed("prompt"),
     FieldStatus::Consumed("completion"),
-    // cache pricing — used to gate the cache timer + drive the
+    // cache pricing, used to gate the cache timer + drive the
     // serving-provider lookup
     FieldStatus::Consumed("input_cache_read"),
     FieldStatus::Consumed("input_cache_write"),
@@ -161,7 +161,7 @@ async fn vendored_openapi_matches_live() {
     // openapi.json is unauthenticated and contains the canonical
     // schema for every endpoint, including ones we don't currently
     // wrap. diffing the vendored copy against the live spec catches
-    // drift at the spec level — earlier than waiting for live
+    // drift at the spec level, earlier than waiting for live
     // responses to start carrying new fields. when this fires:
     //
     //   curl -s https://openrouter.ai/openapi.json \

@@ -185,8 +185,7 @@ impl UsagePoller {
     }
 }
 
-// -- response parsing --
-
+// response parsing
 #[derive(Deserialize)]
 struct RawUsageResponse {
     five_hour: Option<RawWindow>,

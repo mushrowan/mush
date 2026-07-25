@@ -1498,8 +1498,7 @@ fn rendered_line_char_count(line: &Line<'_>) -> usize {
         .sum()
 }
 
-// -- bordered tool boxes for completed tool calls --
-
+// bordered tool boxes for completed tool calls
 /// indent for tool boxes (matches message content indent)
 const BOX_INDENT: usize = 1;
 
@@ -1993,7 +1992,7 @@ fn render_side_by_side_boxes(
         .map(|tc| tool_icon_colour(tc, theme).1)
         .collect();
 
-    // -- top border --
+    // top border
     let mut top_spans = vec![indent.clone()];
     for (i, tc) in tools.iter().enumerate() {
         let (icon, colour) = tool_icon_colour(tc, theme);
@@ -2022,7 +2021,7 @@ fn render_side_by_side_boxes(
     ));
     lines.push(Line::from(top_spans));
 
-    // -- content rows: max of content heights across panels --
+    // content rows: max of content heights across panels
     // pre-wrap content per panel to fit panel width
     let panel_contents: Vec<Vec<String>> = tools
         .iter()
@@ -2077,7 +2076,7 @@ fn render_side_by_side_boxes(
         lines.push(Line::from(spans));
     }
 
-    // -- bottom border --
+    // bottom border
     let mut bot_spans = vec![indent];
     for (i, _) in tools.iter().enumerate() {
         let border = Style::default().fg(colours[i]);
@@ -3503,8 +3502,7 @@ mod tests {
         assert!(content.contains("b.rs"), "missing second tool summary");
     }
 
-    // -- grid layout for batched tools --
-
+    // grid layout for batched tools
     #[test]
     fn grid_dimensions_single_row_when_wide() {
         assert_eq!(grid_dimensions(4, 200, 30), (1, 4));
@@ -3970,8 +3968,7 @@ mod tests {
         );
     }
 
-    // -- read tool output syntax highlighting --
-
+    // read tool output syntax highlighting
     #[test]
     fn parse_read_line_extracts_number_and_content() {
         assert_eq!(parse_read_line("L1: fn main() {"), Some((1, "fn main() {")));

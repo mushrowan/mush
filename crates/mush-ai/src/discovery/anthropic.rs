@@ -104,7 +104,7 @@ impl ModelDiscovery for AnthropicDiscovery {
 
 /// parse the raw response body into [`DiscoveredModel`] entries.
 ///
-/// pure function, no I/O — the entry point used by tests and by [`AnthropicDiscovery::fetch`].
+/// pure function, no I/O, the entry point used by tests and by [`AnthropicDiscovery::fetch`].
 /// each entry's verbatim JSON is preserved on `DiscoveredModel::raw` so future code can
 /// access fields we don't promote to [`Model`] (e.g. `capabilities.pdf_input`).
 pub fn parse_anthropic_models(body: &str) -> Result<Vec<DiscoveredModel>, DiscoveryError> {

@@ -12,7 +12,7 @@
 //! [`FieldStatus::Consumed`] (we read this field and act on it) or
 //! [`FieldStatus::Ignored`] (we know it exists, deliberately don't
 //! surface it). a field present in the response and absent from the
-//! manifest is **unknown** — the test fails so a human decides
+//! manifest is **unknown**, the test fails so a human decides
 //! between consumed and ignored before merging.
 
 use std::collections::BTreeSet;
@@ -121,7 +121,7 @@ mod tests {
 
     #[test]
     fn unknown_fields_treats_ignored_entries_as_acknowledged() {
-        // Ignored is a real ack — fields marked ignored shouldn't show
+        // Ignored is a real ack, fields marked ignored shouldn't show
         // up as drift even though we don't read them
         let value = json!({"a": 1, "deprecated": "old"});
         let manifest = &[

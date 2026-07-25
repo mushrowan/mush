@@ -496,8 +496,7 @@ fn try_load_persisted_settings(
     }
 }
 
-// -- per-directory + per-model thinking level persistence --
-
+// per-directory + per-model thinking level persistence
 fn thinking_prefs_path() -> PathBuf {
     mush_session::data_dir().join("thinking.json")
 }
@@ -535,8 +534,7 @@ pub fn save_thinking_prefs(prefs: &mush_tui::ThinkingPrefs) {
     }
 }
 
-// -- per-directory last-model persistence --
-
+// per-directory last-model persistence
 fn last_model_path() -> PathBuf {
     mush_session::data_dir().join("last-model.json")
 }

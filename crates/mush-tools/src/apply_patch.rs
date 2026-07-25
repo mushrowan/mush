@@ -27,8 +27,7 @@ use serde::Deserialize;
 
 use crate::util::resolve_path;
 
-// -- types --
-
+// types
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ApplyPatchArgs {
@@ -59,8 +58,7 @@ pub struct UpdateChunk {
     pub is_eof: bool,
 }
 
-// -- parser --
-
+// parser
 #[derive(Debug)]
 pub enum PatchError {
     MissingMarkers,
@@ -251,8 +249,7 @@ pub fn parse_patch(patch_text: &str) -> Result<Vec<Hunk>, PatchError> {
     Ok(hunks)
 }
 
-// -- application --
-
+// application
 /// multi-pass line matching: exact, rstrip, trim, normalised unicode
 fn seek_sequence(lines: &[&str], pattern: &[String], start: usize, eof: bool) -> Option<usize> {
     if pattern.is_empty() || lines.len() < pattern.len() {
@@ -463,8 +460,7 @@ pub fn apply_hunks(cwd: &Path, hunks: &[Hunk]) -> Result<Vec<String>, PatchError
     Ok(summary)
 }
 
-// -- tool --
-
+// tool
 const DESCRIPTION: &str = "\
 Use the apply_patch tool to make file changes. The patch format supports creating, updating, \
 deleting, and moving files.\n\n\

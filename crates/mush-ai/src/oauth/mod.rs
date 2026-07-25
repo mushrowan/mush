@@ -132,8 +132,7 @@ pub trait OAuthProvider: Send + Sync {
     }
 }
 
-// -- built-in provider registry --
-
+// built-in provider registry
 fn builtin_providers() -> Vec<Box<dyn OAuthProvider>> {
     vec![
         Box::new(anthropic::AnthropicOAuth),

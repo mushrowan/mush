@@ -1612,7 +1612,7 @@ mod tests {
                     })])
                     .build(),
             ),
-            // user message follows without a matching tool result —
+            // user message follows without a matching tool result,
             // request was sent before the call could be executed
             Message::User(UserMessage {
                 content: UserContent::Text("retrying".into()),
@@ -1689,7 +1689,7 @@ mod tests {
 
     #[test]
     fn orphaned_function_call_output_is_stripped() {
-        // tool result without a preceding assistant tool_call — would
+        // tool result without a preceding assistant tool_call, would
         // happen if compaction or session manipulation removed the call
         let model = sample_codex_model();
         let messages = vec![Message::ToolResult(ToolResultMessage {

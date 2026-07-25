@@ -1,12 +1,10 @@
 //! popover overlay for the api-key entry prompt
 //!
 //! rendered on top of the [`super::login_picker`] widget while the
-//! picker is armed for entry or actively validating. concentrating
-//! the input row, status line, and hint into one small focused box
-//! keeps the user's eyes in one place during paste / validate / retry,
-//! instead of forcing them to scan from the top of the picker (where
-//! the prompt used to live) down to the bottom toast (where errors
-//! used to land)
+//! picker is armed for entry or actively validating. the input row,
+//! status line and hint sit together in one small box so the user's eyes
+//! stay in one place across paste, validate and retry, rather than
+//! scanning between the top of the picker and the bottom toast
 
 use crate::login_picker::{EntryPrompt, LoginPickerState};
 use crate::theme::Theme;

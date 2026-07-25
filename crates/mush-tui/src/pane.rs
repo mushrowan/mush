@@ -263,8 +263,7 @@ impl PaneManager {
         id
     }
 
-    // -- accessors --
-
+    // accessors
     pub fn focused(&self) -> &Pane {
         &self.panes[self.focused]
     }
@@ -301,8 +300,7 @@ impl PaneManager {
         self.panes.len() > 1
     }
 
-    // -- focus management --
-
+    // focus management
     pub fn focus_next(&mut self) {
         if self.panes.len() > 1 {
             self.focused = (self.focused + 1) % self.panes.len();
@@ -325,8 +323,7 @@ impl PaneManager {
         }
     }
 
-    // -- lifecycle --
-
+    // lifecycle
     /// add a pane, returns its index
     pub fn add_pane(&mut self, pane: Pane) -> usize {
         let idx = self.panes.len();
@@ -355,8 +352,7 @@ impl PaneManager {
         self.remove_pane(id)
     }
 
-    // -- layout --
-
+    // layout
     /// determine layout mode for a given terminal width
     pub fn layout_mode(&self, terminal_width: u16) -> LayoutMode {
         let n = self.panes.len() as u16;

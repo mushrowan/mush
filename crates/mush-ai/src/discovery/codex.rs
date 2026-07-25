@@ -575,7 +575,7 @@ mod tests {
 
     #[test]
     fn extras_tolerates_missing_fields() {
-        // bare-minimum entry with only `slug` — every optional field stays None / default
+        // bare-minimum entry with only `slug`, every optional field stays None / default
         let raw = serde_json::json!({ "slug": "tiny" });
         let extras = extras(Some(&raw)).unwrap();
         assert!(extras.description.is_none());

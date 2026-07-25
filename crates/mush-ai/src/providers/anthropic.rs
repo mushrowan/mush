@@ -350,8 +350,7 @@ impl ApiProvider for AnthropicProvider {
     }
 }
 
-// -- request body construction --
-
+// request body construction
 #[derive(Serialize)]
 struct RequestBody {
     model: String,
@@ -1361,8 +1360,7 @@ fn inject_synthetic_results(
     }
 }
 
-// -- SSE parsing --
-
+// SSE parsing
 /// raw SSE event from the anthropic stream
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]

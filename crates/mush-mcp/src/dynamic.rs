@@ -97,8 +97,7 @@ impl McpToolIndex {
 
 type SharedIndex = Arc<McpToolIndex>;
 
-// -- mcp_list_tools --
-
+// mcp_list_tools
 pub struct McpListToolsTool {
     index: SharedIndex,
 }
@@ -169,8 +168,7 @@ impl AgentTool for McpListToolsTool {
     }
 }
 
-// -- mcp_get_schemas --
-
+// mcp_get_schemas
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GetSchemasArgs {
@@ -249,8 +247,7 @@ impl AgentTool for McpGetSchemasTool {
     }
 }
 
-// -- mcp_call_tool --
-
+// mcp_call_tool
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CallToolArgs {

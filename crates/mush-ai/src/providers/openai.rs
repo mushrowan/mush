@@ -75,8 +75,7 @@ impl ApiProvider for OpenaiCompletionsProvider {
     }
 }
 
-// -- request body --
-
+// request body
 #[derive(Serialize)]
 struct RequestBody {
     model: String,
@@ -276,8 +275,7 @@ impl super::MessageVisitor for OpenaiVisitor<'_> {
     }
 }
 
-// -- SSE parsing --
-
+// SSE parsing
 #[derive(Debug, Deserialize)]
 struct ChunkResponse {
     #[serde(default)]

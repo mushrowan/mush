@@ -153,8 +153,8 @@ pub enum SlashAction {
     RefreshModels,
     Quit,
     /// toggle whether the focused assistant message's thinking text is
-    /// expanded. used to be ctrl+o; promoted to a slash command so the
-    /// keybind is freed up for user binds
+    /// expanded. a slash command rather than a keybind so the key stays
+    /// available for user binds
     ToggleThinkingExpanded,
     Other {
         name: String,

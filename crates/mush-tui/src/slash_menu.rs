@@ -12,12 +12,12 @@ pub struct SlashCommand {
 pub struct ModelCompletion {
     pub id: String,
     pub name: String,
-    /// provider key (`Provider::to_string()` of the source) — used by the
+    /// provider key (`Provider::to_string()` of the source), used by the
     /// picker's delete-stale flow to tell `DiscoveryCache::remove_model`
     /// which provider's sub-cache to mutate
     pub provider: String,
     /// the model is in the discovery cache but absent from the latest
-    /// fetch for its provider — likely deprecated. picker renders a
+    /// fetch for its provider, likely deprecated. picker renders a
     /// `[stale]` marker so the user can spot dropped entries.
     pub stale: bool,
     /// optional human-readable blurb (codex returns these per model).
