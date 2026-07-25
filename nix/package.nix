@@ -101,4 +101,18 @@ in {
       <(${schemaEmitter}/bin/mush-config-schema)
     touch $out
   '';
+
+  # unused-dependency check. cargo-shear reads the source rather than
+  # guessing from names, so it catches dev-dependencies nothing imports.
+  # runs through crane so `cargo metadata` resolves against the vendored
+  # registry instead of reaching for the network.
+  # fix with `cargo shear --fix`
+  shear = craneLib.mkCargoDerivation (commonArgs
+    // {
+      cargoArtifacts = null;
+      pnameSuffix = "-shear";
+      doInstallCargoArtifacts = false;
+      buildPhaseCargoCommand = "cargo-shear";
+      nativeBuildInputs = commonArgs.nativeBuildInputs ++ [pkgs.cargo-shear];
+    });
 }

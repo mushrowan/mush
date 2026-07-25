@@ -71,7 +71,6 @@ lang-css = ["dep:tree-sitter-css"]
 lang-nix = ["dep:tree-sitter-nix"]
 
 [dev-dependencies]
-pretty_assertions.workspace = true
 tempfile.workspace = true
 filetime.workspace = true
 

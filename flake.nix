@@ -210,7 +210,7 @@
         '';
 
         checks = {
-          inherit (craneOutputs) package clippy test fmt deny doctest schemaCheck;
+          inherit (craneOutputs) package clippy test fmt deny doctest schemaCheck shear;
         };
 
         devShells.default = import ./nix/devshell.nix {
