@@ -1,14 +1,18 @@
 //! anthropic oauth provider (claude pro/max)
 
 use super::{
-    AuthPrompt, OAuthCredentials, OAuthError, OAuthProvider, PkceChallenge, generate_pkce,
+    AuthPrompt, BrowserLogin, OAuthCredentials, OAuthError, OAuthProvider, PkceChallenge,
+    generate_pkce,
 };
+use crate::oauth::callback_server::{CallbackConfig, CallbackServer};
 use serde::Deserialize;
 
 const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const AUTHORIZE_URL: &str = "https://claude.ai/oauth/authorize";
 const TOKEN_URL: &str = "https://console.anthropic.com/v1/oauth/token";
 const REDIRECT_URI: &str = "https://console.anthropic.com/oauth/code/callback";
+const CALLBACK_PATH: &str = "/callback";
+const CALLBACK_PORT: u16 = 54545;
 const SCOPES: &str = "org:create_api_key user:profile user:inference";
 const EXPIRY_BUFFER_MS: u64 = 5 * 60 * 1000;
 
@@ -25,12 +29,33 @@ impl OAuthProvider for AnthropicOAuth {
 
     fn begin_login(&self) -> Result<(AuthPrompt, PkceChallenge), OAuthError> {
         let pkce = generate_pkce()?;
-        let url = build_auth_url(&pkce);
+        let url = build_auth_url(&pkce, REDIRECT_URI);
         let prompt = AuthPrompt {
             url,
             instructions: "after authorising, paste the code here (format: code#state)".into(),
         };
         Ok((prompt, pkce))
+    }
+
+    fn begin_browser_login(
+        &self,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<BrowserLogin, OAuthError>> + Send + '_>,
+    > {
+        Box::pin(async move {
+            let pkce = generate_pkce()?;
+            let state = pkce.verifier.clone();
+            let server = CallbackServer::bind(
+                CallbackConfig::new(CALLBACK_PATH, CALLBACK_PORT).expecting_state(state.clone()),
+            )
+            .await?;
+            let redirect_uri = server.redirect_uri();
+            let auth_url = build_auth_url(&pkce, &redirect_uri);
+            Ok(BrowserLogin::new(
+                auth_url,
+                await_browser_credentials(server, pkce, redirect_uri),
+            ))
+        })
     }
 
     fn exchange_code(
@@ -42,7 +67,10 @@ impl OAuthProvider for AnthropicOAuth {
     > {
         let code = code.to_string();
         let verifier = pkce.verifier.clone();
-        Box::pin(async move { exchange_code_impl(&code, &verifier).await })
+        Box::pin(async move {
+            let (code, state) = split_code_and_state(&code);
+            exchange_code_impl(&code, &state, &verifier, REDIRECT_URI).await
+        })
     }
 
     fn refresh_token(
@@ -56,12 +84,49 @@ impl OAuthProvider for AnthropicOAuth {
     }
 }
 
-fn build_auth_url(pkce: &PkceChallenge) -> String {
+/// wait for the loopback callback, then exchange its code against the
+/// same redirect uri the authorize request carried
+async fn await_browser_credentials(
+    server: CallbackServer,
+    pkce: PkceChallenge,
+    redirect_uri: String,
+) -> Result<OAuthCredentials, OAuthError> {
+    let (params, writer) = server.await_callback().await?;
+
+    if let Some(detail) = params.error_detail() {
+        let _ = writer.write_error(&detail).await;
+        return Err(OAuthError::TokenExchange(detail));
+    }
+
+    let code = params
+        .code
+        .ok_or_else(|| OAuthError::TokenExchange("oauth callback missing code".into()))?;
+    let state = params.state.unwrap_or_else(|| pkce.verifier.clone());
+
+    match exchange_code_impl(&code, &state, &pkce.verifier, &redirect_uri).await {
+        Ok(creds) => {
+            let _ = writer.write_success().await;
+            Ok(creds)
+        }
+        Err(err) => {
+            let _ = writer.write_error(&err.to_string()).await;
+            Err(err)
+        }
+    }
+}
+
+/// the console paste flow hands back `code#state` in one string
+fn split_code_and_state(input: &str) -> (String, String) {
+    let (code, state) = input.split_once('#').unwrap_or((input, ""));
+    (code.to_string(), state.to_string())
+}
+
+fn build_auth_url(pkce: &PkceChallenge, redirect_uri: &str) -> String {
     let params = [
         ("code", "true"),
         ("client_id", CLIENT_ID),
         ("response_type", "code"),
-        ("redirect_uri", REDIRECT_URI),
+        ("redirect_uri", redirect_uri),
         ("scope", SCOPES),
         ("code_challenge", &pkce.challenge),
         ("code_challenge_method", "S256"),
@@ -78,11 +143,11 @@ fn build_auth_url(pkce: &PkceChallenge) -> String {
 }
 
 async fn exchange_code_impl(
-    auth_code: &str,
+    code: &str,
+    state: &str,
     verifier: &str,
+    redirect_uri: &str,
 ) -> Result<OAuthCredentials, OAuthError> {
-    let (code, state) = auth_code.split_once('#').unwrap_or((auth_code, ""));
-
     let client = crate::http::client();
     let response = client
         .post(TOKEN_URL)
@@ -91,7 +156,7 @@ async fn exchange_code_impl(
             "client_id": CLIENT_ID,
             "code": code,
             "state": state,
-            "redirect_uri": REDIRECT_URI,
+            "redirect_uri": redirect_uri,
             "code_verifier": verifier,
         }))
         .send()
@@ -158,7 +223,7 @@ mod tests {
     #[test]
     fn auth_url_contains_required_params() {
         let pkce = generate_pkce().expect("pkce generation should succeed");
-        let url = build_auth_url(&pkce);
+        let url = build_auth_url(&pkce, REDIRECT_URI);
         assert!(url.starts_with("https://claude.ai/oauth/authorize?"));
         assert!(url.contains("client_id="));
         assert!(url.contains("code_challenge="));
@@ -176,5 +241,30 @@ mod tests {
         let (prompt, pkce) = provider.begin_login().expect("begin_login should succeed");
         assert!(prompt.url.contains("claude.ai"));
         assert!(!pkce.verifier.is_empty());
+    }
+
+    #[tokio::test]
+    async fn browser_login_points_the_redirect_at_the_bound_loopback_port() {
+        // the auto-completing flow swaps the console paste redirect for
+        // a loopback one, so the port in the url has to be the port the
+        // server actually bound (the preferred one may be taken)
+        let login = AnthropicOAuth
+            .begin_browser_login()
+            .await
+            .expect("browser login should start");
+        assert!(
+            login
+                .auth_url
+                .starts_with("https://claude.ai/oauth/authorize?")
+        );
+        assert!(
+            login
+                .auth_url
+                .contains("redirect_uri=http%3A%2F%2Flocalhost%3A"),
+            "got: {}",
+            login.auth_url
+        );
+        assert!(login.auth_url.contains("%2Fcallback"));
+        assert!(login.auth_url.contains("code_challenge="));
     }
 }

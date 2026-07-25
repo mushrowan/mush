@@ -19,7 +19,8 @@
 //! anthropic and codex providers already share.
 
 use super::{
-    AuthPrompt, OAuthCredentials, OAuthError, OAuthProvider, PkceChallenge, generate_pkce,
+    AuthPrompt, BrowserLogin, OAuthCredentials, OAuthError, OAuthProvider, PkceChallenge,
+    generate_pkce,
 };
 use crate::oauth::callback_server::{CallbackConfig, CallbackServer};
 
@@ -56,6 +57,18 @@ impl OAuthProvider for OpenRouterOAuth {
             },
             pkce,
         ))
+    }
+
+    fn begin_browser_login(
+        &self,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<BrowserLogin, OAuthError>> + Send + '_>,
+    > {
+        Box::pin(async move {
+            let session = OpenRouterLoginSession::start().await?;
+            let auth_url = session.auth_url.clone();
+            Ok(BrowserLogin::new(auth_url, session.await_credentials()))
+        })
     }
 
     fn exchange_code(

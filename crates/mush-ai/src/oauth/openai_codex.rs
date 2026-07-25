@@ -5,7 +5,8 @@ use reqwest::Url;
 use serde::Deserialize;
 
 use super::{
-    AuthPrompt, OAuthCredentials, OAuthError, OAuthProvider, PkceChallenge, generate_pkce,
+    AuthPrompt, BrowserLogin, OAuthCredentials, OAuthError, OAuthProvider, PkceChallenge,
+    generate_pkce,
 };
 use crate::oauth::callback_server::{CallbackConfig, CallbackServer};
 
@@ -38,6 +39,18 @@ impl OAuthProvider for OpenaiCodexOAuth {
             instructions: "after authorising, paste the full redirect URL (or code) here".into(),
         };
         Ok((prompt, pkce))
+    }
+
+    fn begin_browser_login(
+        &self,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<BrowserLogin, OAuthError>> + Send + '_>,
+    > {
+        Box::pin(async move {
+            let session = CodexLoginSession::start().await?;
+            let auth_url = session.auth_url.clone();
+            Ok(BrowserLogin::new(auth_url, session.await_credentials()))
+        })
     }
 
     fn exchange_code(

@@ -2804,6 +2804,7 @@ dependencies = [
  "mush-treesitter",
  "mush-tui",
  "nixcfg-rs",
+ "open",
  "pretty_assertions",
  "reqwest 0.13.4",
  "schemars",

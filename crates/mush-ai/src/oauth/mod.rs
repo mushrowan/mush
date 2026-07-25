@@ -57,6 +57,37 @@ pub struct AuthPrompt {
     pub instructions: String,
 }
 
+/// an in-progress browser login. `auth_url` is what the user opens; the
+/// provider's loopback callback server is already listening by the time
+/// this exists, so [`Self::await_credentials`] resolves as soon as the
+/// browser lands on the redirect and the token exchange settles
+pub struct BrowserLogin {
+    pub auth_url: String,
+    completion: std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<OAuthCredentials, OAuthError>> + Send>,
+    >,
+}
+
+impl BrowserLogin {
+    pub fn new(
+        auth_url: impl Into<String>,
+        completion: impl std::future::Future<Output = Result<OAuthCredentials, OAuthError>>
+        + Send
+        + 'static,
+    ) -> Self {
+        Self {
+            auth_url: auth_url.into(),
+            completion: Box::pin(completion),
+        }
+    }
+
+    /// wait for the browser to hit the loopback callback, then exchange
+    /// the code for credentials
+    pub async fn await_credentials(self) -> Result<OAuthCredentials, OAuthError> {
+        self.completion.await
+    }
+}
+
 /// trait for oauth providers
 pub trait OAuthProvider: Send + Sync {
     /// unique id (e.g. "anthropic")
@@ -65,8 +96,18 @@ pub trait OAuthProvider: Send + Sync {
     /// human-readable name
     fn name(&self) -> &str;
 
-    /// start the login flow, returning the URL and instructions
+    /// start the login flow, returning the URL and instructions for the
+    /// paste-the-code fallback (used when no browser can reach this
+    /// machine, e.g. over ssh)
     fn begin_login(&self) -> Result<(AuthPrompt, PkceChallenge), OAuthError>;
+
+    /// bind a loopback callback server and prepare the browser login
+    /// that completes itself once the provider redirects back
+    fn begin_browser_login(
+        &self,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<BrowserLogin, OAuthError>> + Send + '_>,
+    >;
 
     /// exchange the user-provided code for credentials
     fn exchange_code(
@@ -237,5 +278,23 @@ mod tests {
         let provider = provider.unwrap();
         assert_eq!(provider.id(), "openrouter");
         assert!(provider.name().to_lowercase().contains("openrouter"));
+    }
+
+    #[tokio::test]
+    async fn every_builtin_provider_offers_a_loopback_browser_login() {
+        // /login relies on this: no provider may be paste-only, or the
+        // picker would have to know which rows can auto-complete
+        for provider in builtin_providers() {
+            let login = provider
+                .begin_browser_login()
+                .await
+                .unwrap_or_else(|e| panic!("{} browser login failed: {e}", provider.id()));
+            assert!(
+                login.auth_url.contains("localhost%3A"),
+                "{} should redirect to a loopback callback, got {}",
+                provider.id(),
+                login.auth_url
+            );
+        }
     }
 }

@@ -302,10 +302,12 @@ pub async fn login(provider_id: Option<String>) -> Result<()> {
 
     eprintln!("logging in to {}...\n", provider.name());
 
-    let creds = match provider_id.as_str() {
-        "openai-codex" => login_codex_with_local_server().await?,
-        "openrouter" => login_openrouter_with_local_server().await?,
-        _ => login_via_paste(provider.as_ref()).await?,
+    let creds = match login_via_browser(provider.as_ref()).await {
+        Ok(creds) => creds,
+        Err(e) => {
+            eprintln!("browser login unavailable ({e})\nfalling back to paste-the-code\n");
+            login_via_paste(provider.as_ref()).await?
+        }
     };
 
     let mut store =
@@ -323,6 +325,28 @@ pub async fn login(provider_id: Option<String>) -> Result<()> {
     eprintln!("model discovery: {}", summary.one_line());
 
     Ok(())
+}
+
+async fn login_via_browser(
+    provider: &dyn mush_ai::oauth::OAuthProvider,
+) -> Result<mush_ai::oauth::OAuthCredentials> {
+    let login = provider
+        .begin_browser_login()
+        .await
+        .map_err(|e| eyre!("failed to start the local callback server: {e}"))?;
+
+    if open::that_detached(&login.auth_url).is_ok() {
+        eprintln!("opened this URL in your browser:\n");
+    } else {
+        eprintln!("open this URL in your browser:\n");
+    }
+    eprintln!("  {}\n", login.auth_url);
+    eprintln!("waiting for the browser callback...");
+
+    login
+        .await_credentials()
+        .await
+        .map_err(|e| eyre!("login failed: {e}"))
 }
 
 async fn login_via_paste(
@@ -344,40 +368,6 @@ async fn login_via_paste(
 
     provider
         .exchange_code(input, &pkce)
-        .await
-        .map_err(|e| eyre!("login failed: {e}"))
-}
-
-async fn login_codex_with_local_server() -> Result<mush_ai::oauth::OAuthCredentials> {
-    use mush_ai::oauth::openai_codex::CodexLoginSession;
-
-    let session = CodexLoginSession::start()
-        .await
-        .map_err(|e| eyre!("failed to start codex login server: {e}"))?;
-
-    eprintln!("open this URL in your browser:\n");
-    eprintln!("  {}\n", session.auth_url);
-    eprintln!("waiting for the browser callback...");
-
-    session
-        .await_credentials()
-        .await
-        .map_err(|e| eyre!("login failed: {e}"))
-}
-
-async fn login_openrouter_with_local_server() -> Result<mush_ai::oauth::OAuthCredentials> {
-    use mush_ai::oauth::openrouter::OpenRouterLoginSession;
-
-    let session = OpenRouterLoginSession::start()
-        .await
-        .map_err(|e| eyre!("failed to start openrouter login server: {e}"))?;
-
-    eprintln!("open this URL in your browser:\n");
-    eprintln!("  {}\n", session.auth_url);
-    eprintln!("waiting for the browser callback...");
-
-    session
-        .await_credentials()
         .await
         .map_err(|e| eyre!("login failed: {e}"))
 }
