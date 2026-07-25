@@ -213,31 +213,14 @@ async fn handle_compaction_recovery_action(
                     .push_system_message("compaction already in progress on this pane");
                 return;
             }
-            let (compact_model, compact_options) = deps
-                .tui_config
-                .compaction_model
-                .as_ref()
-                .map(|(model, options)| (model.clone(), options.clone()))
-                .unwrap_or_else(|| {
-                    let pane = pane_mgr.focused();
-                    let model = super::streams::resolve_runtime_model(
-                        pane.app.model_id.as_str(),
-                        &deps.tui_config.model,
-                    );
-                    (model, deps.tui_config.options.clone())
-                });
-            let compact_options = crate::event_handler::resolve_auth_into_options(
-                &compact_model,
-                compact_options,
-                &deps.tui_config.provider_api_keys,
-            )
-            .await;
+            let target =
+                super::streams::compaction_target(pane_mgr, pane_id, deps.tui_config).await;
             pane_mgr.focused_mut().app.status = Some("retrying compaction…".into());
             pane_mgr.focused_mut().app.compacting = true;
             let task = crate::slash::start_compaction(
                 recovery.failure.original_messages().to_vec(),
-                compact_model,
-                compact_options,
+                target.model,
+                target.options,
                 deps.registry.clone(),
                 Some(deps.lifecycle_hooks.clone()),
                 Some(deps.cwd.to_path_buf()),

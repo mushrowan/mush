@@ -557,12 +557,12 @@ async fn auto_compact(
     };
 
     let context_tokens = pane.app.stats.context_tokens;
-    let compaction_window = tui_config.model.compaction_window();
-
     let messages = pane.conversation.context();
+    let target = compaction_target(pane_mgr, pane_id, tui_config).await;
+
     if !mush_session::compact::needs_compaction_for_messages(
         context_tokens,
-        compaction_window,
+        target.window,
         &messages,
     ) {
         return;
@@ -574,22 +574,10 @@ async fn auto_compact(
     )]
     let pane = pane_mgr.pane_mut(pane_id).expect("pane exists after check");
 
-    let (compact_model, compact_options) = tui_config
-        .compaction_model
-        .as_ref()
-        .map(|(m, o)| (m.clone(), o.clone()))
-        .unwrap_or_else(|| (tui_config.model.clone(), tui_config.options.clone()));
-    let compact_options = crate::event_handler::resolve_auth_into_options(
-        &compact_model,
-        compact_options,
-        &tui_config.provider_api_keys,
-    )
-    .await;
-
     let task = crate::slash::start_compaction(
         messages,
-        compact_model,
-        compact_options,
+        target.model,
+        target.options,
         registry.clone(),
         Some(tui_config.lifecycle_hooks.clone()),
         Some(tui_config.cwd.clone()),
@@ -996,6 +984,45 @@ fn pane_model(pane_mgr: &PaneManager, pane_id: PaneId, default_model: &Model) ->
         .unwrap_or_else(|| default_model.clone())
 }
 
+/// what a compaction run for one pane should use
+pub(super) struct CompactionTarget {
+    /// model that writes the summary. `/compaction-model` overrides it,
+    /// otherwise the pane's own model does the work
+    pub model: Model,
+    /// options for that model, with fresh auth resolved
+    pub options: StreamOptions,
+    /// input-token budget to compact against. always the pane's own
+    /// model, never the summariser's, since that is the window the
+    /// conversation has to fit into
+    pub window: mush_ai::types::TokenCount,
+}
+
+/// resolve the summariser model, its auth and the budget for compacting
+/// `pane_id`. every compaction entry point (`/compact`, the recovery
+/// retry, auto-compaction) goes through here so a pane switched with
+/// `/model` compacts against its own window with its own model
+pub(super) async fn compaction_target(
+    pane_mgr: &PaneManager,
+    pane_id: PaneId,
+    tui_config: &TuiConfig,
+) -> CompactionTarget {
+    let pane_model = pane_model(pane_mgr, pane_id, &tui_config.model);
+    let (model, options) = tui_config
+        .compaction_options()
+        .unwrap_or_else(|| (pane_model.clone(), tui_config.stream_options()));
+    let options = crate::event_handler::resolve_auth_into_options(
+        &model,
+        options,
+        &tui_config.provider_api_keys,
+    )
+    .await;
+    CompactionTarget {
+        model,
+        options,
+        window: pane_model.compaction_window(),
+    }
+}
+
 /// resolve a model id picked at runtime (via `/model` or a delegation
 /// request) against the merged catalogue (static + user + discovered).
 ///
@@ -1334,6 +1361,68 @@ mod tests {
 
     use mush_ai::models;
     use mush_ai::types::{ModelId, ToolCallId};
+
+    #[tokio::test]
+    async fn compaction_target_follows_the_pane_model_not_the_startup_one() {
+        // a pane switched with /model has its own context window and its
+        // own summariser. keying either off the startup model compacts
+        // against the wrong budget with the wrong model
+        let catalogue = models::all_models_with_user();
+        let startup = catalogue.first().expect("catalogue is never empty").clone();
+        let switched = catalogue
+            .iter()
+            .find(|m| m.id != startup.id && m.compaction_window() != startup.compaction_window())
+            .expect("catalogue should hold two models with different windows")
+            .clone();
+
+        let mut config = crate::runner::TuiConfig::for_test();
+        config.model = startup.clone();
+
+        let pane_id = PaneId::new(1);
+        let mut app = crate::app::App::new(switched.id.clone(), switched.context_window);
+        app.model_id = switched.id.clone();
+        let pane_mgr = PaneManager::new(crate::pane::Pane::new(pane_id, app));
+
+        let target = compaction_target(&pane_mgr, pane_id, &config).await;
+
+        assert_eq!(
+            target.model.id, switched.id,
+            "the pane's own model should write the summary"
+        );
+        assert_eq!(
+            target.window,
+            switched.compaction_window(),
+            "the pane's own window is the budget to compact against"
+        );
+    }
+
+    #[tokio::test]
+    async fn compaction_target_prefers_the_configured_summariser_model() {
+        let catalogue = models::all_models_with_user();
+        let pane_model = catalogue.first().expect("catalogue is never empty").clone();
+        let summariser = catalogue
+            .iter()
+            .find(|m| m.id != pane_model.id)
+            .expect("catalogue should hold two models")
+            .clone();
+
+        let mut config = crate::runner::TuiConfig::for_test();
+        config.model = pane_model.clone();
+        config.compaction_model = Some((summariser.clone(), StreamOptions::default()));
+
+        let pane_id = PaneId::new(1);
+        let app = crate::app::App::new(pane_model.id.clone(), pane_model.context_window);
+        let pane_mgr = PaneManager::new(crate::pane::Pane::new(pane_id, app));
+
+        let target = compaction_target(&pane_mgr, pane_id, &config).await;
+
+        assert_eq!(target.model.id, summariser.id, "/compaction-model wins");
+        assert_eq!(
+            target.window,
+            pane_model.compaction_window(),
+            "the window still comes from the pane's model, not the summariser"
+        );
+    }
 
     #[test]
     fn stream_config_groups_owned_fields() {

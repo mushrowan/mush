@@ -43,44 +43,32 @@ pub(super) async fn handle_slash_action(
 
     match action {
         SlashAction::Compact { context_budget } => {
-            let pane = pane_mgr.focused_mut();
-            let pane_id = pane.id;
-            let messages = pane.conversation.context();
-            let before = messages.len();
-            if before <= slash::MIN_MESSAGES_FOR_COMPACTION {
-                pane.app
+            let pane_id = pane_mgr.focused().id;
+            let messages = pane_mgr.focused().conversation.context();
+            if messages.len() <= slash::MIN_MESSAGES_FOR_COMPACTION {
+                pane_mgr
+                    .focused_mut()
+                    .app
                     .push_system_message("conversation too short to compact");
             } else {
                 use std::collections::hash_map::Entry;
                 match pending_compactions.entry(pane_id) {
                     Entry::Occupied(_) => {
-                        pane.app
+                        pane_mgr
+                            .focused_mut()
+                            .app
                             .push_system_message("compaction already in progress on this pane");
                     }
                     Entry::Vacant(slot) => {
-                        let (compact_model, compact_options) = tui_config
-                            .compaction_model
-                            .as_ref()
-                            .map(|(m, o)| (m.clone(), o.clone()))
-                            .unwrap_or_else(|| {
-                                let m = super::streams::resolve_runtime_model(
-                                    pane.app.model_id.as_str(),
-                                    &tui_config.model,
-                                );
-                                (m, tui_config.options.clone())
-                            });
-                        let compact_options = crate::event_handler::resolve_auth_into_options(
-                            &compact_model,
-                            compact_options,
-                            &tui_config.provider_api_keys,
-                        )
-                        .await;
+                        let target =
+                            super::streams::compaction_target(pane_mgr, pane_id, tui_config).await;
+                        let pane = pane_mgr.focused_mut();
                         pane.app.status = Some("compacting…".into());
                         pane.app.compacting = true;
                         let task = slash::start_compaction(
                             messages,
-                            compact_model,
-                            compact_options,
+                            target.model,
+                            target.options,
                             registry.clone(),
                             Some(lifecycle_hooks.clone()),
                             Some(cwd.to_path_buf()),
