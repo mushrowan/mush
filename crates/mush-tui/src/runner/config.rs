@@ -171,6 +171,8 @@ pub struct TuiConfig {
     /// `None` means /reload reports "not supported" rather than silently
     /// becoming a no-op
     pub reload_context: Option<ReloadCallback>,
+    /// live MCP servers, for `/mcp`. `None` when no servers are configured
+    pub mcp: Option<std::sync::Arc<mush_mcp::McpManager>>,
     /// validator applied to file content produced by `write` and `edit`.
     /// rejects content containing any of the configured chars unless
     /// the model passes `allow_forbidden_chars: true` on the call.
@@ -295,6 +297,7 @@ impl TuiConfig {
             save_recent_models: None,
             keymap: crate::keybinds::KeyMap::default(),
             reload_context: None,
+            mcp: None,
             forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars::default(),
         }
     }

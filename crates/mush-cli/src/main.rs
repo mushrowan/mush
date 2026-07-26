@@ -621,6 +621,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
                 }
             },
         )),
+        mcp: setup.mcp.clone(),
         forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars::with_classes(
             setup.cfg.forbidden_chars.iter().copied(),
             setup.cfg.forbidden_char_classes.iter().copied(),

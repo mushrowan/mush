@@ -105,6 +105,10 @@ pub(super) async fn handle_slash_action(
         SlashAction::Endpoints { model_id } => {
             handle_endpoints(pane_mgr.focused_mut(), tui_config, model_id.as_deref()).await;
         }
+        SlashAction::Mcp(query) => {
+            let report = mcp_report(tui_config.mcp.as_deref(), &query).await;
+            pane_mgr.focused_mut().app.push_system_message(report);
+        }
         SlashAction::Broadcast { message } => {
             if !pane_mgr.is_multi_pane() {
                 pane_mgr
@@ -412,6 +416,35 @@ fn apply_reloaded_templates(pane_mgr: &mut PaneManager, templates: &[mush_ext::P
                     description: template.description.clone().unwrap_or_default(),
                 });
             pane.app.completion.templates.push(template.clone());
+        }
+    }
+}
+
+/// answer a `/mcp` query against the live servers
+///
+/// every branch reads through the manager rather than a startup snapshot,
+/// so a `/mcp reconnect` is reflected by the next `/mcp tools`.
+async fn mcp_report(manager: Option<&mush_mcp::McpManager>, query: &slash::McpQuery) -> String {
+    use mush_mcp::report;
+    use slash::McpQuery;
+
+    let Some(manager) = manager else {
+        return "no MCP servers configured. add an [mcp.<name>] section to config.toml".to_string();
+    };
+
+    match query {
+        McpQuery::Status => report::format_status(&manager.statuses().await),
+        McpQuery::Tools { server } => {
+            let tools = manager.catalogue().tools(server.as_deref()).await;
+            report::format_tools(&tools, server.as_deref())
+        }
+        McpQuery::Schema { tool } => {
+            let schema = manager.catalogue().schema(tool).await;
+            report::format_schema(tool, schema.as_ref())
+        }
+        McpQuery::Reconnect { server } => {
+            let state = manager.reconnect(server).await;
+            report::format_reconnect(server, state.as_ref())
         }
     }
 }
@@ -798,6 +831,55 @@ mod tests {
             .templates
             .push(template("old-template", "stale"));
         pane
+    }
+
+    #[tokio::test]
+    async fn mcp_without_any_configured_servers_points_at_the_config_file() {
+        let report = mcp_report(None, &slash::McpQuery::Status).await;
+        assert!(report.contains("config.toml"), "got {report}");
+    }
+
+    #[tokio::test]
+    async fn mcp_status_of_an_empty_manager_says_nothing_is_configured() {
+        let manager = mush_mcp::McpManager::connect_all(&std::collections::HashMap::new()).await;
+        let report = mcp_report(Some(&manager), &slash::McpQuery::Status).await;
+        assert_eq!(report, "no MCP servers configured");
+    }
+
+    #[tokio::test]
+    async fn mcp_reconnect_of_an_unknown_server_says_so() {
+        let manager = mush_mcp::McpManager::connect_all(&std::collections::HashMap::new()).await;
+        let report = mcp_report(
+            Some(&manager),
+            &slash::McpQuery::Reconnect {
+                server: "ghost".into(),
+            },
+        )
+        .await;
+        assert!(report.contains("ghost"), "got {report}");
+    }
+
+    #[tokio::test]
+    async fn mcp_tools_of_an_empty_manager_names_the_requested_server() {
+        let manager = mush_mcp::McpManager::connect_all(&std::collections::HashMap::new()).await;
+        let report = mcp_report(
+            Some(&manager),
+            &slash::McpQuery::Tools {
+                server: Some("sweethome3d".into()),
+            },
+        )
+        .await;
+        assert!(report.contains("sweethome3d"), "got {report}");
+    }
+
+    #[test]
+    fn mcp_is_listed_in_the_slash_menu() {
+        assert!(
+            super::super::runtime::BUILTIN_SLASH_COMMANDS
+                .iter()
+                .any(|(name, _)| *name == "mcp"),
+            "/mcp should be discoverable in the slash menu"
+        );
     }
 
     #[test]

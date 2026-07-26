@@ -12,7 +12,7 @@ use crate::pane::{Pane, PaneId, PaneManager};
 use crate::slash::PendingCompaction;
 use crate::slash_menu::SlashCommand;
 
-const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
+pub(super) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("help", "show available commands"),
     ("keys", "show keyboard shortcuts"),
     ("new", "save session, start fresh"),
@@ -30,6 +30,7 @@ const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("credits", "show openrouter credit balance"),
     ("endpoints", "show openrouter providers serving a model"),
     ("logs", "show recent log entries"),
+    ("mcp", "MCP server status, tools, schemas, reconnect"),
     ("injection", "toggle prompt injection preview"),
     (
         "settings",

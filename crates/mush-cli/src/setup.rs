@@ -32,6 +32,8 @@ pub struct AppSetup {
     pub lsp_diagnostics: Option<mush_agent::DiagnosticCallback>,
     /// shared http client for all network calls
     pub http_client: mush_ai::http::HttpClient,
+    /// live MCP servers, retained so `/mcp` can inspect and redial them
+    pub mcp: Option<std::sync::Arc<mush_mcp::McpManager>>,
 }
 
 /// CLI args needed for shared setup (avoids depending on clap struct)
@@ -113,7 +115,7 @@ impl AppSetup {
             t.phase("builtin tools");
         }
 
-        init_mcp(&cfg, args.no_tools, &mut tools).await;
+        let mcp = init_mcp(&cfg, args.no_tools, &mut tools).await;
         if let Some(t) = &mut timer {
             t.phase("mcp");
         }
@@ -184,6 +186,7 @@ impl AppSetup {
                 file_rules,
                 lsp_diagnostics,
                 http_client,
+                mcp,
             },
             report,
         ))
@@ -215,25 +218,27 @@ fn init_builtin_tools(
     )
 }
 
+/// connect configured MCP servers and register their tools
+///
+/// returns the manager so `/mcp` can report status and redial. in dynamic
+/// mode the three meta-tools are registered even when nothing connected,
+/// so a later `/mcp reconnect` makes tools reachable without a restart.
 async fn init_mcp(
     cfg: &config::Config,
     no_tools: bool,
     tools: &mut mush_agent::tool::ToolRegistry,
-) {
+) -> Option<std::sync::Arc<mush_mcp::McpManager>> {
     if no_tools || cfg.mcp.is_empty() {
-        return;
+        return None;
     }
 
-    let (mcp_manager, mcp_tools) = mush_mcp::McpManager::connect_all(&cfg.mcp).await;
+    let manager = std::sync::Arc::new(mush_mcp::McpManager::connect_all(&cfg.mcp).await);
     if cfg.dynamic_mcp {
-        let conns = mcp_manager.connections();
-        if !conns.is_empty() {
-            let dynamic = mush_mcp::dynamic::dynamic_mcp_tools(&conns);
-            tools.extend_shared(dynamic.iter().cloned());
-        }
+        tools.extend_shared(mush_mcp::dynamic::dynamic_mcp_tools(manager.catalogue()));
     } else {
-        tools.extend_shared(mcp_tools.iter().cloned());
+        tools.extend_shared(manager.tool_registry().await.iter().cloned());
     }
+    Some(manager)
 }
 
 fn init_skill_tools(

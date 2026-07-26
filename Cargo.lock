@@ -2955,6 +2955,7 @@ dependencies = [
  "mush-agent",
  "mush-ai",
  "mush-ext",
+ "mush-mcp",
  "mush-session",
  "mush-tools",
  "notify",

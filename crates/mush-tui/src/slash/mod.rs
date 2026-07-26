@@ -17,6 +17,19 @@ pub use compaction::{
     fallback_applied_compaction, handle_compact, run_compaction, start_compaction,
 };
 
+/// what `/mcp` was asked for
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpQuery {
+    /// per-server connection status
+    Status,
+    /// tool names and descriptions, optionally for one server
+    Tools { server: Option<String> },
+    /// json schema for one tool
+    Schema { tool: String },
+    /// redial one server, keeping registered tools pointed at it
+    Reconnect { server: String },
+}
+
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum SlashParseError {
     #[error("slash commands must start with /")]
@@ -25,6 +38,8 @@ pub enum SlashParseError {
     BranchUsage,
     #[error("usage: /logs [n]")]
     LogsUsage,
+    #[error("usage: /mcp | /mcp tools [server] | /mcp schema <tool> | /mcp reconnect <server>")]
+    McpUsage,
     #[error("usage: /broadcast <message>")]
     BroadcastUsage,
     #[error("usage: /lock <path>")]
@@ -133,6 +148,8 @@ pub enum SlashAction {
     Panes,
     Merge,
     Card,
+    /// inspect configured MCP servers and the tools they advertise
+    Mcp(McpQuery),
     TaskClaim {
         id: String,
         description: String,
@@ -240,6 +257,7 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
             model_id: (!args.is_empty()).then(|| args.to_string()),
         }),
         "card" => Ok(SlashAction::Card),
+        "mcp" => parse_mcp(args).map(SlashAction::Mcp),
         "logs" if args.is_empty() => Ok(SlashAction::Logs { count: 50 }),
         "logs" => args
             .parse::<usize>()
@@ -343,9 +361,80 @@ fn parse_context_budget(
     Ok(Some(budget))
 }
 
+fn parse_mcp(args: &str) -> Result<McpQuery, SlashParseError> {
+    let (sub, rest) = split_name_and_args(args);
+    match sub {
+        "" => Ok(McpQuery::Status),
+        "tools" => Ok(McpQuery::Tools {
+            server: (!rest.is_empty()).then(|| rest.to_string()),
+        }),
+        "schema" if rest.is_empty() => Err(SlashParseError::McpUsage),
+        "schema" => Ok(McpQuery::Schema {
+            tool: rest.to_string(),
+        }),
+        "reconnect" if rest.is_empty() => Err(SlashParseError::McpUsage),
+        "reconnect" => Ok(McpQuery::Reconnect {
+            server: rest.to_string(),
+        }),
+        _ => Err(SlashParseError::McpUsage),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_mcp_bare_is_status() {
+        assert_eq!(parse("/mcp").unwrap(), SlashAction::Mcp(McpQuery::Status));
+    }
+
+    #[test]
+    fn parse_mcp_tools_with_and_without_a_server() {
+        assert_eq!(
+            parse("/mcp tools").unwrap(),
+            SlashAction::Mcp(McpQuery::Tools { server: None })
+        );
+        assert_eq!(
+            parse("/mcp tools sweethome3d").unwrap(),
+            SlashAction::Mcp(McpQuery::Tools {
+                server: Some("sweethome3d".into())
+            })
+        );
+    }
+
+    #[test]
+    fn parse_mcp_schema_needs_a_tool_name() {
+        assert_eq!(
+            parse("/mcp schema sweethome3d_render_photo").unwrap(),
+            SlashAction::Mcp(McpQuery::Schema {
+                tool: "sweethome3d_render_photo".into()
+            })
+        );
+        assert_eq!(parse("/mcp schema"), Err(SlashParseError::McpUsage));
+    }
+
+    #[test]
+    fn parse_mcp_reconnect_needs_a_server() {
+        assert_eq!(
+            parse("/mcp reconnect sweethome3d").unwrap(),
+            SlashAction::Mcp(McpQuery::Reconnect {
+                server: "sweethome3d".into()
+            })
+        );
+        assert_eq!(parse("/mcp reconnect"), Err(SlashParseError::McpUsage));
+    }
+
+    #[test]
+    fn parse_mcp_rejects_an_unknown_subcommand() {
+        assert_eq!(parse("/mcp wibble"), Err(SlashParseError::McpUsage));
+    }
+
+    #[test]
+    fn mcp_status_is_safe_during_stream() {
+        // read-only, so it must not be blocked mid-turn
+        assert!(SlashAction::Mcp(McpQuery::Status).is_safe_during_stream());
+    }
 
     #[test]
     fn parse_thinking_expand_action() {

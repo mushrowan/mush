@@ -2057,6 +2057,7 @@ mod tests {
             save_recent_models: None,
             keymap: crate::keybinds::KeyMap::default(),
             reload_context: None,
+            mcp: None,
             forbidden_chars: Default::default(),
         }
     }
