@@ -144,6 +144,18 @@ impl ImageMimeType {
             _ => Self::Png,
         }
     }
+
+    /// parse from a mime type string, `None` when the api cannot carry it
+    #[must_use]
+    pub fn from_mime_type(mime: &str) -> Option<Self> {
+        match mime.trim().to_lowercase().as_str() {
+            "image/jpeg" | "image/jpg" => Some(Self::Jpeg),
+            "image/png" => Some(Self::Png),
+            "image/gif" => Some(Self::Gif),
+            "image/webp" => Some(Self::Webp),
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Display for ImageMimeType {
