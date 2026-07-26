@@ -1,8 +1,6 @@
 //! MCP server connection management
 
-use std::collections::HashMap;
 use std::io::IsTerminal;
-use std::sync::Arc;
 use std::time::Duration;
 
 use rmcp::ServiceExt;
@@ -14,7 +12,6 @@ use rmcp::transport::ConfigureCommandExt;
 use tokio::process::Command;
 
 use crate::config::{McpServerConfig, McpServerType, build_http_config};
-use crate::tool::McpTool;
 
 /// error type for MCP operations
 #[derive(Debug, thiserror::Error)]
@@ -25,12 +22,14 @@ pub enum McpError {
     ToolCall(String),
     #[error("server disabled")]
     Disabled,
+    #[error("server {0} is not connected")]
+    NotConnected(String),
     #[error("timed out after {}s", .0.as_secs())]
     Timeout(Duration),
 }
 
-const DIM: &str = "2";
-const YELLOW: &str = "33";
+pub(crate) const DIM: &str = "2";
+pub(crate) const YELLOW: &str = "33";
 
 /// wrap a startup status line in an ansi code, or leave it alone
 ///
@@ -45,7 +44,7 @@ fn status_line(text: &str, ansi: &str, colour: bool) -> String {
 }
 
 /// report startup status on stderr, styled only for a real terminal
-fn report_status(text: &str, ansi: &str) {
+pub(crate) fn report_status(text: &str, ansi: &str) {
     eprintln!(
         "{}",
         status_line(text, ansi, std::io::stderr().is_terminal())
@@ -185,126 +184,9 @@ impl McpConnection {
     }
 }
 
-/// manages connections to multiple MCP servers
-pub struct McpManager {
-    connections: HashMap<String, Arc<McpConnection>>,
-}
-
-impl McpManager {
-    /// connect to all configured MCP servers
-    #[tracing::instrument(name = "mcp_connect_all", skip_all)]
-    pub async fn connect_all(
-        configs: &HashMap<String, McpServerConfig>,
-    ) -> (Self, mush_agent::tool::ToolRegistry) {
-        let mut connections = HashMap::new();
-        let mut tools = mush_agent::tool::ToolRegistry::new();
-
-        for (name, config) in configs {
-            if !config.enabled {
-                continue;
-            }
-
-            match McpConnection::connect(name, config).await {
-                Ok(conn) => {
-                    let conn = Arc::new(conn);
-                    for mcp_tool in &conn.tools {
-                        tools.register_shared(std::sync::Arc::new(McpTool::new(
-                            name,
-                            mcp_tool.clone(),
-                            Arc::clone(&conn),
-                        )));
-                    }
-                    connections.insert(name.clone(), conn);
-                }
-                Err(McpError::Disabled) => {}
-                Err(e) => {
-                    tracing::warn!(server = %name, error = %e, "MCP server connection failed");
-                    report_status(&format!("mcp: {name} failed: {e}"), YELLOW);
-                }
-            }
-        }
-
-        (Self { connections }, tools)
-    }
-
-    /// get a connection by name
-    pub fn get(&self, name: &str) -> Option<&Arc<McpConnection>> {
-        self.connections.get(name)
-    }
-
-    /// list connected server names
-    pub fn connected_servers(&self) -> Vec<&str> {
-        self.connections.keys().map(|s| s.as_str()).collect()
-    }
-
-    /// get all connections as (name, connection) pairs for dynamic tool building
-    pub fn connections(&self) -> Vec<(String, Arc<McpConnection>)> {
-        self.connections
-            .iter()
-            .map(|(k, v)| (k.clone(), Arc::clone(v)))
-            .collect()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
-
-    /// one local server keyed as `name`, running `command`
-    fn local(name: &str, command: &[&str], timeout: u64) -> HashMap<String, McpServerConfig> {
-        HashMap::from([(
-            name.to_string(),
-            McpServerConfig {
-                server_type: McpServerType::Local {
-                    command: command.iter().map(|s| (*s).to_string()).collect(),
-                },
-                enabled: true,
-                timeout,
-                environment: HashMap::new(),
-            },
-        )])
-    }
-
-    #[tokio::test]
-    async fn connect_all_with_empty_config() {
-        let (manager, tools) = McpManager::connect_all(&HashMap::new()).await;
-        assert!(manager.connected_servers().is_empty());
-        assert!(tools.is_empty());
-    }
-
-    #[tokio::test]
-    async fn disabled_server_skipped() {
-        let mut configs = local("test", &["nonexistent"], 30);
-        configs.get_mut("test").unwrap().enabled = false;
-
-        let (manager, tools) = McpManager::connect_all(&configs).await;
-        assert!(manager.connected_servers().is_empty());
-        assert!(tools.is_empty());
-    }
-
-    #[tokio::test]
-    async fn invalid_command_reports_error() {
-        let configs = local("bad", &["__nonexistent_binary_xyz__"], 5);
-        let (manager, _tools) = McpManager::connect_all(&configs).await;
-        assert!(manager.connected_servers().is_empty());
-    }
-
-    /// a server that spawns but never speaks must not wedge startup
-    /// a server that spawns but never speaks must not wedge startup
-    #[tokio::test]
-    async fn silent_server_gives_up_after_the_configured_timeout() {
-        let configs = local("hang", &["sleep", "60"], 1);
-
-        let connected =
-            tokio::time::timeout(Duration::from_secs(20), McpManager::connect_all(&configs)).await;
-
-        let Ok((manager, tools)) = connected else {
-            panic!("connect_all ignored the 1s timeout and hung");
-        };
-        assert!(manager.connected_servers().is_empty());
-        assert!(tools.is_empty());
-    }
 
     #[test]
     fn status_is_plain_when_stderr_is_redirected() {

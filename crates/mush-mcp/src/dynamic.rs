@@ -10,101 +10,20 @@
 use std::sync::Arc;
 
 use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
-use rmcp::model::Tool as McpToolDef;
 use serde::Deserialize;
 
-use crate::connection::McpConnection;
+use crate::catalogue::McpCatalogue;
 
-/// lightweight tool info for listing (no schema)
-#[derive(Debug, Clone)]
-struct ToolInfo {
-    server: String,
-    full_name: String,
-    tool_name: String,
-    description: String,
-}
-
-/// shared state for all dynamic meta-tools
-pub struct McpToolIndex {
-    tools: Vec<ToolInfo>,
-    definitions: Vec<(String, McpToolDef)>,
-    connections: Vec<(String, Arc<McpConnection>)>,
-}
-
-impl McpToolIndex {
-    /// build from connected MCP servers
-    pub fn new(connections: &[(String, Arc<McpConnection>)]) -> Self {
-        let mut tools = Vec::new();
-        let mut definitions = Vec::new();
-        let mut conns = Vec::new();
-
-        for (server_name, conn) in connections {
-            conns.push((server_name.clone(), Arc::clone(conn)));
-            for tool_def in &conn.tools {
-                let tool_name = tool_def.name.to_string();
-                let full_name = format!("{server_name}_{tool_name}");
-                let description = tool_def
-                    .description
-                    .as_deref()
-                    .unwrap_or("MCP tool")
-                    .to_string();
-                tools.push(ToolInfo {
-                    server: server_name.clone(),
-                    full_name: full_name.clone(),
-                    tool_name,
-                    description,
-                });
-                definitions.push((full_name, tool_def.clone()));
-            }
-        }
-
-        Self {
-            tools,
-            definitions,
-            connections: conns,
-        }
-    }
-
-    /// export tool names and descriptions for semantic indexing
-    pub fn tool_descriptions(&self) -> Vec<(String, String)> {
-        self.tools
-            .iter()
-            .map(|t| (t.full_name.clone(), t.description.clone()))
-            .collect()
-    }
-
-    fn find_definition(&self, name: &str) -> Option<&McpToolDef> {
-        let query = name.to_lowercase();
-        self.definitions
-            .iter()
-            .find(|(n, _)| n.to_lowercase() == query)
-            .map(|(_, d)| d)
-    }
-
-    fn find_connection(&self, tool_name: &str) -> Option<(&str, &str, &Arc<McpConnection>)> {
-        let query = tool_name.to_lowercase();
-        self.tools
-            .iter()
-            .find(|t| t.full_name.to_lowercase() == query)
-            .and_then(|t| {
-                self.connections
-                    .iter()
-                    .find(|(s, _)| *s == t.server)
-                    .map(|(_, conn)| (t.server.as_str(), t.tool_name.as_str(), conn))
-            })
-    }
-}
-
-type SharedIndex = Arc<McpToolIndex>;
+type SharedCatalogue = Arc<McpCatalogue>;
 
 // mcp_list_tools
 pub struct McpListToolsTool {
-    index: SharedIndex,
+    catalogue: SharedCatalogue,
 }
 
 impl McpListToolsTool {
-    pub fn new(index: SharedIndex) -> Self {
-        Self { index }
+    pub fn new(catalogue: SharedCatalogue) -> Self {
+        Self { catalogue }
     }
 }
 
@@ -138,21 +57,8 @@ impl AgentTool for McpListToolsTool {
         mush_agent::tool::OutputLimit::Head
     }
     async fn execute(&self, args: serde_json::Value) -> ToolResult {
-        let filter = args
-            .get("server")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_lowercase());
-
-        let tools: Vec<_> = self
-            .index
-            .tools
-            .iter()
-            .filter(|t| {
-                filter
-                    .as_ref()
-                    .is_none_or(|f| t.server.to_lowercase() == *f)
-            })
-            .collect();
+        let filter = args.get("server").and_then(|v| v.as_str());
+        let tools = self.catalogue.tools(filter).await;
 
         if tools.is_empty() {
             return ToolResult::text("no MCP tools available");
@@ -176,12 +82,12 @@ struct GetSchemasArgs {
 }
 
 pub struct McpGetSchemasTool {
-    index: SharedIndex,
+    catalogue: SharedCatalogue,
 }
 
 impl McpGetSchemasTool {
-    pub fn new(index: SharedIndex) -> Self {
-        Self { index }
+    pub fn new(catalogue: SharedCatalogue) -> Self {
+        Self { catalogue }
     }
 }
 
@@ -224,17 +130,11 @@ impl AgentTool for McpGetSchemasTool {
         let mut not_found = Vec::new();
 
         for name in &args.names {
-            match self.index.find_definition(name) {
-                Some(def) => {
-                    let schema = serde_json::to_value(&def.input_schema)
-                        .unwrap_or_else(|_| serde_json::json!({}));
-                    let desc = def.description.as_deref().unwrap_or("");
-                    output.push(format!(
-                        "## {}\n{desc}\n```json\n{}\n```",
-                        name,
-                        serde_json::to_string_pretty(&schema).unwrap_or_default()
-                    ));
-                }
+            match self.catalogue.schema(name).await {
+                Some(schema) => output.push(format!(
+                    "## {name}\n```json\n{}\n```",
+                    serde_json::to_string_pretty(&schema).unwrap_or_default()
+                )),
                 None => not_found.push(name.as_str()),
             }
         }
@@ -257,12 +157,12 @@ struct CallToolArgs {
 }
 
 pub struct McpCallToolTool {
-    index: SharedIndex,
+    catalogue: SharedCatalogue,
 }
 
 impl McpCallToolTool {
-    pub fn new(index: SharedIndex) -> Self {
-        Self { index }
+    pub fn new(catalogue: SharedCatalogue) -> Self {
+        Self { catalogue }
     }
 }
 
@@ -305,12 +205,13 @@ impl AgentTool for McpCallToolTool {
             Err(e) => return e,
         };
 
-        let Some((server, tool_name, conn)) = self.index.find_connection(&args.name) else {
+        let Some((server, tool_name)) = self.catalogue.resolve(&args.name).await else {
             let available: Vec<_> = self
-                .index
-                .tools
-                .iter()
-                .map(|t| t.full_name.as_str())
+                .catalogue
+                .tools(None)
+                .await
+                .into_iter()
+                .map(|t| t.full_name)
                 .collect();
             return ToolResult::error(format!(
                 "tool '{}' not found. available: {}",
@@ -323,55 +224,104 @@ impl AgentTool for McpCallToolTool {
             ));
         };
 
-        match conn.call_tool(tool_name.to_string(), args.arguments).await {
+        match server.call_tool(tool_name.clone(), args.arguments).await {
             Ok(result) => crate::result::convert_call_result(result),
-            Err(e) => ToolResult::error(format!("MCP call {tool_name} on {server}: {e}")),
+            Err(e) => ToolResult::error(format!("MCP call {tool_name} on {}: {e}", server.name())),
         }
     }
 }
 
 /// create the three dynamic MCP meta-tools
-pub fn dynamic_mcp_tools(connections: &[(String, Arc<McpConnection>)]) -> Vec<Arc<dyn AgentTool>> {
-    let index: SharedIndex = Arc::new(McpToolIndex::new(connections));
+#[must_use]
+pub fn dynamic_mcp_tools(catalogue: McpCatalogue) -> Vec<Arc<dyn AgentTool>> {
+    let catalogue: SharedCatalogue = Arc::new(catalogue);
     vec![
-        Arc::new(McpListToolsTool::new(Arc::clone(&index))),
-        Arc::new(McpGetSchemasTool::new(Arc::clone(&index))),
-        Arc::new(McpCallToolTool::new(index)),
+        Arc::new(McpListToolsTool::new(Arc::clone(&catalogue))),
+        Arc::new(McpGetSchemasTool::new(Arc::clone(&catalogue))),
+        Arc::new(McpCallToolTool::new(catalogue)),
     ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::McpServer;
+    use rmcp::model::Tool as McpToolDef;
 
-    fn empty_index() -> SharedIndex {
-        Arc::new(McpToolIndex::new(&[]))
+    fn empty() -> SharedCatalogue {
+        Arc::new(McpCatalogue::new(Vec::new()))
+    }
+
+    fn stocked() -> SharedCatalogue {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "quality": { "type": "string" } }
+        });
+        Arc::new(McpCatalogue::new(vec![Arc::new(McpServer::with_tools(
+            "sweethome3d",
+            vec![McpToolDef::new(
+                "render_photo",
+                "ray-traced render",
+                Arc::new(schema.as_object().unwrap().clone()),
+            )],
+        ))]))
     }
 
     #[tokio::test]
     async fn list_tools_empty() {
-        let tool = McpListToolsTool::new(empty_index());
+        let tool = McpListToolsTool::new(empty());
         let result = tool.execute(serde_json::json!({})).await;
-        let text = extract_text(&result);
-        assert_eq!(text, "no MCP tools available");
+        assert_eq!(extract_text(&result), "no MCP tools available");
+    }
+
+    #[tokio::test]
+    async fn list_tools_names_each_tool_with_its_server() {
+        let tool = McpListToolsTool::new(stocked());
+        let text = extract_text(&tool.execute(serde_json::json!({})).await);
+
+        assert!(text.contains("sweethome3d_render_photo"), "got {text}");
+        assert!(text.contains("ray-traced render"), "got {text}");
     }
 
     #[tokio::test]
     async fn get_schemas_not_found() {
-        let tool = McpGetSchemasTool::new(empty_index());
+        let tool = McpGetSchemasTool::new(empty());
         let result = tool
             .execute(serde_json::json!({"names": ["nonexistent"]}))
             .await;
-        let text = extract_text(&result);
-        assert!(text.contains("not found: nonexistent"));
+        assert!(extract_text(&result).contains("not found: nonexistent"));
+    }
+
+    #[tokio::test]
+    async fn get_schemas_returns_the_input_schema() {
+        let tool = McpGetSchemasTool::new(stocked());
+        let text = extract_text(
+            &tool
+                .execute(serde_json::json!({"names": ["sweethome3d_render_photo"]}))
+                .await,
+        );
+
+        assert!(text.contains("quality"), "got {text}");
     }
 
     #[tokio::test]
     async fn call_tool_not_found() {
-        let tool = McpCallToolTool::new(empty_index());
+        let tool = McpCallToolTool::new(empty());
         let result = tool.execute(serde_json::json!({"name": "missing"})).await;
         assert!(result.outcome.is_error());
         assert!(extract_text(&result).contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn call_tool_lists_what_is_available_when_the_name_is_wrong() {
+        let tool = McpCallToolTool::new(stocked());
+        let result = tool.execute(serde_json::json!({"name": "typo"})).await;
+
+        assert!(result.outcome.is_error());
+        assert!(
+            extract_text(&result).contains("sweethome3d_render_photo"),
+            "the error should point at real tool names"
+        );
     }
 
     fn extract_text(result: &ToolResult) -> String {

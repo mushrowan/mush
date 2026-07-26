@@ -5,7 +5,7 @@ use std::sync::Arc;
 use mush_agent::tool::{AgentTool, ToolResult};
 use rmcp::model::Tool as McpToolDef;
 
-use crate::connection::McpConnection;
+use crate::server::McpServer;
 
 /// wraps an MCP tool as an AgentTool for the agent loop
 pub struct McpTool {
@@ -13,24 +13,21 @@ pub struct McpTool {
     full_name: String,
     /// just the tool name (for display)
     tool_name: String,
-    /// server name
-    server_name: String,
     /// tool definition from the MCP server
     definition: McpToolDef,
-    /// connection to the MCP server
-    connection: Arc<McpConnection>,
+    /// handle to the server, which survives reconnects
+    server: Arc<McpServer>,
 }
 
 impl McpTool {
-    pub fn new(server_name: &str, definition: McpToolDef, connection: Arc<McpConnection>) -> Self {
+    pub fn new(definition: McpToolDef, server: Arc<McpServer>) -> Self {
         let tool_name = definition.name.to_string();
-        let full_name = format!("{server_name}_{tool_name}");
+        let full_name = format!("{}_{tool_name}", server.name());
         Self {
             full_name,
             tool_name,
-            server_name: server_name.to_string(),
             definition,
-            connection,
+            server,
         }
     }
 }
@@ -67,15 +64,12 @@ impl AgentTool for McpTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> ToolResult {
-        match self
-            .connection
-            .call_tool(self.tool_name.clone(), args)
-            .await
-        {
+        match self.server.call_tool(self.tool_name.clone(), args).await {
             Ok(result) => crate::result::convert_call_result(result),
             Err(e) => ToolResult::error(format!(
                 "MCP tool {} on {}: {e}",
-                self.tool_name, self.server_name
+                self.tool_name,
+                self.server.name()
             )),
         }
     }
@@ -83,11 +77,37 @@ impl AgentTool for McpTool {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn mcp_tool_naming() {
-        let name = "server";
-        let tool_name = "my_tool";
-        let full = format!("{name}_{tool_name}");
-        assert_eq!(full, "server_my_tool");
+    use super::*;
+
+    fn definition(name: &'static str) -> McpToolDef {
+        McpToolDef::new(
+            name,
+            "does a thing",
+            Arc::new(
+                serde_json::json!({ "type": "object" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+    }
+
+    #[tokio::test]
+    async fn tool_is_named_for_its_server() {
+        let server = Arc::new(McpServer::with_tools("git", vec![definition("commit")]));
+        let tool = McpTool::new(definition("commit"), server);
+
+        assert_eq!(tool.name(), "git_commit");
+        assert_eq!(tool.label(), "commit");
+    }
+
+    #[tokio::test]
+    async fn calling_a_dead_server_reports_the_server_name() {
+        let server = Arc::new(McpServer::with_tools("git", vec![definition("commit")]));
+        let tool = McpTool::new(definition("commit"), server);
+
+        let result = tool.execute(serde_json::json!({})).await;
+
+        assert!(result.outcome.is_error());
     }
 }
