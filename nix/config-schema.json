@@ -565,7 +565,7 @@
         },
         "timeout": {
           "default": 30,
-          "description": "timeout in seconds for requests (default: 30)",
+          "description": "timeout in seconds for requests, 0 to wait indefinitely (default: 30)",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
