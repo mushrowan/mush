@@ -689,7 +689,7 @@ fn image_render_areas_never_pin_to_top_when_scrolled_past() {
     }
     // bottom-anchored view of the newest content; older images are
     // scrolled off the top
-    app.scroll_offset = 0;
+    app.scroll_to_bottom();
     let _ = render_app(&app, 60, 30);
 
     let areas = app.render_state.image_render_areas.borrow();
@@ -715,7 +715,8 @@ fn image_render_area_hidden_when_partially_above_viewport() {
     for _ in 0..5 {
         app.push_user_message_with_images("hi", vec![vec![0u8; 100]]);
     }
-    app.scroll_offset = 10;
+    let _ = render_app(&app, 60, 30);
+    app.scroll_up(10);
     let _ = render_app(&app, 60, 30);
 
     let areas = app.render_state.image_render_areas.borrow();
@@ -1983,9 +1984,8 @@ fn content_hash_cached_across_renders() {
 
 #[test]
 fn scroll_position_stable_when_content_grows() {
-    // bug: when scrolled up and new content arrives at the bottom,
-    // the viewport shifts because scroll_offset is "from bottom" but
-    // max_scroll increases. the view should stay pinned
+    // new content arriving at the bottom must not move a viewport that
+    // is anchored above it
     let mut app = App::new("test".into(), TokenCount::new(200_000));
 
     // fill with enough messages to exceed viewport
@@ -1996,10 +1996,8 @@ fn scroll_position_stable_when_content_grows() {
         ));
     }
 
-    // scroll up
-    app.scroll_offset = 15;
-
-    // first render to establish baseline
+    render_app(&app, 60, 20);
+    app.scroll_up(15);
     render_app(&app, 60, 20);
     let scroll_before = app.render_state.render_scroll.get();
     assert!(scroll_before > 0, "should be scrolled");
@@ -2023,10 +2021,9 @@ fn scroll_position_stable_when_content_grows() {
 
 #[test]
 fn scroll_down_after_content_growth_steps_by_scroll_lines() {
-    // repro: sit a few lines above the bottom, let a long message land
-    // (the viewport stays pinned via compensation), then press j once.
-    // scroll_offset alone would hit 0 and snap the viewport to the
-    // real bottom, skipping everything that arrived in between
+    // sit a few lines above the bottom, let a long message land, then
+    // press j once. the viewport must step down one scroll_lines worth,
+    // not snap to the new bottom and skip everything that arrived
     const STEP: u16 = 3;
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.scroll_lines = STEP;
@@ -2041,7 +2038,7 @@ fn scroll_down_after_content_growth_steps_by_scroll_lines() {
     }
     render_app(&app, 60, 20);
 
-    app.scroll_offset = STEP;
+    app.scroll_up(STEP);
     render_app(&app, 60, 20);
     let pinned = app.render_state.render_scroll.get();
     assert!(pinned > 0, "should be scrolled up");
@@ -2058,9 +2055,6 @@ fn scroll_down_after_content_growth_steps_by_scroll_lines() {
         app.render_state.render_scroll.get(),
         "viewport stays pinned while content grows"
     );
-    let growth = app.render_state.scroll_compensation.get();
-    assert!(growth > STEP as isize, "content should have grown a lot");
-
     let j = crossterm::event::KeyEvent::new(
         crossterm::event::KeyCode::Char('j'),
         crossterm::event::KeyModifiers::NONE,
@@ -2073,19 +2067,16 @@ fn scroll_down_after_content_growth_steps_by_scroll_lines() {
         pinned + STEP,
         "one j should move down exactly scroll_lines, not jump to the bottom"
     );
-    // the offset started STEP lines above the bottom and `growth` lines
-    // landed below it, so stepping STEP down leaves `growth` to go
-    assert_eq!(
-        app.scroll_offset as isize, growth,
-        "scroll_offset should absorb the growth so it stays true \
-         lines-from-bottom"
+    assert!(
+        app.is_scrolled_up(),
+        "a single step down must not reach the bottom of the new content"
     );
 }
 
 #[test]
-fn scroll_compensation_resets_at_bottom() {
-    // when user scrolls back to bottom (scroll_offset=0), compensation
-    // should reset so future scrolling starts fresh
+fn returning_to_the_bottom_resumes_following_new_content() {
+    // once back at the bottom the viewport must track new content again
+    // instead of staying pinned where the user had scrolled to
     let mut app = App::new("test".into(), TokenCount::new(200_000));
 
     for i in 0..20 {
@@ -2095,40 +2086,31 @@ fn scroll_compensation_resets_at_bottom() {
         ));
     }
 
-    // scroll up, render, add content, render (accumulates compensation)
-    app.scroll_offset = 10;
     render_app(&app, 60, 20);
+    app.scroll_up(10);
+    render_app(&app, 60, 20);
+    let pinned = app.render_state.render_scroll.get();
+
+    app.scroll_to_bottom();
+    render_app(&app, 60, 20);
+    let at_bottom = app.render_state.render_scroll.get();
+    assert!(at_bottom > pinned, "scrolling to bottom moves the viewport");
+
     app.messages
         .push(DisplayMessage::new(MessageRole::Assistant, "extra content"));
     render_app(&app, 60, 20);
     assert!(
-        app.render_state.scroll_compensation.get() > 0,
-        "should have accumulated compensation"
-    );
-
-    // scroll to bottom
-    app.scroll_offset = 0;
-    render_app(&app, 60, 20);
-    assert_eq!(
-        app.render_state.scroll_compensation.get(),
-        0,
-        "compensation should reset when at bottom"
+        app.render_state.render_scroll.get() > at_bottom,
+        "the viewport should follow content appended while at the bottom"
     );
 }
 
-/// repro for the "j doesn't go down after resize during streaming"
-/// bug: after a resize while scrolled up, the next render's stale
-/// `prev_content_lines` (computed under the OLD wrap width) becomes
-/// the baseline. if the new width produces a smaller line count,
-/// `compensation = total_new - baseline_old` is negative and big
-/// enough to clamp `effective_offset` to 0 - locking the viewport
-/// at max_scroll regardless of how many `j` presses arrive.
-///
-/// fix invariant: after a resize, pressing `j` from the same
-/// scroll_offset must produce a strictly larger `render_scroll`
-/// (= viewport moved down) than not pressing it.
+/// a width change reflows every message, so a viewport pinned by line
+/// count from either end of the document lands somewhere unrelated. the
+/// anchor names a message instead, so the message the user was reading
+/// stays on the viewport's top edge and `j` keeps stepping from there.
 #[test]
-fn j_still_scrolls_down_after_resize_during_scroll() {
+fn resize_keeps_the_anchored_message_at_the_top_and_j_still_steps() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     // long message bodies so wrap width genuinely changes total
     // line count: a 200-char paragraph wraps to ~10 lines at width
@@ -2140,49 +2122,47 @@ fn j_still_scrolls_down_after_resize_during_scroll() {
         ));
     }
 
-    // scroll up at the narrow width so prev_content_lines captures
-    // a large total (lots of wrap)
-    app.scroll_offset = 30;
     render_app(&app, 30, 20);
-    // settle: a second render so the baseline moves out of the
-    // first-frame capture branch
+    // far enough up that the anchored message is mid-document at both
+    // widths, so the "last screen of content" clamp isn't what's tested
+    app.scroll_up(200);
     render_app(&app, 30, 20);
+    let anchored = app.scroll;
+    let crate::app::ScrollPosition::Message {
+        msg: anchored_msg, ..
+    } = anchored
+    else {
+        panic!("scrolling up should anchor to a message, got {anchored:?}");
+    };
 
-    // simulate the resize handler: notify_resize fires before the
-    // first post-resize render
-    app.notify_resize();
-
-    // first post-resize render at a much wider width
+    // the same anchor at a much wider width
     render_app(&app, 120, 20);
-    let render_scroll_after_resize = app.render_state.render_scroll.get();
-
-    // press j: scroll_offset decreases
-    let prev_offset = app.scroll_offset;
-    app.scroll_down(app.scroll_lines);
-    assert!(
-        app.scroll_offset < prev_offset,
-        "j should reduce scroll_offset; if equal, scroll_lines is 0 - check test setup"
+    assert_eq!(
+        anchored, app.scroll,
+        "a resize must not move the anchor itself"
+    );
+    assert_eq!(
+        Some(anchored_msg),
+        app.message_at_screen_row(0),
+        "the anchored message should still be the one on the top row"
     );
 
-    // re-render: viewport must move DOWN, i.e. render_scroll
-    // (= max_scroll - effective_offset) must increase
+    let render_scroll_after_resize = app.render_state.render_scroll.get();
+    app.scroll_down(app.scroll_lines);
     render_app(&app, 120, 20);
-    let render_scroll_after_j = app.render_state.render_scroll.get();
-    assert!(
-        render_scroll_after_j > render_scroll_after_resize,
-        "j must move the viewport down after a resize, but render_scroll \
-         went from {render_scroll_after_resize} to {render_scroll_after_j}"
+    assert_eq!(
+        app.render_state.render_scroll.get(),
+        render_scroll_after_resize + app.scroll_lines,
+        "j must step the viewport down by scroll_lines after a resize"
     );
 }
 
 #[test]
 fn scroll_position_stable_when_content_fluctuates() {
-    // bug: while scrolled up during streaming, the message log "shakes"
-    // by ±1 line. root cause: compensation uses `saturating_sub` so
-    // only positive deltas update it. when content height oscillates
-    // (word-wrap reflowing as tokens arrive, trailing estimate drifting
-    // between frames) shrinks are absorbed silently, so effective
-    // offset is too high once content grows back, drifting the view
+    // the message log used to "shake" by a line while scrolled up during
+    // streaming, because content below the viewport oscillates in height
+    // as word wrap reflows around arriving tokens. content below the
+    // anchor must not move the view in either direction
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     for i in 0..20 {
         app.messages.push(DisplayMessage::new(
@@ -2194,20 +2174,21 @@ fn scroll_position_stable_when_content_fluctuates() {
     // actually changes the rendered line count
     let long_multiline = "line a is here\nline b is here\nline c is here\nline d is here";
     app.messages.last_mut().unwrap().content = long_multiline.into();
-    app.scroll_offset = 15;
 
     render_app(&app, 60, 20);
-    let scroll_baseline = app.render_state.render_scroll.get();
-    assert!(scroll_baseline > 0, "precondition: viewport scrolled up");
+    app.scroll_up(15);
+    render_app(&app, 60, 20);
+    let anchored = app.render_state.render_scroll.get();
+    assert!(anchored > 0, "precondition: viewport scrolled up");
 
     // shrink last message by collapsing to a single line
     app.messages.last_mut().unwrap().content = "just one line".into();
     render_app(&app, 60, 20);
     let scroll_after_shrink = app.render_state.render_scroll.get();
     assert_eq!(
-        scroll_baseline, scroll_after_shrink,
+        anchored, scroll_after_shrink,
         "viewport should stay pinned to the same content line when \
-         content shrinks while scrolled (baseline={scroll_baseline}, \
+         content shrinks while scrolled (anchored={anchored}, \
          after_shrink={scroll_after_shrink})"
     );
 
@@ -2216,22 +2197,23 @@ fn scroll_position_stable_when_content_fluctuates() {
     render_app(&app, 60, 20);
     let scroll_after_regrow = app.render_state.render_scroll.get();
     assert_eq!(
-        scroll_baseline, scroll_after_regrow,
-        "viewport should return to baseline after grow restores content \
-         (baseline={scroll_baseline}, after_regrow={scroll_after_regrow})"
+        anchored, scroll_after_regrow,
+        "viewport should return to the anchored row after grow restores \
+         content (anchored={anchored}, after_regrow={scroll_after_regrow})"
     );
 }
 
 #[test]
-fn start_streaming_preserves_scroll_offset() {
+fn start_streaming_preserves_scroll_position() {
     // start_streaming should not yank the user to bottom
     // (push_user_message already does that when the user sends)
     let mut app = App::new("test".into(), TokenCount::new(200_000));
-    app.scroll_offset = 20;
+    let anchored = crate::app::ScrollPosition::Message { msg: 2, line: 4 };
+    app.scroll = anchored;
     app.start_streaming();
     assert_eq!(
-        app.scroll_offset, 20,
-        "start_streaming should not reset scroll_offset"
+        anchored, app.scroll,
+        "start_streaming should not reset the scroll position"
     );
 }
 
@@ -2270,10 +2252,10 @@ fn scrolled_up_during_streaming_shows_no_gap_in_viewport() {
     }
 
     // scroll up far enough that some messages are in the viewport
-    // despite the long streaming content appended below. with vh=20
-    // and streaming_N=80, effective_offset must exceed streaming_N
-    // for messages to enter the visible window
-    app.scroll_offset = 90;
+    // despite the long streaming content appended below: the anchor has
+    // to clear the whole streaming block for messages to be on screen
+    render_app(&app, 60, 20);
+    app.scroll_up(90);
 
     let buf = render_app(&app, 60, 20);
     let content = buffer_to_string(&buf);
@@ -2306,193 +2288,47 @@ fn scrolled_up_during_streaming_shows_no_gap_in_viewport() {
 }
 
 #[test]
-fn height_cache_converges_after_render() {
-    // bug: height_cache stores an estimate from count_estimated_lines
-    // (which counts raw markdown chars). once cached, it never rechecks
-    // the indented_cache even after the message has been rendered with
-    // exact line counts. the stale estimate persists across frames
+fn viewport_growth_clamps_the_view_without_losing_the_anchor() {
+    // the message area grows whenever a tool panel disappears or the
+    // status bar unwraps. the anchor has to survive that: while the
+    // anchored row cannot fill the taller viewport the view clamps to
+    // the last screen of content, keypresses step from what is actually
+    // on screen, and shrinking back restores the original row
     let mut app = App::new("test".into(), TokenCount::new(200_000));
+    for i in 0..30 {
+        app.messages.push(DisplayMessage::new(
+            MessageRole::Assistant,
+            format!("message {i} body content"),
+        ));
+    }
+    render_app(&app, 60, 20);
+    app.scroll_up(3);
+    render_app(&app, 60, 20);
+    let anchor = app.scroll;
+    let top = app.render_state.render_scroll.get();
+    assert!(top > 0, "precondition: scrolled up");
 
-    // markdown-heavy content where raw char count overestimates lines.
-    // **bold** markers add 4 invisible chars per emphasis
-    let content = "**this is some very bold text that will definitely wrap at narrow widths** and **here is even more bold text for wrapping**";
-    app.messages
-        .push(DisplayMessage::new(MessageRole::Assistant, content));
-
-    // first render at a narrow width to populate caches
-    render_app(&app, 30, 20);
-
-    // the height_cache should now have the actual rendered height,
-    // not the overestimate from raw char counting
-    let cache = app.render_state.height_cache.borrow();
-    let entry = cache[0].as_ref().expect("height should be cached");
-    let cached_height = entry.height;
-
-    // compute actual height by checking how many indented lines were produced
-    let indented = app.render_state.indented_cache.borrow();
-    let (_, _, actual_lines) = indented[0].as_ref().expect("indented should be cached");
-    let actual_content_lines = actual_lines.len();
-    // total = separator (1) + content lines
-    let actual_total = 1 + actual_content_lines;
-
+    render_app(&app, 60, 28);
+    let grown_top = app.render_state.render_scroll.get();
     assert_eq!(
-        cached_height, actual_total,
-        "height_cache should converge to actual rendered height \
-         (cached={cached_height}, actual={actual_total})"
+        anchor, app.scroll,
+        "growing the viewport must not move the anchor"
     );
-}
 
-#[test]
-fn scrolling_continues_to_work_after_terminal_resize_grows_viewport() {
-    // regression: when the user is scrolled up and the terminal is
-    // resized so the message-list area grows by more than the
-    // current scroll_offset, the existing baseline_vis pin makes
-    // compensation negative. effective_offset clamps to 0 and the
-    // first N presses of k (or j) appear to do nothing because
-    // scroll_from_top stays at max_scroll. only after enough k
-    // presses to overcome the negative compensation does the view
-    // start moving. that's the "scrolling stopped working until you
-    // resize back" symptom rowan reported. the fix is to reset the
-    // scroll baseline on a real resize so the math doesn't carry
-    // stale baseline_vis into the new dimensions
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-    for i in 0..30 {
-        app.messages.push(DisplayMessage::new(
-            MessageRole::Assistant,
-            format!("message {i} body content"),
-        ));
-    }
-    // initial render at one size, scroll up a little
     render_app(&app, 60, 20);
-    app.scroll_offset = 3;
-    render_app(&app, 60, 20);
-    let scroll_before = app.render_state.render_scroll.get();
-    assert!(scroll_before > 0, "precondition: scrolled up");
+    assert_eq!(
+        top,
+        app.render_state.render_scroll.get(),
+        "shrinking back must restore the anchored row"
+    );
 
-    // simulate a real resize that grows the viewport by more than
-    // the current scroll_offset
-    app.notify_resize();
     render_app(&app, 60, 28);
-    let scroll_after_resize = app.render_state.render_scroll.get();
-
-    // press k once: scroll should move by scroll_lines, not be
-    // swallowed by stale baseline_vis compensation
     app.scroll_up(app.scroll_lines);
     render_app(&app, 60, 28);
-    let scroll_after_k = app.render_state.render_scroll.get();
-
-    assert_ne!(
-        scroll_after_resize, scroll_after_k,
-        "single k press after resize must change scroll position \
-         (post-resize scroll={scroll_after_resize}, after k={scroll_after_k}). \
-         when this fails the user has to press k repeatedly with no \
-         visible feedback before scrolling resumes"
-    );
-    assert!(
-        scroll_after_k < scroll_after_resize,
-        "k should scroll up (decrease scroll_from_top): \
-         {scroll_after_resize} -> {scroll_after_k}"
-    );
-}
-
-#[test]
-fn scrolling_without_resize_notification_is_swallowed_by_stale_baseline() {
-    // when the message-list area grows (e.g. because a tool panel
-    // disappeared, or the status bar unwrapped) without going through
-    // notify_resize, the cached baseline_vis is now smaller than the
-    // current vis. compensation goes negative and absorbs the user's
-    // first N k/j keypresses. previously the only callsite for
-    // notify_resize was the terminal Event::Resize handler; the same
-    // family of stale-baseline bugs also fires on tool-panel resize.
-    // the fix re-pins the baseline at render time when current_vis
-    // grows past stored_vis, since a grown viewport means the pin's
-    // implicit "viewport shrank from baseline" assumption is no
-    // longer true
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-    for i in 0..30 {
-        app.messages.push(DisplayMessage::new(
-            MessageRole::Assistant,
-            format!("message {i} body content"),
-        ));
-    }
-    render_app(&app, 60, 20);
-    app.scroll_offset = 3;
-    render_app(&app, 60, 20);
-
-    // simulate the message-list area growing by 8 lines (tool panel
-    // disappeared, or similar) without notify_resize. with the fix,
-    // baseline gets re-pinned and the next keypress moves the view
-    render_app(&app, 60, 28);
-    let scroll_after_grow = app.render_state.render_scroll.get();
-
-    app.scroll_up(app.scroll_lines);
-    render_app(&app, 60, 28);
-    let scroll_after_k = app.render_state.render_scroll.get();
-
-    assert_ne!(
-        scroll_after_grow, scroll_after_k,
-        "first k press after vis grows must move the viewport \
-         (post-grow={scroll_after_grow}, after_k={scroll_after_k}). \
-         when this fails the user has to press k repeatedly with no \
-         visible feedback before scrolling resumes - the same family \
-         of bug as the resize fix but triggered by tool-panel changes"
-    );
-    assert!(
-        scroll_after_k < scroll_after_grow,
-        "k should scroll up (decrease scroll_from_top): \
-         {scroll_after_grow} -> {scroll_after_k}"
-    );
-}
-
-#[test]
-fn j_key_responds_immediately_after_vis_grows() {
-    // bug report: "k works to go up, but sometimes j doesn't work
-    // to go down" in scroll mode. when vis grew without notify_resize
-    // (tool panel disappeared, etc), compensation went negative and
-    // the user was effectively stuck at scroll_offset 0 even though
-    // the displayed view appeared scrolled up. j (saturating_sub)
-    // was a no-op because effective_offset stayed clamped at 0,
-    // while k (saturating_add) appeared "weak" but eventually
-    // overcame the clamp.
-    //
-    // pick scroll_offset small enough that scroll_offset +
-    // compensation < 0, so without the fix j would be a no-op
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-    for i in 0..30 {
-        app.messages.push(DisplayMessage::new(
-            MessageRole::Assistant,
-            format!("message {i} body content"),
-        ));
-    }
-    render_app(&app, 60, 20);
-    app.scroll_offset = 5;
-    render_app(&app, 60, 20);
-    let scroll_before_grow = app.render_state.render_scroll.get();
-
-    // vis grows by 8 (tool panel disappeared, etc). without the fix
-    // compensation = (20 - 28) = -8 and effective_offset clamps to
-    // max(0, 5 - 8) = 0, so the view jumps to the bottom and the
-    // next j becomes a no-op
-    render_app(&app, 60, 28);
-    let scroll_before_j = app.render_state.render_scroll.get();
-
-    // press j: scroll_offset goes 5 → 2
-    app.scroll_down(app.scroll_lines);
-    render_app(&app, 60, 28);
-    let scroll_after_j = app.render_state.render_scroll.get();
-
-    assert_ne!(
-        scroll_before_j, scroll_after_j,
-        "j press after vis grows must move the viewport \
-         (before_j={scroll_before_j}, after_j={scroll_after_j}). \
-         when this assertion fails, j is silently no-op'ing because \
-         effective_offset clamped to 0. baseline still respected \
-         before_grow={scroll_before_grow}"
-    );
-    assert!(
-        scroll_after_j > scroll_before_j,
-        "j should scroll down (increase scroll_from_top): \
-         {scroll_before_j} -> {scroll_after_j}"
+    assert_eq!(
+        app.render_state.render_scroll.get(),
+        grown_top - app.scroll_lines,
+        "k must step up from the row on screen, not from a clamped anchor"
     );
 }
 
@@ -2512,7 +2348,7 @@ fn scroll_stays_stable_when_viewport_height_jitters() {
         ));
     }
     render_app(&app, 60, 20);
-    app.scroll_offset = 15;
+    app.scroll_up(15);
     render_app(&app, 60, 20);
     let anchor = app.render_state.render_scroll.get();
 
@@ -2538,13 +2374,11 @@ fn scroll_stays_stable_when_viewport_height_jitters() {
 
 #[test]
 fn scroll_stays_stable_while_streaming_typewriter_reveals_text() {
-    // regression: while scrolled up during streaming, the viewport drifts
-    // each frame because compensation is computed from *estimated* total
-    // (count_estimated_lines on raw chars) but scroll uses *actual* total
-    // (markdown-rendered lines). when the estimate over- or under-counts
-    // (e.g. code fences, heading style rows, `**bold**` markers), the
-    // effective_offset diverges from actual content growth and the view
-    // creeps up/down by the estimate error.
+    // the layout pass places messages by estimated height (raw chars) but
+    // the paint pass knows the actual markdown-rendered line count. where
+    // the two disagree (code fences, heading style rows, `**bold**`
+    // markers) the anchored row must still hold frame to frame instead of
+    // creeping by the estimate error
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     for i in 0..30 {
         app.messages.push(DisplayMessage::new(
@@ -2556,7 +2390,7 @@ fn scroll_stays_stable_while_streaming_typewriter_reveals_text() {
     render_app(&app, 60, 20);
 
     // scroll up into history
-    app.scroll_offset = 15;
+    app.scroll_up(15);
     render_app(&app, 60, 20);
     let scroll_anchor = app.render_state.render_scroll.get();
 
@@ -2607,7 +2441,7 @@ fn scroll_stays_stable_when_streaming_thinking_then_text() {
         ));
     }
     render_app(&app, 60, 20);
-    app.scroll_offset = 15;
+    app.scroll_up(15);
     render_app(&app, 60, 20);
     let anchor = app.render_state.render_scroll.get();
 
@@ -2723,7 +2557,7 @@ fn scroll_stays_stable_when_streaming_starts_from_empty() {
         ));
     }
     render_app(&app, 60, 20);
-    app.scroll_offset = 15;
+    app.scroll_up(15);
     render_app(&app, 60, 20);
     let anchor = app.render_state.render_scroll.get();
 
@@ -2768,7 +2602,7 @@ fn scroll_stays_stable_across_busy_label_ticks_only() {
         ));
     }
     render_app(&app, 60, 20);
-    app.scroll_offset = 15;
+    app.scroll_up(15);
     render_app(&app, 60, 20);
     let anchor = app.render_state.render_scroll.get();
 
@@ -2794,6 +2628,109 @@ fn scroll_stays_stable_across_busy_label_ticks_only() {
         min, max,
         "busy-label-only ticks shouldn't move the viewport \
          (anchor={anchor}, min={min}, max={max})"
+    );
+}
+
+#[test]
+fn viewport_stays_pinned_when_turn_ends_and_viewport_grows() {
+    // bug report: scrolled up, the model streams a reply, the turn ends,
+    // then a single scroll press lands the user at the bottom. at turn
+    // end the tool panels clear, so the message area grows, and the
+    // area growing must not disturb a viewport anchored above the reply
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    for i in 0..40 {
+        app.messages.push(DisplayMessage::new(
+            MessageRole::Assistant,
+            format!("message {i} body content"),
+        ));
+    }
+    // a tool panel is up during the turn, so the message area is 12 rows
+    // shorter than it becomes once the turn ends
+    render_app(&app, 60, 20);
+    app.scroll_up(4);
+    render_app(&app, 60, 20);
+    let anchor = app.render_state.render_scroll.get();
+
+    // the reply lands below the viewport while the user sits scrolled up
+    app.start_streaming();
+    let reply: String = (0..30).map(|i| format!("reply line {i}\n")).collect();
+    app.push_text_delta(&reply);
+    for _ in 0..reply.len() {
+        app.tick();
+    }
+    render_app(&app, 60, 20);
+    app.finish_streaming(None, None);
+    render_app(&app, 60, 20);
+    let after_finish = app.render_state.render_scroll.get();
+    assert_eq!(
+        anchor, after_finish,
+        "precondition: view stays pinned while the reply grows below \
+         (anchor={anchor}, after_finish={after_finish})"
+    );
+
+    // turn ends: active tool panels clear and the message area grows
+    render_app(&app, 60, 32);
+    let after_grow = app.render_state.render_scroll.get();
+    assert_eq!(
+        anchor, after_grow,
+        "the message area growing must not move the pinned content line \
+         (anchor={anchor}, after_grow={after_grow})"
+    );
+
+    // and one scroll press must move by exactly one step, not jump
+    app.scroll_down(app.scroll_lines);
+    render_app(&app, 60, 32);
+    let after_scroll = app.render_state.render_scroll.get();
+    assert_eq!(
+        after_scroll,
+        anchor + app.scroll_lines,
+        "one scroll press should move one step, not jump to the bottom"
+    );
+}
+
+#[test]
+fn viewport_anchored_inside_the_stream_survives_finalisation() {
+    // scrolling up only a little while a long reply streams leaves the
+    // viewport anchored inside the trailing block. when the stream turns
+    // into a stored message the trailing block empties, so an anchor that
+    // still pointed at it would fall to the bottom
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    for i in 0..20 {
+        app.messages.push(DisplayMessage::new(
+            MessageRole::Assistant,
+            format!("message {i} body content"),
+        ));
+    }
+    render_app(&app, 60, 20);
+
+    app.start_streaming();
+    let reply: String = (0..40).map(|i| format!("reply line {i}\n")).collect();
+    app.push_text_delta(&reply);
+    for _ in 0..reply.len() {
+        app.tick();
+    }
+    render_app(&app, 60, 20);
+
+    // 4 rows up lands inside the streaming text, not in any message
+    app.scroll_up(4);
+    assert!(
+        matches!(app.scroll, crate::app::ScrollPosition::Trailing { .. }),
+        "expected an anchor inside the trailing block, got {:?}",
+        app.scroll
+    );
+    render_app(&app, 60, 20);
+    let anchored = app.render_state.render_scroll.get();
+
+    app.finish_streaming(None, None);
+    render_app(&app, 60, 20);
+    assert_eq!(
+        anchored,
+        app.render_state.render_scroll.get(),
+        "finalising the stream must not move the viewport"
+    );
+    assert!(
+        app.is_scrolled_up(),
+        "the anchor should have followed the streamed text into its message"
     );
 }
 

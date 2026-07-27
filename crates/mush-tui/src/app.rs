@@ -10,7 +10,7 @@ use std::rc::Rc;
 pub use crate::app_event::{AppEvent, AppMode};
 pub use crate::app_state::{
     CachedStatusBar, CompactionRecoveryAction, CompactionRecoveryState, CompletionState,
-    InteractionState, NavigationState, RenderState, SearchState,
+    InteractionState, NavigationState, RenderState, ScrollPosition, SearchState,
 };
 pub use crate::batch_output::{
     BatchSection, parse_batch_output, truncate_output, truncate_output_large,
@@ -172,8 +172,8 @@ pub struct App {
     pub stream: StreamingState,
     /// user input buffer with cursor, images, scroll
     pub input: InputBuffer,
-    /// vertical scroll offset (lines from bottom)
-    pub scroll_offset: u16,
+    /// where the message list viewport is pinned
+    pub scroll: ScrollPosition,
     /// model id being used
     pub model_id: ModelId,
     /// token and cost tracking
@@ -267,7 +267,7 @@ impl App {
             messages: Vec::new(),
             stream: StreamingState::new(),
             input: InputBuffer::new(),
-            scroll_offset: 0,
+            scroll: ScrollPosition::Bottom,
             model_id,
             stats: TokenStats::new(context_window),
             should_quit: false,
@@ -326,48 +326,6 @@ impl App {
     #[cfg(test)]
     pub fn tick(&mut self) {
         self.tick_animation();
-    }
-
-    /// reset the scroll anchor on a real terminal resize.
-    ///
-    /// the baseline anchors viewport position to a content line plus a
-    /// snapshot of the viewport height, so streaming-time line growth
-    /// and small status-bar wraps don't shift the user's view. but a
-    /// real terminal resize is a much larger change: the new vis
-    /// makes the cached baseline_vis stale, and the negative
-    /// compensation that ensues clamps `effective_offset` to 0,
-    /// swallowing the first N keypresses worth of scrolling. clearing
-    /// the baseline lets the next render re-pin against the new
-    /// dimensions, so subsequent k/j presses move the viewport
-    /// immediately. status-bar height jitter (vis ±1 between frames
-    /// from cache countdown text width changing, etc) is unaffected
-    /// because it doesn't go through this path.
-    ///
-    /// `prev_content_lines` is also cleared because it gets fed into
-    /// the next baseline capture (in `update_scroll_baseline`'s
-    /// `(_, 0)` arm). without this reset the post-resize baseline
-    /// would anchor against a line count computed under the OLD wrap
-    /// width, producing a wrong (often negative) compensation that
-    /// clamps `effective_offset` to 0 and locks the viewport at
-    /// max_scroll - the "j stops scrolling down after a resize"
-    /// symptom. one frame of zero-compensation rendering follows the
-    /// resize while the new total propagates, then anchoring resumes
-    /// correctly
-    pub fn notify_resize(&mut self) {
-        let prior_baseline = self.render_state.scroll_baseline.get();
-        let prior_baseline_vis = self.render_state.scroll_baseline_vis.get();
-        let prior_prev_content_lines = self.render_state.prev_content_lines.get();
-        self.render_state.scroll_baseline.set(0);
-        self.render_state.scroll_baseline_vis.set(0);
-        self.render_state.prev_content_lines.set(0);
-        tracing::info!(
-            target: "mush_tui::resize",
-            scroll_offset = self.scroll_offset,
-            prior_baseline,
-            prior_baseline_vis,
-            prior_prev_content_lines,
-            "notify_resize cleared scroll baseline"
-        );
     }
 
     /// whether the unread flash indicator is in the "on" phase
@@ -450,7 +408,7 @@ impl App {
     pub fn push_user_message(&mut self, text: impl Into<String>) {
         self.messages
             .push(DisplayMessage::new(MessageRole::User, text));
-        self.scroll_offset = 0;
+        self.scroll = ScrollPosition::Bottom;
     }
 
     /// add a user message with attached images to the display
@@ -458,7 +416,7 @@ impl App {
         let mut msg = DisplayMessage::new(MessageRole::User, text);
         msg.images = images;
         self.messages.push(msg);
-        self.scroll_offset = 0;
+        self.scroll = ScrollPosition::Bottom;
     }
 
     /// remove all queued steering messages, returning their text content
@@ -481,7 +439,7 @@ impl App {
             queued: true,
             ..DisplayMessage::new(MessageRole::User, text)
         });
-        self.scroll_offset = 0;
+        self.scroll = ScrollPosition::Bottom;
     }
 
     /// add a queued steering message carrying attached images, so the UI
@@ -495,7 +453,7 @@ impl App {
         msg.queued = true;
         msg.images = images;
         self.messages.push(msg);
-        self.scroll_offset = 0;
+        self.scroll = ScrollPosition::Bottom;
     }
 
     /// remove the last queued steering message from display, return its text
@@ -629,7 +587,7 @@ impl App {
     pub(crate) fn clear_display(&mut self) {
         self.messages.clear();
         self.stream = StreamingState::new();
-        self.scroll_offset = 0;
+        self.scroll = ScrollPosition::Bottom;
         self.input.images.clear();
     }
 

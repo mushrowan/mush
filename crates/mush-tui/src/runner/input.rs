@@ -372,24 +372,11 @@ fn budget_suffix(
 }
 
 /// shared resize handler: invalidate the cached size so ratatui's
-/// `autoresize` refetches dimensions on the next frame, and reset
-/// every pane's scroll baseline so post-resize k/j presses don't get
-/// swallowed by stale `baseline_vis` values. used by every code path
-/// that observes a `crossterm::event::Event::Resize`
-pub(super) fn apply_resize(
-    size_cache: &std::rc::Rc<super::size_cached_backend::CachedSizeState>,
-    pane_mgr: &mut PaneManager,
-) {
+/// `autoresize` refetches dimensions on the next frame. used by every code
+/// path that observes a `crossterm::event::Event::Resize`
+pub(super) fn apply_resize(size_cache: &std::rc::Rc<super::size_cached_backend::CachedSizeState>) {
     size_cache.invalidate();
-    let pane_count = pane_mgr.panes().len();
-    tracing::info!(
-        target: "mush_tui::resize",
-        pane_count,
-        "apply_resize: size cache invalidated, notifying panes"
-    );
-    for pane in pane_mgr.panes_mut() {
-        pane.app.notify_resize();
-    }
+    tracing::info!(target: "mush_tui::resize", "size cache invalidated");
 }
 
 pub(super) async fn handle_streaming_terminal_events(
@@ -417,11 +404,9 @@ pub(super) async fn handle_streaming_terminal_events(
                 changed = true;
             }
             Event::Resize(w, h) => {
-                // invalidate the size cache so ratatui's autoresize
-                // picks up the new dimensions on the next frame, and
-                // reset every pane's scroll baseline so post-resize
-                // k/j presses don't get swallowed by stale baseline_vis
-                apply_resize(deps.size_cache, pane_mgr);
+                // invalidate the size cache so ratatui's autoresize picks
+                // up the new dimensions on the next frame
+                apply_resize(deps.size_cache);
                 changed = true;
                 tracing::info!(
                     target: "mush_tui::resize",
@@ -687,7 +672,7 @@ pub(super) async fn handle_idle_terminal_events(
                 pane_mgr.focused_mut().app.handle_paste(&text);
             }
             Event::Resize(w, h) => {
-                apply_resize(deps.size_cache, pane_mgr);
+                apply_resize(deps.size_cache);
                 tracing::info!(
                     target: "mush_tui::resize",
                     phase = "idle",
@@ -770,45 +755,8 @@ mod tests {
         }
     }
 
-    fn pane_with_baselines(id: u32, baseline: usize, baseline_vis: u16) -> Pane {
-        let pane = Pane::new(
-            PaneId::new(id),
-            App::new("test".into(), TokenCount::new(200_000)),
-        );
-        pane.app.render_state.scroll_baseline.set(baseline);
-        pane.app.render_state.scroll_baseline_vis.set(baseline_vis);
-        pane
-    }
-
     fn streaming_test_config() -> crate::runner::TuiConfig {
         crate::runner::TuiConfig::for_test()
-    }
-
-    #[test]
-    fn apply_resize_resets_scroll_baselines_across_all_panes() {
-        // a queued resize event should reset *every* pane's scroll
-        // baseline, not just the focused one. otherwise post-resize k/j
-        // presses get swallowed by stale baseline_vis on background
-        // panes once they regain focus
-        let mut mgr = PaneManager::new(pane_with_baselines(1, 42, 7));
-        mgr.add_pane(pane_with_baselines(2, 99, 11));
-        mgr.add_pane(pane_with_baselines(3, 13, 3));
-
-        let size_cache = Rc::new(CachedSizeState::default());
-        apply_resize(&size_cache, &mut mgr);
-
-        for pane in mgr.panes_mut() {
-            assert_eq!(
-                pane.app.render_state.scroll_baseline.get(),
-                0,
-                "scroll_baseline should reset on every pane"
-            );
-            assert_eq!(
-                pane.app.render_state.scroll_baseline_vis.get(),
-                0,
-                "scroll_baseline_vis should reset on every pane"
-            );
-        }
     }
 
     #[test]
@@ -816,12 +764,11 @@ mod tests {
         // mid-streaming resize must mark the size cache stale so the
         // next backend.size() refetches. observed by checking
         // `has_cached_size()` flips false after the call
-        let mut mgr = PaneManager::new(pane_with_baselines(1, 0, 0));
         let size_cache = Rc::new(CachedSizeState::default());
         size_cache.set_size_for_test(ratatui::layout::Size::new(80, 25));
         assert!(size_cache.has_cached_size());
 
-        apply_resize(&size_cache, &mut mgr);
+        apply_resize(&size_cache);
 
         assert!(
             !size_cache.has_cached_size(),

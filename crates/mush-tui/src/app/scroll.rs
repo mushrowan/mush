@@ -1,105 +1,109 @@
 //! scroll position and viewport maths
 //!
-//! `scroll_offset` counts lines above the bottom of the current content.
-//! the renderer keeps the viewport still while content grows by adding a
-//! compensation on top, so any keypress has to absorb that compensation
-//! first (see [`App::absorb_scroll_compensation`]).
+//! the viewport is pinned by a [`ScrollPosition`], which names a document
+//! position rather than a distance from the bottom. content arriving below
+//! the anchor cannot move the view, and a viewport that changes height just
+//! reveals or hides rows below it, so no compensation arithmetic is needed.
 
 use super::*;
+use crate::widgets::message_list::DocumentLayout;
 
 impl App {
+    /// whether the viewport is pinned above the newest content
+    #[must_use]
+    pub fn is_scrolled_up(&self) -> bool {
+        !self.scroll.is_bottom()
+    }
+
     /// jump to bottom of conversation and clear unread indicator
     pub fn scroll_to_bottom(&mut self) {
-        self.scroll_offset = 0;
+        self.scroll = ScrollPosition::Bottom;
         self.navigation.has_unread = false;
     }
 
-    /// fold the renderer's pinning compensation into `scroll_offset` so
-    /// it means "lines above the bottom of the current content" again,
-    /// and re-pin the baseline to the last rendered frame.
-    ///
-    /// while the user sits scrolled up the renderer holds the viewport
-    /// still by adding `total_lines - baseline` on top of the offset
-    /// rather than touching `scroll_offset` itself. a scroll keypress
-    /// has to move relative to what is on screen, so absorb that
-    /// compensation first. without this, content that arrived while
-    /// scrolled up is invisible to the offset arithmetic and the first
-    /// press that drives the offset to 0 snaps to the real bottom
-    fn absorb_scroll_compensation(&mut self) {
-        let compensation = self.render_state.scroll_compensation.get();
-        if self.scroll_offset == 0 || compensation == 0 {
-            return;
-        }
-        let absorbed = (self.scroll_offset as isize + compensation).clamp(0, u16::MAX as isize);
-        self.scroll_offset = absorbed as u16;
-        self.render_state
-            .scroll_baseline
-            .set(self.render_state.prev_content_lines.get());
-        self.render_state
-            .scroll_baseline_vis
-            .set(self.render_state.visible_area_height.get());
-        self.render_state.scroll_compensation.set(0);
+    /// jump to the top of the conversation. used after a manual /compact
+    /// so the freshly generated summary is the first thing the user sees,
+    /// instead of leaving them at the bottom looking at the same kept
+    /// messages they had before
+    pub fn scroll_to_top(&mut self) {
+        self.scroll = match self.document_layout() {
+            Some((layout, vis)) => layout.position_at(0, vis),
+            None => ScrollPosition::Message { msg: 0, line: 0 },
+        };
     }
 
     /// scroll `lines` towards older content
     pub fn scroll_up(&mut self, lines: u16) {
-        self.absorb_scroll_compensation();
-        self.scroll_offset = self.scroll_offset.saturating_add(lines);
+        self.scroll_by(-(lines as isize));
     }
 
     /// scroll `lines` towards newer content, clearing the unread
     /// indicator once the bottom is reached
     pub fn scroll_down(&mut self, lines: u16) {
-        self.absorb_scroll_compensation();
-        self.scroll_offset = self.scroll_offset.saturating_sub(lines);
-        if self.scroll_offset == 0 {
-            self.navigation.has_unread = false;
-        }
+        self.scroll_by(lines as isize);
     }
 
-    /// jump to the top of the conversation. used after a manual /compact
-    /// so the freshly generated summary (pushed at index 0) is the first
-    /// thing the user sees, instead of leaving them at the bottom looking
-    /// at the same kept messages they had before. setting `u16::MAX` is
-    /// safe because the renderer clamps `scroll_offset` to
-    /// `total_lines - visible_lines` at draw time
-    pub fn scroll_to_top(&mut self) {
-        self.scroll_offset = u16::MAX;
+    /// move the viewport `delta` rows through the document, re-anchoring to
+    /// whatever lands on the top edge. moving relative to the row currently
+    /// on screen (rather than to the stored anchor) means a keypress always
+    /// does what the user can see, even when the anchor was clamped because
+    /// the viewport grew past the remaining content
+    fn scroll_by(&mut self, delta: isize) {
+        let Some((layout, vis)) = self.document_layout() else {
+            return;
+        };
+        let top = layout.top_row(self.scroll, vis);
+        let target = top.saturating_add_signed(delta);
+        self.scroll = layout.position_at(target, vis);
+        if self.scroll.is_bottom() {
+            self.navigation.has_unread = false;
+        }
+        tracing::debug!(
+            target: "mush_tui::scroll",
+            delta,
+            prev_top = top,
+            target,
+            position = ?self.scroll,
+            "scroll moved"
+        );
+    }
+
+    /// document layout and viewport height as of the last rendered frame.
+    /// `None` until a frame has been drawn, since without a width there are
+    /// no wrapped-line heights to reason about
+    fn document_layout(&self) -> Option<(DocumentLayout, u16)> {
+        let area = self.render_state.message_area.get();
+        if area.width == 0 || area.height == 0 {
+            return None;
+        }
+        Some((DocumentLayout::build(self, area.width), area.height))
+    }
+
+    /// document row at the top of the viewport, from the last rendered
+    /// frame's geometry. `None` before the first frame
+    #[cfg(test)]
+    pub(crate) fn viewport_top(&self) -> Option<usize> {
+        let (layout, vis) = self.document_layout()?;
+        Some(layout.top_row(self.scroll, vis))
     }
 
     /// whether the message at `msg_idx` overlaps the current viewport based
     /// on cached heights from the last render. returns true when no render
-    /// has happened yet (`visible_area_height == 0`) so callers do not block
-    /// on missing data. used to gate scroll-mode selection movement so we
-    /// never select a message that is off-screen
+    /// has happened yet so callers do not block on missing data. used to
+    /// gate scroll-mode selection movement so we never select a message
+    /// that is off-screen
     pub fn is_message_visible(&self, msg_idx: usize) -> bool {
         if msg_idx >= self.messages.len() {
             return false;
         }
-        let visible = self.render_state.visible_area_height.get() as usize;
-        if visible == 0 {
+        let Some((layout, vis)) = self.document_layout() else {
             return true;
-        }
-        let cache = self.render_state.height_cache.borrow();
-        let height_of = |i: usize| -> usize {
-            if self.messages.get(i).is_none_or(|m| m.queued) {
-                return 0;
-            }
-            cache
-                .get(i)
-                .and_then(|e| e.as_ref())
-                .map_or(0, |e| e.height)
         };
-        let msg_start: usize = (0..msg_idx).map(height_of).sum();
-        let msg_height = height_of(msg_idx);
-        let total: usize = (0..self.messages.len()).map(height_of).sum();
-        drop(cache);
-
-        let scroll_offset = (self.scroll_offset as usize).min(total.saturating_sub(visible));
-        let top_of_view = total.saturating_sub(scroll_offset + visible);
-        let bottom_of_view = total.saturating_sub(scroll_offset);
-
-        msg_start < bottom_of_view && msg_start + msg_height > top_of_view
+        let Some(entry) = layout.entry(msg_idx) else {
+            return false;
+        };
+        let top = layout.top_row(self.scroll, vis);
+        entry.start < top + vis as usize && entry.end() > top
     }
 
     /// find which message is displayed at a given screen row

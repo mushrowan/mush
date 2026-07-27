@@ -123,7 +123,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     // `MessageEnd` and the next `TurnStart`, when text is no longer
     // streaming but the agent is still cranking through tool calls
     if is_cancel_key(app, key) {
-        if app.scroll_offset > 0 {
+        if app.is_scrolled_up() {
             app.scroll_to_bottom();
             return None;
         }
@@ -988,7 +988,6 @@ fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         .matches_in(KeyScope::Scroll, Action::NextItem, key)
     {
         let scroll_lines = app.scroll_lines;
-        let prev_scroll_offset = app.scroll_offset;
         if app.navigation.scroll_unit == ScrollUnit::Block {
             let blocks = app.blocks();
             if let Some(sel) = app.navigation.selected_block
@@ -1011,8 +1010,7 @@ fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             target: "mush_tui::scroll",
             key = "next_item",
             scroll_lines,
-            prev_scroll_offset,
-            new_scroll_offset = app.scroll_offset,
+            position = ?app.scroll,
             "scroll keypress"
         );
         return None;
@@ -1022,7 +1020,6 @@ fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         .matches_in(KeyScope::Scroll, Action::PreviousItem, key)
     {
         let scroll_lines = app.scroll_lines;
-        let prev_scroll_offset = app.scroll_offset;
         if app.navigation.scroll_unit == ScrollUnit::Block {
             let blocks = app.blocks();
             if let Some(sel) = app.navigation.selected_block {
@@ -1044,8 +1041,7 @@ fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             target: "mush_tui::scroll",
             key = "previous_item",
             scroll_lines,
-            prev_scroll_offset,
-            new_scroll_offset = app.scroll_offset,
+            position = ?app.scroll,
             "scroll keypress"
         );
         return None;
@@ -1072,7 +1068,7 @@ fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         .keymap
         .matches_in(KeyScope::Scroll, Action::NavigateTop, key)
     {
-        app.scroll_offset = u16::MAX;
+        app.scroll_to_top();
         if app.navigation.scroll_unit == ScrollUnit::Block {
             let blocks = app.blocks();
             app.navigation.selected_block = if blocks.is_empty() { None } else { Some(0) };

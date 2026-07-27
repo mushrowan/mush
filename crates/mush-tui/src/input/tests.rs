@@ -1,6 +1,7 @@
 //! tests for input
 
 use super::*;
+use crate::app::ScrollPosition;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 use mush_ai::types::{ThinkingLevel, TokenCount};
 
@@ -184,13 +185,13 @@ fn escape_scrolls_to_bottom_before_aborting_when_streaming_and_scrolled_up() {
     // is the one that cancels
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.stream.active = true;
-    app.scroll_offset = 25;
+    app.scroll = ScrollPosition::Message { msg: 0, line: 0 };
     let event = handle_key(&mut app, key(KeyCode::Esc));
     assert!(
         event.is_none(),
         "first esc should scroll to bottom, not abort (got {event:?})"
     );
-    assert_eq!(app.scroll_offset, 0);
+    assert!(!app.is_scrolled_up());
     // second esc now aborts since we're at bottom
     let event = handle_key(&mut app, key(KeyCode::Esc));
     assert!(matches!(event, Some(AppEvent::Abort)));
@@ -238,13 +239,13 @@ fn jump_to_bottom_hotkey_scrolls_without_aborting() {
     // the stream so it's safe to mash while the agent's working
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.stream.active = true;
-    app.scroll_offset = 40;
+    app.scroll = ScrollPosition::Message { msg: 0, line: 0 };
     let event = handle_key(&mut app, KeyEvent::new(KeyCode::End, KeyModifiers::SHIFT));
     assert!(
         event.is_none(),
         "jump_to_bottom should not emit Abort (got {event:?})"
     );
-    assert_eq!(app.scroll_offset, 0);
+    assert!(!app.is_scrolled_up());
 }
 
 #[test]
@@ -313,14 +314,21 @@ fn home_end_navigation() {
 
 #[test]
 fn page_up_down_scrolls() {
+    // 5 msgs, 10 rows each, total 50, viewport 10: the bottom sits at
+    // row 40 and a page is 10 rows
     let mut app = App::new("test".into(), TokenCount::new(200_000));
+    for i in 0..5 {
+        app.push_user_message(format!("msg {i}"));
+    }
+    install_tall_message_heights(&mut app, 10, 10);
+
     let event = handle_key(&mut app, key(KeyCode::PageUp));
     assert!(matches!(event, Some(AppEvent::ScrollUp(10))));
-    assert_eq!(app.scroll_offset, 10);
+    assert_eq!(app.viewport_top(), Some(30));
 
     let event = handle_key(&mut app, key(KeyCode::PageDown));
     assert!(matches!(event, Some(AppEvent::ScrollDown(10))));
-    assert_eq!(app.scroll_offset, 0);
+    assert!(!app.is_scrolled_up());
 }
 
 #[test]
@@ -1686,30 +1694,31 @@ fn esc_cascade_scroll_select_to_abort() {
     }
 
     // enter scroll mode, select a message, start visual selection,
-    // then scroll up so the later scroll_offset > 0 branch fires.
+    // then scroll up so the later scrolled-up branch fires.
     // ctrl+s is an idle-only binding, so enter scroll mode before
     // simulating the in-flight stream
     handle_key(&mut app, ctrl(KeyCode::Char('s')));
     handle_key(&mut app, key(KeyCode::Char('b')));
     handle_key(&mut app, key(KeyCode::Char('v')));
     assert!(app.navigation.selection_anchor.is_some());
-    app.scroll_offset = 20;
+    let scrolled_up = ScrollPosition::Message { msg: 1, line: 0 };
+    app.scroll = scrolled_up;
     app.stream.active = true;
 
     // 1. first esc: clears selection, scroll mode retained
     assert!(handle_key(&mut app, key(KeyCode::Esc)).is_none());
     assert_eq!(app.interaction.mode, AppMode::Scroll);
     assert!(app.navigation.selection_anchor.is_none());
-    assert_eq!(app.scroll_offset, 20);
+    assert_eq!(app.scroll, scrolled_up);
 
     // 2. second esc: exits scroll mode, stays scrolled up
     assert!(handle_key(&mut app, key(KeyCode::Esc)).is_none());
     assert_eq!(app.interaction.mode, AppMode::Normal);
-    assert_eq!(app.scroll_offset, 20);
+    assert_eq!(app.scroll, scrolled_up);
 
     // 3. third esc: anchors at bottom of message log
     assert!(handle_key(&mut app, key(KeyCode::Esc)).is_none());
-    assert_eq!(app.scroll_offset, 0);
+    assert!(!app.is_scrolled_up());
 
     // 4. fourth esc: now at bottom, cancels the stream
     let event = handle_key(&mut app, key(KeyCode::Esc));
@@ -1785,23 +1794,26 @@ fn scroll_mode_block_jk_navigates_paragraphs_and_code_blocks() {
 /// install cached heights for tall messages so viewport intersection
 /// checks have something to consume. no real render runs in unit tests
 fn install_tall_message_heights(app: &mut App, height_each: usize, visible: u16) {
-    let count = app.messages.len();
+    const WIDTH: u16 = 80;
+    let lens: Vec<usize> = app.messages.iter().map(|m| m.content.len()).collect();
     let mut cache = app.render_state.height_cache.borrow_mut();
-    cache.resize_with(count, || None);
-    for slot in cache.iter_mut() {
+    cache.resize_with(lens.len(), || None);
+    for (slot, content_len) in cache.iter_mut().zip(lens) {
         *slot = Some(crate::app_state::CachedHeight {
-            content_len: 0,
+            content_len,
             thinking_len: 0,
             tool_output_len: 0,
             completed_tool_count: 0,
             thinking_expanded: false,
             has_usage: false,
-            width: 80,
+            width: WIDTH,
             height: height_each,
         });
     }
     drop(cache);
-    app.render_state.visible_area_height.set(visible);
+    app.render_state
+        .message_area
+        .set(ratatui::layout::Rect::new(0, 0, WIDTH, visible));
 }
 
 #[test]
@@ -1818,29 +1830,29 @@ fn scroll_mode_k_only_advances_selection_when_target_visible() {
     handle_key(&mut app, key(KeyCode::Char('b')));
     assert_eq!(app.navigation.scroll_unit, ScrollUnit::Message);
     assert_eq!(app.navigation.selected_message, Some(4));
-    // start at bottom: scroll_offset=0, viewport [40,50), only msg 4 visible
+    // start at bottom: viewport [40,50), only msg 4 visible
 
-    // press k: scroll_offset → 3, viewport [37,47). msg 3 [30,40) overlaps → visible, select it
+    // press k: viewport [37,47). msg 3 [30,40) overlaps, so select it
     handle_key(&mut app, key(KeyCode::Char('k')));
-    assert_eq!(app.scroll_offset, 3);
+    assert_eq!(app.viewport_top(), Some(37));
     assert_eq!(app.navigation.selected_message, Some(3));
 
-    // press k again: scroll_offset → 6, viewport [34,44). msg 2 [20,30):
-    // 20<44 but 30>34 is false → not visible. selection stays on msg 3
+    // press k again: viewport [34,44). msg 2 [20,30) does not reach it,
+    // so the selection stays on msg 3
     handle_key(&mut app, key(KeyCode::Char('k')));
-    assert_eq!(app.scroll_offset, 6);
+    assert_eq!(app.viewport_top(), Some(34));
     assert_eq!(
         app.navigation.selected_message,
         Some(3),
         "selection must not move to an off-screen message"
     );
 
-    // press k until msg 2 becomes visible. at scroll 11: viewport [29,39).
-    // msg 2 [20,30): 20<39 && 30>29 → visible
+    // press k until msg 2 becomes visible: viewport [28,38) overlaps
+    // msg 2 [20,30)
     for _ in 0..2 {
         handle_key(&mut app, key(KeyCode::Char('k')));
     }
-    assert_eq!(app.scroll_offset, 12);
+    assert_eq!(app.viewport_top(), Some(28));
     assert_eq!(app.navigation.selected_message, Some(2));
 }
 
@@ -1855,18 +1867,18 @@ fn scroll_mode_j_only_advances_selection_when_target_visible() {
     handle_key(&mut app, ctrl(KeyCode::Char('s')));
     handle_key(&mut app, key(KeyCode::Char('b')));
     // start at bottom then scroll all the way up
-    app.scroll_offset = 40;
+    app.scroll_to_top();
     app.navigation.selected_message = Some(0);
     // viewport [0,10): only msg 0 visible
 
-    // press j: scroll_offset → 37, viewport [3,13). msg 1 [10,20) overlaps → select
+    // press j: viewport [3,13). msg 1 [10,20) overlaps, so select it
     handle_key(&mut app, key(KeyCode::Char('j')));
-    assert_eq!(app.scroll_offset, 37);
+    assert_eq!(app.viewport_top(), Some(3));
     assert_eq!(app.navigation.selected_message, Some(1));
 
-    // press j again: scroll_offset → 34, viewport [6,16). msg 2 [20,30): 20<16 false → not visible
+    // press j again: viewport [6,16). msg 2 [20,30) is still below it
     handle_key(&mut app, key(KeyCode::Char('j')));
-    assert_eq!(app.scroll_offset, 34);
+    assert_eq!(app.viewport_top(), Some(6));
     assert_eq!(
         app.navigation.selected_message,
         Some(1),
@@ -1886,13 +1898,13 @@ fn scroll_mode_respects_custom_scroll_lines() {
 
     handle_key(&mut app, ctrl(KeyCode::Char('s')));
     handle_key(&mut app, key(KeyCode::Char('b')));
-    assert_eq!(app.scroll_offset, 0);
+    assert_eq!(app.viewport_top(), Some(40));
 
     handle_key(&mut app, key(KeyCode::Char('k')));
-    assert_eq!(app.scroll_offset, 5);
+    assert_eq!(app.viewport_top(), Some(35));
 
     handle_key(&mut app, key(KeyCode::Char('j')));
-    assert_eq!(app.scroll_offset, 0);
+    assert!(!app.is_scrolled_up());
 }
 
 // ctrl+[ is the same byte as ESC in legacy terminal mode, but terminals

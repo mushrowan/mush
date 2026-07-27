@@ -547,8 +547,8 @@ mod tests {
 
     /// after /compact the user-facing scroll position is left where it
     /// was. the previous implementation rebuilt the display from scratch
-    /// (clearing it via `clear_messages`, which reset scroll_offset to
-    /// the bottom) and then jumped to the top so the freshly rendered
+    /// (clearing it via `clear_messages`, which reset the scroll position
+    /// to the bottom) and then jumped to the top so the freshly rendered
     /// summary at index 0 was visible. now the summary is appended at
     /// the END of the existing display, so leaving scroll alone keeps
     /// the user where they were and the new banner is naturally below
@@ -567,7 +567,8 @@ mod tests {
         let options = StreamOptions::default();
 
         // simulate the user reading scrolled-up history
-        app.scroll_offset = 10;
+        let scrolled_up = crate::app::ScrollPosition::Message { msg: 0, line: 3 };
+        app.scroll = scrolled_up;
 
         handle_compact(
             &mut app,
@@ -582,9 +583,8 @@ mod tests {
         .await;
 
         assert_eq!(
-            app.scroll_offset, 10,
-            "/compact must not move the scroll position; was {} after, expected 10",
-            app.scroll_offset
+            app.scroll, scrolled_up,
+            "/compact must not move the scroll position"
         );
     }
 

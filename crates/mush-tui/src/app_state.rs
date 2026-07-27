@@ -283,6 +283,33 @@ pub struct NavigationState {
     pub selected_block: Option<usize>,
 }
 
+/// where the message list viewport is pinned.
+///
+/// the anchor names a position in the document rather than a distance
+/// from the bottom, so content arriving below it cannot move the view and
+/// no compensation arithmetic is needed. `Bottom` is the follow state:
+/// the viewport tracks the newest content as it grows
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScrollPosition {
+    /// follow the newest content
+    #[default]
+    Bottom,
+    /// top row of the viewport sits `line` wrapped rows below the first
+    /// row of message `msg`
+    Message { msg: usize, line: u16 },
+    /// top row of the viewport sits `line` wrapped rows below the first
+    /// row of the trailing block (in-flight stream, queued messages)
+    Trailing { line: u16 },
+}
+
+impl ScrollPosition {
+    /// whether the viewport is following new content
+    #[must_use]
+    pub fn is_bottom(self) -> bool {
+        self == Self::Bottom
+    }
+}
+
 /// cached indented lines for a single message.
 /// keyed by (content_hash, width) so entries invalidate on content or resize.
 type CachedIndentedLines = (u64, u16, Vec<Line<'static>>);
@@ -339,8 +366,6 @@ pub struct RenderState {
     pub stream_markdown_cache: RefCell<Option<(usize, String, Text<'static>)>>,
     /// total content lines (set during render by MessageList)
     pub total_content_lines: Cell<u16>,
-    /// visible area height (set during render by MessageList)
-    pub visible_area_height: Cell<u16>,
     /// per-message indented lines cache.
     /// stores (content_hash, width, pre-indented lines) so stable
     /// messages skip both the markdown clone and indent_line computation
@@ -357,33 +382,6 @@ pub struct RenderState {
     /// avoids re-running syntect over stable tool summaries and previews
     /// every frame.
     pub tool_box_cache: RefCell<Vec<Option<CachedToolBoxLines>>>,
-    /// total content lines (actual) from the previous render frame.
-    /// used to anchor scroll compensation during content fluctuation
-    pub prev_content_lines: Cell<usize>,
-    /// actual total content lines at the moment the user scrolled up
-    /// from the bottom. while `scroll_offset > 0`, compensation keeps
-    /// the viewport pinned to this baseline by offsetting scroll by
-    /// `current_actual_total - baseline`. reset to 0 when scroll_offset
-    /// returns to 0 so the next scroll-up re-captures the baseline.
-    /// this makes the viewport stable against estimate/actual drift
-    /// during streaming (the previous estimate-based delta approach
-    /// accumulated errors whenever count_estimated_lines disagreed
-    /// with markdown-rendered line count)
-    pub scroll_baseline: Cell<usize>,
-    /// viewport height at the moment the baseline was captured. when
-    /// the message area shrinks/grows between frames (status bar
-    /// wrapping to 2 lines as cache countdown text changes width, scroll
-    /// position indicator appearing, etc) `vis` jitters by 1 and the
-    /// viewport would shift unless we add `(baseline_vis - vis)` into
-    /// the compensation. paired with `scroll_baseline`, reset together
-    pub scroll_baseline_vis: Cell<u16>,
-    /// scroll compensation (in lines) derived post-render as
-    /// `total_content_lines - scroll_baseline` while scrolled up,
-    /// otherwise 0. signed so shrinkage past the baseline is handled
-    /// correctly. read by the status bar and folded back into
-    /// `scroll_offset` by `App::scroll_up`/`scroll_down` so a keypress
-    /// moves relative to what is on screen
-    pub scroll_compensation: Cell<isize>,
     /// per-frame status bar cache. cleared at the start of each frame so
     /// stale stats never leak. within a frame all `status_bar_height`,
     /// `StatusBar::render` and `Ui::cursor_position` callers share the
@@ -407,15 +405,10 @@ impl RenderState {
             markdown_cache: RefCell::new(HashMap::new()),
             stream_markdown_cache: RefCell::new(None),
             total_content_lines: Cell::new(0),
-            visible_area_height: Cell::new(0),
             indented_cache: RefCell::new(Vec::new()),
             height_cache: RefCell::new(Vec::new()),
             content_hash_cache: RefCell::new(Vec::new()),
             tool_box_cache: RefCell::new(Vec::new()),
-            prev_content_lines: Cell::new(0),
-            scroll_baseline: Cell::new(0),
-            scroll_baseline_vis: Cell::new(0),
-            scroll_compensation: Cell::new(0),
             status_bar_cache: RefCell::new(None),
             blocks_cache: RefCell::new(None),
         }

@@ -308,13 +308,12 @@ fn left_status(app: &App, width: u16) -> LeftStatus {
 
     // scroll position indicator (only when scrolled away from bottom).
     // stays inline with the scroll mode section
-    if app.interaction.status_bar.show_scroll_position && app.scroll_offset > 0 {
+    if app.interaction.status_bar.show_scroll_position && app.is_scrolled_up() {
         let total = app.render_state.total_content_lines.get();
-        let visible = app.render_state.visible_area_height.get();
+        let visible = app.render_state.message_area.get().height;
         let max_scroll = total.saturating_sub(visible);
         if max_scroll > 0 {
-            // scroll_offset is lines from bottom, convert to percentage from top
-            let from_top = max_scroll.saturating_sub(app.scroll_offset);
+            let from_top = app.render_state.render_scroll.get();
             let pct = (from_top as f64 / max_scroll as f64 * 100.0) as u16;
             b.push_inline(Span::styled(format!(" {pct}%"), app.theme.scroll_indicator));
         }

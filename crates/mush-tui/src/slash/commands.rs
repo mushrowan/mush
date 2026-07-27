@@ -454,11 +454,11 @@ fn build_debug_dump(app: &App, session_id: &str) -> String {
     let _ = writeln!(out, "\n[render]");
     let _ = writeln!(
         out,
-        "scroll_offset: {} compensation: {} total_lines: {} visible: {}",
-        app.scroll_offset,
-        app.render_state.scroll_compensation.get(),
+        "scroll: {:?} render_scroll: {} total_lines: {} visible: {}",
+        app.scroll,
+        app.render_state.render_scroll.get(),
         app.render_state.total_content_lines.get(),
-        app.render_state.visible_area_height.get()
+        app.render_state.message_area.get().height
     );
     let _ = writeln!(
         out,

@@ -8,10 +8,16 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Widget;
 
 use crate::app::{
-    App, DisplayMessage, DisplayToolCall, ImageRenderArea, MessageRole, ToolCallStatus,
+    App, DisplayMessage, DisplayToolCall, ImageRenderArea, MessageRole, ScrollPosition,
+    ToolCallStatus,
 };
 use crate::app_state::CachedHeight;
 use crate::widgets::shimmer::shimmer_spans;
+
+mod layout;
+
+pub(crate) use layout::DocumentLayout;
+use layout::anchor_row;
 
 #[cfg(test)]
 thread_local! {
@@ -39,71 +45,6 @@ fn record_materialised_line_count(_count: usize) {}
 /// calculation so the indent math stays declared in exactly one place
 pub(crate) const MESSAGE_INDENT_LEFT: usize = 1;
 pub(crate) const MESSAGE_INDENT_RIGHT: usize = 1;
-
-/// capture or clear the scroll baseline based on the current scroll_offset.
-/// returns the baseline (line count, viewport height) to use for this
-/// frame's compensation math. baseline_vis pins the viewport height at
-/// the moment of scroll-up so subsequent vis jitter (status bar wrapping
-/// during streaming, etc) doesn't shift the user's content position.
-///
-/// re-pin when current_vis grows past the stored_vis: a grown viewport
-/// would otherwise produce negative compensation that absorbs k/j
-/// keypresses (effective_offset clamps to 0). this fires when a tool
-/// panel disappears, the status bar unwraps, or the terminal grows
-/// without going through notify_resize. shrinking vis still pins to
-/// the original baseline_vis so 1-line status-bar jitter is invisible
-fn update_scroll_baseline(app: &App, current_vis: u16) -> (usize, u16) {
-    let stored = app.render_state.scroll_baseline.get();
-    let stored_vis = app.render_state.scroll_baseline_vis.get();
-    let prev_content_lines = app.render_state.prev_content_lines.get();
-    let (baseline, baseline_vis, reason) = match (app.scroll_offset, stored) {
-        (0, _) => (0, 0, "at_bottom"),
-        // first frame scrolled up: pin to prev actual + current vis
-        (_, 0) => (prev_content_lines, current_vis, "first_capture"),
-        // viewport grew past what was captured: re-pin so compensation
-        // doesn't go negative and absorb scroll keypresses
-        (_, _) if current_vis > stored_vis => (prev_content_lines, current_vis, "repin_grow"),
-        (_, current) => (current, stored_vis, "hold"),
-    };
-    if baseline != stored || baseline_vis != stored_vis {
-        tracing::debug!(
-            target: "mush_tui::scroll",
-            reason,
-            scroll_offset = app.scroll_offset,
-            prev_baseline = stored,
-            prev_baseline_vis = stored_vis,
-            new_baseline = baseline,
-            new_baseline_vis = baseline_vis,
-            current_vis,
-            prev_content_lines,
-            "baseline updated"
-        );
-    }
-    app.render_state.scroll_baseline.set(baseline);
-    app.render_state.scroll_baseline_vis.set(baseline_vis);
-    (baseline, baseline_vis)
-}
-
-/// signed compensation in lines to keep scroll_from_top pinned at the
-/// baseline as content grows or shrinks AND the viewport height jitters.
-/// `total` is the candidate total line count (estimate during preview,
-/// actual for the final scroll). `vis` is the current visible area
-/// height. returns 0 when no baseline is set (i.e. user is at the bottom
-/// or the first render hasn't captured a baseline yet)
-fn scroll_compensation(baseline: usize, baseline_vis: u16, total: usize, vis: u16) -> isize {
-    if baseline == 0 {
-        0
-    } else {
-        // (total - baseline) anchors against content growth;
-        // (baseline_vis - vis) anchors against viewport-height jitter
-        (total as isize - baseline as isize) + (baseline_vis as isize - vis as isize)
-    }
-}
-
-/// combine scroll_offset with a signed compensation, clamping at 0
-fn clamped_effective_offset(scroll_offset: u16, compensation: isize) -> usize {
-    (scroll_offset as isize + compensation).max(0) as usize
-}
 
 /// usable width for message body content given an outer column width.
 /// subtracts both the left indent and any right-side reservation so
@@ -220,65 +161,6 @@ impl MaterialisedLineSegment {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct MessageLayoutEntry {
-    msg_idx: usize,
-    start: usize,
-    height: usize,
-}
-
-impl MessageLayoutEntry {
-    fn end(self) -> usize {
-        self.start + self.height
-    }
-}
-
-#[derive(Debug)]
-struct MessageLayoutIndex {
-    entries: Vec<MessageLayoutEntry>,
-    total_height: usize,
-}
-
-impl MessageLayoutIndex {
-    fn build(app: &App, width: u16) -> Self {
-        let mut entries = Vec::with_capacity(app.messages.len());
-        let mut total_height = 0usize;
-
-        for (msg_idx, msg) in app.messages.iter().enumerate() {
-            if msg.queued {
-                continue;
-            }
-            let height = estimate_message_height(msg, msg_idx, width, &app.render_state);
-            entries.push(MessageLayoutEntry {
-                msg_idx,
-                start: total_height,
-                height,
-            });
-            total_height += height;
-        }
-
-        Self {
-            entries,
-            total_height,
-        }
-    }
-
-    fn visible_entry_range(
-        &self,
-        render_start: usize,
-        render_end: usize,
-    ) -> std::ops::Range<usize> {
-        if render_start >= render_end {
-            return 0..0;
-        }
-        let start = self
-            .entries
-            .partition_point(|entry| entry.end() <= render_start);
-        let end = start + self.entries[start..].partition_point(|entry| entry.start < render_end);
-        start..end
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SelectedBlockInfo {
     msg_idx: usize,
@@ -312,13 +194,11 @@ impl SelectedBlockInfo {
 /// what the virtual-scroll pass decided before any line is materialised
 struct Viewport {
     /// per-message height index for the whole document
-    layout_index: MessageLayoutIndex,
-    /// estimated height of the message list alone, excluding trailing content
-    estimated_total: usize,
-    /// scroll baseline captured (or held) for this frame
-    baseline: usize,
-    /// viewport height at the moment the baseline was captured
-    baseline_vis: u16,
+    layout: DocumentLayout,
+    /// document row the viewport's top edge should land on, in the
+    /// estimate space of `layout`. `None` while following the bottom,
+    /// which can only be resolved against the final line count
+    target_top: Option<usize>,
     /// document row range worth materialising: the viewport plus a
     /// viewport of margin either side
     render_start: usize,
@@ -330,48 +210,16 @@ impl Viewport {
     /// overlap the viewport, so off-screen messages skip markdown
     /// rendering and `indent_line` entirely
     fn compute(app: &App, area: Rect) -> Self {
-        let layout_index = MessageLayoutIndex::build(app, area.width);
-        let estimated_total = layout_index.total_height;
-        // include trailing content (streaming, tool args, queued) in the
-        // estimate so the viewport calc matches the real scroll target.
-        // without it the visible range is computed against a shorter
-        // document and on-screen messages get marked off-screen, leaving
-        // blank placeholder rows
-        let trailing_estimate = estimate_trailing_height(app, area.width, &app.render_state);
-        let total_estimate = estimated_total + trailing_estimate;
-
-        // keep the viewport pinned to a stable content line while scrolled
-        // up. scroll_offset is "lines from bottom", so as content grows or
-        // shrinks below, effective_offset has to follow along by the same
-        // amount for max_scroll - effective_offset to stay constant.
-        //
-        // the baseline is the actual total line count snapshotted on the
-        // first frame the user scrolled up, so compensation = current total
-        // - baseline. with effective_offset = scroll_offset + compensation,
-        // scroll_from_top = baseline - visible - scroll_offset and the
-        // current total cancels out. that is why the preview pass (using
-        // the estimate) and the final pass (using actuals) agree even when
-        // the two totals disagree, and it is what stops estimate/actual
-        // divergence (code fences, headings, elided `**` markers) from
-        // accumulating into a per-frame drift
-        let (baseline, baseline_vis) = update_scroll_baseline(app, area.height);
-        let preview_compensation =
-            scroll_compensation(baseline, baseline_vis, total_estimate, area.height);
-        let effective_offset = clamped_effective_offset(app.scroll_offset, preview_compensation);
-
+        let layout = DocumentLayout::build(app, area.width);
+        let top = layout.top_row(app.scroll, area.height);
         let vis_h = area.height as usize;
-        let scroll_from_top = total_estimate
-            .saturating_sub(vis_h)
-            .saturating_sub(effective_offset);
         let margin = vis_h;
 
         Self {
-            layout_index,
-            estimated_total,
-            baseline,
-            baseline_vis,
-            render_start: scroll_from_top.saturating_sub(margin),
-            render_end: (scroll_from_top + vis_h + margin).min(estimated_total),
+            target_top: (!app.scroll.is_bottom()).then_some(top),
+            render_start: top.saturating_sub(margin),
+            render_end: (top + vis_h + margin).min(layout.trailing_start()),
+            layout,
         }
     }
 }
@@ -393,13 +241,13 @@ struct FrameGeometry {
 /// line count, publish the geometry other widgets read, and hand back
 /// what the paint pass needs.
 ///
-/// the preview pass in [`Viewport::compute`] used estimated heights, which
-/// is fine for deciding what to materialise. the final scroll has to use
-/// actual counts so buffer writes land on the right rows
+/// `target_top` is the document row the anchor resolved to once actual
+/// heights corrected the estimates the layout pass worked from, or `None`
+/// while following the bottom
 fn settle_geometry(
     app: &App,
     area: Rect,
-    viewport: &Viewport,
+    target_top: Option<usize>,
     content_doc_len: usize,
     mut message_ranges: Vec<crate::app::MessageRowRange>,
 ) -> FrameGeometry {
@@ -429,33 +277,19 @@ fn settle_geometry(
 
     let total_lines = content_lines + padding as u16;
     let max_scroll = total_lines.saturating_sub(visible);
-    let total_lines_usize = total_lines as usize;
-    let compensation = scroll_compensation(
-        viewport.baseline,
-        viewport.baseline_vis,
-        total_lines_usize,
-        visible,
-    );
-    let effective_offset = clamped_effective_offset(app.scroll_offset, compensation);
-    let scroll = max_scroll.saturating_sub(effective_offset.min(u16::MAX as usize) as u16);
+    let scroll = target_top.map_or(max_scroll, |top| clamp_usize_to_u16(top).min(max_scroll));
 
-    app.render_state.prev_content_lines.set(total_lines_usize);
-    app.render_state.scroll_compensation.set(compensation);
     app.render_state.total_content_lines.set(total_lines);
-    app.render_state.visible_area_height.set(visible);
     app.render_state.message_area.set(area);
     app.render_state.render_scroll.set(scroll);
     tracing::trace!(
         target: "mush_tui::scroll",
-        scroll_offset = app.scroll_offset,
-        effective_offset,
+        position = ?app.scroll,
+        target_top,
         render_scroll = scroll,
         max_scroll,
-        total_lines = total_lines_usize,
+        total_lines,
         visible,
-        baseline = viewport.baseline,
-        baseline_vis = viewport.baseline_vis,
-        compensation,
         area_w = area.width,
         area_h = area.height,
         "frame settled"
@@ -765,12 +599,15 @@ impl Widget for MessageList<'_> {
         let mut frame = FrameLines::new();
 
         // body: every stored message overlapping the render window
-        let layout_index = &viewport.layout_index;
+        let layout = &viewport.layout;
         let (render_start, render_end) = (viewport.render_start, viewport.render_end);
+        // the anchored message's document row shifts when messages above it
+        // inside the window render taller or shorter than the layout pass
+        // estimated. track the corrected row so the paint pass puts the
+        // anchor exactly on the viewport's top edge
+        let mut corrected_top = None;
         let mut visible_height_delta = 0isize;
-        for entry in
-            &layout_index.entries[layout_index.visible_entry_range(render_start, render_end)]
-        {
+        for entry in &layout.entries()[layout.visible_entry_range(render_start, render_end)] {
             let Some(msg) = self.app.messages.get(entry.msg_idx) else {
                 continue;
             };
@@ -797,11 +634,12 @@ impl Widget for MessageList<'_> {
             );
             frame.lines.push(Line::raw(""));
 
-            // correct the height_cache with the actual rendered height.
-            // the cache may hold a stale estimate from count_estimated_lines
-            // (which counts raw markdown chars). updating here ensures the
-            // cache converges after one render.
             let actual_height = frame.lines.len() - start_line;
+            if let ScrollPosition::Message { msg: anchor, line } = self.app.scroll
+                && anchor == entry.msg_idx
+            {
+                corrected_top = Some(anchor_row(msg_start, actual_height, line));
+            }
             absolutise_render_metadata(
                 msg_start,
                 start_line,
@@ -813,6 +651,9 @@ impl Widget for MessageList<'_> {
                 line_start: start_line,
                 line_count: actual_height,
             });
+            // the cache may hold an estimate from count_estimated_lines
+            // (which counts raw markdown chars), so feed the actual line
+            // count back and let it converge after one render
             if actual_height != estimated_height {
                 update_cached_height(
                     msg,
@@ -832,7 +673,7 @@ impl Widget for MessageList<'_> {
 
         // trailing: streaming content and queued messages, positioned after
         // the last stored message
-        let trailing_doc_start = offset_usize(viewport.estimated_total, visible_height_delta);
+        let trailing_doc_start = offset_usize(layout.trailing_start(), visible_height_delta);
         let trailing_line_start = frame.lines.len();
         let trailing_image_start = frame.images.len();
         let trailing_deferred_start = frame.deferred.len();
@@ -851,6 +692,9 @@ impl Widget for MessageList<'_> {
                 line_count: trailing_line_count,
             });
         }
+        if let ScrollPosition::Trailing { line } = self.app.scroll {
+            corrected_top = Some(trailing_doc_start + line as usize);
+        }
         record_materialised_line_count(frame.lines.len());
 
         // pre-compute y positions for image placeholders before moving lines
@@ -866,7 +710,7 @@ impl Widget for MessageList<'_> {
         let geometry = settle_geometry(
             self.app,
             area,
-            &viewport,
+            corrected_top.or(viewport.target_top),
             trailing_doc_start + trailing_line_count,
             std::mem::take(&mut frame.ranges),
         );

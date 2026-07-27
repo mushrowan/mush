@@ -1144,34 +1144,38 @@ fn copy_block_selection_copies_selected_block_content() {
 }
 
 /// set up `app` with `count` messages whose cached render height is
-/// `height_each`, mimicking a completed render. used by
-/// `is_message_visible` tests to avoid driving a real terminal
+/// `height_each`, mimicking a completed render into an 80x`visible`
+/// message area. used by `is_message_visible` tests to avoid driving a
+/// real terminal
 fn with_uniform_message_heights(app: &mut App, count: usize, height_each: usize, visible: u16) {
+    const WIDTH: u16 = 80;
     for i in 0..count {
         app.messages
             .push(DisplayMessage::new(MessageRole::User, format!("msg {i}")));
     }
     let mut cache = app.render_state.height_cache.borrow_mut();
     cache.resize_with(count, || None);
-    for slot in cache.iter_mut() {
+    for (i, slot) in cache.iter_mut().enumerate() {
         *slot = Some(crate::app_state::CachedHeight {
-            content_len: 0,
+            content_len: format!("msg {i}").len(),
             thinking_len: 0,
             tool_output_len: 0,
             completed_tool_count: 0,
             thinking_expanded: false,
             has_usage: false,
-            width: 80,
+            width: WIDTH,
             height: height_each,
         });
     }
     drop(cache);
-    app.render_state.visible_area_height.set(visible);
+    app.render_state
+        .message_area
+        .set(ratatui::layout::Rect::new(0, 0, WIDTH, visible));
 }
 
 #[test]
 fn is_message_visible_returns_true_before_first_render() {
-    // with visible_area_height == 0 (no render yet) we can't compute
+    // with no message area from a previous render we can't compute
     // viewport intersection, so don't block the caller
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.messages
@@ -1187,12 +1191,12 @@ fn is_message_visible_out_of_bounds_returns_false() {
 }
 
 #[test]
-fn is_message_visible_scroll_zero_shows_bottom_messages() {
-    // 5 msgs, 10 lines each, total 50. visible 15. scroll_offset 0.
-    // viewport shows lines [35, 50): only msgs 3 and 4 overlap
+fn is_message_visible_at_bottom_shows_last_messages() {
+    // 5 msgs, 10 lines each, total 50. visible 15. following the bottom,
+    // so the viewport shows lines [35, 50): only msgs 3 and 4 overlap
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     with_uniform_message_heights(&mut app, 5, 10, 15);
-    app.scroll_offset = 0;
+    app.scroll_to_bottom();
     assert!(!app.is_message_visible(0));
     assert!(!app.is_message_visible(1));
     assert!(!app.is_message_visible(2));
@@ -1201,11 +1205,11 @@ fn is_message_visible_scroll_zero_shows_bottom_messages() {
 }
 
 #[test]
-fn is_message_visible_tracks_scroll_offset() {
-    // same 5x10 layout, scroll_offset 10 → viewport [25, 40)
+fn is_message_visible_tracks_the_anchor() {
+    // same 5x10 layout, 10 rows up from the bottom is viewport [25, 40)
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     with_uniform_message_heights(&mut app, 5, 10, 15);
-    app.scroll_offset = 10;
+    app.scroll_up(10);
     assert!(!app.is_message_visible(1)); // [10,20) above viewport
     assert!(app.is_message_visible(2)); // [20,30) overlaps [25,40)
     assert!(app.is_message_visible(3)); // [30,40) inside

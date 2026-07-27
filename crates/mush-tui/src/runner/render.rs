@@ -463,7 +463,13 @@ mod tests {
     fn mouse_scroll_over_messages_scrolls_conversation() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.input.area.set(ratatui::layout::Rect::new(0, 10, 40, 5));
-        let before = app.scroll_offset;
+        for i in 0..10 {
+            app.push_user_message(format!("msg {i}"));
+        }
+        app.render_state
+            .message_area
+            .set(ratatui::layout::Rect::new(0, 0, 40, 5));
+        let before = app.viewport_top();
         handle_mouse(
             &mut app,
             MouseEvent {
@@ -473,7 +479,10 @@ mod tests {
                 modifiers: crossterm::event::KeyModifiers::NONE,
             },
         );
-        assert!(app.scroll_offset > before);
+        assert!(
+            app.viewport_top() < before,
+            "wheel up moves the viewport up"
+        );
     }
 
     #[test]
@@ -543,7 +552,7 @@ mod tests {
     }
 
     #[test]
-    fn message_at_screen_row_with_scroll_offset() {
+    fn message_at_screen_row_with_render_scroll() {
         use crate::app::MessageRowRange;
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.messages.push(crate::app::DisplayMessage::new(

@@ -21,7 +21,7 @@ impl App {
     /// start streaming a new assistant message
     pub fn start_streaming(&mut self) {
         self.stream.start();
-        // don't reset scroll_offset here: push_user_message() already does it
+        // don't reset the scroll position here: push_user_message() does it
         // when the user sends a message. resetting here would yank the user
         // to the bottom if streaming starts in other contexts (delegation,
         // resume, etc) while they're scrolled up
@@ -298,6 +298,15 @@ impl App {
             .map(|i| i + 1)
             .unwrap_or(0);
         self.messages.insert(insert_pos, assistant_msg);
+        // a viewport anchored inside the in-flight stream has to follow the
+        // same content into its new home, otherwise the trailing block
+        // shrinking out from under the anchor drops the view to the bottom
+        if let ScrollPosition::Trailing { line } = self.scroll {
+            self.scroll = ScrollPosition::Message {
+                msg: insert_pos,
+                line,
+            };
+        }
 
         if let Some(ref u) = usage {
             let prev_usage_snapshot = self.stats.prev_usage().copied();
@@ -398,7 +407,7 @@ impl App {
         } else if let Some(c) = cost {
             self.stats.total_cost += c;
         }
-        if self.scroll_offset > 0 {
+        if self.is_scrolled_up() {
             self.navigation.has_unread = true;
         }
     }
