@@ -17,6 +17,16 @@
       "automerge": false
     },
     {
+      "description": "never touch flake.nix. anything written there is pinned on purpose, but renovate's nix manager reads a channel ref (nixos-25.11) as a version via its nixpkgs versioning scheme, and treats an explicit rev as a replaceable string, so left alone it will try to rewrite both. only flake.lock refreshes are wanted.",
+      "matchManagers": ["nix"],
+      "enabled": false
+    },
+    {
+      "matchManagers": ["nix"],
+      "matchUpdateTypes": ["lockFileMaintenance"],
+      "enabled": true
+    },
+    {
       "matchManagers": ["cargo"],
       "groupName": "cargo dependencies",
       "automerge": false
