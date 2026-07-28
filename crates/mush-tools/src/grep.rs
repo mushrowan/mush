@@ -46,6 +46,8 @@ struct GrepArgs {
     case_sensitive: bool,
     #[serde(default)]
     whole_word: bool,
+    #[serde(default)]
+    include_hidden: bool,
     #[serde(default, deserialize_with = "mush_agent::de::uint")]
     context_before: u64,
     #[serde(default, deserialize_with = "mush_agent::de::uint")]
@@ -84,7 +86,8 @@ impl AgentTool for GrepTool {
         "Grep"
     }
     fn description(&self) -> &str {
-        "Search file contents using ripgrep. Respects .gitignore. \
+        "Search file contents using ripgrep. Respects .gitignore and skips hidden files \
+         unless include_hidden is set. \
          Returns matching lines with file paths and line numbers. \
          The pattern is a raw regex; do not wrap it in quotes (e.g. pass `fn main`, not `\"fn main\"`). \
          Use 'count' output to get per-file match counts instead of full lines. \
@@ -119,6 +122,10 @@ impl AgentTool for GrepTool {
                 },
                 "whole_word": {
                     "description": "only match whole words (default false)",
+                    "type": "boolean"
+                },
+                "include_hidden": {
+                    "description": "also search hidden files and directories (dotfiles). gitignored paths stay excluded (default false)",
                     "type": "boolean"
                 },
                 "context_before": {
@@ -168,50 +175,21 @@ impl AgentTool for GrepTool {
             .map(|path| resolve_path(&self.cwd, path))
             .unwrap_or_else(|| self.cwd.to_path_buf());
 
-        let cwd = self.cwd.clone();
         let cleaned = clean_regex_pattern(&args.pattern);
-        let pattern = cleaned.pattern.clone();
-        let include = args.include.clone();
+        let mut args = args;
+        args.pattern = cleaned.pattern;
 
-        let result = tokio::task::spawn_blocking(move || {
-            run_search(
-                &cwd,
-                &pattern,
-                &search_path,
-                include.as_deref(),
-                args.mode,
-                args.case_sensitive,
-                args.whole_word,
-                args.context_before,
-                args.context_after,
-                args.output,
-                args.max_results,
-                args.top_n,
-            )
-        })
-        .await
-        .unwrap_or_else(|e| ToolResult::error(format!("task join error: {e}")));
+        let result = tokio::task::spawn_blocking(move || run_search(&search_path, &args))
+            .await
+            .unwrap_or_else(|e| ToolResult::error(format!("task join error: {e}")));
         inject_note(result, cleaned.note)
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn run_search(
-    cwd: &Path,
-    pattern: &str,
-    search_path: &Path,
-    include: Option<&str>,
-    mode: GrepMode,
-    case_sensitive: bool,
-    whole_word: bool,
-    context_before: u64,
-    context_after: u64,
-    output_mode: GrepOutput,
-    max_results: Option<usize>,
-    top_n: Option<usize>,
-) -> ToolResult {
+fn run_search(search_path: &Path, args: &GrepArgs) -> ToolResult {
     // strip newlines from pattern - LLMs sometimes include literal newlines
-    let pattern: String = pattern
+    let pattern: String = args
+        .pattern
         .chars()
         .filter(|&c| c != '\n' && c != '\r')
         .collect();
@@ -222,13 +200,13 @@ fn run_search(
 
     // build the regex matcher
     let mut builder = RegexMatcherBuilder::new();
-    if matches!(mode, GrepMode::Literal) {
+    if matches!(args.mode, GrepMode::Literal) {
         builder.fixed_strings(true);
     }
-    if !case_sensitive {
+    if !args.case_sensitive {
         builder.case_insensitive(true);
     }
-    if whole_word {
+    if args.whole_word {
         builder.word(true);
     }
     let matcher = match builder.build(&pattern) {
@@ -237,7 +215,7 @@ fn run_search(
     };
 
     // collect files to search
-    let files = match collect_files(cwd, search_path, include) {
+    let files = match collect_files(search_path, args.include.as_deref(), args.include_hidden) {
         Ok(f) => f,
         Err(e) => return ToolResult::error(e.to_string()),
     };
@@ -246,31 +224,31 @@ fn run_search(
         return ToolResult::text("No matches found.");
     }
 
-    match output_mode {
+    match args.output {
         GrepOutput::Lines => search_lines(
             &matcher,
             &files,
             search_path,
-            context_before as usize,
-            context_after as usize,
+            args.context_before as usize,
+            args.context_after as usize,
         ),
         GrepOutput::Count | GrepOutput::Json => search_count(
             &matcher,
             &files,
             search_path,
-            output_mode,
-            max_results,
-            top_n,
+            args.output,
+            args.max_results,
+            args.top_n,
         ),
-        GrepOutput::Files => search_files(&matcher, &files, search_path, max_results),
+        GrepOutput::Files => search_files(&matcher, &files, search_path, args.max_results),
     }
 }
 
 /// collect files to search, respecting .gitignore
 fn collect_files(
-    _cwd: &Path,
     search_path: &Path,
     include: Option<&str>,
+    include_hidden: bool,
 ) -> io::Result<Vec<PathBuf>> {
     // single file
     if search_path.is_file() {
@@ -287,7 +265,7 @@ fn collect_files(
     }
 
     let mut walk = WalkBuilder::new(search_path);
-    walk.hidden(true).git_ignore(true).parents(true);
+    walk.hidden(!include_hidden).git_ignore(true).parents(true);
 
     // post-filter on the include glob with `globset` rather than the
     // walker's OverrideBuilder: an override of `!*` also excludes
@@ -666,6 +644,67 @@ mod tests {
         assert!(result.outcome.is_error(), "missing path should be an error");
         let text = extract_text(&result);
         assert!(text.contains("path not found"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn grep_skips_hidden_files_unless_asked() {
+        let dir = temp_dir();
+        fs::write(dir.path().join(".hidden.txt"), "needle in dotfile").unwrap();
+        let hidden_dir = dir.path().join(".config");
+        fs::create_dir(&hidden_dir).unwrap();
+        fs::write(hidden_dir.join("conf.toml"), "needle in dotdir").unwrap();
+        fs::write(dir.path().join("visible.txt"), "needle in plain sight").unwrap();
+
+        let tool = GrepTool::new(dir.path().into());
+        let default = extract_text(
+            &tool
+                .execute(serde_json::json!({
+                    "pattern": "needle",
+                    "path": dir.path().to_str().unwrap()
+                }))
+                .await,
+        );
+        assert!(default.contains("visible.txt"), "got: {default}");
+        assert!(!default.contains(".hidden.txt"), "got: {default}");
+        assert!(!default.contains("conf.toml"), "got: {default}");
+
+        let with_hidden = extract_text(
+            &tool
+                .execute(serde_json::json!({
+                    "pattern": "needle",
+                    "path": dir.path().to_str().unwrap(),
+                    "include_hidden": true
+                }))
+                .await,
+        );
+        assert!(with_hidden.contains("visible.txt"), "got: {with_hidden}");
+        assert!(with_hidden.contains(".hidden.txt"), "got: {with_hidden}");
+        assert!(with_hidden.contains("conf.toml"), "got: {with_hidden}");
+    }
+
+    #[tokio::test]
+    async fn grep_include_hidden_still_respects_gitignore() {
+        let dir = temp_dir();
+        // .gitignore only applies inside a git repo, same as ripgrep
+        fs::create_dir(dir.path().join(".git")).unwrap();
+        fs::write(dir.path().join(".gitignore"), "target/\n").unwrap();
+        let target = dir.path().join("target");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("generated.rs"), "needle generated").unwrap();
+        fs::write(dir.path().join(".envrc"), "needle envrc").unwrap();
+
+        let tool = GrepTool::new(dir.path().into());
+        let text = extract_text(
+            &tool
+                .execute(serde_json::json!({
+                    "pattern": "needle",
+                    "path": dir.path().to_str().unwrap(),
+                    "include_hidden": true
+                }))
+                .await,
+        );
+        assert!(text.contains(".envrc"), "got: {text}");
+        assert!(!text.contains("generated.rs"), "got: {text}");
     }
 
     #[tokio::test]
