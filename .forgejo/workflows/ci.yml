@@ -18,7 +18,7 @@ jobs:
     runs-on: lix-node
     steps:
       - name: checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # the lix-node image already has flakes enabled (baked into the
       # image's /etc/nix/nix.conf), so no setup step is needed before
