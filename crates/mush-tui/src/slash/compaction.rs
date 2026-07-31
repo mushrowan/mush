@@ -757,6 +757,76 @@ mod tests {
         );
     }
 
+    /// after /compact, quitting and resuming must still show the
+    /// compaction. both resume paths rebuild the display from the
+    /// persisted conversation: startup resume renders
+    /// `display_history()`, the `/resume` slash command renders
+    /// `context()`. a banner must survive a save/load round trip in
+    /// both
+    #[tokio::test]
+    async fn a_resumed_session_still_shows_the_compaction_banner() {
+        let mut msgs = Vec::new();
+        for i in 0..12 {
+            msgs.push(user_msg(&format!("question {i}")));
+            msgs.push(assistant_msg(&format!("answer {i}"), 1_000));
+        }
+        let mut conversation = ConversationState::from_messages(msgs);
+        let mut app = App::new(test_model().id, TokenCount::new(200_000));
+        let registry = ApiRegistry::new();
+
+        handle_compact(
+            &mut app,
+            &mut conversation,
+            &test_model(),
+            &StreamOptions::default(),
+            &registry,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        let json = serde_json::to_string(&conversation).expect("serialise conversation");
+        let loaded: ConversationState = serde_json::from_str(&json).expect("load conversation");
+
+        let banner = |messages: &[Message]| {
+            let mut resumed = App::new(test_model().id, TokenCount::new(200_000));
+            crate::conversation_display::rebuild_display(&mut resumed, messages);
+            resumed
+                .messages
+                .iter()
+                .any(|m| m.content.contains("compacted summary"))
+        };
+
+        assert!(
+            banner(&loaded.display_history()),
+            "startup resume should show the banner, history: {:?}",
+            loaded
+                .display_history()
+                .iter()
+                .map(message_preview)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            banner(&loaded.context()),
+            "/resume should show the banner, context: {:?}",
+            loaded
+                .context()
+                .iter()
+                .map(message_preview)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    fn message_preview(message: &Message) -> String {
+        let text = match message {
+            Message::User(user) => user.text(),
+            Message::Assistant(assistant) => assistant.text(),
+            _ => String::new(),
+        };
+        text.chars().take(40).collect()
+    }
+
     /// /compact must preserve the conversation tree so the user can
     /// `/tree` / `/branch` back to pre-compaction state. the previous
     /// implementation called `replace_messages` which built a fresh tree
