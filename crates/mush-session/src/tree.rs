@@ -74,6 +74,21 @@ pub struct TreeNode {
     pub children: Vec<TreeNode>,
 }
 
+/// one entry laid out for display, from [`SessionTree::rows`]
+#[derive(Debug, Clone)]
+pub struct TreeRow<'a> {
+    pub entry: &'a SessionEntry,
+    /// how deeply nested in abandoned branches this entry is. the line
+    /// leading to the leaf is 0
+    pub depth: usize,
+    /// whether the entry is on the branch the next message extends
+    pub on_branch: bool,
+    /// whether the entry is the current leaf
+    pub is_leaf: bool,
+    /// whether branches diverge here
+    pub is_fork: bool,
+}
+
 /// append-only session tree with a leaf pointer
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionTree {
@@ -239,9 +254,14 @@ impl SessionTree {
 
     /// walk from leaf to root, returning entries in root-first order
     pub fn current_branch(&self) -> Vec<&SessionEntry> {
+        self.branch_ending_at(self.leaf_id.as_ref())
+    }
+
+    /// the branch an entry sits on, from root to that entry
+    fn branch_ending_at(&self, id: Option<&EntryId>) -> Vec<&SessionEntry> {
         let index = self.build_index();
         let mut path = Vec::new();
-        let mut current = self.leaf_id.as_ref();
+        let mut current = id;
         while let Some(id) = current {
             if let Some(entry) = index.get(&**id) {
                 path.push(*entry);
@@ -252,6 +272,105 @@ impl SessionTree {
         }
         path.reverse();
         path
+    }
+
+    /// entries whose id starts with `prefix`. every candidate is
+    /// returned so an ambiguous prefix can be reported as such
+    pub fn entries_matching_prefix(&self, prefix: &str) -> Vec<&SessionEntry> {
+        let prefix = prefix.to_ascii_lowercase();
+        self.entries
+            .iter()
+            .filter(|entry| entry.id.starts_with(&prefix))
+            .collect()
+    }
+
+    /// tool calls that would be left without a result if `id` became the
+    /// leaf. providers reject a context whose last assistant turn has an
+    /// unanswered call, so this gates branching
+    pub fn unanswered_tool_calls(&self, id: &EntryId) -> Vec<ToolCallId> {
+        let mut open: Vec<ToolCallId> = Vec::new();
+        for entry in self.branch_ending_at(Some(id)) {
+            let EntryKind::Message { message } = &entry.kind else {
+                continue;
+            };
+            match message {
+                Message::Assistant(assistant) => {
+                    open.extend(assistant.content.iter().filter_map(|part| match part {
+                        AssistantContentPart::ToolCall(call) => Some(call.id.clone()),
+                        _ => None,
+                    }));
+                }
+                Message::ToolResult(result) => open.retain(|call| call != &result.tool_call_id),
+                Message::User(_) => {}
+            }
+        }
+        open
+    }
+
+    /// closest ancestor of `id` that can be branched from
+    pub fn nearest_branchable_ancestor(&self, id: &EntryId) -> Option<&EntryId> {
+        let index = self.build_index();
+        let mut current = index.get(&**id)?.parent_id.as_ref();
+        while let Some(candidate) = current {
+            let entry: &SessionEntry = index.get(&**candidate)?;
+            if self.unanswered_tool_calls(&entry.id).is_empty() {
+                return Some(&entry.id);
+            }
+            current = entry.parent_id.as_ref();
+        }
+        None
+    }
+
+    /// every entry as a renderable row, root first. the line leading to
+    /// the leaf stays at depth 0 and abandoned branches nest above the
+    /// entry that replaced them
+    pub fn rows(&self) -> Vec<TreeRow<'_>> {
+        let on_branch: std::collections::HashSet<&str> =
+            self.current_branch().into_iter().map(|e| &*e.id).collect();
+
+        let mut children: std::collections::HashMap<&str, Vec<&SessionEntry>> =
+            std::collections::HashMap::new();
+        let mut roots: Vec<&SessionEntry> = Vec::new();
+        for entry in &self.entries {
+            match &entry.parent_id {
+                Some(parent) => children.entry(&**parent).or_default().push(entry),
+                None => roots.push(entry),
+            }
+        }
+
+        let mut rows = Vec::with_capacity(self.entries.len());
+        let mut stack: Vec<(&SessionEntry, usize)> =
+            roots.into_iter().rev().map(|entry| (entry, 0)).collect();
+        while let Some((entry, depth)) = stack.pop() {
+            let kids = children
+                .get(&*entry.id)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            rows.push(TreeRow {
+                entry,
+                depth,
+                on_branch: on_branch.contains(&*entry.id),
+                is_leaf: self.leaf_id.as_deref() == Some(&*entry.id),
+                is_fork: kids.len() > 1,
+            });
+
+            // the child continuing towards the leaf keeps the current
+            // depth. it goes on the stack first so the abandoned
+            // branches pop, and render, above it
+            let main = kids
+                .iter()
+                .position(|kid| on_branch.contains(&*kid.id))
+                .unwrap_or_else(|| kids.len().saturating_sub(1));
+            if let Some(kid) = kids.get(main) {
+                stack.push((kid, depth));
+            }
+            for (index, kid) in kids.iter().enumerate().rev() {
+                if index != main {
+                    stack.push((kid, depth + 1));
+                }
+            }
+        }
+        rows
     }
 
     /// build the conversation messages for the current branch (what the LLM sees)
@@ -448,6 +567,163 @@ mod tests {
                 .timestamp_ms(Timestamp::zero())
                 .build(),
         )
+    }
+
+    fn assistant_calling(tool_call_id: &str) -> Message {
+        Message::Assistant(
+            AssistantMessage::builder()
+                .content(vec![AssistantContentPart::ToolCall(ToolCall {
+                    id: tool_call_id.into(),
+                    name: "bash".into(),
+                    arguments: serde_json::json!({}),
+                })])
+                .model("test".into())
+                .provider(Provider::Custom("test".into()))
+                .api(Api::AnthropicMessages)
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )
+    }
+
+    fn tool_result(tool_call_id: &str) -> Message {
+        Message::ToolResult(ToolResultMessage {
+            tool_call_id: tool_call_id.into(),
+            tool_name: "bash".into(),
+            content: vec![ToolResultContentPart::Text(TextContent {
+                text: "done".into(),
+            })],
+            outcome: ToolOutcome::Success,
+            timestamp_ms: Timestamp::zero(),
+        })
+    }
+
+    /// a tree with one abandoned branch:
+    ///
+    ///   q0 - a0 - q1(abandoned) - a1(abandoned)
+    ///           \ q2 - a2 (current)
+    fn forked_tree() -> SessionTree {
+        let mut tree = SessionTree::new();
+        tree.append_message(user_msg("q0"));
+        let fork = tree.append_message(assistant_msg("a0"));
+        tree.append_message(user_msg("q1"));
+        tree.append_message(assistant_msg("a1"));
+        tree.branch(&fork);
+        tree.append_message(user_msg("q2"));
+        tree.append_message(assistant_msg("a2"));
+        tree
+    }
+
+    #[test]
+    fn a_unique_prefix_resolves_to_one_entry() {
+        let mut tree = SessionTree::new();
+        let id = tree.append_message(user_msg("q0"));
+
+        let found = tree.entries_matching_prefix(&id[..4]);
+
+        assert_eq!(found.len(), 1, "one entry should match");
+        assert_eq!(found[0].id, id);
+    }
+
+    #[test]
+    fn an_ambiguous_prefix_reports_every_candidate() {
+        // the caller needs the candidates to render a "did you mean" list,
+        // so matching returns all of them rather than giving up
+        let mut tree = SessionTree::new();
+        tree.append_message(user_msg("q0"));
+        tree.append_message(user_msg("q1"));
+
+        let found = tree.entries_matching_prefix("");
+
+        assert_eq!(found.len(), 2);
+    }
+
+    #[test]
+    fn an_unknown_prefix_matches_nothing() {
+        let mut tree = SessionTree::new();
+        tree.append_message(user_msg("q0"));
+
+        assert!(tree.entries_matching_prefix("zzzzzzzz").is_empty());
+    }
+
+    #[test]
+    fn rows_keep_the_current_branch_flush_left() {
+        let mut tree = SessionTree::new();
+        tree.append_message(user_msg("q0"));
+        let leaf = tree.append_message(assistant_msg("a0"));
+
+        let rows = tree.rows();
+
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row.depth == 0 && row.on_branch));
+        assert!(rows.last().unwrap().is_leaf);
+        assert!(rows.last().unwrap().entry.id == leaf);
+        assert!(rows.iter().all(|row| !row.is_fork));
+    }
+
+    #[test]
+    fn rows_indent_an_abandoned_branch_above_the_line_that_replaced_it() {
+        let rows = forked_tree();
+        let rows = rows.rows();
+
+        let rendered: Vec<(usize, String, bool)> = rows
+            .iter()
+            .map(|row| {
+                (
+                    row.depth,
+                    text_of(&entry_to_message(row.entry)),
+                    row.on_branch,
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            rendered,
+            vec![
+                (0, "q0".into(), true),
+                (0, "a0".into(), true),
+                (1, "q1".into(), false),
+                (1, "a1".into(), false),
+                (0, "q2".into(), true),
+                (0, "a2".into(), true),
+            ]
+        );
+        assert!(
+            rows[1].is_fork,
+            "the entry the branches diverge from should be marked"
+        );
+    }
+
+    #[test]
+    fn every_entry_in_the_tree_gets_a_row() {
+        let tree = forked_tree();
+        assert_eq!(tree.rows().len(), tree.entries().len());
+    }
+
+    #[test]
+    fn unanswered_tool_calls_names_the_calls_a_leaf_would_leave_open() {
+        let mut tree = SessionTree::new();
+        tree.append_message(user_msg("q0"));
+        let calling = tree.append_message(assistant_calling("call_1"));
+        let answered = tree.append_message(tool_result("call_1"));
+
+        assert_eq!(
+            tree.unanswered_tool_calls(&calling),
+            vec![ToolCallId::from("call_1")],
+            "branching off the assistant turn leaves its tool call unanswered"
+        );
+        assert!(
+            tree.unanswered_tool_calls(&answered).is_empty(),
+            "the tool result closes the call"
+        );
+    }
+
+    #[test]
+    fn the_nearest_branchable_ancestor_skips_entries_with_open_tool_calls() {
+        let mut tree = SessionTree::new();
+        let user = tree.append_message(user_msg("q0"));
+        let calling = tree.append_message(assistant_calling("call_1"));
+
+        assert_eq!(tree.nearest_branchable_ancestor(&calling), Some(&user));
     }
 
     #[test]
