@@ -24,6 +24,7 @@ pub mod pane;
 pub mod path_utils;
 pub mod prompt_cache;
 pub mod runner;
+pub mod scrollback;
 pub mod serving_provider;
 pub mod session_picker;
 pub mod settings;

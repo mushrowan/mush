@@ -212,6 +212,10 @@ pub struct App {
     pub cache: CacheTimer,
     /// batch counter for grouping parallel tool calls
     current_tool_batch: u32,
+    /// bumped every time the display is rebuilt from the conversation
+    /// tree. an inline viewport can't retract what it has already
+    /// printed, so it watches this to know its committed run is stale
+    display_generation: u64,
     /// oauth usage data (5h and 7d rolling windows)
     pub oauth_usage: Option<mush_ai::oauth::usage::OAuthUsage>,
     /// provider id that produced `oauth_usage`.
@@ -295,6 +299,7 @@ impl App {
             background_alert: None,
             cache: CacheTimer::new(300),
             current_tool_batch: 0,
+            display_generation: 0,
             oauth_usage: None,
             oauth_usage_provider: None,
             pending_oauth: None,
@@ -585,6 +590,7 @@ impl App {
     /// correct; only the rendered list of messages and scroll position
     /// need to reset.
     pub(crate) fn clear_display(&mut self) {
+        self.display_generation = self.display_generation.wrapping_add(1);
         self.messages.clear();
         self.stream = StreamingState::new();
         self.scroll = ScrollPosition::Bottom;
@@ -602,6 +608,12 @@ impl App {
     pub fn push_system_message(&mut self, text: impl Into<String>) {
         self.messages
             .push(DisplayMessage::new(MessageRole::System, text));
+    }
+
+    /// how many times the display has been rebuilt from the conversation
+    #[must_use]
+    pub fn display_generation(&self) -> u64 {
+        self.display_generation
     }
 
     /// index of the first message whose rendered lines can still change.
