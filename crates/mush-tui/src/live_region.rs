@@ -104,7 +104,7 @@ mod tests {
 /// it, so a version bump forces us back here to delete code
 #[cfg(test)]
 mod upstream_gaps {
-    use ratatui::backend::{Backend, TestBackend};
+    use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
     use ratatui::text::Line;
     use ratatui::widgets::Widget;

@@ -207,17 +207,8 @@ impl Pane {
     }
 }
 
-/// min column width before falling back to tabs
+/// narrowest a pane column gets
 pub const MIN_COLUMN_WIDTH: u16 = 60;
-
-/// how panes are arranged on screen
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LayoutMode {
-    /// side-by-side vertical columns
-    Columns,
-    /// stacked with tab bar, only focused pane visible
-    Tabs,
-}
 
 /// manages multiple panes: layout, focus, lifecycle
 pub struct PaneManager {
@@ -337,30 +328,13 @@ impl PaneManager {
     }
 
     // layout
-    /// determine layout mode for a given terminal width
-    pub fn layout_mode(&self, terminal_width: u16) -> LayoutMode {
-        let n = self.panes.len() as u16;
-        if n <= 1 {
-            return LayoutMode::Columns;
-        }
-        // reserve 1 char per separator between columns
-        let separators = n - 1;
-        let usable = terminal_width.saturating_sub(separators);
-        if usable / n >= MIN_COLUMN_WIDTH {
-            LayoutMode::Columns
-        } else {
-            LayoutMode::Tabs
-        }
-    }
-
-    /// compute layout rects for all panes, returns the active mode
-    pub fn compute_layout(&mut self, area: Rect) -> LayoutMode {
-        let mode = self.layout_mode(area.width);
-        match mode {
-            LayoutMode::Columns => {
+    /// lay the panes out as side-by-side columns
+    pub fn compute_layout(&mut self, area: Rect) {
+        {
+            {
                 let n = self.panes.len() as u16;
                 if n == 0 {
-                    return mode;
+                    return;
                 }
                 // single pane: no separators
                 let separators = n.saturating_sub(1);
@@ -400,20 +374,7 @@ impl PaneManager {
                     }
                 }
             }
-            LayoutMode::Tabs => {
-                let tab_h = if self.panes.len() > 1 { 1 } else { 0 };
-                let content = Rect::new(
-                    area.x,
-                    area.y + tab_h,
-                    area.width,
-                    area.height.saturating_sub(tab_h),
-                );
-                for pane in &mut self.panes {
-                    pane.area = content;
-                }
-            }
         }
-        mode
     }
 
     /// resize the focused pane by delta columns (negative = shrink)
@@ -563,46 +524,12 @@ mod tests {
     }
 
     #[test]
-    fn layout_columns_single_pane() {
-        let mgr = PaneManager::new(test_pane(1));
-        assert_eq!(mgr.layout_mode(80), LayoutMode::Columns);
-    }
-
-    #[test]
-    fn layout_columns_two_panes_wide() {
-        let mut mgr = PaneManager::new(test_pane(1));
-        mgr.add_pane(test_pane(2));
-        // (121 - 1 sep) / 2 = 60 >= MIN_COLUMN_WIDTH
-        assert_eq!(mgr.layout_mode(121), LayoutMode::Columns);
-    }
-
-    #[test]
-    fn layout_tabs_when_narrow() {
-        let mut mgr = PaneManager::new(test_pane(1));
-        mgr.add_pane(test_pane(2));
-        mgr.add_pane(test_pane(3));
-        // (122 - 2 seps) / 3 = 40 < MIN_COLUMN_WIDTH
-        assert_eq!(mgr.layout_mode(122), LayoutMode::Tabs);
-    }
-
-    #[test]
-    fn layout_columns_exact_threshold() {
-        let mut mgr = PaneManager::new(test_pane(1));
-        mgr.add_pane(test_pane(2));
-        // (121 - 1 sep) / 2 = 60 == MIN_COLUMN_WIDTH (passes >=)
-        assert_eq!(mgr.layout_mode(121), LayoutMode::Columns);
-        // (120 - 1 sep) / 2 = 59 < MIN_COLUMN_WIDTH
-        assert_eq!(mgr.layout_mode(120), LayoutMode::Tabs);
-    }
-
-    #[test]
     fn compute_layout_columns_even() {
         let mut mgr = PaneManager::new(test_pane(1));
         mgr.add_pane(test_pane(2));
         // 121 wide: 1 separator, usable = 120, each col = 60
         let area = Rect::new(0, 0, 121, 40);
-        let mode = mgr.compute_layout(area);
-        assert_eq!(mode, LayoutMode::Columns);
+        mgr.compute_layout(area);
         assert_eq!(mgr.panes()[0].area, Rect::new(0, 0, 60, 40));
         // x=60 content + 1 sep = 61
         assert_eq!(mgr.panes()[1].area, Rect::new(61, 0, 60, 40));
@@ -621,25 +548,10 @@ mod tests {
     }
 
     #[test]
-    fn compute_layout_tabs() {
-        let mut mgr = PaneManager::new(test_pane(1));
-        mgr.add_pane(test_pane(2));
-        mgr.add_pane(test_pane(3));
-        let area = Rect::new(0, 0, 100, 40);
-        let mode = mgr.compute_layout(area);
-        assert_eq!(mode, LayoutMode::Tabs);
-        // all panes get same content area below 1-line tab bar
-        for pane in mgr.panes() {
-            assert_eq!(pane.area, Rect::new(0, 1, 100, 39));
-        }
-    }
-
-    #[test]
     fn compute_layout_single_pane_full_area() {
         let mut mgr = PaneManager::new(test_pane(1));
         let area = Rect::new(0, 0, 80, 24);
-        let mode = mgr.compute_layout(area);
-        assert_eq!(mode, LayoutMode::Columns);
+        mgr.compute_layout(area);
         assert_eq!(mgr.panes()[0].area, Rect::new(0, 0, 80, 24));
     }
 
@@ -659,8 +571,7 @@ mod tests {
         mgr.add_pane(test_pane(3));
         // 182 wide: 2 separators, usable = 180, each col = 60
         let area = Rect::new(0, 0, 182, 40);
-        let mode = mgr.compute_layout(area);
-        assert_eq!(mode, LayoutMode::Columns);
+        mgr.compute_layout(area);
         assert_eq!(mgr.panes()[0].area, Rect::new(0, 0, 60, 40));
         assert_eq!(mgr.panes()[1].area, Rect::new(61, 0, 60, 40));
         assert_eq!(mgr.panes()[2].area, Rect::new(122, 0, 60, 40));
@@ -711,16 +622,6 @@ mod tests {
         let area = Rect::new(0, 0, 46, 24);
         mgr.compute_layout(area);
         assert_eq!(mgr.panes()[0].area.width, 46);
-    }
-
-    #[test]
-    fn narrow_terminal_multi_pane_tabs() {
-        let mut mgr = PaneManager::new(test_pane(1));
-        mgr.add_pane(test_pane(2));
-        // too narrow for columns, falls back to tabs
-        let area = Rect::new(0, 0, 80, 24);
-        let mode = mgr.compute_layout(area);
-        assert_eq!(mode, LayoutMode::Tabs);
     }
 
     /// build a minimal valid png (1x1 red pixel) for protocol-ensure tests

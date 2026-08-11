@@ -6,7 +6,7 @@ use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::layout::Rect;
 
 use crate::app::{self, App};
-use crate::pane::{LayoutMode, PaneManager};
+use crate::pane::PaneManager;
 use crate::ui::Ui;
 use crate::widgets;
 
@@ -79,20 +79,14 @@ pub(super) fn draw_panes(
             area.height.saturating_sub(shared_status_h),
         );
 
-        let mode = pane_mgr.compute_layout(panes_area);
-
-        if mode == LayoutMode::Tabs && pane_count > 1 {
-            let tab_area =
-                ratatui::layout::Rect::new(panes_area.x, panes_area.y, panes_area.width, 1);
-            frame.render_widget(crate::widgets::tab_bar::TabBar::new(&*pane_mgr), tab_area);
-        }
+        pane_mgr.compute_layout(panes_area);
 
         let focused_area = pane_mgr.panes()[focused_idx].area;
         let (cx, cy) = Ui::new(&pane_mgr.panes()[focused_idx].app)
             .hide_status(is_multi)
             .cursor_position(focused_area);
 
-        if mode == LayoutMode::Columns && pane_count > 1 {
+        if pane_count > 1 {
             let buf = frame.buffer_mut();
             for (i, pane) in pane_mgr.panes().iter().enumerate() {
                 if i == 0 {
@@ -116,10 +110,7 @@ pub(super) fn draw_panes(
             }
         }
 
-        for (i, pane) in pane_mgr.panes_mut().iter_mut().enumerate() {
-            if mode == LayoutMode::Tabs && i != focused_idx {
-                continue;
-            }
+        for pane in pane_mgr.panes_mut() {
             let pane_area = pane.area;
             frame.render_widget(Ui::new(&pane.app).hide_status(is_multi), pane_area);
 
