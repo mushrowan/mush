@@ -174,15 +174,16 @@ impl CacheTimer {
     /// from rendering " cold" even though we aren't observing warmth
     #[must_use]
     pub fn remaining_secs(&self) -> Option<u16> {
+        self.remaining_after(self.elapsed_secs()?)
+    }
+
+    /// seconds left on the cache `elapsed` seconds after it was last warm
+    fn remaining_after(&self, elapsed: u64) -> Option<u16> {
         if self.ttl_secs == 0 {
             return None;
         }
-        let elapsed = self.last_active?.elapsed().as_secs() as u16;
-        if elapsed >= self.ttl_secs {
-            Some(0)
-        } else {
-            Some(self.ttl_secs - elapsed)
-        }
+        let elapsed = u16::try_from(elapsed).unwrap_or(u16::MAX);
+        Some(self.ttl_secs.saturating_sub(elapsed))
     }
 
     /// seconds since last cache activity, None if never active
@@ -813,6 +814,18 @@ mod tests {
                 .as_deref(),
             Some("54:50")
         );
+    }
+
+    #[test]
+    fn an_idle_night_leaves_no_cache() {
+        let timer = CacheTimer::new(3600);
+        assert_eq!(timer.remaining_after(18 * 60 * 60 + 1800), Some(0));
+    }
+
+    #[test]
+    fn a_disabled_timer_has_no_remaining_time() {
+        let timer = CacheTimer::new(0);
+        assert_eq!(timer.remaining_after(10), None);
     }
 
     #[test]
