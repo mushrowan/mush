@@ -253,6 +253,12 @@ fn edit_file(path: &Path, old_text: &str, new_text: &str, opts: &EditOpts) -> To
         }
     }
 
+    // punctuation: models substitute smart quotes, dashes and nbsp for the
+    // ascii the file actually holds
+    for actual_old in find_punctuation_folded_matches(&search_content, old_text) {
+        candidates.push((actual_old, new_text.to_string()));
+    }
+
     candidates.dedup();
 
     let expected = opts.expected_matches;
@@ -341,21 +347,34 @@ fn edit_file(path: &Path, old_text: &str, new_text: &str, opts: &EditOpts) -> To
         ));
     }
 
+    // a range that clips the match is likelier than a whitespace slip, and
+    // the near-miss below only searches the region
+    if opts.start_line.is_some() && content.contains(old_text) {
+        return ToolResult::error(format!(
+            "oldText found in {} but outside{range_label}\n\
+             hint: widen start_line/end_line, or drop them",
+            path.display()
+        ));
+    }
+
     // try to provide helpful context about why the match failed
-    let hint = find_near_miss(content, old_text);
+    let hint = find_near_miss(&search_content, old_text);
+    // near-miss lines are relative to the region, report them as file lines
+    let line_offset = opts.start_line.unwrap_or(1) - 1;
     let display = path.display();
 
     match hint {
         NearMiss::WhitespaceDifference(line_num) => ToolResult::error(format!(
             "oldText not found in {display}{range_label}\n\
-             near-miss: whitespace-normalised match near line {line_num}\n\
-             hint: check for extra/missing spaces, tabs, or trailing whitespace"
+             near-miss: whitespace-normalised match near line {}\n\
+             hint: check for extra/missing spaces, tabs, or trailing whitespace",
+            line_num + line_offset
         )),
         NearMiss::SimilarLines(lines) => {
             let mut msg =
                 format!("oldText not found in {display}{range_label}\n\nsimilar lines:\n");
             for (num, line) in lines {
-                msg.push_str(&format!("  {num}: {line}\n"));
+                msg.push_str(&format!("  {}: {line}\n", num + line_offset));
             }
             msg.push_str("\nhint: use Read to check exact file contents, then retry");
             ToolResult::error(msg)
@@ -374,6 +393,53 @@ enum NearMiss {
     SimilarLines(Vec<(usize, String)>),
     /// nothing close found
     None,
+}
+
+/// fold the punctuation a model is liable to substitute when it echoes
+/// source back: smart quotes, unicode dashes and unicode spaces
+fn fold_char(c: char) -> char {
+    match c {
+        '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}' => '\'',
+        '\u{201c}' | '\u{201d}' | '\u{201e}' | '\u{201f}' => '"',
+        '\u{2010}'..='\u{2015}' | '\u{2212}' => '-',
+        '\u{00a0}' | '\u{2007}' | '\u{202f}' | '\u{2000}'..='\u{200a}' => ' ',
+        other => other,
+    }
+}
+
+/// the source text at every position where `old_text` matches once
+/// punctuation is folded on both sides.
+///
+/// folding maps one char to one char, so a match found in folded space
+/// covers the same char range in the source
+fn find_punctuation_folded_matches(content: &str, old_text: &str) -> Vec<String> {
+    let needle: Vec<char> = old_text.chars().map(fold_char).collect();
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let hay: Vec<(usize, char)> = content
+        .char_indices()
+        .map(|(i, c)| (i, fold_char(c)))
+        .collect();
+    if hay.len() < needle.len() {
+        return Vec::new();
+    }
+
+    let mut results = Vec::new();
+    for start in 0..=hay.len() - needle.len() {
+        if (0..needle.len()).all(|k| hay[start + k].1 == needle[k]) {
+            let from = hay[start].0;
+            let to = hay
+                .get(start + needle.len())
+                .map_or(content.len(), |(i, _)| *i);
+            let source = &content[from..to];
+            if source != old_text {
+                results.push(source.to_string());
+            }
+        }
+    }
+    results.dedup();
+    results
 }
 
 /// find substrings in content that match old_text when each line is trimEnd'd
@@ -881,6 +947,105 @@ mod tests {
         assert!(
             diff.contains("+ ## gitignored local files"),
             "added line should appear: {diff}"
+        );
+    }
+
+    #[test]
+    fn an_edit_matches_through_smart_punctuation() {
+        // models echo source back with the punctuation their tokeniser
+        // prefers, so match past it rather than erroring
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("quotes.rs");
+        fs::write(&path, "let s = \"hi\";\nlet n = 1 - 2;\n").unwrap();
+
+        let result = edit_file(
+            &path,
+            "let s = \u{201c}hi\u{201d};\nlet n = 1 \u{2013} 2;",
+            "let s = \"bye\";",
+            &EditOpts::default(),
+        );
+        assert!(result.outcome.is_success(), "{result:?}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "let s = \"bye\";\n");
+    }
+
+    #[test]
+    fn an_edit_matches_through_a_non_breaking_space() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nbsp.md");
+        fs::write(&path, "a b c\n").unwrap();
+
+        let result = edit_file(&path, "a\u{a0}b c", "done", &EditOpts::default());
+        assert!(result.outcome.is_success(), "{result:?}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "done\n");
+    }
+
+    #[test]
+    fn a_match_outside_the_range_says_so() {
+        // the hint used to come from a whitespace near-miss anywhere in the
+        // file, which points at the wrong line when the range is the problem
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ranged.rs");
+        fs::write(&path, "one\ntwo\nthree\nfour\nfive\n").unwrap();
+
+        let result = edit_file(
+            &path,
+            "four\nfive",
+            "gone",
+            &EditOpts {
+                start_line: Some(1),
+                end_line: Some(3),
+                ..EditOpts::default()
+            },
+        );
+
+        assert!(!result.outcome.is_success());
+        let text = result
+            .content
+            .iter()
+            .find_map(|p| match p {
+                mush_ai::types::ToolResultContentPart::Text(t) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            text.contains("outside") && text.contains("lines 1-3"),
+            "should point at the range, got: {text}"
+        );
+    }
+
+    #[test]
+    fn a_near_miss_in_a_range_reports_a_file_line_number() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("offset.rs");
+        let mut src = "filler\n".repeat(20);
+        src.push_str("let  x  =  1;\n");
+        fs::write(&path, &src).unwrap();
+
+        // internal spacing differs, so only the normalised compare matches
+        let result = edit_file(
+            &path,
+            "let x = 1;",
+            "let x = 2;",
+            &EditOpts {
+                start_line: Some(20),
+                end_line: Some(21),
+                ..EditOpts::default()
+            },
+        );
+
+        assert!(!result.outcome.is_success());
+        let text = result
+            .content
+            .iter()
+            .find_map(|p| match p {
+                mush_ai::types::ToolResultContentPart::Text(t) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(text.contains("near-miss"), "expected a near-miss: {text}");
+        assert!(
+            text.contains("line 21"),
+            "near-miss line should be a file line, got: {text}"
         );
     }
 
