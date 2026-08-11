@@ -63,6 +63,48 @@ fn rewrite_rule(style: &MessageStyle<'_>, width: u16) -> Line<'static> {
     Line::styled(format!("{rule}{REWRITE_RULE}{rule}"), style.theme.dim)
 }
 
+/// byte offset up to which streamed markdown can no longer reshape.
+///
+/// the live region can't outgrow the terminal, so a long reply has to
+/// commit its head while its tail is still arriving. a blank line ends a
+/// markdown block, so everything before the last blank line is final. a
+/// fence that hasn't closed holds back everything from its opening line,
+/// since the text inside it isn't a block yet
+#[must_use]
+pub fn settled_prefix(text: &str) -> usize {
+    let mut fence: Option<&str> = None;
+    let mut settled = 0;
+    let mut offset = 0;
+
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim();
+        offset += line.len();
+        match fence {
+            Some(marker) if trimmed.starts_with(marker) => fence = None,
+            Some(_) => {}
+            None => {
+                if let Some(marker) = fence_marker(trimmed) {
+                    fence = Some(marker);
+                } else if trimmed.is_empty() {
+                    settled = offset;
+                }
+            }
+        }
+    }
+    settled
+}
+
+/// the run of backticks or tildes that opens a fence, if this line does
+fn fence_marker(trimmed: &str) -> Option<&'static str> {
+    if trimmed.starts_with("```") {
+        Some("```")
+    } else if trimmed.starts_with("~~~") {
+        Some("~~~")
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,5 +214,64 @@ mod tests {
         let after = text_of(&scrollback.take_settled(&app, &style(&theme), 80));
         assert!(after.contains(REWRITE_RULE), "got:\n{after}");
         assert!(after.contains("compacted"));
+    }
+
+    #[test]
+    fn a_growing_paragraph_settles_nothing() {
+        assert_eq!(settled_prefix("a partial sen"), 0);
+    }
+
+    #[test]
+    fn a_finished_block_settles() {
+        let text = "first para\n\nsecond par";
+        assert_eq!(&text[..settled_prefix(text)], "first para\n\n");
+    }
+
+    #[test]
+    fn an_open_fence_holds_back_everything_from_its_opening() {
+        let text = "intro\n\n```rust\nfn main() {\n";
+        assert_eq!(&text[..settled_prefix(text)], "intro\n\n");
+    }
+
+    #[test]
+    fn a_closed_fence_settles_with_the_blank_line_after_it() {
+        let text = "```rust\nfn main() {}\n```\n\nafter";
+        assert_eq!(
+            &text[..settled_prefix(text)],
+            "```rust\nfn main() {}\n```\n\n"
+        );
+    }
+
+    #[test]
+    fn a_blank_line_inside_a_fence_does_not_settle() {
+        let text = "```\none\n\ntwo\n";
+        assert_eq!(settled_prefix(text), 0);
+    }
+
+    #[test]
+    fn a_setext_heading_cannot_rewrite_settled_text() {
+        // the ==== retroactively turns the line above into a heading, so
+        // that line must not have been committed already
+        let text = "para\n\nheading\n====\n";
+        assert_eq!(&text[..settled_prefix(text)], "para\n\n");
+    }
+
+    #[test]
+    fn the_prefix_only_grows_as_the_reply_streams() {
+        let full = "intro para\n\n```rust\nfn main() {\n    todo!()\n}\n```\n\nmiddle bit\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\ndone\n";
+        let mut seen = 0;
+        for end in 0..=full.len() {
+            if !full.is_char_boundary(end) {
+                continue;
+            }
+            let prefix = settled_prefix(&full[..end]);
+            assert!(
+                prefix >= seen,
+                "settled prefix went backwards at {end}: {prefix} < {seen}"
+            );
+            assert!(full.is_char_boundary(prefix));
+            seen = prefix;
+        }
+        assert!(seen > 0, "a finished reply should settle something");
     }
 }
