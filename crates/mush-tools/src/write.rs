@@ -11,6 +11,7 @@ use crate::util::resolve_path;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WriteArgs {
+    #[serde(alias = "file_path")]
     path: String,
     content: String,
 }
@@ -140,6 +141,25 @@ mod tests {
         assert!(text.contains("preview:"), "got: {text}");
         assert!(text.contains("first line"), "got: {text}");
         assert!(text.contains("second line"), "got: {text}");
+    }
+
+    #[test]
+    fn a_write_accepts_file_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = WriteTool::new(dir.path().into());
+
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(tool.execute(serde_json::json!({
+                "file_path": "aliased.txt",
+                "content": "hi",
+            })));
+
+        assert!(result.outcome.is_success(), "{result:?}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("aliased.txt")).unwrap(),
+            "hi"
+        );
     }
 
     fn result_text(result: &ToolResult) -> String {

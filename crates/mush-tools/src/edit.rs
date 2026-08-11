@@ -15,6 +15,7 @@ use crate::util::resolve_path;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EditArgs {
+    #[serde(alias = "file_path")]
     path: String,
     #[serde(rename = "oldText")]
     old_text: String,
@@ -1047,6 +1048,27 @@ mod tests {
             text.contains("line 21"),
             "near-miss line should be a file line, got: {text}"
         );
+    }
+
+    #[test]
+    fn an_edit_accepts_file_path() {
+        // anthropic-tuned models send file_path, matching claude code's
+        // signature. read already aliases it
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("aliased.rs");
+        fs::write(&path, "before\n").unwrap();
+        let tool = EditTool::new(dir.path().into());
+
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(tool.execute(serde_json::json!({
+                "file_path": "aliased.rs",
+                "oldText": "before",
+                "newText": "after",
+            })));
+
+        assert!(result.outcome.is_success(), "{result:?}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "after\n");
     }
 
     #[test]
