@@ -11,8 +11,7 @@ use super::commands::{drain_finished_browser_logins, refresh_models_after_login}
 use super::input::{
     InputDeps, LoopAction, handle_idle_terminal_events, handle_streaming_terminal_events,
 };
-use super::panes::drain_inboxes;
-use super::runtime::{RunnerRuntime, RunnerServices};
+use super::runtime::RunnerRuntime;
 use super::streams::{AgentStreams, StreamState, poll_confirmation_prompt, poll_live_tool_output};
 
 pub(super) const ANIMATION_FRAME_INTERVAL: std::time::Duration =
@@ -25,7 +24,6 @@ pub(super) async fn run_loop_iteration(
     agent_streams: &mut AgentStreams<'_>,
     stream_state: &mut StreamState,
     runtime: &mut RunnerRuntime,
-    services: &RunnerServices,
     tui_config: &mut TuiConfig,
     registry: &ApiRegistry,
     image_picker: &Option<ratatui_image::picker::Picker>,
@@ -36,7 +34,6 @@ pub(super) async fn run_loop_iteration(
         handle_idle_iteration(
             stream_state,
             runtime,
-            services,
             tui_config,
             registry,
             image_picker,
@@ -48,7 +45,6 @@ pub(super) async fn run_loop_iteration(
             agent_streams,
             stream_state,
             runtime,
-            services,
             tui_config,
             registry,
             image_picker,
@@ -61,14 +57,13 @@ pub(super) async fn run_loop_iteration(
 
 fn input_parts<'a>(
     runtime: &'a mut RunnerRuntime,
-    services: &'a RunnerServices,
     tui_config: &'a mut TuiConfig,
     registry: &'a ApiRegistry,
     image_picker: &'a Option<ratatui_image::picker::Picker>,
     size_cache: &'a std::rc::Rc<super::size_cached_backend::CachedSizeState>,
-) -> (&'a mut crate::pane::PaneManager, InputDeps<'a>) {
+) -> (&'a mut crate::session::Session, InputDeps<'a>) {
     let RunnerRuntime {
-        pane_mgr,
+        session,
         thinking_prefs,
         thinking_saver,
         lifecycle_hooks,
@@ -78,14 +73,12 @@ fn input_parts<'a>(
         ..
     } = runtime;
     (
-        pane_mgr,
+        session,
         InputDeps {
             tui_config,
             thinking_prefs,
             thinking_saver,
             registry,
-            message_bus: &services.message_bus,
-            file_tracker: &services.file_tracker,
             lifecycle_hooks,
             cwd,
             pending_prompt,
@@ -101,7 +94,6 @@ async fn handle_streaming_iteration(
     agent_streams: &mut AgentStreams<'_>,
     stream_state: &mut StreamState,
     runtime: &mut RunnerRuntime,
-    services: &RunnerServices,
     tui_config: &mut TuiConfig,
     registry: &ApiRegistry,
     image_picker: &Option<ratatui_image::picker::Picker>,
@@ -122,7 +114,7 @@ async fn handle_streaming_iteration(
             if let Some((pane_id, stream_gen, event)) = result {
                 saw_agent_event = true;
                 saw_settling_agent_event |= is_settling_agent_event(&event);
-                dispatch_agent_event(pane_id, stream_gen, event, stream_state, runtime, services, tui_config, registry, image_picker).await;
+                dispatch_agent_event(pane_id, stream_gen, event, stream_state, runtime, tui_config, registry, image_picker).await;
                 trace_draw_reason("agent_event");
                 runtime.tick_streaming_text_panes();
             }
@@ -144,7 +136,7 @@ async fn handle_streaming_iteration(
                         saw_agent_event = true;
                         saw_settling_agent_event |= is_settling_agent_event(&event);
                         drained_events += 1;
-                        dispatch_agent_event(pane_id, stream_gen, event, stream_state, runtime, services, tui_config, registry, image_picker).await;
+                        dispatch_agent_event(pane_id, stream_gen, event, stream_state, runtime, tui_config, registry, image_picker).await;
                         trace_draw_reason("agent_event_drain");
                         runtime.tick_streaming_text_panes();
                     }
@@ -161,8 +153,8 @@ async fn handle_streaming_iteration(
             // SIGWINCH-driven cache flag covers ratatui's autoresize
             // independently, but other resize side-effects still need
             // the queued event to be drained
-            let (pane_mgr, mut deps) = input_parts(runtime, services, tui_config, registry, image_picker, size_cache);
-            let action = handle_streaming_terminal_events(pane_mgr, stream_state, &mut deps).await?;
+            let (session, mut deps) = input_parts(runtime, tui_config, registry, image_picker, size_cache);
+            let action = handle_streaming_terminal_events(session, stream_state, &mut deps).await?;
             if matches!(action, LoopAction::Quit) {
                 return Ok(LoopAction::Quit);
             }
@@ -173,27 +165,26 @@ async fn handle_streaming_iteration(
                 tick_changed = true;
                 trace_draw_reason("animation_tick");
             }
-            if poll_confirmation_prompt(&mut runtime.pane_mgr, stream_state).await {
+            if poll_confirmation_prompt(&mut runtime.session, stream_state).await {
                 tick_changed = true;
                 trace_draw_reason("confirmation_prompt");
             }
-            if poll_live_tool_output(&mut runtime.pane_mgr, &tui_config.tool_output_live) {
+            if poll_live_tool_output(&mut runtime.session, &tui_config.tool_output_live) {
                 tick_changed = true;
                 trace_draw_reason("live_tool_output");
             }
-            if drain_session_picker(&mut runtime.pane_mgr) {
+            if drain_session_picker(&mut runtime.session) {
                 tick_changed = true;
                 trace_draw_reason("session_picker");
             }
-            if drain_browser_logins(&mut runtime.pane_mgr, tui_config).await {
+            if drain_browser_logins(&mut runtime.session, tui_config).await {
                 tick_changed = true;
                 trace_draw_reason("browser_login");
             }
-            drain_inboxes(&mut runtime.pane_mgr, stream_state).await;
-            stream_state.save_dirty_session(&runtime.pane_mgr, tui_config);
+            stream_state.save_dirty_session(&runtime.session, tui_config);
 
-            let (pane_mgr, mut deps) = input_parts(runtime, services, tui_config, registry, image_picker, size_cache);
-            let action = handle_streaming_terminal_events(pane_mgr, stream_state, &mut deps).await?;
+            let (session, mut deps) = input_parts(runtime, tui_config, registry, image_picker, size_cache);
+            let action = handle_streaming_terminal_events(session, stream_state, &mut deps).await?;
             if matches!(action, LoopAction::Quit) {
                 return Ok(LoopAction::Quit);
             }
@@ -262,12 +253,11 @@ fn trace_draw_reason(reason: &'static str) {
 /// process a single agent event (extracted for reuse in drain loop)
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_agent_event(
-    pane_id: crate::pane::PaneId,
+    pane_id: mush_ai::types::PaneId,
     stream_gen: super::streams::StreamGeneration,
     event: AgentEvent,
     stream_state: &mut super::streams::StreamState,
     runtime: &mut RunnerRuntime,
-    services: &RunnerServices,
     tui_config: &mut super::TuiConfig,
     registry: &ApiRegistry,
     image_picker: &Option<ratatui_image::picker::Picker>,
@@ -277,7 +267,8 @@ async fn dispatch_agent_event(
         return;
     }
 
-    if let Some(pane) = runtime.pane_mgr.pane_mut(pane_id) {
+    {
+        let pane = &mut runtime.session;
         let model = stream_state
             .meta(pane_id)
             .map(|meta| &meta.model)
@@ -298,11 +289,10 @@ async fn dispatch_agent_event(
     }
 
     super::streams::handle_agent_event_side_effects(
-        &mut runtime.pane_mgr,
+        &mut runtime.session,
         stream_state,
         pane_id,
         &event,
-        &services.file_tracker,
         tui_config,
         registry,
     )
@@ -330,19 +320,16 @@ fn tool_exec_may_touch_tty(tool_name: &str) -> bool {
 /// settle any oauth browser login whose callback has arrived, refreshing
 /// the model catalogue when one landed. returns whether anything changed
 async fn drain_browser_logins(
-    pane_mgr: &mut crate::pane::PaneManager,
+    session: &mut crate::session::Session,
     tui_config: &TuiConfig,
 ) -> bool {
-    let has_pending = pane_mgr
-        .panes()
-        .iter()
-        .any(|pane| pane.app.pending_browser_login.is_some());
+    let has_pending = session.app.pending_browser_login.is_some();
     if !has_pending {
         return false;
     }
-    let drained = drain_finished_browser_logins(pane_mgr);
+    let drained = drain_finished_browser_logins(session);
     if drained.saved {
-        refresh_models_after_login(pane_mgr, tui_config).await;
+        refresh_models_after_login(session, tui_config).await;
     }
     drained.settled
 }
@@ -351,9 +338,9 @@ async fn drain_browser_logins(
 /// state. the /sessions slash command kicks off a thread that parses
 /// session files off the event loop; the results land here on the next
 /// tick so the overlay populates progressively
-fn drain_session_picker(pane_mgr: &mut crate::pane::PaneManager) -> bool {
+fn drain_session_picker(session: &mut crate::session::Session) -> bool {
     let mut changed = false;
-    for pane in pane_mgr.panes_mut() {
+    for pane in std::slice::from_mut(session) {
         if let Some(picker) = pane.app.interaction.session_picker.as_mut() {
             changed |= picker.drain_incoming();
         }
@@ -365,26 +352,17 @@ fn drain_session_picker(pane_mgr: &mut crate::pane::PaneManager) -> bool {
 async fn handle_idle_iteration(
     stream_state: &mut StreamState,
     runtime: &mut RunnerRuntime,
-    services: &RunnerServices,
     tui_config: &mut TuiConfig,
     registry: &ApiRegistry,
     image_picker: &Option<ratatui_image::picker::Picker>,
     size_cache: &std::rc::Rc<super::size_cached_backend::CachedSizeState>,
 ) -> io::Result<LoopAction> {
-    drain_inboxes(&mut runtime.pane_mgr, stream_state).await;
-    stream_state.save_dirty_session(&runtime.pane_mgr, tui_config);
-    let picker_changed = drain_session_picker(&mut runtime.pane_mgr);
-    let login_changed = drain_browser_logins(&mut runtime.pane_mgr, tui_config).await;
+    stream_state.save_dirty_session(&runtime.session, tui_config);
+    let picker_changed = drain_session_picker(&mut runtime.session);
+    let login_changed = drain_browser_logins(&mut runtime.session, tui_config).await;
 
-    let (pane_mgr, mut deps) = input_parts(
-        runtime,
-        services,
-        tui_config,
-        registry,
-        image_picker,
-        size_cache,
-    );
-    let action = handle_idle_terminal_events(pane_mgr, &mut deps).await?;
+    let (session, mut deps) = input_parts(runtime, tui_config, registry, image_picker, size_cache);
+    let action = handle_idle_terminal_events(session, &mut deps).await?;
     if matches!(action, LoopAction::Continue) && (picker_changed || login_changed) {
         Ok(LoopAction::Redraw)
     } else {
@@ -476,15 +454,11 @@ mod tests {
     #[test]
     fn focused_pane_session_picker_drain_reports_disconnect() {
         let app = crate::app::App::new("test".into(), mush_ai::types::TokenCount::new(200_000));
-        let pane = crate::pane::Pane::new(crate::pane::PaneId::new(0), app);
-        let mut pane_mgr = crate::pane::PaneManager::new(pane);
+        let mut session = crate::session::Session::new(app);
         let (tx, rx) = std::sync::mpsc::channel();
-        pane_mgr
-            .focused_mut()
-            .app
-            .open_session_picker_streaming(rx, "/tmp".into());
+        session.app.open_session_picker_streaming(rx, "/tmp".into());
         drop(tx);
 
-        assert!(drain_session_picker(&mut pane_mgr));
+        assert!(drain_session_picker(&mut session));
     }
 }

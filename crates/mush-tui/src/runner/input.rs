@@ -1,3 +1,4 @@
+use mush_ai::types::PaneId;
 use std::io;
 use std::path::Path;
 
@@ -6,10 +7,9 @@ use mush_ai::registry::ApiRegistry;
 
 use crate::app::{self, App, AppEvent};
 use crate::input::handle_key;
-use crate::pane::PaneManager;
+use crate::session::Session;
 
 use super::commands::{SlashEnv, handle_slash_action, save_thinking_pref};
-use super::panes::{close_focused_pane, fork_pane};
 use super::render::handle_mouse;
 use super::streams::{
     StreamState, abort_focused_stream, answer_confirmation, edit_last_queued_steering,
@@ -41,13 +41,11 @@ pub(super) struct InputDeps<'a> {
     pub thinking_prefs: &'a mut ThinkingPrefs,
     pub thinking_saver: &'a Option<ThinkingPrefsSaver>,
     pub registry: &'a ApiRegistry,
-    pub message_bus: &'a crate::messaging::MessageBus,
-    pub file_tracker: &'a crate::file_tracker::FileTracker,
     pub lifecycle_hooks: &'a mush_agent::LifecycleHooks,
     pub cwd: &'a Path,
     pub pending_prompt: &'a mut Option<String>,
     pub pending_compactions:
-        &'a mut std::collections::HashMap<crate::pane::PaneId, crate::slash::PendingCompaction>,
+        &'a mut std::collections::HashMap<mush_ai::types::PaneId, crate::slash::PendingCompaction>,
     pub image_picker: &'a Option<ratatui_image::picker::Picker>,
     /// handle to the Terminal backend's size cache so resize events
     /// can invalidate it (ratatui's autoresize will then pick up the
@@ -105,14 +103,14 @@ fn trace_dropped_event(event: Event, phase: &str) {
 
 async fn handle_common_app_event(
     app_event: &AppEvent,
-    pane_mgr: &mut PaneManager,
-    stream_state: Option<&mut StreamState>,
+    session: &mut Session,
+    _stream_state: Option<&mut StreamState>,
     deps: &mut InputDeps<'_>,
 ) -> Option<LoopAction> {
     match app_event {
         AppEvent::Quit => Some(LoopAction::Quit),
         AppEvent::CycleThinkingLevel => {
-            let app = &pane_mgr.focused().app;
+            let app = &session.app;
             save_thinking_pref(
                 deps.thinking_prefs,
                 deps.thinking_saver,
@@ -123,44 +121,7 @@ async fn handle_common_app_event(
             Some(LoopAction::Redraw)
         }
         AppEvent::PasteImage => {
-            paste_clipboard_image(&mut pane_mgr.focused_mut().app).await;
-            Some(LoopAction::Redraw)
-        }
-        AppEvent::SplitPane => {
-            fork_pane(
-                pane_mgr,
-                deps.tui_config,
-                deps.message_bus,
-                &deps.tui_config.tool_output_live,
-            )
-            .await;
-            Some(LoopAction::Redraw)
-        }
-        AppEvent::ClosePane => {
-            close_focused_pane(
-                pane_mgr,
-                stream_state,
-                deps.message_bus,
-                deps.file_tracker,
-                deps.cwd,
-            )
-            .await;
-            Some(LoopAction::Redraw)
-        }
-        AppEvent::FocusNextPane => {
-            pane_mgr.focus_next();
-            Some(LoopAction::Redraw)
-        }
-        AppEvent::FocusPrevPane => {
-            pane_mgr.focus_prev();
-            Some(LoopAction::Redraw)
-        }
-        AppEvent::FocusPaneByIndex(index) => {
-            pane_mgr.focus_index(*index);
-            Some(LoopAction::Redraw)
-        }
-        AppEvent::ResizePane(delta) => {
-            pane_mgr.resize_focused(*delta);
+            paste_clipboard_image(&mut session.app).await;
             Some(LoopAction::Redraw)
         }
         AppEvent::ValidateAndSaveApiKey {
@@ -168,17 +129,11 @@ async fn handle_common_app_event(
             provider_name,
             key,
         } => {
-            validate_and_save_api_key(
-                &mut pane_mgr.focused_mut().app,
-                entry_id,
-                provider_name,
-                key,
-            )
-            .await;
+            validate_and_save_api_key(&mut session.app, entry_id, provider_name, key).await;
             Some(LoopAction::Redraw)
         }
         AppEvent::CompactionRecoverySelected { action } => {
-            handle_compaction_recovery_action(pane_mgr, deps, *action).await;
+            handle_compaction_recovery_action(session, deps, *action).await;
             Some(LoopAction::Redraw)
         }
         _ => None,
@@ -186,36 +141,28 @@ async fn handle_common_app_event(
 }
 
 async fn handle_compaction_recovery_action(
-    pane_mgr: &mut PaneManager,
+    session: &mut Session,
     deps: &mut InputDeps<'_>,
     action: crate::app_state::CompactionRecoveryAction,
 ) {
-    let pane_id = pane_mgr.focused().id;
-    let Some(recovery) = pane_mgr
-        .focused_mut()
-        .app
-        .interaction
-        .compaction_recovery
-        .take()
-    else {
-        pane_mgr.focused_mut().app.interaction.mode = app::AppMode::Normal;
+    let pane_id = PaneId::new(1);
+    let Some(recovery) = session.app.interaction.compaction_recovery.take() else {
+        session.app.interaction.mode = app::AppMode::Normal;
         return;
     };
-    pane_mgr.focused_mut().app.interaction.mode = app::AppMode::Normal;
+    session.app.interaction.mode = app::AppMode::Normal;
 
     match action {
         crate::app_state::CompactionRecoveryAction::Retry => {
             if deps.pending_compactions.contains_key(&pane_id) {
-                pane_mgr
-                    .focused_mut()
+                session
                     .app
                     .push_system_message("compaction already in progress on this pane");
                 return;
             }
-            let target =
-                super::streams::compaction_target(pane_mgr, pane_id, deps.tui_config).await;
-            pane_mgr.focused_mut().app.status = Some("retrying compaction…".into());
-            pane_mgr.focused_mut().app.compacting = true;
+            let target = super::streams::compaction_target(session, pane_id, deps.tui_config).await;
+            session.app.status = Some("retrying compaction…".into());
+            session.app.compacting = true;
             let task = crate::slash::start_compaction(
                 recovery.failure.original_messages().to_vec(),
                 target.model,
@@ -237,7 +184,7 @@ async fn handle_compaction_recovery_action(
                 Some(deps.cwd),
             )
             .await;
-            let pane = pane_mgr.focused_mut();
+            let pane = &mut *session;
             crate::slash::apply_applied_compaction(&mut pane.app, &mut pane.conversation, applied);
             super::runtime::replay_compaction_inputs(pane);
             // persist the recovered compaction immediately, same reason as
@@ -245,13 +192,13 @@ async fn handle_compaction_recovery_action(
             // the user might quit
             if let Some(saver) = &deps.tui_config.save_session {
                 saver(super::streams::build_session_snapshot(
-                    pane_mgr,
+                    session,
                     deps.tui_config,
                 ));
             }
         }
         crate::app_state::CompactionRecoveryAction::Cancel => {
-            let pane = pane_mgr.focused_mut();
+            let pane = &mut *session;
             pane.app.compacting = false;
             pane.app.status = Some("compaction cancelled".into());
             pane.app.push_system_message("compaction cancelled");
@@ -379,7 +326,7 @@ pub(super) fn apply_resize(size_cache: &std::rc::Rc<super::size_cached_backend::
 }
 
 pub(super) async fn handle_streaming_terminal_events(
-    pane_mgr: &mut PaneManager,
+    session: &mut Session,
     stream_state: &mut StreamState,
     deps: &mut InputDeps<'_>,
 ) -> io::Result<LoopAction> {
@@ -388,18 +335,18 @@ pub(super) async fn handle_streaming_terminal_events(
         let event = event::read()?;
         match event {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
-                match handle_streaming_key_event(pane_mgr, stream_state, deps, key).await? {
+                match handle_streaming_key_event(session, stream_state, deps, key).await? {
                     LoopAction::Quit => return Ok(LoopAction::Quit),
                     LoopAction::Redraw => changed = true,
                     LoopAction::Continue => {}
                 }
             }
             Event::Mouse(mouse) => {
-                handle_mouse(&mut pane_mgr.focused_mut().app, mouse);
+                handle_mouse(&mut session.app, mouse);
                 changed = true;
             }
             Event::Paste(text) => {
-                pane_mgr.focused_mut().app.handle_paste(&text);
+                session.app.handle_paste(&text);
                 changed = true;
             }
             Event::Resize(w, h) => {
@@ -427,26 +374,26 @@ pub(super) async fn handle_streaming_terminal_events(
 }
 
 async fn handle_streaming_key_event(
-    pane_mgr: &mut PaneManager,
+    session: &mut Session,
     stream_state: &mut StreamState,
     deps: &mut InputDeps<'_>,
     key: KeyEvent,
 ) -> io::Result<LoopAction> {
-    if pane_mgr.focused().app.interaction.mode == app::AppMode::ToolConfirm {
+    if session.app.interaction.mode == app::AppMode::ToolConfirm {
         if let Some(allowed) = confirmation_answer(key.code) {
-            answer_confirmation(pane_mgr, stream_state, allowed).await;
+            answer_confirmation(session, stream_state, allowed).await;
             return Ok(LoopAction::Redraw);
         }
         return Ok(LoopAction::Continue);
     }
 
-    let app_event = handle_key(&mut pane_mgr.focused_mut().app, key);
+    let app_event = handle_key(&mut session.app, key);
     let Some(app_event) = app_event else {
         return Ok(LoopAction::Redraw);
     };
 
     if let Some(action) =
-        handle_common_app_event(&app_event, pane_mgr, Some(stream_state), deps).await
+        handle_common_app_event(&app_event, session, Some(stream_state), deps).await
     {
         return Ok(match action {
             LoopAction::Continue => LoopAction::Redraw,
@@ -456,14 +403,14 @@ async fn handle_streaming_key_event(
 
     match app_event {
         AppEvent::Abort => {
-            abort_focused_stream(pane_mgr, stream_state).await;
+            abort_focused_stream(session, stream_state).await;
         }
         AppEvent::UserSubmit { text, images } => {
-            submit_streaming_input(pane_mgr, stream_state, text, images).await;
-            record_model_use(pane_mgr, deps.tui_config);
+            submit_streaming_input(session, stream_state, text, images).await;
+            record_model_use(session, deps.tui_config);
         }
         AppEvent::EditSteering => {
-            edit_last_queued_steering(pane_mgr, stream_state).await;
+            edit_last_queued_steering(session, stream_state).await;
         }
         AppEvent::SlashCommand { action } => {
             // a slash command can reach the streaming iteration two ways:
@@ -473,14 +420,12 @@ async fn handle_streaming_key_event(
             // still draining out of `agent_streams`. either way it must
             // run rather than be dropped. mirrors the idle dispatch.
             let state_changed = handle_slash_action(
-                pane_mgr,
+                session,
                 action,
                 SlashEnv {
                     tui_config: deps.tui_config,
                     thinking_prefs: deps.thinking_prefs,
                     registry: deps.registry,
-                    message_bus: deps.message_bus,
-                    file_tracker: deps.file_tracker,
                     lifecycle_hooks: deps.lifecycle_hooks,
                     cwd: deps.cwd,
                     pending_prompt: deps.pending_prompt,
@@ -490,7 +435,7 @@ async fn handle_streaming_key_event(
             .await;
             if state_changed && let Some(ref saver) = deps.tui_config.save_session {
                 saver(super::streams::build_session_snapshot(
-                    pane_mgr,
+                    session,
                     deps.tui_config,
                 ));
             }
@@ -505,21 +450,21 @@ async fn handle_streaming_key_event(
 /// message is actually sent so the favourites picker can sort by recency
 /// without alt+m cycling polluting the order. updates the in-memory list
 /// on both the config and the focused app, then persists via the saver
-fn record_model_use(pane_mgr: &mut PaneManager, tui_config: &mut TuiConfig) {
-    let model_id = pane_mgr.focused().app.model_id.clone();
+fn record_model_use(session: &mut Session, tui_config: &mut TuiConfig) {
+    let model_id = session.app.model_id.clone();
     let updated = crate::model_picker::promote_recent_model(&tui_config.recent_models, &model_id);
     if updated == tui_config.recent_models {
         return;
     }
     tui_config.recent_models = updated.clone();
-    pane_mgr.focused_mut().app.completion.recent_models = updated;
+    session.app.completion.recent_models = updated;
     if let Some(ref saver) = tui_config.save_recent_models {
         saver(&tui_config.recent_models);
     }
 }
 
 pub(super) async fn handle_idle_terminal_events(
-    pane_mgr: &mut PaneManager,
+    session: &mut Session,
     deps: &mut InputDeps<'_>,
 ) -> io::Result<LoopAction> {
     if !event::poll(std::time::Duration::from_millis(50))? {
@@ -530,7 +475,7 @@ pub(super) async fn handle_idle_terminal_events(
         let event = event::read()?;
         match event {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
-                let app_event = handle_key(&mut pane_mgr.focused_mut().app, key);
+                let app_event = handle_key(&mut session.app, key);
                 let Some(app_event) = app_event else {
                     if !event::poll(std::time::Duration::ZERO)? {
                         break;
@@ -538,8 +483,7 @@ pub(super) async fn handle_idle_terminal_events(
                     continue;
                 };
 
-                if let Some(action) =
-                    handle_common_app_event(&app_event, pane_mgr, None, deps).await
+                if let Some(action) = handle_common_app_event(&app_event, session, None, deps).await
                 {
                     if matches!(action, LoopAction::Quit) {
                         return Ok(LoopAction::Quit);
@@ -555,18 +499,18 @@ pub(super) async fn handle_idle_terminal_events(
                             // runtime can replay them as a fresh turn
                             // once compaction lands; the input box
                             // clears so the user can keep typing
-                            let pane_id = pane_mgr.focused().id;
+                            let pane_id = PaneId::new(1);
                             if deps.pending_compactions.contains_key(&pane_id) {
-                                let pane = pane_mgr.focused_mut();
+                                let pane = &mut *session;
                                 pane.queue_input_during_compaction(text, images);
                                 continue;
                             }
                             let expanded = slash::expand_template(&text);
-                            let pane = pane_mgr.focused_mut();
+                            let pane = &mut *session;
                             if pane.label.is_none() && pane.conversation.is_empty() {
                                 pane.label = Some(expanded.chars().take(30).collect());
                             }
-                            let pane = pane_mgr.focused_mut();
+                            let pane = &mut *session;
                             let pending_images: Vec<Vec<u8>> =
                                 images.iter().map(|img| img.data.clone()).collect();
                             if pending_images.is_empty() {
@@ -586,30 +530,28 @@ pub(super) async fn handle_idle_terminal_events(
                                     }
                                 }
                             }
-                            let pane = pane_mgr.focused_mut();
+                            let pane = &mut *session;
                             pane.app.active_tools.clear();
                             pane.app.start_streaming();
                             pane.pending_prompt =
-                                Some(crate::pane::PendingPrompt::with_images(expanded, images));
+                                Some(crate::session::PendingPrompt::with_images(expanded, images));
                             super::runtime::save_pane_pending_prompt(pane);
                             // save the user message immediately so it survives crashes
                             if let Some(ref saver) = deps.tui_config.save_session {
                                 saver(super::streams::build_session_snapshot(
-                                    pane_mgr,
+                                    session,
                                     deps.tui_config,
                                 ));
                             }
                         }
                         AppEvent::SlashCommand { action } => {
                             let state_changed = handle_slash_action(
-                                pane_mgr,
+                                session,
                                 action,
                                 SlashEnv {
                                     tui_config: deps.tui_config,
                                     thinking_prefs: deps.thinking_prefs,
                                     registry: deps.registry,
-                                    message_bus: deps.message_bus,
-                                    file_tracker: deps.file_tracker,
                                     lifecycle_hooks: deps.lifecycle_hooks,
                                     cwd: deps.cwd,
                                     pending_prompt: deps.pending_prompt,
@@ -620,19 +562,19 @@ pub(super) async fn handle_idle_terminal_events(
 
                             if state_changed && let Some(ref saver) = deps.tui_config.save_session {
                                 saver(super::streams::build_session_snapshot(
-                                    pane_mgr,
+                                    session,
                                     deps.tui_config,
                                 ));
                             }
                         }
                         AppEvent::SettingsToggleSelected => {
-                            apply_settings_toggle(pane_mgr, deps.tui_config);
+                            apply_settings_toggle(session, deps.tui_config);
                         }
                         AppEvent::ModelSelected { model_id } => {
                             // route through the same slash action so the
                             // switch-model logic stays single-sourced
                             let state_changed = handle_slash_action(
-                                pane_mgr,
+                                session,
                                 crate::slash::SlashAction::Model {
                                     model_id: Some(model_id),
                                     show_all: false,
@@ -641,8 +583,6 @@ pub(super) async fn handle_idle_terminal_events(
                                     tui_config: deps.tui_config,
                                     thinking_prefs: deps.thinking_prefs,
                                     registry: deps.registry,
-                                    message_bus: deps.message_bus,
-                                    file_tracker: deps.file_tracker,
                                     lifecycle_hooks: deps.lifecycle_hooks,
                                     cwd: deps.cwd,
                                     pending_prompt: deps.pending_prompt,
@@ -652,23 +592,23 @@ pub(super) async fn handle_idle_terminal_events(
                             .await;
                             if state_changed && let Some(ref saver) = deps.tui_config.save_session {
                                 saver(super::streams::build_session_snapshot(
-                                    pane_mgr,
+                                    session,
                                     deps.tui_config,
                                 ));
                             }
                         }
                         AppEvent::PersistFavourites => {
                             if let Some(ref saver) = deps.tui_config.save_favourite_models {
-                                saver(&pane_mgr.focused().app.completion.favourite_models);
+                                saver(&session.app.completion.favourite_models);
                             }
                         }
                         _ => {}
                     }
                 }
             }
-            Event::Mouse(mouse) => handle_mouse(&mut pane_mgr.focused_mut().app, mouse),
+            Event::Mouse(mouse) => handle_mouse(&mut session.app, mouse),
             Event::Paste(text) => {
-                pane_mgr.focused_mut().app.handle_paste(&text);
+                session.app.handle_paste(&text);
             }
             Event::Resize(w, h) => {
                 apply_resize(deps.size_cache);
@@ -694,10 +634,10 @@ pub(super) async fn handle_idle_terminal_events(
 /// apply a toggle to the selected /settings menu item and sync the result
 /// into the live StreamOptions so the next turn picks up the change
 fn apply_settings_toggle(
-    pane_mgr: &mut crate::pane::PaneManager,
+    session: &mut crate::session::Session,
     tui_config: &mut crate::runner::TuiConfig,
 ) {
-    let app = &mut pane_mgr.focused_mut().app;
+    let app = &mut session.app;
     let Some(menu) = app.settings_menu.as_mut() else {
         return;
     };
@@ -739,8 +679,8 @@ async fn paste_clipboard_image(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pane::{Pane, PaneId, PaneManager};
     use crate::runner::size_cached_backend::CachedSizeState;
+    use crate::session::Session;
     use crossterm::event::{KeyEvent, KeyEventState, KeyModifiers};
     use mush_ai::types::TokenCount;
     use std::rc::Rc;
@@ -777,12 +717,9 @@ mod tests {
 
     #[tokio::test]
     async fn streaming_key_input_requests_redraw() {
-        let pane = Pane::new(
-            PaneId::new(1),
-            App::new("test".into(), TokenCount::new(200_000)),
-        );
-        let mut pane_mgr = PaneManager::new(pane);
-        pane_mgr.focused_mut().app.start_tool(
+        let mut session = Session::new(App::new("test".into(), TokenCount::new(200_000)));
+
+        session.app.start_tool(
             &mush_ai::types::ToolCallId::from("toolu_test"),
             "bash_status",
             "job 1",
@@ -790,7 +727,7 @@ mod tests {
         let (_tx, rx) = tokio::sync::mpsc::channel(1);
         let mut stream_state = StreamState::new();
         stream_state.register_active(
-            pane_mgr.focused().id,
+            PaneId::new(1),
             super::super::streams::StreamMeta {
                 cancel: tokio_util::sync::CancellationToken::new(),
                 steering_queue: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
@@ -805,8 +742,6 @@ mod tests {
         );
         let mut tui_config = streaming_test_config();
         let registry = mush_ai::registry::ApiRegistry::new();
-        let message_bus = crate::messaging::MessageBus::new();
-        let file_tracker = crate::file_tracker::FileTracker::new(std::path::PathBuf::new());
         let lifecycle_hooks = mush_agent::LifecycleHooks::default();
         let mut pending_prompt = None;
         let mut pending_compactions = std::collections::HashMap::new();
@@ -817,8 +752,6 @@ mod tests {
             thinking_prefs: &mut ThinkingPrefs::default(),
             thinking_saver: &None,
             registry: &registry,
-            message_bus: &message_bus,
-            file_tracker: &file_tracker,
             lifecycle_hooks: &lifecycle_hooks,
             cwd: std::path::Path::new(""),
             pending_prompt: &mut pending_prompt,
@@ -828,7 +761,7 @@ mod tests {
         };
 
         let action = handle_streaming_key_event(
-            &mut pane_mgr,
+            &mut session,
             &mut stream_state,
             &mut deps,
             key(KeyCode::Char('h')),
@@ -837,7 +770,7 @@ mod tests {
         .unwrap();
 
         assert!(matches!(action, LoopAction::Redraw));
-        assert_eq!(pane_mgr.focused().app.input.text, "h");
+        assert_eq!(session.app.input.text, "h");
     }
 
     #[tokio::test]
@@ -851,20 +784,15 @@ mod tests {
         // handler used to silently drop. typing `/compact` (or any slash
         // command) right after an abort therefore did nothing. `/cost`
         // stands in here as a cheap, synchronous, observable command.
-        let mut pane_mgr = PaneManager::new(Pane::new(
-            PaneId::new(1),
-            App::new("test".into(), TokenCount::new(200_000)),
-        ));
-        pane_mgr.focused_mut().app.stream.active = false;
-        assert!(!pane_mgr.focused().app.interaction.show_cost);
-        pane_mgr.focused_mut().app.input.text = "/cost".into();
-        pane_mgr.focused_mut().app.input.cursor = "/cost".len();
+        let mut session = Session::new(App::new("test".into(), TokenCount::new(200_000)));
+        session.app.stream.active = false;
+        assert!(!session.app.interaction.show_cost);
+        session.app.input.text = "/cost".into();
+        session.app.input.cursor = "/cost".len();
 
         let mut stream_state = StreamState::new();
         let mut tui_config = streaming_test_config();
         let registry = mush_ai::registry::ApiRegistry::new();
-        let message_bus = crate::messaging::MessageBus::new();
-        let file_tracker = crate::file_tracker::FileTracker::new(std::path::PathBuf::new());
         let lifecycle_hooks = mush_agent::LifecycleHooks::default();
         let mut pending_prompt = None;
         let mut pending_compactions = std::collections::HashMap::new();
@@ -875,8 +803,6 @@ mod tests {
             thinking_prefs: &mut ThinkingPrefs::default(),
             thinking_saver: &None,
             registry: &registry,
-            message_bus: &message_bus,
-            file_tracker: &file_tracker,
             lifecycle_hooks: &lifecycle_hooks,
             cwd: std::path::Path::new(""),
             pending_prompt: &mut pending_prompt,
@@ -886,7 +812,7 @@ mod tests {
         };
 
         handle_streaming_key_event(
-            &mut pane_mgr,
+            &mut session,
             &mut stream_state,
             &mut deps,
             key(KeyCode::Enter),
@@ -895,7 +821,7 @@ mod tests {
         .unwrap();
 
         assert!(
-            pane_mgr.focused().app.interaction.show_cost,
+            session.app.interaction.show_cost,
             "a slash command entered during a streaming iteration must execute, not be dropped"
         );
     }

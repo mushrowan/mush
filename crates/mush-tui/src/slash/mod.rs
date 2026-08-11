@@ -40,14 +40,6 @@ pub enum SlashParseError {
     LogsUsage,
     #[error("usage: /mcp | /mcp tools [server] | /mcp schema <tool> | /mcp reconnect <server>")]
     McpUsage,
-    #[error("usage: /broadcast <message>")]
-    BroadcastUsage,
-    #[error("usage: /lock <path>")]
-    LockUsage,
-    #[error("usage: /unlock <path>")]
-    UnlockUsage,
-    #[error("usage: /task claim <id> <description> | /task release <id> | /task list")]
-    TaskUsage,
     #[error("usage: /login-complete <code>")]
     LoginCodeUsage,
     #[error("usage: /compaction-model [same|<model-id>]")]
@@ -131,22 +123,6 @@ pub enum SlashAction {
     LoginComplete {
         code: String,
     },
-    Close,
-    Broadcast {
-        message: String,
-    },
-    Lock {
-        path: String,
-    },
-    Unlock {
-        path: String,
-    },
-    Locks,
-    Label {
-        text: Option<String>,
-    },
-    Panes,
-    Merge,
     Card,
     /// inspect configured MCP servers and the tools they advertise
     Mcp(McpQuery),
@@ -196,7 +172,6 @@ impl SlashAction {
                 | Self::Branch { .. }
                 | Self::Compact { .. }
                 | Self::Undo
-                | Self::Merge
                 | Self::Reload
         )
     }
@@ -273,26 +248,6 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
         "login-complete" | "login-code" => Ok(SlashAction::LoginComplete {
             code: args.to_string(),
         }),
-        "close" => Ok(SlashAction::Close),
-        "broadcast" if args.is_empty() => Err(SlashParseError::BroadcastUsage),
-        "broadcast" => Ok(SlashAction::Broadcast {
-            message: args.to_string(),
-        }),
-        "lock" if args.is_empty() => Err(SlashParseError::LockUsage),
-        "lock" => Ok(SlashAction::Lock {
-            path: args.to_string(),
-        }),
-        "unlock" if args.is_empty() => Err(SlashParseError::UnlockUsage),
-        "unlock" => Ok(SlashAction::Unlock {
-            path: args.to_string(),
-        }),
-        "locks" => Ok(SlashAction::Locks),
-        "label" => Ok(SlashAction::Label {
-            text: (!args.is_empty()).then(|| args.to_string()),
-        }),
-        "panes" => Ok(SlashAction::Panes),
-        "merge" => Ok(SlashAction::Merge),
-        "task" | "tasks" => parse_task_subcommand(args),
         "debug" => Ok(SlashAction::Debug),
         "reload" => Ok(SlashAction::Reload),
         "refresh-models" | "models-refresh" => Ok(SlashAction::RefreshModels),
@@ -302,28 +257,6 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
             name: other.to_string(),
             args: args.to_string(),
         }),
-    }
-}
-
-fn parse_task_subcommand(args: &str) -> Result<SlashAction, SlashParseError> {
-    let (sub, rest) = split_name_and_args(args);
-    match sub {
-        "claim" => {
-            let (id, description) = split_name_and_args(rest);
-            if id.is_empty() || description.is_empty() {
-                Err(SlashParseError::TaskUsage)
-            } else {
-                Ok(SlashAction::TaskClaim {
-                    id: id.to_string(),
-                    description: description.to_string(),
-                })
-            }
-        }
-        "release" if !rest.is_empty() => Ok(SlashAction::TaskRelease {
-            id: rest.to_string(),
-        }),
-        "list" | "" => Ok(SlashAction::TaskList),
-        _ => Err(SlashParseError::TaskUsage),
     }
 }
 
@@ -558,53 +491,6 @@ mod tests {
                 show_all: true,
             }
         );
-    }
-
-    #[test]
-    fn parse_lock_requires_path() {
-        assert_eq!(
-            parse("/lock").unwrap_err().to_string(),
-            "usage: /lock <path>"
-        );
-    }
-
-    #[test]
-    fn parse_task_claim() {
-        assert_eq!(
-            parse("/task claim fix-auth rewrite the auth module").unwrap(),
-            SlashAction::TaskClaim {
-                id: "fix-auth".into(),
-                description: "rewrite the auth module".into(),
-            }
-        );
-    }
-
-    #[test]
-    fn parse_task_release() {
-        assert_eq!(
-            parse("/task release fix-auth").unwrap(),
-            SlashAction::TaskRelease {
-                id: "fix-auth".into(),
-            }
-        );
-    }
-
-    #[test]
-    fn parse_task_list() {
-        assert_eq!(parse("/task list").unwrap(), SlashAction::TaskList);
-        assert_eq!(parse("/task").unwrap(), SlashAction::TaskList);
-        assert_eq!(parse("/tasks").unwrap(), SlashAction::TaskList);
-    }
-
-    #[test]
-    fn parse_task_claim_needs_id_and_description() {
-        assert!(parse("/task claim").is_err());
-        assert!(parse("/task claim myid").is_err());
-    }
-
-    #[test]
-    fn parse_task_release_needs_id() {
-        assert!(parse("/task release").is_err());
     }
 
     #[test]

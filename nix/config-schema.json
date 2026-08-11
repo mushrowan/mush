@@ -389,26 +389,6 @@
       ],
       "type": "string"
     },
-    "IsolationMode": {
-      "description": "how pane file access is isolated",
-      "oneOf": [
-        {
-          "const": "none",
-          "description": "detect-and-warn: track modifications, advisory locks (default)",
-          "type": "string"
-        },
-        {
-          "const": "worktree",
-          "description": "git worktree per pane: full filesystem isolation",
-          "type": "string"
-        },
-        {
-          "const": "jj",
-          "description": "jj change per pane: separate changes in same working dir",
-          "type": "string"
-        }
-      ]
-    },
     "KeyboardEnhancementMode": {
       "enum": [
         "auto",
@@ -1097,11 +1077,6 @@
         "stop": []
       },
       "description": "lifecycle hooks"
-    },
-    "isolation": {
-      "$ref": "#/$defs/IsolationMode",
-      "default": "none",
-      "description": "multi-pane file isolation mode: none (detect-and-warn), worktree, jj"
     },
     "keys": {
       "$ref": "#/$defs/KeysConfig",

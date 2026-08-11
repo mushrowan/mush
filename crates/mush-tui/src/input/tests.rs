@@ -521,23 +521,6 @@ fn configured_word_delete_binding_is_used() {
 }
 
 #[test]
-fn configured_pane_split_binding_is_used() {
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-    let raw = crate::keybinds::scoped_test_config(
-        crate::keybinds::KeyScope::Pane,
-        [(
-            "split_pane",
-            crate::keybinds::BindingSource::One("alt+enter".into()),
-        )],
-    );
-    app.keymap.override_scoped(&raw);
-
-    let event = handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
-
-    assert!(matches!(event, Some(AppEvent::SplitPane)));
-}
-
-#[test]
 fn ctrl_k_deletes_to_end() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.input.text = "hello world".into();
@@ -690,26 +673,6 @@ fn configured_global_bindings_are_used() {
 
     assert!(event.is_none());
     assert!(app.confirm_quit_pending);
-}
-
-#[test]
-fn configured_focus_pane_binding_is_used() {
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-    let raw = crate::keybinds::scoped_test_config(
-        crate::keybinds::KeyScope::Pane,
-        [(
-            "focus_pane_two",
-            crate::keybinds::BindingSource::One("alt+w".into()),
-        )],
-    );
-    app.keymap.override_scoped(&raw);
-
-    let event = handle_key(
-        &mut app,
-        KeyEvent::new(KeyCode::Char('w'), KeyModifiers::ALT),
-    );
-
-    assert!(matches!(event, Some(AppEvent::FocusPaneByIndex(1))));
 }
 
 #[test]
@@ -1490,110 +1453,6 @@ fn alt(code: KeyCode) -> KeyEvent {
         kind: KeyEventKind::Press,
         state: KeyEventState::NONE,
     }
-}
-
-#[test]
-fn alt_number_focuses_pane() {
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-    let event = handle_key(&mut app, alt(KeyCode::Char('1')));
-    assert!(matches!(event, Some(AppEvent::FocusPaneByIndex(0))));
-
-    let event = handle_key(&mut app, alt(KeyCode::Char('3')));
-    assert!(matches!(event, Some(AppEvent::FocusPaneByIndex(2))));
-
-    let event = handle_key(&mut app, alt(KeyCode::Char('9')));
-    assert!(matches!(event, Some(AppEvent::FocusPaneByIndex(8))));
-}
-
-#[test]
-fn ctrl_shift_enter_splits_pane() {
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-    let event = handle_key(
-        &mut app,
-        KeyEvent {
-            code: KeyCode::Enter,
-            modifiers: KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-            kind: KeyEventKind::Press,
-            state: KeyEventState::NONE,
-        },
-    );
-    assert!(matches!(event, Some(AppEvent::SplitPane)));
-}
-
-#[test]
-fn ctrl_tab_focuses_next_pane() {
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-    let event = handle_key(
-        &mut app,
-        KeyEvent {
-            code: KeyCode::Tab,
-            modifiers: KeyModifiers::CONTROL,
-            kind: KeyEventKind::Press,
-            state: KeyEventState::NONE,
-        },
-    );
-    assert!(matches!(event, Some(AppEvent::FocusNextPane)));
-}
-
-#[test]
-fn ctrl_shift_tab_focuses_prev_pane() {
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-    let event = handle_key(
-        &mut app,
-        KeyEvent {
-            code: KeyCode::BackTab,
-            modifiers: KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-            kind: KeyEventKind::Press,
-            state: KeyEventState::NONE,
-        },
-    );
-    assert!(matches!(event, Some(AppEvent::FocusPrevPane)));
-}
-
-#[test]
-fn pane_keys_work_while_streaming() {
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-    app.stream.active = true;
-
-    // alt+number should still focus panes
-    let event = handle_key(&mut app, alt(KeyCode::Char('2')));
-    assert!(matches!(event, Some(AppEvent::FocusPaneByIndex(1))));
-
-    // ctrl+shift+enter should still split
-    let event = handle_key(
-        &mut app,
-        KeyEvent {
-            code: KeyCode::Enter,
-            modifiers: KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-            kind: KeyEventKind::Press,
-            state: KeyEventState::NONE,
-        },
-    );
-    assert!(matches!(event, Some(AppEvent::SplitPane)));
-
-    // ctrl+tab should still cycle panes
-    let event = handle_key(
-        &mut app,
-        KeyEvent {
-            code: KeyCode::Tab,
-            modifiers: KeyModifiers::CONTROL,
-            kind: KeyEventKind::Press,
-            state: KeyEventState::NONE,
-        },
-    );
-    assert!(matches!(event, Some(AppEvent::FocusNextPane)));
-
-    // ctrl+shift+left should resize
-    let event = handle_key(
-        &mut app,
-        KeyEvent {
-            code: KeyCode::Left,
-            modifiers: KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-            kind: KeyEventKind::Press,
-            state: KeyEventState::NONE,
-        },
-    );
-    assert!(matches!(event, Some(AppEvent::ResizePane(-4))));
 }
 
 #[test]

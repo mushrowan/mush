@@ -40,7 +40,6 @@ enum ThinkingConfigWire {
     Level(ThinkingLevel),
 }
 
-pub use mush_tui::IsolationMode;
 pub use mush_tui::StatusBarConfig;
 pub use mush_tui::TerminalPolicy;
 
@@ -88,8 +87,6 @@ pub struct Config {
     /// show cache warmth countdown and send desktop notifications (on by default)
     #[serde(default = "default_cache_timer")]
     pub cache_timer: bool,
-    /// multi-pane file isolation mode: none (detect-and-warn), worktree, jj
-    pub isolation: IsolationMode,
     /// terminal behaviour overrides
     pub terminal: TerminalPolicy,
     pub api_keys: ApiKeys,
@@ -208,7 +205,6 @@ impl Default for Config {
             show_token_counters: false,
             status_bar: StatusBarConfig::default(),
             cache_timer: default_cache_timer(),
-            isolation: IsolationMode::default(),
             terminal: TerminalPolicy::default(),
             api_keys: ApiKeys::default(),
             theme: mush_tui::ThemeConfig::default(),
@@ -799,24 +795,6 @@ advisor = true
     fn parse_empty_config() {
         let config: Config = toml::from_str("").unwrap();
         assert!(config.model.is_none());
-    }
-
-    #[test]
-    fn parse_isolation_mode() {
-        let config: Config = toml::from_str(r#"isolation = "jj""#).unwrap();
-        assert_eq!(config.isolation, IsolationMode::Jj);
-
-        let config: Config = toml::from_str(r#"isolation = "worktree""#).unwrap();
-        assert_eq!(config.isolation, IsolationMode::Worktree);
-
-        let config: Config = toml::from_str(r#"isolation = "none""#).unwrap();
-        assert_eq!(config.isolation, IsolationMode::None);
-    }
-
-    #[test]
-    fn isolation_defaults_to_none() {
-        let config: Config = toml::from_str("").unwrap();
-        assert_eq!(config.isolation, IsolationMode::None);
     }
 
     #[test]

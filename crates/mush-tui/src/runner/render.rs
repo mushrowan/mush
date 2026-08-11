@@ -6,7 +6,7 @@ use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::layout::Rect;
 
 use crate::app::{self, App};
-use crate::pane::PaneManager;
+use crate::session::Session;
 use crate::ui::Ui;
 use crate::widgets;
 
@@ -15,135 +15,43 @@ use super::size_cached_backend::SizeCachedBackend;
 #[tracing::instrument(name = "draw_panes", skip_all)]
 pub(super) fn draw_panes(
     terminal: &mut Terminal<SizeCachedBackend<CrosstermBackend<io::Stdout>>>,
-    pane_mgr: &mut PaneManager,
+    session: &mut Session,
     image_picker: &Option<ratatui_image::picker::Picker>,
     settings: &crate::settings::ScopedSettings,
 ) -> io::Result<()> {
     repair_terminal_before_frame(terminal)?;
 
-    let pane_count = pane_mgr.pane_count() as u16;
-    let focused_idx = pane_mgr.focused_index();
-
-    // invalidate per-frame caches on every pane so stats changes
-    // between frames can't leak through the cache
-    for pane in pane_mgr.panes_mut().iter_mut() {
-        pane.app.render_state.status_bar_cache.borrow_mut().take();
-    }
-
-    if pane_count > 1 {
-        let alert: Option<String> = {
-            let busy: Vec<String> = pane_mgr
-                .panes()
-                .iter()
-                .enumerate()
-                .filter(|(i, pane)| *i != focused_idx && pane.app.is_busy())
-                .map(|(i, _)| format!("pane {}", i + 1))
-                .collect();
-            if busy.is_empty() {
-                None
-            } else {
-                Some(format!("{}: busy", busy.join(", ")))
-            }
-        };
-        for (i, pane) in pane_mgr.panes_mut().iter_mut().enumerate() {
-            pane.app.pane_info = Some(((i + 1) as u16, pane_count));
-            pane.app.background_alert = if i == focused_idx {
-                alert.clone()
-            } else {
-                None
-            };
-        }
-    } else {
-        pane_mgr.panes_mut()[0].app.pane_info = None;
-        pane_mgr.panes_mut()[0].app.background_alert = None;
-    }
+    session
+        .app
+        .render_state
+        .status_bar_cache
+        .borrow_mut()
+        .take();
+    session.app.pane_info = None;
+    session.app.background_alert = None;
 
     terminal.draw(|frame| {
         let area = frame.area();
-        let focused_idx = pane_mgr.focused_index();
-        let pane_count = pane_mgr.pane_count();
-        let is_multi = pane_count > 1;
+        let (cx, cy) = Ui::new(&session.app).cursor_position(area);
 
-        let shared_status_h = if is_multi {
-            crate::widgets::status_bar::status_bar_height(
-                &pane_mgr.panes()[focused_idx].app,
-                area.width,
-            )
-        } else {
-            0
-        };
-        let panes_area = Rect::new(
-            area.x,
-            area.y,
-            area.width,
-            area.height.saturating_sub(shared_status_h),
-        );
+        frame.render_widget(Ui::new(&session.app), area);
 
-        pane_mgr.compute_layout(panes_area);
-
-        let focused_area = pane_mgr.panes()[focused_idx].area;
-        let (cx, cy) = Ui::new(&pane_mgr.panes()[focused_idx].app)
-            .hide_status(is_multi)
-            .cursor_position(focused_area);
-
-        if pane_count > 1 {
-            let buf = frame.buffer_mut();
-            for (i, pane) in pane_mgr.panes().iter().enumerate() {
-                if i == 0 {
-                    continue;
-                }
-                let sep_x = pane.area.x.saturating_sub(1);
-                let is_adjacent_to_focus = i == focused_idx || i == focused_idx + 1;
-                let style = if is_adjacent_to_focus {
-                    pane_mgr.panes()[focused_idx]
-                        .app
-                        .theme
-                        .pane_separator_active
-                } else {
-                    pane_mgr.panes()[focused_idx].app.theme.pane_separator
-                };
-                for y in panes_area.y..panes_area.y + panes_area.height {
-                    if let Some(cell) = buf.cell_mut(ratatui::layout::Position::new(sep_x, y)) {
-                        cell.set_symbol("│").set_style(style);
-                    }
-                }
+        let render_areas = session.app.render_state.image_render_areas.borrow().clone();
+        if let Some(picker) = image_picker.as_ref() {
+            session.ensure_image_protocols(picker, &render_areas);
+        }
+        for img_area in &render_areas {
+            if let Some(proto) = session
+                .image_protos
+                .get_mut(&(img_area.msg_idx, img_area.tc_idx))
+            {
+                let widget =
+                    ratatui_image::StatefulImage::new().resize(ratatui_image::Resize::Fit(None));
+                frame.render_stateful_widget(widget, img_area.area, proto);
             }
         }
 
-        for pane in pane_mgr.panes_mut() {
-            let pane_area = pane.area;
-            frame.render_widget(Ui::new(&pane.app).hide_status(is_multi), pane_area);
-
-            let render_areas = pane.app.render_state.image_render_areas.borrow().clone();
-            if let Some(picker) = image_picker.as_ref() {
-                pane.ensure_image_protocols(picker, &render_areas);
-            }
-            for img_area in &render_areas {
-                if let Some(proto) = pane
-                    .image_protos
-                    .get_mut(&(img_area.msg_idx, img_area.tc_idx))
-                {
-                    let widget = ratatui_image::StatefulImage::new()
-                        .resize(ratatui_image::Resize::Fit(None));
-                    frame.render_stateful_widget(widget, img_area.area, proto);
-                }
-            }
-        }
-
-        if is_multi && shared_status_h > 0 {
-            let status_area = Rect::new(
-                area.x,
-                panes_area.y + panes_area.height,
-                area.width,
-                shared_status_h,
-            );
-            frame.render_widget(
-                crate::widgets::status_bar::StatusBar::new(&pane_mgr.panes()[focused_idx].app),
-                status_area,
-            );
-        }
-
-        let focused_app = &pane_mgr.panes()[focused_idx].app;
+        let focused_app = &session.app;
         let streaming_idle = focused_app.is_busy() && focused_app.input.text.is_empty();
         if !streaming_idle
             && (focused_app.interaction.mode == app::AppMode::Normal
@@ -175,7 +83,7 @@ pub(super) fn draw_panes(
         let needs_input_anchor = focused_app.completion.slash_menu.is_some()
             || focused_app.interaction.at_picker.is_some();
         if needs_input_anchor {
-            let input_area = input_region(focused_app, focused_area, is_multi);
+            let input_area = input_region(focused_app, area);
             if let Some(ref menu) = focused_app.completion.slash_menu {
                 widgets::slash_menu::render(frame, menu, input_area, &focused_app.theme);
             }
@@ -190,15 +98,11 @@ pub(super) fn draw_panes(
 /// the input box's rect inside a pane, recomputed the same way the pane
 /// itself laid out. overlays anchored to the input (slash menu, at
 /// picker) need it, and getting it wrong floats them over the wrong row
-fn input_region(app: &App, pane_area: Rect, is_multi: bool) -> Rect {
+fn input_region(app: &App, pane_area: Rect) -> Rect {
     let input_h = crate::ui::input_height(&app.input, pane_area.width);
     let tools_h =
         crate::widgets::tool_panels::tool_panels_height(&app.active_tools, pane_area.width);
-    let status_h = if is_multi {
-        0
-    } else {
-        crate::widgets::status_bar::status_bar_height(app, pane_area.width)
-    };
+    let status_h = crate::widgets::status_bar::status_bar_height(app, pane_area.width);
     crate::ui::layout(pane_area, input_h, tools_h, status_h).input
 }
 

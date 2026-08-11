@@ -571,7 +571,6 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
                 }
             }))
         },
-        isolation_mode: setup.cfg.isolation,
         terminal_policy,
         lifecycle_hooks: setup.lifecycle_hooks,
         cwd: std::env::current_dir().unwrap_or_default(),

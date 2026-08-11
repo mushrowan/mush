@@ -156,9 +156,6 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     }
 
     // 3. pane management (works regardless of streaming state)
-    if let Some(event) = handle_pane_keys(app, key) {
-        return Some(event);
-    }
 
     // alt+m / alt+shift+m cycle through favourite models. works while
     // streaming so the user can hot-swap mid-turn without aborting.
@@ -215,57 +212,6 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     } else {
         handle_idle_keys(app, key)
     }
-}
-
-/// pane management bindings, independent of streaming state
-fn handle_pane_keys(app: &App, key: KeyEvent) -> Option<AppEvent> {
-    if app.keymap.matches(crate::keybinds::Action::SplitPane, key) {
-        return Some(AppEvent::SplitPane);
-    }
-    if app
-        .keymap
-        .matches(crate::keybinds::Action::FocusNextPane, key)
-    {
-        return Some(AppEvent::FocusNextPane);
-    }
-    if app
-        .keymap
-        .matches(crate::keybinds::Action::FocusPrevPane, key)
-    {
-        return Some(AppEvent::FocusPrevPane);
-    }
-    if app
-        .keymap
-        .matches(crate::keybinds::Action::ResizePaneLeft, key)
-    {
-        return Some(AppEvent::ResizePane(-4));
-    }
-    if app
-        .keymap
-        .matches(crate::keybinds::Action::ResizePaneRight, key)
-    {
-        return Some(AppEvent::ResizePane(4));
-    }
-
-    focus_pane_index(app, key).map(AppEvent::FocusPaneByIndex)
-}
-
-fn focus_pane_index(app: &App, key: KeyEvent) -> Option<usize> {
-    use crate::keybinds::Action;
-
-    [
-        Action::FocusPane1,
-        Action::FocusPane2,
-        Action::FocusPane3,
-        Action::FocusPane4,
-        Action::FocusPane5,
-        Action::FocusPane6,
-        Action::FocusPane7,
-        Action::FocusPane8,
-        Action::FocusPane9,
-    ]
-    .into_iter()
-    .position(|action| app.keymap.matches(action, key))
 }
 
 /// keys specific to streaming: enter submits to steering queue

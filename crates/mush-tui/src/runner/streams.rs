@@ -14,9 +14,9 @@ use mush_ai::types::{
 use tokio::sync::Mutex;
 
 use crate::event_handler;
-use crate::file_tracker::FileTracker;
-use crate::pane::{PaneId, PaneManager, PendingPrompt};
 use crate::runner::runtime::save_pane_pending_prompt;
+use crate::session::{PendingPrompt, Session};
+use mush_ai::types::PaneId;
 
 const USER_CANCELLED_TOOL_MESSAGE: &str = "user cancelled tool";
 
@@ -92,9 +92,6 @@ pub(super) struct StreamDeps<'a> {
     pub injections: mush_agent::AgentInjections,
     pub tools: &'a ToolRegistry,
     pub registry: &'a ApiRegistry,
-    pub message_bus: &'a crate::messaging::MessageBus,
-    pub shared_state: &'a crate::shared_state::SharedState,
-    pub file_tracker: &'a FileTracker,
 }
 
 impl StreamState {
@@ -154,39 +151,31 @@ impl StreamState {
     /// save session if enough time has passed since the last save
     pub(super) fn save_session_debounced(
         &mut self,
-        pane_mgr: &PaneManager,
+        session: &Session,
         tui_config: &super::TuiConfig,
     ) {
         self.session_dirty = true;
-        self.save_dirty_session(pane_mgr, tui_config);
+        self.save_dirty_session(session, tui_config);
     }
 
     /// flush pending session changes when the debounce interval has elapsed.
     /// this keeps long streams checkpointed even if no further agent event
     /// arrives after a message/tool boundary marks the session dirty
-    pub(super) fn save_dirty_session(
-        &mut self,
-        pane_mgr: &PaneManager,
-        tui_config: &super::TuiConfig,
-    ) {
+    pub(super) fn save_dirty_session(&mut self, session: &Session, tui_config: &super::TuiConfig) {
         if !self.session_dirty || self.last_session_save.elapsed() < SESSION_SAVE_DEBOUNCE {
             return;
         }
         if let Some(ref saver) = tui_config.save_session {
-            saver(build_session_snapshot(pane_mgr, tui_config));
+            saver(build_session_snapshot(session, tui_config));
             self.last_session_save = std::time::Instant::now();
             self.session_dirty = false;
         }
     }
 
     /// unconditional save (for AgentEnd and other important checkpoints)
-    pub(super) fn save_session_now(
-        &mut self,
-        pane_mgr: &PaneManager,
-        tui_config: &super::TuiConfig,
-    ) {
+    pub(super) fn save_session_now(&mut self, session: &Session, tui_config: &super::TuiConfig) {
         if let Some(ref saver) = tui_config.save_session {
-            saver(build_session_snapshot(pane_mgr, tui_config));
+            saver(build_session_snapshot(session, tui_config));
             self.last_session_save = std::time::Instant::now();
             self.session_dirty = false;
         }
@@ -194,32 +183,32 @@ impl StreamState {
 }
 
 pub(super) fn take_pending_prompts(
-    pane_mgr: &mut PaneManager,
+    session: &mut Session,
     pending_prompt: &mut Option<String>,
 ) -> Vec<(PaneId, PendingPrompt)> {
     let mut prompts = Vec::new();
     if let Some(prompt) = pending_prompt.take() {
-        prompts.push((pane_mgr.focused().id, PendingPrompt::text(prompt)));
+        prompts.push((PaneId::new(1), PendingPrompt::text(prompt)));
     }
-    for pane in pane_mgr.panes_mut() {
+    for pane in std::slice::from_mut(session) {
         if let Some(prompt) = pane.pending_prompt.take()
-            && !prompts.iter().any(|(id, _)| *id == pane.id)
+            && !prompts.iter().any(|(id, _)| *id == PaneId::new(1))
         {
-            prompts.push((pane.id, prompt));
+            prompts.push((PaneId::new(1), prompt));
         }
     }
     prompts
 }
 
 pub(super) async fn poll_confirmation_prompt(
-    pane_mgr: &mut PaneManager,
+    session: &mut Session,
     stream_state: &mut StreamState,
 ) -> bool {
-    let focused_id = pane_mgr.focused().id;
+    let focused_id = PaneId::new(1);
     if let Some(meta) = stream_state.meta_mut(focused_id)
         && let Ok(confirm) = meta.confirm_req_rx.try_recv()
     {
-        let app = &mut pane_mgr.focused_mut().app;
+        let app = &mut session.app;
         app.interaction.mode = crate::app::AppMode::ToolConfirm;
         app.interaction.confirm_tool_call_id = Some(confirm.tool_call_id.clone());
         app.interaction.confirm_prompt = Some(confirm.prompt);
@@ -233,11 +222,11 @@ pub(super) async fn poll_confirmation_prompt(
 }
 
 pub(super) async fn answer_confirmation(
-    pane_mgr: &mut PaneManager,
+    session: &mut Session,
     stream_state: &mut StreamState,
     allowed: bool,
 ) {
-    let focused_id = pane_mgr.focused().id;
+    let focused_id = PaneId::new(1);
     let pending_tool_call_id = if let Some(meta) = stream_state.meta_mut(focused_id)
         && let Some(pending) = meta.confirm_reply.lock().await.take()
     {
@@ -248,7 +237,7 @@ pub(super) async fn answer_confirmation(
         None
     };
 
-    let app = &mut pane_mgr.focused_mut().app;
+    let app = &mut session.app;
     app.interaction.mode = crate::app::AppMode::Normal;
     app.interaction.confirm_prompt = None;
     app.interaction.confirm_tool_call_id = None;
@@ -261,7 +250,7 @@ pub(super) async fn answer_confirmation(
 }
 
 pub(super) fn poll_live_tool_output(
-    pane_mgr: &mut PaneManager,
+    session: &mut Session,
     live: &Option<crate::runner::config::LiveToolOutput>,
 ) -> bool {
     let Some(live) = live else {
@@ -275,7 +264,7 @@ pub(super) fn poll_live_tool_output(
     };
     // route each line to the focused pane's matching panel (by exec id), so
     // concurrent tools stream into their own boxes instead of the last one
-    let app = &mut pane_mgr.focused_mut().app;
+    let app = &mut session.app;
     let mut changed = false;
     for (exec_id, line) in updates {
         changed |= app.push_tool_output_by_exec_id(&exec_id, &line);
@@ -283,54 +272,9 @@ pub(super) fn poll_live_tool_output(
     changed
 }
 
-/// track file conflicts in multi-pane mode when tools start/end
-fn track_file_conflicts(
-    pane_mgr: &mut PaneManager,
-    pane_id: PaneId,
-    event: &AgentEvent,
-    file_tracker: &FileTracker,
-) {
-    if !pane_mgr.is_multi_pane() {
-        return;
-    }
-    match event {
-        AgentEvent::ToolExecStart {
-            tool_call_id,
-            tool_name,
-            args,
-        } => {
-            file_tracker.record_tool_start(pane_id, tool_call_id, tool_name.as_str(), args);
-        }
-        AgentEvent::ToolExecEnd {
-            tool_call_id,
-            tool_name: _,
-            result,
-        } => {
-            if let Some(conflict) =
-                file_tracker.record_tool_end(pane_id, tool_call_id, result.outcome.is_success())
-            {
-                let others: Vec<String> = conflict
-                    .other_panes
-                    .iter()
-                    .map(|pane_id| pane_id.to_string())
-                    .collect();
-                let warning = format!(
-                    "⚠ file conflict: {} also modified by pane {}",
-                    conflict.path.display(),
-                    others.join(", ")
-                );
-                if let Some(pane) = pane_mgr.pane_mut(pane_id) {
-                    pane.app.status = Some(warning);
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
 /// cleanup and follow-up work when the agent finishes
 async fn handle_agent_end(
-    pane_mgr: &mut PaneManager,
+    session: &mut Session,
     stream_state: &mut StreamState,
     pane_id: PaneId,
     tui_config: &TuiConfig,
@@ -339,12 +283,11 @@ async fn handle_agent_end(
     stream_state.remove(pane_id);
     crate::notify::play(crate::notify::Sound::Complete);
 
-    let title_request = if let Some(pane) = pane_mgr.pane(pane_id)
-        && !pane.title_generated
-        && pane.conversation.context_len() >= 2
+    let title_request = if !session.title_generated
+        && session.conversation.context_len() >= 2
         && let Some(ref updater) = tui_config.update_title
     {
-        Some((pane.conversation.context_prefix(4), updater.clone()))
+        Some((session.conversation.context_prefix(4), updater.clone()))
     } else {
         None
     };
@@ -363,14 +306,14 @@ async fn handle_agent_end(
         {
             updater(title);
         }
-        if let Some(pane) = pane_mgr.pane_mut(pane_id) {
+        {
+            let pane = &mut *session;
             pane.title_generated = true;
         }
     }
 
     if tui_config.cache_timer
-        && let Some(pane) = pane_mgr.pane(pane_id)
-        && let Some(remaining) = pane.app.cache.remaining_secs()
+        && let Some(remaining) = session.app.cache.remaining_secs()
         && remaining > crate::app::CACHE_WARN_SECS
     {
         crate::notify::send_with_sound(
@@ -381,18 +324,17 @@ async fn handle_agent_end(
     }
 
     if tui_config.auto_fork_compact {
-        auto_compact(pane_mgr, pane_id, tui_config, registry).await;
+        auto_compact(session, pane_id, tui_config, registry).await;
     }
 
-    stream_state.save_session_now(pane_mgr, tui_config);
+    stream_state.save_session_now(session, tui_config);
 }
 
 pub(super) async fn handle_agent_event_side_effects(
-    pane_mgr: &mut PaneManager,
+    session: &mut Session,
     stream_state: &mut StreamState,
     pane_id: PaneId,
     event: &AgentEvent,
-    file_tracker: &FileTracker,
     tui_config: &TuiConfig,
     registry: &ApiRegistry,
 ) {
@@ -416,21 +358,19 @@ pub(super) async fn handle_agent_event_side_effects(
             .meta(pane_id)
             .map(|m| m.model.clone())
             .unwrap_or_else(|| tui_config.model.clone());
-        reconcile_openrouter_generation(pane_mgr, pane_id, gen_id, &model, tui_config).await;
+        reconcile_openrouter_generation(session, pane_id, gen_id, &model, tui_config).await;
     }
-
-    track_file_conflicts(pane_mgr, pane_id, event, file_tracker);
 
     // incremental save after meaningful state changes (debounced)
     if matches!(
         event,
         AgentEvent::MessageEnd { .. } | AgentEvent::ToolExecEnd { .. }
     ) {
-        stream_state.save_session_debounced(pane_mgr, tui_config);
+        stream_state.save_session_debounced(session, tui_config);
     }
 
     if matches!(event, AgentEvent::AgentEnd) {
-        handle_agent_end(pane_mgr, stream_state, pane_id, tui_config, registry).await;
+        handle_agent_end(session, stream_state, pane_id, tui_config, registry).await;
     }
 }
 
@@ -440,8 +380,8 @@ pub(super) async fn handle_agent_event_side_effects(
 /// drop the result rather than block the user. apply_serving_provider
 /// then recomputes ttl_secs from the cycle 2.1 per-provider table
 async fn reconcile_openrouter_generation(
-    pane_mgr: &mut PaneManager,
-    pane_id: PaneId,
+    session: &mut Session,
+    _pane_id: PaneId,
     gen_id: String,
     model: &Model,
     tui_config: &TuiConfig,
@@ -466,7 +406,8 @@ async fn reconcile_openrouter_generation(
         return;
     };
 
-    if let Some(pane) = pane_mgr.pane_mut(pane_id) {
+    {
+        let pane = &mut *session;
         pane.app.cache.apply_serving_provider(
             provider_name,
             model,
@@ -480,18 +421,16 @@ async fn reconcile_openrouter_generation(
 /// context limit. uses the same tree-native path as `/compact` so the
 /// pre-compaction state stays navigable via `/tree` + `/branch`.
 async fn auto_compact(
-    pane_mgr: &mut PaneManager,
+    session: &mut Session,
     pane_id: PaneId,
     tui_config: &TuiConfig,
     registry: &ApiRegistry,
 ) {
-    let Some(pane) = pane_mgr.pane(pane_id) else {
-        return;
-    };
+    let pane = &*session;
 
     let context_tokens = pane.app.stats.context_tokens;
     let messages = pane.conversation.context();
-    let target = compaction_target(pane_mgr, pane_id, tui_config).await;
+    let target = compaction_target(session, pane_id, tui_config).await;
 
     if !mush_session::compact::needs_compaction_for_messages(
         context_tokens,
@@ -501,11 +440,7 @@ async fn auto_compact(
         return;
     }
 
-    #[expect(
-        clippy::expect_used,
-        reason = "pane existence verified by early return above"
-    )]
-    let pane = pane_mgr.pane_mut(pane_id).expect("pane exists after check");
+    let pane = &mut *session;
 
     let task = crate::slash::start_compaction(
         messages,
@@ -521,13 +456,7 @@ async fn auto_compact(
         return;
     };
 
-    #[expect(
-        clippy::expect_used,
-        reason = "pane existence verified by compact call above"
-    )]
-    let pane = pane_mgr
-        .pane_mut(pane_id)
-        .expect("pane exists after compact");
+    let pane = session;
     match result {
         crate::slash::CompactionTaskResult::Applied(result) => {
             crate::slash::apply_applied_compaction(&mut pane.app, &mut pane.conversation, result);
@@ -550,16 +479,13 @@ async fn auto_compact(
     }
 }
 
-pub(super) async fn abort_focused_stream(
-    pane_mgr: &mut PaneManager,
-    stream_state: &mut StreamState,
-) {
-    let focused_id = pane_mgr.focused().id;
-    record_cancelled_tools(pane_mgr.focused_mut());
+pub(super) async fn abort_focused_stream(session: &mut Session, stream_state: &mut StreamState) {
+    let focused_id = PaneId::new(1);
+    record_cancelled_tools(session);
 
     stream_state.abort(focused_id);
 
-    let pane = pane_mgr.focused_mut();
+    let pane = &mut *session;
     pane.app.finish_streaming(None, None);
     // queued steering messages live in two parallel structures: the
     // display side (`app.messages` with queued=true, drained by
@@ -578,7 +504,7 @@ pub(super) async fn abort_focused_stream(
     }
 }
 
-fn record_cancelled_tools(pane: &mut crate::pane::Pane) {
+fn record_cancelled_tools(pane: &mut crate::session::Session) {
     let running_tools: Vec<_> = pane
         .app
         .active_tools
@@ -612,12 +538,12 @@ fn record_cancelled_tools(pane: &mut crate::pane::Pane) {
 }
 
 pub(super) async fn submit_streaming_input(
-    pane_mgr: &mut PaneManager,
+    session: &mut Session,
     stream_state: &StreamState,
     text: String,
     images: Vec<crate::input_buffer::PendingImage>,
 ) {
-    let focused_id = pane_mgr.focused().id;
+    let focused_id = PaneId::new(1);
     if let Some(meta) = stream_state.meta(focused_id) {
         let content = build_user_content(&text, &images);
         meta.steering_queue
@@ -629,15 +555,14 @@ pub(super) async fn submit_streaming_input(
             }));
         let image_bytes: Vec<Vec<u8>> = images.into_iter().map(|img| img.data).collect();
         if image_bytes.is_empty() {
-            pane_mgr.focused_mut().app.push_queued_message(text);
+            session.app.push_queued_message(text);
         } else {
-            pane_mgr
-                .focused_mut()
+            session
                 .app
                 .push_queued_message_with_images(text, image_bytes);
         }
     } else {
-        let pane = pane_mgr.focused_mut();
+        let pane = &mut *session;
         let image_bytes: Vec<Vec<u8>> = images.iter().map(|img| img.data.clone()).collect();
         if image_bytes.is_empty() {
             pane.app.push_user_message(text.clone());
@@ -674,12 +599,9 @@ pub(crate) fn build_user_content(
     UserContent::Parts(parts)
 }
 
-pub(super) async fn edit_last_queued_steering(
-    pane_mgr: &mut PaneManager,
-    stream_state: &StreamState,
-) {
-    let focused_id = pane_mgr.focused().id;
-    let app = &mut pane_mgr.focused_mut().app;
+pub(super) async fn edit_last_queued_steering(session: &mut Session, stream_state: &StreamState) {
+    let focused_id = PaneId::new(1);
+    let app = &mut session.app;
 
     if let Some(queued_text) = app.pop_last_queued_message() {
         let current_input = app.input.take_text();
@@ -740,46 +662,32 @@ pub(super) async fn edit_last_queued_steering(
 pub(super) async fn start_pending_streams<'a>(
     agent_streams: &mut AgentStreams<'a>,
     stream_state: &mut StreamState,
-    pane_mgr: &mut PaneManager,
+    session: &mut Session,
     pending_prompt: &mut Option<String>,
     deps: StreamDeps<'a>,
 ) {
-    for (pane_id, prompt) in take_pending_prompts(pane_mgr, pending_prompt) {
-        start_stream_for_prompt(
-            agent_streams,
-            stream_state,
-            pane_mgr,
-            pane_id,
-            prompt,
-            &deps,
-        )
-        .await;
+    for (pane_id, prompt) in take_pending_prompts(session, pending_prompt) {
+        start_stream_for_prompt(agent_streams, stream_state, session, pane_id, prompt, &deps).await;
     }
 }
 
 async fn start_stream_for_prompt<'a>(
     agent_streams: &mut AgentStreams<'a>,
     stream_state: &mut StreamState,
-    pane_mgr: &mut PaneManager,
+    session: &mut Session,
     pane_id: PaneId,
     prompt: PendingPrompt,
     deps: &StreamDeps<'a>,
 ) {
     let tools = deps.tools;
     let registry = deps.registry;
-    let message_bus = deps.message_bus;
-    let shared_state = deps.shared_state;
-    let file_tracker = deps.file_tracker;
-    let Some(pane_ref) = pane_mgr.pane(pane_id) else {
-        return;
-    };
+    let pane_ref = &*session;
+    {};
     let steering_queue = pane_ref.steering_queue.clone();
-    let model = pane_model(pane_mgr, pane_id, &deps.config.default_model);
-    let thinking_level = pane_thinking_level(pane_mgr, pane_id);
+    let model = pane_model(session, &deps.config.default_model);
+    let thinking_level = pane_thinking_level(session);
     let conversation_snapshot = {
-        let Some(pane) = pane_mgr.pane_mut(pane_id) else {
-            return;
-        };
+        let pane = &mut *session;
         pane.pending_prompt = Some(prompt);
         save_pane_pending_prompt(pane);
         let conversation = pane.conversation.context();
@@ -800,10 +708,7 @@ async fn start_stream_for_prompt<'a>(
     )
     .await;
     let do_auto_compact = deps.config.auto_compact;
-    let initial_ctx = pane_mgr
-        .pane(pane_id)
-        .map(|pane| pane.app.stats.context_tokens.get())
-        .unwrap_or(0);
+    let initial_ctx = session.app.stats.context_tokens.get();
     let initial_estimated_tokens = estimated_tokens_u64(&conversation_snapshot);
     let context_tokens_shared = Arc::new(std::sync::atomic::AtomicU64::new(initial_ctx));
     let transform = build_context_transform(
@@ -820,12 +725,7 @@ async fn start_stream_for_prompt<'a>(
 
     let steering = build_steering_callback(steering_queue.clone());
     let follow_up = build_steering_callback(steering_queue.clone());
-    let (confirm_req_rx, confirm) = build_confirm_callback(
-        pane_id,
-        deps.config.confirm_tools,
-        pane_mgr.is_multi_pane(),
-        file_tracker,
-    );
+    let (confirm_req_rx, confirm) = build_confirm_callback(deps.config.confirm_tools);
 
     let mut call_options = deps.config.options.clone();
     let (api_key, account_id) =
@@ -834,17 +734,10 @@ async fn start_stream_for_prompt<'a>(
     call_options.account_id = account_id;
     call_options.thinking = Some(thinking_level);
 
-    let extra_tools =
-        build_extra_tools(pane_mgr.is_multi_pane(), pane_id, message_bus, shared_state);
-    let system_prompt = build_system_prompt(pane_mgr, pane_id, &deps.config.system_prompt);
-    let pane_tools = pane_mgr
-        .pane_mut(pane_id)
-        .and_then(|pane| pane.tools.take());
+    let extra_tools: Vec<SharedTool> = Vec::new();
+    let system_prompt = build_system_prompt(&deps.config.system_prompt);
 
     let mut tool_registry = tools.clone();
-    if let Some(pane_tools) = pane_tools {
-        tool_registry = tool_registry.with_shared(pane_tools.iter().cloned());
-    }
     tool_registry.extend_shared(extra_tools);
 
     // align the model-dependent tools (apply_patch ↔ edit + write,
@@ -853,10 +746,10 @@ async fn start_stream_for_prompt<'a>(
     // gpt and switching to claude would leave claude with apply_patch
     // and no edit tool. effective cwd respects worktree-pane overrides
     // so the rebuilt tools target the right tree
-    let effective_cwd = pane_mgr
-        .pane(pane_id)
-        .and_then(|p| p.cwd_override.clone())
-        .or_else(|| deps.injections.cwd.clone())
+    let effective_cwd = deps
+        .injections
+        .cwd
+        .clone()
         .unwrap_or_else(|| std::path::PathBuf::from("."));
     mush_tools::align_for_model(
         &mut tool_registry,
@@ -903,11 +796,8 @@ async fn start_stream_for_prompt<'a>(
     agent_streams.push(tagged);
 }
 
-fn pane_model(pane_mgr: &PaneManager, pane_id: PaneId, default_model: &Model) -> Model {
-    pane_mgr
-        .pane(pane_id)
-        .map(|pane| resolve_runtime_model(pane.app.model_id.as_str(), default_model))
-        .unwrap_or_else(|| default_model.clone())
+fn pane_model(session: &Session, default_model: &Model) -> Model {
+    resolve_runtime_model(session.app.model_id.as_str(), default_model)
 }
 
 /// what a compaction run for one pane should use
@@ -928,11 +818,11 @@ pub(super) struct CompactionTarget {
 /// retry, auto-compaction) goes through here so a pane switched with
 /// `/model` compacts against its own window with its own model
 pub(super) async fn compaction_target(
-    pane_mgr: &PaneManager,
-    pane_id: PaneId,
+    session: &Session,
+    _pane_id: PaneId,
     tui_config: &TuiConfig,
 ) -> CompactionTarget {
-    let pane_model = pane_model(pane_mgr, pane_id, &tui_config.model);
+    let pane_model = pane_model(session, &tui_config.model);
     let (model, options) = tui_config
         .compaction_options()
         .unwrap_or_else(|| (pane_model.clone(), tui_config.stream_options()));
@@ -960,11 +850,8 @@ pub(super) fn resolve_runtime_model(id: &str, default: &Model) -> Model {
     mush_ai::discovery::resolve_model_by_id(id).unwrap_or_else(|| default.clone())
 }
 
-fn pane_thinking_level(pane_mgr: &PaneManager, pane_id: PaneId) -> ThinkingLevel {
-    pane_mgr
-        .pane(pane_id)
-        .map(|pane| pane.app.thinking_level.clone())
-        .unwrap_or(ThinkingLevel::Off)
+fn pane_thinking_level(session: &Session) -> ThinkingLevel {
+    session.app.thinking_level.clone()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1093,17 +980,13 @@ fn build_steering_callback(
 }
 
 fn build_confirm_callback(
-    pane_id: PaneId,
     confirm_tools: bool,
-    is_multi_pane: bool,
-    file_tracker: &FileTracker,
 ) -> (
     tokio::sync::mpsc::Receiver<ConfirmRequest>,
     Option<mush_agent::ConfirmFn>,
 ) {
     let (confirm_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel::<ConfirmRequest>(1);
-    let confirm: Option<mush_agent::ConfirmFn> = if confirm_tools || is_multi_pane {
-        let file_tracker = file_tracker.clone();
+    let confirm: Option<mush_agent::ConfirmFn> = if confirm_tools {
         Some(Box::new(
             move |tool_call_id: &ToolCallId,
                   name: &str,
@@ -1111,7 +994,6 @@ fn build_confirm_callback(
                   -> std::pin::Pin<
                 Box<dyn std::future::Future<Output = mush_agent::ConfirmAction> + Send>,
             > {
-                let file_tracker = file_tracker.clone();
                 let tx = confirm_req_tx.clone();
                 let summary = mush_agent::summarise_tool_args(name, args);
                 let prompt = format!("{name} {summary}");
@@ -1119,16 +1001,7 @@ fn build_confirm_callback(
                 let name = name.to_string();
                 let args = args.clone();
                 Box::pin(async move {
-                    if matches!(name.as_str(), "write" | "edit")
-                        && let Some(path) = args["path"].as_str()
-                        && let Some(owner) = file_tracker.check_lock(pane_id, path)
-                    {
-                        return mush_agent::ConfirmAction::DenyWithReason(format!(
-                            "file \"{}\" is locked by pane {}",
-                            path,
-                            owner.as_u32()
-                        ));
-                    }
+                    let _ = (&name, &args);
                     if confirm_tools {
                         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
                         if tx
@@ -1169,99 +1042,20 @@ fn build_confirm_callback(
     (confirm_req_rx, confirm)
 }
 
-fn build_extra_tools(
-    is_multi_pane: bool,
-    pane_id: PaneId,
-    message_bus: &crate::messaging::MessageBus,
-    shared_state: &crate::shared_state::SharedState,
-) -> Vec<SharedTool> {
-    let mut extra_tools = Vec::new();
-    if is_multi_pane {
-        extra_tools.push(Arc::new(crate::messaging::SendMessageTool {
-            sender_id: pane_id,
-            bus: message_bus.clone(),
-        }) as SharedTool);
-        extra_tools.push(Arc::new(crate::shared_state::ReadStateTool {
-            state: shared_state.clone(),
-        }) as SharedTool);
-        extra_tools.push(Arc::new(crate::shared_state::WriteStateTool {
-            state: shared_state.clone(),
-        }) as SharedTool);
-    }
-    extra_tools
+fn build_system_prompt(base_system_prompt: &Option<String>) -> Option<String> {
+    base_system_prompt.clone()
 }
 
-fn build_system_prompt(
-    pane_mgr: &PaneManager,
-    pane_id: PaneId,
-    base_system_prompt: &Option<String>,
-) -> Option<String> {
-    let mut system_prompt = if pane_mgr.is_multi_pane() {
-        let sibling_info = super::panes::build_sibling_prompt(pane_id, pane_mgr);
-        match base_system_prompt.as_ref() {
-            Some(base) => Some(format!("{base}\n\n{sibling_info}")),
-            None => Some(sibling_info),
-        }
-    } else {
-        base_system_prompt.clone()
-    };
-
-    if let Some(pane) = pane_mgr.pane(pane_id) {
-        match &pane.isolation {
-            Some(crate::isolation::PaneIsolation::Worktree { path, branch }) => {
-                let note = format!(
-                    "\n\n## worktree isolation\n\
-                     you are working in a git worktree at `{}`.\n\
-                     your branch is `{branch}`. all file operations are isolated \
-                     from the main working directory. use /merge when your work \
-                     is ready to be merged back.",
-                    path.display()
-                );
-                system_prompt =
-                    Some(system_prompt.map_or(note.clone(), |prompt| format!("{prompt}{note}")));
-            }
-            Some(crate::isolation::PaneIsolation::Jj { change_id }) => {
-                let short = &change_id[..change_id.len().min(12)];
-                let note = format!(
-                    "\n\n## jj isolation\n\
-                     you are working on jj change `{short}`. \
-                     your edits are tracked as a separate jj change. \
-                     use /merge when your work is ready to be squashed \
-                     into the parent change."
-                );
-                system_prompt =
-                    Some(system_prompt.map_or(note.clone(), |prompt| format!("{prompt}{note}")));
-            }
-            None => {}
-        }
-    }
-
-    system_prompt
-}
-
-/// build a snapshot of all pane conversations for session persistence
+/// snapshot the conversation for session persistence
 pub(crate) fn build_session_snapshot(
-    pane_mgr: &PaneManager,
+    session: &Session,
     tui_config: &super::TuiConfig,
 ) -> super::SessionSnapshot {
-    let primary = pane_mgr.focused();
-    let additional: Vec<super::PaneSnapshot> = pane_mgr
-        .panes()
-        .iter()
-        .filter(|p| p.id != primary.id)
-        .map(|p| super::PaneSnapshot {
-            pane_id: p.id,
-            label: p.label.clone(),
-            model_id: p.app.model_id.to_string(),
-            conversation: p.conversation.clone(),
-        })
-        .collect();
-
     super::SessionSnapshot {
         session_id: tui_config.session_id.clone(),
-        primary: primary.conversation.clone(),
-        model_id: primary.app.model_id.to_string(),
-        panes: additional,
+        primary: session.conversation.clone(),
+        model_id: session.app.model_id.to_string(),
+        panes: Vec::new(),
         system_prompt: tui_config.system_prompt.clone(),
     }
 }
@@ -1292,9 +1086,9 @@ mod tests {
         let pane_id = PaneId::new(1);
         let mut app = crate::app::App::new(switched.id.clone(), switched.context_window);
         app.model_id = switched.id.clone();
-        let pane_mgr = PaneManager::new(crate::pane::Pane::new(pane_id, app));
+        let session = crate::session::Session::new(app);
 
-        let target = compaction_target(&pane_mgr, pane_id, &config).await;
+        let target = compaction_target(&session, pane_id, &config).await;
 
         assert_eq!(
             target.model.id, switched.id,
@@ -1323,9 +1117,9 @@ mod tests {
 
         let pane_id = PaneId::new(1);
         let app = crate::app::App::new(pane_model.id.clone(), pane_model.context_window);
-        let pane_mgr = PaneManager::new(crate::pane::Pane::new(pane_id, app));
+        let session = crate::session::Session::new(app);
 
-        let target = compaction_target(&pane_mgr, pane_id, &config).await;
+        let target = compaction_target(&session, pane_id, &config).await;
 
         assert_eq!(target.model.id, summariser.id, "/compaction-model wins");
         assert_eq!(
@@ -1365,7 +1159,7 @@ mod tests {
     }
 
     use crate::app::App;
-    use crate::pane::Pane;
+    use crate::session::Session;
 
     fn app() -> App {
         App::new(ModelId::from("test-model"), TokenCount::new(4096))
@@ -1453,7 +1247,7 @@ mod tests {
         use mush_ai::types::ImageMimeType;
 
         let pane_id = PaneId::new(1);
-        let mut pane_mgr = PaneManager::new(Pane::new(pane_id, app()));
+        let mut session = Session::new(app());
         let mut stream_state = StreamState::new();
         let (_confirm_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
         let steering_queue = Arc::new(Mutex::new(Vec::new()));
@@ -1471,7 +1265,7 @@ mod tests {
         );
 
         submit_streaming_input(
-            &mut pane_mgr,
+            &mut session,
             &stream_state,
             "look at this".into(),
             vec![PendingImage {
@@ -1502,7 +1296,7 @@ mod tests {
 
         // input buffer images should be drained
         assert!(
-            pane_mgr.focused().app.input.images.is_empty(),
+            session.app.input.images.is_empty(),
             "pending images should be drained after submission"
         );
     }
@@ -1512,7 +1306,7 @@ mod tests {
         // baseline: text-only submit still produces UserContent::Text, keeping
         // the existing wire format unchanged when no images are attached
         let pane_id = PaneId::new(1);
-        let mut pane_mgr = PaneManager::new(Pane::new(pane_id, app()));
+        let mut session = Session::new(app());
         let mut stream_state = StreamState::new();
         let (_confirm_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
         let steering_queue = Arc::new(Mutex::new(Vec::new()));
@@ -1529,13 +1323,7 @@ mod tests {
             },
         );
 
-        submit_streaming_input(
-            &mut pane_mgr,
-            &stream_state,
-            "just words".into(),
-            Vec::new(),
-        )
-        .await;
+        submit_streaming_input(&mut session, &stream_state, "just words".into(), Vec::new()).await;
 
         let queue = steering_queue.lock().await;
         let Message::User(user_msg) = &queue[0] else {
@@ -1556,7 +1344,7 @@ mod tests {
         // abort, which joins leftovers with \n). after lift+submit the
         // queue should contain exactly the edited text, not both
         let pane_id = PaneId::new(1);
-        let mut pane_mgr = PaneManager::new(Pane::new(pane_id, app()));
+        let mut session = Session::new(app());
         let mut stream_state = StreamState::new();
         let (_confirm_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
         let steering_queue = Arc::new(Mutex::new(Vec::new()));
@@ -1576,7 +1364,7 @@ mod tests {
         // first submit: "original message "  (with trailing space to exercise
         // whitespace-sensitive content match)
         submit_streaming_input(
-            &mut pane_mgr,
+            &mut session,
             &stream_state,
             "original message ".into(),
             Vec::new(),
@@ -1591,7 +1379,7 @@ mod tests {
         // lift: pulls the queued message back into input.text and should
         // remove it from the steering queue. input is empty at this point
         // so the preservation branch doesn't fire
-        edit_last_queued_steering(&mut pane_mgr, &stream_state).await;
+        edit_last_queued_steering(&mut session, &stream_state).await;
         let queue_len_after_lift = steering_queue.lock().await.len();
         assert_eq!(
             queue_len_after_lift, 0,
@@ -1599,16 +1387,15 @@ mod tests {
              (had {queue_len_after_lift} left over)"
         );
         assert_eq!(
-            pane_mgr.focused().app.input.text,
-            "original message ",
+            session.app.input.text, "original message ",
             "lifted text should land in the input buffer"
         );
 
         // edit + resubmit
-        pane_mgr.focused_mut().app.input.text = "edited message".into();
-        pane_mgr.focused_mut().app.input.cursor = "edited message".len();
-        let edited = pane_mgr.focused_mut().app.input.take_text();
-        submit_streaming_input(&mut pane_mgr, &stream_state, edited, Vec::new()).await;
+        session.app.input.text = "edited message".into();
+        session.app.input.cursor = "edited message".len();
+        let edited = session.app.input.take_text();
+        submit_streaming_input(&mut session, &stream_state, edited, Vec::new()).await;
 
         let queue = steering_queue.lock().await;
         assert_eq!(
@@ -1629,24 +1416,17 @@ mod tests {
     }
 
     #[test]
-    fn take_pending_prompts_deduplicates_focused_pane() {
-        let mut pane_mgr = PaneManager::new(Pane::new(PaneId::new(1), app()));
-        pane_mgr.add_pane(Pane::new(PaneId::new(2), app()));
-
+    fn take_pending_prompts_prefers_the_typed_prompt() {
+        let mut session = Session::new(app());
         let mut pending_prompt = Some("focused".to_string());
-        pane_mgr.focused_mut().pending_prompt = Some(PendingPrompt::text("duplicate"));
-        pane_mgr.panes_mut()[1].pending_prompt = Some(PendingPrompt::text("other"));
+        session.pending_prompt = Some(PendingPrompt::text("duplicate"));
 
-        let prompts = take_pending_prompts(&mut pane_mgr, &mut pending_prompt);
+        let prompts = take_pending_prompts(&mut session, &mut pending_prompt);
 
-        assert_eq!(prompts.len(), 2);
-        assert_eq!(prompts[0].0, PaneId::new(1));
+        assert_eq!(prompts.len(), 1);
         assert_eq!(prompts[0].1.text, "focused");
-        assert_eq!(prompts[1].0, PaneId::new(2));
-        assert_eq!(prompts[1].1.text, "other");
         assert!(pending_prompt.is_none());
-        assert!(pane_mgr.focused().pending_prompt.is_none());
-        assert!(pane_mgr.panes()[1].pending_prompt.is_none());
+        assert!(session.pending_prompt.is_none());
     }
 
     #[tokio::test]
@@ -1675,7 +1455,7 @@ mod tests {
     #[tokio::test]
     async fn poll_confirmation_prompt_tracks_tool_call_id() {
         let pane_id = PaneId::new(1);
-        let mut pane_mgr = PaneManager::new(Pane::new(pane_id, app()));
+        let mut session = Session::new(app());
         let mut stream_state = StreamState::new();
         let (confirm_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
 
@@ -1702,9 +1482,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(poll_confirmation_prompt(&mut pane_mgr, &mut stream_state).await);
+        assert!(poll_confirmation_prompt(&mut session, &mut stream_state).await);
 
-        let app = &pane_mgr.focused().app;
+        let app = &session.app;
         assert_eq!(app.interaction.mode, crate::app::AppMode::ToolConfirm);
         assert_eq!(
             app.interaction.confirm_prompt.as_deref(),
@@ -1730,7 +1510,7 @@ mod tests {
     #[tokio::test]
     async fn answer_confirmation_clears_tool_call_id_and_sends_reply() {
         let pane_id = PaneId::new(1);
-        let mut pane_mgr = PaneManager::new(Pane::new(pane_id, app()));
+        let mut session = Session::new(app());
         let mut stream_state = StreamState::new();
         let (confirm_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
 
@@ -1757,11 +1537,11 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(poll_confirmation_prompt(&mut pane_mgr, &mut stream_state).await);
-        answer_confirmation(&mut pane_mgr, &mut stream_state, true).await;
+        assert!(poll_confirmation_prompt(&mut session, &mut stream_state).await);
+        answer_confirmation(&mut session, &mut stream_state, true).await;
 
         assert!(reply_rx.await.unwrap());
-        let app = &pane_mgr.focused().app;
+        let app = &session.app;
         assert_eq!(app.interaction.mode, crate::app::AppMode::Normal);
         assert!(app.interaction.confirm_prompt.is_none());
         assert!(app.interaction.confirm_tool_call_id.is_none());
@@ -1779,7 +1559,7 @@ mod tests {
     #[tokio::test]
     async fn answer_confirmation_deny_sends_false_and_sets_status() {
         let pane_id = PaneId::new(1);
-        let mut pane_mgr = PaneManager::new(Pane::new(pane_id, app()));
+        let mut session = Session::new(app());
         let mut stream_state = StreamState::new();
         let (confirm_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
 
@@ -1806,12 +1586,12 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(poll_confirmation_prompt(&mut pane_mgr, &mut stream_state).await);
-        answer_confirmation(&mut pane_mgr, &mut stream_state, false).await;
+        assert!(poll_confirmation_prompt(&mut session, &mut stream_state).await);
+        answer_confirmation(&mut session, &mut stream_state, false).await;
 
         // reply channel gets `false` so the agent knows the tool was denied
         assert!(!reply_rx.await.unwrap());
-        let app = &pane_mgr.focused().app;
+        let app = &session.app;
         assert_eq!(app.interaction.mode, crate::app::AppMode::Normal);
         assert!(app.interaction.confirm_prompt.is_none());
         assert!(app.interaction.confirm_tool_call_id.is_none());
@@ -1832,21 +1612,16 @@ mod tests {
 
     #[test]
     fn poll_live_tool_output_updates_focused_tool() {
-        let pane_id = PaneId::new(1);
-        let mut pane_mgr = PaneManager::new(Pane::new(pane_id, app()));
+        let _pane_id = PaneId::new(1);
+        let mut session = Session::new(app());
         let tool_call_id = ToolCallId::from("tc_live");
-        pane_mgr
-            .focused_mut()
-            .app
-            .start_tool(&tool_call_id, "bash", "cargo test");
+        session.app.start_tool(&tool_call_id, "bash", "cargo test");
 
         let live = live_map(&[("tc_live", "running")]);
-        assert!(poll_live_tool_output(&mut pane_mgr, &live));
+        assert!(poll_live_tool_output(&mut session, &live));
 
         assert_eq!(
-            pane_mgr.focused().app.active_tools[0]
-                .live_output
-                .as_deref(),
+            session.app.active_tools[0].live_output.as_deref(),
             Some("running")
         );
     }
@@ -1855,40 +1630,31 @@ mod tests {
     fn poll_live_tool_output_routes_each_exec_id_to_its_own_panel() {
         // regression: with several active tools, all live output used to
         // land in the last panel. each exec id must stream into its own.
-        let mut pane_mgr = PaneManager::new(Pane::new(PaneId::new(1), app()));
+        let mut session = Session::new(app());
         let a = ToolCallId::from("tc_a");
         let b = ToolCallId::from("tc_b");
-        pane_mgr.focused_mut().app.start_tool(&a, "bash", "jj st");
-        pane_mgr
-            .focused_mut()
-            .app
-            .start_tool(&b, "bash", "cargo test");
+        session.app.start_tool(&a, "bash", "jj st");
+        session.app.start_tool(&b, "bash", "cargo test");
 
         let live = live_map(&[("tc_a", "jj output"), ("tc_b", "test output")]);
-        assert!(poll_live_tool_output(&mut pane_mgr, &live));
+        assert!(poll_live_tool_output(&mut session, &live));
 
-        let tools = &pane_mgr.focused().app.active_tools;
+        let tools = &session.app.active_tools;
         assert_eq!(tools[0].live_output.as_deref(), Some("jj output"));
         assert_eq!(tools[1].live_output.as_deref(), Some("test output"));
     }
 
     #[test]
     fn poll_live_tool_output_reports_unchanged_output() {
-        let pane_id = PaneId::new(1);
-        let mut pane_mgr = PaneManager::new(Pane::new(pane_id, app()));
+        let _pane_id = PaneId::new(1);
+        let mut session = Session::new(app());
         let tool_call_id = ToolCallId::from("tc_live");
-        pane_mgr
-            .focused_mut()
-            .app
-            .start_tool(&tool_call_id, "bash", "cargo test");
-        pane_mgr
-            .focused_mut()
-            .app
-            .push_tool_output(&tool_call_id, "running");
+        session.app.start_tool(&tool_call_id, "bash", "cargo test");
+        session.app.push_tool_output(&tool_call_id, "running");
 
         let live = live_map(&[("tc_live", "running")]);
 
-        assert!(!poll_live_tool_output(&mut pane_mgr, &live));
+        assert!(!poll_live_tool_output(&mut session, &live));
     }
 
     fn test_tui_config() -> super::super::TuiConfig {
@@ -1921,7 +1687,6 @@ mod tests {
             thinking_display: crate::app::ThinkingDisplay::Collapse,
             tool_output_live: None,
             log_buffer: None,
-            isolation_mode: crate::file_tracker::IsolationMode::None,
             terminal_policy: crate::terminal_policy::TerminalPolicy::default(),
             lifecycle_hooks: mush_agent::LifecycleHooks::default(),
             cwd: std::path::PathBuf::from("/tmp"),
@@ -1950,9 +1715,8 @@ mod tests {
 
     #[test]
     fn save_dirty_session_flushes_after_debounce() {
-        let mut pane_mgr = PaneManager::new(Pane::new(PaneId::new(1), app()));
-        pane_mgr
-            .focused_mut()
+        let mut session = Session::new(app());
+        session
             .conversation
             .append_message(Message::User(UserMessage {
                 content: UserContent::Text("persist me".into()),
@@ -1966,10 +1730,10 @@ mod tests {
         }));
 
         let mut stream_state = StreamState::new();
-        stream_state.save_session_debounced(&pane_mgr, &config);
-        stream_state.save_session_debounced(&pane_mgr, &config);
+        stream_state.save_session_debounced(&session, &config);
+        stream_state.save_session_debounced(&session, &config);
         stream_state.last_session_save = std::time::Instant::now() - SESSION_SAVE_DEBOUNCE;
-        stream_state.save_dirty_session(&pane_mgr, &config);
+        stream_state.save_dirty_session(&session, &config);
 
         assert_eq!(saves.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
@@ -2090,14 +1854,14 @@ mod tests {
         // once per submitted message
 
         let pane_id = PaneId::new(1);
-        let mut pane_mgr = PaneManager::new(Pane::new(pane_id, app()));
+        let mut session = Session::new(app());
         let mut stream_state = StreamState::new();
 
         let (_tx, rx) = tokio::sync::mpsc::channel(1);
         stream_state.register_active(
             pane_id,
             StreamMeta {
-                steering_queue: pane_mgr.pane(pane_id).unwrap().steering_queue.clone(),
+                steering_queue: session.steering_queue.clone(),
                 confirm_req_rx: rx,
                 confirm_reply: Arc::new(Mutex::new(None)),
                 model: models::all_models_with_user().into_iter().next().unwrap(),
@@ -2107,17 +1871,17 @@ mod tests {
         );
         // mark the pane as actively streaming so submit_streaming_input
         // takes the queueing path rather than the cold-start path
-        pane_mgr.focused_mut().app.start_streaming();
+        session.app.start_streaming();
 
         submit_streaming_input(
-            &mut pane_mgr,
+            &mut session,
             &stream_state,
             "first steer".into(),
             Vec::new(),
         )
         .await;
         submit_streaming_input(
-            &mut pane_mgr,
+            &mut session,
             &stream_state,
             "second steer".into(),
             Vec::new(),
@@ -2125,28 +1889,19 @@ mod tests {
         .await;
 
         // sanity: both queues should contain the two messages right now
-        assert_eq!(pane_mgr.focused().steering_queue.lock().await.len(), 2);
-        assert_eq!(
-            pane_mgr
-                .focused()
-                .app
-                .messages
-                .iter()
-                .filter(|m| m.queued)
-                .count(),
-            2
-        );
+        assert_eq!(session.steering_queue.lock().await.len(), 2);
+        assert_eq!(session.app.messages.iter().filter(|m| m.queued).count(), 2);
 
-        abort_focused_stream(&mut pane_mgr, &mut stream_state).await;
+        abort_focused_stream(&mut session, &mut stream_state).await;
 
-        let restored_input = &pane_mgr.focused().app.input.text;
+        let restored_input = &session.app.input.text;
         assert_eq!(
             restored_input, "first steer\nsecond steer",
             "abort must restore each queued message exactly once, got: {restored_input:?}"
         );
         // both queues should now be empty
-        assert!(pane_mgr.focused().steering_queue.lock().await.is_empty());
-        assert!(!pane_mgr.focused().app.messages.iter().any(|m| m.queued));
+        assert!(session.steering_queue.lock().await.is_empty());
+        assert!(!session.app.messages.iter().any(|m| m.queued));
     }
 
     #[tokio::test]
@@ -2157,14 +1912,14 @@ mod tests {
         };
 
         let pane_id = PaneId::new(1);
-        let mut pane_mgr = PaneManager::new(Pane::new(pane_id, app()));
+        let mut session = Session::new(app());
         let mut stream_state = StreamState::new();
 
         let (_tx, rx) = tokio::sync::mpsc::channel(1);
         stream_state.register_active(
             pane_id,
             StreamMeta {
-                steering_queue: pane_mgr.pane(pane_id).unwrap().steering_queue.clone(),
+                steering_queue: session.steering_queue.clone(),
                 confirm_req_rx: rx,
                 confirm_reply: Arc::new(Mutex::new(None)),
                 model: models::all_models_with_user().into_iter().next().unwrap(),
@@ -2174,37 +1929,31 @@ mod tests {
         );
 
         let tool_call_id = ToolCallId::from("tc_cancelled");
-        pane_mgr
-            .focused_mut()
-            .conversation
-            .append_message(Message::Assistant(
-                AssistantMessage::builder()
-                    .content(vec![
-                        AssistantContentPart::Text(TextContent {
-                            text: "i will read that".into(),
-                        }),
-                        AssistantContentPart::ToolCall(ToolCall {
-                            id: tool_call_id.clone(),
-                            name: ToolName::from("read"),
-                            arguments: serde_json::json!({"path": "src/lib.rs"}),
-                        }),
-                    ])
-                    .model(ModelId::from("test-model"))
-                    .provider(Provider::Anthropic)
-                    .api(Api::AnthropicMessages)
-                    .timestamp_ms(Timestamp::zero())
-                    .build(),
-            ));
-        pane_mgr.focused_mut().app.start_streaming();
-        pane_mgr.focused_mut().app.finish_streaming(None, None);
-        pane_mgr
-            .focused_mut()
-            .app
-            .start_tool(&tool_call_id, "read", "src/lib.rs");
+        session.conversation.append_message(Message::Assistant(
+            AssistantMessage::builder()
+                .content(vec![
+                    AssistantContentPart::Text(TextContent {
+                        text: "i will read that".into(),
+                    }),
+                    AssistantContentPart::ToolCall(ToolCall {
+                        id: tool_call_id.clone(),
+                        name: ToolName::from("read"),
+                        arguments: serde_json::json!({"path": "src/lib.rs"}),
+                    }),
+                ])
+                .model(ModelId::from("test-model"))
+                .provider(Provider::Anthropic)
+                .api(Api::AnthropicMessages)
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        ));
+        session.app.start_streaming();
+        session.app.finish_streaming(None, None);
+        session.app.start_tool(&tool_call_id, "read", "src/lib.rs");
 
-        abort_focused_stream(&mut pane_mgr, &mut stream_state).await;
+        abort_focused_stream(&mut session, &mut stream_state).await;
 
-        let ctx = pane_mgr.focused().conversation.context();
+        let ctx = session.conversation.context();
         let Some(Message::ToolResult(result)) = ctx.last() else {
             panic!("abort should append a tool result");
         };
@@ -2228,11 +1977,11 @@ mod tests {
         // session reuse the exact prompt that was cached, instead of
         // rebuilding from current AGENTS.md (which would bust the cache
         // on the first call after resume)
-        let pane_mgr = PaneManager::new(Pane::new(PaneId::new(1), app()));
+        let session = Session::new(app());
         let mut config = test_tui_config();
         config.system_prompt = Some("you are running inside mush\nproject context: foo".into());
 
-        let snapshot = build_session_snapshot(&pane_mgr, &config);
+        let snapshot = build_session_snapshot(&session, &config);
 
         assert_eq!(
             snapshot.system_prompt.as_deref(),
@@ -2251,19 +2000,19 @@ mod tests {
             count_clone.fetch_add(1, Ordering::Relaxed);
         }));
 
-        let pane_mgr = PaneManager::new(Pane::new(PaneId::new(1), app()));
+        let session = Session::new(app());
         let mut stream_state = StreamState::new();
 
         // first call should save (debounce timer starts in the past)
-        stream_state.save_session_debounced(&pane_mgr, &config);
+        stream_state.save_session_debounced(&session, &config);
         assert_eq!(save_count.load(Ordering::Relaxed), 1);
 
         // immediate second call should be debounced
-        stream_state.save_session_debounced(&pane_mgr, &config);
+        stream_state.save_session_debounced(&session, &config);
         assert_eq!(save_count.load(Ordering::Relaxed), 1);
 
         // save_session_now bypasses debounce
-        stream_state.save_session_now(&pane_mgr, &config);
+        stream_state.save_session_now(&session, &config);
         assert_eq!(save_count.load(Ordering::Relaxed), 2);
     }
 
@@ -2313,10 +2062,8 @@ mod tests {
         });
         cache.save(&cache_path()).unwrap();
 
-        let pane_id = PaneId::new(1);
-        let mut pane = Pane::new(pane_id, app());
-        pane.app.model_id = ModelId::from(glm_id);
-        let pane_mgr = PaneManager::new(pane);
+        let mut session = Session::new(app());
+        session.app.model_id = ModelId::from(glm_id);
 
         let default = Model {
             id: ModelId::from("claude-opus-4-7"),
@@ -2340,7 +2087,7 @@ mod tests {
             default_thinking_level: None,
         };
 
-        let resolved = pane_model(&pane_mgr, pane_id, &default);
+        let resolved = pane_model(&session, &default);
 
         // restore env before asserting so a panic doesn't leak env
         unsafe {

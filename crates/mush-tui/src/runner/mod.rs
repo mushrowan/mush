@@ -11,7 +11,6 @@ mod diag;
 mod input;
 mod last_model;
 mod looping;
-mod panes;
 mod render;
 mod runtime;
 mod size_cached_backend;
@@ -109,7 +108,7 @@ pub async fn run_tui(
         "after_terminal_clear",
         terminal.size().map(|size| Some((size.width, size.height))),
     ));
-    let (mut runtime, services) = RunnerRuntime::new(&mut tui_config).await;
+    let mut runtime = RunnerRuntime::new(&mut tui_config).await;
     if let Some(rx) = startup_discovery {
         runtime.install_discovery_updates(rx);
     }
@@ -129,7 +128,7 @@ pub async fn run_tui(
 
     draw_panes(
         &mut terminal,
-        &mut runtime.pane_mgr,
+        &mut runtime.session,
         &image_picker,
         &tui_config.settings,
     )?;
@@ -161,7 +160,7 @@ pub async fn run_tui(
         start_pending_streams(
             &mut agent_streams,
             &mut stream_state,
-            &mut runtime.pane_mgr,
+            &mut runtime.session,
             &mut runtime.pending_prompt,
             StreamDeps {
                 config: StreamConfig {
@@ -184,9 +183,6 @@ pub async fn run_tui(
                 },
                 tools,
                 registry,
-                message_bus: &services.message_bus,
-                shared_state: &services.shared_state,
-                file_tracker: &services.file_tracker,
             },
         )
         .await;
@@ -204,7 +200,6 @@ pub async fn run_tui(
             &mut agent_streams,
             &mut stream_state,
             &mut runtime,
-            &services,
             &mut tui_config,
             registry,
             &image_picker,
@@ -270,7 +265,7 @@ pub async fn run_tui(
             );
             draw_panes(
                 &mut terminal,
-                &mut runtime.pane_mgr,
+                &mut runtime.session,
                 &image_picker,
                 &tui_config.settings,
             )?;

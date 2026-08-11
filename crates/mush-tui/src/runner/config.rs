@@ -122,8 +122,6 @@ pub struct TuiConfig {
     pub tool_output_live: Option<LiveToolOutput>,
     /// callback to get recent log entries (returns last N lines)
     pub log_buffer: Option<std::sync::Arc<dyn Fn(usize) -> Vec<String> + Send + Sync>>,
-    /// multi-pane file isolation mode
-    pub isolation_mode: crate::file_tracker::IsolationMode,
     /// terminal setup policy and overrides
     pub terminal_policy: crate::terminal_policy::TerminalPolicy,
     /// user-configured lifecycle hooks
@@ -275,7 +273,6 @@ impl TuiConfig {
             thinking_display: crate::app::ThinkingDisplay::Collapse,
             tool_output_live: None,
             log_buffer: None,
-            isolation_mode: crate::file_tracker::IsolationMode::None,
             terminal_policy: crate::terminal_policy::TerminalPolicy::default(),
             lifecycle_hooks: mush_agent::LifecycleHooks::default(),
             cwd: std::path::PathBuf::from("/tmp"),

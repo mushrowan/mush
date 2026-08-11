@@ -43,7 +43,7 @@ pub enum KeyScope {
     Shared,
     Normal,
     Edit,
-    Pane,
+    Session,
     SessionPicker,
     ModelPicker,
     AtPicker,
@@ -59,7 +59,7 @@ impl KeyScope {
             Self::Shared => "shared",
             Self::Normal => "normal",
             Self::Edit => "edit",
-            Self::Pane => "pane",
+            Self::Session => "pane",
             Self::SessionPicker => "session_picker",
             Self::ModelPicker => "model_picker",
             Self::AtPicker => "at_picker",
@@ -74,7 +74,7 @@ impl KeyScope {
         Self::Shared,
         Self::Normal,
         Self::Edit,
-        Self::Pane,
+        Self::Session,
         Self::SessionPicker,
         Self::ModelPicker,
         Self::AtPicker,
@@ -179,24 +179,6 @@ pub enum Action {
     EnterSearch,
     /// enter scroll / selection mode. default binding: `ctrl-s`
     EnterScroll,
-    /// focus pane 1. default binding: `alt-1`
-    FocusPane1,
-    /// focus pane 2. default binding: `alt-2`
-    FocusPane2,
-    /// focus pane 3. default binding: `alt-3`
-    FocusPane3,
-    /// focus pane 4. default binding: `alt-4`
-    FocusPane4,
-    /// focus pane 5. default binding: `alt-5`
-    FocusPane5,
-    /// focus pane 6. default binding: `alt-6`
-    FocusPane6,
-    /// focus pane 7. default binding: `alt-7`
-    FocusPane7,
-    /// focus pane 8. default binding: `alt-8`
-    FocusPane8,
-    /// focus pane 9. default binding: `alt-9`
-    FocusPane9,
     /// jump the message log to the bottom without aborting or
     /// otherwise affecting the stream. default binding: `shift-end`
     JumpToBottom,
@@ -221,16 +203,6 @@ pub enum Action {
     DeleteToEnd,
     /// delete from cursor to start of line. default binding: `ctrl-u`
     DeleteToStart,
-    /// split the current pane. default binding: `ctrl-shift-enter`
-    SplitPane,
-    /// focus the next pane. default binding: `ctrl-tab`
-    FocusNextPane,
-    /// focus the previous pane. default binding: `ctrl-shift-tab`
-    FocusPrevPane,
-    /// grow the focused pane to the right. default binding: `ctrl-shift-right`
-    ResizePaneRight,
-    /// grow the focused pane to the left. default binding: `ctrl-shift-left`
-    ResizePaneLeft,
     /// insert a literal newline in the input. default bindings:
     /// `alt-enter`, `shift-enter`, `ctrl-j`
     InsertNewline,
@@ -302,20 +274,6 @@ impl Action {
             Self::ScrollPageUp => "scroll_page_up",
             Self::DeleteWordBackward => "delete_word_backward",
             Self::DeleteWordForward => "delete_word_forward",
-            Self::SplitPane => "split_pane",
-            Self::FocusNextPane => "focus_next_pane",
-            Self::FocusPane1 => "focus_pane_one",
-            Self::FocusPane2 => "focus_pane_two",
-            Self::FocusPane3 => "focus_pane_three",
-            Self::FocusPane4 => "focus_pane_four",
-            Self::FocusPane5 => "focus_pane_five",
-            Self::FocusPane6 => "focus_pane_six",
-            Self::FocusPane7 => "focus_pane_seven",
-            Self::FocusPane8 => "focus_pane_eight",
-            Self::FocusPane9 => "focus_pane_nine",
-            Self::FocusPrevPane => "focus_prev_pane",
-            Self::ResizePaneRight => "resize_pane_right",
-            Self::ResizePaneLeft => "resize_pane_left",
         }
     }
 
@@ -362,20 +320,6 @@ impl Action {
         Self::ScrollPageUp,
         Self::DeleteWordBackward,
         Self::DeleteWordForward,
-        Self::SplitPane,
-        Self::FocusNextPane,
-        Self::FocusPane1,
-        Self::FocusPane2,
-        Self::FocusPane3,
-        Self::FocusPane4,
-        Self::FocusPane5,
-        Self::FocusPane6,
-        Self::FocusPane7,
-        Self::FocusPane8,
-        Self::FocusPane9,
-        Self::FocusPrevPane,
-        Self::ResizePaneRight,
-        Self::ResizePaneLeft,
     ];
 }
 
@@ -535,20 +479,6 @@ const fn default_scope_for_action(action: Action) -> KeyScope {
         Action::ModelPickerDeleteAllStale
         | Action::ModelPickerDeleteSelectedStale
         | Action::ModelPickerToggleFavourite => KeyScope::ModelPicker,
-        Action::SplitPane
-        | Action::FocusNextPane
-        | Action::FocusPrevPane
-        | Action::FocusPane1
-        | Action::FocusPane2
-        | Action::FocusPane3
-        | Action::FocusPane4
-        | Action::FocusPane5
-        | Action::FocusPane6
-        | Action::FocusPane7
-        | Action::FocusPane8
-        | Action::FocusPane9
-        | Action::ResizePaneRight
-        | Action::ResizePaneLeft => KeyScope::Pane,
         Action::CursorLineEnd
         | Action::CursorLineStart
         | Action::CursorLeft
@@ -861,60 +791,6 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
             (KeyCode::Char('d'), KeyModifiers::ALT),
         ],
     ),
-    (
-        KeyScope::Pane,
-        Action::SplitPane,
-        &[(
-            KeyCode::Enter,
-            KeyModifiers::CONTROL.union(KeyModifiers::SHIFT),
-        )],
-    ),
-    (
-        KeyScope::Pane,
-        Action::FocusNextPane,
-        &[(KeyCode::Tab, KeyModifiers::CONTROL)],
-    ),
-    (
-        KeyScope::Pane,
-        Action::FocusPrevPane,
-        &[
-            (KeyCode::BackTab, KeyModifiers::CONTROL),
-            (
-                KeyCode::BackTab,
-                KeyModifiers::CONTROL.union(KeyModifiers::SHIFT),
-            ),
-        ],
-    ),
-    (
-        KeyScope::Pane,
-        Action::ResizePaneRight,
-        &[(
-            KeyCode::Right,
-            KeyModifiers::CONTROL.union(KeyModifiers::SHIFT),
-        )],
-    ),
-    (
-        KeyScope::Pane,
-        Action::ResizePaneLeft,
-        &[(
-            KeyCode::Left,
-            KeyModifiers::CONTROL.union(KeyModifiers::SHIFT),
-        )],
-    ),
-];
-
-/// alt+1 .. alt+9 focus panes 1 .. 9. generated rather than listed so the
-/// digit and the action can't drift apart
-const PANE_FOCUS_ACTIONS: &[(char, Action)] = &[
-    ('1', Action::FocusPane1),
-    ('2', Action::FocusPane2),
-    ('3', Action::FocusPane3),
-    ('4', Action::FocusPane4),
-    ('5', Action::FocusPane5),
-    ('6', Action::FocusPane6),
-    ('7', Action::FocusPane7),
-    ('8', Action::FocusPane8),
-    ('9', Action::FocusPane9),
 ];
 
 impl Default for KeyMap {
@@ -933,16 +809,6 @@ impl Default for KeyMap {
                 .map(|(code, modifiers)| KeyCombination::new(*code, *modifiers))
                 .collect();
             bind(*scope, *action, combos);
-        }
-        for (digit, action) in PANE_FOCUS_ACTIONS {
-            bind(
-                KeyScope::Pane,
-                *action,
-                vec![KeyCombination::new(
-                    KeyCode::Char(*digit),
-                    KeyModifiers::ALT,
-                )],
-            );
         }
 
         Self { bindings }
@@ -1018,7 +884,7 @@ impl KeysConfig {
             self.edit.raw.clone(),
         );
         scopes.insert(
-            KeyScope::Pane.config_key().to_string(),
+            KeyScope::Session.config_key().to_string(),
             self.pane.raw.clone(),
         );
         scopes.insert(
@@ -1206,31 +1072,6 @@ mod tests {
         assert!(map.matches(
             Action::ModelPickerDeleteAllStale,
             KeyEvent::new(KeyCode::Char('d'), KeyModifiers::ALT)
-        ));
-    }
-
-    #[test]
-    fn default_keymap_has_pane_bindings() {
-        let map = KeyMap::default();
-        assert!(map.matches(
-            Action::SplitPane,
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL | KeyModifiers::SHIFT)
-        ));
-        assert!(map.matches(
-            Action::FocusNextPane,
-            KeyEvent::new(KeyCode::Tab, KeyModifiers::CONTROL)
-        ));
-        assert!(map.matches(
-            Action::FocusPrevPane,
-            KeyEvent::new(KeyCode::BackTab, KeyModifiers::CONTROL)
-        ));
-        assert!(map.matches(
-            Action::ResizePaneLeft,
-            KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL | KeyModifiers::SHIFT)
-        ));
-        assert!(map.matches(
-            Action::ResizePaneRight,
-            KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL | KeyModifiers::SHIFT)
         ));
     }
 

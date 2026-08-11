@@ -34,18 +34,6 @@ pub enum AppEvent {
     CycleThinkingLevel,
     /// user triggered clipboard image paste
     PasteImage,
-    /// split current pane (fork conversation into new agent)
-    SplitPane,
-    /// close the focused pane
-    ClosePane,
-    /// focus the next pane
-    FocusNextPane,
-    /// focus the previous pane
-    FocusPrevPane,
-    /// focus pane by index (0-based)
-    FocusPaneByIndex(usize),
-    /// resize focused pane (positive = grow, negative = shrink)
-    ResizePane(i16),
     /// alt+k: edit a queued steering message
     EditSteering,
     /// validate an api key against its provider, then save on success.

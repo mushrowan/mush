@@ -3,12 +3,13 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 use super::{ThinkingPrefs, ThinkingPrefsSaver, TuiConfig, streams};
+use mush_ai::types::PaneId;
 use mush_ai::types::{Message, ThinkingLevel, Timestamp, UserMessage};
 use mush_session::ConversationState;
 use notify::RecommendedWatcher;
 
 use crate::app::App;
-use crate::pane::{Pane, PaneId, PaneManager};
+use crate::session::Session;
 use crate::slash::PendingCompaction;
 use crate::slash_menu::SlashCommand;
 
@@ -41,25 +42,14 @@ pub(super) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
         "login-complete",
         "finish oauth login with the authorization code",
     ),
-    ("close", "close focused pane"),
-    ("broadcast", "send a message to all panes"),
-    ("lock", "lock a file for this pane"),
-    ("unlock", "release a file lock"),
     ("locks", "list all file locks"),
     ("label", "set pane label"),
     ("panes", "list all panes"),
-    ("merge", "merge forked pane's work back"),
     ("debug", "dump internal state (for bug reports)"),
     ("reload", "rebuild AGENTS.md, prompt templates, and skills"),
     ("refresh-models", "refresh discovered model catalogue"),
     ("quit", "exit mush"),
 ];
-
-pub(super) struct RunnerServices {
-    pub message_bus: crate::messaging::MessageBus,
-    pub shared_state: crate::shared_state::SharedState,
-    pub file_tracker: crate::file_tracker::FileTracker,
-}
 
 /// how often the TUI calls into the usage poller (the poller itself
 /// has its own internal cache interval for actual HTTP requests)
@@ -73,7 +63,7 @@ pub enum DiscoveryUpdate {
 
 pub(super) struct RunnerRuntime {
     pub cwd: PathBuf,
-    pub pane_mgr: PaneManager,
+    pub session: Session,
     pub thinking_prefs: ThinkingPrefs,
     pub thinking_saver: Option<ThinkingPrefsSaver>,
     pub lifecycle_hooks: mush_agent::LifecycleHooks,
@@ -91,10 +81,10 @@ pub(super) struct RunnerRuntime {
 
 impl RunnerRuntime {
     #[cfg(test)]
-    fn from_pane(pane: Pane, thinking_prefs: ThinkingPrefs) -> Self {
+    fn from_pane(session: Session, thinking_prefs: ThinkingPrefs) -> Self {
         Self {
             cwd: PathBuf::new(),
-            pane_mgr: PaneManager::new(pane),
+            session,
             thinking_prefs,
             thinking_saver: None,
             lifecycle_hooks: mush_agent::LifecycleHooks::default(),
@@ -107,44 +97,14 @@ impl RunnerRuntime {
         }
     }
 
-    pub(super) async fn new(tui_config: &mut TuiConfig) -> (Self, RunnerServices) {
+    pub(super) async fn new(tui_config: &mut TuiConfig) -> Self {
         let cwd = std::env::current_dir().unwrap_or_default();
         let mut app = build_initial_app(tui_config, &cwd);
         let conversation = replay_conversation(
             &mut app,
             std::mem::take(&mut tui_config.initial_conversation),
         );
-        let mut pane_mgr =
-            PaneManager::new(Pane::with_conversation(PaneId::new(1), app, conversation));
-
-        let message_bus = crate::messaging::MessageBus::new();
-        let shared_state = crate::shared_state::SharedState::new();
-        let file_tracker = crate::file_tracker::FileTracker::new(cwd.clone());
-        let initial_inbox = message_bus.register(PaneId::new(1));
-        pane_mgr.focused_mut().inbox = Some(initial_inbox);
-
-        // restore additional panes from saved session
-        for pane_snapshot in std::mem::take(&mut tui_config.initial_panes) {
-            let pane_id = pane_mgr.next_id();
-            let mut pane_app = build_initial_app(tui_config, &cwd);
-            pane_app.model_id = pane_snapshot.model_id.into();
-            let pane_conversation = replay_conversation(&mut pane_app, pane_snapshot.conversation);
-            let mut pane = Pane::with_conversation(pane_id, pane_app, pane_conversation);
-            pane.label = pane_snapshot.label;
-            pane.inbox = Some(message_bus.register(pane_id));
-            pane_mgr.add_pane(pane);
-        }
-
-        if matches!(
-            tui_config.isolation_mode,
-            crate::file_tracker::IsolationMode::Worktree
-        ) {
-            let cleaned = crate::isolation::cleanup_stale_worktrees(&cwd).await;
-            if cleaned > 0 {
-                pane_mgr.focused_mut().app.status =
-                    Some(format!("cleaned {cleaned} stale worktree(s)"));
-            }
-        }
+        let session = Session::with_conversation(app, conversation);
 
         let (_config_watcher, config_rx) = watch_config(tui_config.config_path.as_ref());
 
@@ -158,26 +118,19 @@ impl RunnerRuntime {
         let usage_rx = usage_poller.map(spawn_usage_poller);
         tracing::debug!(has_poller = usage_rx.is_some(), "usage poller setup");
 
-        (
-            Self {
-                cwd,
-                pane_mgr,
-                thinking_prefs: std::mem::take(&mut tui_config.thinking_prefs),
-                thinking_saver: tui_config.save_thinking_prefs.clone(),
-                lifecycle_hooks: tui_config.lifecycle_hooks.clone(),
-                pending_prompt: None,
-                pending_compactions: HashMap::new(),
-                usage_rx,
-                _config_watcher,
-                config_rx,
-                discovery_rx: None,
-            },
-            RunnerServices {
-                message_bus,
-                shared_state,
-                file_tracker,
-            },
-        )
+        Self {
+            cwd,
+            session,
+            thinking_prefs: std::mem::take(&mut tui_config.thinking_prefs),
+            thinking_saver: tui_config.save_thinking_prefs.clone(),
+            lifecycle_hooks: tui_config.lifecycle_hooks.clone(),
+            pending_prompt: None,
+            pending_compactions: HashMap::new(),
+            usage_rx,
+            _config_watcher,
+            config_rx,
+            discovery_rx: None,
+        }
     }
 
     pub(super) fn apply_config_reload(&mut self, tui_config: &mut TuiConfig) {
@@ -185,10 +138,11 @@ impl RunnerRuntime {
             && let Ok(new_theme) = rx.try_recv()
         {
             tui_config.theme = new_theme;
-            for pane in self.pane_mgr.panes_mut() {
+            {
+                let pane = &mut self.session;
                 pane.app.theme = tui_config.theme.clone();
             }
-            self.pane_mgr.focused_mut().app.status = Some("config reloaded".into());
+            self.session.app.status = Some("config reloaded".into());
         }
     }
 
@@ -205,7 +159,8 @@ impl RunnerRuntime {
         while let Ok(update) = rx.try_recv() {
             match update {
                 DiscoveryUpdate::Refreshed => {
-                    for pane in self.pane_mgr.panes_mut() {
+                    {
+                        let pane = &mut self.session;
                         crate::input::reload_model_completions(&mut pane.app);
                     }
                     changed = true;
@@ -216,12 +171,13 @@ impl RunnerRuntime {
     }
 
     pub(super) fn focused_should_quit(&self) -> bool {
-        self.pane_mgr.focused().app.should_quit
+        self.session.app.should_quit
     }
 
     pub(super) fn tick_animation_panes(&mut self) -> bool {
         let mut ticked = false;
-        for pane in self.pane_mgr.panes_mut() {
+        {
+            let pane = &mut self.session;
             if pane.app.has_visible_animation() {
                 pane.app.tick_animation();
                 ticked = true;
@@ -231,7 +187,8 @@ impl RunnerRuntime {
     }
 
     pub(super) fn tick_streaming_text_panes(&mut self) {
-        for pane in self.pane_mgr.panes_mut() {
+        {
+            let pane = &mut self.session;
             if pane.app.stream.active {
                 pane.app.tick_streaming_text();
             }
@@ -239,16 +196,11 @@ impl RunnerRuntime {
     }
 
     pub(super) fn needs_periodic_redraw(&self, cache_timer_enabled: bool) -> bool {
-        self.pane_mgr
-            .panes()
-            .iter()
-            .any(|pane| pane.app.needs_periodic_redraw(cache_timer_enabled))
+        self.session.app.needs_periodic_redraw(cache_timer_enabled)
     }
 
     pub(super) fn active_tool_labels(&self) -> Vec<String> {
-        self.pane_mgr
-            .panes()
-            .iter()
+        std::iter::once(&self.session)
             .flat_map(|pane| {
                 pane.app.active_tools.iter().map(|tool| {
                     if tool.summary.is_empty() {
@@ -283,7 +235,8 @@ impl RunnerRuntime {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::warn!(error = %e, "compaction task panicked");
-                    if let Some(pane) = self.pane_mgr.pane_mut(pane_id) {
+                    {
+                        let pane = &mut self.session;
                         pane.app.compacting = false;
                         pane.app.push_system_message("compaction failed");
                     }
@@ -297,14 +250,12 @@ impl RunnerRuntime {
 
     pub(super) fn handle_compaction_task_result(
         &mut self,
-        pane_id: PaneId,
+        _pane_id: PaneId,
         result: crate::slash::CompactionTaskResult,
         tui_config: &TuiConfig,
     ) {
         let applied = {
-            let Some(pane) = self.pane_mgr.pane_mut(pane_id) else {
-                return;
-            };
+            let pane = &mut self.session;
             match result {
                 crate::slash::CompactionTaskResult::Applied(result) => {
                     crate::slash::apply_applied_compaction(
@@ -336,7 +287,7 @@ impl RunnerRuntime {
         // persisting here the collapsed history is lost if the user quits
         // before the next agent turn
         if applied && let Some(saver) = &tui_config.save_session {
-            saver(streams::build_session_snapshot(&self.pane_mgr, tui_config));
+            saver(streams::build_session_snapshot(&self.session, tui_config));
         }
     }
 
@@ -345,7 +296,8 @@ impl RunnerRuntime {
             return;
         }
 
-        for pane in self.pane_mgr.panes_mut() {
+        {
+            let pane = &mut self.session;
             if let Some(remaining) = pane.app.cache.remaining_secs() {
                 if remaining == 0 && !pane.app.cache.expired_sent {
                     pane.app.cache.expired_sent = true;
@@ -384,7 +336,8 @@ impl RunnerRuntime {
             return false;
         };
 
-        for pane in self.pane_mgr.panes_mut() {
+        {
+            let pane = &mut self.session;
             pane.app.oauth_usage = Some(usage.clone());
             pane.app.oauth_usage_provider = Some("anthropic".into());
         }
@@ -417,7 +370,7 @@ fn spawn_usage_poller(
 /// message (texts joined with blank lines, images concatenated in
 /// order) so the agent sees one coherent prompt instead of being
 /// pinged repeatedly. no-op when nothing was queued.
-pub(super) fn replay_compaction_inputs(pane: &mut Pane) {
+pub(super) fn replay_compaction_inputs(pane: &mut Session) {
     let drained = pane.drain_compaction_inputs();
     if drained.is_empty() {
         return;
@@ -441,10 +394,10 @@ pub(super) fn replay_compaction_inputs(pane: &mut Pane) {
     // take_pending_prompts drains every pane's slot, so setting just
     // this pane's slot is enough; no need to thread the focused
     // override through here
-    pane.pending_prompt = Some(crate::pane::PendingPrompt::with_images(combined, images));
+    pane.pending_prompt = Some(crate::session::PendingPrompt::with_images(combined, images));
 }
 
-pub(super) fn save_pane_pending_prompt(pane: &mut Pane) {
+pub(super) fn save_pane_pending_prompt(pane: &mut Session) {
     let Some(prompt) = pane.pending_prompt.as_mut() else {
         return;
     };
@@ -457,7 +410,7 @@ pub(super) fn save_pane_pending_prompt(pane: &mut Pane) {
 
 pub(super) fn save_prompt_to_conversation(
     conversation: &mut ConversationState,
-    prompt: &crate::pane::PendingPrompt,
+    prompt: &crate::session::PendingPrompt,
 ) {
     let user_message = Message::User(UserMessage {
         content: streams::build_user_content(&prompt.text, &prompt.images),
@@ -746,7 +699,7 @@ mod tests {
         // queued bubbles disappear, streaming starts, and pending_prompt
         // gets the combined string so the runner picks it up next loop
         let app = App::new("test".into(), TokenCount::new(200_000));
-        let mut pane = Pane::new(PaneId::new(1), app);
+        let mut pane = Session::new(app);
         pane.queue_input_during_compaction("first thought".into(), vec![]);
         pane.queue_input_during_compaction("second thought".into(), vec![]);
 
@@ -776,7 +729,7 @@ mod tests {
         // common case: user waited out compaction without typing.
         // nothing should fire, nothing should change
         let app = App::new("test".into(), TokenCount::new(200_000));
-        let mut pane = Pane::new(PaneId::new(1), app);
+        let mut pane = Session::new(app);
 
         replay_compaction_inputs(&mut pane);
 
@@ -791,7 +744,7 @@ mod tests {
         use mush_ai::types::{ImageMimeType, Message, UserContent, UserContentPart};
 
         let app = App::new("test".into(), TokenCount::new(200_000));
-        let mut pane = Pane::new(PaneId::new(1), app);
+        let mut pane = Session::new(app);
         pane.queue_input_during_compaction(
             "look".into(),
             vec![PendingImage {
@@ -805,8 +758,7 @@ mod tests {
 
         save_pane_pending_prompt(&mut pane);
         assert!(pane.pending_prompt.is_some());
-        let snapshot =
-            crate::runner::streams::build_session_snapshot(&PaneManager::new(pane), &test_config());
+        let snapshot = crate::runner::streams::build_session_snapshot(&pane, &test_config());
         let Message::User(user) = &snapshot.primary.context()[0] else {
             panic!("expected user message");
         };
@@ -832,8 +784,7 @@ mod tests {
                 status: crate::display_types::ToolCallStatus::Running,
                 output: None,
             });
-        let runtime =
-            RunnerRuntime::from_pane(Pane::new(PaneId::new(1), app), ThinkingPrefs::default());
+        let runtime = RunnerRuntime::from_pane(Session::new(app), ThinkingPrefs::default());
 
         assert_eq!(runtime.active_tool_labels(), vec!["bash: cargo test"]);
     }
@@ -853,7 +804,7 @@ mod tests {
             msgs.push(assistant_message(&format!("a {i}")));
         }
         let app = App::new("test".into(), TokenCount::new(200_000));
-        let mut pane = Pane::new(PaneId::new(1), app);
+        let mut pane = Session::new(app);
         pane.conversation = ConversationState::from_messages(msgs);
         let mut runtime = RunnerRuntime::from_pane(pane, ThinkingPrefs::default());
 
@@ -864,7 +815,7 @@ mod tests {
             *saved_clone.lock().unwrap() = Some(snapshot);
         }));
 
-        let context = runtime.pane_mgr.focused().conversation.context();
+        let context = runtime.session.conversation.context();
         let applied = crate::slash::AppliedCompaction {
             messages: context,
             summary: "summary of earlier turns".into(),
@@ -897,8 +848,7 @@ mod tests {
     #[test]
     fn compaction_failure_opens_recovery_prompt() {
         let app = App::new("test".into(), TokenCount::new(200_000));
-        let mut runtime =
-            RunnerRuntime::from_pane(Pane::new(PaneId::new(1), app), ThinkingPrefs::default());
+        let mut runtime = RunnerRuntime::from_pane(Session::new(app), ThinkingPrefs::default());
         let original = vec![user_message("hello"), assistant_message("hi")];
         let diagnostics = mush_session::compact::CompactionDiagnostics {
             model_id: "test".into(),
@@ -919,7 +869,7 @@ mod tests {
 
         runtime.handle_compaction_task_result(PaneId::new(1), failed, &test_config());
 
-        let app = &runtime.pane_mgr.focused().app;
+        let app = &runtime.session.app;
         assert_eq!(
             app.interaction.mode,
             crate::app::AppMode::CompactionRecovery
@@ -956,7 +906,7 @@ mod tests {
     #[test]
     fn fallback_recovery_applies_summary_and_replays_queued_input() {
         let app = App::new("test".into(), TokenCount::new(200_000));
-        let mut pane = Pane::new(PaneId::new(1), app);
+        let mut pane = Session::new(app);
         pane.queue_input_during_compaction("queued thought".into(), vec![]);
         pane.app.open_compaction_recovery(
             failure_report(vec![
@@ -970,8 +920,7 @@ mod tests {
         let mut runtime = RunnerRuntime::from_pane(pane, ThinkingPrefs::default());
 
         let recovery = runtime
-            .pane_mgr
-            .focused_mut()
+            .session
             .app
             .interaction
             .compaction_recovery
@@ -989,12 +938,12 @@ mod tests {
             diagnostics: result.diagnostics,
         };
         {
-            let pane = runtime.pane_mgr.focused_mut();
+            let pane = &mut runtime.session;
             crate::slash::apply_applied_compaction(&mut pane.app, &mut pane.conversation, applied);
             replay_compaction_inputs(pane);
         }
 
-        let pane = runtime.pane_mgr.focused();
+        let pane = &mut runtime.session;
         assert!(pane.conversation.context_len() < 3);
         assert!(pane.app.stream.active, "queued input should replay");
         assert_eq!(
@@ -1008,7 +957,7 @@ mod tests {
     #[test]
     fn cancel_recovery_replays_queued_input_without_compacting() {
         let app = App::new("test".into(), TokenCount::new(200_000));
-        let mut pane = Pane::new(PaneId::new(1), app);
+        let mut pane = Session::new(app);
         pane.conversation = ConversationState::from_messages(vec![
             user_message("old question"),
             assistant_message("old answer"),
@@ -1021,18 +970,14 @@ mod tests {
         );
         let mut runtime = RunnerRuntime::from_pane(pane, ThinkingPrefs::default());
 
-        runtime
-            .pane_mgr
-            .focused_mut()
-            .app
-            .close_compaction_recovery();
+        runtime.session.app.close_compaction_recovery();
         {
-            let pane = runtime.pane_mgr.focused_mut();
+            let pane = &mut runtime.session;
             pane.app.compacting = false;
             replay_compaction_inputs(pane);
         }
 
-        let pane = runtime.pane_mgr.focused();
+        let pane = &mut runtime.session;
         assert_eq!(pane.conversation.context_len(), 2);
         assert!(pane.app.stream.active, "queued input should replay");
         assert_eq!(
@@ -1069,18 +1014,16 @@ mod tests {
                 status: crate::display_types::ToolCallStatus::Running,
                 output: None,
             });
-        let mut runtime =
-            RunnerRuntime::from_pane(Pane::new(PaneId::new(1), app), ThinkingPrefs::default());
+        let mut runtime = RunnerRuntime::from_pane(Session::new(app), ThinkingPrefs::default());
 
         assert!(runtime.tick_animation_panes());
-        assert_eq!(runtime.pane_mgr.focused().app.shimmer_phase(), 1);
+        assert_eq!(runtime.session.app.shimmer_phase(), 1);
     }
 
     #[test]
     fn poll_usage_drains_background_updates_without_awaiting_http() {
         let app = App::new("claude-sonnet-4-5".into(), TokenCount::new(200_000));
-        let mut runtime =
-            RunnerRuntime::from_pane(Pane::new(PaneId::new(1), app), ThinkingPrefs::default());
+        let mut runtime = RunnerRuntime::from_pane(Session::new(app), ThinkingPrefs::default());
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         runtime.usage_rx = Some(rx);
 
@@ -1094,7 +1037,7 @@ mod tests {
         .unwrap();
 
         assert!(runtime.poll_usage());
-        let app = &runtime.pane_mgr.focused().app;
+        let app = &runtime.session.app;
         assert_eq!(app.oauth_usage_provider.as_deref(), Some("anthropic"));
         assert_eq!(
             app.oauth_usage
@@ -1108,7 +1051,7 @@ mod tests {
     #[test]
     fn apply_discovery_updates_reloads_models_without_posting_message() {
         let mut config = test_config();
-        let (mut runtime, _) = tokio::runtime::Builder::new_current_thread()
+        let mut runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap()
@@ -1119,7 +1062,7 @@ mod tests {
         tx.send(DiscoveryUpdate::Refreshed).unwrap();
 
         assert!(runtime.apply_discovery_updates());
-        let app = &runtime.pane_mgr.focused().app;
+        let app = &runtime.session.app;
         assert!(
             !app.messages
                 .iter()
