@@ -59,7 +59,6 @@ pub(super) struct RunnerServices {
     pub message_bus: crate::messaging::MessageBus,
     pub shared_state: crate::shared_state::SharedState,
     pub file_tracker: crate::file_tracker::FileTracker,
-    pub delegation_queue: crate::delegate::DelegationQueue,
 }
 
 /// how often the TUI calls into the usage poller (the poller itself
@@ -177,7 +176,6 @@ impl RunnerRuntime {
                 message_bus,
                 shared_state,
                 file_tracker,
-                delegation_queue: crate::delegate::new_queue(),
             },
         )
     }

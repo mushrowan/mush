@@ -231,14 +231,6 @@ pub async fn run_tui(
             break;
         }
 
-        // process pending delegations (fork panes for delegate_task tool calls)
-        panes::process_delegations(
-            &mut runtime.pane_mgr,
-            &tui_config,
-            &services.message_bus,
-            &services.delegation_queue,
-        );
-
         runtime.notify_cache_state(tui_config.cache_timer);
 
         // finalise any background compaction tasks whose LLM call returned

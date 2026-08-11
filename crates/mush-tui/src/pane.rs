@@ -20,18 +20,6 @@ use crate::isolation::PaneIsolation;
 
 pub use mush_ai::types::PaneId;
 
-/// tracks a pane spawned by the delegate_task tool
-#[derive(Debug, Clone)]
-pub struct DelegationInfo {
-    /// pane that requested this delegation
-    pub from_pane: PaneId,
-    /// task identifier for result routing
-    pub task_id: String,
-}
-
-/// max agent turns for delegation sub-agents (prevents runaway resource usage)
-pub const DELEGATION_MAX_TURNS: usize = 10;
-
 #[derive(Debug, Clone)]
 pub struct PendingPrompt {
     pub text: String,
@@ -93,8 +81,6 @@ pub struct Pane {
     pub cwd_override: Option<PathBuf>,
     /// VCS isolation state
     pub isolation: Option<PaneIsolation>,
-    /// set when this pane was spawned by delegate_task
-    pub delegation: Option<DelegationInfo>,
 }
 
 impl Pane {
@@ -115,7 +101,6 @@ impl Pane {
             tools: None,
             cwd_override: None,
             isolation: None,
-            delegation: None,
         }
     }
 
@@ -136,7 +121,6 @@ impl Pane {
             tools: None,
             cwd_override: None,
             isolation: None,
-            delegation: None,
         }
     }
 

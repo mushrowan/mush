@@ -23,8 +23,8 @@ impl App {
         self.stream.start();
         // don't reset the scroll position here: push_user_message() does it
         // when the user sends a message. resetting here would yank the user
-        // to the bottom if streaming starts in other contexts (delegation,
-        // resume, etc) while they're scrolled up
+        // to the bottom if streaming starts in other contexts (resume,
+        // pending prompt) while they're scrolled up
     }
 
     /// append text delta to the current stream

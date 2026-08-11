@@ -385,8 +385,6 @@ async fn handle_agent_end(
     }
 
     stream_state.save_session_now(pane_mgr, tui_config);
-
-    complete_delegation(pane_mgr, pane_id, tui_config);
 }
 
 pub(super) async fn handle_agent_event_side_effects(
@@ -478,63 +476,6 @@ async fn reconcile_openrouter_generation(
     }
 }
 
-/// if pane is a delegation pane, send the last assistant message back to the
-/// parent and remove the pane. returns true if the pane was a delegation.
-fn complete_delegation(
-    pane_mgr: &mut PaneManager,
-    pane_id: PaneId,
-    tui_config: &TuiConfig,
-) -> bool {
-    let Some(pane) = pane_mgr.pane(pane_id) else {
-        return false;
-    };
-    let Some(del) = pane.delegation.clone() else {
-        return false;
-    };
-
-    let result_text = pane
-        .conversation
-        .context()
-        .into_iter()
-        .rev()
-        .find_map(|msg| match msg {
-            Message::Assistant(a) => {
-                let text = a.text();
-                if text.is_empty() { None } else { Some(text) }
-            }
-            _ => None,
-        })
-        .unwrap_or_else(|| "(delegation completed with no text result)".into());
-
-    // notify parent pane
-    if let Some(parent) = pane_mgr.pane_mut(del.from_pane) {
-        let display = format!(
-            "✓ delegation result (task_id={}): {}",
-            del.task_id,
-            crate::text::truncate_with_ellipsis(&result_text, 500),
-        );
-        parent.app.push_system_message(display);
-
-        // inject the full result as a user message so the parent agent sees it
-        let steering_msg = Message::User(mush_ai::types::UserMessage {
-            content: mush_ai::types::UserContent::Text(format!(
-                "[delegation result task_id={}]\n{}",
-                del.task_id, result_text,
-            )),
-            timestamp_ms: mush_ai::types::Timestamp::now(),
-        });
-        parent.conversation.append_message(steering_msg);
-    }
-
-    // save before closing so the result is persisted
-    if let Some(ref saver) = tui_config.save_session {
-        saver(build_session_snapshot(pane_mgr, tui_config));
-    }
-
-    pane_mgr.remove_pane(pane_id);
-    true
-}
-
 /// compact the current branch when the conversation is approaching the
 /// context limit. uses the same tree-native path as `/compact` so the
 /// pre-compaction state stays navigable via `/tree` + `/branch`.
@@ -612,18 +553,11 @@ async fn auto_compact(
 pub(super) async fn abort_focused_stream(
     pane_mgr: &mut PaneManager,
     stream_state: &mut StreamState,
-    delegation_queue: &crate::delegate::DelegationQueue,
 ) {
     let focused_id = pane_mgr.focused().id;
     record_cancelled_tools(pane_mgr.focused_mut());
 
     stream_state.abort(focused_id);
-
-    // drain pending delegations queued by the aborted stream
-    {
-        let mut q = delegation_queue.lock().unwrap_or_else(|e| e.into_inner());
-        q.retain(|d| d.from != focused_id);
-    }
 
     let pane = pane_mgr.focused_mut();
     pane.app.finish_streaming(None, None);
@@ -951,7 +885,7 @@ async fn start_stream_for_prompt<'a>(
         tools: tool_registry,
         registry,
         options: call_options,
-        max_turns: effective_max_turns(pane_mgr, pane_id, deps.config.max_turns),
+        max_turns: deps.config.max_turns,
         hooks: Box::new(mush_agent::ClosureHooks {
             steering,
             follow_up,
@@ -1015,7 +949,7 @@ pub(super) async fn compaction_target(
     }
 }
 
-/// resolve a model id picked at runtime (via `/model` or a delegation
+/// resolve a model id picked at runtime (via `/model` or a fork
 /// request) against the merged catalogue (static + user + discovered).
 ///
 /// the static-only `find_model_by_id` would silently fall back to
@@ -1031,18 +965,6 @@ fn pane_thinking_level(pane_mgr: &PaneManager, pane_id: PaneId) -> ThinkingLevel
         .pane(pane_id)
         .map(|pane| pane.app.thinking_level.clone())
         .unwrap_or(ThinkingLevel::Off)
-}
-
-/// resolve effective max_turns: delegation panes are capped
-fn effective_max_turns(pane_mgr: &PaneManager, pane_id: PaneId, default: usize) -> usize {
-    if pane_mgr
-        .pane(pane_id)
-        .is_some_and(|p| p.delegation.is_some())
-    {
-        default.min(crate::pane::DELEGATION_MAX_TURNS)
-    } else {
-        default
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1266,9 +1188,6 @@ fn build_extra_tools(
             state: shared_state.clone(),
         }) as SharedTool);
     }
-    // delegate_task disabled: sub-agents frequently fail or step on each other.
-    // keeping the module and queue around for when we fix delegation properly.
-    // see todo.md "investigate delegate_task reliability"
     extra_tools
 }
 
@@ -1972,31 +1891,6 @@ mod tests {
         assert!(!poll_live_tool_output(&mut pane_mgr, &live));
     }
 
-    #[test]
-    fn effective_max_turns_caps_delegation_panes() {
-        use crate::pane::DelegationInfo;
-
-        let mut pane_mgr = PaneManager::new(Pane::new(PaneId::new(1), app()));
-
-        // normal pane uses default
-        assert_eq!(effective_max_turns(&pane_mgr, PaneId::new(1), 32), 32);
-
-        // delegation pane gets capped
-        let mut del_pane = Pane::new(PaneId::new(2), app());
-        del_pane.delegation = Some(DelegationInfo {
-            from_pane: PaneId::new(1),
-            task_id: "del-1".into(),
-        });
-        pane_mgr.add_pane(del_pane);
-        assert_eq!(
-            effective_max_turns(&pane_mgr, PaneId::new(2), 32),
-            crate::pane::DELEGATION_MAX_TURNS
-        );
-
-        // if default is lower than cap, use default
-        assert_eq!(effective_max_turns(&pane_mgr, PaneId::new(2), 5), 5);
-    }
-
     fn test_tui_config() -> super::super::TuiConfig {
         let model = models::all_models_with_user().into_iter().next().unwrap();
         super::super::TuiConfig {
@@ -2112,71 +2006,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn complete_delegation_sends_result_and_removes_pane() {
-        use crate::pane::DelegationInfo;
-        use mush_ai::types::*;
-
-        let mut pane_mgr = PaneManager::new(Pane::new(PaneId::new(1), app()));
-
-        let mut del_pane = Pane::new(PaneId::new(2), app());
-        del_pane.delegation = Some(DelegationInfo {
-            from_pane: PaneId::new(1),
-            task_id: "del-result".into(),
-        });
-        // add an assistant message so there's a result to send back
-        let model = models::all_models_with_user().into_iter().next().unwrap();
-        del_pane.conversation.append_message(Message::Assistant(
-            AssistantMessage::builder()
-                .content(vec![AssistantContentPart::Text(TextContent {
-                    text: "found 3 issues in main.rs".into(),
-                })])
-                .model(model.id)
-                .provider(Provider::Anthropic)
-                .api(Api::AnthropicMessages)
-                .timestamp_ms(Timestamp::zero())
-                .build(),
-        ));
-        pane_mgr.add_pane(del_pane);
-
-        let tui_config = test_tui_config();
-        let completed = complete_delegation(&mut pane_mgr, PaneId::new(2), &tui_config);
-
-        assert!(completed);
-        // delegation pane was removed
-        assert_eq!(pane_mgr.pane_count(), 1);
-        assert!(pane_mgr.pane(PaneId::new(2)).is_none());
-
-        // parent got a system message with the result
-        let parent = pane_mgr.pane(PaneId::new(1)).unwrap();
-        let has_result_msg = parent.app.messages.iter().any(|m| {
-            m.content.contains("delegation result") && m.content.contains("found 3 issues")
-        });
-        assert!(has_result_msg, "parent should have result message");
-
-        // parent conversation got the result injected
-        let ctx = parent.conversation.context();
-        let has_injected = ctx.iter().any(|msg| {
-            matches!(
-                msg,
-                Message::User(u) if u.text().contains("delegation result")
-            )
-        });
-        assert!(
-            has_injected,
-            "parent conversation should have injected result"
-        );
-    }
-
-    #[test]
-    fn complete_delegation_skips_normal_panes() {
-        let mut pane_mgr = PaneManager::new(Pane::new(PaneId::new(1), app()));
-        let tui_config = test_tui_config();
-        let completed = complete_delegation(&mut pane_mgr, PaneId::new(1), &tui_config);
-        assert!(!completed);
-        assert_eq!(pane_mgr.pane_count(), 1);
-    }
-
     #[tokio::test]
     async fn generation_rejects_stale_stream_events() {
         let mut stream_state = StreamState::new();
@@ -2252,61 +2081,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn abort_focused_stream_drains_delegation_queue() {
-        use crate::delegate;
-
-        let pane_id = PaneId::new(1);
-        let mut pane_mgr = PaneManager::new(Pane::new(pane_id, app()));
-        let mut stream_state = StreamState::new();
-
-        let (_tx, rx) = tokio::sync::mpsc::channel(1);
-        stream_state.register_active(
-            pane_id,
-            StreamMeta {
-                steering_queue: pane_mgr.pane(pane_id).unwrap().steering_queue.clone(),
-                confirm_req_rx: rx,
-                confirm_reply: Arc::new(Mutex::new(None)),
-                model: models::all_models_with_user().into_iter().next().unwrap(),
-                context_tokens: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-                cancel: tokio_util::sync::CancellationToken::new(),
-            },
-        );
-
-        // simulate the agent queuing two delegations before user aborts
-        let queue = delegate::new_queue();
-        queue
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(delegate::PendingDelegation {
-                task: "from pane 1".into(),
-                from: pane_id,
-                task_id: "del-a".into(),
-                model: None,
-            });
-        queue
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(delegate::PendingDelegation {
-                task: "from pane 2".into(),
-                from: PaneId::new(2),
-                task_id: "del-b".into(),
-                model: None,
-            });
-
-        abort_focused_stream(&mut pane_mgr, &mut stream_state, &queue).await;
-
-        // delegations from the aborted pane should be drained,
-        // only the delegation from pane 2 should remain
-        let remaining = queue.lock().unwrap_or_else(|e| e.into_inner());
-        assert_eq!(
-            remaining.len(),
-            1,
-            "abort should drain delegations from the focused pane"
-        );
-        assert_eq!(remaining[0].from, PaneId::new(2));
-    }
-
-    #[tokio::test]
     async fn abort_focused_stream_restores_queued_messages_without_duplicates() {
         // when the user submits a message during streaming, it lands in
         // BOTH the display-side queued messages list AND the runtime
@@ -2314,7 +2088,6 @@ mod tests {
         // both sources into the input box, doubling each unprocessed
         // message. this test pins that the input is restored exactly
         // once per submitted message
-        use crate::delegate;
 
         let pane_id = PaneId::new(1);
         let mut pane_mgr = PaneManager::new(Pane::new(pane_id, app()));
@@ -2364,8 +2137,7 @@ mod tests {
             2
         );
 
-        let queue = delegate::new_queue();
-        abort_focused_stream(&mut pane_mgr, &mut stream_state, &queue).await;
+        abort_focused_stream(&mut pane_mgr, &mut stream_state).await;
 
         let restored_input = &pane_mgr.focused().app.input.text;
         assert_eq!(
@@ -2379,7 +2151,6 @@ mod tests {
 
     #[tokio::test]
     async fn abort_focused_stream_records_running_tools_as_cancelled_results() {
-        use crate::delegate;
         use mush_ai::types::{
             Api, AssistantContentPart, AssistantMessage, Message, Provider, TextContent, ToolCall,
             ToolCallId, ToolName, ToolOutcome, ToolResultContentPart,
@@ -2431,7 +2202,7 @@ mod tests {
             .app
             .start_tool(&tool_call_id, "read", "src/lib.rs");
 
-        abort_focused_stream(&mut pane_mgr, &mut stream_state, &delegate::new_queue()).await;
+        abort_focused_stream(&mut pane_mgr, &mut stream_state).await;
 
         let ctx = pane_mgr.focused().conversation.context();
         let Some(Message::ToolResult(result)) = ctx.last() else {

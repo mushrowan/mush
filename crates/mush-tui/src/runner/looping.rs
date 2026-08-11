@@ -90,7 +90,6 @@ fn input_parts<'a>(
             cwd,
             pending_prompt,
             pending_compactions,
-            delegation_queue: &services.delegation_queue,
             image_picker,
             size_cache,
         },

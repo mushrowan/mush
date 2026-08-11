@@ -21,7 +21,7 @@ basically: go on, move, get on with it
 
 - tool calling for files, shell, web, and MCP
 - session history, branching, and compaction
-- multi-pane agents with delegation
+- multi-pane agents
 - LSP diagnostics after edits
 - built for hacking on locally
 

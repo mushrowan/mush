@@ -48,7 +48,6 @@ pub(super) struct InputDeps<'a> {
     pub pending_prompt: &'a mut Option<String>,
     pub pending_compactions:
         &'a mut std::collections::HashMap<crate::pane::PaneId, crate::slash::PendingCompaction>,
-    pub delegation_queue: &'a crate::delegate::DelegationQueue,
     pub image_picker: &'a Option<ratatui_image::picker::Picker>,
     /// handle to the Terminal backend's size cache so resize events
     /// can invalidate it (ratatui's autoresize will then pick up the
@@ -457,7 +456,7 @@ async fn handle_streaming_key_event(
 
     match app_event {
         AppEvent::Abort => {
-            abort_focused_stream(pane_mgr, stream_state, deps.delegation_queue).await;
+            abort_focused_stream(pane_mgr, stream_state).await;
         }
         AppEvent::UserSubmit { text, images } => {
             submit_streaming_input(pane_mgr, stream_state, text, images).await;
@@ -811,7 +810,6 @@ mod tests {
         let lifecycle_hooks = mush_agent::LifecycleHooks::default();
         let mut pending_prompt = None;
         let mut pending_compactions = std::collections::HashMap::new();
-        let delegation_queue = crate::delegate::new_queue();
         let image_picker = None;
         let size_cache = Rc::new(CachedSizeState::default());
         let mut deps = InputDeps {
@@ -825,7 +823,6 @@ mod tests {
             cwd: std::path::Path::new(""),
             pending_prompt: &mut pending_prompt,
             pending_compactions: &mut pending_compactions,
-            delegation_queue: &delegation_queue,
             image_picker: &image_picker,
             size_cache: &size_cache,
         };
@@ -871,7 +868,6 @@ mod tests {
         let lifecycle_hooks = mush_agent::LifecycleHooks::default();
         let mut pending_prompt = None;
         let mut pending_compactions = std::collections::HashMap::new();
-        let delegation_queue = crate::delegate::new_queue();
         let image_picker = None;
         let size_cache = Rc::new(CachedSizeState::default());
         let mut deps = InputDeps {
@@ -885,7 +881,6 @@ mod tests {
             cwd: std::path::Path::new(""),
             pending_prompt: &mut pending_prompt,
             pending_compactions: &mut pending_compactions,
-            delegation_queue: &delegation_queue,
             image_picker: &image_picker,
             size_cache: &size_cache,
         };

@@ -215,7 +215,7 @@ impl TuiConfig {
     }
 
     /// apply every config-derived field to an `App`, so panes created
-    /// after startup (fork, delegation) look like the first one.
+    /// after startup (fork) look like the first one.
     ///
     /// leaves conversation-derived state alone: messages, model id,
     /// thinking level and completions belong to whoever built the app

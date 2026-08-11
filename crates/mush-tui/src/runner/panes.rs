@@ -185,9 +185,8 @@ pub(super) async fn fork_pane(
                         pane_http,
                         tui_config.forbidden_chars.clone(),
                         None,
-                        // delegated panes use the default (exa) search provider
-                        // for now; TuiConfig doesn't carry the web_search config
-                        // yet. revisit if pane search needs the searx instance.
+                        // forked panes use the default (exa) search provider.
+                        // TuiConfig doesn't carry the web_search config yet
                         Default::default(),
                     );
                     if !skip_batch {
@@ -277,93 +276,6 @@ pub(super) async fn fork_pane(
     });
 }
 
-/// process pending delegations: fork a pane for each and inject the task as prompt
-pub(super) fn process_delegations(
-    pane_mgr: &mut PaneManager,
-    tui_config: &TuiConfig,
-    bus: &crate::messaging::MessageBus,
-    queue: &crate::delegate::DelegationQueue,
-) {
-    let delegations: Vec<_> = {
-        let mut q = queue.lock().unwrap_or_else(|e| e.into_inner());
-        std::mem::take(&mut *q)
-    };
-
-    for del in delegations {
-        let new_id = pane_mgr.next_id();
-        let mut new_app = app_from_parent(pane_mgr.focused(), tui_config);
-
-        // resolve model tier or direct model id. consult the merged
-        // catalogue so openrouter (or any other discovered) slugs route
-        // correctly instead of silently falling back to the default
-        if let Some(ref model_spec) = del.model {
-            let model_id = resolve_model_tier(model_spec, &tui_config.model_tiers);
-            if let Some(model) = mush_ai::discovery::resolve_model_by_id(&model_id) {
-                new_app.model_id = model.id.clone();
-                new_app.stats.context_window = model.context_window;
-                new_app.supported_thinking_levels = model.supported_thinking_levels.clone();
-            } else {
-                // unknown model, set id anyway. the stream layer will
-                // emit a clear MissingApiKey / unknown-provider error
-                new_app.model_id = model_id.into();
-            }
-        }
-
-        let mut new_pane = crate::pane::Pane::new(new_id, new_app);
-        new_pane.label = Some(format!("task: {}", truncate_label(&del.task)));
-        new_pane.inbox = Some(bus.register(new_id));
-        new_pane.pending_prompt = Some(PendingPrompt::text(del.task));
-        save_pane_pending_prompt(&mut new_pane);
-        new_pane.delegation = Some(crate::pane::DelegationInfo {
-            from_pane: del.from,
-            task_id: del.task_id.clone(),
-        });
-        pane_mgr.add_pane(new_pane);
-
-        // notify the delegating pane
-        let _ = bus.send(
-            del.from,
-            crate::messaging::InterPaneMessage {
-                from: new_id,
-                to: Some(del.from),
-                intent: crate::messaging::MessageIntent::Info,
-                content: format!(
-                    "sub-agent pane {} started working on task_id={}",
-                    new_id.as_u32(),
-                    del.task_id
-                ),
-                task_id: Some(del.task_id),
-                timestamp: mush_ai::types::Timestamp::now(),
-            },
-        );
-    }
-}
-
-/// create a fresh App inheriting display settings from a parent pane
-fn app_from_parent(parent: &crate::pane::Pane, tui_config: &TuiConfig) -> App {
-    let mut app = App::new(parent.app.model_id.clone(), parent.app.stats.context_window);
-    tui_config.seed_app(&mut app);
-    app.thinking_level = parent.app.thinking_level.clone();
-    app.thinking_display = parent.app.thinking_display;
-    app.completion.completions = parent.app.completion.completions.clone();
-    app.completion.slash_commands = parent.app.completion.slash_commands.clone();
-    app.completion.model_completions = parent.app.completion.model_completions.clone();
-    app.completion.favourite_models = parent.app.completion.favourite_models.clone();
-    app.completion.favourites_locked = parent.app.completion.favourites_locked;
-    app.completion.recent_models = parent.app.completion.recent_models.clone();
-    app.cwd = parent.app.cwd.clone();
-    app
-}
-
-/// resolve a model spec: check tier map first, fall back to literal model id
-fn resolve_model_tier(spec: &str, tiers: &std::collections::HashMap<String, String>) -> String {
-    tiers.get(spec).cloned().unwrap_or_else(|| spec.to_string())
-}
-
-fn truncate_label(s: &str) -> String {
-    crate::text::truncate_with_ellipsis(s.lines().next().unwrap_or(s), 40)
-}
-
 pub(super) async fn close_focused_pane(
     pane_mgr: &mut PaneManager,
     stream_state: Option<&mut super::streams::StreamState>,
@@ -430,14 +342,6 @@ mod tests {
         App::new(ModelId::from("test-model"), TokenCount::new(4096))
     }
 
-    #[test]
-    fn a_multibyte_label_truncates_by_display_width() {
-        assert_eq!(truncate_label(&"é".repeat(30)), "é".repeat(30));
-        let long = truncate_label(&"é".repeat(60));
-        assert!(long.ends_with('…'));
-        assert_eq!(long.chars().count(), 40);
-    }
-
     #[tokio::test]
     async fn close_focused_pane_rejects_last_pane() {
         let mut pane_mgr = PaneManager::new(Pane::new(PaneId::new(1), app()));
@@ -487,40 +391,6 @@ mod tests {
         assert_eq!(message_bus.pane_ids(), vec![PaneId::new(1)]);
     }
 
-    #[test]
-    fn process_delegations_marks_pane_with_delegation_info() {
-        use crate::delegate;
-
-        let mut pane_mgr = PaneManager::new(Pane::new(PaneId::new(1), app()));
-        let bus = crate::messaging::MessageBus::new();
-        bus.register(PaneId::new(1));
-        let queue = delegate::new_queue();
-
-        queue.lock().unwrap().push(delegate::PendingDelegation {
-            task: "review code".into(),
-            from: PaneId::new(1),
-            task_id: "del-test".into(),
-            model: None,
-        });
-
-        let _model = mush_ai::models::all_models_with_user()
-            .into_iter()
-            .next()
-            .unwrap();
-        let tui_config = TuiConfig::for_test();
-
-        process_delegations(&mut pane_mgr, &tui_config, &bus, &queue);
-
-        assert_eq!(pane_mgr.pane_count(), 2);
-        let new_pane = &pane_mgr.panes()[1];
-        let del = new_pane
-            .delegation
-            .as_ref()
-            .expect("delegation info should be set");
-        assert_eq!(del.from_pane, PaneId::new(1));
-        assert_eq!(del.task_id, "del-test");
-    }
-
     #[tokio::test]
     async fn forked_pane_inherits_display_config_from_tui_config() {
         // a forked pane is a full pane: it has to render with the
@@ -546,25 +416,6 @@ mod tests {
             "theme should be inherited"
         );
         assert!(forked.interaction.show_cost, "toggles should be inherited");
-    }
-
-    #[test]
-    fn resolve_tier_from_map() {
-        let mut tiers = std::collections::HashMap::new();
-        tiers.insert("fast".into(), "claude-haiku-3-5-20241022".into());
-        tiers.insert("strong".into(), "claude-opus-4-7".into());
-
-        assert_eq!(
-            resolve_model_tier("fast", &tiers),
-            "claude-haiku-3-5-20241022"
-        );
-        assert_eq!(resolve_model_tier("strong", &tiers), "claude-opus-4-7");
-    }
-
-    #[test]
-    fn resolve_tier_falls_back_to_literal() {
-        let tiers = std::collections::HashMap::new();
-        assert_eq!(resolve_model_tier("gpt-4o", &tiers), "gpt-4o");
     }
 
     #[tokio::test]

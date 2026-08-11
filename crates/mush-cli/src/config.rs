@@ -109,7 +109,7 @@ pub struct Config {
     /// LSP integration settings
     #[serde(default)]
     pub lsp: LspConfig,
-    /// model tier aliases for delegation and multi-pane
+    /// model tier aliases for `/model`
     #[serde(default)]
     pub model_tiers: HashMap<String, String>,
     /// models the user has pinned as favourites, shown with a star in the

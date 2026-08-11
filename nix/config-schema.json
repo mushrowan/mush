@@ -1175,7 +1175,7 @@
         "type": "string"
       },
       "default": {},
-      "description": "model tier aliases for delegation and multi-pane",
+      "description": "model tier aliases for `/model`",
       "type": "object"
     },
     "repo_map": {
