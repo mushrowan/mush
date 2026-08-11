@@ -361,12 +361,7 @@ fn resolve_model_tier(spec: &str, tiers: &std::collections::HashMap<String, Stri
 }
 
 fn truncate_label(s: &str) -> String {
-    let first_line = s.lines().next().unwrap_or(s);
-    if first_line.len() <= 40 {
-        first_line.to_string()
-    } else {
-        format!("{}…", &first_line[..39])
-    }
+    crate::text::truncate_with_ellipsis(s.lines().next().unwrap_or(s), 40)
 }
 
 pub(super) async fn close_focused_pane(
@@ -433,6 +428,14 @@ mod tests {
 
     fn app() -> App {
         App::new(ModelId::from("test-model"), TokenCount::new(4096))
+    }
+
+    #[test]
+    fn a_multibyte_label_truncates_by_display_width() {
+        assert_eq!(truncate_label(&"é".repeat(30)), "é".repeat(30));
+        let long = truncate_label(&"é".repeat(60));
+        assert!(long.ends_with('…'));
+        assert_eq!(long.chars().count(), 40);
     }
 
     #[tokio::test]

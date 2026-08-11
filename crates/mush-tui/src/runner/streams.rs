@@ -511,7 +511,7 @@ fn complete_delegation(
         let display = format!(
             "✓ delegation result (task_id={}): {}",
             del.task_id,
-            truncate_result(&result_text, 500),
+            crate::text::truncate_with_ellipsis(&result_text, 500),
         );
         parent.app.push_system_message(display);
 
@@ -533,14 +533,6 @@ fn complete_delegation(
 
     pane_mgr.remove_pane(pane_id);
     true
-}
-
-fn truncate_result(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..max - 1])
-    }
 }
 
 /// compact the current branch when the conversation is approaching the
