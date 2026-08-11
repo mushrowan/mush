@@ -97,3 +97,40 @@ mod tests {
         assert_eq!(region.area(), Rect::new(0, 0, 80, 24));
     }
 }
+
+/// tripwires on the ratatui gaps that make mush own the history writes.
+///
+/// each one passes while the gap is open and fails when upstream closes
+/// it, so a version bump forces us back here to delete code
+#[cfg(test)]
+mod upstream_gaps {
+    use ratatui::backend::{Backend, TestBackend};
+    use ratatui::layout::Rect;
+    use ratatui::text::Line;
+    use ratatui::widgets::Widget;
+    use ratatui::{Terminal, TerminalOptions, Viewport};
+
+    /// when this fails, drop `Scrollback`'s own emission and call
+    /// `insert_before`
+    #[test]
+    fn insert_before_ignores_a_fixed_viewport() {
+        let mut terminal = Terminal::with_options(
+            TestBackend::new(20, 10),
+            TerminalOptions {
+                viewport: Viewport::Fixed(Rect::new(0, 5, 20, 5)),
+            },
+        )
+        .unwrap();
+
+        terminal
+            .insert_before(1, |buf| Line::raw("settled").render(buf.area, buf))
+            .unwrap();
+
+        let screen = terminal.backend().buffer().content();
+        let text: String = screen.iter().map(|c| c.symbol()).collect();
+        assert!(
+            !text.contains("settled"),
+            "ratatui now writes history for a Fixed viewport, so mush should not"
+        );
+    }
+}
