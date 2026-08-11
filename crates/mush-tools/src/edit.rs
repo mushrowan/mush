@@ -17,10 +17,14 @@ use crate::util::resolve_path;
 struct EditArgs {
     #[serde(alias = "file_path")]
     path: String,
+    /// one replacement, the shape most models reach for first
     #[serde(rename = "oldText")]
-    old_text: String,
+    old_text: Option<String>,
     #[serde(rename = "newText")]
-    new_text: String,
+    new_text: Option<String>,
+    /// several disjoint replacements in one call
+    #[serde(default)]
+    edits: Vec<Replacement>,
     #[serde(default, deserialize_with = "mush_agent::de::opt_uint")]
     expected_matches: Option<usize>,
     #[serde(default, deserialize_with = "mush_agent::de::opt_uint")]
@@ -29,16 +33,30 @@ struct EditArgs {
     end_line: Option<usize>,
 }
 
+#[derive(Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct Replacement {
+    #[serde(rename = "oldText")]
+    pub old_text: String,
+    #[serde(rename = "newText")]
+    pub new_text: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 enum EditArgsError {
     #[error("end_line requires start_line")]
     EndLineRequiresStartLine,
     #[error("end_line ({end_line}) must be >= start_line ({start_line})")]
     EndBeforeStart { start_line: usize, end_line: usize },
+    #[error("provide oldText and newText, or a non-empty edits array")]
+    NoReplacements,
+    #[error("start_line/end_line apply to a single oldText, not to edits")]
+    RangeWithBatch,
 }
 
 impl EditArgs {
-    fn into_opts(self) -> Result<(String, String, String, EditOpts), EditArgsError> {
+    /// the path, the replacements to make, and how to match them
+    fn into_opts(self) -> Result<(String, Vec<Replacement>, EditOpts), EditArgsError> {
         if self.end_line.is_some() && self.start_line.is_none() {
             return Err(EditArgsError::EndLineRequiresStartLine);
         }
@@ -51,10 +69,20 @@ impl EditArgs {
             });
         }
 
+        let mut edits = self.edits;
+        if let (Some(old_text), Some(new_text)) = (self.old_text, self.new_text) {
+            edits.push(Replacement { old_text, new_text });
+        }
+        if edits.is_empty() {
+            return Err(EditArgsError::NoReplacements);
+        }
+        if edits.len() > 1 && self.start_line.is_some() {
+            return Err(EditArgsError::RangeWithBatch);
+        }
+
         Ok((
             self.path,
-            self.old_text,
-            self.new_text,
+            edits,
             EditOpts {
                 expected_matches: self.expected_matches.unwrap_or(1),
                 start_line: self.start_line,
@@ -86,7 +114,10 @@ impl AgentTool for EditTool {
         "Edit a file by replacing exact text. The oldText must match exactly (including whitespace). \
          Use this for precise, surgical edits. By default oldText must appear exactly once in the \
          file - use expected_matches to allow replacing multiple occurrences. Use start_line/end_line \
-         to restrict the search to a specific line range."
+         to restrict the search to a specific line range. \
+         To change several separate places in one file, send one call with an edits array rather \
+         than one call per change. Each edits[] entry is matched against the file as it was, so the \
+         entries must not overlap, and nothing is written unless every entry resolves."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -105,6 +136,24 @@ impl AgentTool for EditTool {
                     "type": "string",
                     "description": "new text to replace the old text with"
                 },
+                "edits": {
+                    "type": "array",
+                    "description": "several disjoint replacements in one call, instead of oldText/newText. each is matched against the file as it was, so they must not overlap. prefer this over one call per change",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "oldText": {
+                                "type": "string",
+                                "description": "exact text to find, must be unique in the file"
+                            },
+                            "newText": {
+                                "type": "string",
+                                "description": "new text to replace it with"
+                            }
+                        },
+                        "required": ["oldText", "newText"]
+                    }
+                },
                 "expected_matches": {
                     "type": "integer",
                     "description": "expected number of matches (default 1). edit proceeds only when actual count equals this"
@@ -118,7 +167,7 @@ impl AgentTool for EditTool {
                     "description": "restrict search to lines ending at this line (1-indexed, inclusive). requires start_line"
                 }
             },
-            "required": ["path", "oldText", "newText"]
+            "required": ["path"]
         })
     }
 
@@ -135,14 +184,14 @@ impl AgentTool for EditTool {
             Err(error) => return error,
         };
 
-        let (path, old_text, new_text, opts) = match args.into_opts() {
+        let (path, edits, opts) = match args.into_opts() {
             Ok(args) => args,
             Err(error) => return ToolResult::error(error.to_string()),
         };
 
         let path = resolve_path(&self.cwd, &path);
 
-        tokio::task::spawn_blocking(move || edit_file(&path, &old_text, &new_text, &opts))
+        tokio::task::spawn_blocking(move || edit_file_batch(&path, &edits, &opts))
             .await
             .unwrap_or_else(|e| ToolResult::error(format!("task join error: {e}")))
     }
@@ -162,6 +211,131 @@ impl Default for EditOpts {
             end_line: None,
         }
     }
+}
+
+/// the (old, new) pairs worth trying against `content`, loosest last.
+///
+/// a model rarely reproduces a file byte for byte, so each entry adapts
+/// the requested text to something the file might actually hold
+fn match_candidates(content: &str, old_text: &str, new_text: &str) -> Vec<(String, String)> {
+    let mut candidates: Vec<(String, String)> = vec![(old_text.to_string(), new_text.to_string())];
+
+    if content.contains("\r\n") && old_text.contains('\n') && !old_text.contains("\r\n") {
+        candidates.push((
+            old_text.replace("\n", "\r\n"),
+            new_text.replace("\n", "\r\n"),
+        ));
+    }
+
+    if !content.contains("\r\n") && old_text.contains("\r\n") {
+        candidates.push((
+            old_text.replace("\r\n", "\n"),
+            new_text.replace("\r\n", "\n"),
+        ));
+    }
+
+    candidates.dedup();
+
+    // also try with/without trailing newline (LLMs often get this wrong)
+    let mut extra = Vec::new();
+    for (o, n) in &candidates {
+        if o.ends_with('\n') && !content.contains(o.as_str()) {
+            let trimmed = o.trim_end_matches('\n').trim_end_matches('\r');
+            extra.push((trimmed.to_string(), n.clone()));
+        } else if !o.ends_with('\n') {
+            extra.push((format!("{o}\n"), format!("{n}\n")));
+            if content.contains("\r\n") {
+                extra.push((format!("{o}\r\n"), format!("{n}\r\n")));
+            }
+        }
+    }
+    candidates.extend(extra);
+
+    // trailing whitespace per-line: LLMs often omit trailing spaces/tabs on lines
+    for actual_old in find_line_trimmed_matches(content, old_text) {
+        if actual_old != old_text {
+            let adapted_new = if actual_old.contains("\r\n") && !new_text.contains("\r\n") {
+                new_text.replace('\n', "\r\n")
+            } else {
+                new_text.to_string()
+            };
+            candidates.push((actual_old, adapted_new));
+        }
+    }
+
+    // punctuation: models substitute smart quotes, dashes and nbsp for the
+    // ascii the file actually holds
+    for actual_old in find_punctuation_folded_matches(content, old_text) {
+        candidates.push((actual_old, new_text.to_string()));
+    }
+
+    candidates.dedup();
+    candidates
+}
+
+/// apply every replacement, each matched against the file as it was.
+///
+/// nothing is written unless all of them resolve, so a bad entry can't
+/// leave the file half-edited
+fn edit_file_batch(path: &Path, edits: &[Replacement], opts: &EditOpts) -> ToolResult {
+    if let [only] = edits {
+        return edit_file(path, &only.old_text, &only.new_text, opts);
+    }
+
+    let content = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => return ToolResult::error(format!("failed to read file: {e}")),
+    };
+
+    // resolve every edit against the original, so one edit's output can
+    // never become another's input
+    let mut splices: Vec<(usize, usize, String)> = Vec::new();
+    for (i, edit) in edits.iter().enumerate() {
+        if edit.old_text.is_empty() {
+            return ToolResult::error(format!("edits[{i}].oldText cannot be empty"));
+        }
+        let resolved = match_candidates(&content, &edit.old_text, &edit.new_text)
+            .into_iter()
+            .find_map(|(old, new)| {
+                let mut hits = content.match_indices(old.as_str());
+                let (start, _) = hits.next()?;
+                hits.next().is_none().then_some((start, old, new))
+            });
+        let Some((start, matched, replacement)) = resolved else {
+            let count = content.matches(edit.old_text.as_str()).count();
+            return ToolResult::error(format!(
+                "edits[{i}] matched {count} times in {}, expected exactly 1\n\
+                 hint: add surrounding context to make oldText unique",
+                path.display()
+            ));
+        };
+        splices.push((start, start + matched.len(), replacement));
+    }
+
+    splices.sort_by_key(|(start, _, _)| *start);
+    for pair in splices.windows(2) {
+        if pair[0].1 > pair[1].0 {
+            return ToolResult::error(
+                "edits overlap. merge the overlapping entries into one".to_string(),
+            );
+        }
+    }
+
+    let mut updated = content.clone();
+    for (start, end, replacement) in splices.iter().rev() {
+        updated.replace_range(start..end, replacement);
+    }
+
+    if let Err(e) = mush_ai::private_io::write_atomic(path, updated.as_bytes()) {
+        return ToolResult::error(format!("failed to write file: {e}"));
+    }
+
+    ToolResult::text(format!(
+        "applied {} edits to {}\n\ndiff:\n{}",
+        edits.len(),
+        path.display(),
+        format_edit_diff(&content, &updated)
+    ))
 }
 
 fn edit_file(path: &Path, old_text: &str, new_text: &str, opts: &EditOpts) -> ToolResult {
@@ -209,58 +383,7 @@ fn edit_file(path: &Path, old_text: &str, new_text: &str, opts: &EditOpts) -> To
         String::new()
     };
 
-    let mut candidates: Vec<(String, String)> = vec![(old_text.to_string(), new_text.to_string())];
-
-    if search_content.contains("\r\n") && old_text.contains('\n') && !old_text.contains("\r\n") {
-        candidates.push((
-            old_text.replace("\n", "\r\n"),
-            new_text.replace("\n", "\r\n"),
-        ));
-    }
-
-    if !search_content.contains("\r\n") && old_text.contains("\r\n") {
-        candidates.push((
-            old_text.replace("\r\n", "\n"),
-            new_text.replace("\r\n", "\n"),
-        ));
-    }
-
-    candidates.dedup();
-
-    // also try with/without trailing newline (LLMs often get this wrong)
-    let mut extra = Vec::new();
-    for (o, n) in &candidates {
-        if o.ends_with('\n') && !search_content.contains(o.as_str()) {
-            let trimmed = o.trim_end_matches('\n').trim_end_matches('\r');
-            extra.push((trimmed.to_string(), n.clone()));
-        } else if !o.ends_with('\n') {
-            extra.push((format!("{o}\n"), format!("{n}\n")));
-            if search_content.contains("\r\n") {
-                extra.push((format!("{o}\r\n"), format!("{n}\r\n")));
-            }
-        }
-    }
-    candidates.extend(extra);
-
-    // trailing whitespace per-line: LLMs often omit trailing spaces/tabs on lines
-    for actual_old in find_line_trimmed_matches(&search_content, old_text) {
-        if actual_old != old_text {
-            let adapted_new = if actual_old.contains("\r\n") && !new_text.contains("\r\n") {
-                new_text.replace('\n', "\r\n")
-            } else {
-                new_text.to_string()
-            };
-            candidates.push((actual_old, adapted_new));
-        }
-    }
-
-    // punctuation: models substitute smart quotes, dashes and nbsp for the
-    // ascii the file actually holds
-    for actual_old in find_punctuation_folded_matches(&search_content, old_text) {
-        candidates.push((actual_old, new_text.to_string()));
-    }
-
-    candidates.dedup();
+    let candidates = match_candidates(&search_content, old_text, new_text);
 
     let expected = opts.expected_matches;
     let mut mismatch_count: Option<usize> = None;
@@ -1072,6 +1195,50 @@ mod tests {
     }
 
     #[test]
+    fn one_call_applies_several_edits() {
+        // pi's shape: many disjoint replacements in one round trip, each
+        // matched against the original content
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("many.rs");
+        fs::write(&path, "one\ntwo\nthree\n").unwrap();
+        let tool = EditTool::new(dir.path().into());
+
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(tool.execute(serde_json::json!({
+                "path": "many.rs",
+                "edits": [
+                    {"oldText": "one", "newText": "1"},
+                    {"oldText": "three", "newText": "3"},
+                ],
+            })));
+
+        assert!(result.outcome.is_success(), "{result:?}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "1\ntwo\n3\n");
+    }
+
+    #[test]
+    fn a_failing_edit_in_a_batch_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("atomic.rs");
+        fs::write(&path, "one\ntwo\n").unwrap();
+        let tool = EditTool::new(dir.path().into());
+
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(tool.execute(serde_json::json!({
+                "path": "atomic.rs",
+                "edits": [
+                    {"oldText": "one", "newText": "1"},
+                    {"oldText": "absent", "newText": "x"},
+                ],
+            })));
+
+        assert!(!result.outcome.is_success());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "one\ntwo\n");
+    }
+
+    #[test]
     fn near_miss_whitespace_difference() {
         let content = "fn main() {\n    println!(\"hello\");\n}\n";
         // extra spaces in the search text
@@ -1466,8 +1633,9 @@ mod tests {
     fn edit_args_into_opts_returns_typed_error() {
         let result = EditArgs {
             path: "todo.md".into(),
-            old_text: "before".into(),
-            new_text: "after".into(),
+            old_text: Some("before".into()),
+            new_text: Some("after".into()),
+            edits: Vec::new(),
             expected_matches: None,
             start_line: None,
             end_line: Some(5),
