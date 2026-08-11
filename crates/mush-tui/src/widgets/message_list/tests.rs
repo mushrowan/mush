@@ -2752,3 +2752,132 @@ fn user_message_with_images_reserves_render_area() {
     assert_eq!(areas[0].msg_idx, 0);
     assert!(areas[0].area.height > 0);
 }
+
+// message_lines: the content renderer an inline viewport hands to scrollback
+
+fn plain_style(theme: &crate::theme::Theme) -> MessageStyle<'_> {
+    MessageStyle {
+        theme,
+        show_usage: false,
+    }
+}
+
+fn rendered_text(lines: &[Line<'static>]) -> String {
+    lines
+        .iter()
+        .map(|l| {
+            l.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn a_rendered_message_outlives_the_app_it_came_from() {
+    let theme = crate::theme::Theme::default();
+    let lines: Vec<Line<'static>> = {
+        let msg = DisplayMessage::new(MessageRole::Assistant, "hello world");
+        message_lines(&msg, &plain_style(&theme), 80)
+    };
+    assert!(rendered_text(&lines).contains("hello world"));
+}
+
+#[test]
+fn the_same_message_renders_the_same_lines() {
+    let theme = crate::theme::Theme::default();
+    let msg = DisplayMessage::new(MessageRole::Assistant, "one\n\ntwo\n\nthree");
+    let first = message_lines(&msg, &plain_style(&theme), 60);
+    let second = message_lines(&msg, &plain_style(&theme), 60);
+    assert_eq!(rendered_text(&first), rendered_text(&second));
+}
+
+#[test]
+fn a_system_message_gets_a_label() {
+    let theme = crate::theme::Theme::default();
+    let msg = DisplayMessage::new(MessageRole::System, "compacted");
+    let lines = message_lines(&msg, &plain_style(&theme), 60);
+    assert!(rendered_text(&lines).starts_with("system"));
+}
+
+#[test]
+fn thinking_only_renders_when_expanded() {
+    let theme = crate::theme::Theme::default();
+    let mut msg = DisplayMessage::new(MessageRole::Assistant, "the answer");
+    msg.thinking = Some("let me work it out".into());
+
+    let collapsed = message_lines(&msg, &plain_style(&theme), 60);
+    assert!(!rendered_text(&collapsed).contains("work it out"));
+
+    msg.thinking_expanded = true;
+    let expanded = message_lines(&msg, &plain_style(&theme), 60);
+    assert!(rendered_text(&expanded).contains("work it out"));
+}
+
+#[test]
+fn a_queued_message_renders_dim() {
+    let theme = crate::theme::Theme::default();
+    let mut msg = DisplayMessage::new(MessageRole::User, "steer me");
+    msg.queued = true;
+    let lines = message_lines(&msg, &plain_style(&theme), 60);
+    assert!(rendered_text(&lines).contains("steer me"));
+    assert!(
+        lines.iter().any(|l| l.style == theme.dim),
+        "a queued bubble is dimmed, not boxed"
+    );
+}
+
+#[test]
+fn the_usage_line_is_gated_on_the_setting() {
+    let theme = crate::theme::Theme::default();
+    let mut msg = DisplayMessage::new(MessageRole::Assistant, "done");
+    msg.usage = Some(Usage {
+        input_tokens: mush_ai::types::TokenCount::new(100),
+        output_tokens: mush_ai::types::TokenCount::new(50),
+        ..Default::default()
+    });
+
+    let off = message_lines(&msg, &plain_style(&theme), 60);
+    assert!(!rendered_text(&off).contains("tok"));
+
+    let on = message_lines(
+        &msg,
+        &MessageStyle {
+            theme: &theme,
+            show_usage: true,
+        },
+        60,
+    );
+    assert!(rendered_text(&on).contains("150tok"));
+}
+
+#[test]
+fn a_running_tool_defers_the_usage_line() {
+    let theme = crate::theme::Theme::default();
+    let mut msg = DisplayMessage::new(MessageRole::Assistant, "working");
+    msg.usage = Some(Usage {
+        input_tokens: mush_ai::types::TokenCount::new(100),
+        output_tokens: mush_ai::types::TokenCount::new(50),
+        ..Default::default()
+    });
+    msg.tool_calls.push(DisplayToolCall {
+        name: "bash".into(),
+        summary: "ls".into(),
+        status: ToolCallStatus::Running,
+        output_preview: None,
+        image_data: None,
+        batch: 1,
+    });
+
+    let lines = message_lines(
+        &msg,
+        &MessageStyle {
+            theme: &theme,
+            show_usage: true,
+        },
+        60,
+    );
+    assert!(!rendered_text(&lines).contains("150tok"));
+}

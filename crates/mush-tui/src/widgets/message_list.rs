@@ -340,15 +340,15 @@ impl SelectionContext {
 /// line buffers and per-message metadata accumulated while materialising a
 /// frame. the body pass fills it, the trailing pass appends, the paint pass
 /// reads it
-struct FrameLines<'a> {
-    lines: Vec<Line<'a>>,
+struct FrameLines {
+    lines: Vec<Line<'static>>,
     images: Vec<ImagePlaceholder>,
     deferred: Vec<DeferredCacheRender>,
     segments: Vec<MaterialisedLineSegment>,
     ranges: Vec<crate::app::MessageRowRange>,
 }
 
-impl FrameLines<'_> {
+impl FrameLines {
     fn new() -> Self {
         Self {
             lines: Vec::new(),
@@ -372,7 +372,7 @@ impl MessageList<'_> {
         &self,
         buf: &mut Buffer,
         area: Rect,
-        frame: &FrameLines<'_>,
+        frame: &FrameLines,
         geometry: &FrameGeometry,
         sel_ctx: &SelectionContext,
         img_y_positions: &[usize],
@@ -491,12 +491,7 @@ impl MessageList<'_> {
     /// materialise everything below the message list: in-flight assistant
     /// text and thinking, the tool-args preview, the compaction label, and
     /// any queued steering messages
-    fn materialise_trailing(
-        &self,
-        area: Rect,
-        sel_ctx: &SelectionContext,
-        frame: &mut FrameLines<'_>,
-    ) {
+    fn materialise_trailing(&self, area: Rect, sel_ctx: &SelectionContext, frame: &mut FrameLines) {
         // streaming content
         if self.app.stream.active {
             let dim = self.app.theme.dim;
@@ -580,10 +575,8 @@ impl MessageList<'_> {
                 self.app,
                 msg,
                 i,
-                &mut frame.lines,
+                frame,
                 sel,
-                &mut frame.images,
-                &mut frame.deferred,
                 area.width,
                 sel_ctx.selected_block,
             );
@@ -625,10 +618,8 @@ impl Widget for MessageList<'_> {
                 self.app,
                 msg,
                 entry.msg_idx,
-                &mut frame.lines,
+                &mut frame,
                 sel,
-                &mut frame.images,
-                &mut frame.deferred,
                 area.width,
                 sel_ctx.selected_block,
             );
@@ -788,68 +779,173 @@ struct SelectionHint {
     has_visual: bool,
 }
 
-#[allow(clippy::too_many_arguments)]
+/// everything a message needs to render itself, with no viewport state
+pub struct MessageStyle<'a> {
+    pub theme: &'a Theme,
+    pub show_usage: bool,
+}
+
+/// render one message to owned lines at `width`.
+///
+/// takes no `App`: selection, scroll position, and the line caches live
+/// in the caller, so these lines can go straight into the terminal's
+/// scrollback. image cells are reported but not drawn
+pub fn message_lines(
+    msg: &DisplayMessage,
+    style: &MessageStyle<'_>,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    // image cells are positions for a live overlay to draw over, keyed by
+    // message index. scrollback can't host one, so both are discarded
+    let mut images = Vec::new();
+
+    if matches!(msg.role, MessageRole::System) {
+        lines.push(system_label_line(style.theme, None));
+    }
+    push_thinking_lines(msg, style.theme, width, &mut lines);
+
+    if msg.queued {
+        push_queued_lines(msg, style.theme, width, &mut lines);
+    } else if matches!(msg.role, MessageRole::User) {
+        render_user_message_box(style.theme, msg, 0, width, &mut lines, &mut images);
+    } else {
+        let content_width = message_content_width(width as usize);
+        let md = crate::markdown::render_with_width(&msg.content, style.theme, Some(content_width));
+        for line in md.lines {
+            lines.extend(indent_line(line, content_width));
+        }
+    }
+
+    push_completed_tool_box_lines(style.theme, msg, width, &mut lines);
+    push_usage_line(msg, style, &mut lines);
+    lines
+}
+
+/// the `system` label, optionally behind a selection marker
+fn system_label_line(theme: &Theme, marker: Option<Span<'static>>) -> Line<'static> {
+    let mut spans = Vec::new();
+    spans.extend(marker);
+    spans.push(Span::styled("system", theme.system_label));
+    Line::from(spans)
+}
+
+fn push_thinking_lines(
+    msg: &DisplayMessage,
+    theme: &Theme,
+    width: u16,
+    lines: &mut Vec<Line<'static>>,
+) {
+    let Some(ref thinking) = msg.thinking else {
+        return;
+    };
+    if !msg.thinking_expanded {
+        return;
+    }
+    let cw = message_content_width(width as usize);
+    let strip = common_leading_space(thinking);
+    for text_line in thinking.lines() {
+        let body = drop_leading_spaces(text_line, strip);
+        let styled = Line::styled(body.to_string(), theme.thinking);
+        lines.extend(indent_line(styled, cw));
+    }
+}
+
+fn push_queued_lines(
+    msg: &DisplayMessage,
+    theme: &Theme,
+    width: u16,
+    lines: &mut Vec<Line<'static>>,
+) {
+    let cw = message_content_width(width as usize);
+    for text_line in msg.content.lines() {
+        let styled = Line::styled(text_line.to_string(), theme.dim);
+        lines.extend(indent_line(styled, cw));
+    }
+}
+
+/// token and cost summary. held back while a tool is still running so it
+/// doesn't appear above the running tool panel
+fn push_usage_line(msg: &DisplayMessage, style: &MessageStyle<'_>, lines: &mut Vec<Line<'static>>) {
+    if !style.show_usage || msg.is_live() {
+        return;
+    }
+    let Some(ref usage) = msg.usage else {
+        return;
+    };
+    let total = usage.total_tokens();
+    if total == TokenCount::ZERO {
+        return;
+    }
+
+    let mut parts = vec![format!(" {total}tok")];
+    let total_input = usage.total_input_tokens();
+    if total_input > TokenCount::ZERO {
+        let reuse_pct = usage.cache_read_tokens.percent_of(total_input) as u32;
+        parts.push(format!("reuse {reuse_pct}%"));
+    }
+    if usage.cache_write_tokens > TokenCount::ZERO {
+        let write_pct = usage.cache_write_tokens.percent_of(total_input) as u32;
+        parts.push(format!("write {write_pct}%"));
+    }
+    if let Some(c) = msg.cost {
+        parts.push(format!("{c}"));
+    }
+    lines.push(Line::styled(parts.join(" | "), style.theme.usage));
+}
+
+/// the marker above a selected message, with the keys that act on it
+fn selection_hint_line(app: &App, sel: SelectionHint) -> Line<'static> {
+    let mut spans = vec![Span::styled("▌", app.theme.selection_marker)];
+    if sel.is_cursor {
+        let hint = if app.navigation.scroll_unit == crate::app::ScrollUnit::Block {
+            " (y to copy block, b for messages)"
+        } else if sel.has_visual {
+            " (y to copy range)"
+        } else {
+            " (v to select, y to copy)"
+        };
+        spans.push(Span::styled(hint, app.theme.scroll_hint));
+    }
+    Line::from(spans)
+}
+
 fn render_message(
     app: &App,
     msg: &DisplayMessage,
     msg_idx: usize,
-    lines: &mut Vec<Line<'_>>,
+    frame: &mut FrameLines,
     sel: SelectionHint,
-    image_placeholders: &mut Vec<ImagePlaceholder>,
-    deferred: &mut Vec<DeferredCacheRender>,
     width: u16,
     selected_block_info: Option<SelectedBlockInfo>,
 ) {
+    let FrameLines {
+        lines,
+        images: image_placeholders,
+        deferred,
+        ..
+    } = frame;
     // user and assistant messages have no label line.
     // user messages are distinguished by a subtle background.
     // only system messages get a text label.
     let is_user = matches!(msg.role, MessageRole::User);
 
     if matches!(msg.role, MessageRole::System) {
-        let mut label_spans = Vec::new();
-        if sel.selected {
-            label_spans.push(Span::styled("▌ ", app.theme.selection_marker));
-        }
-        label_spans.push(Span::styled("system", app.theme.system_label));
-        lines.push(Line::from(label_spans));
+        let marker = sel
+            .selected
+            .then(|| Span::styled("▌ ", app.theme.selection_marker));
+        lines.push(system_label_line(&app.theme, marker));
     } else if sel.selected {
-        let mut hint_spans = vec![Span::styled("▌", app.theme.selection_marker)];
-        if sel.is_cursor {
-            let hint = if app.navigation.scroll_unit == crate::app::ScrollUnit::Block {
-                " (y to copy block, b for messages)"
-            } else if sel.has_visual {
-                " (y to copy range)"
-            } else {
-                " (v to select, y to copy)"
-            };
-            hint_spans.push(Span::styled(hint, app.theme.scroll_hint));
-        }
-        lines.push(Line::from(hint_spans));
+        lines.push(selection_hint_line(app, sel));
     }
 
-    // thinking block
-    if let Some(ref thinking) = msg.thinking
-        && msg.thinking_expanded
-    {
-        let cw = message_content_width(width as usize);
-        let strip = common_leading_space(thinking);
-        for text_line in thinking.lines() {
-            let body = drop_leading_spaces(text_line, strip);
-            let styled = Line::styled(body.to_string(), app.theme.thinking);
-            lines.extend(indent_line(styled, cw));
-        }
-    }
+    push_thinking_lines(msg, &app.theme, width, lines);
 
     // main content (markdown rendered)
     if msg.queued {
-        let dim = app.theme.dim;
-        let cw = message_content_width(width as usize);
-        for text_line in msg.content.lines() {
-            let styled = Line::styled(text_line.to_string(), dim);
-            lines.extend(indent_line(styled, cw));
-        }
+        push_queued_lines(msg, &app.theme, width, lines);
     } else if is_user {
-        render_user_message_box(app, msg, msg_idx, width, lines, image_placeholders);
+        render_user_message_box(&app.theme, msg, msg_idx, width, lines, image_placeholders);
     } else {
         // determine if a code block in this message is selected
         let highlight_block = selected_block_info
@@ -921,49 +1017,25 @@ fn render_message(
 
     render_completed_tool_boxes_cached(app, msg, msg_idx, width, lines, image_placeholders);
 
-    // usage line (compact: total tokens + cost, with cache reuse + write ratios)
-    // gated on show_usage_lines since the same info is in the status bar.
-    // deferred while any tool is still running to avoid a "premature" usage
-    // line appearing above the running tool panel
-    let has_running_tool = msg
-        .tool_calls
-        .iter()
-        .any(|tc| tc.status == ToolCallStatus::Running);
-    if app.interaction.show_usage_lines
-        && !has_running_tool
-        && let Some(ref usage) = msg.usage
-    {
-        let total = usage.total_tokens();
-        if total > TokenCount::ZERO {
-            let mut parts = vec![format!(" {total}tok")];
-            let total_input = usage.total_input_tokens();
-            if total_input > TokenCount::ZERO {
-                let reuse_pct = usage.cache_read_tokens.percent_of(total_input) as u32;
-                parts.push(format!("reuse {reuse_pct}%"));
-            }
-            if usage.cache_write_tokens > TokenCount::ZERO {
-                let write_pct = usage
-                    .cache_write_tokens
-                    .percent_of(usage.total_input_tokens()) as u32;
-                parts.push(format!("write {write_pct}%"));
-            }
-            if let Some(c) = msg.cost {
-                parts.push(format!("{c}"));
-            }
-            lines.push(Line::styled(parts.join(" | "), app.theme.usage));
-        }
-    }
+    push_usage_line(
+        msg,
+        &MessageStyle {
+            theme: &app.theme,
+            show_usage: app.interaction.show_usage_lines,
+        },
+        lines,
+    );
 }
 
 /// render a user message as a rounded-cornered box with optional
 /// attachment row above. attachments share the message box's top border
 /// via left/right tees so the visual is a unified stack
-fn render_user_message_box<'a>(
-    app: &App,
+fn render_user_message_box(
+    theme: &Theme,
     msg: &DisplayMessage,
     msg_idx: usize,
     width: u16,
-    lines: &mut Vec<Line<'a>>,
+    lines: &mut Vec<Line<'static>>,
     image_placeholders: &mut Vec<ImagePlaceholder>,
 ) {
     let w = width as usize;
@@ -976,8 +1048,8 @@ fn render_user_message_box<'a>(
         return;
     }
 
-    let border_style = app.theme.dim;
-    let bg = app.theme.user_msg_bg;
+    let border_style = theme.dim;
+    let bg = theme.user_msg_bg;
     let image_count = msg.images.len();
     let inner = w.saturating_sub(2); // space between left and right walls
 
@@ -1571,12 +1643,12 @@ pub(crate) fn grid_dimensions(n: usize, width: usize, min: usize) -> (usize, usi
     (rows, cols)
 }
 
-fn render_completed_tool_boxes_cached<'a>(
+fn render_completed_tool_boxes_cached(
     app: &App,
     msg: &DisplayMessage,
     msg_idx: usize,
     width: u16,
-    lines: &mut Vec<Line<'a>>,
+    lines: &mut Vec<Line<'static>>,
     image_placeholders: &mut Vec<ImagePlaceholder>,
 ) {
     let Some(hash) = tool_boxes_hash(msg) else {
@@ -1601,7 +1673,7 @@ fn render_completed_tool_boxes_cached<'a>(
     }
 
     let mut rendered = Vec::new();
-    render_completed_tool_box_lines(app, msg, width, &mut rendered);
+    push_completed_tool_box_lines(&app.theme, msg, width, &mut rendered);
     lines.extend(rendered.iter().cloned());
 
     let mut cache = app.render_state.tool_box_cache.borrow_mut();
@@ -1611,12 +1683,12 @@ fn render_completed_tool_boxes_cached<'a>(
     cache[msg_idx] = Some((hash, width, rendered));
 }
 
-fn render_completed_tool_boxes<'a>(
+fn render_completed_tool_boxes(
     app: &App,
     msg: &DisplayMessage,
     msg_idx: usize,
     width: u16,
-    lines: &mut Vec<Line<'a>>,
+    lines: &mut Vec<Line<'static>>,
     image_placeholders: &mut Vec<ImagePlaceholder>,
 ) {
     let completed: Vec<(usize, &DisplayToolCall)> = msg
@@ -1637,11 +1709,11 @@ fn render_completed_tool_boxes<'a>(
     }
 }
 
-fn render_completed_tool_box_lines<'a>(
-    app: &App,
+fn push_completed_tool_box_lines(
+    theme: &Theme,
     msg: &DisplayMessage,
     width: u16,
-    lines: &mut Vec<Line<'a>>,
+    lines: &mut Vec<Line<'static>>,
 ) {
     let completed: Vec<&DisplayToolCall> = msg
         .tool_calls
@@ -1650,7 +1722,7 @@ fn render_completed_tool_box_lines<'a>(
         .collect();
 
     for group in completed.chunk_by(|a, b| a.batch == b.batch) {
-        render_tool_box_group(group, width, lines, &app.theme);
+        render_tool_box_group(group, width, lines, theme);
     }
 }
 
@@ -1725,7 +1797,7 @@ fn tool_status_tag(status: ToolCallStatus) -> u8 {
 fn render_tool_box_group(
     tools: &[&DisplayToolCall],
     total_width: u16,
-    lines: &mut Vec<Line<'_>>,
+    lines: &mut Vec<Line<'static>>,
     theme: &Theme,
 ) {
     let usable = total_width.saturating_sub(BOX_INDENT as u16);
