@@ -15,6 +15,7 @@ pub mod input;
 pub mod input_buffer;
 pub mod isolation;
 pub mod keybinds;
+pub mod live_region;
 pub mod login_picker;
 pub mod markdown;
 pub mod messaging;
