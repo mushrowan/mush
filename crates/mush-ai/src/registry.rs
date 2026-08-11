@@ -67,7 +67,7 @@ pub fn truncate_error_body(body: &str) -> String {
     } else {
         format!(
             "{}... ({} bytes total)",
-            &body[..MAX_ERROR_BODY],
+            &body[..body.floor_char_boundary(MAX_ERROR_BODY)],
             body.len()
         )
     }
@@ -314,6 +314,14 @@ mod tests {
         let truncated = truncate_error_body(&body);
         assert!(truncated.len() < body.len());
         assert!(truncated.contains("5000 bytes total"));
+    }
+
+    #[test]
+    fn truncate_error_body_cuts_a_multibyte_body_on_a_char_boundary() {
+        let body = "…".repeat(MAX_ERROR_BODY);
+        let truncated = truncate_error_body(&body);
+        assert!(truncated.starts_with('…'));
+        assert!(truncated.contains(&format!("{} bytes total", body.len())));
     }
 
     #[test]
