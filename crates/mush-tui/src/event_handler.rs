@@ -191,6 +191,13 @@ fn apply_message_end(app: &mut App, message: &AssistantMessage, model: &Model, d
             .error_message
             .as_deref()
             .unwrap_or("stream ended with an error");
+        tracing::error!(
+            error = err,
+            model = %message.model,
+            provider = %message.provider,
+            stop_reason = ?message.stop_reason,
+            "assistant turn ended in an error"
+        );
         app.push_system_message(format!("⚠ API error: {err}"));
         app.finish_streaming(None, None);
         return;

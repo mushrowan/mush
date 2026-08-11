@@ -1461,6 +1461,18 @@ enum DeltaData {
 struct MessageDeltaData {
     #[serde(default)]
     stop_reason: Option<String>,
+    #[serde(default)]
+    stop_details: Option<StopDetailsData>,
+}
+
+/// structured detail on a `refusal` stop. always present on a refusal,
+/// but every field inside it can be null
+#[derive(Debug, Deserialize)]
+struct StopDetailsData {
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    explanation: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1751,7 +1763,12 @@ fn process_sse_event(
         SseEvent::MessageDelta { delta, usage } => {
             output.usage.output_tokens = TokenCount::new(usage.output_tokens);
             if let Some(reason) = delta.stop_reason {
-                output.stop_reason = map_stop_reason(&reason);
+                let (stop_reason, message) = map_stop_reason(&reason, delta.stop_details.as_ref());
+                output.stop_reason = stop_reason;
+                if let Some(message) = message {
+                    tracing::warn!(stop_reason = %reason, %message, "anthropic ended the turn");
+                    output.error_message = Some(message);
+                }
             }
         }
         SseEvent::MessageStop => {}
@@ -1766,12 +1783,41 @@ fn process_sse_event(
     events
 }
 
-fn map_stop_reason(reason: &str) -> StopReason {
+/// map an anthropic stop_reason, with a message for the ones that end a
+/// turn without a usable result. the documented set is end_turn,
+/// max_tokens, stop_sequence, tool_use, pause_turn, refusal, and
+/// model_context_window_exceeded
+fn map_stop_reason(
+    reason: &str,
+    details: Option<&StopDetailsData>,
+) -> (StopReason, Option<String>) {
     match reason {
-        "end_turn" | "stop_sequence" | "pause_turn" => StopReason::Stop,
-        "max_tokens" => StopReason::Length,
-        "tool_use" => StopReason::ToolUse,
-        _ => StopReason::Error,
+        "end_turn" | "stop_sequence" | "pause_turn" => (StopReason::Stop, None),
+        "max_tokens" => (StopReason::Length, None),
+        "tool_use" => (StopReason::ToolUse, None),
+        "refusal" => (StopReason::Error, Some(refusal_message(details))),
+        "model_context_window_exceeded" => (
+            StopReason::Error,
+            Some("the response filled the model's context window. compact and retry".into()),
+        ),
+        other => (
+            StopReason::Error,
+            Some(format!("unknown stop reason: {other}")),
+        ),
+    }
+}
+
+/// user-facing text for a refusal, preferring anthropic's own explanation
+/// over the bare policy category
+fn refusal_message(details: Option<&StopDetailsData>) -> String {
+    let detail = details.and_then(|d| {
+        d.explanation
+            .clone()
+            .or_else(|| d.category.as_ref().map(|c| format!("category: {c}")))
+    });
+    match detail {
+        Some(detail) => format!("claude declined to respond ({detail}). retry on another model"),
+        None => "claude declined to respond. retry on another model".into(),
     }
 }
 
@@ -1839,10 +1885,93 @@ mod tests {
 
     #[test]
     fn map_stop_reasons() {
-        assert_eq!(map_stop_reason("end_turn"), StopReason::Stop);
-        assert_eq!(map_stop_reason("max_tokens"), StopReason::Length);
-        assert_eq!(map_stop_reason("tool_use"), StopReason::ToolUse);
-        assert_eq!(map_stop_reason("unknown"), StopReason::Error);
+        assert_eq!(map_stop_reason("end_turn", None), (StopReason::Stop, None));
+        assert_eq!(
+            map_stop_reason("max_tokens", None),
+            (StopReason::Length, None)
+        );
+        assert_eq!(
+            map_stop_reason("tool_use", None),
+            (StopReason::ToolUse, None)
+        );
+    }
+
+    #[test]
+    fn a_refusal_names_the_classifier_category() {
+        let details = StopDetailsData {
+            category: Some("cyber".into()),
+            explanation: None,
+        };
+        let (reason, message) = map_stop_reason("refusal", Some(&details));
+        assert_eq!(reason, StopReason::Error);
+        assert!(message.unwrap().contains("cyber"));
+    }
+
+    #[test]
+    fn a_refusal_prefers_anthropics_own_explanation() {
+        let details = StopDetailsData {
+            category: Some("cyber".into()),
+            explanation: Some("this could enable cyber harm".into()),
+        };
+        let (_, message) = map_stop_reason("refusal", Some(&details));
+        assert_eq!(
+            message.unwrap(),
+            "claude declined to respond (this could enable cyber harm). retry on another model"
+        );
+    }
+
+    #[test]
+    fn a_refusal_without_a_category_still_says_it_was_a_refusal() {
+        let (_, message) = map_stop_reason("refusal", None);
+        assert!(message.unwrap().contains("declined"));
+    }
+
+    #[test]
+    fn a_filled_context_window_says_so() {
+        let (reason, message) = map_stop_reason("model_context_window_exceeded", None);
+        assert_eq!(reason, StopReason::Error);
+        assert!(message.unwrap().contains("context window"));
+    }
+
+    #[test]
+    fn an_unknown_stop_reason_keeps_its_name() {
+        let (reason, message) = map_stop_reason("brand_new_thing", None);
+        assert_eq!(reason, StopReason::Error);
+        assert!(message.unwrap().contains("brand_new_thing"));
+    }
+
+    #[test]
+    fn a_message_delta_carries_the_refusal_onto_the_output() {
+        let mut output = AssistantMessage::builder()
+            .model("test".into())
+            .provider(Provider::Anthropic)
+            .api(Api::AnthropicMessages)
+            .timestamp_ms(Timestamp::zero())
+            .build();
+
+        process_sse_event(
+            SseEvent::MessageDelta {
+                delta: MessageDeltaData {
+                    stop_reason: Some("refusal".into()),
+                    stop_details: Some(StopDetailsData {
+                        category: Some("cyber".into()),
+                        explanation: None,
+                    }),
+                },
+                usage: UsageDeltaData { output_tokens: 7 },
+            },
+            &mut output,
+            &mut Vec::new(),
+            false,
+            &[],
+        );
+
+        assert_eq!(output.stop_reason, StopReason::Error);
+        assert!(
+            output.error_message.as_deref().unwrap().contains("cyber"),
+            "got {:?}",
+            output.error_message
+        );
     }
 
     #[test]

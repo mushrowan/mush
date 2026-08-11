@@ -488,7 +488,12 @@ fn process_chunk(
     };
 
     if let Some(reason) = choice.finish_reason {
-        output.stop_reason = map_stop_reason(&reason);
+        let (stop_reason, message) = map_stop_reason(&reason);
+        output.stop_reason = stop_reason;
+        if let Some(message) = message {
+            tracing::warn!(finish_reason = %reason, %message, "openai ended the turn");
+            output.error_message = Some(message);
+        }
     }
 
     // handle reasoning/thinking content
@@ -676,13 +681,18 @@ fn finish_tool_blocks_silent(tool_blocks: &mut Vec<ToolBlock>, output: &mut Assi
     }
 }
 
-fn map_stop_reason(reason: &str) -> StopReason {
+/// map an openai finish_reason, with a message for the ones that end a
+/// turn without a usable result
+fn map_stop_reason(reason: &str) -> (StopReason, Option<String>) {
     match reason {
-        "stop" => StopReason::Stop,
-        "length" => StopReason::Length,
-        "tool_calls" | "function_call" => StopReason::ToolUse,
-        "content_filter" => StopReason::Error,
-        _ => StopReason::Stop,
+        "stop" => (StopReason::Stop, None),
+        "length" => (StopReason::Length, None),
+        "tool_calls" | "function_call" => (StopReason::ToolUse, None),
+        "content_filter" => (
+            StopReason::Error,
+            Some("the provider's content filter stopped the response".into()),
+        ),
+        _ => (StopReason::Stop, None),
     }
 }
 
@@ -738,11 +748,17 @@ mod tests {
 
     #[test]
     fn map_stop_reasons() {
-        assert_eq!(map_stop_reason("stop"), StopReason::Stop);
-        assert_eq!(map_stop_reason("length"), StopReason::Length);
-        assert_eq!(map_stop_reason("tool_calls"), StopReason::ToolUse);
-        assert_eq!(map_stop_reason("content_filter"), StopReason::Error);
-        assert_eq!(map_stop_reason("unknown"), StopReason::Stop);
+        assert_eq!(map_stop_reason("stop"), (StopReason::Stop, None));
+        assert_eq!(map_stop_reason("length"), (StopReason::Length, None));
+        assert_eq!(map_stop_reason("tool_calls"), (StopReason::ToolUse, None));
+        assert_eq!(map_stop_reason("unknown"), (StopReason::Stop, None));
+    }
+
+    #[test]
+    fn a_content_filter_stop_says_so() {
+        let (reason, message) = map_stop_reason("content_filter");
+        assert_eq!(reason, StopReason::Error);
+        assert!(message.unwrap().contains("content filter"));
     }
 
     #[test]
