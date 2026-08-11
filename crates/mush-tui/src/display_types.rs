@@ -75,6 +75,16 @@ impl DisplayMessage {
             images: Vec::new(),
         }
     }
+
+    /// whether this message can still be rewritten or removed
+    #[must_use]
+    pub fn is_live(&self) -> bool {
+        self.queued
+            || self
+                .tool_calls
+                .iter()
+                .any(|tc| tc.status == ToolCallStatus::Running)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

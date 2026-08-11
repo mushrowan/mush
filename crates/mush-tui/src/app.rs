@@ -604,6 +604,29 @@ impl App {
             .push(DisplayMessage::new(MessageRole::System, text));
     }
 
+    /// index of the first message whose rendered lines can still change.
+    ///
+    /// everything below it is settled history that an inline viewport can
+    /// hand to the terminal's own scrollback. the live turn starts at the
+    /// last user message, since the assistant reply is inserted into it,
+    /// its thinking can still be toggled, and its tools can still be
+    /// running. a rewrite (`/compact`, `/branch`, `/undo`) resets this to
+    /// zero, which the inline runner treats as the start of a new run
+    #[must_use]
+    pub fn commit_point(&self) -> usize {
+        let live_turn = self
+            .messages
+            .iter()
+            .rposition(|m| m.role == MessageRole::User && !m.queued)
+            .unwrap_or(self.messages.len());
+        let unsettled = self
+            .messages
+            .iter()
+            .position(DisplayMessage::is_live)
+            .unwrap_or(self.messages.len());
+        live_turn.min(unsettled)
+    }
+
     /// toggle thinking text visibility for the last assistant message
     pub fn toggle_thinking_expanded(&mut self) {
         if let Some(msg) = self

@@ -2474,3 +2474,101 @@ fn selected_login_provider_returns_filtered_id() {
         Some("openai-codex")
     );
 }
+
+// commit point: what an inline viewport can hand to the terminal's scrollback
+
+/// drive a turn the way the agent loop does: the user bubble, then the
+/// assistant bubble from MessageEnd, then any tools inside it
+fn finish_turn(app: &mut App, prompt: &str) {
+    app.push_user_message(prompt);
+    app.start_streaming();
+    app.finish_streaming(None, None);
+}
+
+#[test]
+fn a_fresh_app_has_nothing_to_commit() {
+    let app = App::new("test".into(), TokenCount::new(200_000));
+    assert_eq!(app.commit_point(), 0);
+}
+
+#[test]
+fn the_whole_current_turn_stays_live() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    finish_turn(&mut app, "first question");
+    // [user, assistant]: thinking can still be toggled on the assistant
+    // and the next tool call lands inside it
+    assert_eq!(app.commit_point(), 0);
+}
+
+#[test]
+fn submitting_a_message_commits_the_previous_turn() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    finish_turn(&mut app, "first question");
+    app.push_user_message("second question");
+    assert_eq!(app.commit_point(), 2);
+}
+
+#[test]
+fn a_running_tool_holds_the_commit_point_back() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    finish_turn(&mut app, "first question");
+    finish_turn(&mut app, "second question");
+    app.start_tool(&"tc_1".into(), "bash", "ls");
+    app.push_user_message("third question");
+
+    // the second turn's assistant still owns a running tool, so it and
+    // everything after it stays live
+    assert_eq!(app.commit_point(), 3);
+}
+
+#[test]
+fn queued_steering_holds_the_commit_point_back() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    finish_turn(&mut app, "first question");
+    app.push_user_message("second question");
+    app.push_queued_message("actually wait");
+    assert_eq!(app.commit_point(), 2);
+}
+
+#[test]
+fn draining_queued_steering_only_removes_live_messages() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    finish_turn(&mut app, "first question");
+    app.push_user_message("second question");
+    app.push_queued_message("actually wait");
+    let before = app.commit_point();
+
+    app.take_queued_messages();
+
+    assert!(
+        app.commit_point() >= before,
+        "draining steering must not unprint committed history"
+    );
+}
+
+#[test]
+fn the_commit_point_only_moves_forward_across_a_session() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    let mut seen = 0;
+    let mut check = |app: &App| {
+        let now = app.commit_point();
+        assert!(now >= seen, "commit point went backwards: {now} < {seen}");
+        seen = now;
+    };
+
+    for turn in 0..3 {
+        app.push_user_message(format!("question {turn}"));
+        check(&app);
+        app.start_streaming();
+        check(&app);
+        app.finish_streaming(None, None);
+        check(&app);
+        let tool = ToolCallId::from(format!("tc_{turn}").as_str());
+        app.start_tool(&tool, "bash", "ls");
+        check(&app);
+        app.end_tool(&tool, "bash", ToolOutcome::Success, Some("ok"), None);
+        check(&app);
+    }
+
+    assert!(seen > 0, "a three turn session should commit something");
+}
