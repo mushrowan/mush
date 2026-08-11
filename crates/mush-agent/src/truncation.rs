@@ -51,15 +51,23 @@ fn save_full_output(content: &str) -> Option<PathBuf> {
     Some(path)
 }
 
+/// truncate text to a byte budget, breaking on the last line boundary
+pub fn truncate_to_budget(text: &str, budget: usize) -> &str {
+    if text.len() <= budget {
+        return text;
+    }
+    let budget = text.floor_char_boundary(budget);
+    match text[..budget].rfind('\n') {
+        Some(pos) => &text[..pos],
+        None => &text[..budget],
+    }
+}
+
 /// save full batch output to a file (cap at 10MB to avoid runaway writes)
 pub fn save_batch_output(content: &str) -> Option<PathBuf> {
     const MAX_SAVE_BYTES: usize = 10 * 1024 * 1024;
     if content.len() > MAX_SAVE_BYTES {
-        // truncate at a line boundary
-        let truncated = match content[..MAX_SAVE_BYTES].rfind('\n') {
-            Some(pos) => &content[..pos],
-            None => &content[..MAX_SAVE_BYTES],
-        };
+        let truncated = truncate_to_budget(content, MAX_SAVE_BYTES);
         let with_notice = format!(
             "{truncated}\n\n[...truncated at {MAX_SAVE_BYTES} byte cap, {} bytes omitted]",
             content.len() - truncated.len()
@@ -293,6 +301,22 @@ fn sample_line_tail(line: &str, max_bytes: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_budget_landing_mid_char_keeps_whole_chars() {
+        let text = "é".repeat(10);
+        assert_eq!(truncate_to_budget(&text, 5), "éé");
+    }
+
+    #[test]
+    fn a_budget_past_a_newline_breaks_at_the_newline() {
+        assert_eq!(truncate_to_budget("aa\nbb\ncc", 6), "aa\nbb");
+    }
+
+    #[test]
+    fn a_budget_bigger_than_the_text_keeps_all_of_it() {
+        assert_eq!(truncate_to_budget("aa\nbb", 99), "aa\nbb");
+    }
 
     #[test]
     fn small_output_not_truncated() {

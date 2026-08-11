@@ -18,18 +18,6 @@ use serde::Deserialize;
 const MAX_CALLS: usize = 25;
 const MAX_TOTAL_OUTPUT: usize = mush_agent::truncation::MAX_BYTES;
 
-/// truncate text to a byte budget on a line boundary
-fn truncate_to_budget(text: &str, budget: usize) -> &str {
-    if text.len() <= budget {
-        return text;
-    }
-    // find last newline before budget
-    match text[..budget].rfind('\n') {
-        Some(pos) => &text[..pos],
-        None => &text[..budget],
-    }
-}
-
 /// extract a "Full output: /path" reference from truncated tool output
 fn extract_file_path(text: &str) -> Option<&str> {
     for line in text.lines() {
@@ -305,7 +293,7 @@ impl AgentTool for BatchTool {
                 } else {
                     // preserve any file path from individual truncation
                     let file_ref = extract_file_path(item_text);
-                    let truncated = truncate_to_budget(item_text, per_item_budget);
+                    let truncated = truncation::truncate_to_budget(item_text, per_item_budget);
                     output.push_str(truncated);
                     let omitted = item_text.len() - truncated.len();
                     output.push_str(&format!("\n[…truncated, {omitted} bytes omitted"));
