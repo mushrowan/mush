@@ -119,7 +119,9 @@ fn strip_heredoc(input: &str) -> &str {
                 .unwrap_or("")
                 .trim()
                 .trim_matches(|c| c == '\'' || c == '"');
-            if let Some(end_pos) = rest.rfind(delim) {
+            if let Some(end_pos) = rest.rfind(delim)
+                && end_pos > body_start
+            {
                 let body = &rest[body_start + 1..end_pos];
                 return body.trim();
             }
@@ -1171,6 +1173,13 @@ mod tests {
             }
             _ => panic!("expected add hunk"),
         }
+    }
+
+    #[test]
+    fn parse_unterminated_heredoc_patch() {
+        let patch = "cat <<'EOF'\n*** Begin Patch\n*** Add File: hello.txt\n+hi\n*** End Patch";
+        let hunks = parse_patch(patch).unwrap();
+        assert_eq!(hunks.len(), 1);
     }
 
     #[test]
