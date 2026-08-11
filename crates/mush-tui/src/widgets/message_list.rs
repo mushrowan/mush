@@ -492,78 +492,7 @@ impl MessageList<'_> {
     /// text and thinking, the tool-args preview, the compaction label, and
     /// any queued steering messages
     fn materialise_trailing(&self, area: Rect, sel_ctx: &SelectionContext, frame: &mut FrameLines) {
-        // streaming content
-        if self.app.stream.active {
-            let dim = self.app.theme.dim;
-            let stream_content_width = message_content_width(area.width as usize);
-
-            if !self.app.stream.thinking.is_empty()
-                && self.app.thinking_display != crate::app::ThinkingDisplay::Hidden
-            {
-                let mut spans = vec![Span::raw(" ")];
-                spans.extend(shimmer_spans(
-                    " thinking",
-                    &self.app.theme.shimmer,
-                    self.app.shimmer_phase(),
-                    dim,
-                ));
-                frame.lines.push(Line::from(spans));
-                let visible_thinking = self.app.visible_streaming_thinking();
-                let strip = common_leading_space(visible_thinking);
-                for text_line in visible_thinking.lines() {
-                    let body = drop_leading_spaces(text_line, strip);
-                    let styled = Line::styled(body.to_string(), self.app.theme.thinking);
-                    frame
-                        .lines
-                        .extend(indent_line(styled, stream_content_width));
-                }
-                frame.lines.push(Line::raw(""));
-            }
-            if !self.app.stream.text.is_empty() {
-                let visible_text = self.app.visible_streaming_text();
-                let md_text =
-                    render_streaming_markdown_cached(self.app, visible_text, stream_content_width);
-                for line in md_text.lines {
-                    frame.lines.extend(indent_line(line, stream_content_width));
-                }
-            }
-            if self.app.stream.text.is_empty() && self.app.stream.thinking.is_empty() {
-                let mut spans = vec![Span::raw(" ")];
-                spans.extend(shimmer_spans(
-                    " working",
-                    &self.app.theme.shimmer,
-                    self.app.shimmer_phase(),
-                    dim,
-                ));
-                frame.lines.push(Line::from(spans));
-            }
-        }
-
-        // streaming tool args (model is building tool call, not yet executing)
-        if self.app.active_tools.is_empty() && !self.app.stream.tool_args.is_empty() {
-            // show a truncated preview of the args being built
-            let preview = truncate_line(&self.app.stream.tool_args, 60);
-            frame.lines.push(Line::from(vec![
-                Span::raw(" "),
-                Span::styled(" building ", self.app.theme.dim),
-                Span::styled(preview, self.app.theme.dim),
-            ]));
-        }
-
-        // backgrounded /compact run: drop a single busy-label row
-        // so the chat shows live progress without an inline system
-        // message that would persist forever in scrollback
-        if self.app.compacting {
-            let dim = self.app.theme.dim;
-            let mut spans = vec![Span::raw(" ")];
-            spans.extend(shimmer_spans(
-                " compacting…",
-                &self.app.theme.shimmer,
-                self.app.shimmer_phase(),
-                dim,
-            ));
-            frame.lines.push(Line::from(spans));
-        }
+        frame.lines.extend(streaming_lines(self.app, area.width));
 
         // queued (steering) messages always appear at the bottom
         for (i, msg) in self.app.messages.iter().enumerate() {
@@ -777,6 +706,95 @@ struct SelectionHint {
     is_cursor: bool,
     /// visual selection is active
     has_visual: bool,
+}
+
+/// the in-flight reply, the tool-args preview, and the compaction label.
+/// redrawn every frame, so none of it is ever committed to scrollback
+fn streaming_lines(app: &App, width: u16) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    if app.stream.active {
+        let dim = app.theme.dim;
+        let stream_content_width = message_content_width(width as usize);
+
+        if !app.stream.thinking.is_empty()
+            && app.thinking_display != crate::app::ThinkingDisplay::Hidden
+        {
+            let mut spans = vec![Span::raw(" ")];
+            spans.extend(shimmer_spans(
+                " thinking",
+                &app.theme.shimmer,
+                app.shimmer_phase(),
+                dim,
+            ));
+            lines.push(Line::from(spans));
+            let visible_thinking = app.visible_streaming_thinking();
+            let strip = common_leading_space(visible_thinking);
+            for text_line in visible_thinking.lines() {
+                let body = drop_leading_spaces(text_line, strip);
+                let styled = Line::styled(body.to_string(), app.theme.thinking);
+                lines.extend(indent_line(styled, stream_content_width));
+            }
+            lines.push(Line::raw(""));
+        }
+        if !app.stream.text.is_empty() {
+            let visible_text = app.visible_streaming_text();
+            let md_text = render_streaming_markdown_cached(app, visible_text, stream_content_width);
+            for line in md_text.lines {
+                lines.extend(indent_line(line, stream_content_width));
+            }
+        }
+        if app.stream.text.is_empty() && app.stream.thinking.is_empty() {
+            let mut spans = vec![Span::raw(" ")];
+            spans.extend(shimmer_spans(
+                " working",
+                &app.theme.shimmer,
+                app.shimmer_phase(),
+                dim,
+            ));
+            lines.push(Line::from(spans));
+        }
+    }
+
+    // streaming tool args (model is building tool call, not yet executing)
+    if app.active_tools.is_empty() && !app.stream.tool_args.is_empty() {
+        // show a truncated preview of the args being built
+        let preview = truncate_line(&app.stream.tool_args, 60);
+        lines.push(Line::from(vec![
+            Span::raw(" "),
+            Span::styled(" building ", app.theme.dim),
+            Span::styled(preview, app.theme.dim),
+        ]));
+    }
+
+    // backgrounded /compact run: a single busy-label row
+    if app.compacting {
+        let dim = app.theme.dim;
+        let mut spans = vec![Span::raw(" ")];
+        spans.extend(shimmer_spans(
+            " compacting…",
+            &app.theme.shimmer,
+            app.shimmer_phase(),
+            dim,
+        ));
+        lines.push(Line::from(spans));
+    }
+
+    lines
+}
+
+/// everything below committed history: the streaming block plus any
+/// queued steering the user has typed ahead
+pub fn live_lines(app: &App, width: u16) -> Vec<Line<'static>> {
+    let style = MessageStyle {
+        theme: &app.theme,
+        show_usage: app.interaction.show_usage_lines,
+    };
+    let mut lines = streaming_lines(app, width);
+    for msg in app.messages.iter().filter(|m| m.queued) {
+        lines.extend(message_lines(msg, &style, width));
+        lines.push(Line::raw(""));
+    }
+    lines
 }
 
 /// everything a message needs to render itself, with no viewport state

@@ -2881,3 +2881,57 @@ fn a_running_tool_defers_the_usage_line() {
     );
     assert!(!rendered_text(&lines).contains("150tok"));
 }
+
+// live region: everything below committed history, redrawn every frame
+
+fn live_text(app: &App, width: u16) -> String {
+    rendered_text(&live_lines(app, width))
+}
+
+#[test]
+fn an_idle_live_region_is_empty() {
+    let app = App::new("test".into(), TokenCount::new(200_000));
+    assert!(live_lines(&app, 80).is_empty());
+}
+
+#[test]
+fn a_streaming_reply_shows_in_the_live_region() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.start_streaming();
+    app.push_text_delta("partial answ");
+    for _ in 0..50 {
+        app.tick_streaming_text();
+    }
+    assert!(live_text(&app, 80).contains("partial answ"));
+}
+
+#[test]
+fn a_stream_with_nothing_yet_still_says_it_is_working() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.start_streaming();
+    assert!(live_text(&app, 80).contains("working"));
+}
+
+#[test]
+fn a_compacting_run_shows_a_label() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.compacting = true;
+    assert!(live_text(&app, 80).contains("compacting"));
+}
+
+#[test]
+fn queued_steering_stays_live() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.push_user_message("first");
+    app.push_queued_message("wait, also this");
+    assert!(live_text(&app, 80).contains("wait, also this"));
+}
+
+#[test]
+fn committed_messages_stay_out_of_the_live_region() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.push_user_message("old question");
+    app.start_streaming();
+    app.finish_streaming(None, None);
+    assert!(!live_text(&app, 80).contains("old question"));
+}

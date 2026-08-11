@@ -74,6 +74,20 @@ pub fn input_height(input: &crate::app::InputBuffer, area_width: u16) -> u16 {
     (layout.total_lines + 2).min(12)
 }
 
+/// rows the live region needs: the streaming block and queued steering,
+/// plus the tool panels, input box, and status bar below them. capped to
+/// what the terminal can actually give
+#[must_use]
+pub fn live_height(app: &App, width: u16, max: u16) -> u16 {
+    let content = u16::try_from(crate::widgets::message_list::live_lines(app, width).len())
+        .unwrap_or(u16::MAX);
+    content
+        .saturating_add(tool_panels_height(&app.active_tools, width))
+        .saturating_add(input_height(&app.input, width))
+        .saturating_add(status_bar_height(app, width))
+        .min(max)
+}
+
 /// compute the main layout
 pub fn layout(area: Rect, input_h: u16, tools_h: u16, status_h: u16) -> LayoutRegions {
     if tools_h > 0 {
@@ -387,5 +401,36 @@ mod tests {
             border_cell, "┬",
             "input bottom border above divider at col {pipe_x} should be `┬`, was `{border_cell}`"
         );
+    }
+
+    #[test]
+    fn an_idle_live_region_has_no_content_rows() {
+        let app = App::new("test".into(), TokenCount::new(200_000));
+        let height = live_height(&app, 80, 40);
+        let expected = input_height(&app.input, 80) + status_bar_height(&app, 80);
+        assert_eq!(height, expected);
+    }
+
+    #[test]
+    fn a_streaming_reply_makes_the_live_region_taller() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        let idle = live_height(&app, 80, 40);
+        app.start_streaming();
+        app.push_text_delta("an answer\n\nwith two paragraphs");
+        for _ in 0..80 {
+            app.tick_streaming_text();
+        }
+        assert!(live_height(&app, 80, 40) > idle);
+    }
+
+    #[test]
+    fn the_live_region_never_outgrows_the_terminal() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.start_streaming();
+        app.push_text_delta(&"a line of streamed text\n\n".repeat(200));
+        for _ in 0..5000 {
+            app.tick_streaming_text();
+        }
+        assert_eq!(live_height(&app, 80, 24), 24);
     }
 }
