@@ -69,6 +69,9 @@ pub struct Theme {
     // user message background
     pub user_msg_bg: Style,
 
+    // background grouping a tool call with its output
+    pub tool_panel_bg: Style,
+
     // code block selection highlight
     pub block_highlight_bg: Color,
 
@@ -224,6 +227,7 @@ impl Theme {
 
             // use indexed colour 236 (dark grey) for user bg on dark terms
             user_msg_bg: Style::default().bg(Color::Indexed(236)),
+            tool_panel_bg: Style::default().bg(Color::Indexed(234)),
             block_highlight_bg: Color::Indexed(237),
 
             pane_separator: Style::default().fg(Color::Indexed(236)),
@@ -351,6 +355,7 @@ impl Theme {
 
             // use indexed colour 254 (light grey) for user bg on light terms
             user_msg_bg: Style::default().bg(Color::Indexed(254)),
+            tool_panel_bg: Style::default().bg(Color::Indexed(253)),
             block_highlight_bg: Color::Indexed(253),
 
             pane_separator: Style::default().fg(Color::Indexed(253)),
@@ -584,6 +589,9 @@ fn apply_palette(theme: &mut Theme, p: &Base24Palette) {
     }
     if let Some(col) = c(&p.base01) {
         theme.user_msg_bg = Style::default().bg(col);
+    }
+    if let Some(col) = c(&p.base00) {
+        theme.tool_panel_bg = Style::default().bg(col);
     }
 }
 

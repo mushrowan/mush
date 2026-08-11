@@ -718,7 +718,7 @@ fn image_render_area_hidden_when_partially_above_viewport() {
 }
 
 #[test]
-fn completed_tool_renders_bordered_box() {
+fn a_completed_tool_is_a_tinted_panel_with_a_status_header() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.messages.push(DisplayMessage {
         tool_calls: vec![crate::app::DisplayToolCall {
@@ -733,16 +733,60 @@ fn completed_tool_renders_bordered_box() {
     });
     let buf = render_app(&app, 50, 10);
     let content = buffer_to_string(&buf);
-    // bordered box with green tick and tool name in title
-    assert!(content.contains("┌"), "missing top-left corner");
-    assert!(content.contains("✓"), "missing tick");
-    assert!(content.contains("bash"), "missing tool name");
+
+    assert!(
+        !content.contains(['┌', '└', '┐', '┘', '│']),
+        "a tool call should not be boxed:\n{content}"
+    );
+    let header = find_buffer_row(&buf, |line| line.contains("bash"));
+    assert_eq!(buffer_row(&buf, header).trim_end(), "  bash · done");
     assert!(content.contains("cargo test"), "missing summary");
-    assert!(content.contains("└"), "missing bottom-left corner");
+
+    // header and body share one tint, two columns in
+    let tint = app.theme.tool_panel_bg.bg.unwrap();
+    let body = find_buffer_row(&buf, |line| line.contains("cargo test"));
+    assert_eq!(buffer_row(&buf, body).find("cargo test"), Some(2));
+    for y in [header, body] {
+        for x in [0, 2, buf.area.width - 1] {
+            assert_eq!(
+                buf[(x, y)].bg,
+                tint,
+                "cell {x},{y} should keep the panel tint:\n{content}"
+            );
+        }
+    }
 }
 
 #[test]
-fn failed_tool_renders_red_bordered_box() {
+fn batched_tools_stack_one_panel_per_call() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    let tool = |name: &str| crate::app::DisplayToolCall {
+        name: name.into(),
+        summary: format!("{name} summary"),
+        status: ToolCallStatus::Done,
+        output_preview: None,
+        image_data: None,
+        batch: 1,
+    };
+    app.messages.push(DisplayMessage {
+        tool_calls: vec![tool("read"), tool("grep"), tool("bash"), tool("edit")],
+        ..DisplayMessage::new(MessageRole::Assistant, "looking")
+    });
+    let buf = render_app(&app, 100, 20);
+    let content = buffer_to_string(&buf);
+
+    let rows: Vec<u16> = ["read", "grep", "bash", "edit"]
+        .iter()
+        .map(|n| find_buffer_row(&buf, |line| line.contains(&format!("  {n} "))))
+        .collect();
+    let mut sorted = rows.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(rows, sorted, "panels should stack in order:\n{content}");
+}
+
+#[test]
+fn a_failed_tool_says_error_in_red() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.messages.push(DisplayMessage {
         tool_calls: vec![crate::app::DisplayToolCall {
@@ -757,201 +801,16 @@ fn failed_tool_renders_red_bordered_box() {
     });
     let buf = render_app(&app, 60, 12);
     let content = buffer_to_string(&buf);
-    assert!(content.contains("✗"), "missing cross");
-    assert!(content.contains("bash"), "missing tool name");
-    assert!(content.contains("error"), "missing error output");
-}
 
-#[test]
-fn parallel_tools_render_side_by_side() {
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-    app.messages.push(DisplayMessage {
-        tool_calls: vec![
-            crate::app::DisplayToolCall {
-                name: "read".into(),
-                summary: "a.rs".into(),
-                status: ToolCallStatus::Done,
-                output_preview: None,
-                image_data: None,
-                batch: 1,
-            },
-            crate::app::DisplayToolCall {
-                name: "read".into(),
-                summary: "b.rs".into(),
-                status: ToolCallStatus::Done,
-                output_preview: None,
-                image_data: None,
-                batch: 1, // same batch = parallel
-            },
-        ],
-        ..DisplayMessage::new(MessageRole::Assistant, "reading")
-    });
-    // 80 wide: each panel gets ~39 cols, > MIN_TOOL_BOX_WIDTH (30)
-    let buf = render_app(&app, 80, 10);
-    let content = buffer_to_string(&buf);
-    // side-by-side uses ┬ as a junction between panels
+    let header = find_buffer_row(&buf, |line| line.contains("bash"));
+    assert_eq!(buffer_row(&buf, header).trim_end(), "  bash \u{b7} error");
     assert!(
-        content.contains("┬"),
-        "missing top junction (not side-by-side)"
-    );
-    assert!(content.contains("a.rs"), "missing first tool summary");
-    assert!(content.contains("b.rs"), "missing second tool summary");
-}
-
-// grid layout for batched tools
-#[test]
-fn grid_dimensions_single_row_when_wide() {
-    assert_eq!(grid_dimensions(4, 200, 30), (1, 4));
-    assert_eq!(grid_dimensions(2, 80, 30), (1, 2));
-}
-
-#[test]
-fn grid_dimensions_forms_grid_on_mid_width() {
-    // 4 tools at width 80, min 30 → 80/30 = 2 cols, so 2x2
-    assert_eq!(grid_dimensions(4, 80, 30), (2, 2));
-    // 6 tools at width 100, min 30 → 100/30 = 3 cols, so 2x3
-    assert_eq!(grid_dimensions(6, 100, 30), (2, 3));
-}
-
-#[test]
-fn grid_dimensions_single_column_when_narrow() {
-    assert_eq!(grid_dimensions(4, 30, 30), (4, 1));
-    assert_eq!(grid_dimensions(3, 20, 30), (3, 1));
-}
-
-#[test]
-fn four_batched_tools_render_as_2x2_grid_on_mid_width() {
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-    let make = |name: &str| crate::app::DisplayToolCall {
-        name: "read".into(),
-        summary: name.into(),
-        status: ToolCallStatus::Done,
-        output_preview: None,
-        image_data: None,
-        batch: 1,
-    };
-    app.messages.push(DisplayMessage {
-        tool_calls: vec![make("a.rs"), make("b.rs"), make("c.rs"), make("d.rs")],
-        ..DisplayMessage::new(MessageRole::Assistant, "reading")
-    });
-    // 80 wide: 80/30 = 2 cols → 2x2 grid, a+b on row 1, c+d on row 2
-    let buf = render_app(&app, 80, 16);
-    let content = buffer_to_string(&buf);
-    // each row should have a ┬ junction (two panels joined)
-    let junction_rows = content.lines().filter(|l| l.contains("┬")).count();
-    assert_eq!(
-        junction_rows, 2,
-        "expected two grid rows with ┬ junctions, got:\n{content}"
-    );
-    // all four summaries visible
-    for name in &["a.rs", "b.rs", "c.rs", "d.rs"] {
-        assert!(content.contains(name), "missing {name} in:\n{content}");
-    }
-}
-
-#[test]
-fn side_by_side_box_lines_have_equal_width() {
-    // regression: content rows were 1 char wider per panel than borders
-    // because the leading space in " {text}" wasn't accounted for in padding
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-    app.messages.push(DisplayMessage {
-        tool_calls: vec![
-            crate::app::DisplayToolCall {
-                name: "read".into(),
-                summary: "file.rs".into(),
-                status: ToolCallStatus::Done,
-                output_preview: Some("L1: hello\nL2: world".into()),
-                image_data: None,
-                batch: 1,
-            },
-            crate::app::DisplayToolCall {
-                name: "read".into(),
-                summary: "other.rs".into(),
-                status: ToolCallStatus::Done,
-                output_preview: Some("L1: foo\nL2: bar".into()),
-                image_data: None,
-                batch: 1,
-            },
-        ],
-        ..DisplayMessage::new(MessageRole::Assistant, "reading files")
-    });
-    let buf = render_app(&app, 100, 20);
-    let content = buffer_to_string(&buf);
-
-    // find lines that belong to the box (contain box-drawing chars)
-    let box_lines: Vec<&str> = content
-        .lines()
-        .filter(|l| {
-            let t = l.trim();
-            t.starts_with('┌') || t.starts_with('│') || t.starts_with('└')
-        })
-        .collect();
-
-    assert!(
-        box_lines.len() >= 3,
-        "expected at least top + content + bottom, got {}",
-        box_lines.len()
+        content.contains("E0063"),
+        "missing error output:\n{content}"
     );
 
-    // find the char-column of the rightmost non-whitespace on each line
-    let right_edges: Vec<usize> = box_lines
-        .iter()
-        .map(|l| {
-            l.chars()
-                .collect::<Vec<_>>()
-                .iter()
-                .rposition(|c| !c.is_whitespace())
-                .map(|pos| pos + 1)
-                .unwrap_or(0)
-        })
-        .collect();
-
-    let first = right_edges[0];
-    for (i, &edge) in right_edges.iter().enumerate() {
-        assert_eq!(
-            edge, first,
-            "box line {i} right edge at col {edge} != expected {first}\n  line: {:?}\n  all edges: {right_edges:?}",
-            box_lines[i]
-        );
-    }
-}
-
-#[test]
-fn side_by_side_boxes_pad_wide_chars_by_cells() {
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-    let output = "界".repeat(18);
-    app.messages.push(DisplayMessage {
-        tool_calls: vec![
-            crate::app::DisplayToolCall {
-                name: "bash".into(),
-                summary: "first".into(),
-                status: ToolCallStatus::Done,
-                output_preview: Some(output.clone()),
-                image_data: None,
-                batch: 1,
-            },
-            crate::app::DisplayToolCall {
-                name: "bash".into(),
-                summary: "second".into(),
-                status: ToolCallStatus::Done,
-                output_preview: Some("ok".into()),
-                image_data: None,
-                batch: 1,
-            },
-        ],
-        ..DisplayMessage::new(MessageRole::Assistant, "running")
-    });
-
-    let buf = render_app(&app, 80, 16);
-    let content = buffer_to_string(&buf);
-    let top_y = find_buffer_row(&buf, |line| line.trim_start().starts_with('┌'));
-    let body_y = find_buffer_row(&buf, |line| line.contains('界'));
-
-    assert_eq!(
-        right_edge_cell(&buf, body_y),
-        right_edge_cell(&buf, top_y),
-        "side-by-side body row should align with border by terminal cells:\n{content}"
-    );
+    let red = app.theme.tool_error.fg.unwrap();
+    assert_eq!(buf[(2, header)].fg, red, "tool name should be red");
 }
 
 #[test]
@@ -1025,71 +884,6 @@ fn selected_message_in_message_mode_gets_highlight() {
 }
 
 #[test]
-fn parallel_tools_stack_when_narrow() {
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-    app.messages.push(DisplayMessage {
-        tool_calls: vec![
-            crate::app::DisplayToolCall {
-                name: "read".into(),
-                summary: "a.rs".into(),
-                status: ToolCallStatus::Done,
-                output_preview: None,
-                image_data: None,
-                batch: 1,
-            },
-            crate::app::DisplayToolCall {
-                name: "read".into(),
-                summary: "b.rs".into(),
-                status: ToolCallStatus::Done,
-                output_preview: None,
-                image_data: None,
-                batch: 1,
-            },
-        ],
-        ..DisplayMessage::new(MessageRole::Assistant, "reading")
-    });
-    // 40 wide: each panel would be ~19 cols, < MIN_TOOL_BOX_WIDTH (30)
-    let buf = render_app(&app, 40, 12);
-    let content = buffer_to_string(&buf);
-    // stacked: no junction, two separate boxes
-    assert!(!content.contains("┬"), "should not be side-by-side");
-    assert!(content.contains("a.rs"), "missing first tool");
-    assert!(content.contains("b.rs"), "missing second tool");
-}
-
-#[test]
-fn error_tool_box_has_red_border() {
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-    app.messages.push(DisplayMessage {
-        tool_calls: vec![crate::app::DisplayToolCall {
-            name: "read".into(),
-            summary: "missing.rs".into(),
-            status: ToolCallStatus::Error,
-            output_preview: Some("file not found".into()),
-            image_data: None,
-            batch: 1,
-        }],
-        ..DisplayMessage::new(MessageRole::Assistant, "reading")
-    });
-    let buf = render_app(&app, 50, 10);
-    // check that the top-left corner cell has red foreground
-    for y in 0..buf.area.height {
-        for x in 0..buf.area.width {
-            let cell = &buf[(x, y)];
-            if cell.symbol() == "┌" {
-                assert_eq!(
-                    cell.fg,
-                    Color::Red,
-                    "border should be red for error tool at ({x}, {y})"
-                );
-                return;
-            }
-        }
-    }
-    panic!("no ┌ found in rendered output");
-}
-
-#[test]
 fn wrap_text_short_line_unchanged() {
     assert_eq!(wrap_text("hello", 20), vec!["hello"]);
 }
@@ -1150,70 +944,6 @@ fn tool_box_wraps_long_summary() {
 }
 
 #[test]
-fn short_content_tool_box_sizes_to_content_not_available_width() {
-    // a read tool with a short path on a wide terminal should render a
-    // narrow box, not a full-width one. the border runs should end well
-    // before the right edge
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-    app.messages.push(DisplayMessage {
-        tool_calls: vec![crate::app::DisplayToolCall {
-            name: "read".into(),
-            summary: "a.rs".into(),
-            status: ToolCallStatus::Done,
-            output_preview: None,
-            image_data: None,
-            batch: 1,
-        }],
-        ..DisplayMessage::new(MessageRole::Assistant, "")
-    });
-    let width = 120u16;
-    let buf = render_app(&app, width, 8);
-    let content = buffer_to_string(&buf);
-    // find a line with the top border and confirm it doesn't stretch
-    // across the whole terminal
-    let top_line = content
-        .lines()
-        .find(|l| l.contains("┌"))
-        .expect("top border row present");
-    let box_width = top_line.trim_end().chars().count();
-    assert!(
-        box_width < width as usize,
-        "expected content-sized box, got width {box_width} on {width}-col terminal"
-    );
-}
-
-#[test]
-fn long_content_tool_box_clamps_to_available_width() {
-    // long summary that exceeds the terminal width should clamp to the
-    // available width (same behaviour as before content-sizing)
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-    let long_path = "a".repeat(200);
-    app.messages.push(DisplayMessage {
-        tool_calls: vec![crate::app::DisplayToolCall {
-            name: "read".into(),
-            summary: long_path,
-            status: ToolCallStatus::Done,
-            output_preview: None,
-            image_data: None,
-            batch: 1,
-        }],
-        ..DisplayMessage::new(MessageRole::Assistant, "")
-    });
-    let buf = render_app(&app, 40, 12);
-    let content = buffer_to_string(&buf);
-    let top_line = content
-        .lines()
-        .find(|l| l.contains("┌"))
-        .expect("top border row present");
-    // box spans most of the 40-col terminal (accounting for BOX_INDENT = 1)
-    let box_width = top_line.trim_end().chars().count();
-    assert!(
-        box_width >= 38,
-        "expected clamped-wide box, got {box_width}"
-    );
-}
-
-#[test]
 fn completed_tool_box_sizes_output_with_halfwidth_dakuten_by_cells() {
     let output = "abcｶﾞ".repeat(4);
     let mut app = App::new("test".into(), TokenCount::new(200_000));
@@ -1254,13 +984,12 @@ fn read_tool_box_pads_halfwidth_dakuten_by_cells() {
 
     let buf = render_app(&app, 80, 12);
     let content = buffer_to_string(&buf);
-    let top_y = find_buffer_row(&buf, |line| line.trim_start().starts_with('┌'));
-    let body_y = find_buffer_row(&buf, |line| line.contains("abcｶﾞ"));
+    let body = find_buffer_row(&buf, |line| line.contains("abcｶﾞ"));
 
     assert_eq!(
-        right_edge_cell(&buf, body_y),
-        right_edge_cell(&buf, top_y),
-        "read tool body row should align with border by terminal cells:\n{content}"
+        buf[(79, body)].bg,
+        app.theme.tool_panel_bg.bg.unwrap(),
+        "half-width dakuten should pad by cells to the panel edge:\n{content}"
     );
 }
 
@@ -1376,12 +1105,8 @@ fn read_tool_box_trims_shared_leading_indent() {
         .lines()
         .find(|l| l.contains("fn main"))
         .expect("fn main row present");
-    // work in char units: `│` is multibyte so byte positions mislead
-    let pipe_char = fn_line.chars().position(|c| c == '│').unwrap();
-    let fn_byte = fn_line.find("fn main").unwrap();
-    let fn_char = fn_line[..fn_byte].chars().count();
-    let gap = fn_char - pipe_char;
-    // layout: │ + space + "1" + 2-space sep = 5 chars, fn should sit at +5
+    // panel pad, a one-digit gutter and its separator
+    let gap = fn_line.chars().take_while(|c| *c == ' ').count();
     assert!(
         gap <= 6,
         "fn main should sit against the gutter after trimming 8 leading \
@@ -1637,13 +1362,6 @@ fn find_buffer_row(buf: &Buffer, predicate: impl Fn(&str) -> bool) -> u16 {
     (0..buf.area.height)
         .find(|&y| predicate(&buffer_row(buf, y)))
         .expect("buffer row present")
-}
-
-fn right_edge_cell(buf: &Buffer, y: u16) -> u16 {
-    (0..buf.area.width)
-        .rev()
-        .find(|&x| !buf[(x, y)].symbol().trim().is_empty())
-        .expect("row has non-empty cell")
 }
 
 fn buffer_row(buf: &Buffer, y: u16) -> String {

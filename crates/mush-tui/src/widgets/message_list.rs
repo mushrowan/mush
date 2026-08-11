@@ -1490,65 +1490,6 @@ fn rendered_line_char_count(line: &Line<'_>) -> usize {
         .sum()
 }
 
-// bordered tool boxes for completed tool calls
-/// indent for tool boxes (matches message content indent)
-const BOX_INDENT: usize = 1;
-
-/// minimum width per panel for side-by-side tool boxes
-const MIN_TOOL_BOX_WIDTH: u16 = 30;
-
-/// minimum width for a content-sized single tool box. keeps very short
-/// tools from rendering as awkwardly-thin slivers
-const MIN_SINGLE_BOX_WIDTH: usize = 20;
-
-/// when a tool box contains diff output (edit tool), prefer a natural
-/// width that allows `widgets::diff` to pick side-by-side rendering.
-/// this is the side-by-side threshold + box chrome
-const DIFF_PREFERRED_WIDTH: usize = crate::widgets::diff::SIDE_BY_SIDE_MIN_WIDTH + 4;
-const BASH_OUTPUT_WRAP_WIDTH: usize = 88;
-
-/// compute the natural width a single tool box needs to render its
-/// title, summary, and output_preview without wrapping any individual
-/// line. the 4 extra columns account for `│ ` + content + ` │` chrome.
-/// tools with diff output grow to `DIFF_PREFERRED_WIDTH` so side-by-side
-/// diffs are reachable on wide terminals. returns a width that the
-/// caller should clamp to available space
-fn natural_single_box_width(tc: &DisplayToolCall) -> usize {
-    // "┌─ icon name ─┐" = corner(2) + icon+spaces(3) + name + space(1) + fill(1) + corner(1)
-    let title_w = text_cell_width(&tc.name) + 8;
-    let summary_w = text_cell_width(&tc.summary) + 4;
-    let output_w = tc
-        .output_preview
-        .as_deref()
-        .map(|o| {
-            o.lines()
-                .map(|line| boxed_preview_width(line, tc.name.as_str()))
-                .max()
-                .unwrap_or(0)
-                + 4
-        })
-        .unwrap_or(0);
-    let diff_w = if tc.name == "edit" && tc.output_preview.is_some() {
-        DIFF_PREFERRED_WIDTH
-    } else {
-        0
-    };
-    title_w
-        .max(summary_w)
-        .max(output_w)
-        .max(diff_w)
-        .max(MIN_SINGLE_BOX_WIDTH)
-}
-
-fn boxed_preview_width(line: &str, tool_name: &str) -> usize {
-    let width = text_cell_width(line);
-    if tool_name.eq_ignore_ascii_case("bash") {
-        width.max(BASH_OUTPUT_WRAP_WIDTH)
-    } else {
-        width
-    }
-}
-
 fn text_cell_width(text: &str) -> usize {
     usize::from(text.cell_width())
 }
@@ -1570,23 +1511,6 @@ fn spans_cell_width(spans: &[Span<'_>]) -> usize {
 
 fn line_cell_width(line: &Line<'_>) -> usize {
     spans_cell_width(&line.spans)
-}
-
-/// compute a grid shape (rows, cols) for laying out `n` panels across
-/// an area of `width` columns with a minimum per-panel width of `min`.
-///
-/// returns `(rows, cols)` where `cols = min(n, max(1, width / min))`
-/// and `rows = ceil(n / cols)`. when the width doesn't fit a single
-/// panel we still return `cols = 1` so callers can stack vertically
-#[must_use]
-pub(crate) fn grid_dimensions(n: usize, width: usize, min: usize) -> (usize, usize) {
-    if n == 0 {
-        return (0, 0);
-    }
-    let max_cols = (width / min).max(1);
-    let cols = n.min(max_cols);
-    let rows = n.div_ceil(cols);
-    (rows, cols)
 }
 
 fn render_completed_tool_boxes_cached(
@@ -1746,167 +1670,129 @@ fn render_tool_box_group(
     lines: &mut Vec<Line<'static>>,
     theme: &Theme,
 ) {
-    let usable = total_width.saturating_sub(BOX_INDENT as u16);
-    if usable < 8 || tools.is_empty() {
+    if total_width < 8 {
         return;
     }
-
-    let n = tools.len();
-    if n == 1 {
-        // single tool: content-size and render standalone
-        let natural = natural_single_box_width(tools[0]);
-        let width = natural.min(usable as usize);
-        render_single_tool_box(tools[0], width, lines, theme);
-        return;
-    }
-
-    // multiple tools: lay out as a grid. rows x cols, cols capped by
-    // `usable / MIN_TOOL_BOX_WIDTH`. each grid row is rendered as one
-    // `render_side_by_side_boxes` call; single-column rows fall back
-    // to individual content-sized boxes
-    let (_rows, cols) = grid_dimensions(n, usable as usize, MIN_TOOL_BOX_WIDTH as usize);
-    if cols == 1 {
-        for tool in tools {
-            let natural = natural_single_box_width(tool);
-            let width = natural.min(usable as usize);
-            render_single_tool_box(tool, width, lines, theme);
-        }
-        return;
-    }
-    for chunk in tools.chunks(cols) {
-        if chunk.len() == 1 {
-            // tail row with a lone tool: render as single content-sized box
-            let natural = natural_single_box_width(chunk[0]);
-            let width = natural.min(usable as usize);
-            render_single_tool_box(chunk[0], width, lines, theme);
-        } else {
-            render_side_by_side_boxes(chunk, usable as usize, lines, theme);
-        }
+    for tc in tools {
+        render_tool_panel(tc, total_width as usize, lines, theme);
     }
 }
 
-/// render one completed tool as a bordered box
-fn render_single_tool_box(
+/// two columns of padding either side of a panel's content
+const PANEL_PAD: usize = 2;
+
+/// width available to a panel's content
+fn panel_content_width(width: usize) -> usize {
+    width.saturating_sub(PANEL_PAD * 2).max(1)
+}
+
+/// one row of a tool panel: `content` indented and padded out to `width`,
+/// all of it on the panel background
+fn push_panel_line(
+    content: Vec<Span<'static>>,
+    width: usize,
+    bg: Style,
+    lines: &mut Vec<Line<'static>>,
+) {
+    let pad = panel_content_width(width).saturating_sub(spans_cell_width(&content));
+    let mut spans = vec![Span::styled(" ".repeat(PANEL_PAD), bg)];
+    spans.extend(content.into_iter().map(|s| {
+        let style = s.style;
+        Span::styled(s.content, bg.patch(style))
+    }));
+    spans.push(Span::styled(" ".repeat(pad + PANEL_PAD), bg));
+    lines.push(Line::from(spans));
+}
+
+/// one completed tool: a `name . status` header over its summary and output
+fn render_tool_panel(
     tc: &DisplayToolCall,
     width: usize,
-    lines: &mut Vec<Line<'_>>,
+    lines: &mut Vec<Line<'static>>,
     theme: &Theme,
 ) {
-    let (icon, colour) = tool_icon_colour(tc, theme);
-    let border = Style::default().fg(colour);
-    let dim = theme.dim;
+    let bg = theme.tool_panel_bg;
+    let inner = panel_content_width(width);
+    let (status, colour) = tool_status_label(tc, theme);
 
-    // title: " ✓ name "
-    let title_text = format!(" {icon} {} ", tc.name);
-    let title_width = text_cell_width(&title_text);
-    // ┌─ + title + ─...─ + ┐  (width total)
-    let fill = width.saturating_sub(title_width + 3); // 3 = ┌─ + ┐
+    push_panel_line(
+        vec![
+            Span::styled(
+                tc.name.clone(),
+                Style::default().fg(colour).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" \u{b7} ", theme.dim),
+            Span::styled(status, Style::default().fg(colour)),
+        ],
+        width,
+        bg,
+        lines,
+    );
 
-    // top border
-    let indent = Span::raw(" ".repeat(BOX_INDENT));
-    lines.push(Line::from(vec![
-        indent.clone(),
-        Span::styled("┌─", border),
-        Span::styled(format!(" {icon} "), Style::default().fg(colour)),
-        Span::styled(
-            tc.name.clone(),
-            Style::default().fg(colour).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" ", border),
-        Span::styled("─".repeat(fill), border),
-        Span::styled("┐", border),
-    ]));
-
-    // content: summary line
-    let inner = width.saturating_sub(4); // │ + space + space + │
     if let Some(lang) = tool_summary_language(tc) {
         push_highlighted_box_line(
             &tc.summary,
             inner,
             &ToolHighlightCtx {
-                border,
-                fallback_style: dim,
-                indent: indent.clone(),
+                bg,
+                fallback_style: theme.dim,
                 lang,
                 theme,
             },
             lines,
         );
     } else {
-        push_box_content_line(&tc.summary, inner, border, dim, &indent, lines);
+        push_box_content_line(&tc.summary, inner, bg, theme.dim, lines);
     }
 
-    // content: output preview with diff colouring / syntax highlighting
-    if let Some(ref output) = tc.output_preview {
-        if tc.name == "edit" {
-            // edit tool produces structured +/- diffs: render in side-by-side
-            // columns when the inner panel is wide enough, otherwise inline.
-            // `tc.summary` holds the file path for edit, use it to detect a
-            // syntect language so we can highlight unchanged tokens
-            let lang = crate::syntax::lang_from_path(&tc.summary);
-            for row in super::diff::render_diff_with_lang_mode(
-                output,
-                inner,
-                theme,
-                lang,
-                super::diff::DiffLayout::Inline,
-            ) {
-                let mut spans = vec![indent.clone(), Span::styled("│ ", border)];
-                spans.extend(row.spans);
-                spans.push(Span::styled(" │", border));
-                lines.push(Line::from(spans));
-            }
-        } else if tc.name == "read" {
-            // read tool output is `L<n>: content`. right-align dim line
-            // numbers as a gutter, syntect-highlight content when possible
-            let ctx = ReadLineCtx {
-                border,
-                indent: indent.clone(),
-                gutter_width: read_line_number_width(output),
-                strip_indent: read_min_content_indent(output),
-                lang: crate::syntax::lang_from_path(&tc.summary),
-                theme,
-            };
-            for text_line in output.lines() {
-                push_read_content_line(text_line, inner, &ctx, lines);
-            }
-        } else {
-            // generic tool output: parse ANSI SGR escapes into styled spans
-            // so bash / cargo / jj output doesn't render as garbage escape
-            // sequences. fall back to the old plain path for output that
-            // contains no escapes at all
-            let lang = tool_output_language(tc);
-            for text_line in output.lines() {
-                let base_style = diff_line_style(text_line, theme);
-                if text_line.contains('\x1b') {
-                    push_ansi_box_lines(text_line, inner, border, base_style, &indent, lines);
-                } else if let Some(lang) = lang {
-                    push_highlighted_box_line(
-                        text_line,
-                        inner,
-                        &ToolHighlightCtx {
-                            border,
-                            fallback_style: base_style,
-                            indent: indent.clone(),
-                            lang,
-                            theme,
-                        },
-                        lines,
-                    );
-                } else {
-                    push_box_content_line(text_line, inner, border, base_style, &indent, lines);
-                }
+    let Some(ref output) = tc.output_preview else {
+        return;
+    };
+    if tc.name == "edit" {
+        let lang = crate::syntax::lang_from_path(&tc.summary);
+        for row in super::diff::render_diff_with_lang_mode(
+            output,
+            inner,
+            theme,
+            lang,
+            super::diff::DiffLayout::Inline,
+        ) {
+            push_panel_line(row.spans, width, bg, lines);
+        }
+    } else if tc.name == "read" {
+        let ctx = ReadLineCtx {
+            bg,
+            gutter_width: read_line_number_width(output),
+            strip_indent: read_min_content_indent(output),
+            lang: crate::syntax::lang_from_path(&tc.summary),
+            theme,
+        };
+        for text_line in output.lines() {
+            push_read_content_line(text_line, inner, &ctx, lines);
+        }
+    } else {
+        let lang = tool_output_language(tc);
+        for text_line in output.lines() {
+            let base_style = diff_line_style(text_line, theme);
+            if text_line.contains('\x1b') {
+                push_ansi_box_lines(text_line, inner, bg, base_style, lines);
+            } else if let Some(lang) = lang {
+                push_highlighted_box_line(
+                    text_line,
+                    inner,
+                    &ToolHighlightCtx {
+                        bg,
+                        fallback_style: base_style,
+                        lang,
+                        theme,
+                    },
+                    lines,
+                );
+            } else {
+                push_box_content_line(text_line, inner, bg, base_style, lines);
             }
         }
     }
-
-    // bottom border
-    lines.push(Line::from(vec![
-        indent,
-        Span::styled("└", border),
-        Span::styled("─".repeat(width.saturating_sub(2)), border),
-        Span::styled("┘", border),
-    ]));
 }
 
 fn tool_summary_language(tc: &DisplayToolCall) -> Option<&'static str> {
@@ -1917,38 +1803,29 @@ fn tool_summary_language(tc: &DisplayToolCall) -> Option<&'static str> {
     }
 }
 
-fn push_ansi_box_lines<'a>(
+fn push_ansi_box_lines(
     text: &str,
     inner_width: usize,
-    border: Style,
+    bg: Style,
     base_style: Style,
-    indent: &Span<'a>,
-    lines: &mut Vec<Line<'a>>,
+    lines: &mut Vec<Line<'static>>,
 ) {
-    let rows = super::ansi::ansi_lines(text, base_style);
-    for spans in rows {
+    for spans in super::ansi::ansi_lines(text, base_style) {
         for wrapped in wrap_styled_spans(spans, inner_width, base_style) {
-            let mut line_spans = vec![indent.clone(), Span::styled("│ ", border)];
-            line_spans.extend(wrapped);
-            line_spans.push(Span::styled(" │", border));
-            lines.push(Line::from(line_spans));
+            push_panel_line(wrapped, inner_width + PANEL_PAD * 2, bg, lines);
         }
     }
 }
 
-fn push_fitted_box_line<'a>(
+fn push_fitted_box_line(
     spans: Vec<Span<'static>>,
     inner_width: usize,
-    border: Style,
+    bg: Style,
     base_style: Style,
-    indent: &Span<'a>,
-    lines: &mut Vec<Line<'a>>,
+    lines: &mut Vec<Line<'static>>,
 ) {
     let fitted = super::diff::fit_spans(spans, inner_width, base_style);
-    let mut line_spans = vec![indent.clone(), Span::styled("│ ", border)];
-    line_spans.extend(fitted);
-    line_spans.push(Span::styled(" │", border));
-    lines.push(Line::from(line_spans));
+    push_panel_line(fitted, inner_width + PANEL_PAD * 2, bg, lines);
 }
 
 fn tool_output_language(tc: &DisplayToolCall) -> Option<&'static str> {
@@ -1960,197 +1837,48 @@ fn tool_output_language(tc: &DisplayToolCall) -> Option<&'static str> {
     }
 }
 
-/// render parallel tools side-by-side in a shared bordered box
-fn render_side_by_side_boxes(
-    tools: &[&DisplayToolCall],
-    width: usize,
-    lines: &mut Vec<Line<'_>>,
-    theme: &Theme,
-) {
-    let n = tools.len();
-    // each panel width (including its borders): divide evenly
-    // total = panel_w * n + (n-1) separators... but we share borders
-    // shared layout: ┌─ a ─┬─ b ─┐ = width total
-    // each panel inner = (width - n - 1) / n
-    let inner_total = width.saturating_sub(n + 1); // n+1 border chars (│ or ┬/┴)
-    let panel_inner = inner_total / n;
-    let remainder = inner_total % n;
-
-    let indent = Span::raw(" ".repeat(BOX_INDENT));
-
-    // determine border colour per panel
-    let colours: Vec<Color> = tools
-        .iter()
-        .map(|tc| tool_icon_colour(tc, theme).1)
-        .collect();
-
-    // top border
-    let mut top_spans = vec![indent.clone()];
-    for (i, tc) in tools.iter().enumerate() {
-        let (icon, colour) = tool_icon_colour(tc, theme);
-        let border = Style::default().fg(colour);
-        let corner = if i == 0 { "┌─" } else { "┬─" };
-        let title = format!(" {icon} {} ", tc.name);
-        let title_width = text_cell_width(&title);
-        let pw = panel_inner + if i < remainder { 1 } else { 0 };
-        let fill = pw.saturating_sub(title_width + 1); // 1 for the ─ after corner
-
-        top_spans.push(Span::styled(corner, border));
-        top_spans.push(Span::styled(
-            format!(" {icon} "),
-            Style::default().fg(colour),
-        ));
-        top_spans.push(Span::styled(
-            tc.name.clone(),
-            Style::default().fg(colour).add_modifier(Modifier::BOLD),
-        ));
-        top_spans.push(Span::styled(" ", border));
-        top_spans.push(Span::styled("─".repeat(fill), border));
-    }
-    top_spans.push(Span::styled(
-        "┐",
-        Style::default().fg(*colours.last().unwrap_or(&Color::DarkGray)),
-    ));
-    lines.push(Line::from(top_spans));
-
-    // content rows: max of content heights across panels
-    // pre-wrap content per panel to fit panel width
-    let panel_contents: Vec<Vec<String>> = tools
-        .iter()
-        .enumerate()
-        .map(|(i, tc)| {
-            let pw = panel_inner + if i < remainder { 1 } else { 0 };
-            let text_width = pw.saturating_sub(1); // reserve 1 for leading space
-            let mut content = Vec::new();
-            for wrapped in wrap_text(&tc.summary, text_width) {
-                content.push(wrapped);
-            }
-            if let Some(ref output) = tc.output_preview {
-                // side-by-side panels can't easily preserve ANSI colouring
-                // because they pack multiple tool outputs into a single
-                // line-per-row grid. strip escapes so content is at least
-                // readable; the single-panel path keeps full colour
-                let cleaned = if output.contains('\x1b') {
-                    super::ansi::strip_ansi(output)
-                } else {
-                    output.clone()
-                };
-                for line in cleaned.lines() {
-                    for wrapped in wrap_text(line, text_width) {
-                        content.push(wrapped);
-                    }
-                }
-            }
-            content
-        })
-        .collect();
-
-    let max_rows = panel_contents.iter().map(|c| c.len()).max().unwrap_or(0);
-
-    for row in 0..max_rows {
-        let mut spans = vec![indent.clone()];
-        for (i, content) in panel_contents.iter().enumerate() {
-            let pw = panel_inner + if i < remainder { 1 } else { 0 };
-            let border = Style::default().fg(colours[i]);
-            spans.push(Span::styled("│", border));
-
-            let text = content.get(row).map(|s| s.as_str()).unwrap_or("");
-            let style = diff_line_style(text, theme);
-            let used = text_cell_width(text) + 1; // +1 for leading space
-            let pad = pw.saturating_sub(used);
-            spans.push(Span::styled(format!(" {text}"), style));
-            spans.push(Span::raw(" ".repeat(pad)));
-        }
-        spans.push(Span::styled(
-            "│",
-            Style::default().fg(*colours.last().unwrap_or(&Color::DarkGray)),
-        ));
-        lines.push(Line::from(spans));
-    }
-
-    // bottom border
-    let mut bot_spans = vec![indent];
-    for (i, _) in tools.iter().enumerate() {
-        let border = Style::default().fg(colours[i]);
-        let pw = panel_inner + if i < remainder { 1 } else { 0 };
-        let corner = if i == 0 { "└" } else { "┴" };
-        bot_spans.push(Span::styled(corner, border));
-        bot_spans.push(Span::styled("─".repeat(pw), border));
-    }
-    bot_spans.push(Span::styled(
-        "┘",
-        Style::default().fg(*colours.last().unwrap_or(&Color::DarkGray)),
-    ));
-    lines.push(Line::from(bot_spans));
-}
-
 /// push a styled content line inside a bordered box, wrapping if needed
-fn push_box_content_line<'a>(
+fn push_box_content_line(
     text: &str,
     inner_width: usize,
-    border: Style,
+    bg: Style,
     style: Style,
-    indent: &Span<'a>,
-    lines: &mut Vec<Line<'a>>,
+    lines: &mut Vec<Line<'static>>,
 ) {
     for wrapped in wrap_text(text, inner_width) {
-        let pad = inner_width.saturating_sub(text_cell_width(&wrapped));
-        lines.push(Line::from(vec![
-            indent.clone(),
-            Span::styled("│ ", border),
-            Span::styled(wrapped, style),
-            Span::raw(" ".repeat(pad)),
-            Span::styled(" │", border),
-        ]));
+        push_panel_line(
+            vec![Span::styled(wrapped, style)],
+            inner_width + PANEL_PAD * 2,
+            bg,
+            lines,
+        );
     }
 }
 
 struct ToolHighlightCtx<'a> {
-    border: Style,
+    bg: Style,
     fallback_style: Style,
-    indent: Span<'static>,
     lang: &'a str,
     theme: &'a Theme,
 }
 
-fn push_highlighted_box_line<'a>(
+fn push_highlighted_box_line(
     text: &str,
     inner_width: usize,
     ctx: &ToolHighlightCtx<'_>,
-    lines: &mut Vec<Line<'a>>,
+    lines: &mut Vec<Line<'static>>,
 ) {
     if text_cell_width(text) > inner_width {
-        push_box_content_line(
-            text,
-            inner_width,
-            ctx.border,
-            ctx.fallback_style,
-            &ctx.indent,
-            lines,
-        );
+        push_box_content_line(text, inner_width, ctx.bg, ctx.fallback_style, lines);
         return;
     }
 
     let Some(spans) = crate::syntax::highlight_line(text, ctx.lang, ctx.theme) else {
-        push_box_content_line(
-            text,
-            inner_width,
-            ctx.border,
-            ctx.fallback_style,
-            &ctx.indent,
-            lines,
-        );
+        push_box_content_line(text, inner_width, ctx.bg, ctx.fallback_style, lines);
         return;
     };
     for wrapped in wrap_styled_spans(spans, inner_width, ctx.fallback_style) {
-        push_fitted_box_line(
-            wrapped,
-            inner_width,
-            ctx.border,
-            ctx.fallback_style,
-            &ctx.indent,
-            lines,
-        );
+        push_fitted_box_line(wrapped, inner_width, ctx.bg, ctx.fallback_style, lines);
     }
 }
 
@@ -2257,8 +1985,7 @@ pub(crate) fn read_min_content_indent(text: &str) -> usize {
 /// `indent` is stored by value (Span owns its string) so the ctx
 /// doesn't inherit the borrow lifetime from the outer call site
 struct ReadLineCtx<'a> {
-    border: Style,
-    indent: Span<'static>,
+    bg: Style,
     gutter_width: usize,
     /// leading spaces common to every non-blank content row, stripped
     /// before display so the smallest-indent row sits against the gutter
@@ -2271,21 +1998,14 @@ struct ReadLineCtx<'a> {
 /// prefix becomes a right-aligned dim gutter, the content is
 /// syntax-highlighted when `ctx.lang` is known. falls back to plain
 /// rendering for lines that don't match the `L<n>:` pattern
-fn push_read_content_line<'a>(
+fn push_read_content_line(
     text: &str,
     inner_width: usize,
     ctx: &ReadLineCtx<'_>,
-    lines: &mut Vec<Line<'a>>,
+    lines: &mut Vec<Line<'static>>,
 ) {
     let Some((n, content)) = parse_read_line(text) else {
-        push_box_content_line(
-            text,
-            inner_width,
-            ctx.border,
-            ctx.theme.dim,
-            &ctx.indent,
-            lines,
-        );
+        push_box_content_line(text, inner_width, ctx.bg, ctx.theme.dim, lines);
         return;
     };
 
@@ -2320,27 +2040,13 @@ fn push_read_content_line<'a>(
     // if content overflows the remaining width, fall back to wrapping
     // without syntax highlighting (simpler and rare for read previews)
     if content_width > remaining_width {
-        push_box_content_line(
-            text,
-            inner_width,
-            ctx.border,
-            ctx.theme.dim,
-            &ctx.indent,
-            lines,
-        );
+        push_box_content_line(text, inner_width, ctx.bg, ctx.theme.dim, lines);
         return;
     }
 
-    let pad = remaining_width.saturating_sub(content_width);
-    let mut spans: Vec<Span<'a>> = vec![
-        ctx.indent.clone(),
-        Span::styled("│ ", ctx.border),
-        Span::styled(gutter, ctx.theme.dim),
-    ];
+    let mut spans = vec![Span::styled(gutter, ctx.theme.dim)];
     spans.extend(content_spans);
-    spans.push(Span::raw(" ".repeat(pad)));
-    spans.push(Span::styled(" │", ctx.border));
-    lines.push(Line::from(spans));
+    push_panel_line(spans, inner_width + PANEL_PAD * 2, ctx.bg, lines);
 }
 
 /// pre-wrap a styled line to `content_width`, prepending a 1-space indent
@@ -2534,12 +2240,12 @@ fn split_word_by_cell_width(word: &str, width: usize) -> Vec<String> {
     chunks
 }
 
-/// get icon and colour for a completed tool call
-fn tool_icon_colour(tc: &DisplayToolCall, theme: &Theme) -> (&'static str, Color) {
+/// the word a tool panel header ends with, and the colour it carries
+fn tool_status_label(tc: &DisplayToolCall, theme: &Theme) -> (&'static str, Color) {
     match tc.status {
-        ToolCallStatus::Done => ("✓", theme.tool_done.fg.unwrap_or(Color::Green)),
-        ToolCallStatus::Error => ("✗", theme.tool_error.fg.unwrap_or(Color::Red)),
-        ToolCallStatus::Running => ("⣾", theme.tool_running.fg.unwrap_or(Color::Cyan)),
+        ToolCallStatus::Done => ("done", theme.tool_done.fg.unwrap_or(Color::Green)),
+        ToolCallStatus::Error => ("error", theme.tool_error.fg.unwrap_or(Color::Red)),
+        ToolCallStatus::Running => ("running", theme.tool_running.fg.unwrap_or(Color::Cyan)),
     }
 }
 
