@@ -23,12 +23,11 @@ impl ModelId {
     pub fn abbreviated(&self) -> String {
         fn abbreviate_part(s: &str) -> String {
             s.split('-')
-                .map(|seg| {
-                    if seg.chars().all(|c| c.is_ascii_alphabetic()) {
-                        seg[..1].to_string()
-                    } else {
-                        seg.to_string()
+                .map(|seg| match seg.chars().next() {
+                    Some(first) if seg.chars().all(|c| c.is_ascii_alphabetic()) => {
+                        first.to_string()
                     }
+                    _ => seg.to_string(),
                 })
                 .collect::<Vec<_>>()
                 .join("-")
@@ -523,6 +522,8 @@ mod tests {
             ("google/gemini-2.5-flash", "g/g-2.5-f"),
             ("test", "t"),
             ("o3-mini", "o3-m"),
+            ("openai/", "o/"),
+            ("gpt--5", "g--5"),
         ];
         for (input, expected) in cases {
             let id = ModelId::from(input);
