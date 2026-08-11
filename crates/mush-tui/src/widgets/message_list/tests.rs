@@ -222,76 +222,63 @@ fn user_message_renders() {
 }
 
 #[test]
-fn user_message_without_images_uses_rounded_box() {
-    // user messages render inside a rounded-corner box so the attachment
-    // row design can share borders cleanly with the message body
+fn a_user_message_is_a_tinted_block_with_no_border() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.push_user_message("hi clob");
     let buf = render_app(&app, 30, 8);
     let content = buffer_to_string(&buf);
-    assert!(content.contains('╭'), "missing rounded top-left corner");
-    assert!(content.contains('╮'), "missing rounded top-right corner");
-    assert!(content.contains('╰'), "missing rounded bottom-left corner");
-    assert!(content.contains('╯'), "missing rounded bottom-right corner");
+
     assert!(content.contains("hi clob"));
-}
-
-#[test]
-fn user_message_box_pads_wide_chars_by_cells() {
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-    app.push_user_message("界".repeat(12));
-
-    let buf = render_app(&app, 28, 8);
-    let content = buffer_to_string(&buf);
-    let top_y = find_buffer_row(&buf, |line| line.contains('╭'));
-    let body_y = find_buffer_row(&buf, |line| line.contains('界'));
-
-    assert_eq!(
-        right_edge_cell(&buf, body_y),
-        right_edge_cell(&buf, top_y),
-        "body row should align with border by terminal cells:\n{content}"
+    assert!(
+        !content.contains(['╭', '╮', '╰', '╯', '│', '─']),
+        "user messages should not be boxed:\n{content}"
     );
+
+    // two columns of padding, and a tinted blank row above and below
+    let body = find_buffer_row(&buf, |line| line.contains("hi clob"));
+    assert_eq!(buffer_row(&buf, body).find("hi clob"), Some(2));
+    for y in [body - 1, body, body + 1] {
+        assert_eq!(
+            buf[(0, y)].bg,
+            app.theme.user_msg_bg.bg.unwrap(),
+            "row {y} should carry the user tint:\n{content}"
+        );
+    }
 }
 
 #[test]
-fn user_message_with_image_renders_attachment_row_above() {
-    // attachments sit above the message box and share the message box's
-    // top border via left/right tees. the attach row itself is a bordered
-    // strip with square top corners and vertical dividers between cells
+fn a_user_message_pads_wide_chars_by_cells() {
+    let theme = crate::theme::Theme::default();
+    let mut msg = DisplayMessage::new(MessageRole::User, "界".repeat(12));
+    msg.queued = false;
+
+    for line in message_lines(&msg, &plain_style(&theme), 28) {
+        assert_eq!(
+            line_cell_width(&line),
+            28,
+            "every tinted row fills the width: {:?}",
+            rendered_text(std::slice::from_ref(&line))
+        );
+    }
+}
+
+#[test]
+fn an_attached_image_reserves_a_row_above_the_text() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.push_user_message_with_images("look here", vec![vec![0u8; 100]]);
     let buf = render_app(&app, 40, 20);
     let content = buffer_to_string(&buf);
 
-    assert!(content.contains('┌'), "missing attach top-left corner");
-    assert!(content.contains('┐'), "missing attach top-right corner");
-    // shared-divider row between attach and msg box: left-tee ├ and right-tee ┤
-    assert!(
-        content.contains('├'),
-        "missing left-tee on attach/msg divider"
-    );
-    assert!(
-        content.contains('┤'),
-        "missing right-tee on attach/msg divider"
-    );
-    // msg body still closes with rounded bottom corners
-    assert!(content.contains('╰'));
-    assert!(content.contains('╯'));
-    // and the message text is rendered
     assert!(content.contains("look here"));
+    let text_row = find_buffer_row(&buf, |line| line.contains("look here"));
 
-    // image render area should land inside the attach cell (between the
-    // top border and the divider row), so some area row must sit above
-    // the msg box body
     let areas = app.render_state.image_render_areas.borrow();
-    assert_eq!(areas.len(), 1, "image render area should be produced");
-    // locate the divider row by scanning buffer for ├
-    let divider_row = (0..buf.area.height)
-        .find(|&y| (0..buf.area.width).any(|x| buf[(x, y)].symbol() == "├"))
-        .expect("divider row with ├ present in buffer");
+    assert_eq!(areas.len(), 1);
+    assert_eq!(areas[0].msg_idx, 0);
+    assert!(areas[0].area.height > 0);
     assert!(
-        areas[0].area.y < divider_row,
-        "image render area (y={}) should sit above the divider row (y={divider_row})",
+        areas[0].area.y < text_row,
+        "image area (y={}) should sit above the text (y={text_row})",
         areas[0].area.y
     );
 }
@@ -2732,25 +2719,6 @@ fn viewport_anchored_inside_the_stream_survives_finalisation() {
         app.is_scrolled_up(),
         "the anchor should have followed the streamed text into its message"
     );
-}
-
-#[test]
-fn user_message_with_images_reserves_render_area() {
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-    let mut msg = DisplayMessage::new(MessageRole::User, "check this out");
-    msg.images = vec![vec![0u8; 100]];
-    app.messages.push(msg);
-    let buf = render_app(&app, 60, 30);
-    let content = buffer_to_string(&buf);
-    // new attachment-box layout shows the title inside the top border
-    assert!(
-        content.contains("attachment"),
-        "attachment title should appear in the top border"
-    );
-    let areas = app.render_state.image_render_areas.borrow();
-    assert_eq!(areas.len(), 1);
-    assert_eq!(areas[0].msg_idx, 0);
-    assert!(areas[0].area.height > 0);
 }
 
 // message_lines: the content renderer an inline viewport hands to scrollback

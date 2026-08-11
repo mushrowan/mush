@@ -1048,6 +1048,13 @@ fn render_message(
 /// render a user message as a rounded-cornered box with optional
 /// attachment row above. attachments share the message box's top border
 /// via left/right tees so the visual is a unified stack
+/// two columns of padding either side of the text
+const USER_PAD: usize = 2;
+
+/// the user's message as a tinted block.
+///
+/// attached images get a row of placeholder cells above the text for the
+/// overlay to draw into
 fn render_user_message_box(
     theme: &Theme,
     msg: &DisplayMessage,
@@ -1056,129 +1063,50 @@ fn render_user_message_box(
     lines: &mut Vec<Line<'static>>,
     image_placeholders: &mut Vec<ImagePlaceholder>,
 ) {
-    let w = width as usize;
-    if w < 6 {
-        // too narrow for a proper box; fall back to plain text so we don't
-        // render broken UI on extreme widths
-        for line in msg.content.lines() {
-            lines.push(Line::raw(line.to_string()));
-        }
-        return;
-    }
-
-    let border_style = theme.dim;
     let bg = theme.user_msg_bg;
-    let image_count = msg.images.len();
-    let inner = w.saturating_sub(2); // space between left and right walls
+    let w = width as usize;
+    let content_width = w.saturating_sub(USER_PAD * 2).max(1);
+    let blank = || Line::styled(" ".repeat(w), bg);
 
-    // attachment row above the message box (when images are attached)
-    if image_count > 0 {
-        let cell_widths = compute_attach_cell_widths(inner, image_count);
-
-        // top border: `┌` + title-aware run + `┬` dividers + ... + `┐`
-        let title = if image_count == 1 {
-            " attachment "
-        } else {
-            " attachments "
-        };
-        let title_width = text_cell_width(title);
-        let mut top = String::from("┌");
-        for (i, cw) in cell_widths.iter().enumerate() {
-            let run = if i == 0 && *cw >= title_width + 2 {
-                let dash_count = cw.saturating_sub(title_width + 1);
-                format!("─{title}{}", "─".repeat(dash_count))
-            } else {
-                "─".repeat(*cw)
-            };
-            top.push_str(&run);
-            if i + 1 < image_count {
-                top.push('┬');
-            }
-        }
-        top.push('┐');
-        lines.push(Line::styled(top, border_style));
-
-        // inner rows: `│` + cell + `│` + cell + ... + `│`. register each
-        // image placeholder on the first inner row so the render-area
-        // compute can place the overlay inside its cell
+    if !msg.images.is_empty() {
+        let cell_widths = compute_attach_cell_widths(content_width, msg.images.len());
         let body_start = lines.len();
-        for _row in 0..ATTACH_INNER_H {
-            let mut row_str = String::from("│");
-            for (i, cw) in cell_widths.iter().enumerate() {
-                row_str.push_str(&" ".repeat(*cw));
-                if i + 1 < image_count {
-                    row_str.push('│');
-                }
-            }
-            row_str.push('│');
-            lines.push(Line::styled(row_str, border_style));
+        for _ in 0..ATTACH_INNER_H {
+            lines.push(blank());
         }
-
-        // register placeholders with cell x-offsets
-        let mut x_offset: u16 = 1; // after the leftmost `│`
-        for (img_idx, cw) in cell_widths.iter().enumerate() {
+        let mut x_offset = USER_PAD as u16;
+        for (tc_idx, cw) in cell_widths.iter().enumerate() {
             image_placeholders.push(ImagePlaceholder {
                 msg_idx,
-                tc_idx: img_idx,
+                tc_idx,
                 line_idx: body_start,
                 x_offset,
                 cell_width: *cw as u16,
                 cell_height: ATTACH_INNER_H,
             });
-            x_offset = x_offset.saturating_add(*cw as u16).saturating_add(1);
+            x_offset = x_offset.saturating_add(*cw as u16);
         }
-
-        // divider row shared with msg box top: `├` + runs + `┴` where cell
-        // dividers end + `┤`
-        let mut divider = String::from("├");
-        for (i, cw) in cell_widths.iter().enumerate() {
-            divider.push_str(&"─".repeat(*cw));
-            if i + 1 < image_count {
-                divider.push('┴');
-            }
-        }
-        divider.push('┤');
-        lines.push(Line::styled(divider, border_style));
-    } else {
-        // plain rounded top when no attachments
-        let mut top = String::from("╭");
-        top.push_str(&"─".repeat(inner));
-        top.push('╮');
-        lines.push(Line::styled(top, border_style));
     }
 
-    // message body rows: `│ content │` with bg fill
-    let content_width = inner.saturating_sub(2); // minus 1 space left + 1 space right
+    lines.push(blank());
     for line in msg.content.lines() {
         for wrapped in wrap_text(line, content_width) {
             let pad = content_width.saturating_sub(text_cell_width(&wrapped));
-            let padded = format!(" {wrapped}{} ", " ".repeat(pad));
-            lines.push(Line::from(vec![
-                Span::styled("│", border_style),
-                Span::styled(padded, bg),
-                Span::styled("│", border_style),
-            ]));
+            let indent = " ".repeat(USER_PAD);
+            let trailing = " ".repeat(pad + USER_PAD);
+            lines.push(Line::styled(format!("{indent}{wrapped}{trailing}"), bg));
         }
     }
-
-    // rounded bottom border
-    let mut bottom = String::from("╰");
-    bottom.push_str(&"─".repeat(inner));
-    bottom.push('╯');
-    lines.push(Line::styled(bottom, border_style));
+    lines.push(blank());
 }
 
-/// distribute `inner` columns across `n` cells joined by (n-1) `│`
-/// dividers. leftover columns go to the first few cells so the total
-/// always matches the message box inner width exactly
-fn compute_attach_cell_widths(inner: usize, n: usize) -> Vec<usize> {
+/// split `total` columns across `n` image cells, widest first
+fn compute_attach_cell_widths(total: usize, n: usize) -> Vec<usize> {
     if n == 0 {
         return Vec::new();
     }
-    let divider_count = n.saturating_sub(1);
-    let cells_total = inner.saturating_sub(divider_count);
-    let base = cells_total / n;
-    let remainder = cells_total % n;
+    let base = total / n;
+    let remainder = total % n;
     (0..n)
         .map(|i| if i < remainder { base + 1 } else { base })
         .collect()
