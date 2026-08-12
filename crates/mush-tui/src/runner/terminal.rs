@@ -10,6 +10,7 @@ use crossterm::event::{
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui::layout::Size;
 
 use crate::app::App;
 use crate::inline::Inline;
@@ -299,6 +300,14 @@ mod tests {
     }
 
     #[test]
+    fn a_terminal_that_wont_say_where_the_cursor_is_opens_at_the_bottom() {
+        let screen = Size::new(80, 24);
+
+        assert_eq!(opening_row(Ok((0, 7)), screen), 7);
+        assert_eq!(opening_row(Err(io::Error::other("no reply")), screen), 23);
+    }
+
+    #[test]
     fn raw_termios_snapshot_restores_echo_and_canonical_mode() {
         let Some((master_fd, slave_fd)) = open_pty_pair() else {
             return;
@@ -343,6 +352,18 @@ mod tests {
             )
         };
         if rc == 0 { Some((master, slave)) } else { None }
+    }
+}
+
+/// the row the block opens on: where the shell left the cursor, or the
+/// bottom of the screen when the terminal won't say
+pub(super) fn opening_row(position: io::Result<(u16, u16)>, screen: Size) -> u16 {
+    match position {
+        Ok((_, row)) => row,
+        Err(error) => {
+            tracing::debug!(?error, "no cursor position, opening at the bottom");
+            screen.height.saturating_sub(1)
+        }
     }
 }
 

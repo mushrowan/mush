@@ -39,7 +39,7 @@ use self::streams::{
     AgentStreams, StreamConfig, StreamDeps, StreamState, new_agent_streams, start_pending_streams,
 };
 use self::terminal::{
-    TerminalStateGuard, cleanup, enter_tui_terminal, install_panic_cleanup_hook,
+    TerminalStateGuard, cleanup, enter_tui_terminal, install_panic_cleanup_hook, opening_row,
     probe_image_picker, restore_terminal_state,
 };
 pub use self::thinking_prefs::{ThinkingPrefs, ThinkingPrefsSaver, canonical_dir};
@@ -100,7 +100,7 @@ pub async fn run_tui(
     // the block opens on the row the shell left the cursor on, and the
     // first frame resizes the viewport to fit it
     let screen = crossterm::terminal::size().map(ratatui::layout::Size::from)?;
-    let top = crossterm::cursor::position()?.1;
+    let top = opening_row(crossterm::cursor::position(), screen);
     let mut inline = Inline::new(screen, top);
     let mut terminal = Terminal::with_options(
         backend,
