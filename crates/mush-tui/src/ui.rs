@@ -15,11 +15,19 @@ use crate::widgets::tool_panels::{ToolPanels, tool_panels_height};
 /// the full TUI layout, composing all widgets
 pub struct Ui<'a> {
     app: &'a App,
+    /// draw only the live turn, leaving settled history to the terminal
+    inline: bool,
 }
 
 impl<'a> Ui<'a> {
     pub fn new(app: &'a App) -> Self {
-        Self { app }
+        Self { app, inline: false }
+    }
+
+    #[must_use]
+    pub fn inline(mut self, inline: bool) -> Self {
+        self.inline = inline;
+        self
     }
 
     /// get the cursor position for the terminal
@@ -73,6 +81,21 @@ pub fn live_height(app: &App, width: u16, max: u16) -> u16 {
         .min(max)
 }
 
+/// draw the live turn against the bottom of `area`, so it grows upward
+/// out of the input box the way the terminal's own output would.
+///
+/// a turn taller than `area` keeps its tail: its head either settled into
+/// scrollback already or is about to
+fn render_live(app: &App, area: Rect, buf: &mut Buffer) {
+    let lines = crate::widgets::message_list::live_lines(app, area.width);
+    let height = usize::from(area.height);
+    let skip = lines.len().saturating_sub(height);
+    let rows = area.rows().skip(height - (lines.len() - skip));
+    for (row, line) in rows.zip(lines.into_iter().skip(skip)) {
+        line.render(row, buf);
+    }
+}
+
 /// compute the main layout
 pub fn layout(area: Rect, input_h: u16, tools_h: u16, status_h: u16) -> LayoutRegions {
     if tools_h > 0 {
@@ -118,7 +141,11 @@ impl Widget for Ui<'_> {
         let status_h = status_bar_height(self.app, area.width);
         let regions = layout(area, input_h, tools_h, status_h);
         self.app.input.area.set(regions.input);
-        MessageList::new(self.app).render(regions.messages, buf);
+        if self.inline {
+            render_live(self.app, regions.messages, buf);
+        } else {
+            MessageList::new(self.app).render(regions.messages, buf);
+        }
         if let Some(tools_area) = regions.tools {
             ToolPanels::new(&self.app.active_tools, &self.app.theme).render(tools_area, buf);
         }
@@ -411,5 +438,56 @@ mod tests {
             app.tick_streaming_text();
         }
         assert_eq!(live_height(&app, 80, 24), 24);
+    }
+
+    fn drawn(ui: Ui<'_>, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|f| f.render_widget(ui, f.area())).unwrap();
+        buffer_to_string(terminal.backend().buffer())
+    }
+
+    fn app_mid_turn() -> App {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.push_user_message("settled question");
+        app.start_streaming();
+        app.push_text_delta("settled answer");
+        app.finish_streaming(None, None);
+        app.push_user_message("live question");
+        app.start_streaming();
+        app.push_text_delta("live answer");
+        for _ in 0..200 {
+            app.tick();
+        }
+        app
+    }
+
+    #[test]
+    fn an_inline_ui_draws_only_the_live_turn() {
+        let app = app_mid_turn();
+        let text = drawn(Ui::new(&app).inline(true), 60, 20);
+
+        assert!(text.contains("live answer"), "got:\n{text}");
+        assert!(
+            !text.contains("settled answer"),
+            "scrollback owns it:\n{text}"
+        );
+    }
+
+    #[test]
+    fn a_full_screen_ui_still_draws_the_transcript() {
+        let app = app_mid_turn();
+        let text = drawn(Ui::new(&app), 60, 20);
+
+        assert!(text.contains("settled answer"), "got:\n{text}");
+    }
+
+    #[test]
+    fn an_inline_ui_keeps_the_input_box_and_status_bar() {
+        let app = app_mid_turn();
+        let inline = drawn(Ui::new(&app).inline(true), 60, 20);
+        let full = drawn(Ui::new(&app), 60, 20);
+
+        let tail = |s: &str| s.lines().rev().take(4).collect::<Vec<_>>().join("\n");
+        assert_eq!(tail(&inline), tail(&full));
     }
 }
