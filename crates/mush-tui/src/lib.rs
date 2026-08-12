@@ -10,6 +10,7 @@ mod conversation_display;
 pub mod display_types;
 pub mod event_handler;
 pub mod fuzzy;
+pub mod inline;
 pub mod input;
 pub mod input_buffer;
 pub mod keybinds;
