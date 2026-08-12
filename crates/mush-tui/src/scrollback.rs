@@ -1,5 +1,8 @@
 //! what the inline viewport has already handed to the terminal
 
+use std::io::{self, Write};
+
+use ratatui::prelude::IntoCrossterm;
 use ratatui::text::Line;
 
 use crate::app::App;
@@ -142,6 +145,21 @@ fn rewrite_rule(style: &MessageStyle<'_>, width: u16) -> Line<'static> {
     Line::styled(format!("{rule}{REWRITE_RULE}{rule}"), style.theme.dim)
 }
 
+/// print settled lines above the live region, where they become the
+/// terminal's own scrollback.
+///
+/// raw mode is on, so each line ends `\r\n`
+pub fn write_lines(out: &mut impl Write, lines: &[Line<'_>]) -> io::Result<()> {
+    for line in lines {
+        for span in &line.spans {
+            let style = line.style.patch(span.style).into_crossterm();
+            write!(out, "{}", style.apply(&span.content))?;
+        }
+        write!(out, "\r\n")?;
+    }
+    Ok(())
+}
+
 /// byte offset up to which streamed markdown can no longer reshape.
 ///
 /// the live region can't outgrow the terminal, so a long reply has to
@@ -189,6 +207,8 @@ mod tests {
     use super::*;
     use crate::theme::Theme;
     use mush_ai::types::TokenCount;
+    use ratatui::style::{Color, Style};
+    use ratatui::text::Span;
 
     fn app() -> App {
         App::new("test".into(), TokenCount::new(200_000))
@@ -414,5 +434,43 @@ mod tests {
 
         assert!(!late.contains("first block"), "printed twice:\n{late}");
         assert!(late.contains("second block"), "got:\n{late}");
+    }
+
+    fn written(lines: &[Line<'static>]) -> String {
+        let mut out = Vec::new();
+        write_lines(&mut out, lines).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn a_plain_line_writes_its_text_and_a_newline() {
+        assert_eq!(written(&[Line::raw("hello")]), "hello\r\n");
+    }
+
+    #[test]
+    fn an_empty_line_writes_a_newline() {
+        assert_eq!(written(&[Line::raw("")]), "\r\n");
+    }
+
+    #[test]
+    fn a_styled_span_writes_an_escape_and_resets() {
+        let out = written(&[Line::from(Span::styled(
+            "red",
+            Style::default().fg(Color::Red),
+        ))]);
+        let (before, after) = out.split_once("red").expect("the text should be there");
+        assert!(before.starts_with('\x1b'), "{out:?}");
+        assert!(
+            after.starts_with('\x1b'),
+            "the colour should not leak: {out:?}"
+        );
+        assert!(out.ends_with("\r\n"), "{out:?}");
+    }
+
+    #[test]
+    fn a_line_style_reaches_a_bare_span() {
+        let plain = written(&[Line::raw("x")]);
+        let styled = written(&[Line::raw("x").style(Style::default().fg(Color::Blue))]);
+        assert_ne!(plain, styled);
     }
 }
