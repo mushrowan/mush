@@ -64,9 +64,6 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     if app.interaction.mode == AppMode::SlotEdit {
         return handle_slot_edit_key(app, key);
     }
-    if app.interaction.mode == AppMode::Scroll {
-        return handle_scroll_mode(app, key);
-    }
     if app.interaction.mode == AppMode::Search {
         return handle_search_mode(app, key);
     }
@@ -122,37 +119,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     // works during the tool-execution window between an assistant
     // `MessageEnd` and the next `TurnStart`, when text is no longer
     // streaming but the agent is still cranking through tool calls
-    if is_cancel_key(app, key) {
-        if app.is_scrolled_up() {
-            app.scroll_to_bottom();
-            return None;
-        }
-        if app.is_busy() {
-            return Some(AppEvent::Abort);
-        }
-    }
-    // dedicated "go to bottom" hotkey: configurable, default shift+End.
-    // fires regardless of stream state and never aborts
-    if app
-        .keymap
-        .matches(crate::keybinds::Action::JumpToBottom, key)
-    {
-        app.scroll_to_bottom();
-        return None;
-    }
-    if app
-        .keymap
-        .matches(crate::keybinds::Action::ScrollPageUp, key)
-    {
-        app.scroll_up(10);
-        return Some(AppEvent::ScrollUp(10));
-    }
-    if app
-        .keymap
-        .matches(crate::keybinds::Action::ScrollPageDown, key)
-    {
-        app.scroll_down(10);
-        return Some(AppEvent::ScrollDown(10));
+    if is_cancel_key(app, key) && app.is_busy() {
+        return Some(AppEvent::Abort);
     }
 
     // 3. pane management (works regardless of streaming state)
@@ -269,25 +237,6 @@ fn handle_idle_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         app.interaction.search.query.clear();
         app.interaction.search.matches.clear();
         app.interaction.search.selected = 0;
-        return None;
-    }
-    if app
-        .keymap
-        .matches(crate::keybinds::Action::EnterScroll, key)
-    {
-        app.interaction.mode = AppMode::Scroll;
-        if !app.messages.is_empty() {
-            app.navigation.selected_message = Some(app.messages.len() - 1);
-        }
-        // initialise block selection when entering in block mode
-        if app.navigation.scroll_unit == crate::app::ScrollUnit::Block {
-            let blocks = app.blocks();
-            app.navigation.selected_block = if blocks.is_empty() {
-                None
-            } else {
-                Some(blocks.len() - 1)
-            };
-        }
         return None;
     }
     if app
@@ -834,20 +783,9 @@ fn handle_search_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             .keymap
             .matches_in(KeyScope::Search, Action::Confirm, key) =>
         {
-            // jump to selected match and enter scroll mode
-            if let Some(&idx) = app
-                .interaction
-                .search
-                .matches
-                .get(app.interaction.search.selected)
-            {
-                app.interaction.mode = AppMode::Scroll;
-                app.navigation.selected_message = Some(idx);
-                app.interaction.search.query.clear();
-                app.interaction.search.matches.clear();
-            } else {
-                app.interaction.mode = AppMode::Normal;
-            }
+            app.interaction.mode = AppMode::Normal;
+            app.interaction.search.query.clear();
+            app.interaction.search.matches.clear();
         }
         _ if app
             .keymap
@@ -875,219 +813,6 @@ fn handle_search_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         _ => {}
     }
     None
-}
-
-fn handle_scroll_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
-    use crate::app::ScrollUnit;
-    use crate::keybinds::{Action, KeyScope};
-
-    if app.keymap.matches(Action::QuitOrAbort, key) {
-        return Some(AppEvent::Quit);
-    }
-    if app.keymap.matches_in(KeyScope::Scroll, Action::Cancel, key) {
-        if app.navigation.selection_anchor.is_some() {
-            app.navigation.selection_anchor = None;
-        } else {
-            app.interaction.mode = AppMode::Normal;
-            app.navigation.selected_message = None;
-            app.navigation.selected_block = None;
-        }
-        return None;
-    }
-    if app
-        .keymap
-        .matches_in(KeyScope::Scroll, Action::ToggleBlockMode, key)
-    {
-        app.navigation.scroll_unit = match app.navigation.scroll_unit {
-            ScrollUnit::Message => {
-                app.navigation.selection_anchor = None;
-                let blocks = app.blocks();
-                app.navigation.selected_block = if blocks.is_empty() {
-                    None
-                } else {
-                    Some(blocks.len() - 1)
-                };
-                ScrollUnit::Block
-            }
-            ScrollUnit::Block => {
-                app.navigation.selected_block = None;
-                app.navigation.selection_anchor = None;
-                ScrollUnit::Message
-            }
-        };
-        return None;
-    }
-    if app
-        .keymap
-        .matches_in(KeyScope::Scroll, Action::ToggleVisualSelection, key)
-        && app.navigation.scroll_unit == ScrollUnit::Message
-    {
-        if app.navigation.selection_anchor.is_some() {
-            app.navigation.selection_anchor = None;
-        } else {
-            app.navigation.selection_anchor = app.navigation.selected_message;
-        }
-        return None;
-    }
-    if app
-        .keymap
-        .matches_in(KeyScope::Scroll, Action::NextItem, key)
-    {
-        let scroll_lines = app.scroll_lines;
-        if app.navigation.scroll_unit == ScrollUnit::Block {
-            let blocks = app.blocks();
-            if let Some(sel) = app.navigation.selected_block
-                && sel + 1 < blocks.len()
-            {
-                app.navigation.selected_block = Some(sel + 1);
-                app.navigation.selected_message = Some(blocks[sel + 1].msg_idx);
-                app.scroll_down(scroll_lines);
-            }
-        } else {
-            app.scroll_down(scroll_lines);
-            if let Some(sel) = app.navigation.selected_message
-                && sel + 1 < app.messages.len()
-                && app.is_message_visible(sel + 1)
-            {
-                app.navigation.selected_message = Some(sel + 1);
-            }
-        }
-        tracing::debug!(
-            target: "mush_tui::scroll",
-            key = "next_item",
-            scroll_lines,
-            position = ?app.scroll,
-            "scroll keypress"
-        );
-        return None;
-    }
-    if app
-        .keymap
-        .matches_in(KeyScope::Scroll, Action::PreviousItem, key)
-    {
-        let scroll_lines = app.scroll_lines;
-        if app.navigation.scroll_unit == ScrollUnit::Block {
-            let blocks = app.blocks();
-            if let Some(sel) = app.navigation.selected_block {
-                let new_sel = sel.saturating_sub(1);
-                app.navigation.selected_block = Some(new_sel);
-                app.navigation.selected_message = Some(blocks[new_sel].msg_idx);
-                app.scroll_up(scroll_lines);
-            }
-        } else {
-            app.scroll_up(scroll_lines);
-            if let Some(sel) = app.navigation.selected_message {
-                let target = sel.saturating_sub(1);
-                if target != sel && app.is_message_visible(target) {
-                    app.navigation.selected_message = Some(target);
-                }
-            }
-        }
-        tracing::debug!(
-            target: "mush_tui::scroll",
-            key = "previous_item",
-            scroll_lines,
-            position = ?app.scroll,
-            "scroll keypress"
-        );
-        return None;
-    }
-    if app
-        .keymap
-        .matches_in(KeyScope::Scroll, Action::NavigateBottom, key)
-    {
-        app.scroll_to_bottom();
-        if app.navigation.scroll_unit == ScrollUnit::Block {
-            let blocks = app.blocks();
-            app.navigation.selected_block = if blocks.is_empty() {
-                None
-            } else {
-                Some(blocks.len() - 1)
-            };
-        }
-        if !app.messages.is_empty() {
-            app.navigation.selected_message = Some(app.messages.len() - 1);
-        }
-        return None;
-    }
-    if app
-        .keymap
-        .matches_in(KeyScope::Scroll, Action::NavigateTop, key)
-    {
-        app.scroll_to_top();
-        if app.navigation.scroll_unit == ScrollUnit::Block {
-            let blocks = app.blocks();
-            app.navigation.selected_block = if blocks.is_empty() { None } else { Some(0) };
-        }
-        app.navigation.selected_message = Some(0);
-        return None;
-    }
-    if app
-        .keymap
-        .matches_in(KeyScope::Scroll, Action::CopySelection, key)
-        && let Some(selection) = app.copy_selection()
-    {
-        if copy_to_clipboard(&selection.text) {
-            app.status = Some(selection.status);
-        } else {
-            app.status = Some("clipboard copy failed".into());
-        }
-    }
-    None
-}
-
-/// copy text to system clipboard. uses OSC 52 primarily (works over SSH
-/// and inside tmux with appropriate config), with shell-based fallbacks
-/// for platforms or terminals that don't support OSC 52.
-///
-/// returns true if at least one method succeeded.
-fn copy_to_clipboard(text: &str) -> bool {
-    // OSC 52 emits an escape sequence the terminal emulator intercepts.
-    // this works transparently over SSH because the escape reaches the
-    // user's local terminal. kitty, iterm2, wezterm, ghostty, alacritty,
-    // and tmux (with set-clipboard passthrough) all support it
-    let osc52 = emit_osc52(text);
-    // also try native clipboard tools for local sessions where the user
-    // might prefer system clipboard integration (paste in non-terminal apps)
-    let native = copy_via_shell(text);
-    osc52 || native
-}
-
-fn emit_osc52(text: &str) -> bool {
-    use crossterm::clipboard::CopyToClipboard;
-    use crossterm::execute;
-
-    let mut stdout = std::io::stdout();
-    execute!(stdout, CopyToClipboard::to_clipboard_from(text)).is_ok()
-}
-
-fn copy_via_shell(text: &str) -> bool {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
-
-    // try each clipboard tool in order
-    let tools: &[&[&str]] = &[
-        &["pbcopy"],                           // macOS
-        &["wl-copy"],                          // wayland
-        &["xclip", "-selection", "clipboard"], // x11
-        &["xsel", "--clipboard", "--input"],   // x11 alt
-    ];
-
-    for tool in tools {
-        if let Ok(mut child) = Command::new(tool[0])
-            .args(&tool[1..])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            && let Some(mut stdin) = child.stdin.take()
-            && stdin.write_all(text.as_bytes()).is_ok()
-        {
-            drop(stdin);
-            return child.wait().map(|s| s.success()).unwrap_or(false);
-        }
-    }
-    false
 }
 
 fn handle_slash_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {

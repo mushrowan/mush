@@ -5,12 +5,11 @@
 
 use mush_ai::types::*;
 use mush_session::SessionMeta;
-use std::rc::Rc;
 
 pub use crate::app_event::{AppEvent, AppMode};
 pub use crate::app_state::{
     CachedStatusBar, CompactionRecoveryAction, CompactionRecoveryState, CompletionState,
-    InteractionState, NavigationState, RenderState, ScrollPosition, SearchState,
+    InteractionState, NavigationState, RenderState, SearchState,
 };
 pub use crate::batch_output::{
     BatchSection, parse_batch_output, truncate_output, truncate_output_large,
@@ -32,30 +31,6 @@ pub use crate::streaming::StreamingState;
 
 use crate::slash_menu::{TabState, filter_command_matches};
 
-#[cfg(test)]
-thread_local! {
-    static BLOCKS_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static BLOCKS_COMPUTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(crate) fn reset_blocks_call_count() {
-    BLOCKS_CALLS.with(|calls| calls.set(0));
-    BLOCKS_COMPUTES.with(|calls| calls.set(0));
-}
-
-#[cfg(test)]
-pub(crate) fn blocks_call_count() -> usize {
-    BLOCKS_CALLS.with(std::cell::Cell::get)
-}
-
-/// number of times the block list was actually recomputed (cache miss),
-/// as opposed to served from the cache. drives the caching regression test
-#[cfg(test)]
-pub(crate) fn blocks_compute_count() -> usize {
-    BLOCKS_COMPUTES.with(std::cell::Cell::get)
-}
-
 /// target cadence for streaming text and shimmer updates.
 pub(crate) const ANIMATION_FRAME_INTERVAL: std::time::Duration =
     std::time::Duration::from_millis(33);
@@ -65,10 +40,6 @@ const UNREAD_FLASH_CYCLE: u8 = 60;
 
 /// ticks the flash indicator stays "on" within each cycle
 const UNREAD_FLASH_ON: u8 = 30;
-
-/// default lines scrolled per j/k keystroke in scroll mode. overridable
-/// via `scroll_lines` in `config.toml`
-pub const DEFAULT_SCROLL_LINES: u16 = 3;
 
 /// truncate a tool's output for the preview/panel display.
 ///
@@ -123,22 +94,6 @@ pub enum ThinkingDisplay {
     Expanded,
 }
 
-/// what j/k navigates in scroll mode
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ScrollUnit {
-    /// navigate between messages
-    Message,
-    /// navigate between fenced code blocks
-    #[default]
-    Block,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CopySelection {
-    pub text: String,
-    pub status: String,
-}
-
 /// pick the next thinking level. when `supported` is non-empty, walks
 /// the curated list (cheap → expensive) wrapping around. when empty,
 /// falls back to the legacy hardcoded cycle so uncurated models still
@@ -172,8 +127,6 @@ pub struct App {
     pub stream: StreamingState,
     /// user input buffer with cursor, images, scroll
     pub input: InputBuffer,
-    /// where the message list viewport is pinned
-    pub scroll: ScrollPosition,
     /// model id being used
     pub model_id: ModelId,
     /// token and cost tracking
@@ -233,8 +186,6 @@ pub struct App {
     pub settings_menu: Option<crate::settings::SettingsMenuState>,
     /// colour theme for all widgets
     pub theme: crate::theme::Theme,
-    /// lines scrolled per j/k keystroke in scroll mode
-    pub scroll_lines: u16,
     /// keybind map: action → key combination(s)
     pub keymap: crate::keybinds::KeyMap,
     /// armed state for ctrl+c quit confirmation. set on first ctrl+c
@@ -252,8 +203,6 @@ pub struct App {
 }
 
 mod modals;
-mod scroll;
-mod selection;
 mod streaming;
 
 /// state captured when /login starts an oauth flow, consumed when the user
@@ -271,7 +220,6 @@ impl App {
             messages: Vec::new(),
             stream: StreamingState::new(),
             input: InputBuffer::new(),
-            scroll: ScrollPosition::Bottom,
             model_id,
             stats: TokenStats::new(context_window),
             should_quit: false,
@@ -306,7 +254,6 @@ impl App {
             pending_browser_login: None,
             settings_menu: None,
             theme: crate::theme::Theme::default(),
-            scroll_lines: DEFAULT_SCROLL_LINES,
             keymap: crate::keybinds::KeyMap::default(),
             confirm_quit_pending: false,
             compacting: false,
@@ -413,7 +360,6 @@ impl App {
     pub fn push_user_message(&mut self, text: impl Into<String>) {
         self.messages
             .push(DisplayMessage::new(MessageRole::User, text));
-        self.scroll = ScrollPosition::Bottom;
     }
 
     /// add a user message with attached images to the display
@@ -421,7 +367,6 @@ impl App {
         let mut msg = DisplayMessage::new(MessageRole::User, text);
         msg.images = images;
         self.messages.push(msg);
-        self.scroll = ScrollPosition::Bottom;
     }
 
     /// remove all queued steering messages, returning their text content
@@ -444,7 +389,6 @@ impl App {
             queued: true,
             ..DisplayMessage::new(MessageRole::User, text)
         });
-        self.scroll = ScrollPosition::Bottom;
     }
 
     /// add a queued steering message carrying attached images, so the UI
@@ -458,7 +402,6 @@ impl App {
         msg.queued = true;
         msg.images = images;
         self.messages.push(msg);
-        self.scroll = ScrollPosition::Bottom;
     }
 
     /// remove the last queued steering message from display, return its text
@@ -593,7 +536,6 @@ impl App {
         self.display_generation = self.display_generation.wrapping_add(1);
         self.messages.clear();
         self.stream = StreamingState::new();
-        self.scroll = ScrollPosition::Bottom;
         self.input.images.clear();
     }
 

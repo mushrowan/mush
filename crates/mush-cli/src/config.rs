@@ -123,9 +123,6 @@ pub struct Config {
     /// provider-specific settings (anthropic betas, scope, etc.)
     #[serde(default)]
     pub settings: Settings,
-    /// lines scrolled per j/k keystroke in scroll mode (default 3)
-    #[serde(default = "default_scroll_lines")]
-    pub scroll_lines: u16,
     /// configurable keybinds grouped by scope, for example
     /// `[keys.normal]` and `[keys.model_picker]`.
     #[serde(default)]
@@ -175,10 +172,6 @@ fn default_max_image_mb() -> u32 {
     5
 }
 
-fn default_scroll_lines() -> u16 {
-    mush_tui::DEFAULT_SCROLL_LINES
-}
-
 fn default_cache_timer() -> bool {
     true
 }
@@ -217,7 +210,6 @@ impl Default for Config {
             favourite_models: Vec::new(),
             compaction_model: None,
             settings: Settings::default(),
-            scroll_lines: default_scroll_lines(),
             keys: mush_tui::KeysConfig::default(),
             forbidden_chars: Vec::new(),
             forbidden_char_classes: Vec::new(),

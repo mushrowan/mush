@@ -134,7 +134,6 @@ pub async fn run_tui(
         &mut terminal,
         &mut inline,
         &mut runtime.session,
-        &image_picker,
         &tui_config.settings,
     )?;
     startup_phases.push(diag::StartupPhase::new(
@@ -272,7 +271,6 @@ pub async fn run_tui(
                 &mut terminal,
                 &mut inline,
                 &mut runtime.session,
-                &image_picker,
                 &tui_config.settings,
             )?;
             draw_count = draw_count.wrapping_add(1);

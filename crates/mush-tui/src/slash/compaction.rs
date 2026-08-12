@@ -545,49 +545,6 @@ mod tests {
         );
     }
 
-    /// after /compact the user-facing scroll position is left where it
-    /// was. the previous implementation rebuilt the display from scratch
-    /// (clearing it via `clear_messages`, which reset the scroll position
-    /// to the bottom) and then jumped to the top so the freshly rendered
-    /// summary at index 0 was visible. now the summary is appended at
-    /// the END of the existing display, so leaving scroll alone keeps
-    /// the user where they were and the new banner is naturally below
-    /// the last message.
-    #[tokio::test]
-    async fn handle_compact_does_not_jump_to_top() {
-        let mut msgs = Vec::new();
-        for i in 0..12 {
-            msgs.push(user_msg(&format!("question {i}")));
-            msgs.push(assistant_msg(&format!("answer {i}"), 1_000));
-        }
-        let mut conversation = ConversationState::from_messages(msgs);
-        let mut app = App::new(test_model().id, TokenCount::new(200_000));
-        let registry = ApiRegistry::new();
-        let model = test_model();
-        let options = StreamOptions::default();
-
-        // simulate the user reading scrolled-up history
-        let scrolled_up = crate::app::ScrollPosition::Message { msg: 0, line: 3 };
-        app.scroll = scrolled_up;
-
-        handle_compact(
-            &mut app,
-            &mut conversation,
-            &model,
-            &options,
-            &registry,
-            None,
-            None,
-            None,
-        )
-        .await;
-
-        assert_eq!(
-            app.scroll, scrolled_up,
-            "/compact must not move the scroll position"
-        );
-    }
-
     /// /compact must NOT block the calling task: the LLM call has to
     /// run on a background `tokio::spawn` so the runner's input loop
     /// can keep redrawing the "compacting…" status. this test proves

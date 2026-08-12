@@ -79,28 +79,17 @@ pub fn handle(
             keys.push_str("general:\n");
             keys.push_str("  enter          - send message\n");
             keys.push_str("  alt/shift+enter - insert newline\n");
-            keys.push_str("  ctrl+c         - quit\n");
-            keys.push_str("  esc            - scroll to bottom / abort stream (in that order)\n");
-            keys.push_str("  shift+end      - jump to bottom without aborting\n");
+            keys.push_str("  ctrl+c         - quit / abort stream\n");
             keys.push_str("  tab            - autocomplete / command menu / expand @template\n");
             keys.push_str("  ctrl+j/k       - navigate menus\n");
             keys.push_str("  ctrl+v         - paste image from clipboard\n");
             keys.push_str("  ctrl+d         - quit (empty input) / delete char\n");
-            keys.push_str("  page up/down   - scroll\n");
             keys.push_str("  alt+k          - edit queued steering message\n");
             keys.push_str("\nmode switches:\n");
-            keys.push_str("  ctrl+s         - scroll/copy mode\n");
             keys.push_str("  ctrl+f         - search\n");
             keys.push_str("  ctrl+t         - cycle thinking level\n");
             keys.push_str("  ctrl+o         - toggle thinking text visibility\n");
             keys.push_str("  ctrl+i         - toggle prompt injection preview\n");
-            keys.push_str("\nscroll mode:\n");
-            keys.push_str("  j/k            - scroll down/up\n");
-            keys.push_str("  g/G            - jump to top/bottom\n");
-            keys.push_str("  b              - toggle block/message mode\n");
-            keys.push_str("  v              - visual selection\n");
-            keys.push_str("  y              - copy selected message\n");
-            keys.push_str("  esc            - exit scroll mode\n");
             keys.push_str("\nediting:\n");
             keys.push_str("  ctrl+a / home  - start of line\n");
             keys.push_str("  ctrl+e / end   - end of line\n");
@@ -453,19 +442,9 @@ fn build_debug_dump(app: &App, session_id: &str) -> String {
     let _ = writeln!(out, "\n[render]");
     let _ = writeln!(
         out,
-        "scroll: {:?} render_scroll: {} total_lines: {} visible: {}",
-        app.scroll,
-        app.render_state.render_scroll.get(),
-        app.render_state.total_content_lines.get(),
-        app.render_state.message_area.get().height
-    );
-    let _ = writeln!(
-        out,
-        "caches: height={} indented={} markdown={} content_hash={}",
-        app.render_state.height_cache.borrow().len(),
-        app.render_state.indented_cache.borrow().len(),
+        "caches: markdown={} tool_box={}",
         app.render_state.markdown_cache.borrow().len(),
-        app.render_state.content_hash_cache.borrow().len()
+        app.render_state.tool_box_cache.borrow().len()
     );
 
     let _ = writeln!(out, "\n[cache]");

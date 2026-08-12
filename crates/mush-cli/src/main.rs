@@ -583,7 +583,6 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
             scope: setup.cfg.settings.scope,
             anthropic_betas: setup.cfg.settings.anthropic_betas.clone(),
         },
-        scroll_lines: setup.cfg.scroll_lines,
         favourite_models: favourite_models.clone(),
         favourites_locked,
         save_favourite_models: if favourites_locked {

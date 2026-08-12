@@ -50,7 +50,6 @@ pub enum KeyScope {
     SlotEdit,
     Settings,
     Search,
-    Scroll,
 }
 
 impl KeyScope {
@@ -66,7 +65,6 @@ impl KeyScope {
             Self::SlotEdit => "slot_edit",
             Self::Settings => "settings",
             Self::Search => "search",
-            Self::Scroll => "scroll",
         }
     }
 
@@ -81,7 +79,6 @@ impl KeyScope {
         Self::SlotEdit,
         Self::Settings,
         Self::Search,
-        Self::Scroll,
     ];
 }
 
@@ -151,7 +148,6 @@ pub enum Action {
     /// default binding: `ctrl-t`
     CycleThinkingLevel,
     Confirm,
-    CopySelection,
     CursorDown,
     /// move the input cursor to the end of the line. default bindings:
     /// `end`, `ctrl-e`
@@ -177,20 +173,11 @@ pub enum Action {
     EditSteering,
     /// enter fullscreen search mode. default binding: `ctrl-f`
     EnterSearch,
-    /// enter scroll / selection mode. default binding: `ctrl-s`
-    EnterScroll,
-    /// jump the message log to the bottom without aborting or
-    /// otherwise affecting the stream. default binding: `shift-end`
-    JumpToBottom,
     /// paste an image from the system clipboard. default binding: `ctrl-v`
     PasteImage,
     /// clear input, abort a busy turn, or arm/confirm quit. default
     /// binding: `ctrl-c`
     QuitOrAbort,
-    /// page the message log down. default binding: `pagedown`
-    ScrollPageDown,
-    /// page the message log up. default binding: `pageup`
-    ScrollPageUp,
     /// delete the word before the cursor. default bindings:
     /// `ctrl-backspace`, `alt-backspace`, `ctrl-w`
     DeleteWordBackward,
@@ -225,8 +212,6 @@ pub enum Action {
     SearchNext,
     SearchPrev,
     SelectOrSpace,
-    ToggleBlockMode,
-    ToggleVisualSelection,
 }
 
 impl Action {
@@ -238,7 +223,6 @@ impl Action {
             Self::Cancel => "cancel",
             Self::CycleThinkingLevel => "cycle_thinking_level",
             Self::Confirm => "confirm",
-            Self::CopySelection => "copy_selection",
             Self::CursorDown => "cursor_down",
             Self::CursorLineEnd => "cursor_line_end",
             Self::CursorLineStart => "cursor_line_start",
@@ -252,7 +236,6 @@ impl Action {
             Self::DeleteToStart => "delete_to_start",
             Self::EditSteering => "edit_steering",
             Self::EnterSearch => "enter_search",
-            Self::EnterScroll => "enter_scroll",
             Self::InsertNewline => "insert_newline",
             Self::NavigateBottom => "navigate_bottom",
             Self::NavigateTop => "navigate_top",
@@ -265,13 +248,8 @@ impl Action {
             Self::SearchNext => "search_next",
             Self::SearchPrev => "search_prev",
             Self::SelectOrSpace => "select_or_space",
-            Self::ToggleBlockMode => "toggle_block_mode",
-            Self::ToggleVisualSelection => "toggle_visual_selection",
-            Self::JumpToBottom => "jump_to_bottom",
             Self::PasteImage => "paste_image",
             Self::QuitOrAbort => "quit_or_abort",
-            Self::ScrollPageDown => "scroll_page_down",
-            Self::ScrollPageUp => "scroll_page_up",
             Self::DeleteWordBackward => "delete_word_backward",
             Self::DeleteWordForward => "delete_word_forward",
         }
@@ -284,7 +262,6 @@ impl Action {
         Self::Cancel,
         Self::CycleThinkingLevel,
         Self::Confirm,
-        Self::CopySelection,
         Self::CursorDown,
         Self::CursorLineEnd,
         Self::CursorLineStart,
@@ -298,7 +275,6 @@ impl Action {
         Self::DeleteToStart,
         Self::EditSteering,
         Self::EnterSearch,
-        Self::EnterScroll,
         Self::InsertNewline,
         Self::NavigateBottom,
         Self::NavigateTop,
@@ -311,13 +287,8 @@ impl Action {
         Self::SearchNext,
         Self::SearchPrev,
         Self::SelectOrSpace,
-        Self::ToggleBlockMode,
-        Self::ToggleVisualSelection,
-        Self::JumpToBottom,
         Self::PasteImage,
         Self::QuitOrAbort,
-        Self::ScrollPageDown,
-        Self::ScrollPageUp,
         Self::DeleteWordBackward,
         Self::DeleteWordForward,
     ];
@@ -463,18 +434,12 @@ const fn default_scope_for_action(action: Action) -> KeyScope {
     match action {
         Action::Cancel
         | Action::Confirm
-        | Action::JumpToBottom
         | Action::NavigateBottom
         | Action::NavigateTop
         | Action::NextItem
         | Action::PreviousItem
         | Action::QuitOrAbort
-        | Action::ScrollPageDown
-        | Action::ScrollPageUp
         | Action::SelectOrSpace => KeyScope::Shared,
-        Action::CopySelection | Action::ToggleBlockMode | Action::ToggleVisualSelection => {
-            KeyScope::Scroll
-        }
         Action::SessionPickerToggleScope => KeyScope::SessionPicker,
         Action::ModelPickerDeleteAllStale
         | Action::ModelPickerDeleteSelectedStale
@@ -543,32 +508,9 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
         &[(KeyCode::Char('f'), KeyModifiers::CONTROL)],
     ),
     (
-        KeyScope::Normal,
-        Action::EnterScroll,
-        &[(KeyCode::Char('s'), KeyModifiers::CONTROL)],
-    ),
-    // shift+End: jump the message log to the bottom without touching the
-    // stream. plain End is line-end in the input editor; ctrl+End isn't
-    // reliably delivered across terminals
-    (
-        KeyScope::Shared,
-        Action::JumpToBottom,
-        &[(KeyCode::End, KeyModifiers::SHIFT)],
-    ),
-    (
         KeyScope::Shared,
         Action::QuitOrAbort,
         &[(KeyCode::Char('c'), KeyModifiers::CONTROL)],
-    ),
-    (
-        KeyScope::Shared,
-        Action::ScrollPageUp,
-        &[(KeyCode::PageUp, KeyModifiers::NONE)],
-    ),
-    (
-        KeyScope::Shared,
-        Action::ScrollPageDown,
-        &[(KeyCode::PageDown, KeyModifiers::NONE)],
     ),
     (
         KeyScope::Shared,
@@ -659,21 +601,6 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
             (KeyCode::End, KeyModifiers::NONE),
             (KeyCode::Char('G'), KeyModifiers::SHIFT),
         ],
-    ),
-    (
-        KeyScope::Scroll,
-        Action::ToggleBlockMode,
-        &[(KeyCode::Char('b'), KeyModifiers::NONE)],
-    ),
-    (
-        KeyScope::Scroll,
-        Action::ToggleVisualSelection,
-        &[(KeyCode::Char('v'), KeyModifiers::NONE)],
-    ),
-    (
-        KeyScope::Scroll,
-        Action::CopySelection,
-        &[(KeyCode::Char('y'), KeyModifiers::NONE)],
     ),
     (
         KeyScope::Normal,
@@ -981,15 +908,6 @@ mod tests {
     }
 
     #[test]
-    fn default_keymap_has_mode_switch_triggers() {
-        let map = KeyMap::default();
-        let ctrl_f = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL);
-        let ctrl_s = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
-        assert!(map.matches(Action::EnterSearch, ctrl_f));
-        assert!(map.matches(Action::EnterScroll, ctrl_s));
-    }
-
-    #[test]
     fn default_keymap_has_word_deletion_bindings() {
         let map = KeyMap::default();
         assert!(map.matches(
@@ -1073,17 +991,6 @@ mod tests {
             Action::ModelPickerDeleteAllStale,
             KeyEvent::new(KeyCode::Char('d'), KeyModifiers::ALT)
         ));
-    }
-
-    #[test]
-    fn default_keymap_has_jump_to_bottom_trigger() {
-        // shift+End jumps the message log to the bottom without aborting
-        // the stream. chosen because plain End is already line-end in the
-        // input editor, and ctrl+End isn't consistently delivered across
-        // terminals. the action stays opt-in configurable via [keys]
-        let map = KeyMap::default();
-        let shift_end = KeyEvent::new(KeyCode::End, KeyModifiers::SHIFT);
-        assert!(map.matches(Action::JumpToBottom, shift_end));
     }
 
     #[test]

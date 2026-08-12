@@ -297,27 +297,6 @@ fn left_status(app: &App, width: u16) -> LeftStatus {
     }
 
     // scroll mode indicator
-    if app.interaction.mode == crate::app::AppMode::Scroll {
-        let unit_label = scroll_selection_label(app);
-        b.section_break();
-        b.push_inline(Span::styled(
-            format!("scroll: {unit_label}"),
-            app.theme.scroll_indicator,
-        ));
-    }
-
-    // scroll position indicator (only when scrolled away from bottom).
-    // stays inline with the scroll mode section
-    if app.interaction.status_bar.show_scroll_position && app.is_scrolled_up() {
-        let total = app.render_state.total_content_lines.get();
-        let visible = app.render_state.message_area.get().height;
-        let max_scroll = total.saturating_sub(visible);
-        if max_scroll > 0 {
-            let from_top = app.render_state.render_scroll.get();
-            let pct = (from_top as f64 / max_scroll as f64 * 100.0) as u16;
-            b.push_inline(Span::styled(format!(" {pct}%"), app.theme.scroll_indicator));
-        }
-    }
 
     // background pane alerts
     if app.interaction.status_bar.show_background_alerts
@@ -380,37 +359,6 @@ fn cache_suffix_for_app(
             display: String::new(),
             ticking: None,
         },
-    }
-}
-
-fn scroll_selection_label(app: &crate::app::App) -> String {
-    match app.navigation.scroll_unit {
-        crate::app::ScrollUnit::Block => match app
-            .navigation
-            .selected_block
-            .and_then(|idx| app.blocks().get(idx).cloned())
-        {
-            Some(block) => {
-                let label = match block.kind {
-                    crate::app::BlockKind::Paragraph => "paragraph".to_string(),
-                    crate::app::BlockKind::Fenced { lang } => lang
-                        .map(|lang| format!("{lang} block"))
-                        .unwrap_or_else(|| "code block".into()),
-                };
-                format!("blocks, y copies {label}, b messages")
-            }
-            None => "blocks, nothing selected, b messages".into(),
-        },
-        crate::app::ScrollUnit::Message => {
-            if let Some((start, end)) = app.selection_range() {
-                let count = end - start + 1;
-                format!("messages, visual {count} bodies, y copies, b blocks")
-            } else if app.navigation.selected_message.is_some() {
-                "messages, y copies body, v visual, b blocks".into()
-            } else {
-                "messages, nothing selected, b blocks".into()
-            }
-        }
     }
 }
 
@@ -1223,53 +1171,6 @@ mod tests {
         assert!(
             line.ends_with(' '),
             "right edge of status bar should have a trailing pad space, got {line:?}"
-        );
-    }
-
-    #[test]
-    fn status_bar_shows_scroll_block_mode() {
-        let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.interaction.mode = crate::app::AppMode::Scroll;
-        app.navigation.scroll_unit = crate::app::ScrollUnit::Block;
-        app.messages.push(crate::app::DisplayMessage::new(
-            crate::app::MessageRole::Assistant,
-            "para",
-        ));
-        app.navigation.selected_block = Some(0);
-        let buf = render_status(&app, 120, 1);
-        let content = buffer_to_string(&buf);
-        assert!(
-            content.contains("blocks, y copies paragraph, b messages"),
-            "missing block mode indicator: {content}"
-        );
-    }
-
-    #[test]
-    fn status_bar_shows_scroll_message_mode() {
-        let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.interaction.mode = crate::app::AppMode::Scroll;
-        app.navigation.scroll_unit = crate::app::ScrollUnit::Message;
-        app.navigation.selected_message = Some(0);
-        let buf = render_status(&app, 120, 1);
-        let content = buffer_to_string(&buf);
-        assert!(
-            content.contains("messages, y copies body, v visual, b blocks"),
-            "missing message mode indicator: {content}"
-        );
-    }
-
-    #[test]
-    fn status_bar_shows_visual_message_copy_count() {
-        let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.interaction.mode = crate::app::AppMode::Scroll;
-        app.navigation.scroll_unit = crate::app::ScrollUnit::Message;
-        app.navigation.selected_message = Some(2);
-        app.navigation.selection_anchor = Some(0);
-        let buf = render_status(&app, 120, 1);
-        let content = buffer_to_string(&buf);
-        assert!(
-            content.contains("messages, visual 3 bodies, y copies, b blocks"),
-            "missing visual mode copy indicator: {content}"
         );
     }
 }

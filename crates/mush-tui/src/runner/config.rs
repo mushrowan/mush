@@ -148,7 +148,6 @@ pub struct TuiConfig {
     /// active runtime settings (scope + anthropic betas)
     pub settings: crate::settings::ScopedSettings,
     /// lines scrolled per j/k keystroke in scroll mode
-    pub scroll_lines: u16,
     /// effective favourite models list (config + disk resolved at startup).
     /// cycled through with alt+m / alt+shift+m, ★-marked in the picker
     pub favourite_models: Vec<String>,
@@ -220,7 +219,6 @@ impl TuiConfig {
     pub(crate) fn seed_app(&self, app: &mut crate::app::App) {
         app.thinking_display = self.thinking_display;
         app.theme = self.theme.clone();
-        app.scroll_lines = self.scroll_lines;
         app.keymap = self.keymap.clone();
         app.interaction.show_cost = self.show_cost;
         app.interaction.show_usage_lines = self.show_usage_lines;
@@ -286,7 +284,6 @@ impl TuiConfig {
             http_client: None,
             session_id: mush_ai::types::SessionId::new(),
             settings: crate::settings::ScopedSettings::default(),
-            scroll_lines: crate::app::DEFAULT_SCROLL_LINES,
             favourite_models: Vec::new(),
             favourites_locked: false,
             save_favourite_models: None,

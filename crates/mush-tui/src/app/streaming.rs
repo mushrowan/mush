@@ -298,16 +298,6 @@ impl App {
             .map(|i| i + 1)
             .unwrap_or(0);
         self.messages.insert(insert_pos, assistant_msg);
-        // a viewport anchored inside the in-flight stream has to follow the
-        // same content into its new home, otherwise the trailing block
-        // shrinking out from under the anchor drops the view to the bottom
-        if let ScrollPosition::Trailing { line } = self.scroll {
-            self.scroll = ScrollPosition::Message {
-                msg: insert_pos,
-                line,
-            };
-        }
-
         if let Some(ref u) = usage {
             let prev_usage_snapshot = self.stats.prev_usage().copied();
             let prev_config_snapshot = self.stats.prev_call_config().cloned();
@@ -406,9 +396,6 @@ impl App {
             }
         } else if let Some(c) = cost {
             self.stats.total_cost += c;
-        }
-        if self.is_scrolled_up() {
-            self.navigation.has_unread = true;
         }
     }
 }

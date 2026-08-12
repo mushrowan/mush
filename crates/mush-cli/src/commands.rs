@@ -89,14 +89,12 @@ pub fn open_config() -> Result<()> {
              # cycle_favourite = \"alt+m\"          # next favourite model\n\
              # cycle_favourite_backward = \"alt+shift+m\"  # prev favourite model\n\
              # enter_search = \"ctrl+f\"            # enter fullscreen search\n\
-             # enter_scroll = \"ctrl+s\"            # enter scroll / selection mode\n\
              \n\
              # [status_bar]\n\
              # show_thinking = true          # `thinking: <level>` segment\n\
              # show_context = true           # `used/window` + cache warmth\n\
              # show_oauth_usage = true       # 5h / 7d usage bars (claude code plan)\n\
              # show_status_messages = true   # ephemeral slash / tool messages\n\
-             # show_scroll_position = true   # `N%` when scrolled up\n\
              # show_background_alerts = true # background pane notifications\n\
              # show_pane_indicator = true    # [i/n] when multi-pane\n\
              # show_cwd = true               # cwd in the right column\n\

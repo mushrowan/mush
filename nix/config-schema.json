@@ -553,13 +553,6 @@
       },
       "type": "object"
     },
-    "MouseTrackingMode": {
-      "enum": [
-        "minimal",
-        "disabled"
-      ],
-      "type": "string"
-    },
     "RepoMapConfig": {
       "description": "repo map tool configuration\n\nthe `repo_map` tool exposes a tree-sitter built structural overview\nof the codebase. it's an opt-in tool the model invokes on demand,\nnot a system-prompt injection. the budget controls how much text\nthe tool can return per call (well below the central tool-output cap)",
       "properties": {
@@ -743,11 +736,6 @@
           "description": "`[i/n]` pane indicator when multi-pane",
           "type": "boolean"
         },
-        "show_scroll_position": {
-          "default": true,
-          "description": "`N%` percent-from-top when scrolled up",
-          "type": "boolean"
-        },
         "show_status_messages": {
           "default": true,
           "description": "ephemeral status messages from slash commands, tools, etc",
@@ -770,10 +758,6 @@
         "keyboard_enhancement": {
           "$ref": "#/$defs/KeyboardEnhancementMode",
           "default": "auto"
-        },
-        "mouse_tracking": {
-          "$ref": "#/$defs/MouseTrackingMode",
-          "default": "minimal"
         }
       },
       "type": "object"
@@ -1161,14 +1145,6 @@
       },
       "description": "repo map tool configuration"
     },
-    "scroll_lines": {
-      "default": 3,
-      "description": "lines scrolled per j/k keystroke in scroll mode (default 3)",
-      "format": "uint16",
-      "maximum": 65535,
-      "minimum": 0,
-      "type": "integer"
-    },
     "settings": {
       "$ref": "#/$defs/Settings",
       "default": {
@@ -1207,7 +1183,6 @@
         "show_cwd": true,
         "show_oauth_usage": true,
         "show_pane_indicator": true,
-        "show_scroll_position": true,
         "show_status_messages": true,
         "show_thinking": true
       },
@@ -1224,8 +1199,7 @@
       "$ref": "#/$defs/TerminalPolicy",
       "default": {
         "image_probe": "auto",
-        "keyboard_enhancement": "auto",
-        "mouse_tracking": "minimal"
+        "keyboard_enhancement": "auto"
       },
       "description": "terminal behaviour overrides"
     },

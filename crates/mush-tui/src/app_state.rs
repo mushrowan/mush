@@ -2,16 +2,13 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::rc::Rc;
 
 use mush_ai::types::ToolCallId;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Text};
 use serde::{Deserialize, Serialize};
 
-use crate::app::{Block, ScrollUnit};
 use crate::app_event::AppMode;
-use crate::display_types::{ImageRenderArea, MessageRowRange};
 use crate::login_picker::LoginPickerState;
 use crate::model_picker::ModelPickerState;
 use crate::session_picker::SessionPickerState;
@@ -186,8 +183,6 @@ pub struct StatusBarConfig {
     pub show_oauth_usage: bool,
     /// ephemeral status messages from slash commands, tools, etc
     pub show_status_messages: bool,
-    /// `N%` percent-from-top when scrolled up
-    pub show_scroll_position: bool,
     /// background pane notifications
     pub show_background_alerts: bool,
     /// `[i/n]` pane indicator when multi-pane
@@ -203,7 +198,6 @@ impl Default for StatusBarConfig {
             show_context: true,
             show_oauth_usage: true,
             show_status_messages: true,
-            show_scroll_position: true,
             show_background_alerts: true,
             show_pane_indicator: true,
             show_cwd: true,
@@ -271,68 +265,14 @@ impl Default for InteractionState {
 /// selection and scroll navigation state
 #[derive(Debug, Clone, Default)]
 pub struct NavigationState {
-    /// new messages arrived while scrolled up
+    /// new messages arrived while the terminal was unfocused
     pub has_unread: bool,
-    /// selected message index in scroll mode (for copy)
-    pub selected_message: Option<usize>,
-    /// anchor for visual selection range (v in scroll mode)
-    pub selection_anchor: Option<usize>,
-    /// what j/k navigates in scroll mode
-    pub scroll_unit: ScrollUnit,
-    /// selected code block index in block scroll mode
-    pub selected_block: Option<usize>,
 }
-
-/// where the message list viewport is pinned.
-///
-/// the anchor names a position in the document rather than a distance
-/// from the bottom, so content arriving below it cannot move the view and
-/// no compensation arithmetic is needed. `Bottom` is the follow state:
-/// the viewport tracks the newest content as it grows
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ScrollPosition {
-    /// follow the newest content
-    #[default]
-    Bottom,
-    /// top row of the viewport sits `line` wrapped rows below the first
-    /// row of message `msg`
-    Message { msg: usize, line: u16 },
-    /// top row of the viewport sits `line` wrapped rows below the first
-    /// row of the trailing block (in-flight stream, queued messages)
-    Trailing { line: u16 },
-}
-
-impl ScrollPosition {
-    /// whether the viewport is following new content
-    #[must_use]
-    pub fn is_bottom(self) -> bool {
-        self == Self::Bottom
-    }
-}
-
-/// cached indented lines for a single message.
-/// keyed by (content_hash, width) so entries invalidate on content or resize.
-type CachedIndentedLines = (u64, u16, Vec<Line<'static>>);
 
 /// cached rendered lines for completed tool boxes.
 /// keyed by (content_hash, width) so entries invalidate on tool content
 /// changes or resize.
 pub type CachedToolBoxLines = (u64, u16, Vec<Line<'static>>);
-
-/// cached estimated height for a single message.
-/// keyed by cheap O(1) byte-length fingerprint so we avoid
-/// re-scanning content with chars().count() every frame
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CachedHeight {
-    pub content_len: usize,
-    pub thinking_len: usize,
-    pub tool_output_len: usize,
-    pub completed_tool_count: usize,
-    pub thinking_expanded: bool,
-    pub has_usage: bool,
-    pub width: u16,
-    pub height: usize,
-}
 
 /// cached per-frame status bar data so `left_spans` (which issues
 /// ~10 format! calls) and `status_bar_height` + `StatusBar::render`
@@ -350,34 +290,14 @@ pub struct CachedStatusBar {
 /// render caches and geometry from the last frame
 #[derive(Debug)]
 pub struct RenderState {
-    /// image render positions (populated by MessageList during render)
-    pub image_render_areas: RefCell<Vec<ImageRenderArea>>,
-    /// per-message wrapped-line ranges (populated by MessageList during render)
-    pub message_row_ranges: RefCell<Vec<MessageRowRange>>,
     /// message area rect from last render
     pub message_area: Cell<Rect>,
-    /// scroll value from last render (wrapped lines scrolled past)
-    pub render_scroll: Cell<u16>,
     /// cached markdown rendering for stable message content
     pub markdown_cache: RefCell<HashMap<String, Text<'static>>>,
     /// cached markdown rendering for the current visible streaming text.
     /// keyed by `(message_width, full_stream_text)` because tables wrap
     /// to the message width and must reflow after resizes
     pub stream_markdown_cache: RefCell<Option<(usize, String, Text<'static>)>>,
-    /// total content lines (set during render by MessageList)
-    pub total_content_lines: Cell<u16>,
-    /// per-message indented lines cache.
-    /// stores (content_hash, width, pre-indented lines) so stable
-    /// messages skip both the markdown clone and indent_line computation
-    pub indented_cache: RefCell<Vec<Option<CachedIndentedLines>>>,
-    /// per-message estimated height cache.
-    /// avoids re-running count_estimated_lines (which does chars().count()
-    /// per line) on every frame for stable messages
-    pub height_cache: RefCell<Vec<Option<CachedHeight>>>,
-    /// per-message content hash cache.
-    /// avoids rehashing full content string every frame when checking
-    /// indented cache validity. keyed by byte length (O(1) check)
-    pub content_hash_cache: RefCell<Vec<Option<(usize, u64)>>>,
     /// per-message rendered completed-tool box cache.
     /// avoids re-running syntect over stable tool summaries and previews
     /// every frame.
@@ -387,30 +307,17 @@ pub struct RenderState {
     /// `StatusBar::render` and `Ui::cursor_position` callers share the
     /// same built spans instead of rebuilding with ~10 format! calls
     pub status_bar_cache: RefCell<Option<CachedStatusBar>>,
-    /// cached scroll-mode block list keyed by a cheap fingerprint of the
-    /// messages (count + per-message content lengths). block scroll mode
-    /// rebuilds this every frame and every j/k keypress, so caching keeps
-    /// review of a long scrollback from going O(total content) per frame
-    pub blocks_cache: RefCell<Option<(u64, Rc<Vec<Block>>)>>,
 }
 
 impl RenderState {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            image_render_areas: RefCell::new(Vec::new()),
-            message_row_ranges: RefCell::new(Vec::new()),
             message_area: Cell::new(Rect::default()),
-            render_scroll: Cell::new(0),
             markdown_cache: RefCell::new(HashMap::new()),
             stream_markdown_cache: RefCell::new(None),
-            total_content_lines: Cell::new(0),
-            indented_cache: RefCell::new(Vec::new()),
-            height_cache: RefCell::new(Vec::new()),
-            content_hash_cache: RefCell::new(Vec::new()),
             tool_box_cache: RefCell::new(Vec::new()),
             status_bar_cache: RefCell::new(None),
-            blocks_cache: RefCell::new(None),
         }
     }
 }
