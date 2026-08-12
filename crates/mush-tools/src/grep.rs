@@ -568,6 +568,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_stringified_bool_reaches_grep() {
+        // the schema says boolean, so "false" is what the model meant
+        let dir = temp_dir();
+        fs::write(dir.path().join("test.txt"), "HELLO world\n").unwrap();
+
+        let tool = GrepTool::new(dir.path().into());
+        let result = tool
+            .call(serde_json::json!({
+                "pattern": "hello",
+                "path": dir.path().to_str().unwrap(),
+                "case_sensitive": "false"
+            }))
+            .await;
+        let text = extract_text(&result);
+        assert!(result.outcome.is_success(), "{text}");
+        assert!(text.contains("HELLO world"), "{text}");
+    }
+
+    #[tokio::test]
     async fn grep_no_matches() {
         let dir = temp_dir();
         fs::write(dir.path().join("test.txt"), "hello world").unwrap();

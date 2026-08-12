@@ -87,7 +87,7 @@ async fn run_call(i: usize, call: BatchCall, tools: &ToolRegistry) -> CallResult
     };
 
     let limit = tool.output_limit();
-    let result = tool.execute(call.parameters).await;
+    let result = tool.call(call.parameters).await;
     (i, call.tool, Some(limit), Ok(result))
 }
 

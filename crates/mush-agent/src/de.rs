@@ -1,13 +1,17 @@
 //! lenient deserialisation helpers for tool arguments.
 //!
 //! tool-calling models routinely emit arguments as JSON strings: an integer
-//! as `"1030"`, an array as `"[{...}]"`. strict serde parsing rejects those
-//! with `invalid type: string`, which surfaces to the model as a confusing
-//! failure it tends to repeat. these helpers accept either the typed value
-//! or the string spelling of it.
+//! as `"1030"`, a bool as `"true"`, an array as `"[{...}]"`. strict serde
+//! parsing rejects those with `invalid type: string`, which surfaces to the
+//! model as a confusing failure it tends to repeat.
 //!
-//! use via `#[serde(deserialize_with = "...")]`. pair [`opt_uint`] and
-//! [`json_seq`] with `#[serde(default)]` so an absent key stays empty.
+//! [`coerce_to_schema`] is the general answer: every tool advertises a JSON
+//! schema, so the types the model was told about are the types to coerce to.
+//! it runs on every tool call.
+//!
+//! the rest are per-field escape hatches for the same problem, via
+//! `#[serde(deserialize_with = "...")]`. pair [`opt_uint`] and [`json_seq`]
+//! with `#[serde(default)]` so an absent key stays empty.
 
 use std::fmt::Display;
 
@@ -80,6 +84,65 @@ where
         other => other,
     };
     serde_json::from_value(value).map_err(D::Error::custom)
+}
+
+/// take the structured value out of a JSON string spelling of it
+fn unstring(args: &mut serde_json::Value) {
+    if let serde_json::Value::String(text) = args
+        && let Ok(parsed) = serde_json::from_str(text)
+    {
+        *args = parsed;
+    }
+}
+
+/// rewrite `args` in place to the types `schema` advertises.
+///
+/// anything that won't coerce is left where it is, so the parse error the
+/// caller raises describes what the model sent
+pub fn coerce_to_schema(args: &mut serde_json::Value, schema: &serde_json::Value) {
+    use serde_json::Value;
+
+    match schema.get("type").and_then(Value::as_str) {
+        Some("object") => {
+            let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
+                return;
+            };
+            unstring(args);
+            let Some(fields) = args.as_object_mut() else {
+                return;
+            };
+            for (key, property) in properties {
+                if let Some(value) = fields.get_mut(key) {
+                    coerce_to_schema(value, property);
+                }
+            }
+        }
+        Some("array") => {
+            unstring(args);
+            let (Some(items), Some(entries)) = (schema.get("items"), args.as_array_mut()) else {
+                return;
+            };
+            for entry in entries {
+                coerce_to_schema(entry, items);
+            }
+        }
+        Some("integer" | "number") => {
+            if let Value::String(text) = args
+                && let Ok(number) = text.trim().parse::<serde_json::Number>()
+            {
+                *args = Value::Number(number);
+            }
+        }
+        Some("boolean") => match args.as_str().map(str::trim) {
+            Some("true") => *args = Value::Bool(true),
+            Some("false") => *args = Value::Bool(false),
+            _ => {}
+        },
+        Some("string") if args.is_number() || args.is_boolean() => {
+            *args = Value::String(args.to_string());
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]
@@ -181,5 +244,88 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("array"), "{err}");
+    }
+
+    #[test]
+    fn a_stringified_bool_reaches_a_bool_field() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "loud": { "type": "boolean" } }
+        });
+        let mut args = serde_json::json!({ "loud": "true" });
+        coerce_to_schema(&mut args, &schema);
+        assert_eq!(args, serde_json::json!({ "loud": true }));
+    }
+
+    #[test]
+    fn a_stringified_number_reaches_a_number_field() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "count": { "type": "integer" },
+                "ratio": { "type": "number" }
+            }
+        });
+        let mut args = serde_json::json!({ "count": "12", "ratio": "0.5" });
+        coerce_to_schema(&mut args, &schema);
+        assert_eq!(args, serde_json::json!({ "count": 12, "ratio": 0.5 }));
+    }
+
+    #[test]
+    fn a_stringified_array_reaches_an_array_field() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": { "n": { "type": "integer" } }
+                    }
+                }
+            }
+        });
+        let mut args = serde_json::json!({ "items": r#"[{"n":"3"}]"# });
+        coerce_to_schema(&mut args, &schema);
+        assert_eq!(args, serde_json::json!({ "items": [{ "n": 3 }] }));
+    }
+
+    #[test]
+    fn a_number_reaches_a_string_field() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "path": { "type": "string" } }
+        });
+        let mut args = serde_json::json!({ "path": 42 });
+        coerce_to_schema(&mut args, &schema);
+        assert_eq!(args, serde_json::json!({ "path": "42" }));
+    }
+
+    #[test]
+    fn a_value_the_schema_already_fits_is_left_alone() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "pattern": { "type": "string" },
+                "limit": { "type": "integer" }
+            }
+        });
+        let mut args = serde_json::json!({ "pattern": "true", "limit": 3, "extra": "kept" });
+        coerce_to_schema(&mut args, &schema);
+        assert_eq!(
+            args,
+            serde_json::json!({ "pattern": "true", "limit": 3, "extra": "kept" })
+        );
+    }
+
+    #[test]
+    fn a_value_that_cannot_coerce_is_left_for_the_parse_error() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "count": { "type": "integer" } }
+        });
+        let mut args = serde_json::json!({ "count": "lots" });
+        coerce_to_schema(&mut args, &schema);
+        assert_eq!(args, serde_json::json!({ "count": "lots" }));
     }
 }

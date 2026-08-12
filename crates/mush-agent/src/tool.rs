@@ -97,6 +97,13 @@ pub trait AgentTool: Send + Sync {
     /// execute the tool with the given arguments
     async fn execute(&self, args: serde_json::Value) -> ToolResult;
 
+    /// coerce `args` to the types [`Self::parameters_schema`] advertises,
+    /// then execute. this is how a model's tool call reaches a tool
+    async fn call(&self, mut args: serde_json::Value) -> ToolResult {
+        crate::de::coerce_to_schema(&mut args, &self.parameters_schema());
+        self.execute(args).await
+    }
+
     /// how this tool's output should be truncated by the agent loop.
     /// every tool must declare a direction explicitly: middle truncation
     /// is not an option because it gutters whichever entry happens to

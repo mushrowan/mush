@@ -306,6 +306,44 @@ mod tests {
         )
     }
 
+    #[test]
+    fn every_advertised_type_is_one_coercion_handles() {
+        // a schema type nothing coerces to is a hard failure the model
+        // cannot see coming
+        fn types(schema: &serde_json::Value, found: &mut Vec<String>) {
+            match schema {
+                serde_json::Value::Object(fields) => {
+                    if let Some(name) = fields.get("type").and_then(|t| t.as_str()) {
+                        found.push(name.to_string());
+                    }
+                    for value in fields.values() {
+                        types(value, found);
+                    }
+                }
+                serde_json::Value::Array(entries) => {
+                    for entry in entries {
+                        types(entry, found);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        const HANDLED: [&str; 6] = ["object", "array", "string", "integer", "number", "boolean"];
+        let registry = registry_with_chars(true, ForbiddenChars::default());
+        for tool in registry.iter() {
+            let mut found = Vec::new();
+            types(&tool.parameters_schema(), &mut found);
+            for name in found {
+                assert!(
+                    HANDLED.contains(&name.as_str()),
+                    "{} advertises {name}, which mush_agent::de::coerce_to_schema ignores",
+                    tool.name()
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn write_call_is_guarded_by_forbidden_chars() {
         let registry = registry_with_chars(false, ForbiddenChars::new(['—']));

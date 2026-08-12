@@ -873,7 +873,7 @@ async fn execute_tool(tools: &ToolRegistry, tool_call: &ToolCall) -> ToolResult 
         Some(tool) => {
             let limit = tool.output_limit();
             tracing::debug!(tool = %tool_call.name, resolved = tool.name(), ?limit, args = %tool_call.arguments, "executing tool");
-            let result = tool.execute(tool_call.arguments.clone()).await;
+            let result = tool.call(tool_call.arguments.clone()).await;
             let output_text: String = result
                 .content
                 .iter()
