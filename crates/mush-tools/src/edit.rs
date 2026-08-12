@@ -9,6 +9,8 @@ use std::sync::Arc;
 use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
 use serde::Deserialize;
 use thiserror::Error;
+use unicode_normalization::UnicodeNormalization;
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::util::resolve_path;
 
@@ -296,9 +298,9 @@ fn match_candidates(content: &str, old_text: &str, new_text: &str) -> Vec<(Strin
         }
     }
 
-    // punctuation: models substitute smart quotes, dashes and nbsp for the
-    // ascii the file actually holds
-    for actual_old in find_punctuation_folded_matches(content, old_text) {
+    // models substitute smart quotes, dashes, nbsp and fullwidth forms
+    // for the ascii the file actually holds
+    for actual_old in find_folded_matches(content, old_text) {
         candidates.push((actual_old, new_text.to_string()));
     }
 
@@ -584,32 +586,63 @@ fn fold_char(c: char) -> char {
     }
 }
 
-/// the source text at every position where `old_text` matches once
-/// punctuation is folded on both sides.
+/// one folded char and the source it came from
+#[derive(Clone, Copy)]
+struct FoldedChar {
+    ch: char,
+    from: usize,
+    to: usize,
+    /// this char opens a source grapheme
+    opens: bool,
+}
+
+/// NFKC-normalise per grapheme, then fold punctuation.
 ///
-/// folding maps one char to one char, so a match found in folded space
-/// covers the same char range in the source
-fn find_punctuation_folded_matches(content: &str, old_text: &str) -> Vec<String> {
-    let needle: Vec<char> = old_text.chars().map(fold_char).collect();
-    if needle.is_empty() {
+/// NFKC turns one grapheme into any number of chars, so each carries the
+/// byte range it came from and whether it opens that range. a match that
+/// starts or ends mid-grapheme is not a match
+fn fold(s: &str) -> Vec<FoldedChar> {
+    let mut folded = Vec::new();
+    let mut from = 0;
+    for grapheme in s.graphemes(true) {
+        let to = from + grapheme.len();
+        let mut opens = true;
+        for ch in grapheme.nfkc().map(fold_char) {
+            folded.push(FoldedChar {
+                ch,
+                from,
+                to,
+                opens,
+            });
+            opens = false;
+        }
+        from = to;
+    }
+    folded
+}
+
+/// the source text at every position where `old_text` matches once both
+/// sides are folded
+fn find_folded_matches(content: &str, old_text: &str) -> Vec<String> {
+    // ascii is NFKC-stable and folds to itself, so there is nothing to find
+    if content.is_ascii() && old_text.is_ascii() {
         return Vec::new();
     }
-    let hay: Vec<(usize, char)> = content
-        .char_indices()
-        .map(|(i, c)| (i, fold_char(c)))
-        .collect();
-    if hay.len() < needle.len() {
+
+    let needle = fold(old_text);
+    let hay = fold(content);
+    if needle.is_empty() || hay.len() < needle.len() {
         return Vec::new();
     }
 
     let mut results = Vec::new();
     for start in 0..=hay.len() - needle.len() {
-        if (0..needle.len()).all(|k| hay[start + k].1 == needle[k]) {
-            let from = hay[start].0;
-            let to = hay
-                .get(start + needle.len())
-                .map_or(content.len(), |(i, _)| *i);
-            let source = &content[from..to];
+        let end = start + needle.len();
+        if !hay[start].opens || hay.get(end).is_some_and(|next| !next.opens) {
+            continue;
+        }
+        if (0..needle.len()).all(|k| hay[start + k].ch == needle[k].ch) {
+            let source = &content[hay[start].from..hay[end - 1].to];
             if source != old_text {
                 results.push(source.to_string());
             }
@@ -1143,6 +1176,67 @@ mod tests {
         );
         assert!(result.outcome.is_success(), "{result:?}");
         assert_eq!(fs::read_to_string(&path).unwrap(), "let s = \"bye\";\n");
+    }
+
+    #[test]
+    fn an_edit_matches_through_a_fullwidth_form() {
+        // nfkc maps the fullwidth forms a cjk-context model reaches for
+        // onto the ascii the file holds
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("width.rs");
+        fs::write(&path, "print(x);\n").unwrap();
+
+        let result = edit_file(
+            &path,
+            "print\u{ff08}x\u{ff09};",
+            "print(y);",
+            &EditOpts::default(),
+        );
+        assert!(result.outcome.is_success(), "{result:?}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "print(y);\n");
+    }
+
+    #[test]
+    fn an_edit_matches_a_differently_composed_accent() {
+        // the file holds a decomposed e + combining acute, the model
+        // sends the composed character
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("accent.md");
+        fs::write(&path, "cafe\u{301} au lait\n").unwrap();
+
+        let result = edit_file(&path, "caf\u{e9} au lait", "tea", &EditOpts::default());
+        assert!(result.outcome.is_success(), "{result:?}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "tea\n");
+    }
+
+    #[test]
+    fn a_fold_match_cannot_start_mid_grapheme() {
+        // nfkc expands the ligature to "fi", but neither half is a place
+        // the source can be spliced
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ligature.md");
+        fs::write(&path, "\u{fb01}ne\n").unwrap();
+
+        let result = edit_file(&path, "i", "x", &EditOpts::default());
+        assert!(result.outcome.is_error(), "{result:?}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "\u{fb01}ne\n");
+    }
+
+    #[test]
+    fn a_folded_match_leaves_the_rest_of_the_file_alone() {
+        // fold to find the match, then splice the source bytes. prime
+        // rewrites the whole file in normalised form instead
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mixed.md");
+        let untouched = "keep \u{fb01}ne \u{201c}quotes\u{201d} and cafe\u{301}\n";
+        fs::write(&path, format!("target\n{untouched}")).unwrap();
+
+        let result = edit_file(&path, "target", "hit", &EditOpts::default());
+        assert!(result.outcome.is_success(), "{result:?}");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            format!("hit\n{untouched}")
+        );
     }
 
     #[test]

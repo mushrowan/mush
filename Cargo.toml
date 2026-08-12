@@ -99,6 +99,9 @@ unicode-width = "0.2"
 unicode-properties = { version = "0.1.4", default-features = false, features = [
   "emoji",
 ] }
+# fold the text a model echoes back onto the text a file holds
+unicode-normalization = "0.1.25"
+unicode-segmentation = "1.13"
 crossterm = { version = "0.29", features = ["osc52"] }
 
 # parses bash/cargo/eza/jj style ANSI SGR escapes out of tool output and
