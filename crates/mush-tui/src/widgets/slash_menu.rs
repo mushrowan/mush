@@ -13,11 +13,17 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding};
 
 /// render the slash menu as a popup above the input area
+/// most commands the popup shows at once
+const MAX_VISIBLE: usize = 12;
+
+/// rows the popup takes above the input box, borders included
+#[must_use]
+pub fn height(menu: &SlashMenuState) -> u16 {
+    u16::try_from(MAX_VISIBLE.min(menu.matches.len()) + 2).unwrap_or(u16::MAX)
+}
+
 pub fn render(frame: &mut Frame, menu: &SlashMenuState, input_area: Rect, theme: &Theme) {
-    let item_count = menu.matches.len();
-    let max_visible = 12.min(item_count);
-    // popup sits above the input box, +2 rows for the borders
-    let height = (max_visible + 2) as u16;
+    let height = height(menu);
     let width = input_area.width.min(80);
     let x = input_area.x;
     let y = input_area.y.saturating_sub(height);

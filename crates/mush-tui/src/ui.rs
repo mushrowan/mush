@@ -11,6 +11,7 @@ use crate::widgets::search_popup::SearchPopup;
 use crate::widgets::status_bar::StatusBar;
 pub use crate::widgets::status_bar::status_bar_height;
 use crate::widgets::tool_panels::{ToolPanels, tool_panels_height};
+use crate::widgets::{at_picker, slash_menu};
 
 /// the full TUI layout, composing all widgets
 pub struct Ui<'a> {
@@ -68,15 +69,35 @@ pub fn input_height(input: &crate::app::InputBuffer, area_width: u16) -> u16 {
 }
 
 /// rows the live region wants: the streaming block and queued steering,
-/// plus the tool panels, input box, and status bar below them
+/// plus the completion popup, tool panels, input box, and status bar
 #[must_use]
 pub fn live_height(app: &App, width: u16) -> u16 {
     let content = u16::try_from(crate::widgets::message_list::live_lines(app, width).len())
         .unwrap_or(u16::MAX);
     content
+        .saturating_add(completion_height(app))
         .saturating_add(tool_panels_height(&app.active_tools, width))
         .saturating_add(input_height(&app.input, width))
         .saturating_add(status_bar_height(app, width))
+}
+
+/// a modal overlay is laid out against the whole screen, so the block
+/// has to take all of it
+#[must_use]
+pub fn is_modal(app: &App) -> bool {
+    app.interaction.session_picker.is_some()
+        || app.interaction.model_picker.is_some()
+        || app.interaction.login_picker.is_some()
+        || app.interaction.compaction_recovery.is_some()
+        || app.settings_menu.is_some()
+        || app.interaction.mode == AppMode::Search
+}
+
+/// rows the completion popup above the input box needs, if one is open
+fn completion_height(app: &App) -> u16 {
+    let slash = app.completion.slash_menu.as_ref().map(slash_menu::height);
+    let at = app.interaction.at_picker.as_ref().map(at_picker::height);
+    slash.or(at).unwrap_or(0)
 }
 
 /// draw the live turn against the bottom of `area`, so it grows upward
@@ -425,6 +446,25 @@ mod tests {
             app.tick_streaming_text();
         }
         assert!(live_height(&app, 80) > idle);
+    }
+
+    #[test]
+    fn an_open_slash_menu_makes_room_for_itself() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.completion.slash_commands = vec![crate::slash_menu::SlashCommand {
+            name: "login".into(),
+            description: "start oauth".into(),
+        }];
+        let idle = live_height(&app, 80);
+
+        app.input.text = "/".into();
+        app.open_slash_menu();
+        let menu = app.completion.slash_menu.as_ref().expect("a menu");
+
+        assert_eq!(
+            live_height(&app, 80),
+            idle + crate::widgets::slash_menu::height(menu)
+        );
     }
 
     fn drawn(ui: Ui<'_>, width: u16, height: u16) -> String {

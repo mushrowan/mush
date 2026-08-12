@@ -11,7 +11,7 @@ use ratatui::layout::{Rect, Size};
 use crate::app::App;
 use crate::live_region::LiveRegion;
 use crate::scrollback::{Scrollback, write_lines};
-use crate::ui::live_height;
+use crate::ui::{is_modal, live_height};
 use crate::widgets::message_list::MessageStyle;
 
 /// drives one frame of the inline ui: what settled goes to the terminal,
@@ -72,13 +72,22 @@ impl Inline {
         }
 
         let printed = u16::try_from(lines.len()).unwrap_or(u16::MAX);
-        let room = self.region.advance(printed, live_height(app, before.width));
+        let wanted = if is_modal(app) {
+            self.region.screen().height
+        } else {
+            live_height(app, before.width)
+        };
+        let room = self.region.advance(printed, wanted);
         if room > 0 {
             out.queue(MoveTo(0, self.region.bottom_row()))?;
             write!(out, "{}", "\n".repeat(usize::from(room)))?;
         }
 
         let area = self.region.area();
+        if area.bottom() < before.bottom().saturating_sub(room) {
+            out.queue(MoveTo(0, area.bottom()))?;
+            out.queue(Clear(ClearType::FromCursorDown))?;
+        }
         Ok((room > 0 || area != before).then_some(area))
     }
 }
@@ -232,6 +241,34 @@ mod tests {
             "printed twice:\n{written}"
         );
         assert!(written.ends_with("\x1b[J"), "the chrome stays: {written:?}");
+    }
+
+    #[test]
+    fn a_shrinking_block_clears_what_it_leaves_behind() {
+        let mut inline = Inline::new(Size::new(40, 40), 0);
+        let mut app = app_mid_turn();
+        app.input.text = "a\nb\nc\nd\ne".into();
+        settle(&mut inline, &app);
+
+        app.input.text = String::new();
+        let (written, area) = settle(&mut inline, &app);
+
+        let vacated = format!("\x1b[{};1H\x1b[J", area.unwrap().bottom() + 1);
+        assert!(written.contains(&vacated), "{written:?}");
+    }
+
+    #[test]
+    fn a_modal_takes_the_whole_screen() {
+        let mut inline = Inline::new(Size::new(40, 40), 0);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.interaction.session_picker = Some(crate::session_picker::SessionPickerState::new(
+            Vec::new(),
+            "/tmp".into(),
+        ));
+
+        let (_, area) = settle(&mut inline, &app);
+
+        assert_eq!(area.unwrap().height, 40);
     }
 
     /// bare newlines: the ones that scroll the screen rather than end a line
