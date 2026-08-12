@@ -848,6 +848,46 @@ fn system_label_line(theme: &Theme, marker: Option<Span<'static>>) -> Line<'stat
     Line::from(spans)
 }
 
+/// what sits between a label and what it qualifies in a header
+const HEADER_SEPARATOR: &str = " \u{b7} ";
+
+/// one line standing in for a collapsed thinking trace: the last bold
+/// section header, else the first line, stripped of markdown
+pub fn thinking_recap(thinking: &str) -> String {
+    let mut lines = thinking.lines().map(str::trim).filter(|l| !l.is_empty());
+    let source = lines
+        .clone()
+        .rfind(|l| is_bold_header(l) || is_markdown_heading(l))
+        .or_else(|| lines.next())
+        .unwrap_or_default();
+
+    let plain: String = source
+        .trim_start_matches('#')
+        .trim_start()
+        .chars()
+        .filter(|c| !matches!(c, '*' | '`'))
+        .collect();
+    plain.trim_end_matches(':').trim_end().to_string()
+}
+
+/// a line that is one run of bold text, optionally ending with a colon
+fn is_bold_header(line: &str) -> bool {
+    let Some(inner) = line
+        .strip_prefix("**")
+        .and_then(|l| l.strip_suffix(':').unwrap_or(l).strip_suffix("**"))
+    else {
+        return false;
+    };
+    !inner.is_empty() && !inner.contains('*')
+}
+
+fn is_markdown_heading(line: &str) -> bool {
+    let hashes = line.len() - line.trim_start_matches('#').len();
+    (1..=6).contains(&hashes)
+        && line[hashes..].starts_with(' ')
+        && !line[hashes..].trim().is_empty()
+}
+
 fn push_thinking_lines(
     msg: &DisplayMessage,
     theme: &Theme,
@@ -857,10 +897,24 @@ fn push_thinking_lines(
     let Some(ref thinking) = msg.thinking else {
         return;
     };
+    let cw = message_content_width(width as usize);
     if !msg.thinking_expanded {
+        let label = "thinking";
+        let prefix = usize::from(label.cell_width()) + usize::from(HEADER_SEPARATOR.cell_width());
+        let recap = Line::from(vec![
+            Span::styled(label, theme.dim),
+            Span::styled(HEADER_SEPARATOR, theme.dim),
+            Span::styled(
+                crate::text::truncate_with_ellipsis(
+                    &thinking_recap(thinking),
+                    cw.saturating_sub(prefix).max(1),
+                ),
+                theme.thinking,
+            ),
+        ]);
+        lines.extend(indent_line(recap, cw));
         return;
     }
-    let cw = message_content_width(width as usize);
     let strip = common_leading_space(thinking);
     for text_line in thinking.lines() {
         let body = drop_leading_spaces(text_line, strip);
@@ -1721,7 +1775,7 @@ fn render_tool_panel(
                 tc.name.clone(),
                 Style::default().fg(colour).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" \u{b7} ", theme.dim),
+            Span::styled(HEADER_SEPARATOR, theme.dim),
             Span::styled(status, Style::default().fg(colour)),
         ],
         width,

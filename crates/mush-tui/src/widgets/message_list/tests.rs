@@ -2489,17 +2489,18 @@ fn a_system_message_gets_a_label() {
 }
 
 #[test]
-fn thinking_only_renders_when_expanded() {
+fn a_collapsed_trace_is_one_line() {
     let theme = crate::theme::Theme::default();
     let mut msg = DisplayMessage::new(MessageRole::Assistant, "the answer");
-    msg.thinking = Some("let me work it out".into());
+    msg.thinking = Some("**Working it out**\n\nfirst i consider\nthen i decide".into());
 
-    let collapsed = message_lines(&msg, &plain_style(&theme), 60);
-    assert!(!rendered_text(&collapsed).contains("work it out"));
+    let collapsed = rendered_text(&message_lines(&msg, &plain_style(&theme), 60));
+    assert!(collapsed.contains("Working it out"), "{collapsed}");
+    assert!(!collapsed.contains("then i decide"), "{collapsed}");
 
     msg.thinking_expanded = true;
-    let expanded = message_lines(&msg, &plain_style(&theme), 60);
-    assert!(rendered_text(&expanded).contains("work it out"));
+    let expanded = rendered_text(&message_lines(&msg, &plain_style(&theme), 60));
+    assert!(expanded.contains("then i decide"), "{expanded}");
 }
 
 #[test]
@@ -2620,4 +2621,55 @@ fn committed_messages_stay_out_of_the_live_region() {
     app.start_streaming();
     app.finish_streaming(None, None);
     assert!(!live_text(&app, 80).contains("old question"));
+}
+
+#[test]
+fn a_recap_takes_the_last_bold_header() {
+    // reasoning summaries are a run of bold section headers. the last
+    // one is where the model got to
+    assert_eq!(
+        thinking_recap("**Weighing options**\n\nblah\n\n**Picking one**\n\nmore"),
+        "Picking one"
+    );
+}
+
+#[test]
+fn a_recap_takes_a_markdown_heading_too() {
+    assert_eq!(
+        thinking_recap("## Checking the parser\n\nblah"),
+        "Checking the parser"
+    );
+}
+
+#[test]
+fn a_recap_without_a_header_takes_the_first_line() {
+    assert_eq!(
+        thinking_recap("i need to work out what the user wants\nthen do it"),
+        "i need to work out what the user wants"
+    );
+}
+
+#[test]
+fn a_recap_drops_emphasis_and_a_trailing_colon() {
+    assert_eq!(thinking_recap("**Reading `edit.rs`:**"), "Reading edit.rs");
+}
+
+#[test]
+fn a_message_without_thinking_gets_no_recap_row() {
+    let theme = crate::theme::Theme::default();
+    let msg = DisplayMessage::new(MessageRole::Assistant, "the answer");
+    let text = rendered_text(&message_lines(&msg, &plain_style(&theme), 60));
+
+    assert!(!text.contains("thinking"), "{text}");
+}
+
+#[test]
+fn a_long_recap_stays_on_one_line() {
+    let theme = crate::theme::Theme::default();
+    let mut msg = DisplayMessage::new(MessageRole::Assistant, "the answer");
+    msg.thinking = Some("xy".repeat(200));
+
+    let text = rendered_text(&message_lines(&msg, &plain_style(&theme), 60));
+    let rows = text.lines().filter(|l| l.contains("xy")).count();
+    assert_eq!(rows, 1, "a collapsed trace is one row, got:\n{text}");
 }
