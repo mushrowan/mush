@@ -95,8 +95,15 @@ impl StreamingState {
         self.think_tw.reset();
     }
 
-    /// append text delta (tracks char count incrementally)
+    /// append text delta, dropping the blank lines a reply opens with.
+    ///
+    /// trimming at the settle instead would shift every offset into `text`
     pub fn push_text(&mut self, delta: &str) {
+        let delta = if self.text.is_empty() {
+            delta.trim_start_matches('\n')
+        } else {
+            delta
+        };
         self.text_tw.record_push(delta.chars().count());
         self.text.push_str(delta);
     }

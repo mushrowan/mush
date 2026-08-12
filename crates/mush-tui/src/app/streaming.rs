@@ -286,7 +286,7 @@ impl App {
             usage,
             cost,
             model_id: Some(self.model_id.clone()),
-            ..DisplayMessage::new(MessageRole::Assistant, text.trim_start_matches('\n'))
+            ..DisplayMessage::new(MessageRole::Assistant, &text)
         };
 
         // insert before any trailing queued (steering) messages so the
