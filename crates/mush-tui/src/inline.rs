@@ -32,17 +32,30 @@ impl Inline {
         }
     }
 
+    /// where the block sits now
+    #[must_use]
+    pub fn area(&self) -> Rect {
+        self.region.area()
+    }
+
+    /// keep the block on a screen this size, placing it again when the
+    /// size changed under it
+    pub fn follow_screen(&mut self, screen: Size) {
+        if screen != self.region.screen() {
+            self.region.reset(screen);
+        }
+    }
+
     /// print what settled since the last frame, and say where the live
     /// block goes when it has to be redrawn from scratch: it moved, it
     /// resized, or the screen scrolled out from under it
-    pub fn settle(
-        &mut self,
-        app: &App,
-        style: &MessageStyle<'_>,
-        out: &mut impl Write,
-    ) -> io::Result<Option<Rect>> {
+    pub fn settle(&mut self, app: &App, out: &mut impl Write) -> io::Result<Option<Rect>> {
+        let style = MessageStyle {
+            theme: &app.theme,
+            show_usage: app.interaction.show_usage_lines,
+        };
         let before = self.region.area();
-        let lines = self.scrollback.take_settled(app, style, before.width);
+        let lines = self.scrollback.take_settled(app, &style, before.width);
         if !lines.is_empty() {
             out.queue(MoveTo(before.x, before.y))?;
             write_lines(out, &lines)?;
@@ -63,7 +76,6 @@ impl Inline {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::theme::Theme;
     use mush_ai::types::TokenCount;
 
     fn app_mid_turn() -> App {
@@ -74,13 +86,8 @@ mod tests {
     }
 
     fn settle(inline: &mut Inline, app: &App) -> (String, Option<Rect>) {
-        let theme = Theme::default();
-        let style = MessageStyle {
-            theme: &theme,
-            show_usage: false,
-        };
         let mut out = Vec::new();
-        let area = inline.settle(app, &style, &mut out).unwrap();
+        let area = inline.settle(app, &mut out).unwrap();
         (String::from_utf8(out).unwrap(), area)
     }
 
@@ -175,6 +182,21 @@ mod tests {
         );
 
         assert_eq!(area.unwrap().y, 7);
+    }
+
+    #[test]
+    fn a_resized_screen_places_the_block_again() {
+        let mut inline = Inline::new(Size::new(40, 40), 30);
+        let app = app_mid_turn();
+        settle(&mut inline, &app);
+        assert_eq!(settle(&mut inline, &app).1, None);
+
+        inline.follow_screen(Size::new(30, 12));
+
+        let (_, area) = settle(&mut inline, &app);
+        let area = area.expect("the block has to be placed on the new screen");
+        assert_eq!(area.width, 30);
+        assert!(area.bottom() <= 12, "off the bottom: {area:?}");
     }
 
     /// bare newlines: the ones that scroll the screen rather than end a line

@@ -4,6 +4,7 @@ use std::io;
 
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui::layout::Rect;
 
 mod commands;
 mod config;
@@ -20,6 +21,8 @@ mod thinking_prefs;
 
 use mush_agent::tool::ToolRegistry;
 use mush_ai::registry::ApiRegistry;
+
+use crate::inline::Inline;
 
 pub use self::config::{
     LiveToolOutput, ModelResolver, PaneSnapshot, ReloadCallback, ReloadedContext, SessionSaver,
@@ -94,18 +97,19 @@ pub async fn run_tui(
     // cache stale. flips `resize_pending` on the shared state; the
     // backend's `size()` / `window_size()` consume it on the next call
     let sigwinch_task = spawn_sigwinch_listener(size_cache.resize_pending_flag());
-    let mut terminal = Terminal::new(backend)?;
+    // the block opens on the row the shell left the cursor on, and the
+    // first frame resizes the viewport to fit it
+    let screen = crossterm::terminal::size().map(ratatui::layout::Size::from)?;
+    let top = crossterm::cursor::position()?.1;
+    let mut inline = Inline::new(screen, top);
+    let mut terminal = Terminal::with_options(
+        backend,
+        ratatui::TerminalOptions {
+            viewport: ratatui::Viewport::Fixed(Rect::new(0, top, screen.width, 0)),
+        },
+    )?;
     startup_phases.push(diag::StartupPhase::new(
         "after_terminal_new",
-        terminal.size().map(|size| Some((size.width, size.height))),
-    ));
-    // alt screen may inherit content from the main screen buffer on some
-    // terminals (esp. after pre-tui eprintln output like the startup report).
-    // clear explicitly so no stale lines leak through cells that widgets
-    // don't overwrite
-    render::clear_for_first_frame(&mut terminal)?;
-    startup_phases.push(diag::StartupPhase::new(
-        "after_terminal_clear",
         terminal.size().map(|size| Some((size.width, size.height))),
     ));
     let mut runtime = RunnerRuntime::new(&mut tui_config).await;
@@ -128,6 +132,7 @@ pub async fn run_tui(
 
     draw_panes(
         &mut terminal,
+        &mut inline,
         &mut runtime.session,
         &image_picker,
         &tui_config.settings,
@@ -265,6 +270,7 @@ pub async fn run_tui(
             );
             draw_panes(
                 &mut terminal,
+                &mut inline,
                 &mut runtime.session,
                 &image_picker,
                 &tui_config.settings,
@@ -274,7 +280,7 @@ pub async fn run_tui(
         }
     }
 
-    cleanup(&mut terminal)?;
+    cleanup(&mut terminal, inline.area())?;
     sigwinch_task.abort();
     terminal_guard.disarm();
     verify_terminal_restored(vec!["exit path: run_tui clean return".into()]);

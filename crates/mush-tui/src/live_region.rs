@@ -28,10 +28,23 @@ impl LiveRegion {
         Rect::new(0, self.top, self.screen.width, self.height)
     }
 
+    #[must_use]
+    pub fn screen(&self) -> Size {
+        self.screen
+    }
+
     /// the last row of the screen, where a newline scrolls
     #[must_use]
     pub fn bottom_row(&self) -> u16 {
         self.screen.height.saturating_sub(1)
+    }
+
+    /// put the block back where it was on a screen of a different size,
+    /// unplaced, so the next frame draws it from scratch
+    pub fn reset(&mut self, screen: Size) {
+        self.screen = screen;
+        self.top = self.top.min(self.bottom_row());
+        self.height = 0;
     }
 
     /// put a block `height` tall below `lines` of history just printed at

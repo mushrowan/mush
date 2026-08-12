@@ -1,18 +1,16 @@
-use std::io;
+use std::io::{self, Write};
 #[cfg(unix)]
 use std::sync::{Mutex, OnceLock};
 
-use crossterm::ExecutableCommand;
-use crossterm::cursor::{SetCursorStyle, Show};
+use crossterm::QueueableCommand;
+use crossterm::cursor::{MoveTo, SetCursorStyle, Show};
 use crossterm::event::{
     self, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
-use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
-    supports_keyboard_enhancement,
-};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui::layout::Rect;
 
 use crate::terminal_policy::{
     ImageProbeMode, KeyboardEnhancementMode, MouseTrackingMode, TerminalPolicy,
@@ -77,9 +75,7 @@ pub(super) fn probe_image_picker(policy: TerminalPolicy) -> Option<ratatui_image
 pub(super) fn enter_tui_terminal(policy: TerminalPolicy) -> io::Result<()> {
     snapshot_original_terminal_state();
     enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    stdout.execute(EnterAlternateScreen)?;
-    apply_tty_modes(policy)?;
+    apply_tty_modes(&mut io::stdout(), policy)?;
 
     // give the terminal a moment to react to the enable bursts, then
     // drain any response bytes (cursor probes, keyboard enhancement
@@ -93,40 +89,36 @@ pub(super) fn enter_tui_terminal(policy: TerminalPolicy) -> io::Result<()> {
     Ok(())
 }
 
-/// re-apply the non-alt-screen mode enables.
+/// re-apply the mode enables.
 ///
 /// called after tool executions that may have touched `/dev/tty` or
 /// otherwise stripped our modes (e.g. bash running `stty sane`,
 /// `reset`, or a pager that pops kitty kbd flags and bracketed paste
-/// on exit). we deliberately don't re-enter alt screen: the user's
-/// tui buffer is already there, and re-entering can clear it
+/// on exit)
 pub(super) fn reapply_tui_modes_after_tool(policy: TerminalPolicy) {
     if let Err(error) = enable_raw_mode() {
         tracing::debug!(?error, "failed to re-enable raw mode after tool");
     }
-    if let Err(error) = apply_tty_modes(policy) {
+    if let Err(error) = apply_tty_modes(&mut io::stdout(), policy) {
         tracing::debug!(?error, "failed to reapply tty modes after tool");
     }
 }
 
-/// shared body for the enable bursts that don't depend on alt screen:
-/// bracketed paste, focus change, mouse tracking, keyboard
-/// enhancement, cursor shape. raw mode is applied separately by each
-/// caller because the ordering differs (enter wants raw before alt
-/// screen, reapply has no alt screen to guard)
-fn apply_tty_modes(policy: TerminalPolicy) -> io::Result<()> {
-    io::stdout().execute(event::EnableBracketedPaste)?;
-    io::stdout().execute(event::EnableFocusChange)?;
-    enable_mouse_tracking(policy.mouse_tracking)?;
-    enable_keyboard_enhancement(policy.keyboard_enhancement);
-    let _ = io::stdout().execute(SetCursorStyle::BlinkingBar);
-    Ok(())
+/// the mode enables that don't depend on raw mode: bracketed paste,
+/// focus change, mouse tracking, keyboard enhancement, cursor shape
+fn apply_tty_modes(out: &mut impl Write, policy: TerminalPolicy) -> io::Result<()> {
+    out.queue(event::EnableBracketedPaste)?;
+    out.queue(event::EnableFocusChange)?;
+    enable_mouse_tracking(out, policy.mouse_tracking)?;
+    enable_keyboard_enhancement(out, policy.keyboard_enhancement);
+    out.queue(SetCursorStyle::BlinkingBar)?;
+    out.flush()
 }
 
-fn enable_keyboard_enhancement(mode: KeyboardEnhancementMode) {
+fn enable_keyboard_enhancement(out: &mut impl Write, mode: KeyboardEnhancementMode) {
     match mode {
         KeyboardEnhancementMode::Auto => match supports_keyboard_enhancement() {
-            Ok(true) => push_keyboard_enhancement(),
+            Ok(true) => push_keyboard_enhancement(out),
             Ok(false) => {
                 tracing::debug!("keyboard enhancement unsupported, leaving it disabled");
             }
@@ -139,7 +131,7 @@ fn enable_keyboard_enhancement(mode: KeyboardEnhancementMode) {
         },
         KeyboardEnhancementMode::Enabled => {
             tracing::debug!("keyboard enhancement forced on by terminal policy");
-            push_keyboard_enhancement();
+            push_keyboard_enhancement(out);
         }
         KeyboardEnhancementMode::Disabled => {
             tracing::debug!("keyboard enhancement disabled by terminal policy");
@@ -147,8 +139,8 @@ fn enable_keyboard_enhancement(mode: KeyboardEnhancementMode) {
     }
 }
 
-fn push_keyboard_enhancement() {
-    if let Err(error) = io::stdout().execute(PushKeyboardEnhancementFlags(
+fn push_keyboard_enhancement(out: &mut impl Write) {
+    if let Err(error) = out.queue(PushKeyboardEnhancementFlags(
         KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
     )) {
         tracing::debug!(?error, "failed to enable keyboard enhancement");
@@ -183,16 +175,9 @@ fn panic_payload_str(info: &std::panic::PanicHookInfo<'_>) -> String {
 /// `?1006h` enables SGR coordinate encoding for large terminals.
 /// we avoid `?1003h` (any-event tracking) which floods the event stream
 /// with movement events even when no button is held
-fn enable_minimal_mouse_tracking() -> io::Result<()> {
-    use std::io::Write;
-
-    io::stdout().write_all(b"\x1b[?1002h\x1b[?1006h")?;
-    io::stdout().flush()
-}
-
-fn enable_mouse_tracking(mode: MouseTrackingMode) -> io::Result<()> {
+fn enable_mouse_tracking(out: &mut impl Write, mode: MouseTrackingMode) -> io::Result<()> {
     match mode {
-        MouseTrackingMode::Minimal => enable_minimal_mouse_tracking(),
+        MouseTrackingMode::Minimal => out.write_all(b"\x1b[?1002h\x1b[?1006h"),
         MouseTrackingMode::Disabled => {
             tracing::debug!("mouse tracking disabled by terminal policy");
             Ok(())
@@ -200,27 +185,23 @@ fn enable_mouse_tracking(mode: MouseTrackingMode) -> io::Result<()> {
     }
 }
 
-fn disable_mouse_tracking(stdout: &mut io::Stdout) {
-    use std::io::Write;
-
-    let _ = stdout.write_all(b"\x1b[?1002l\x1b[?1006l");
+/// put back everything [`apply_tty_modes`] set
+fn restore_tty_modes(out: &mut impl Write) {
+    let _ = out.queue(PopKeyboardEnhancementFlags);
+    let _ = out.queue(event::DisableFocusChange);
+    let _ = out.queue(event::DisableBracketedPaste);
+    let _ = out.queue(SetCursorStyle::DefaultUserShape);
+    let _ = out.write_all(b"\x1b[?1002l\x1b[?1006l");
+    let _ = out.queue(Show);
+    let _ = out.queue(crossterm::style::ResetColor);
+    let _ = out.flush();
 }
 
 pub(super) fn restore_terminal_state() {
-    use std::io::Write;
-
-    let mut stdout = io::stdout();
-    let _ = stdout.execute(PopKeyboardEnhancementFlags);
-    let _ = stdout.execute(event::DisableFocusChange);
-    let _ = stdout.execute(event::DisableBracketedPaste);
-    let _ = stdout.execute(SetCursorStyle::DefaultUserShape);
+    restore_tty_modes(&mut io::stdout());
     let _ = disable_raw_mode();
     restore_original_terminal_state();
-    disable_mouse_tracking(&mut stdout);
-    let _ = stdout.execute(LeaveAlternateScreen);
-    let _ = stdout.execute(Show);
-    let _ = stdout.execute(crossterm::style::ResetColor);
-    let _ = stdout.flush();
+    let _ = io::stdout().flush();
     let _ = io::stderr().flush();
 }
 
@@ -302,6 +283,45 @@ fn set_termios(fd: libc::c_int, termios: &libc::termios) -> io::Result<()> {
 mod tests {
     use super::*;
 
+    fn quiet_policy() -> TerminalPolicy {
+        TerminalPolicy {
+            keyboard_enhancement: KeyboardEnhancementMode::Disabled,
+            mouse_tracking: MouseTrackingMode::Minimal,
+            image_probe: ImageProbeMode::Disabled,
+        }
+    }
+
+    fn written(write: impl FnOnce(&mut Vec<u8>)) -> String {
+        let mut out = Vec::new();
+        write(&mut out);
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    #[test]
+    fn entering_the_ui_stays_on_the_main_screen() {
+        let out = written(|out| apply_tty_modes(out, quiet_policy()).unwrap());
+
+        assert!(out.contains("\x1b[?2004h"), "bracketed paste: {out:?}");
+        assert!(out.contains("\x1b[?1002h"), "mouse tracking: {out:?}");
+        assert!(!out.contains("?1049"), "alt screen: {out:?}");
+    }
+
+    #[test]
+    fn leaving_the_ui_puts_the_modes_back_and_nothing_else() {
+        let out = written(restore_tty_modes);
+
+        assert!(out.contains("\x1b[?2004l"), "bracketed paste: {out:?}");
+        assert!(out.contains("\x1b[?1002l"), "mouse tracking: {out:?}");
+        assert!(!out.contains("?1049"), "alt screen: {out:?}");
+    }
+
+    #[test]
+    fn the_prompt_lands_below_the_block() {
+        let out = written(|out| park_cursor_below(out, Rect::new(0, 10, 40, 6)).unwrap());
+
+        assert_eq!(out, "\x1b[16;1H\r\n");
+    }
+
     #[test]
     fn raw_termios_snapshot_restores_echo_and_canonical_mode() {
         let Some((master_fd, slave_fd)) = open_pty_pair() else {
@@ -350,11 +370,21 @@ mod tests {
     }
 }
 
+/// leave the block on screen and put the cursor after it, so the shell
+/// prompt doesn't land on top of the last thing mush drew
+fn park_cursor_below(out: &mut impl Write, block: Rect) -> io::Result<()> {
+    out.queue(MoveTo(0, block.bottom().saturating_sub(1)))?;
+    out.write_all(b"\r\n")?;
+    out.flush()
+}
+
 pub(super) fn cleanup(
     terminal: &mut Terminal<
         super::size_cached_backend::SizeCachedBackend<CrosstermBackend<io::Stdout>>,
     >,
+    block: Rect,
 ) -> io::Result<()> {
+    park_cursor_below(&mut io::stdout(), block)?;
     restore_terminal_state();
     terminal.show_cursor()?;
     Ok(())
