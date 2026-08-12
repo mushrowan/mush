@@ -22,11 +22,13 @@ pub struct Inline {
 }
 
 impl Inline {
+    /// `top` is the row the cursor is on, so the block opens below
+    /// whatever the shell left on screen
     #[must_use]
-    pub fn new(screen: Size) -> Self {
+    pub fn new(screen: Size, top: u16) -> Self {
         Self {
             scrollback: Scrollback::new(),
-            region: LiveRegion::new(screen, 0),
+            region: LiveRegion::new(screen, top),
         }
     }
 
@@ -41,18 +43,20 @@ impl Inline {
     ) -> io::Result<Option<Rect>> {
         let before = self.region.area();
         let lines = self.scrollback.take_settled(app, style, before.width);
-        let mut scrolled = 0;
         if !lines.is_empty() {
             out.queue(MoveTo(before.x, before.y))?;
             write_lines(out, &lines)?;
-            scrolled += self
-                .region
-                .emit(u16::try_from(lines.len()).unwrap_or(u16::MAX));
         }
-        scrolled += self.region.set_height(live_height(app, before.width));
+
+        let printed = u16::try_from(lines.len()).unwrap_or(u16::MAX);
+        let room = self.region.advance(printed, live_height(app, before.width));
+        if room > 0 {
+            out.queue(MoveTo(0, self.region.bottom_row()))?;
+            write!(out, "{}", "\n".repeat(usize::from(room)))?;
+        }
 
         let area = self.region.area();
-        Ok((scrolled > 0 || area != before).then_some(area))
+        Ok((room > 0 || area != before).then_some(area))
     }
 }
 
@@ -96,7 +100,7 @@ mod tests {
 
     #[test]
     fn a_settled_turn_goes_out_above_the_live_block() {
-        let mut inline = Inline::new(Size::new(40, 40));
+        let mut inline = Inline::new(Size::new(40, 40), 0);
         let (written, area) = settle(&mut inline, &app_mid_turn());
 
         assert!(written.contains("settled answer"), "got:\n{written}");
@@ -107,13 +111,13 @@ mod tests {
 
     #[test]
     fn the_live_block_is_as_tall_as_the_turn_in_it() {
-        let mut inline = Inline::new(Size::new(40, 40));
+        let mut inline = Inline::new(Size::new(40, 40), 0);
         let (_, idle) = settle(
             &mut inline,
             &App::new("test".into(), TokenCount::new(200_000)),
         );
 
-        let mut inline = Inline::new(Size::new(40, 40));
+        let mut inline = Inline::new(Size::new(40, 40), 0);
         let (_, mid_turn) = settle(&mut inline, &app_mid_turn());
 
         let (idle, mid_turn) = (idle.unwrap(), mid_turn.unwrap());
@@ -122,7 +126,7 @@ mod tests {
 
     #[test]
     fn a_frame_that_moves_nothing_asks_for_no_resize() {
-        let mut inline = Inline::new(Size::new(40, 40));
+        let mut inline = Inline::new(Size::new(40, 40), 0);
         let app = app_mid_turn();
         settle(&mut inline, &app);
 
@@ -133,7 +137,7 @@ mod tests {
     fn a_frame_that_scrolls_the_screen_asks_for_a_resize() {
         // pinned against the bottom, so settled lines scroll the screen
         // out from under ratatui's back buffer
-        let mut inline = Inline::new(Size::new(40, 12));
+        let mut inline = Inline::new(Size::new(40, 12), 0);
         let mut app = app_mid_turn();
         let (_, placed) = settle(&mut inline, &app);
 
@@ -143,5 +147,38 @@ mod tests {
 
         assert_eq!(after, placed, "the block cannot move any further down");
         assert!(after.is_some(), "the screen scrolled, so redraw all of it");
+    }
+
+    #[test]
+    fn a_block_with_the_screen_to_itself_asks_for_no_scroll() {
+        let mut inline = Inline::new(Size::new(40, 40), 0);
+        let (written, _) = settle(&mut inline, &app_mid_turn());
+
+        assert_eq!(scrolls(&written), 0, "got:\n{written:?}");
+    }
+
+    #[test]
+    fn a_block_against_the_bottom_scrolls_the_screen_to_fit() {
+        let mut inline = Inline::new(Size::new(40, 12), 0);
+        let (written, area) = settle(&mut inline, &app_mid_turn());
+
+        assert!(scrolls(&written) > 0, "got:\n{written:?}");
+        assert_eq!(area.unwrap().bottom(), 12, "it sits against the bottom");
+    }
+
+    #[test]
+    fn a_block_opens_where_the_cursor_is() {
+        let mut inline = Inline::new(Size::new(40, 40), 7);
+        let (_, area) = settle(
+            &mut inline,
+            &App::new("test".into(), TokenCount::new(200_000)),
+        );
+
+        assert_eq!(area.unwrap().y, 7);
+    }
+
+    /// bare newlines: the ones that scroll the screen rather than end a line
+    fn scrolls(written: &str) -> usize {
+        written.matches('\n').count() - written.matches("\r\n").count()
     }
 }
