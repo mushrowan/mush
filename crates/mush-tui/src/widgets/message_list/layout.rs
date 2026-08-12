@@ -6,9 +6,11 @@
 //! cache, so the layout the renderer works from and the layout a keypress
 //! works from agree by construction.
 
-use std::ops::Range;
+use super::{estimate_message_height, estimate_trailing_height};
 
-use super::{clamp_usize_to_u16, estimate_message_height, estimate_trailing_height};
+fn clamp_usize_to_u16(value: usize) -> u16 {
+    u16::try_from(value).unwrap_or(u16::MAX)
+}
 use crate::app::{App, ScrollPosition};
 
 /// document rows occupied by one message
@@ -62,15 +64,6 @@ impl DocumentLayout {
         }
     }
 
-    pub(crate) fn entries(&self) -> &[MessageLayoutEntry] {
-        &self.entries
-    }
-
-    /// document row where the trailing block begins
-    pub(crate) fn trailing_start(&self) -> usize {
-        self.trailing_start
-    }
-
     /// highest top row that still fills a `vis`-row viewport
     fn max_top(&self, vis: u16) -> usize {
         (self.trailing_start + self.trailing_height).saturating_sub(vis as usize)
@@ -116,22 +109,6 @@ impl DocumentLayout {
             },
             None => ScrollPosition::Bottom,
         }
-    }
-
-    /// entries overlapping the document rows `[render_start, render_end)`
-    pub(crate) fn visible_entry_range(
-        &self,
-        render_start: usize,
-        render_end: usize,
-    ) -> Range<usize> {
-        if render_start >= render_end {
-            return 0..0;
-        }
-        let start = self
-            .entries
-            .partition_point(|entry| entry.end() <= render_start);
-        let end = start + self.entries[start..].partition_point(|entry| entry.start < render_end);
-        start..end
     }
 }
 

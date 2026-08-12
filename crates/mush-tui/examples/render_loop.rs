@@ -1,4 +1,4 @@
-//! standalone render-loop harness for profiling the message-list render
+//! standalone render-loop harness for profiling the live block's render
 //! hot path without criterion's setup, plotting, or process-spawning
 //! overhead polluting the profile.
 //!
@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use mush_ai::types::TokenCount;
 use mush_tui::app::{App, DisplayMessage, MessageRole};
-use mush_tui::widgets::message_list::MessageList;
+use mush_tui::ui::Ui;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::widgets::Widget;
@@ -68,7 +68,7 @@ fn main() {
     // warm syntect's lazy syntax-set load and the markdown/indent caches so
     // the timed loop is the steady-state cached render, not one-time init
     let warm_start = Instant::now();
-    MessageList::new(&app).render(area, &mut buf);
+    Ui::new(&app).render(area, &mut buf);
     let warm = warm_start.elapsed();
 
     eprintln!("warm-up render took {warm:.2?}");
@@ -78,7 +78,7 @@ fn main() {
     let loop_start = Instant::now();
     while Instant::now() < deadline {
         for _ in 0..512 {
-            MessageList::new(&app).render(area, &mut buf);
+            Ui::new(&app).render(area, &mut buf);
             frames += 1;
         }
     }

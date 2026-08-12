@@ -23,21 +23,6 @@ use crate::theme::Theme;
 static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
 static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
 
-#[cfg(test)]
-thread_local! {
-    static HIGHLIGHT_LINE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(crate) fn reset_highlight_line_call_count() {
-    HIGHLIGHT_LINE_CALLS.with(|calls| calls.set(0));
-}
-
-#[cfg(test)]
-pub(crate) fn highlight_line_call_count() -> usize {
-    HIGHLIGHT_LINE_CALLS.with(std::cell::Cell::get)
-}
-
 /// map a file path to a syntect language token via its extension.
 ///
 /// returns `None` when the path has no extension or the extension maps
@@ -76,9 +61,6 @@ pub fn lang_from_path(path: &str) -> Option<&'static str> {
 /// highlighting fails. callers should fall back to plain-text rendering
 #[must_use]
 pub fn highlight_line(line: &str, lang: &str, ui_theme: &Theme) -> Option<Vec<Span<'static>>> {
-    #[cfg(test)]
-    HIGHLIGHT_LINE_CALLS.with(|calls| calls.set(calls.get() + 1));
-
     let ps = &*SYNTAX_SET;
     let syntax = ps.find_syntax_by_token(lang)?;
     let theme = &THEME_SET.themes["base16-ocean.dark"];

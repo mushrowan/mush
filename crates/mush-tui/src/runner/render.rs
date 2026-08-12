@@ -42,7 +42,7 @@ pub(super) fn draw_panes(
         let area = frame.area();
         let (cx, cy) = Ui::new(&session.app).cursor_position(area);
 
-        frame.render_widget(Ui::new(&session.app).inline(true), area);
+        frame.render_widget(Ui::new(&session.app), area);
 
         let render_areas = session.app.render_state.image_render_areas.borrow().clone();
         if let Some(picker) = image_picker.as_ref() {

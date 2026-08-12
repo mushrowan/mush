@@ -1,41 +1,21 @@
 //! message list widget - renders conversation history
 
 use mush_ai::types::TokenCount;
-use ratatui::buffer::{Buffer, CellDiffOption, CellWidth};
+#[cfg(test)]
+use ratatui::buffer::Buffer;
+use ratatui::buffer::CellWidth;
+#[cfg(test)]
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::Widget;
 
-use crate::app::{
-    App, DisplayMessage, DisplayToolCall, ImageRenderArea, MessageRole, ScrollPosition,
-    ToolCallStatus,
-};
+use crate::app::{App, DisplayMessage, DisplayToolCall, MessageRole, ToolCallStatus};
 use crate::app_state::CachedHeight;
 use crate::widgets::shimmer::shimmer_spans;
 
 mod layout;
 
 pub(crate) use layout::DocumentLayout;
-use layout::anchor_row;
-
-#[cfg(test)]
-thread_local! {
-    static LAST_MATERIALISED_LINE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-fn record_materialised_line_count(count: usize) {
-    LAST_MATERIALISED_LINE_COUNT.with(|cell| cell.set(count));
-}
-
-#[cfg(test)]
-fn last_materialised_line_count() -> usize {
-    LAST_MATERIALISED_LINE_COUNT.with(std::cell::Cell::get)
-}
-
-#[cfg(not(test))]
-fn record_materialised_line_count(_count: usize) {}
 
 /// horizontal padding cells reserved around message body content.
 ///
@@ -127,586 +107,12 @@ fn content_hash_call_count() -> usize {
 }
 use crate::theme::Theme;
 
-/// renders the full message list including any active stream
-pub struct MessageList<'a> {
-    app: &'a App,
-}
-
-impl<'a> MessageList<'a> {
-    pub fn new(app: &'a App) -> Self {
-        Self { app }
-    }
-}
-
-/// tracks where cached content was replaced with placeholders
-/// so we can overlay it directly after the main line pass
-struct DeferredCacheRender {
-    msg_idx: usize,
-    /// absolute document line where the cached lines begin (before padding)
-    start_line: usize,
-    line_count: usize,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct MaterialisedLineSegment {
-    doc_start: usize,
-    line_start: usize,
-    line_count: usize,
-}
-
-impl MaterialisedLineSegment {
-    fn line_for_doc(self, doc_line: usize) -> Option<usize> {
-        let offset = doc_line.checked_sub(self.doc_start)?;
-        (offset < self.line_count).then_some(self.line_start + offset)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SelectedBlockInfo {
-    msg_idx: usize,
-    block_idx_in_msg: usize,
-}
-
-impl SelectedBlockInfo {
-    fn for_app(app: &App) -> Option<Self> {
-        if app.interaction.mode != crate::app::AppMode::Scroll
-            || app.navigation.scroll_unit != crate::app::ScrollUnit::Block
-        {
-            return None;
-        }
-
-        let selected_block = app.navigation.selected_block?;
-        // map the global block index onto its message using the cached
-        // block list. blocks belonging to one message are contiguous, so
-        // the within-message index is the offset from that message's first
-        // block. shares `App::blocks` so navigation and highlight agree on
-        // one segmentation instead of rescanning every message each frame
-        let blocks = app.blocks();
-        let msg_idx = blocks.get(selected_block)?.msg_idx;
-        let first = blocks.iter().position(|b| b.msg_idx == msg_idx)?;
-        Some(Self {
-            msg_idx,
-            block_idx_in_msg: selected_block - first,
-        })
-    }
-}
-
-/// what the virtual-scroll pass decided before any line is materialised
-struct Viewport {
-    /// per-message height index for the whole document
-    layout: DocumentLayout,
-    /// document row the viewport's top edge should land on, in the
-    /// estimate space of `layout`. `None` while following the bottom,
-    /// which can only be resolved against the final line count
-    target_top: Option<usize>,
-    /// document row range worth materialising: the viewport plus a
-    /// viewport of margin either side
-    render_start: usize,
-    render_end: usize,
-}
-
-impl Viewport {
-    /// estimate per-message heights and work out which document rows
-    /// overlap the viewport, so off-screen messages skip markdown
-    /// rendering and `indent_line` entirely
-    fn compute(app: &App, area: Rect) -> Self {
-        let layout = DocumentLayout::build(app, area.width);
-        let top = layout.top_row(app.scroll, area.height);
-        let vis_h = area.height as usize;
-        let margin = vis_h;
-
-        Self {
-            target_top: (!app.scroll.is_bottom()).then_some(top),
-            render_start: top.saturating_sub(margin),
-            render_end: (top + vis_h + margin).min(layout.trailing_start()),
-            layout,
-        }
-    }
-}
-
-/// where the frame's content ends up on screen once actual line counts
-/// are known
-struct FrameGeometry {
-    /// blank rows inserted above the content so a short conversation sits
-    /// near the input box rather than the top of the pane
-    padding: usize,
-    /// first document row to paint, i.e. what ratatui would call the
-    /// paragraph scroll
-    scroll: u16,
-    /// height of the message area this frame
-    visible: u16,
-}
-
-/// resolve the frame's scroll position against the actual materialised
-/// line count, publish the geometry other widgets read, and hand back
-/// what the paint pass needs.
-///
-/// `target_top` is the document row the anchor resolved to once actual
-/// heights corrected the estimates the layout pass worked from, or `None`
-/// while following the bottom
-fn settle_geometry(
-    app: &App,
-    area: Rect,
-    target_top: Option<usize>,
-    content_doc_len: usize,
-    mut message_ranges: Vec<crate::app::MessageRowRange>,
-) -> FrameGeometry {
-    let content_lines = clamp_usize_to_u16(content_doc_len);
-    let visible = area.height;
-    let padding = if content_lines < visible {
-        (visible - content_lines) as usize
-    } else {
-        0
-    };
-
-    // per-message wrapped-line ranges for mouse hit testing. ranges are
-    // absolute document rows, not offsets into the materialised lines, so
-    // off-screen messages need no placeholder rows
-    if !message_ranges.is_empty() && area.width > 0 {
-        if padding > 0 {
-            let padding_u16 = clamp_usize_to_u16(padding);
-            for range in &mut message_ranges {
-                range.start = range.start.saturating_add(padding_u16);
-                range.end = range.end.saturating_add(padding_u16);
-            }
-        }
-        *app.render_state.message_row_ranges.borrow_mut() = message_ranges;
-    } else {
-        app.render_state.message_row_ranges.borrow_mut().clear();
-    }
-
-    let total_lines = content_lines + padding as u16;
-    let max_scroll = total_lines.saturating_sub(visible);
-    let scroll = target_top.map_or(max_scroll, |top| clamp_usize_to_u16(top).min(max_scroll));
-
-    app.render_state.total_content_lines.set(total_lines);
-    app.render_state.message_area.set(area);
-    app.render_state.render_scroll.set(scroll);
-    tracing::trace!(
-        target: "mush_tui::scroll",
-        position = ?app.scroll,
-        target_top,
-        render_scroll = scroll,
-        max_scroll,
-        total_lines,
-        visible,
-        area_w = area.width,
-        area_h = area.height,
-        "frame settled"
-    );
-
-    FrameGeometry {
-        padding,
-        scroll,
-        visible,
-    }
-}
-
-/// the selection state both materialisation passes need, resolved once per
-/// frame instead of per message
-struct SelectionContext {
-    in_scroll_mode: bool,
-    range: Option<(usize, usize)>,
-    selected_block: Option<SelectedBlockInfo>,
-    has_visual: bool,
-    cursor: Option<usize>,
-}
-
-impl SelectionContext {
-    fn for_app(app: &App) -> Self {
-        Self {
-            in_scroll_mode: app.interaction.mode == crate::app::AppMode::Scroll,
-            range: app.selection_range(),
-            selected_block: SelectedBlockInfo::for_app(app),
-            has_visual: app.has_selection(),
-            cursor: app.navigation.selected_message,
-        }
-    }
-
-    /// how message `msg_idx` should be highlighted this frame
-    fn hint(&self, msg_idx: usize) -> SelectionHint {
-        let in_range = self
-            .range
-            .is_some_and(|(start, end)| msg_idx >= start && msg_idx <= end);
-        let is_cursor = self.cursor == Some(msg_idx);
-        SelectionHint {
-            selected: self.in_scroll_mode && (is_cursor || in_range),
-            is_cursor: self.in_scroll_mode && is_cursor,
-            has_visual: self.has_visual,
-        }
-    }
-}
-
-/// line buffers and per-message metadata accumulated while materialising a
-/// frame. the body pass fills it, the trailing pass appends, the paint pass
-/// reads it
-struct FrameLines {
-    lines: Vec<Line<'static>>,
-    images: Vec<ImagePlaceholder>,
-    deferred: Vec<DeferredCacheRender>,
-    segments: Vec<MaterialisedLineSegment>,
-    ranges: Vec<crate::app::MessageRowRange>,
-}
-
-impl FrameLines {
-    fn new() -> Self {
-        Self {
-            lines: Vec::new(),
-            images: Vec::new(),
-            deferred: Vec::new(),
-            segments: Vec::new(),
-            ranges: Vec::new(),
-        }
-    }
-}
-
-impl MessageList<'_> {
-    /// write the materialised lines into the buffer, place any images, and
-    /// overlay the selection highlight.
-    ///
-    /// bypasses ratatui's `Paragraph` on purpose: lines are already wrapped
-    /// to the content width by `indent_line`, so Paragraph's LineTruncator
-    /// would re-grapheme-scan text that already fits. profiling put that at
-    /// ~40% of main-thread CPU in long sessions
-    fn paint(
-        &self,
-        buf: &mut Buffer,
-        area: Rect,
-        frame: &FrameLines,
-        geometry: &FrameGeometry,
-        sel_ctx: &SelectionContext,
-        img_y_positions: &[usize],
-    ) {
-        let FrameGeometry {
-            padding,
-            scroll,
-            visible,
-        } = *geometry;
-        // compute image render areas based on scroll position
-        let mut render_areas = Vec::new();
-        if !frame.images.is_empty() && area.width > 0 {
-            let scroll_i = scroll as i32;
-            let padding_i = padding as i32;
-            let visible_i = visible as i32;
-            for (i, ph) in frame.images.iter().enumerate() {
-                let y_before = img_y_positions[i].min(i32::MAX as usize) as i32;
-                // placeholder line_idx now points directly at the first body
-                // row, so no +1 offset
-                let doc_top = padding_i + y_before;
-                let doc_bot = doc_top + ph.cell_height as i32;
-                let screen_top = doc_top - scroll_i;
-                let screen_bot = doc_bot - scroll_i;
-                // hide-on-partial: only render when fully inside the
-                // viewport. ratatui_image's Fit resize would squish a
-                // partial rect, and cropping needs upstream support
-                // (see untracked-docs/todo.md)
-                if screen_top < 0 || screen_bot > visible_i {
-                    continue;
-                }
-                let visible_y = area.y + screen_top as u16;
-                let img_x = area.x + ph.x_offset;
-                let img_w = ph.cell_width;
-                if img_w > 0 {
-                    let area = Rect::new(img_x, visible_y, img_w, ph.cell_height);
-                    render_areas.push(ImageRenderArea {
-                        msg_idx: ph.msg_idx,
-                        tc_idx: ph.tc_idx,
-                        area,
-                    });
-                    mark_image_overlay_cells(area, buf);
-                }
-            }
-        }
-        *self.app.render_state.image_render_areas.borrow_mut() = render_areas;
-
-        // render lines directly to the buffer, bypassing ratatui's
-        // `Paragraph`. lines are pre-wrapped to `content_width` by
-        // `indent_line`, so Paragraph's internal `LineTruncator` would
-        // just re-grapheme-scan content that already fits. profiling
-        // showed this accounted for ~40% of main-thread CPU in long
-        // sessions (LineTruncator::next_line + Graphemes::next +
-        // unicode_width::lookup_width). writing via `set_line` skips
-        // the whole reflow pipeline
-        let scroll_usize = scroll as usize;
-        let visible_usize = visible as usize;
-        for screen_y in 0..visible_usize {
-            let doc_y = scroll_usize + screen_y;
-            if doc_y < padding {
-                continue; // blank padding row, buffer is already empty
-            }
-            let doc_line = doc_y - padding;
-            let Some(line_idx) = frame
-                .segments
-                .iter()
-                .find_map(|segment| segment.line_for_doc(doc_line))
-            else {
-                continue;
-            };
-            buf.set_line(
-                area.x,
-                area.y + screen_y as u16,
-                &frame.lines[line_idx],
-                area.width,
-            );
-        }
-
-        // overlay deferred cached content directly to the buffer.
-        // during the lines build, cached content was replaced with empty
-        // placeholders to avoid deep-cloning Line vecs. now we borrow
-        // from the indented_cache and write directly, zero clones
-        if !frame.deferred.is_empty() {
-            let scroll_usize = scroll as usize;
-            let visible_usize = area.height as usize;
-            let cache = self.app.render_state.indented_cache.borrow();
-            for dc in &frame.deferred {
-                if let Some(Some((_, _, cached_lines))) = cache.get(dc.msg_idx) {
-                    let doc_y = padding + dc.start_line;
-                    let doc_end = doc_y + dc.line_count;
-                    if doc_end > scroll_usize && doc_y < scroll_usize + visible_usize {
-                        let skip = scroll_usize.saturating_sub(doc_y);
-                        let screen_y = (doc_y.saturating_sub(scroll_usize)) as u16;
-                        write_lines_to_buf(&cached_lines[skip..], buf, area, area.y + screen_y);
-                    }
-                }
-            }
-        }
-
-        // highlight rows belonging to selected messages / visual range so the
-        // user can see exactly what `y` will copy. block-mode highlighting is
-        // still handled inline during line building (styled spans) because it
-        // needs to colour only the code-block portion of a message.
-        if sel_ctx.in_scroll_mode
-            && self.app.navigation.scroll_unit != crate::app::ScrollUnit::Block
-        {
-            apply_message_highlight(
-                self.app,
-                buf,
-                area,
-                scroll,
-                &self.app.render_state.message_row_ranges.borrow(),
-            );
-        }
-    }
-
-    /// materialise everything below the message list: in-flight assistant
-    /// text and thinking, the tool-args preview, the compaction label, and
-    /// any queued steering messages
-    fn materialise_trailing(&self, area: Rect, sel_ctx: &SelectionContext, frame: &mut FrameLines) {
-        frame.lines.extend(streaming_lines(self.app, area.width));
-
-        // queued (steering) messages always appear at the bottom
-        for (i, msg) in self.app.messages.iter().enumerate() {
-            if !msg.queued {
-                continue;
-            }
-            let sel = sel_ctx.hint(i);
-            render_message(
-                self.app,
-                msg,
-                i,
-                frame,
-                sel,
-                area.width,
-                sel_ctx.selected_block,
-            );
-            frame.lines.push(Line::raw(""));
-        }
-    }
-}
-
-impl Widget for MessageList<'_> {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        let sel_ctx = SelectionContext::for_app(self.app);
-        let viewport = Viewport::compute(self.app, area);
-        let mut frame = FrameLines::new();
-
-        // body: every stored message overlapping the render window
-        let layout = &viewport.layout;
-        let (render_start, render_end) = (viewport.render_start, viewport.render_end);
-        // the anchored message's document row shifts when messages above it
-        // inside the window render taller or shorter than the layout pass
-        // estimated. track the corrected row so the paint pass puts the
-        // anchor exactly on the viewport's top edge
-        let mut corrected_top = None;
-        let mut visible_height_delta = 0isize;
-        for entry in &layout.entries()[layout.visible_entry_range(render_start, render_end)] {
-            let Some(msg) = self.app.messages.get(entry.msg_idx) else {
-                continue;
-            };
-            if msg.queued {
-                continue; // rendered after streaming content
-            }
-            let msg_start = offset_usize(entry.start, visible_height_delta);
-            let estimated_height = entry.height;
-            let start_line = frame.lines.len();
-
-            let image_start = frame.images.len();
-            let deferred_start = frame.deferred.len();
-            let sel = sel_ctx.hint(entry.msg_idx);
-            render_message(
-                self.app,
-                msg,
-                entry.msg_idx,
-                &mut frame,
-                sel,
-                area.width,
-                sel_ctx.selected_block,
-            );
-            frame.lines.push(Line::raw(""));
-
-            let actual_height = frame.lines.len() - start_line;
-            if let ScrollPosition::Message { msg: anchor, line } = self.app.scroll
-                && anchor == entry.msg_idx
-            {
-                corrected_top = Some(anchor_row(msg_start, actual_height, line));
-            }
-            absolutise_render_metadata(
-                msg_start,
-                start_line,
-                &mut frame.images[image_start..],
-                &mut frame.deferred[deferred_start..],
-            );
-            frame.segments.push(MaterialisedLineSegment {
-                doc_start: msg_start,
-                line_start: start_line,
-                line_count: actual_height,
-            });
-            // the cache may hold an estimate from count_estimated_lines
-            // (which counts raw markdown chars), so feed the actual line
-            // count back and let it converge after one render
-            if actual_height != estimated_height {
-                update_cached_height(
-                    msg,
-                    entry.msg_idx,
-                    area.width,
-                    actual_height,
-                    &self.app.render_state,
-                );
-            }
-            visible_height_delta += actual_height as isize - estimated_height as isize;
-            frame.ranges.push(crate::app::MessageRowRange {
-                msg_idx: entry.msg_idx,
-                start: clamp_usize_to_u16(msg_start),
-                end: clamp_usize_to_u16(msg_start + actual_height),
-            });
-        }
-
-        // trailing: streaming content and queued messages, positioned after
-        // the last stored message
-        let trailing_doc_start = offset_usize(layout.trailing_start(), visible_height_delta);
-        let trailing_line_start = frame.lines.len();
-        let trailing_image_start = frame.images.len();
-        let trailing_deferred_start = frame.deferred.len();
-        self.materialise_trailing(area, &sel_ctx, &mut frame);
-        let trailing_line_count = frame.lines.len() - trailing_line_start;
-        if trailing_line_count > 0 {
-            absolutise_render_metadata(
-                trailing_doc_start,
-                trailing_line_start,
-                &mut frame.images[trailing_image_start..],
-                &mut frame.deferred[trailing_deferred_start..],
-            );
-            frame.segments.push(MaterialisedLineSegment {
-                doc_start: trailing_doc_start,
-                line_start: trailing_line_start,
-                line_count: trailing_line_count,
-            });
-        }
-        if let ScrollPosition::Trailing { line } = self.app.scroll {
-            corrected_top = Some(trailing_doc_start + line as usize);
-        }
-        record_materialised_line_count(frame.lines.len());
-
-        // pre-compute y positions for image placeholders before moving lines
-        // into Text. since indent_line and wrap_text pre-wrap all lines to fit
-        // within area.width, each line occupies exactly one row
-        let w = area.width as usize;
-        let img_y_positions: Vec<usize> = if !frame.images.is_empty() && w > 0 {
-            frame.images.iter().map(|ph| ph.line_idx).collect()
-        } else {
-            Vec::new()
-        };
-
-        let geometry = settle_geometry(
-            self.app,
-            area,
-            corrected_top.or(viewport.target_top),
-            trailing_doc_start + trailing_line_count,
-            std::mem::take(&mut frame.ranges),
-        );
-        self.paint(buf, area, &frame, &geometry, &sel_ctx, &img_y_positions);
-    }
-}
-
-fn clamp_usize_to_u16(value: usize) -> u16 {
-    value.min(u16::MAX as usize) as u16
-}
-
-fn offset_usize(value: usize, delta: isize) -> usize {
-    if delta >= 0 {
-        value.saturating_add(delta as usize)
-    } else {
-        value.saturating_sub(delta.unsigned_abs())
-    }
-}
-
-fn absolutise_render_metadata(
-    doc_start: usize,
-    line_start: usize,
-    image_placeholders: &mut [ImagePlaceholder],
-    deferred_renders: &mut [DeferredCacheRender],
-) {
-    for placeholder in image_placeholders {
-        placeholder.line_idx = doc_start + placeholder.line_idx.saturating_sub(line_start);
-    }
-    for deferred in deferred_renders {
-        deferred.start_line = doc_start + deferred.start_line.saturating_sub(line_start);
-    }
-}
-
-fn mark_image_overlay_cells(area: Rect, buf: &mut Buffer) {
-    for y in area.y..area.y.saturating_add(area.height) {
-        for x in area.x..area.x.saturating_add(area.width) {
-            if let Some(cell) = buf.cell_mut((x, y)) {
-                cell.set_diff_option(CellDiffOption::Skip);
-            }
-        }
-    }
-}
-
 /// height reserved for inline image rendering (in lines)
 const IMAGE_HEIGHT: u16 = 12;
 
 /// height of an image body inside a user-message attachment cell (excludes
 /// the top border; the shared divider row with the message box is free)
 const ATTACH_INNER_H: u16 = 8;
-
-/// tracks where an image placeholder starts in the lines vec
-struct ImagePlaceholder {
-    msg_idx: usize,
-    tc_idx: usize,
-    /// line index in the lines vec where the image body starts (not the
-    /// label or top border)
-    line_idx: usize,
-    /// column offset (relative to the render area x) where the image cell
-    /// begins. used for per-attachment cells in user messages so each
-    /// image lands inside its own cell instead of across the full width
-    x_offset: u16,
-    /// cell width in columns (image render width)
-    cell_width: u16,
-    /// image body height in rows
-    cell_height: u16,
-}
-
-/// scroll/selection state passed to render_message
-struct SelectionHint {
-    /// message is highlighted (cursor or within visual range)
-    selected: bool,
-    /// message is the cursor position (shows hint text)
-    is_cursor: bool,
-    /// visual selection is active
-    has_visual: bool,
-}
 
 /// the in-flight reply, the tool-args preview, and the compaction label.
 /// redrawn every frame, so none of it is ever committed to scrollback
@@ -822,7 +228,6 @@ pub fn message_lines(
     let mut lines = Vec::new();
     // image cells are positions for a live overlay to draw over, keyed by
     // message index. scrollback can't host one, so both are discarded
-    let mut images = Vec::new();
 
     if matches!(msg.role, MessageRole::System) {
         lines.push(system_label_line(style.theme, None));
@@ -832,7 +237,7 @@ pub fn message_lines(
     if msg.queued {
         push_queued_lines(msg, style.theme, width, &mut lines);
     } else if matches!(msg.role, MessageRole::User) {
-        render_user_message_box(style.theme, msg, 0, width, &mut lines, &mut images);
+        render_user_message_box(style.theme, msg, width, &mut lines);
     } else {
         let content_width = message_content_width(width as usize);
         let md = crate::markdown::render_with_width(&msg.content, style.theme, Some(content_width));
@@ -972,142 +377,6 @@ fn push_usage_line(msg: &DisplayMessage, style: &MessageStyle<'_>, lines: &mut V
     lines.push(Line::styled(parts.join(" | "), style.theme.usage));
 }
 
-/// the marker above a selected message, with the keys that act on it
-fn selection_hint_line(app: &App, sel: SelectionHint) -> Line<'static> {
-    let mut spans = vec![Span::styled("▌", app.theme.selection_marker)];
-    if sel.is_cursor {
-        let hint = if app.navigation.scroll_unit == crate::app::ScrollUnit::Block {
-            " (y to copy block, b for messages)"
-        } else if sel.has_visual {
-            " (y to copy range)"
-        } else {
-            " (v to select, y to copy)"
-        };
-        spans.push(Span::styled(hint, app.theme.scroll_hint));
-    }
-    Line::from(spans)
-}
-
-fn render_message(
-    app: &App,
-    msg: &DisplayMessage,
-    msg_idx: usize,
-    frame: &mut FrameLines,
-    sel: SelectionHint,
-    width: u16,
-    selected_block_info: Option<SelectedBlockInfo>,
-) {
-    let FrameLines {
-        lines,
-        images: image_placeholders,
-        deferred,
-        ..
-    } = frame;
-    // user and assistant messages have no label line.
-    // user messages are distinguished by a subtle background.
-    // only system messages get a text label.
-    let is_user = matches!(msg.role, MessageRole::User);
-
-    if matches!(msg.role, MessageRole::System) {
-        let marker = sel
-            .selected
-            .then(|| Span::styled("▌ ", app.theme.selection_marker));
-        lines.push(system_label_line(&app.theme, marker));
-    } else if sel.selected {
-        lines.push(selection_hint_line(app, sel));
-    }
-
-    push_thinking_lines(msg, &app.theme, width, lines);
-
-    // main content (markdown rendered)
-    if msg.queued {
-        push_queued_lines(msg, &app.theme, width, lines);
-    } else if is_user {
-        render_user_message_box(&app.theme, msg, msg_idx, width, lines, image_placeholders);
-    } else {
-        // determine if a code block in this message is selected
-        let highlight_block = selected_block_info
-            .filter(|selected| selected.msg_idx == msg_idx)
-            .map(|selected| selected.block_idx_in_msg);
-
-        let content_width = message_content_width(width as usize);
-        let highlight_range =
-            highlight_block.and_then(|b| block_line_ranges(&msg.content).get(b).copied());
-
-        if highlight_range.is_none() {
-            // fast path: serve cached indented lines for stable messages
-            let hash = cached_content_hash(&msg.content, msg_idx, &app.render_state);
-            let width_u16 = content_width as u16;
-            let cache_hit_count = {
-                let cache = app.render_state.indented_cache.borrow();
-                cache
-                    .get(msg_idx)
-                    .and_then(|e| e.as_ref())
-                    .filter(|(h, w, _)| *h == hash && *w == width_u16)
-                    .map(|(_, _, cached_lines)| cached_lines.len())
-            };
-            if let Some(line_count) = cache_hit_count {
-                // push empty placeholders instead of deep-cloning.
-                // the overlay pass after Paragraph will write cached
-                // content directly to the buffer
-                let start_line = lines.len();
-                lines.resize_with(lines.len() + line_count, || Line::raw(""));
-                deferred.push(DeferredCacheRender {
-                    msg_idx,
-                    start_line,
-                    line_count,
-                });
-            } else {
-                let md_text = render_markdown_cached(app, &msg.content, content_width);
-                let mut indented = Vec::new();
-                for line in md_text.lines {
-                    indented.extend(indent_line(line, content_width));
-                }
-                lines.extend(indented.iter().cloned());
-                let mut cache = app.render_state.indented_cache.borrow_mut();
-                if cache.len() <= msg_idx {
-                    cache.resize_with(msg_idx + 1, || None);
-                }
-                cache[msg_idx] = Some((hash, width_u16, indented));
-            }
-        } else {
-            // block highlight active: compute fresh with style overrides
-            let md_text = render_markdown_cached(app, &msg.content, content_width);
-            for (i, line) in md_text.lines.into_iter().enumerate() {
-                let style_override = if let Some((start, end)) = highlight_range
-                    && i >= start
-                    && i < end
-                {
-                    Some(Style::default().bg(app.theme.block_highlight_bg))
-                } else {
-                    None
-                };
-
-                for mut indented in indent_line(line, content_width) {
-                    if let Some(style) = style_override {
-                        indented = indented.style(style);
-                    }
-                    lines.push(indented);
-                }
-            }
-        }
-    }
-
-    render_completed_tool_boxes_cached(app, msg, msg_idx, width, lines, image_placeholders);
-
-    push_usage_line(
-        msg,
-        &MessageStyle {
-            theme: &app.theme,
-            show_usage: app.interaction.show_usage_lines,
-        },
-        lines,
-    );
-}
-
-/// render a user message as a rounded-cornered box with optional
-/// attachment row above. attachments share the message box's top border
-/// via left/right tees so the visual is a unified stack
 /// two columns of padding either side of the text
 const USER_PAD: usize = 2;
 
@@ -1118,34 +387,16 @@ const USER_PAD: usize = 2;
 fn render_user_message_box(
     theme: &Theme,
     msg: &DisplayMessage,
-    msg_idx: usize,
     width: u16,
     lines: &mut Vec<Line<'static>>,
-    image_placeholders: &mut Vec<ImagePlaceholder>,
 ) {
     let bg = theme.user_msg_bg;
     let w = width as usize;
     let content_width = w.saturating_sub(USER_PAD * 2).max(1);
     let blank = || Line::styled(" ".repeat(w), bg);
 
-    if !msg.images.is_empty() {
-        let cell_widths = compute_attach_cell_widths(content_width, msg.images.len());
-        let body_start = lines.len();
-        for _ in 0..ATTACH_INNER_H {
-            lines.push(blank());
-        }
-        let mut x_offset = USER_PAD as u16;
-        for (tc_idx, cw) in cell_widths.iter().enumerate() {
-            image_placeholders.push(ImagePlaceholder {
-                msg_idx,
-                tc_idx,
-                line_idx: body_start,
-                x_offset,
-                cell_width: *cw as u16,
-                cell_height: ATTACH_INNER_H,
-            });
-            x_offset = x_offset.saturating_add(*cw as u16);
-        }
+    for _ in 0..ATTACH_INNER_H * u16::from(!msg.images.is_empty()) {
+        lines.push(blank());
     }
 
     lines.push(blank());
@@ -1158,18 +409,6 @@ fn render_user_message_box(
         }
     }
     lines.push(blank());
-}
-
-/// split `total` columns across `n` image cells, widest first
-fn compute_attach_cell_widths(total: usize, n: usize) -> Vec<usize> {
-    if n == 0 {
-        return Vec::new();
-    }
-    let base = total / n;
-    let remainder = total % n;
-    (0..n)
-        .map(|i| if i < remainder { base + 1 } else { base })
-        .collect()
 }
 
 /// hash string content for cache keying
@@ -1277,23 +516,6 @@ fn estimate_message_height(
     }
 
     h
-}
-
-/// update the height_cache entry with the actual rendered line count.
-/// called after render_message so the cache converges to exact values
-/// even when the initial estimate from count_estimated_lines was wrong
-fn update_cached_height(
-    msg: &DisplayMessage,
-    msg_idx: usize,
-    width: u16,
-    actual_height: usize,
-    render_state: &crate::app_state::RenderState,
-) {
-    let mut cache = render_state.height_cache.borrow_mut();
-    if cache.len() <= msg_idx {
-        cache.resize_with(msg_idx + 1, || None);
-    }
-    cache[msg_idx] = Some(height_fingerprint(msg, width, actual_height));
 }
 
 /// inner height computation (called on cache miss)
@@ -1453,30 +675,6 @@ fn truncate_line(s: &str, max: usize) -> String {
     }
 }
 
-/// render markdown text to styled ratatui Text
-fn render_markdown_cached(app: &App, source: &str, width: usize) -> Text<'static> {
-    if source.is_empty() {
-        return Text::default();
-    }
-
-    if let Some(cached) = app
-        .render_state
-        .markdown_cache
-        .borrow()
-        .get(&format!("{width}\0{source}"))
-        .cloned()
-    {
-        return cached;
-    }
-
-    let rendered = crate::markdown::render_with_width(source, &app.theme, Some(width));
-    app.render_state
-        .markdown_cache
-        .borrow_mut()
-        .insert(format!("{width}\0{source}"), rendered.clone());
-    rendered
-}
-
 fn render_streaming_markdown_cached(app: &App, source: &str, width: usize) -> Text<'static> {
     if source.is_empty() {
         return Text::default();
@@ -1573,72 +771,6 @@ fn line_cell_width(line: &Line<'_>) -> usize {
     spans_cell_width(&line.spans)
 }
 
-fn render_completed_tool_boxes_cached(
-    app: &App,
-    msg: &DisplayMessage,
-    msg_idx: usize,
-    width: u16,
-    lines: &mut Vec<Line<'static>>,
-    image_placeholders: &mut Vec<ImagePlaceholder>,
-) {
-    let Some(hash) = tool_boxes_hash(msg) else {
-        return;
-    };
-    if completed_tool_boxes_have_images(msg) {
-        render_completed_tool_boxes(app, msg, msg_idx, width, lines, image_placeholders);
-        return;
-    }
-
-    if let Some(cached_lines) = app
-        .render_state
-        .tool_box_cache
-        .borrow()
-        .get(msg_idx)
-        .and_then(|entry| entry.as_ref())
-        .filter(|(h, w, _)| *h == hash && *w == width)
-        .map(|(_, _, cached)| cached.clone())
-    {
-        lines.extend(cached_lines);
-        return;
-    }
-
-    let mut rendered = Vec::new();
-    push_completed_tool_box_lines(&app.theme, msg, width, &mut rendered);
-    lines.extend(rendered.iter().cloned());
-
-    let mut cache = app.render_state.tool_box_cache.borrow_mut();
-    if cache.len() <= msg_idx {
-        cache.resize_with(msg_idx + 1, || None);
-    }
-    cache[msg_idx] = Some((hash, width, rendered));
-}
-
-fn render_completed_tool_boxes(
-    app: &App,
-    msg: &DisplayMessage,
-    msg_idx: usize,
-    width: u16,
-    lines: &mut Vec<Line<'static>>,
-    image_placeholders: &mut Vec<ImagePlaceholder>,
-) {
-    let completed: Vec<(usize, &DisplayToolCall)> = msg
-        .tool_calls
-        .iter()
-        .enumerate()
-        .filter(|(_, tc)| tc.status != ToolCallStatus::Running)
-        .collect();
-
-    for group in completed.chunk_by(|a, b| a.1.batch == b.1.batch) {
-        render_tool_box_group(
-            &group.iter().map(|(_, tc)| *tc).collect::<Vec<_>>(),
-            width,
-            lines,
-            &app.theme,
-        );
-        register_tool_image_placeholders(group, msg_idx, width, lines, image_placeholders, app);
-    }
-}
-
 fn push_completed_tool_box_lines(
     theme: &Theme,
     msg: &DisplayMessage,
@@ -1653,73 +785,6 @@ fn push_completed_tool_box_lines(
 
     for group in completed.chunk_by(|a, b| a.batch == b.batch) {
         render_tool_box_group(group, width, lines, theme);
-    }
-}
-
-fn register_tool_image_placeholders(
-    group: &[(usize, &DisplayToolCall)],
-    msg_idx: usize,
-    width: u16,
-    lines: &mut Vec<Line<'_>>,
-    image_placeholders: &mut Vec<ImagePlaceholder>,
-    app: &App,
-) {
-    for &(tc_idx, tc) in group {
-        if tc.image_data.is_none() {
-            continue;
-        }
-
-        lines.push(Line::from(vec![
-            Span::styled("    📷 ", Style::default()),
-            Span::styled("image", app.theme.image_label),
-        ]));
-        image_placeholders.push(ImagePlaceholder {
-            msg_idx,
-            tc_idx,
-            line_idx: lines.len(),
-            x_offset: 4,
-            cell_width: width.saturating_sub(8),
-            cell_height: IMAGE_HEIGHT.saturating_sub(1),
-        });
-        for _ in 1..IMAGE_HEIGHT {
-            lines.push(Line::raw(""));
-        }
-    }
-}
-
-fn completed_tool_boxes_have_images(msg: &DisplayMessage) -> bool {
-    msg.tool_calls
-        .iter()
-        .any(|tc| tc.status != ToolCallStatus::Running && tc.image_data.is_some())
-}
-
-fn tool_boxes_hash(msg: &DisplayMessage) -> Option<u64> {
-    let mut has_completed = false;
-    let mut h = std::hash::DefaultHasher::new();
-    use std::hash::{Hash, Hasher};
-
-    for tc in msg
-        .tool_calls
-        .iter()
-        .filter(|tc| tc.status != ToolCallStatus::Running)
-    {
-        has_completed = true;
-        tc.name.hash(&mut h);
-        tc.summary.hash(&mut h);
-        tool_status_tag(tc.status).hash(&mut h);
-        tc.output_preview.hash(&mut h);
-        tc.image_data.as_ref().map(Vec::len).hash(&mut h);
-        tc.batch.hash(&mut h);
-    }
-
-    has_completed.then(|| h.finish())
-}
-
-fn tool_status_tag(status: ToolCallStatus) -> u8 {
-    match status {
-        ToolCallStatus::Running => 0,
-        ToolCallStatus::Done => 1,
-        ToolCallStatus::Error => 2,
     }
 }
 
@@ -2320,69 +1385,9 @@ fn diff_line_style(line: &str, theme: &Theme) -> Style {
     }
 }
 
-/// compute rendered-line ranges for each selectable block in a
-/// message body, in the same order as [`App::blocks`] yields them
-/// for that message. paragraphs and fenced bodies both produce
-/// ranges. fence marker lines are consumed (not rendered) just as
-/// they are by the markdown renderer, so paragraph ranges that
-/// border a fence don't include the fence line.
-fn block_line_ranges(source: &str) -> Vec<(usize, usize)> {
-    let mut ranges = Vec::new();
-    let mut in_fence = false;
-    let mut rendered_idx = 0usize;
-    let mut fence_start = 0usize;
-    let mut para_start: Option<usize> = None;
-
-    for line in source.lines() {
-        if line.starts_with("```") {
-            if in_fence {
-                // closing fence: emit fence range
-                ranges.push((fence_start + 1, rendered_idx + 1));
-                in_fence = false;
-            } else {
-                // opening fence: flush any open paragraph first
-                if let Some(start) = para_start.take() {
-                    ranges.push((start, rendered_idx));
-                }
-                fence_start = rendered_idx;
-                in_fence = true;
-            }
-            // fence markers are consumed, not rendered
-            continue;
-        }
-
-        if in_fence {
-            if rendered_idx == fence_start {
-                rendered_idx += 1;
-            }
-            rendered_idx += 1;
-            continue;
-        }
-
-        if line.trim().is_empty() {
-            // paragraph boundary
-            if let Some(start) = para_start.take() {
-                ranges.push((start, rendered_idx));
-            }
-        } else if para_start.is_none() {
-            para_start = Some(rendered_idx);
-        }
-        rendered_idx += 1;
-    }
-
-    // tail flushes
-    if let Some(start) = para_start {
-        ranges.push((start, rendered_idx));
-    }
-    if in_fence && rendered_idx > fence_start {
-        ranges.push((fence_start + 1, rendered_idx + 1));
-    }
-
-    ranges
-}
-
 /// write borrowed lines directly to a buffer at a y offset.
 /// clips to the area height. returns the number of rows written.
+#[cfg(test)]
 fn write_lines_to_buf(lines: &[Line<'_>], buf: &mut Buffer, area: Rect, start_y: u16) -> u16 {
     let mut written = 0u16;
     for line in lines {
@@ -2394,58 +1399,6 @@ fn write_lines_to_buf(lines: &[Line<'_>], buf: &mut Buffer, area: Rect, start_y:
         written += 1;
     }
     written
-}
-
-/// paint a subtle background tint on rows belonging to the selected
-/// message (or the visual selection range) so the user sees exactly
-/// which content `y` will copy.
-///
-/// called after the main Paragraph has already drawn text, so we only
-/// mutate the `bg` style and preserve foreground content.
-fn apply_message_highlight(
-    app: &App,
-    buf: &mut Buffer,
-    area: Rect,
-    scroll: u16,
-    ranges: &[crate::app::MessageRowRange],
-) {
-    let (sel_start, sel_end) = match app.selection_range() {
-        Some((s, e)) => (s, e),
-        None => match app.navigation.selected_message {
-            Some(sel) => (sel, sel),
-            None => return,
-        },
-    };
-
-    let bg = app.theme.block_highlight_bg;
-    for range in ranges {
-        if range.msg_idx < sel_start || range.msg_idx > sel_end {
-            continue;
-        }
-        let doc_start = range.start as u32;
-        let doc_end = range.end as u32;
-        if doc_end <= scroll as u32 {
-            continue;
-        }
-        let visible_start = doc_start.saturating_sub(scroll as u32);
-        let visible_end = doc_end
-            .saturating_sub(scroll as u32)
-            .min(area.height as u32);
-        if visible_start >= visible_end {
-            continue;
-        }
-        for y_offset in visible_start..visible_end {
-            let y = area.y + y_offset as u16;
-            if y >= area.bottom() {
-                break;
-            }
-            for x in area.x..area.right() {
-                if let Some(cell) = buf.cell_mut((x, y)) {
-                    cell.set_bg(bg);
-                }
-            }
-        }
-    }
 }
 
 #[cfg(test)]

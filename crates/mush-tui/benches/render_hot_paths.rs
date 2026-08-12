@@ -8,19 +8,17 @@ use mush_tui::app::{
 use mush_tui::markdown;
 use mush_tui::theme::Theme;
 use mush_tui::ui;
+use mush_tui::ui::Ui;
 use mush_tui::widgets::input_box::benchmark_build_input_layout;
-use mush_tui::widgets::message_list::MessageList;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::widgets::Widget;
 
-/// renders a full `MessageList` into a fixed viewport while the conversation
-/// length grows. the viewport (visible rows) is constant, so any growth with
-/// message count exposes per-frame work that scales with total scrollback
-/// rather than what's on screen (off-screen placeholder lines, full-history
-/// passes). this is the long-session regime where users notice lag.
-fn bench_message_list_scaling(c: &mut Criterion) {
-    let mut group = c.benchmark_group("message_list_scaling");
+/// renders the live block while the conversation length grows. the block
+/// holds the turn in flight and nothing else, so a cost that grows with
+/// message count means settled history is being touched again.
+fn bench_live_block_scaling(c: &mut Criterion) {
+    let mut group = c.benchmark_group("live_block_scaling");
     let area = Rect::new(0, 0, 100, 40);
 
     for &count in &[16usize, 64, 256, 1024] {
@@ -31,10 +29,10 @@ fn bench_message_list_scaling(c: &mut Criterion) {
         // before timing. criterion's --profile-time skips warmup, so without
         // this the profiled loop is dominated by the one-time syntax-set
         // deserialize instead of the steady-state cached render we want.
-        MessageList::new(&app).render(area, &mut buf);
+        Ui::new(&app).render(area, &mut buf);
         group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, _| {
             b.iter(|| {
-                MessageList::new(black_box(&app)).render(area, &mut buf);
+                Ui::new(black_box(&app)).render(area, &mut buf);
                 black_box(&buf);
             })
         });
@@ -203,7 +201,7 @@ fn input_fixture() -> (String, Vec<PendingImage>) {
 
 criterion_group!(
     benches,
-    bench_message_list_scaling,
+    bench_live_block_scaling,
     bench_blocks_scaling,
     bench_markdown,
     bench_code_blocks,

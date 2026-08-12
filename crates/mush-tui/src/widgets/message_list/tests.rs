@@ -3,19 +3,30 @@
 use super::*;
 use crate::test_support::buffer_to_string;
 use mush_ai::types::{Dollars, Usage};
-use ratatui::Terminal;
-use ratatui::backend::TestBackend;
 
+/// the whole conversation as the lines scrollback would hold, painted
+/// into a buffer so tests can read them back
+/// the whole conversation as the lines scrollback would hold
+fn all_lines(app: &App, width: u16) -> Vec<Line<'static>> {
+    let style = MessageStyle {
+        theme: &app.theme,
+        show_usage: app.interaction.show_usage_lines,
+    };
+    let mut lines = Vec::new();
+    for msg in &app.messages {
+        lines.extend(message_lines(msg, &style, width));
+        lines.push(Line::raw(""));
+    }
+    lines.extend(streaming_lines(app, width));
+    lines
+}
+
+/// those lines painted into a buffer, so tests can read them back
 fn render_app(app: &App, width: u16, height: u16) -> Buffer {
-    let backend = TestBackend::new(width, height);
-    let mut terminal = Terminal::new(backend).unwrap();
-    terminal
-        .draw(|frame| {
-            let area = frame.area();
-            frame.render_widget(MessageList::new(app), area);
-        })
-        .unwrap();
-    terminal.backend().buffer().clone()
+    let area = Rect::new(0, 0, width, height);
+    let mut buf = Buffer::empty(area);
+    write_lines_to_buf(&all_lines(app, width), &mut buf, area, 0);
+    buf
 }
 
 #[test]
@@ -118,20 +129,6 @@ fn compacting_busy_row_does_not_render_braille_spinner() {
     assert_no_braille_spinner(&content);
 }
 
-#[test]
-fn image_overlay_cells_are_skipped_while_visible() {
-    let area = Rect::new(1, 1, 2, 2);
-    let mut buf = Buffer::empty(Rect::new(0, 0, 5, 5));
-
-    mark_image_overlay_cells(area, &mut buf);
-
-    for y in 1..3 {
-        for x in 1..3 {
-            assert_eq!(buf[(x, y)].diff_option, CellDiffOption::Skip);
-        }
-    }
-}
-
 fn assert_no_braille_spinner(content: &str) {
     for symbol in ["⠷", "⠯", "⠟", "⠻", "⠽", "⠾"] {
         assert!(
@@ -152,64 +149,6 @@ fn compacting_row_disappears_once_flag_cleared() {
     app.compacting = false;
     let buf = render_app(&app, 40, 10);
     assert!(!buffer_to_string(&buf).contains("compacting"));
-}
-
-#[test]
-fn long_conversation_renders_without_clone() {
-    // regression: the render path used to clone the entire Text just to
-    // count wrapped lines. verify that a multi-message conversation
-    // still renders correctly with the lines.len() optimisation
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-    for i in 0..20 {
-        let role = if i % 2 == 0 {
-            MessageRole::User
-        } else {
-            MessageRole::Assistant
-        };
-        app.messages.push(DisplayMessage::new(
-            role,
-            format!("message number {i} with some text"),
-        ));
-    }
-    let buf = render_app(&app, 60, 30);
-    let content = buffer_to_string(&buf);
-    // last message should be visible near the bottom
-    assert!(
-        content.contains("message number 19"),
-        "last message should be visible"
-    );
-    // content should be bottom-anchored (no excess padding at top)
-    // find first non-empty line
-    let first_content_line = content
-        .lines()
-        .position(|l| !l.trim().is_empty())
-        .unwrap_or(0);
-    // with 20 messages and 30 lines visible, content should start near the top
-    assert!(
-        first_content_line < 5,
-        "content should start near top, but first content at line {first_content_line}"
-    );
-}
-
-#[test]
-fn long_offscreen_scrollback_does_not_materialise_placeholder_lines() {
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-    for i in 0..1000 {
-        app.messages.push(DisplayMessage::new(
-            MessageRole::Assistant,
-            format!("message number {i}"),
-        ));
-    }
-
-    let buf = render_app(&app, 80, 20);
-    let content = buffer_to_string(&buf);
-    let materialised = last_materialised_line_count();
-
-    assert!(content.contains("message number 999"));
-    assert!(
-        materialised <= 80,
-        "render should only materialise the visible window plus margin, got {materialised} lines"
-    );
 }
 
 #[test]
@@ -260,27 +199,6 @@ fn a_user_message_pads_wide_chars_by_cells() {
             rendered_text(std::slice::from_ref(&line))
         );
     }
-}
-
-#[test]
-fn an_attached_image_reserves_a_row_above_the_text() {
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-    app.push_user_message_with_images("look here", vec![vec![0u8; 100]]);
-    let buf = render_app(&app, 40, 20);
-    let content = buffer_to_string(&buf);
-
-    assert!(content.contains("look here"));
-    let text_row = find_buffer_row(&buf, |line| line.contains("look here"));
-
-    let areas = app.render_state.image_render_areas.borrow();
-    assert_eq!(areas.len(), 1);
-    assert_eq!(areas[0].msg_idx, 0);
-    assert!(areas[0].area.height > 0);
-    assert!(
-        areas[0].area.y < text_row,
-        "image area (y={}) should sit above the text (y={text_row})",
-        areas[0].area.y
-    );
 }
 
 #[test]
@@ -617,55 +535,6 @@ fn expanded_thinking_uses_thinking_style() {
 }
 
 #[test]
-fn image_reserves_space_and_produces_render_area() {
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-    app.messages.push(DisplayMessage {
-        tool_calls: vec![crate::app::DisplayToolCall {
-            name: "read".into(),
-            summary: "photo.png".into(),
-            status: ToolCallStatus::Done,
-            output_preview: None,
-            image_data: Some(vec![0u8; 100]), // dummy bytes
-            batch: 1,
-        }],
-        ..DisplayMessage::new(MessageRole::Assistant, "here is the image")
-    });
-    let buf = render_app(&app, 60, 30);
-    let content = buffer_to_string(&buf);
-    // should show the image label
-    assert!(content.contains("📷"));
-    assert!(content.contains("image"));
-    // should have produced a render area
-    let areas = app.render_state.image_render_areas.borrow();
-    assert_eq!(areas.len(), 1);
-    assert_eq!(areas[0].msg_idx, 0);
-    assert_eq!(areas[0].tc_idx, 0);
-    // area should have reasonable dimensions
-    assert!(areas[0].area.height > 0);
-    assert!(areas[0].area.width > 0);
-}
-
-#[test]
-fn image_render_area_respects_bottom_anchor_padding() {
-    // short content in a tall area gets bottom-anchored via top padding.
-    // the image render y must include that padding so the overlay lands
-    // next to its label instead of at the top of the area
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-    app.push_user_message_with_images("hi", vec![vec![0u8; 100]]);
-
-    let _ = render_app(&app, 60, 40);
-    let areas = app.render_state.image_render_areas.borrow();
-    assert_eq!(areas.len(), 1);
-    // user msg + label + image body is well under 40 rows, so padding
-    // pushes the image past the first 15 rows of the area
-    assert!(
-        areas[0].area.y > 15,
-        "image render y should account for bottom-anchor padding, got y={}",
-        areas[0].area.y
-    );
-}
-
-#[test]
 fn image_render_areas_never_pin_to_top_when_scrolled_past() {
     // saturating_sub(scroll) used to clamp off-screen images to y=0
     // and stack them at the top of the viewport at full height. after
@@ -811,76 +680,6 @@ fn a_failed_tool_says_error_in_red() {
 
     let red = app.theme.tool_error.fg.unwrap();
     assert_eq!(buf[(2, header)].fg, red, "tool name should be red");
-}
-
-#[test]
-fn selected_code_block_gets_highlight() {
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-    app.messages.push(DisplayMessage::new(
-        MessageRole::Assistant,
-        "here:\n```bash\nrm -rf mything\n```\nand:\n```python\nprint(42)\n```",
-    ));
-    // enter scroll mode with block selected
-    app.interaction.mode = crate::app::AppMode::Scroll;
-    app.navigation.scroll_unit = crate::app::ScrollUnit::Block;
-    // block 0 is the "here:" paragraph; block 1 is the bash fence body
-    app.navigation.selected_block = Some(1);
-
-    let buf = render_app(&app, 60, 20);
-
-    // find the cell that renders "rm" and check it has a bg colour
-    let mut found_highlight = false;
-    for y in 0..buf.area.height {
-        for x in 0..buf.area.width {
-            let cell = &buf[(x, y)];
-            if cell.symbol() == "r" {
-                // check the next cell is "m" to confirm it's "rm"
-                if x + 1 < buf.area.width && buf[(x + 1, y)].symbol() == "m" {
-                    // selected block should have a non-default background
-                    if cell.bg != Color::Reset {
-                        found_highlight = true;
-                    }
-                }
-            }
-        }
-    }
-    assert!(
-        found_highlight,
-        "selected code block should have a background highlight"
-    );
-}
-
-#[test]
-fn selected_message_in_message_mode_gets_highlight() {
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-    app.messages
-        .push(DisplayMessage::new(MessageRole::Assistant, "hello world"));
-    app.messages
-        .push(DisplayMessage::new(MessageRole::User, "second message"));
-    app.interaction.mode = crate::app::AppMode::Scroll;
-    app.navigation.scroll_unit = crate::app::ScrollUnit::Message;
-    app.navigation.selected_message = Some(0); // first message
-
-    let buf = render_app(&app, 60, 20);
-
-    // check that the "h" of "hello" has a non-default bg
-    let mut found_highlight = false;
-    for y in 0..buf.area.height {
-        for x in 0..buf.area.width {
-            let cell = &buf[(x, y)];
-            if cell.symbol() == "h"
-                && x + 1 < buf.area.width
-                && buf[(x + 1, y)].symbol() == "e"
-                && cell.bg != Color::Reset
-            {
-                found_highlight = true;
-            }
-        }
-    }
-    assert!(
-        found_highlight,
-        "selected message should have a background highlight"
-    );
 }
 
 #[test]
@@ -1234,70 +1033,6 @@ fn bash_tool_output_is_syntax_highlighted_when_plain() {
 }
 
 #[test]
-fn stable_tool_boxes_reuse_highlighted_render() {
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-    app.messages.push(DisplayMessage {
-        tool_calls: vec![crate::app::DisplayToolCall {
-            name: "bash".into(),
-            summary: "for file in *.rs; do echo $file; done".into(),
-            status: ToolCallStatus::Done,
-            output_preview: Some("for file in *.rs; do echo $file; done".into()),
-            image_data: None,
-            batch: 1,
-        }],
-        ..DisplayMessage::new(MessageRole::Assistant, "done")
-    });
-
-    crate::syntax::reset_highlight_line_call_count();
-    render_app(&app, 80, 20);
-    let first_calls = crate::syntax::highlight_line_call_count();
-    assert!(
-        first_calls > 0,
-        "first render should highlight tool box text"
-    );
-
-    render_app(&app, 80, 20);
-
-    assert_eq!(crate::syntax::highlight_line_call_count(), first_calls);
-}
-
-#[test]
-fn cached_tool_boxes_preserve_image_order_by_batch() {
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-    app.messages.push(DisplayMessage {
-        tool_calls: vec![
-            crate::app::DisplayToolCall {
-                name: "bash".into(),
-                summary: "first".into(),
-                status: ToolCallStatus::Done,
-                output_preview: None,
-                image_data: Some(vec![0u8; 100]),
-                batch: 1,
-            },
-            crate::app::DisplayToolCall {
-                name: "bash".into(),
-                summary: "second".into(),
-                status: ToolCallStatus::Done,
-                output_preview: None,
-                image_data: None,
-                batch: 2,
-            },
-        ],
-        ..DisplayMessage::new(MessageRole::Assistant, "done")
-    });
-
-    let first = buffer_to_string(&render_app(&app, 80, 30));
-    let second = buffer_to_string(&render_app(&app, 80, 30));
-
-    assert_eq!(second, first);
-    assert!(
-        first.find("image").expect("image label should render")
-            < first.find("second").expect("second tool should render"),
-        "image label should stay with the first batch: {first}"
-    );
-}
-
-#[test]
 fn bash_tool_output_wraps_long_highlighted_lines() {
     let long_json = r#"{"duration_seconds":12.0,"exit_code":0,"status":"success","stderr":"Compiling mush-tui v0.1.0 (/home/rowan/dev/mush/crates/mush-tui) and then a lot more output that should wrap"}"#;
     let mut app = App::new("test".into(), TokenCount::new(200_000));
@@ -1493,105 +1228,6 @@ fn streaming_typewriter_ticks_dont_reparse_markdown() {
 }
 
 #[test]
-fn direct_render_caches_code_block_highlight() {
-    // mirrors the render_loop example: render the widget directly,
-    // repeatedly, with a stable code-block conversation. highlighting
-    // must happen once, not per frame.
-    crate::markdown::reset_highlight_code_block_call_count();
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-    for _ in 0..4 {
-        app.messages.push(DisplayMessage::new(
-            MessageRole::Assistant,
-            "## summary\n\n```rust\nfn main() {\n    let x = 42;\n}\n```\n",
-        ));
-    }
-    let area = Rect::new(0, 0, 100, 40);
-    let mut buf = Buffer::empty(area);
-    crate::markdown::reset_render_call_count();
-    MessageList::new(&app).render(area, &mut buf);
-    let first = crate::markdown::highlight_code_block_call_count();
-    let first_parse = crate::markdown::render_call_count();
-    for _ in 0..5 {
-        MessageList::new(&app).render(area, &mut buf);
-    }
-    let after = crate::markdown::highlight_code_block_call_count();
-    let after_parse = crate::markdown::render_call_count();
-    assert_eq!(
-        first, after,
-        "re-highlighted across renders: {first} -> {after}"
-    );
-    assert_eq!(
-        first_parse, after_parse,
-        "re-parsed markdown across renders: {first_parse} -> {after_parse}"
-    );
-}
-
-#[test]
-fn offscreen_messages_skip_markdown_render() {
-    // with viewport-aware rendering, messages above the visible area
-    // should not trigger markdown rendering or indent_line allocations
-    crate::markdown::reset_render_call_count();
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-    for i in 0..100 {
-        let role = if i % 2 == 0 {
-            MessageRole::User
-        } else {
-            MessageRole::Assistant
-        };
-        app.messages.push(DisplayMessage::new(
-            role,
-            format!("message {i} with enough text to be a real message"),
-        ));
-    }
-
-    // render in a small viewport (10 lines visible)
-    render_app(&app, 60, 10);
-    let first_renders = crate::markdown::render_call_count();
-
-    // with 100 messages and only 10 visible lines, most messages
-    // are off-screen. we should render FAR fewer than 50 assistant
-    // messages worth of markdown (50 = half of 100 messages)
-    assert!(
-        first_renders < 20,
-        "expected fewer than 20 markdown renders for 10-line viewport, got {first_renders}"
-    );
-
-    // the last message should still be visible
-    let buf = render_app(&app, 60, 10);
-    let content = buffer_to_string(&buf);
-    assert!(
-        content.contains("message 99"),
-        "last message should be visible in viewport"
-    );
-}
-
-#[test]
-fn stable_messages_reuse_cached_indented_lines() {
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-    for i in 0..10 {
-        app.messages.push(DisplayMessage::new(
-            MessageRole::Assistant,
-            format!("message {i} with **markdown** and `code`"),
-        ));
-    }
-
-    // first render populates the cache
-    reset_indent_line_call_count();
-    render_app(&app, 60, 40);
-    let first_calls = indent_line_call_count();
-    assert!(first_calls > 0, "first render should call indent_line");
-
-    // second render at same width should serve from cache
-    reset_indent_line_call_count();
-    render_app(&app, 60, 40);
-    let second_calls = indent_line_call_count();
-    assert_eq!(
-        second_calls, 0,
-        "second render should use cached indented lines, got {second_calls} calls"
-    );
-}
-
-#[test]
 fn indented_cache_invalidates_on_width_change() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     for i in 0..5 {
@@ -1687,226 +1323,10 @@ fn content_hash_cached_across_renders() {
     );
 }
 
-#[test]
-fn scroll_position_stable_when_content_grows() {
-    // new content arriving at the bottom must not move a viewport that
-    // is anchored above it
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-
-    // fill with enough messages to exceed viewport
-    for i in 0..20 {
-        app.messages.push(DisplayMessage::new(
-            MessageRole::Assistant,
-            format!("message number {i} with some content"),
-        ));
-    }
-
-    render_app(&app, 60, 20);
-    app.scroll_up(15);
-    render_app(&app, 60, 20);
-    let scroll_before = app.render_state.render_scroll.get();
-    assert!(scroll_before > 0, "should be scrolled");
-
-    // simulate new content arriving (streaming adds a message)
-    app.messages.push(DisplayMessage::new(
-        MessageRole::Assistant,
-        "new streaming content that just arrived",
-    ));
-
-    // second render: scroll position should stay the same
-    render_app(&app, 60, 20);
-    let scroll_after = app.render_state.render_scroll.get();
-
-    assert_eq!(
-        scroll_before, scroll_after,
-        "viewport should stay pinned when content grows while scrolled up \
-         (before={scroll_before}, after={scroll_after})"
-    );
-}
-
-#[test]
-fn scroll_down_after_content_growth_steps_by_scroll_lines() {
-    // sit a few lines above the bottom, let a long message land, then
-    // press j once. the viewport must step down one scroll_lines worth,
-    // not snap to the new bottom and skip everything that arrived
-    const STEP: u16 = 3;
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-    app.scroll_lines = STEP;
-    app.navigation.scroll_unit = crate::app::ScrollUnit::Message;
-    app.interaction.mode = crate::app::AppMode::Scroll;
-
-    for i in 0..30 {
-        app.messages.push(DisplayMessage::new(
-            MessageRole::Assistant,
-            format!("message {i}"),
-        ));
-    }
-    render_app(&app, 60, 20);
-
-    app.scroll_up(STEP);
-    render_app(&app, 60, 20);
-    let pinned = app.render_state.render_scroll.get();
-    assert!(pinned > 0, "should be scrolled up");
-
-    let long_body = (0..50)
-        .map(|i| format!("line {i}"))
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    app.messages
-        .push(DisplayMessage::new(MessageRole::Assistant, long_body));
-    render_app(&app, 60, 20);
-    assert_eq!(
-        pinned,
-        app.render_state.render_scroll.get(),
-        "viewport stays pinned while content grows"
-    );
-    let j = crossterm::event::KeyEvent::new(
-        crossterm::event::KeyCode::Char('j'),
-        crossterm::event::KeyModifiers::NONE,
-    );
-    crate::input::handle_key(&mut app, j);
-    render_app(&app, 60, 20);
-
-    assert_eq!(
-        app.render_state.render_scroll.get(),
-        pinned + STEP,
-        "one j should move down exactly scroll_lines, not jump to the bottom"
-    );
-    assert!(
-        app.is_scrolled_up(),
-        "a single step down must not reach the bottom of the new content"
-    );
-}
-
-#[test]
-fn returning_to_the_bottom_resumes_following_new_content() {
-    // once back at the bottom the viewport must track new content again
-    // instead of staying pinned where the user had scrolled to
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-
-    for i in 0..20 {
-        app.messages.push(DisplayMessage::new(
-            MessageRole::Assistant,
-            format!("message {i}"),
-        ));
-    }
-
-    render_app(&app, 60, 20);
-    app.scroll_up(10);
-    render_app(&app, 60, 20);
-    let pinned = app.render_state.render_scroll.get();
-
-    app.scroll_to_bottom();
-    render_app(&app, 60, 20);
-    let at_bottom = app.render_state.render_scroll.get();
-    assert!(at_bottom > pinned, "scrolling to bottom moves the viewport");
-
-    app.messages
-        .push(DisplayMessage::new(MessageRole::Assistant, "extra content"));
-    render_app(&app, 60, 20);
-    assert!(
-        app.render_state.render_scroll.get() > at_bottom,
-        "the viewport should follow content appended while at the bottom"
-    );
-}
-
 /// a width change reflows every message, so a viewport pinned by line
 /// count from either end of the document lands somewhere unrelated. the
 /// anchor names a message instead, so the message the user was reading
 /// stays on the viewport's top edge and `j` keeps stepping from there.
-#[test]
-fn resize_keeps_the_anchored_message_at_the_top_and_j_still_steps() {
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-    // long message bodies so wrap width genuinely changes total
-    // line count: a 200-char paragraph wraps to ~10 lines at width
-    // 20 vs ~3 lines at width 80
-    for i in 0..40 {
-        app.messages.push(DisplayMessage::new(
-            MessageRole::Assistant,
-            format!("message {i} ").repeat(20),
-        ));
-    }
-
-    render_app(&app, 30, 20);
-    // far enough up that the anchored message is mid-document at both
-    // widths, so the "last screen of content" clamp isn't what's tested
-    app.scroll_up(200);
-    render_app(&app, 30, 20);
-    let anchored = app.scroll;
-    let crate::app::ScrollPosition::Message {
-        msg: anchored_msg, ..
-    } = anchored
-    else {
-        panic!("scrolling up should anchor to a message, got {anchored:?}");
-    };
-
-    // the same anchor at a much wider width
-    render_app(&app, 120, 20);
-    assert_eq!(
-        anchored, app.scroll,
-        "a resize must not move the anchor itself"
-    );
-    assert_eq!(
-        Some(anchored_msg),
-        app.message_at_screen_row(0),
-        "the anchored message should still be the one on the top row"
-    );
-
-    let render_scroll_after_resize = app.render_state.render_scroll.get();
-    app.scroll_down(app.scroll_lines);
-    render_app(&app, 120, 20);
-    assert_eq!(
-        app.render_state.render_scroll.get(),
-        render_scroll_after_resize + app.scroll_lines,
-        "j must step the viewport down by scroll_lines after a resize"
-    );
-}
-
-#[test]
-fn scroll_position_stable_when_content_fluctuates() {
-    // the message log used to "shake" by a line while scrolled up during
-    // streaming, because content below the viewport oscillates in height
-    // as word wrap reflows around arriving tokens. content below the
-    // anchor must not move the view in either direction
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-    for i in 0..20 {
-        app.messages.push(DisplayMessage::new(
-            MessageRole::Assistant,
-            format!("message number {i} with some stable content"),
-        ));
-    }
-    // give the last message real multi-line content so shrink/grow
-    // actually changes the rendered line count
-    let long_multiline = "line a is here\nline b is here\nline c is here\nline d is here";
-    app.messages.last_mut().unwrap().content = long_multiline.into();
-
-    render_app(&app, 60, 20);
-    app.scroll_up(15);
-    render_app(&app, 60, 20);
-    let anchored = app.render_state.render_scroll.get();
-    assert!(anchored > 0, "precondition: viewport scrolled up");
-
-    // shrink last message by collapsing to a single line
-    app.messages.last_mut().unwrap().content = "just one line".into();
-    render_app(&app, 60, 20);
-    let scroll_after_shrink = app.render_state.render_scroll.get();
-    assert_eq!(
-        anchored, scroll_after_shrink,
-        "viewport should stay pinned to the same content line when \
-         content shrinks while scrolled (anchored={anchored}, \
-         after_shrink={scroll_after_shrink})"
-    );
-
-    // grow back to original height
-    app.messages.last_mut().unwrap().content = long_multiline.into();
-    render_app(&app, 60, 20);
-    let scroll_after_regrow = app.render_state.render_scroll.get();
-    assert_eq!(
-        anchored, scroll_after_regrow,
-        "viewport should return to the anchored row after grow restores \
-         content (anchored={anchored}, after_regrow={scroll_after_regrow})"
-    );
-}
 
 #[test]
 fn start_streaming_preserves_scroll_position() {
@@ -1989,51 +1409,6 @@ fn scrolled_up_during_streaming_shows_no_gap_in_viewport() {
     assert!(
         max_consecutive_blanks < 5,
         "found {max_consecutive_blanks} consecutive blank rows in viewport: \n{content}"
-    );
-}
-
-#[test]
-fn viewport_growth_clamps_the_view_without_losing_the_anchor() {
-    // the message area grows whenever a tool panel disappears or the
-    // status bar unwraps. the anchor has to survive that: while the
-    // anchored row cannot fill the taller viewport the view clamps to
-    // the last screen of content, keypresses step from what is actually
-    // on screen, and shrinking back restores the original row
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-    for i in 0..30 {
-        app.messages.push(DisplayMessage::new(
-            MessageRole::Assistant,
-            format!("message {i} body content"),
-        ));
-    }
-    render_app(&app, 60, 20);
-    app.scroll_up(3);
-    render_app(&app, 60, 20);
-    let anchor = app.scroll;
-    let top = app.render_state.render_scroll.get();
-    assert!(top > 0, "precondition: scrolled up");
-
-    render_app(&app, 60, 28);
-    let grown_top = app.render_state.render_scroll.get();
-    assert_eq!(
-        anchor, app.scroll,
-        "growing the viewport must not move the anchor"
-    );
-
-    render_app(&app, 60, 20);
-    assert_eq!(
-        top,
-        app.render_state.render_scroll.get(),
-        "shrinking back must restore the anchored row"
-    );
-
-    render_app(&app, 60, 28);
-    app.scroll_up(app.scroll_lines);
-    render_app(&app, 60, 28);
-    assert_eq!(
-        app.render_state.render_scroll.get(),
-        grown_top - app.scroll_lines,
-        "k must step up from the row on screen, not from a clamped anchor"
     );
 }
 
@@ -2333,109 +1708,6 @@ fn scroll_stays_stable_across_busy_label_ticks_only() {
         min, max,
         "busy-label-only ticks shouldn't move the viewport \
          (anchor={anchor}, min={min}, max={max})"
-    );
-}
-
-#[test]
-fn viewport_stays_pinned_when_turn_ends_and_viewport_grows() {
-    // bug report: scrolled up, the model streams a reply, the turn ends,
-    // then a single scroll press lands the user at the bottom. at turn
-    // end the tool panels clear, so the message area grows, and the
-    // area growing must not disturb a viewport anchored above the reply
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-    for i in 0..40 {
-        app.messages.push(DisplayMessage::new(
-            MessageRole::Assistant,
-            format!("message {i} body content"),
-        ));
-    }
-    // a tool panel is up during the turn, so the message area is 12 rows
-    // shorter than it becomes once the turn ends
-    render_app(&app, 60, 20);
-    app.scroll_up(4);
-    render_app(&app, 60, 20);
-    let anchor = app.render_state.render_scroll.get();
-
-    // the reply lands below the viewport while the user sits scrolled up
-    app.start_streaming();
-    let reply: String = (0..30).map(|i| format!("reply line {i}\n")).collect();
-    app.push_text_delta(&reply);
-    for _ in 0..reply.len() {
-        app.tick();
-    }
-    render_app(&app, 60, 20);
-    app.finish_streaming(None, None);
-    render_app(&app, 60, 20);
-    let after_finish = app.render_state.render_scroll.get();
-    assert_eq!(
-        anchor, after_finish,
-        "precondition: view stays pinned while the reply grows below \
-         (anchor={anchor}, after_finish={after_finish})"
-    );
-
-    // turn ends: active tool panels clear and the message area grows
-    render_app(&app, 60, 32);
-    let after_grow = app.render_state.render_scroll.get();
-    assert_eq!(
-        anchor, after_grow,
-        "the message area growing must not move the pinned content line \
-         (anchor={anchor}, after_grow={after_grow})"
-    );
-
-    // and one scroll press must move by exactly one step, not jump
-    app.scroll_down(app.scroll_lines);
-    render_app(&app, 60, 32);
-    let after_scroll = app.render_state.render_scroll.get();
-    assert_eq!(
-        after_scroll,
-        anchor + app.scroll_lines,
-        "one scroll press should move one step, not jump to the bottom"
-    );
-}
-
-#[test]
-fn viewport_anchored_inside_the_stream_survives_finalisation() {
-    // scrolling up only a little while a long reply streams leaves the
-    // viewport anchored inside the trailing block. when the stream turns
-    // into a stored message the trailing block empties, so an anchor that
-    // still pointed at it would fall to the bottom
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-    for i in 0..20 {
-        app.messages.push(DisplayMessage::new(
-            MessageRole::Assistant,
-            format!("message {i} body content"),
-        ));
-    }
-    render_app(&app, 60, 20);
-
-    app.start_streaming();
-    let reply: String = (0..40).map(|i| format!("reply line {i}\n")).collect();
-    app.push_text_delta(&reply);
-    for _ in 0..reply.len() {
-        app.tick();
-    }
-    render_app(&app, 60, 20);
-
-    // 4 rows up lands inside the streaming text, not in any message
-    app.scroll_up(4);
-    assert!(
-        matches!(app.scroll, crate::app::ScrollPosition::Trailing { .. }),
-        "expected an anchor inside the trailing block, got {:?}",
-        app.scroll
-    );
-    render_app(&app, 60, 20);
-    let anchored = app.render_state.render_scroll.get();
-
-    app.finish_streaming(None, None);
-    render_app(&app, 60, 20);
-    assert_eq!(
-        anchored,
-        app.render_state.render_scroll.get(),
-        "finalising the stream must not move the viewport"
-    );
-    assert!(
-        app.is_scrolled_up(),
-        "the anchor should have followed the streamed text into its message"
     );
 }
 

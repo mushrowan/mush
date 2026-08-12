@@ -6,29 +6,20 @@ use ratatui::widgets::Widget;
 
 use crate::app::{App, AppMode};
 use crate::widgets::input_box::InputBox;
-use crate::widgets::message_list::MessageList;
 use crate::widgets::search_popup::SearchPopup;
 use crate::widgets::status_bar::StatusBar;
 pub use crate::widgets::status_bar::status_bar_height;
 use crate::widgets::tool_panels::{ToolPanels, tool_panels_height};
 use crate::widgets::{at_picker, slash_menu};
 
-/// the full TUI layout, composing all widgets
+/// the live block: the turn in flight and the chrome under it
 pub struct Ui<'a> {
     app: &'a App,
-    /// draw only the live turn, leaving settled history to the terminal
-    inline: bool,
 }
 
 impl<'a> Ui<'a> {
     pub fn new(app: &'a App) -> Self {
-        Self { app, inline: false }
-    }
-
-    #[must_use]
-    pub fn inline(mut self, inline: bool) -> Self {
-        self.inline = inline;
-        self
+        Self { app }
     }
 
     /// get the cursor position for the terminal
@@ -160,11 +151,7 @@ impl Widget for Ui<'_> {
         let status_h = status_bar_height(self.app, area.width);
         let regions = layout(area, input_h, tools_h, status_h);
         self.app.input.area.set(regions.input);
-        if self.inline {
-            render_live(self.app, regions.messages, buf);
-        } else {
-            MessageList::new(self.app).render(regions.messages, buf);
-        }
+        render_live(self.app, regions.messages, buf);
         if let Some(tools_area) = regions.tools {
             ToolPanels::new(&self.app.active_tools, &self.app.theme).render(tools_area, buf);
         }
@@ -489,32 +476,14 @@ mod tests {
     }
 
     #[test]
-    fn an_inline_ui_draws_only_the_live_turn() {
+    fn the_ui_draws_only_the_live_turn() {
         let app = app_mid_turn();
-        let text = drawn(Ui::new(&app).inline(true), 60, 20);
+        let text = drawn(Ui::new(&app), 60, 20);
 
         assert!(text.contains("live answer"), "got:\n{text}");
         assert!(
             !text.contains("settled answer"),
             "scrollback owns it:\n{text}"
         );
-    }
-
-    #[test]
-    fn a_full_screen_ui_still_draws_the_transcript() {
-        let app = app_mid_turn();
-        let text = drawn(Ui::new(&app), 60, 20);
-
-        assert!(text.contains("settled answer"), "got:\n{text}");
-    }
-
-    #[test]
-    fn an_inline_ui_keeps_the_input_box_and_status_bar() {
-        let app = app_mid_turn();
-        let inline = drawn(Ui::new(&app).inline(true), 60, 20);
-        let full = drawn(Ui::new(&app), 60, 20);
-
-        let tail = |s: &str| s.lines().rev().take(4).collect::<Vec<_>>().join("\n");
-        assert_eq!(tail(&inline), tail(&full));
     }
 }
