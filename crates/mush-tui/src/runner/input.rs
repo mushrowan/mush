@@ -10,7 +10,6 @@ use crate::input::handle_key;
 use crate::session::Session;
 
 use super::commands::{SlashEnv, handle_slash_action, save_thinking_pref};
-use super::render::handle_mouse;
 use super::streams::{
     StreamState, abort_focused_stream, answer_confirmation, edit_last_queued_steering,
     submit_streaming_input,
@@ -341,10 +340,6 @@ pub(super) async fn handle_streaming_terminal_events(
                     LoopAction::Continue => {}
                 }
             }
-            Event::Mouse(mouse) => {
-                handle_mouse(&mut session.app, mouse);
-                changed = true;
-            }
             Event::Paste(text) => {
                 session.app.handle_paste(&text);
                 changed = true;
@@ -606,7 +601,6 @@ pub(super) async fn handle_idle_terminal_events(
                     }
                 }
             }
-            Event::Mouse(mouse) => handle_mouse(&mut session.app, mouse),
             Event::Paste(text) => {
                 session.app.handle_paste(&text);
             }

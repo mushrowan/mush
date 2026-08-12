@@ -103,9 +103,8 @@ pub fn open_config() -> Result<()> {
              \n\
              # [terminal]\n\
              # keyboard_enhancement = \"auto\"  # auto | enabled | disabled\n\
-             # mouse_tracking = \"minimal\"     # minimal | disabled\n\
              # image_probe = \"auto\"           # auto | disabled\n\
-             # env overrides: MUSH_TUI_KEYBOARD_ENHANCEMENT, MUSH_TUI_MOUSE_TRACKING, MUSH_TUI_IMAGE_PROBE\n\
+             # env overrides: MUSH_TUI_KEYBOARD_ENHANCEMENT, MUSH_TUI_IMAGE_PROBE\n\
              \n\
              # [api_keys]\n\
              # anthropic = \"sk-...\"\n\
@@ -168,7 +167,6 @@ pub fn status(terminal_overrides: mush_tui::TerminalPolicyOverrides) -> Result<(
         "  keyboard enhancement: {}",
         terminal.keyboard_enhancement.as_str()
     );
-    println!("  mouse tracking: {}", terminal.mouse_tracking.as_str());
     println!("  image probe: {}", terminal.image_probe.as_str());
 
     // auth status

@@ -803,7 +803,6 @@ advisor = true
             r#"
 [terminal]
 keyboard_enhancement = "disabled"
-mouse_tracking = "disabled"
 image_probe = "disabled"
 "#,
         )
@@ -811,10 +810,6 @@ image_probe = "disabled"
         assert_eq!(
             config.terminal.keyboard_enhancement,
             mush_tui::KeyboardEnhancementMode::Disabled
-        );
-        assert_eq!(
-            config.terminal.mouse_tracking,
-            mush_tui::MouseTrackingMode::Disabled
         );
         assert_eq!(
             config.terminal.image_probe,

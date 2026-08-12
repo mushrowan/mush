@@ -12,9 +12,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 
-use crate::terminal_policy::{
-    ImageProbeMode, KeyboardEnhancementMode, MouseTrackingMode, TerminalPolicy,
-};
+use crate::terminal_policy::{ImageProbeMode, KeyboardEnhancementMode, TerminalPolicy};
 
 #[cfg(unix)]
 static ORIGINAL_TERMIOS: OnceLock<Mutex<Option<libc::termios>>> = OnceLock::new();
@@ -109,7 +107,6 @@ pub(super) fn reapply_tui_modes_after_tool(policy: TerminalPolicy) {
 fn apply_tty_modes(out: &mut impl Write, policy: TerminalPolicy) -> io::Result<()> {
     out.queue(event::EnableBracketedPaste)?;
     out.queue(event::EnableFocusChange)?;
-    enable_mouse_tracking(out, policy.mouse_tracking)?;
     enable_keyboard_enhancement(out, policy.keyboard_enhancement);
     out.queue(SetCursorStyle::BlinkingBar)?;
     out.flush()
@@ -169,29 +166,12 @@ fn panic_payload_str(info: &std::panic::PanicHookInfo<'_>) -> String {
     }
 }
 
-/// enable mouse tracking: clicks, scroll, and drag with sgr coordinates
-///
-/// `?1002h` reports button press/release and motion while a button is held.
-/// `?1006h` enables SGR coordinate encoding for large terminals.
-/// we avoid `?1003h` (any-event tracking) which floods the event stream
-/// with movement events even when no button is held
-fn enable_mouse_tracking(out: &mut impl Write, mode: MouseTrackingMode) -> io::Result<()> {
-    match mode {
-        MouseTrackingMode::Minimal => out.write_all(b"\x1b[?1002h\x1b[?1006h"),
-        MouseTrackingMode::Disabled => {
-            tracing::debug!("mouse tracking disabled by terminal policy");
-            Ok(())
-        }
-    }
-}
-
 /// put back everything [`apply_tty_modes`] set
 fn restore_tty_modes(out: &mut impl Write) {
     let _ = out.queue(PopKeyboardEnhancementFlags);
     let _ = out.queue(event::DisableFocusChange);
     let _ = out.queue(event::DisableBracketedPaste);
     let _ = out.queue(SetCursorStyle::DefaultUserShape);
-    let _ = out.write_all(b"\x1b[?1002l\x1b[?1006l");
     let _ = out.queue(Show);
     let _ = out.queue(crossterm::style::ResetColor);
     let _ = out.flush();
@@ -286,7 +266,6 @@ mod tests {
     fn quiet_policy() -> TerminalPolicy {
         TerminalPolicy {
             keyboard_enhancement: KeyboardEnhancementMode::Disabled,
-            mouse_tracking: MouseTrackingMode::Minimal,
             image_probe: ImageProbeMode::Disabled,
         }
     }
@@ -302,8 +281,11 @@ mod tests {
         let out = written(|out| apply_tty_modes(out, quiet_policy()).unwrap());
 
         assert!(out.contains("\x1b[?2004h"), "bracketed paste: {out:?}");
-        assert!(out.contains("\x1b[?1002h"), "mouse tracking: {out:?}");
         assert!(!out.contains("?1049"), "alt screen: {out:?}");
+        assert!(
+            !out.contains("?1002"),
+            "the wheel is the terminal's: {out:?}"
+        );
     }
 
     #[test]
@@ -311,7 +293,6 @@ mod tests {
         let out = written(restore_tty_modes);
 
         assert!(out.contains("\x1b[?2004l"), "bracketed paste: {out:?}");
-        assert!(out.contains("\x1b[?1002l"), "mouse tracking: {out:?}");
         assert!(!out.contains("?1049"), "alt screen: {out:?}");
     }
 

@@ -262,13 +262,6 @@ impl InputBuffer {
         self.scroll.set(next);
     }
 
-    /// whether the mouse position is over the input box
-    pub fn is_mouse_over(&self, column: u16, row: u16) -> bool {
-        self.area
-            .get()
-            .contains(ratatui::layout::Position::new(column, row))
-    }
-
     /// remove pending images whose placeholders fall within text[start..end]
     fn remove_images_in_range(&mut self, start: usize, end: usize) {
         let range = &self.text[start..end];

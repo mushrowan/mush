@@ -49,6 +49,6 @@ pub use runner::{
 };
 pub use terminal_policy::{
     IMAGE_PROBE_ENV, ImageProbeMode, KEYBOARD_ENHANCEMENT_ENV, KeyboardEnhancementMode,
-    MOUSE_TRACKING_ENV, MouseTrackingMode, TerminalPolicy, TerminalPolicyOverrides,
+    TerminalPolicy, TerminalPolicyOverrides,
 };
 pub use theme::{Theme, ThemeConfig};

@@ -162,8 +162,6 @@ impl TerminalStateDump {
              - DisableBracketedPaste (\\e[?2004l)\n\
              - SetCursorStyle::DefaultUserShape (\\e[0 q)\n\
              - disable_raw_mode (tcsetattr)\n\
-             - disable_mouse_tracking (\\e[?1002l\\e[?1006l)\n\
-             - LeaveAlternateScreen (\\e[?1049l)\n\
              - Show cursor (\\e[?25h)\n\
              - ResetColor (\\e[0m)\n",
         );

@@ -1,6 +1,5 @@
 use std::io::{self, Write};
 
-use crossterm::event::{MouseEvent, MouseEventKind};
 use ratatui::Terminal;
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::layout::Rect;
@@ -115,106 +114,10 @@ fn input_region(app: &App, pane_area: Rect) -> Rect {
     crate::ui::layout(pane_area, input_h, tools_h, status_h).input
 }
 
-pub(super) fn handle_mouse(app: &mut App, mouse: MouseEvent) {
-    const SCROLL_LINES: u16 = 3;
-
-    match mouse.kind {
-        MouseEventKind::ScrollUp => {
-            if app.input.is_mouse_over(mouse.column, mouse.row) {
-                app.input.scroll_by(-(SCROLL_LINES as i16));
-            } else {
-                app.scroll_up(SCROLL_LINES);
-            }
-        }
-        MouseEventKind::ScrollDown => {
-            if app.input.is_mouse_over(mouse.column, mouse.row) {
-                app.input.scroll_by(SCROLL_LINES as i16);
-            } else {
-                app.scroll_down(SCROLL_LINES);
-            }
-        }
-        MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
-            if !app.input.is_mouse_over(mouse.column, mouse.row)
-                && let Some(msg_idx) = app.message_at_screen_row(mouse.row)
-            {
-                app.interaction.mode = app::AppMode::Scroll;
-                app.navigation.scroll_unit = app::ScrollUnit::Message;
-                app.navigation.selected_message = Some(msg_idx);
-                app.navigation.selection_anchor = Some(msg_idx);
-            }
-        }
-        MouseEventKind::Drag(crossterm::event::MouseButton::Left)
-            if app.interaction.mode == app::AppMode::Scroll =>
-        {
-            if let Some(msg_idx) = app.message_at_screen_row(mouse.row) {
-                app.navigation.selected_message = Some(msg_idx);
-            }
-        }
-        _ => {}
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use mush_ai::types::TokenCount;
-
-    #[test]
-    fn mouse_scroll_over_messages_scrolls_conversation() {
-        let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.input.area.set(ratatui::layout::Rect::new(0, 10, 40, 5));
-        for i in 0..10 {
-            app.push_user_message(format!("msg {i}"));
-        }
-        app.render_state
-            .message_area
-            .set(ratatui::layout::Rect::new(0, 0, 40, 5));
-        let before = app.viewport_top();
-        handle_mouse(
-            &mut app,
-            MouseEvent {
-                kind: MouseEventKind::ScrollUp,
-                column: 1,
-                row: 1,
-                modifiers: crossterm::event::KeyModifiers::NONE,
-            },
-        );
-        assert!(
-            app.viewport_top() < before,
-            "wheel up moves the viewport up"
-        );
-    }
-
-    #[test]
-    fn mouse_scroll_over_input_scrolls_input() {
-        let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.input.area.set(ratatui::layout::Rect::new(0, 10, 40, 5));
-        app.input.visible_lines.set(2);
-        app.input.total_lines.set(8);
-        app.input.scroll.set(2);
-
-        handle_mouse(
-            &mut app,
-            MouseEvent {
-                kind: MouseEventKind::ScrollUp,
-                column: 1,
-                row: 11,
-                modifiers: crossterm::event::KeyModifiers::NONE,
-            },
-        );
-        assert_eq!(app.input.scroll.get(), 0);
-
-        handle_mouse(
-            &mut app,
-            MouseEvent {
-                kind: MouseEventKind::ScrollDown,
-                column: 1,
-                row: 11,
-                modifiers: crossterm::event::KeyModifiers::NONE,
-            },
-        );
-        assert_eq!(app.input.scroll.get(), 3);
-    }
 
     #[test]
     fn message_at_screen_row_finds_correct_message() {
@@ -284,115 +187,5 @@ mod tests {
         assert_eq!(app.message_at_screen_row(0), Some(0));
         // screen row 2 -> render line 5 -> msg 1
         assert_eq!(app.message_at_screen_row(2), Some(1));
-    }
-
-    #[test]
-    fn mouse_click_enters_scroll_mode_at_message() {
-        use crate::app::{AppMode, MessageRowRange};
-        use crossterm::event::MouseButton;
-        let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.input.area.set(Rect::new(0, 18, 80, 2));
-        app.messages.push(crate::app::DisplayMessage::new(
-            crate::app::MessageRole::User,
-            "hello",
-        ));
-        app.messages.push(crate::app::DisplayMessage::new(
-            crate::app::MessageRole::Assistant,
-            "world",
-        ));
-
-        *app.render_state.message_row_ranges.borrow_mut() = vec![
-            MessageRowRange {
-                msg_idx: 0,
-                start: 0,
-                end: 3,
-            },
-            MessageRowRange {
-                msg_idx: 1,
-                start: 3,
-                end: 6,
-            },
-        ];
-        app.render_state.render_scroll.set(0);
-        app.render_state.message_area.set(Rect::new(0, 0, 80, 18));
-
-        handle_mouse(
-            &mut app,
-            MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Left),
-                column: 5,
-                row: 4,
-                modifiers: crossterm::event::KeyModifiers::NONE,
-            },
-        );
-
-        assert_eq!(app.interaction.mode, AppMode::Scroll);
-        assert_eq!(app.navigation.selected_message, Some(1));
-    }
-
-    #[test]
-    fn mouse_drag_creates_visual_selection() {
-        use crate::app::{AppMode, MessageRowRange};
-        use crossterm::event::MouseButton;
-        let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.input.area.set(Rect::new(0, 18, 80, 2));
-        app.messages.push(crate::app::DisplayMessage::new(
-            crate::app::MessageRole::User,
-            "first",
-        ));
-        app.messages.push(crate::app::DisplayMessage::new(
-            crate::app::MessageRole::Assistant,
-            "second",
-        ));
-        app.messages.push(crate::app::DisplayMessage::new(
-            crate::app::MessageRole::User,
-            "third",
-        ));
-
-        *app.render_state.message_row_ranges.borrow_mut() = vec![
-            MessageRowRange {
-                msg_idx: 0,
-                start: 0,
-                end: 3,
-            },
-            MessageRowRange {
-                msg_idx: 1,
-                start: 3,
-                end: 6,
-            },
-            MessageRowRange {
-                msg_idx: 2,
-                start: 6,
-                end: 9,
-            },
-        ];
-        app.render_state.render_scroll.set(0);
-        app.render_state.message_area.set(Rect::new(0, 0, 80, 18));
-
-        // mouse down on message 0
-        handle_mouse(
-            &mut app,
-            MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Left),
-                column: 5,
-                row: 1,
-                modifiers: crossterm::event::KeyModifiers::NONE,
-            },
-        );
-        assert_eq!(app.interaction.mode, AppMode::Scroll);
-        assert_eq!(app.navigation.selection_anchor, Some(0));
-
-        // drag to message 2
-        handle_mouse(
-            &mut app,
-            MouseEvent {
-                kind: MouseEventKind::Drag(MouseButton::Left),
-                column: 5,
-                row: 7,
-                modifiers: crossterm::event::KeyModifiers::NONE,
-            },
-        );
-        assert_eq!(app.navigation.selected_message, Some(2));
-        assert_eq!(app.selection_range(), Some((0, 2)));
     }
 }

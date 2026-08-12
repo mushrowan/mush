@@ -80,9 +80,6 @@ struct Cli {
     #[arg(long, hide = true, env = mush_tui::KEYBOARD_ENHANCEMENT_ENV)]
     tui_keyboard_enhancement: Option<mush_tui::KeyboardEnhancementMode>,
 
-    #[arg(long, hide = true, env = mush_tui::MOUSE_TRACKING_ENV)]
-    tui_mouse_tracking: Option<mush_tui::MouseTrackingMode>,
-
     #[arg(long, hide = true, env = mush_tui::IMAGE_PROBE_ENV)]
     tui_image_probe: Option<mush_tui::ImageProbeMode>,
 }
@@ -118,7 +115,6 @@ impl Cli {
     fn terminal_policy_overrides(&self) -> mush_tui::TerminalPolicyOverrides {
         mush_tui::TerminalPolicyOverrides {
             keyboard_enhancement: self.tui_keyboard_enhancement,
-            mouse_tracking: self.tui_mouse_tracking,
             image_probe: self.tui_image_probe,
         }
     }
@@ -699,7 +695,6 @@ mod tests {
         let _lock = ENV_LOCK.lock().unwrap();
         let _guard = with_env(&[
             (mush_tui::KEYBOARD_ENHANCEMENT_ENV, Some("disabled")),
-            (mush_tui::MOUSE_TRACKING_ENV, Some("off")),
             (mush_tui::IMAGE_PROBE_ENV, Some("false")),
         ]);
 
@@ -709,10 +704,6 @@ mod tests {
         assert_eq!(
             overrides.keyboard_enhancement,
             Some(mush_tui::KeyboardEnhancementMode::Disabled)
-        );
-        assert_eq!(
-            overrides.mouse_tracking,
-            Some(mush_tui::MouseTrackingMode::Disabled)
         );
         assert_eq!(
             overrides.image_probe,
