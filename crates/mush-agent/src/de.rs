@@ -1,19 +1,18 @@
 //! lenient deserialisation helpers for tool arguments.
 //!
-//! tool-calling models routinely emit integer arguments as JSON strings
-//! (e.g. `"1030"` instead of `1030`), especially for fields the advertised
-//! schema doesn't type as integers. strict serde parsing rejects those with
-//! `invalid type: string, expected usize`, which surfaces to the model as a
-//! confusing failure it tends to repeat. these helpers accept either a JSON
-//! number or a numeric string so the call still succeeds.
+//! tool-calling models routinely emit arguments as JSON strings: an integer
+//! as `"1030"`, an array as `"[{...}]"`. strict serde parsing rejects those
+//! with `invalid type: string`, which surfaces to the model as a confusing
+//! failure it tends to repeat. these helpers accept either the typed value
+//! or the string spelling of it.
 //!
-//! use via `#[serde(deserialize_with = "...")]` on unsigned-integer fields.
-//! pair [`opt_uint`] with `#[serde(default)]` so an absent key stays `None`.
+//! use via `#[serde(deserialize_with = "...")]`. pair [`opt_uint`] and
+//! [`json_seq`] with `#[serde(default)]` so an absent key stays empty.
 
 use std::fmt::Display;
 
 use serde::Deserialize;
-use serde::de::{Deserializer, Error};
+use serde::de::{DeserializeOwned, Deserializer, Error};
 
 #[derive(Deserialize)]
 #[serde(untagged)]
@@ -68,6 +67,21 @@ where
     }
 }
 
+/// deserialize an array that may arrive as a JSON string holding one.
+/// pair with `#[serde(default)]` so an absent key becomes an empty vec.
+pub fn json_seq<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: DeserializeOwned,
+{
+    let value = match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::String(s) => serde_json::from_str(&s)
+            .map_err(|e| D::Error::custom(format!("expected an array, got string {s:?}: {e}")))?,
+        other => other,
+    };
+    serde_json::from_value(value).map_err(D::Error::custom)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,5 +132,54 @@ mod tests {
     fn rejects_non_numeric_strings() {
         let err = serde_json::from_value::<Sample>(serde_json::json!({ "opt": "abc" }));
         assert!(err.is_err());
+    }
+
+    #[derive(Deserialize, Debug, PartialEq)]
+    #[serde(deny_unknown_fields)]
+    struct Item {
+        name: String,
+    }
+
+    #[derive(Deserialize, Debug)]
+    struct Listed {
+        #[serde(default, deserialize_with = "json_seq")]
+        items: Vec<Item>,
+    }
+
+    #[test]
+    fn accepts_a_real_array() {
+        let listed: Listed =
+            serde_json::from_value(serde_json::json!({ "items": [{ "name": "a" }] })).unwrap();
+        assert_eq!(listed.items, vec![Item { name: "a".into() }]);
+    }
+
+    #[test]
+    fn accepts_an_array_sent_as_a_json_string() {
+        let listed: Listed =
+            serde_json::from_value(serde_json::json!({ "items": r#"[{"name":"a"}]"# })).unwrap();
+        assert_eq!(listed.items, vec![Item { name: "a".into() }]);
+    }
+
+    #[test]
+    fn absent_seq_is_empty() {
+        let listed: Listed = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(listed.items.is_empty());
+    }
+
+    #[test]
+    fn a_bad_entry_in_a_real_array_names_the_field() {
+        let err =
+            serde_json::from_value::<Listed>(serde_json::json!({ "items": [{ "nmae": "a" }] }))
+                .unwrap_err()
+                .to_string();
+        assert!(err.contains("nmae"), "{err}");
+    }
+
+    #[test]
+    fn a_string_that_isnt_an_array_says_so() {
+        let err = serde_json::from_value::<Listed>(serde_json::json!({ "items": "nope" }))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("array"), "{err}");
     }
 }

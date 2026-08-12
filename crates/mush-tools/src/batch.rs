@@ -31,6 +31,7 @@ fn extract_file_path(text: &str) -> Option<&str> {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BatchArgs {
+    #[serde(deserialize_with = "mush_agent::de::json_seq")]
     tool_calls: Vec<BatchCall>,
     /// when true, run tool_calls strictly in submission order and stop
     /// at the first failure. defaults to false (parallel / path-grouped)
@@ -368,6 +369,24 @@ mod tests {
             _ => panic!("expected text"),
         };
         assert!(text.contains("cannot nest batch inside batch"));
+    }
+
+    #[tokio::test]
+    async fn tool_calls_arrive_as_a_json_string() {
+        let tool = BatchTool::new(ToolRegistry::new());
+        let result = tool
+            .execute(serde_json::json!({
+                "tool_calls": r#"[{"tool":"does-not-exist","parameters":{}}]"#
+            }))
+            .await;
+        let text = match &result.content[0] {
+            ToolResultContentPart::Text(t) => &t.text,
+            _ => panic!("expected text"),
+        };
+        assert!(
+            text.contains("unknown tool"),
+            "the string should have parsed as the array it holds: {text}"
+        );
     }
 
     #[tokio::test]

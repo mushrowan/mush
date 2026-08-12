@@ -23,7 +23,7 @@ struct EditArgs {
     #[serde(rename = "newText")]
     new_text: Option<String>,
     /// several disjoint replacements in one call
-    #[serde(default)]
+    #[serde(default, deserialize_with = "mush_agent::de::json_seq")]
     edits: Vec<Replacement>,
     #[serde(default, deserialize_with = "mush_agent::de::opt_uint")]
     expected_matches: Option<usize>,
@@ -1211,6 +1211,26 @@ mod tests {
                     {"oldText": "one", "newText": "1"},
                     {"oldText": "three", "newText": "3"},
                 ],
+            })));
+
+        assert!(result.outcome.is_success(), "{result:?}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "1\ntwo\n3\n");
+    }
+
+    #[test]
+    fn edits_arrive_as_a_json_string() {
+        // some models send the array serialised. prime names opus 4.6 and
+        // glm-5.1
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stringified.rs");
+        fs::write(&path, "one\ntwo\nthree\n").unwrap();
+        let tool = EditTool::new(dir.path().into());
+
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(tool.execute(serde_json::json!({
+                "path": "stringified.rs",
+                "edits": r#"[{"oldText":"one","newText":"1"},{"oldText":"three","newText":"3"}]"#,
             })));
 
         assert!(result.outcome.is_success(), "{result:?}");
