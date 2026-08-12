@@ -2615,12 +2615,21 @@ fn queued_steering_stays_live() {
 }
 
 #[test]
-fn committed_messages_stay_out_of_the_live_region() {
+fn a_turn_stays_live_until_the_next_one_starts() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.push_user_message("old question");
     app.start_streaming();
+    app.push_text_delta("old answer");
     app.finish_streaming(None, None);
-    assert!(!live_text(&app, 80).contains("old question"));
+
+    let during = live_text(&app, 80);
+    assert!(during.contains("old question"), "got:\n{during}");
+    assert!(during.contains("old answer"), "got:\n{during}");
+
+    app.push_user_message("new question");
+    let after = live_text(&app, 80);
+    assert!(!after.contains("old answer"), "got:\n{after}");
+    assert!(after.contains("new question"), "got:\n{after}");
 }
 
 #[test]
@@ -2672,4 +2681,42 @@ fn a_long_recap_stays_on_one_line() {
     let text = rendered_text(&message_lines(&msg, &plain_style(&theme), 60));
     let rows = text.lines().filter(|l| l.contains("xy")).count();
     assert_eq!(rows, 1, "a collapsed trace is one row, got:\n{text}");
+}
+
+/// reveal everything the typewriter is holding back
+fn reveal(app: &mut App) {
+    for _ in 0..200 {
+        app.tick();
+    }
+}
+
+#[test]
+fn the_live_region_holds_the_turn_that_started_it() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.push_user_message("the question");
+    app.start_streaming();
+    app.push_text_delta("the reply");
+    reveal(&mut app);
+
+    let text = live_text(&app, 60);
+    assert!(text.contains("the question"), "got:\n{text}");
+    assert!(text.contains("the reply"), "got:\n{text}");
+}
+
+#[test]
+fn queued_steering_sits_below_the_reply() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.push_user_message("the question");
+    app.start_streaming();
+    app.push_text_delta("the reply");
+    app.messages.push(DisplayMessage {
+        queued: true,
+        ..DisplayMessage::new(MessageRole::User, "steering")
+    });
+    reveal(&mut app);
+
+    let text = live_text(&app, 60);
+    let reply = text.find("the reply").expect("reply should render");
+    let steering = text.find("steering").expect("steering should render");
+    assert!(reply < steering, "got:\n{text}");
 }

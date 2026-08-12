@@ -782,15 +782,21 @@ fn streaming_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     lines
 }
 
-/// everything below committed history: the streaming block plus any
-/// queued steering the user has typed ahead
+/// everything below committed history: the live turn's messages, the
+/// streaming block, and any queued steering the user has typed ahead
 pub fn live_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     let style = MessageStyle {
         theme: &app.theme,
         show_usage: app.interaction.show_usage_lines,
     };
-    let mut lines = streaming_lines(app, width);
-    for msg in app.messages.iter().filter(|m| m.queued) {
+    let live = app.messages.get(app.commit_point()..).unwrap_or_default();
+    let mut lines = Vec::new();
+    for msg in live.iter().filter(|m| !m.queued) {
+        lines.extend(message_lines(msg, &style, width));
+        lines.push(Line::raw(""));
+    }
+    lines.extend(streaming_lines(app, width));
+    for msg in live.iter().filter(|m| m.queued) {
         lines.extend(message_lines(msg, &style, width));
         lines.push(Line::raw(""));
     }
