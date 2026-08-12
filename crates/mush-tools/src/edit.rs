@@ -18,15 +18,21 @@ struct EditArgs {
     #[serde(alias = "file_path")]
     path: String,
     /// one replacement, the shape most models reach for first
-    #[serde(rename = "oldText")]
+    #[serde(rename = "oldText", alias = "old_string")]
     old_text: Option<String>,
-    #[serde(rename = "newText")]
+    #[serde(rename = "newText", alias = "new_string")]
     new_text: Option<String>,
     /// several disjoint replacements in one call
     #[serde(default, deserialize_with = "mush_agent::de::json_seq")]
     edits: Vec<Replacement>,
-    #[serde(default, deserialize_with = "mush_agent::de::opt_uint")]
+    #[serde(
+        default,
+        alias = "expected_replacements",
+        deserialize_with = "mush_agent::de::opt_uint"
+    )]
     expected_matches: Option<usize>,
+    #[serde(default)]
+    replace_all: bool,
     #[serde(default, deserialize_with = "mush_agent::de::opt_uint")]
     start_line: Option<usize>,
     #[serde(default, deserialize_with = "mush_agent::de::opt_uint")]
@@ -36,10 +42,19 @@ struct EditArgs {
 #[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct Replacement {
-    #[serde(rename = "oldText")]
+    #[serde(rename = "oldText", alias = "old_string")]
     pub old_text: String,
-    #[serde(rename = "newText")]
+    #[serde(rename = "newText", alias = "new_string")]
     pub new_text: String,
+    #[serde(default)]
+    pub replace_all: bool,
+}
+
+/// how many occurrences a replacement may take
+#[derive(Clone, Copy)]
+enum Matches {
+    Exactly(usize),
+    All,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -71,7 +86,16 @@ impl EditArgs {
 
         let mut edits = self.edits;
         if let (Some(old_text), Some(new_text)) = (self.old_text, self.new_text) {
-            edits.push(Replacement { old_text, new_text });
+            edits.push(Replacement {
+                old_text,
+                new_text,
+                replace_all: false,
+            });
+        }
+        if self.replace_all {
+            for edit in &mut edits {
+                edit.replace_all = true;
+            }
         }
         if edits.is_empty() {
             return Err(EditArgsError::NoReplacements);
@@ -84,7 +108,7 @@ impl EditArgs {
             self.path,
             edits,
             EditOpts {
-                expected_matches: self.expected_matches.unwrap_or(1),
+                matches: Matches::Exactly(self.expected_matches.unwrap_or(1)),
                 start_line: self.start_line,
                 end_line: self.end_line,
             },
@@ -113,8 +137,8 @@ impl AgentTool for EditTool {
     fn description(&self) -> &str {
         "Edit a file by replacing exact text. The oldText must match exactly (including whitespace). \
          Use this for precise, surgical edits. By default oldText must appear exactly once in the \
-         file - use expected_matches to allow replacing multiple occurrences. Use start_line/end_line \
-         to restrict the search to a specific line range. \
+         file - set replace_all to take every occurrence, or expected_matches when you know the \
+         count. Use start_line/end_line to restrict the search to a specific line range. \
          To change several separate places in one file, send one call with an edits array rather \
          than one call per change. Each edits[] entry is matched against the file as it was, so the \
          entries must not overlap, and nothing is written unless every entry resolves."
@@ -149,6 +173,10 @@ impl AgentTool for EditTool {
                             "newText": {
                                 "type": "string",
                                 "description": "new text to replace it with"
+                            },
+                            "replace_all": {
+                                "type": "boolean",
+                                "description": "replace every occurrence of this entry's oldText (default false, which requires exactly one)"
                             }
                         },
                         "required": ["oldText", "newText"]
@@ -157,6 +185,10 @@ impl AgentTool for EditTool {
                 "expected_matches": {
                     "type": "integer",
                     "description": "expected number of matches (default 1). edit proceeds only when actual count equals this"
+                },
+                "replace_all": {
+                    "type": "boolean",
+                    "description": "replace every occurrence, however many. use expected_matches instead when you know the count"
                 },
                 "start_line": {
                     "type": "integer",
@@ -197,8 +229,9 @@ impl AgentTool for EditTool {
     }
 }
 
+#[derive(Clone, Copy)]
 struct EditOpts {
-    expected_matches: usize,
+    matches: Matches,
     start_line: Option<usize>,
     end_line: Option<usize>,
 }
@@ -206,7 +239,7 @@ struct EditOpts {
 impl Default for EditOpts {
     fn default() -> Self {
         Self {
-            expected_matches: 1,
+            matches: Matches::Exactly(1),
             start_line: None,
             end_line: None,
         }
@@ -279,7 +312,17 @@ fn match_candidates(content: &str, old_text: &str, new_text: &str) -> Vec<(Strin
 /// leave the file half-edited
 fn edit_file_batch(path: &Path, edits: &[Replacement], opts: &EditOpts) -> ToolResult {
     if let [only] = edits {
-        return edit_file(path, &only.old_text, &only.new_text, opts);
+        let matches = if only.replace_all {
+            Matches::All
+        } else {
+            opts.matches
+        };
+        return edit_file(
+            path,
+            &only.old_text,
+            &only.new_text,
+            &EditOpts { matches, ..*opts },
+        );
     }
 
     let content = match std::fs::read_to_string(path) {
@@ -297,19 +340,28 @@ fn edit_file_batch(path: &Path, edits: &[Replacement], opts: &EditOpts) -> ToolR
         let resolved = match_candidates(&content, &edit.old_text, &edit.new_text)
             .into_iter()
             .find_map(|(old, new)| {
-                let mut hits = content.match_indices(old.as_str());
-                let (start, _) = hits.next()?;
-                hits.next().is_none().then_some((start, old, new))
+                let starts: Vec<usize> = content
+                    .match_indices(old.as_str())
+                    .map(|(start, _)| start)
+                    .collect();
+                let enough = if edit.replace_all {
+                    !starts.is_empty()
+                } else {
+                    starts.len() == 1
+                };
+                enough.then_some((starts, old, new))
             });
-        let Some((start, matched, replacement)) = resolved else {
+        let Some((starts, matched, replacement)) = resolved else {
             let count = content.matches(edit.old_text.as_str()).count();
             return ToolResult::error(format!(
                 "edits[{i}] matched {count} times in {}, expected exactly 1\n\
-                 hint: add surrounding context to make oldText unique",
+                 hint: add surrounding context to make oldText unique, or set replace_all",
                 path.display()
             ));
         };
-        splices.push((start, start + matched.len(), replacement));
+        for start in starts {
+            splices.push((start, start + matched.len(), replacement.clone()));
+        }
     }
 
     splices.sort_by_key(|(start, _, _)| *start);
@@ -385,7 +437,6 @@ fn edit_file(path: &Path, old_text: &str, new_text: &str, opts: &EditOpts) -> To
 
     let candidates = match_candidates(&search_content, old_text, new_text);
 
-    let expected = opts.expected_matches;
     let mut mismatch_count: Option<usize> = None;
 
     for (match_old, match_new) in candidates {
@@ -393,7 +444,9 @@ fn edit_file(path: &Path, old_text: &str, new_text: &str, opts: &EditOpts) -> To
         if count == 0 {
             continue;
         }
-        if count != expected {
+        if let Matches::Exactly(want) = opts.matches
+            && count != want
+        {
             mismatch_count = Some(count);
             continue;
         }
@@ -423,8 +476,8 @@ fn edit_file(path: &Path, old_text: &str, new_text: &str, opts: &EditOpts) -> To
         return match write_result {
             Ok(()) => {
                 let diff = format_edit_diff(old_text, new_text);
-                let count_note = if expected > 1 {
-                    format!(" ({expected} replacements)")
+                let count_note = if count > 1 {
+                    format!(" ({count} replacements)")
                 } else {
                     String::new()
                 };
@@ -439,7 +492,7 @@ fn edit_file(path: &Path, old_text: &str, new_text: &str, opts: &EditOpts) -> To
         };
     }
 
-    if let Some(found) = mismatch_count {
+    if let (Some(found), Matches::Exactly(want)) = (mismatch_count, opts.matches) {
         // find all match locations to help the caller add context
         let first_line = old_text.lines().next().unwrap_or(old_text);
         let match_lines: Vec<usize> = content
@@ -460,13 +513,13 @@ fn edit_file(path: &Path, old_text: &str, new_text: &str, opts: &EditOpts) -> To
                     .join(", ")
             )
         };
-        let hint = if found > expected {
-            "\nhint: add more context in oldText to uniquify, or use start_line/end_line to restrict"
+        let hint = if found > want {
+            "\nhint: add more context in oldText to uniquify, set replace_all, or use start_line/end_line to restrict"
         } else {
             ""
         };
         return ToolResult::error(format!(
-            "expected {expected} match(es) but found {found} in {}{range_label}{locations}{hint}",
+            "expected {want} match(es) but found {found} in {}{range_label}{locations}{hint}",
             path.display(),
         ));
     }
@@ -1238,6 +1291,110 @@ mod tests {
     }
 
     #[test]
+    fn an_edit_accepts_claude_code_names() {
+        // claude code spells the same tool file_path / old_string /
+        // new_string, and anthropic models reach for it
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("named.rs");
+        fs::write(&path, "before\n").unwrap();
+        let tool = EditTool::new(dir.path().into());
+
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(tool.execute(serde_json::json!({
+                "file_path": "named.rs",
+                "old_string": "before",
+                "new_string": "after",
+            })));
+
+        assert!(result.outcome.is_success(), "{result:?}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "after\n");
+    }
+
+    #[test]
+    fn replace_all_takes_every_occurrence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rename.rs");
+        fs::write(&path, "old\nkeep\nold\nold\n").unwrap();
+        let tool = EditTool::new(dir.path().into());
+
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(tool.execute(serde_json::json!({
+                "path": "rename.rs",
+                "old_string": "old",
+                "new_string": "new",
+                "replace_all": true,
+            })));
+
+        assert!(result.outcome.is_success(), "{result:?}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new\nkeep\nnew\nnew\n");
+    }
+
+    #[test]
+    fn an_edit_accepts_expected_replacements() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("counted.rs");
+        fs::write(&path, "x\ny\nx\n").unwrap();
+        let tool = EditTool::new(dir.path().into());
+
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(tool.execute(serde_json::json!({
+                "path": "counted.rs",
+                "oldText": "x",
+                "newText": "z",
+                "expected_replacements": 2,
+            })));
+
+        assert!(result.outcome.is_success(), "{result:?}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "z\ny\nz\n");
+    }
+
+    #[test]
+    fn an_entry_accepts_claude_code_names() {
+        // multiedit's shape: edits[{old_string, new_string, replace_all}]
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("multi.rs");
+        fs::write(&path, "one\ntwo\nthree\ntwo\n").unwrap();
+        let tool = EditTool::new(dir.path().into());
+
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(tool.execute(serde_json::json!({
+                "file_path": "multi.rs",
+                "edits": [
+                    {"old_string": "one", "new_string": "1"},
+                    {"old_string": "two", "new_string": "2", "replace_all": true},
+                ],
+            })));
+
+        assert!(result.outcome.is_success(), "{result:?}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "1\n2\nthree\n2\n");
+    }
+
+    #[test]
+    fn an_entry_without_replace_all_still_wants_one_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ambiguous.rs");
+        fs::write(&path, "dup\nkeep\ndup\n").unwrap();
+        let tool = EditTool::new(dir.path().into());
+
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(tool.execute(serde_json::json!({
+                "path": "ambiguous.rs",
+                "edits": [
+                    {"oldText": "dup", "newText": "x"},
+                    {"oldText": "keep", "newText": "y"},
+                ],
+            })));
+
+        assert!(!result.outcome.is_success());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "dup\nkeep\ndup\n");
+    }
+
+    #[test]
     fn a_failing_edit_in_a_batch_writes_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("atomic.rs");
@@ -1458,7 +1615,7 @@ mod tests {
             "TODO: fix",
             "DONE",
             &EditOpts {
-                expected_matches: 2,
+                matches: Matches::Exactly(2),
                 ..Default::default()
             },
         );
@@ -1478,7 +1635,7 @@ mod tests {
             "foo",
             "replaced",
             &EditOpts {
-                expected_matches: 2,
+                matches: Matches::Exactly(2),
                 ..Default::default()
             },
         );
@@ -1558,7 +1715,7 @@ mod tests {
             "let x = 1;",
             "let x = 99;",
             &EditOpts {
-                expected_matches: 1,
+                matches: Matches::Exactly(1),
                 start_line: Some(2),
                 end_line: Some(4),
             },
@@ -1657,6 +1814,7 @@ mod tests {
             new_text: Some("after".into()),
             edits: Vec::new(),
             expected_matches: None,
+            replace_all: false,
             start_line: None,
             end_line: Some(5),
         }
