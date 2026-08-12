@@ -5,6 +5,7 @@ use std::io::{self, Write};
 
 use crossterm::QueueableCommand;
 use crossterm::cursor::MoveTo;
+use crossterm::terminal::{Clear, ClearType};
 use ratatui::layout::{Rect, Size};
 
 use crate::app::App;
@@ -46,16 +47,25 @@ impl Inline {
         }
     }
 
+    /// hand the rest of the conversation over and clear the block, so
+    /// the shell prompt lands after the last message
+    pub fn finish(&mut self, app: &App, out: &mut impl Write) -> io::Result<()> {
+        let area = self.region.area();
+        let lines = self.scrollback.take_rest(app, &style_of(app), area.width);
+        out.queue(MoveTo(area.x, area.y))?;
+        write_lines(out, &lines)?;
+        out.queue(Clear(ClearType::FromCursorDown))?;
+        out.flush()
+    }
+
     /// print what settled since the last frame, and say where the live
     /// block goes when it has to be redrawn from scratch: it moved, it
     /// resized, or the screen scrolled out from under it
     pub fn settle(&mut self, app: &App, out: &mut impl Write) -> io::Result<Option<Rect>> {
-        let style = MessageStyle {
-            theme: &app.theme,
-            show_usage: app.interaction.show_usage_lines,
-        };
         let before = self.region.area();
-        let lines = self.scrollback.take_settled(app, &style, before.width);
+        let lines = self
+            .scrollback
+            .take_settled(app, &style_of(app), before.width);
         if !lines.is_empty() {
             out.queue(MoveTo(before.x, before.y))?;
             write_lines(out, &lines)?;
@@ -70,6 +80,13 @@ impl Inline {
 
         let area = self.region.area();
         Ok((room > 0 || area != before).then_some(area))
+    }
+}
+
+fn style_of(app: &App) -> MessageStyle<'_> {
+    MessageStyle {
+        theme: &app.theme,
+        show_usage: app.interaction.show_usage_lines,
     }
 }
 
@@ -197,6 +214,24 @@ mod tests {
         let area = area.expect("the block has to be placed on the new screen");
         assert_eq!(area.width, 30);
         assert!(area.bottom() <= 12, "off the bottom: {area:?}");
+    }
+
+    #[test]
+    fn the_block_comes_down_at_the_end() {
+        let mut inline = Inline::new(Size::new(40, 40), 0);
+        let app = app_mid_turn();
+        settle(&mut inline, &app);
+
+        let mut out = Vec::new();
+        inline.finish(&app, &mut out).unwrap();
+        let written = String::from_utf8_lossy(&out).into_owned();
+
+        assert!(written.contains("live answer"), "got:\n{written}");
+        assert!(
+            !written.contains("settled answer"),
+            "printed twice:\n{written}"
+        );
+        assert!(written.ends_with("\x1b[J"), "the chrome stays: {written:?}");
     }
 
     /// bare newlines: the ones that scroll the screen rather than end a line

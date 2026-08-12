@@ -25,6 +25,15 @@ pub struct Scrollback {
     generation: u64,
 }
 
+/// how much of the conversation a hand-over covers
+#[derive(Debug, Clone, Copy)]
+enum Cut {
+    /// only what can no longer reshape
+    Settled,
+    /// all of it, in-flight reply included
+    All,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct SettledHead {
     message: usize,
@@ -50,8 +59,31 @@ impl Scrollback {
         style: &MessageStyle<'_>,
         width: u16,
     ) -> Vec<Line<'static>> {
+        self.take(app, style, width, Cut::Settled)
+    }
+
+    /// lines for everything left, so the live block can come down
+    pub fn take_rest(
+        &mut self,
+        app: &App,
+        style: &MessageStyle<'_>,
+        width: u16,
+    ) -> Vec<Line<'static>> {
+        self.take(app, style, width, Cut::All)
+    }
+
+    fn take(
+        &mut self,
+        app: &App,
+        style: &MessageStyle<'_>,
+        width: u16,
+        cut: Cut,
+    ) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
-        let settled = app.commit_point();
+        let settled = match cut {
+            Cut::Settled => app.commit_point(),
+            Cut::All => app.messages.len(),
+        };
 
         if app.display_generation() != self.generation {
             if self.committed > 0 || self.streamed > 0 {
@@ -80,7 +112,7 @@ impl Scrollback {
         }
         self.committed = settled;
 
-        lines.extend(self.take_streamed(app, style, width));
+        lines.extend(self.take_streamed(app, style, width, cut));
         lines
     }
 
@@ -107,13 +139,17 @@ impl Scrollback {
         app: &App,
         style: &MessageStyle<'_>,
         width: u16,
+        cut: Cut,
     ) -> Vec<Line<'static>> {
         if !app.stream.active {
             return Vec::new();
         }
 
         let text = app.visible_streaming_text();
-        let prefix = settled_prefix(text);
+        let prefix = match cut {
+            Cut::Settled => settled_prefix(text),
+            Cut::All => text.len(),
+        };
         if prefix <= self.streamed {
             return Vec::new();
         }

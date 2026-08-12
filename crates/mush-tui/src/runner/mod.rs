@@ -280,7 +280,7 @@ pub async fn run_tui(
         }
     }
 
-    cleanup(&mut terminal, inline.area())?;
+    cleanup(&mut terminal, &mut inline, &runtime.session.app)?;
     sigwinch_task.abort();
     terminal_guard.disarm();
     verify_terminal_restored(vec!["exit path: run_tui clean return".into()]);

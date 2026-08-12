@@ -3,14 +3,16 @@ use std::io::{self, Write};
 use std::sync::{Mutex, OnceLock};
 
 use crossterm::QueueableCommand;
-use crossterm::cursor::{MoveTo, SetCursorStyle, Show};
+use crossterm::cursor::{SetCursorStyle, Show};
 use crossterm::event::{
     self, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::Rect;
+
+use crate::app::App;
+use crate::inline::Inline;
 
 use crate::terminal_policy::{ImageProbeMode, KeyboardEnhancementMode, TerminalPolicy};
 
@@ -297,13 +299,6 @@ mod tests {
     }
 
     #[test]
-    fn the_prompt_lands_below_the_block() {
-        let out = written(|out| park_cursor_below(out, Rect::new(0, 10, 40, 6)).unwrap());
-
-        assert_eq!(out, "\x1b[16;1H\r\n");
-    }
-
-    #[test]
     fn raw_termios_snapshot_restores_echo_and_canonical_mode() {
         let Some((master_fd, slave_fd)) = open_pty_pair() else {
             return;
@@ -351,21 +346,14 @@ mod tests {
     }
 }
 
-/// leave the block on screen and put the cursor after it, so the shell
-/// prompt doesn't land on top of the last thing mush drew
-fn park_cursor_below(out: &mut impl Write, block: Rect) -> io::Result<()> {
-    out.queue(MoveTo(0, block.bottom().saturating_sub(1)))?;
-    out.write_all(b"\r\n")?;
-    out.flush()
-}
-
 pub(super) fn cleanup(
     terminal: &mut Terminal<
         super::size_cached_backend::SizeCachedBackend<CrosstermBackend<io::Stdout>>,
     >,
-    block: Rect,
+    inline: &mut Inline,
+    app: &App,
 ) -> io::Result<()> {
-    park_cursor_below(&mut io::stdout(), block)?;
+    inline.finish(app, &mut io::stdout())?;
     restore_terminal_state();
     terminal.show_cursor()?;
     Ok(())
