@@ -27,6 +27,9 @@ static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
 
 const MAX_HIGHLIGHTED_CODE_BLOCK_LINES: usize = 64;
 
+/// widest a thematic break is drawn, however wide the message is
+const HORIZONTAL_RULE_WIDTH: usize = 80;
+
 #[cfg(test)]
 thread_local! {
     static RENDER_CALLS: Cell<usize> = const { Cell::new(0) };
@@ -116,7 +119,8 @@ struct MarkdownRenderer<'a> {
     current: Vec<Span<'static>>,
     style_stack: Vec<Style>,
     list_stack: Vec<Option<u64>>,
-    pending_item_prefix: Option<String>,
+    pending_marker: Option<String>,
+    quote_depth: usize,
     code_block: Option<(String, String)>,
     table: Option<TableCapture>,
     link_stack: Vec<LinkCapture>,
@@ -147,7 +151,8 @@ impl<'a> MarkdownRenderer<'a> {
             current: Vec::new(),
             style_stack: vec![Style::default()],
             list_stack: Vec::new(),
-            pending_item_prefix: None,
+            pending_marker: None,
+            quote_depth: 0,
             code_block: None,
             table: None,
             link_stack: Vec::new(),
@@ -167,9 +172,14 @@ impl<'a> MarkdownRenderer<'a> {
             Event::Code(code) => self.push_inline_code(&code),
             Event::SoftBreak => self.push_text(" "),
             Event::HardBreak => self.push_current_line(),
-            Event::Rule => self
-                .lines
-                .push(Line::styled("─".repeat(40), self.theme.horizontal_rule)),
+            Event::Rule => {
+                self.separate();
+                let width = self.width.unwrap_or(HORIZONTAL_RULE_WIDTH);
+                self.lines.push(Line::styled(
+                    "─".repeat(width.min(HORIZONTAL_RULE_WIDTH)),
+                    self.theme.horizontal_rule,
+                ));
+            }
             Event::Html(html) | Event::InlineHtml(html) => self.push_text(&html),
             _ => {}
         }
@@ -177,32 +187,60 @@ impl<'a> MarkdownRenderer<'a> {
 
     fn start_tag(&mut self, tag: Tag<'_>) {
         match tag {
-            Tag::Heading { level, .. } => self.push_style(heading_style(level, self.theme)),
+            Tag::Paragraph => {
+                if self.list_stack.is_empty() {
+                    self.separate();
+                }
+            }
+            Tag::Heading { level, .. } => {
+                self.separate();
+                self.push_style(heading_style(level, self.theme));
+                if level as usize >= HeadingLevel::H3 as usize {
+                    let hashes = "#".repeat(level as usize);
+                    self.current
+                        .push(Span::styled(format!("{hashes} "), self.current_style()));
+                }
+            }
             Tag::Strong => self.push_style(self.current_style().add_modifier(Modifier::BOLD)),
             Tag::Emphasis => self.push_style(self.current_style().add_modifier(Modifier::ITALIC)),
             Tag::Strikethrough => {
                 self.push_style(self.current_style().add_modifier(Modifier::CROSSED_OUT))
             }
-            Tag::List(start) => self.list_stack.push(start),
+            Tag::BlockQuote(_) => {
+                self.separate();
+                self.quote_depth += 1;
+                self.push_style(self.theme.dim.add_modifier(Modifier::ITALIC));
+            }
+            Tag::List(start) => {
+                if self.list_stack.is_empty() {
+                    self.separate();
+                } else {
+                    self.push_current_line();
+                }
+                self.list_stack.push(start);
+            }
             Tag::Item => {
-                let prefix = match self.list_stack.last_mut().and_then(Option::as_mut) {
+                let marker = match self.list_stack.last_mut().and_then(Option::as_mut) {
                     Some(next) => {
-                        let prefix = format!("{next}. ");
+                        let marker = format!("{next}. ");
                         *next += 1;
-                        prefix
+                        marker
                     }
-                    None => "• ".into(),
+                    None => "- ".into(),
                 };
-                self.pending_item_prefix = Some(prefix);
+                let depth = self.list_stack.len().saturating_sub(1);
+                self.pending_marker = Some(format!("{}{marker}", "  ".repeat(depth)));
             }
             Tag::CodeBlock(CodeBlockKind::Fenced(info)) => {
-                self.push_current_line();
-                self.push_blank_line();
+                self.separate();
                 let lang = info.split_whitespace().next().unwrap_or("").to_string();
                 self.code_block = Some((lang, String::new()));
             }
             Tag::CodeBlock(CodeBlockKind::Indented) => {}
-            Tag::Table(_) => self.table = Some(TableCapture::default()),
+            Tag::Table(_) => {
+                self.separate();
+                self.table = Some(TableCapture::default());
+            }
             Tag::Link { dest_url, .. } => self.link_stack.push(LinkCapture {
                 destination: dest_url.to_string(),
                 text: String::new(),
@@ -213,8 +251,17 @@ impl<'a> MarkdownRenderer<'a> {
 
     fn end_tag(&mut self, tag: TagEnd) {
         match tag {
-            TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::Item => self.push_current_line(),
+            TagEnd::Paragraph | TagEnd::Item => self.push_current_line(),
+            TagEnd::Heading(_) => {
+                self.push_current_line();
+                self.pop_style();
+            }
             TagEnd::Strong | TagEnd::Emphasis | TagEnd::Strikethrough => self.pop_style(),
+            TagEnd::BlockQuote(_) => {
+                self.push_current_line();
+                self.pop_style();
+                self.quote_depth = self.quote_depth.saturating_sub(1);
+            }
             TagEnd::List(_) => {
                 self.list_stack.pop();
             }
@@ -227,7 +274,6 @@ impl<'a> MarkdownRenderer<'a> {
                         self.theme,
                         self.code_highlighting,
                     ));
-                    self.push_blank_line();
                 }
             }
             TagEnd::Link => {
@@ -344,10 +390,6 @@ impl<'a> MarkdownRenderer<'a> {
         if let Some(link) = self.link_stack.last_mut() {
             link.text.push_str(text);
         }
-        if let Some(prefix) = self.pending_item_prefix.take() {
-            self.current
-                .push(Span::styled(prefix, self.theme.list_bullet));
-        }
         self.current
             .push(Span::styled(text.to_string(), self.current_style()));
     }
@@ -357,7 +399,7 @@ impl<'a> MarkdownRenderer<'a> {
             link.text.push_str(code);
         }
         self.current
-            .push(Span::styled(format!("`{code}`"), self.theme.inline_code));
+            .push(Span::styled(code.to_string(), self.theme.inline_code));
     }
 
     fn push_link_destination(&mut self, link: &LinkCapture) {
@@ -370,15 +412,35 @@ impl<'a> MarkdownRenderer<'a> {
         ));
     }
 
-    fn push_current_line(&mut self) {
-        if !self.current.is_empty() || self.pending_item_prefix.is_some() {
-            if let Some(prefix) = self.pending_item_prefix.take() {
-                self.current
-                    .push(Span::styled(prefix, self.theme.list_bullet));
-            }
-            self.lines
-                .push(Line::from(std::mem::take(&mut self.current)));
+    /// start a new block: finish the line in hand, and leave one blank
+    /// line between it and what came before
+    fn separate(&mut self) {
+        self.push_current_line();
+        if !self.lines.is_empty() {
+            self.push_blank_line();
         }
+    }
+
+    /// the marker a line opens with: a list item's bullet, or the indent
+    /// that lines its continuations up under it
+    fn line_opener(&mut self) -> Option<Span<'static>> {
+        if let Some(marker) = self.pending_marker.take() {
+            return Some(Span::styled(marker, self.theme.list_bullet));
+        }
+        (!self.list_stack.is_empty()).then(|| Span::raw("  ".repeat(self.list_stack.len())))
+    }
+
+    fn push_current_line(&mut self) {
+        if self.current.is_empty() && self.pending_marker.is_none() {
+            return;
+        }
+        let mut spans = Vec::with_capacity(self.current.len() + 2);
+        if self.quote_depth > 0 {
+            spans.push(Span::styled("│ ".repeat(self.quote_depth), self.theme.dim));
+        }
+        spans.extend(self.line_opener());
+        spans.append(&mut self.current);
+        self.lines.push(Line::from(spans));
     }
 
     fn push_blank_line(&mut self) {
@@ -448,6 +510,7 @@ fn is_plain_text_line(line: &str) -> bool {
             && !line.starts_with("# ")
             && !line.starts_with("- ")
             && !line.starts_with("* ")
+            && !line.starts_with("> ")
             && !line.trim_start().starts_with('|')
             && line != "---"
             && line != "***"
@@ -921,6 +984,80 @@ mod tests {
     }
 
     #[test]
+    fn a_heading_does_not_colour_the_text_after_it() {
+        let text = render("## a heading\n\nplain prose after it", &t());
+        let prose = text
+            .lines
+            .iter()
+            .find(|line| line.to_string().contains("prose"))
+            .expect("the paragraph should render");
+
+        assert!(
+            prose
+                .spans
+                .iter()
+                .all(|span| span.style == Style::default()),
+            "heading style leaked: {:?}",
+            prose.spans
+        );
+    }
+
+    fn rendered(source: &str) -> Vec<String> {
+        render(source, &t())
+            .lines
+            .iter()
+            .map(Line::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn a_blank_line_separates_two_blocks() {
+        assert_eq!(
+            rendered("first para\n\nsecond para\n\n## a heading\n\nthird para"),
+            [
+                "first para",
+                "",
+                "second para",
+                "",
+                "a heading",
+                "",
+                "third para"
+            ]
+        );
+    }
+
+    #[test]
+    fn what_follows_a_list_marker_lines_up_under_it() {
+        assert_eq!(
+            rendered("- one\n\n  more about one\n\n- two"),
+            ["- one", "  more about one", "- two"]
+        );
+    }
+
+    #[test]
+    fn a_nested_list_is_indented_under_its_parent() {
+        assert_eq!(
+            rendered("- one\n  - nested\n- two"),
+            ["- one", "  - nested", "- two"]
+        );
+    }
+
+    #[test]
+    fn an_ordered_list_counts_from_where_it_starts() {
+        assert_eq!(rendered("4. four\n5. five"), ["4. four", "5. five"]);
+    }
+
+    #[test]
+    fn a_quote_wears_a_border() {
+        assert_eq!(rendered("> quoted\n\nafter"), ["│ quoted", "", "after"]);
+    }
+
+    #[test]
+    fn a_deeper_heading_keeps_its_hashes() {
+        assert_eq!(rendered("### deep"), ["### deep"]);
+    }
+
+    #[test]
     fn plain_text() {
         let text = render("hello world", &t());
         assert_eq!(text.lines.len(), 1);
@@ -929,11 +1066,10 @@ mod tests {
 
     #[test]
     fn headings() {
-        let text = render("# heading 1\n## heading 2\n### heading 3", &t());
-        assert_eq!(text.lines.len(), 3);
-        assert_eq!(text.lines[0].to_string(), "heading 1");
-        assert_eq!(text.lines[1].to_string(), "heading 2");
-        assert_eq!(text.lines[2].to_string(), "heading 3");
+        assert_eq!(
+            rendered("# heading 1\n## heading 2\n### heading 3"),
+            ["heading 1", "", "heading 2", "", "### heading 3"]
+        );
     }
 
     #[test]
@@ -982,7 +1118,8 @@ mod tests {
     fn inline_code() {
         let text = render("use `cargo build`", &t());
         assert_eq!(text.lines.len(), 1);
-        assert_eq!(text.lines[0].to_string(), "use `cargo build`");
+        assert_eq!(text.lines[0].to_string(), "use cargo build");
+        assert_eq!(text.lines[0].spans[1].style, t().inline_code);
     }
 
     #[test]
@@ -1033,16 +1170,15 @@ mod tests {
     #[test]
     fn code_block() {
         let text = render("```rust\nfn main() {}\n```", &t());
-        assert_eq!(text.lines.len(), 4);
-        // content should be indented with syntax highlighting applied
-        let content = text.lines[2].to_string();
+        assert_eq!(text.lines.len(), 3);
+        let content = text.lines[1].to_string();
         assert!(content.contains("fn main()"), "got: {content}");
     }
 
     #[test]
     fn code_block_has_colour() {
         let text = render("```rust\nlet x = 42;\n```", &t());
-        assert_eq!(text.lines.len(), 4);
+        assert_eq!(text.lines.len(), 3);
         // should have multiple spans (indentation + highlighted tokens)
         assert!(
             text.lines[1].spans.len() > 1,
@@ -1054,8 +1190,8 @@ mod tests {
     #[test]
     fn code_block_unknown_lang() {
         let text = render("```xyz\nhello world\n```", &t());
-        assert_eq!(text.lines.len(), 4);
-        assert!(text.lines[2].to_string().contains("hello world"));
+        assert_eq!(text.lines.len(), 3);
+        assert!(text.lines[1].to_string().contains("hello world"));
     }
 
     #[test]
@@ -1064,8 +1200,8 @@ mod tests {
 
         let text = render("```\nhello world\n```", &t());
 
-        assert_eq!(text.lines.len(), 4);
-        assert!(text.lines[2].to_string().contains("hello world"));
+        assert_eq!(text.lines.len(), 3);
+        assert!(text.lines[1].to_string().contains("hello world"));
         assert_eq!(highlight_code_block_call_count(), 0);
     }
 
@@ -1098,8 +1234,8 @@ mod tests {
 
         let text = render("```xyz\nhello world\n```", &t());
 
-        assert_eq!(text.lines.len(), 4);
-        assert!(text.lines[2].to_string().contains("hello world"));
+        assert_eq!(text.lines.len(), 3);
+        assert!(text.lines[1].to_string().contains("hello world"));
         assert_eq!(highlight_code_block_call_count(), 0);
     }
 
@@ -1110,8 +1246,8 @@ mod tests {
 
         let text = render(&source, &t());
 
-        assert_eq!(text.lines.len(), 83);
-        assert!(text.lines[2].to_string().contains("let x = 42;"));
+        assert_eq!(text.lines.len(), 82);
+        assert!(text.lines[1].to_string().contains("let x = 42;"));
         assert_eq!(highlight_code_block_call_count(), 0);
     }
 
@@ -1133,8 +1269,8 @@ mod tests {
     #[test]
     fn horizontal_rule() {
         let text = render("above\n---\nbelow", &t());
-        assert_eq!(text.lines.len(), 3);
-        assert!(text.lines[1].to_string().contains("─"));
+        assert_eq!(text.lines.len(), 5);
+        assert!(text.lines[2].to_string().contains("─"));
     }
 
     #[test]
