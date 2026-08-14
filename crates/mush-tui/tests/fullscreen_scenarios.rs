@@ -186,17 +186,16 @@ fn start_reading(app: &mut App) {
 }
 
 #[test]
-fn esc_with_something_typed_clears_it_first() {
+fn the_composer_survives_the_whole_cycle() {
     let mut app = conversation(20);
-    app.input.text = "hello".into();
-    app.input.cursor = 5;
-    let before = window_rows(&app);
+    app.input.text = "explain the borrow checker".into();
+    app.input.cursor = app.input.text.len();
 
     press(&mut app, KeyCode::Esc);
-    press(&mut app, KeyCode::Char('k'));
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Esc);
 
-    assert_eq!(app.input.text, "k");
-    assert_eq!(window_rows(&app), before);
+    assert_eq!(app.input.text, "explain the borrow checker");
 }
 
 #[test]

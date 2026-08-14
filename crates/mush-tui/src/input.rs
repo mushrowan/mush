@@ -73,11 +73,6 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         return Some(AppEvent::PasteImage);
     }
     if is_cancel_key(app, key) {
-        if !app.input.text.is_empty() || !app.input.images.is_empty() {
-            app.input.take_text();
-            app.input.take_images();
-            return None;
-        }
         if app.is_busy() {
             return Some(AppEvent::Abort);
         }

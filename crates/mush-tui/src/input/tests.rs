@@ -2082,15 +2082,14 @@ fn esc_on_an_empty_input_enters_navigation() {
 }
 
 #[test]
-fn esc_with_something_typed_clears_it_first() {
+fn esc_leaves_what_is_typed_alone() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.input.text = "hello".into();
     app.input.cursor = 5;
 
     handle_key(&mut app, key(KeyCode::Esc));
 
-    assert_eq!(app.interaction.mode, AppMode::Normal);
-    assert!(app.input.text.is_empty());
+    assert_eq!(app.input.text, "hello");
 }
 
 #[test]
