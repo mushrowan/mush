@@ -9,6 +9,8 @@ use mush_tui::keybinds::{BindingSource, ScopedKeysConfig};
 use mush_tui::screen::Screen;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use ratatui::buffer::{Buffer, CellDiffOption};
+use ratatui::layout::Rect;
 
 fn conversation(exchanges: usize) -> App {
     let mut app = App::new("claude-opus-4-5".into(), TokenCount::new(200_000));
@@ -457,4 +459,29 @@ fn leaving_navigation_snaps_back_to_the_newest_output() {
     press_with(&mut app, KeyCode::Char('['), KeyModifiers::CONTROL);
 
     assert_eq!(window_rows(&app), bottom);
+}
+
+#[test]
+fn a_row_with_a_stitched_cluster_is_never_trusted_stale() {
+    let mut app = conversation(1);
+    app.messages.push(DisplayMessage::new(
+        MessageRole::Assistant,
+        "gotcha, dropped \u{d26}\u{d4d}\u{d26}(\u{1d54}\u{15dc}\u{1d54})",
+    ));
+
+    let area = Rect::new(0, 0, 80, 24);
+    let mut buffer = Buffer::empty(area);
+    Screen::new().render(&app, area, &mut buffer);
+
+    let row = (0..buffer.area.height)
+        .find(|y| (0..buffer.area.width).any(|x| buffer[(x, *y)].symbol().chars().count() > 1))
+        .expect("the cluster landed in a cell");
+    let trusted: Vec<u16> = (0..buffer.area.width)
+        .filter(|x| buffer[(*x, row)].diff_option != CellDiffOption::AlwaysUpdate)
+        .collect();
+
+    assert!(
+        trusted.is_empty(),
+        "row {row} still diffs against a model the terminal disagrees with: {trusted:?}"
+    );
 }

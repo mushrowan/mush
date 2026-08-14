@@ -2,7 +2,7 @@ use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
-use ratatui::buffer::Buffer;
+use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::layout::Rect;
 use ratatui::text::Line;
 use ratatui::widgets::Widget;
@@ -216,6 +216,18 @@ impl Viewport {
     }
 }
 
+fn redraw_stitched_row(row: Rect, buf: &mut Buffer) {
+    let stitched = row
+        .columns()
+        .any(|cell| buf[cell.as_position()].symbol().chars().count() > 1);
+    if !stitched {
+        return;
+    }
+    for cell in row.columns() {
+        buf[cell.as_position()].set_diff_option(CellDiffOption::AlwaysUpdate);
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct Screen {}
 
@@ -258,6 +270,7 @@ impl Screen {
             .place(&lines, usize::from(regions.messages.height));
         for (row, line) in regions.messages.rows().zip(&lines[window]) {
             line.render(row, buf);
+            redraw_stitched_row(row, buf);
         }
         self.render_scrollbar(app, regions.messages, buf);
 
