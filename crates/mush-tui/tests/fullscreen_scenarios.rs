@@ -421,6 +421,22 @@ fn sending_a_message_snaps_to_the_bottom() {
 }
 
 #[test]
+fn ctrl_c_leaves_what_i_typed_alone() {
+    let mut app = conversation(1);
+    app.input.text = "explain the borrow checker".into();
+    app.input.cursor = app.input.text.len();
+
+    let event = handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+    );
+
+    assert!(event.is_none(), "{event:?}");
+    assert_eq!(app.input.text, "explain the borrow checker");
+    assert_eq!(app.status.as_deref(), Some("press ctrl+c again to exit"));
+}
+
+#[test]
 fn ctrl_c_stops_then_arms_then_quits() {
     let mut app = conversation(1);
     app.start_streaming();

@@ -795,12 +795,6 @@ fn cycle_favourite_model(app: &mut App, direction: isize) -> Option<AppEvent> {
 }
 
 fn handle_quit_or_abort(app: &mut App) -> Option<AppEvent> {
-    if !app.input.text.is_empty() || !app.input.images.is_empty() {
-        app.input.take_text();
-        app.input.take_images();
-        app.confirm_quit_pending = false;
-        return None;
-    }
     if app.is_busy() {
         app.confirm_quit_pending = false;
         return Some(AppEvent::Abort);

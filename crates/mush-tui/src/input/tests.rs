@@ -87,26 +87,25 @@ fn ctrl_c_twice_quits() {
 }
 
 #[test]
-fn ctrl_c_with_text_clears_input_without_quitting() {
+fn ctrl_c_with_text_arms_quit_without_clearing() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.input.text = "draft prompt".into();
     app.input.cursor = app.input.text.len();
     let event = handle_key(&mut app, ctrl(KeyCode::Char('c')));
     assert!(event.is_none());
-    assert!(app.input.text.is_empty());
-    assert_eq!(app.input.cursor, 0);
-    assert!(!app.confirm_quit_pending);
+    assert_eq!(app.input.text, "draft prompt");
+    assert!(app.confirm_quit_pending);
 }
 
 #[test]
-fn ctrl_c_clear_then_ctrl_c_arms_quit() {
+fn ctrl_c_twice_quits_with_text_still_in_the_composer() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.input.text = "stuff".into();
     app.input.cursor = 5;
     let _ = handle_key(&mut app, ctrl(KeyCode::Char('c')));
     let event = handle_key(&mut app, ctrl(KeyCode::Char('c')));
-    assert!(event.is_none());
-    assert!(app.confirm_quit_pending);
+    assert!(matches!(event, Some(AppEvent::Quit)), "{event:?}");
+    assert_eq!(app.input.text, "stuff");
 }
 
 #[test]
@@ -118,7 +117,7 @@ fn any_other_key_resets_quit_confirm() {
     assert!(!app.confirm_quit_pending);
     let event = handle_key(&mut app, ctrl(KeyCode::Char('c')));
     assert!(event.is_none());
-    assert!(app.input.text.is_empty());
+    assert_eq!(app.input.text, "a");
 }
 
 #[test]
