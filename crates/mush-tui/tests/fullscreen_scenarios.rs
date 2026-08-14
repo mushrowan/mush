@@ -140,7 +140,7 @@ fn a_long_conversation_shows_its_newest_lines() {
 }
 
 #[test]
-fn new_output_stays_in_view() {
+fn the_tail_follows_while_i_type() {
     let mut app = conversation(20);
     let before = rows(&app, 80, 24).join("\n");
     assert!(!before.contains("answer 20"));
@@ -239,6 +239,20 @@ fn ctrl_o_reaches_the_log_in_one_press() {
     press_with(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL);
 
     assert_eq!(app.interaction.mode.caret(), Caret::Log);
+}
+
+#[test]
+fn a_scrolled_view_does_not_follow() {
+    let mut app = conversation(20);
+    start_reading(&mut app);
+    press_with(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL);
+    press(&mut app, KeyCode::Esc);
+    let scrolled = window_rows(&app);
+
+    app.messages
+        .push(DisplayMessage::new(MessageRole::Assistant, "brand new"));
+
+    assert_eq!(window_rows(&app), scrolled);
 }
 
 #[test]
@@ -431,7 +445,7 @@ fn ctrl_c_stops_then_arms_then_quits() {
 }
 
 #[test]
-fn entering_navigation_stops_the_view_moving_on_its_own() {
+fn the_log_holds_still_while_i_read_it() {
     let mut app = conversation(20);
     start_reading(&mut app);
     let reading = window_rows(&app);
