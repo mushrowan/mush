@@ -119,6 +119,7 @@ pub enum Action {
     FocusLog,
     PasteImage,
     QuitOrAbort,
+    SelectAll,
     DeleteWordBackward,
     DeleteWordForward,
     DeleteChar,
@@ -186,6 +187,7 @@ impl Action {
             Self::SelectOrSpace => "select_or_space",
             Self::PasteImage => "paste_image",
             Self::QuitOrAbort => "quit_or_abort",
+            Self::SelectAll => "select_all",
             Self::DeleteWordBackward => "delete_word_backward",
             Self::DeleteWordForward => "delete_word_forward",
         }
@@ -210,6 +212,7 @@ impl Action {
         Self::DeleteToStart,
         Self::EditSteering,
         Self::EnterSearch,
+        Self::FocusLog,
         Self::InsertNewline,
         Self::NavigateBottom,
         Self::NavigateTop,
@@ -230,6 +233,7 @@ impl Action {
         Self::SelectOrSpace,
         Self::PasteImage,
         Self::QuitOrAbort,
+        Self::SelectAll,
         Self::DeleteWordBackward,
         Self::DeleteWordForward,
     ];
@@ -425,6 +429,11 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
         KeyScope::Normal,
         Action::EnterSearch,
         &[(KeyCode::Char('f'), KeyModifiers::CONTROL)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::SelectAll,
+        &[(KeyCode::Char('a'), KeyModifiers::CONTROL)],
     ),
     (
         KeyScope::Shared,
@@ -651,10 +660,7 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
     (
         KeyScope::Edit,
         Action::CursorLineStart,
-        &[
-            (KeyCode::Home, KeyModifiers::NONE),
-            (KeyCode::Char('a'), KeyModifiers::CONTROL),
-        ],
+        &[(KeyCode::Home, KeyModifiers::NONE)],
     ),
     (
         KeyScope::Edit,

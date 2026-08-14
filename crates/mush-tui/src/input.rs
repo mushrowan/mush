@@ -1,4 +1,4 @@
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::app::{App, AppEvent, AppMode};
 use crate::session_picker::{SessionScope, filtered_sessions};
@@ -63,6 +63,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     if app.interaction.mode == AppMode::ComposerNormal {
         return handle_composer_normal_key(app, key);
     }
+    if app.input.selected {
+        return handle_selection_key(app, key);
+    }
 
     if app
         .keymap
@@ -81,6 +84,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     }
     if app.keymap.matches(crate::keybinds::Action::FocusLog, key) {
         return focus_log(app);
+    }
+    if app.keymap.matches(crate::keybinds::Action::SelectAll, key) {
+        app.input.selected = !app.input.text.is_empty();
+        return None;
     }
 
     if app
@@ -804,6 +811,28 @@ fn handle_quit_or_abort(app: &mut App) -> Option<AppEvent> {
     }
     app.confirm_quit_pending = true;
     app.status = Some("press ctrl+c again to exit".into());
+    None
+}
+
+fn handle_selection_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
+    if app
+        .keymap
+        .matches(crate::keybinds::Action::QuitOrAbort, key)
+    {
+        return handle_quit_or_abort(app);
+    }
+    if is_cancel_key(app, key) {
+        app.input.selected = false;
+        app.input.cursor = app.input.text.len();
+        app.input.ensure_cursor_visible();
+        return None;
+    }
+    if crate::keybinds::is_backspace(key)
+        || (key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::NONE)
+    {
+        app.input.take_text();
+        app.input.selected = false;
+    }
     None
 }
 

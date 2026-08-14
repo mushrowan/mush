@@ -420,6 +420,95 @@ fn sending_a_message_snaps_to_the_bottom() {
     assert_eq!(window_rows(&app), bottom, "back at the newest line");
 }
 
+fn highlighted(app: &App) -> String {
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    let mut screen = Screen::new();
+    terminal
+        .draw(|frame| screen.render(app, frame.area(), frame.buffer_mut()))
+        .unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .filter(|x| {
+                    buffer[(*x, y)]
+                        .modifier
+                        .contains(ratatui::style::Modifier::REVERSED)
+                })
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+#[test]
+fn ctrl_a_highlights_the_whole_composer() {
+    let mut app = conversation(1);
+    app.input.text = "explain the borrow checker".into();
+    app.input.cursor = app.input.text.len();
+
+    press_with(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
+
+    assert_eq!(app.input.text, "explain the borrow checker");
+    assert_eq!(highlighted(&app), "explain the borrow checker");
+}
+
+#[test]
+fn typing_does_nothing_while_the_selection_is_live() {
+    let mut app = conversation(1);
+    app.input.text = "explain the borrow checker".into();
+    app.input.cursor = app.input.text.len();
+    press_with(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
+
+    press(&mut app, KeyCode::Char('x'));
+
+    assert_eq!(app.input.text, "explain the borrow checker");
+}
+
+#[test]
+fn backspace_empties_the_composer() {
+    let mut app = conversation(1);
+    app.input.text = "explain the borrow checker".into();
+    app.input.cursor = app.input.text.len();
+    press_with(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
+
+    press(&mut app, KeyCode::Backspace);
+    for c in "hi".chars() {
+        press(&mut app, KeyCode::Char(c));
+    }
+
+    assert_eq!(app.input.text, "hi");
+}
+
+#[test]
+fn c_empties_the_composer() {
+    let mut app = conversation(1);
+    app.input.text = "explain the borrow checker".into();
+    app.input.cursor = app.input.text.len();
+    press_with(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
+
+    press(&mut app, KeyCode::Char('c'));
+    for c in "hi".chars() {
+        press(&mut app, KeyCode::Char(c));
+    }
+
+    assert_eq!(app.input.text, "hi");
+}
+
+#[test]
+fn esc_drops_the_selection_and_leaves_the_cursor_at_the_end() {
+    let mut app = conversation(1);
+    app.input.text = "explain the borrow checker".into();
+    app.input.cursor = 0;
+    press_with(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
+
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Char('!'));
+
+    assert_eq!(app.input.text, "explain the borrow checker!");
+}
+
 #[test]
 fn ctrl_c_leaves_what_i_typed_alone() {
     let mut app = conversation(1);

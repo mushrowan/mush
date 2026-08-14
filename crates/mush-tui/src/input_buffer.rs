@@ -16,6 +16,7 @@ pub struct PendingImage {
 pub struct InputBuffer {
     pub text: String,
     pub cursor: usize,
+    pub selected: bool,
     pub images: Vec<PendingImage>,
     pub scroll: Cell<u16>,
     pub total_lines: Cell<u16>,
@@ -32,6 +33,7 @@ impl InputBuffer {
         Self {
             text: String::new(),
             cursor: 0,
+            selected: false,
             images: Vec::new(),
             scroll: Cell::new(0),
             total_lines: Cell::new(0),
