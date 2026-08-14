@@ -1,5 +1,6 @@
 use std::cell::Cell;
 use std::ops::Range;
+use std::time::{Duration, Instant};
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -12,12 +13,15 @@ use crate::widgets::message_list::transcript_lines;
 use crate::widgets::status_bar::StatusBar;
 use crate::widgets::tool_panels::{ToolPanels, tool_panels_height};
 
+pub const SCROLLBAR_FADE: Duration = Duration::from_millis(1200);
+
 #[derive(Debug)]
 pub struct Viewport {
     scroll_top: Cell<usize>,
     following: Cell<bool>,
     total: Cell<usize>,
     height: Cell<usize>,
+    moved: Cell<Option<Instant>>,
 }
 
 impl Default for Viewport {
@@ -27,6 +31,7 @@ impl Default for Viewport {
             following: Cell::new(true),
             total: Cell::new(0),
             height: Cell::new(0),
+            moved: Cell::new(None),
         }
     }
 }
@@ -71,6 +76,22 @@ impl Viewport {
         let top = top.min(self.max_scroll());
         self.scroll_top.set(top);
         self.following.set(top >= self.max_scroll());
+        self.moved.set(Some(Instant::now()));
+    }
+
+    #[must_use]
+    pub fn thumb(&self, now: Instant) -> Option<Range<usize>> {
+        let faded = self
+            .moved
+            .get()
+            .is_none_or(|moved| now.duration_since(moved) > SCROLLBAR_FADE);
+        let height = self.height.get();
+        if faded || self.total.get() <= height {
+            return None;
+        }
+        let span = (height * height).div_ceil(self.total.get()).max(1);
+        let top = (self.scroll_top.get() * height).div_ceil(self.total.get());
+        Some(top..(top + span).min(height))
     }
 
     fn max_scroll(&self) -> usize {
@@ -101,12 +122,28 @@ impl Screen {
         for (row, line) in regions.messages.rows().zip(&lines[window]) {
             line.render(row, buf);
         }
+        self.render_scrollbar(app, regions.messages, buf);
 
         if let Some(tools) = regions.tools {
             ToolPanels::new(&app.active_tools, &app.theme).render(tools, buf);
         }
         InputBox::new(app).render(regions.input, buf);
         StatusBar::new(app).render(regions.status, buf);
+    }
+}
+
+impl Screen {
+    fn render_scrollbar(&self, app: &App, area: Rect, buf: &mut Buffer) {
+        let Some(thumb) = app.viewport.thumb(Instant::now()) else {
+            return;
+        };
+        let x = area.right().saturating_sub(1);
+        for row in thumb {
+            let Ok(y) = u16::try_from(row) else { continue };
+            if let Some(cell) = buf.cell_mut((x, area.y + y)) {
+                cell.set_symbol("\u{2588}").set_style(app.theme.dim);
+            }
+        }
     }
 }
 
@@ -144,6 +181,26 @@ mod tests {
         viewport.scroll_by(5);
 
         assert!(viewport.is_following());
+    }
+
+    #[test]
+    fn the_scrollbar_fades_once_you_stop_moving() {
+        let viewport = Viewport::default();
+        viewport.window(200, 20);
+        viewport.scroll_by(-10);
+
+        let now = Instant::now();
+        assert!(viewport.thumb(now).is_some());
+        assert!(viewport.thumb(now + SCROLLBAR_FADE * 2).is_none());
+    }
+
+    #[test]
+    fn a_transcript_that_fits_has_no_scrollbar() {
+        let viewport = Viewport::default();
+        viewport.window(6, 20);
+        viewport.scroll_by(-1);
+
+        assert!(viewport.thumb(Instant::now()).is_none());
     }
 
     #[test]

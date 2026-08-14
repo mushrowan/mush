@@ -435,13 +435,6 @@ fn ctrl_k_deletes_to_end() {
 }
 
 #[test]
-fn ctrl_d_on_empty_quits() {
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-    let event = handle_key(&mut app, ctrl(KeyCode::Char('d')));
-    assert!(matches!(event, Some(AppEvent::Quit)));
-}
-
-#[test]
 fn ctrl_d_with_input_deletes_char() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.input.text = "abc".into();
@@ -451,12 +444,12 @@ fn ctrl_d_with_input_deletes_char() {
 }
 
 #[test]
-fn configured_delete_char_or_quit_binding_is_used() {
+fn configured_delete_char_binding_is_used() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     let raw = crate::keybinds::scoped_test_config(
         crate::keybinds::KeyScope::Edit,
         [(
-            "delete_char_or_quit",
+            "delete_char",
             crate::keybinds::BindingSource::One("alt+x".into()),
         )],
     );

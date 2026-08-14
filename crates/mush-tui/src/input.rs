@@ -223,6 +223,7 @@ fn handle_idle_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             if app.input.text.trim().is_empty() {
                 return None;
             }
+            app.viewport.to_bottom();
             let text = app.input.take_text();
             if text.starts_with('/') {
                 match crate::slash::parse(&text) {
@@ -239,13 +240,7 @@ fn handle_idle_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             })
         }
 
-        _ if app
-            .keymap
-            .matches(crate::keybinds::Action::DeleteCharOrQuit, key) =>
-        {
-            if app.input.text.is_empty() {
-                return Some(AppEvent::Quit);
-            }
+        _ if app.keymap.matches(crate::keybinds::Action::DeleteChar, key) => {
             app.input.delete();
             None
         }

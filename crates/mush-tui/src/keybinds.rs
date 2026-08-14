@@ -120,7 +120,7 @@ pub enum Action {
     QuitOrAbort,
     DeleteWordBackward,
     DeleteWordForward,
-    DeleteCharOrQuit,
+    DeleteChar,
     DeleteToEnd,
     DeleteToStart,
     InsertNewline,
@@ -157,7 +157,7 @@ impl Action {
             Self::CursorWordLeft => "cursor_word_left",
             Self::CursorWordRight => "cursor_word_right",
             Self::CursorUp => "cursor_up",
-            Self::DeleteCharOrQuit => "delete_char_or_quit",
+            Self::DeleteChar => "delete_char",
             Self::DeleteToEnd => "delete_to_end",
             Self::DeleteToStart => "delete_to_start",
             Self::EditSteering => "edit_steering",
@@ -199,7 +199,7 @@ impl Action {
         Self::CursorWordLeft,
         Self::CursorWordRight,
         Self::CursorUp,
-        Self::DeleteCharOrQuit,
+        Self::DeleteChar,
         Self::DeleteToEnd,
         Self::DeleteToStart,
         Self::EditSteering,
@@ -368,7 +368,7 @@ const fn default_scope_for_action(action: Action) -> KeyScope {
         | Action::CursorRight
         | Action::CursorWordLeft
         | Action::CursorWordRight
-        | Action::DeleteCharOrQuit
+        | Action::DeleteChar
         | Action::DeleteToEnd
         | Action::DeleteToStart
         | Action::DeleteWordBackward
@@ -561,7 +561,7 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
     ),
     (
         KeyScope::Edit,
-        Action::DeleteCharOrQuit,
+        Action::DeleteChar,
         &[(KeyCode::Char('d'), KeyModifiers::CONTROL)],
     ),
     (
@@ -847,7 +847,7 @@ mod tests {
             KeyEvent::new(KeyCode::Char('d'), KeyModifiers::ALT)
         ));
         assert!(map.matches(
-            Action::DeleteCharOrQuit,
+            Action::DeleteChar,
             KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL)
         ));
     }

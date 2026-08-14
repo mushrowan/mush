@@ -1,9 +1,11 @@
 use chrono::{TimeDelta, Utc};
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use mush_ai::oauth::usage::{OAuthUsage, UsageWindow};
 use mush_ai::types::TokenCount;
+use mush_tui::AppEvent;
 use mush_tui::app::{App, DisplayMessage, MessageRole};
 use mush_tui::input::handle_key;
+use mush_tui::keybinds::{BindingSource, ScopedKeysConfig};
 use mush_tui::screen::Screen;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -38,19 +40,47 @@ fn rows(app: &App, width: u16, height: u16) -> Vec<String> {
         .collect()
 }
 
+fn window_rows(app: &App) -> Vec<String> {
+    rows(app, 80, 24)[..20]
+        .iter()
+        .map(|row| {
+            row.chars()
+                .take(79)
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .collect()
+}
+
 fn press(app: &mut App, code: KeyCode) {
     handle_key(app, KeyEvent::from(code));
+}
+
+fn press_with(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+    handle_key(app, KeyEvent::new(code, modifiers));
+}
+
+fn scoped_keys(scope: &str, action: &str, keys: &str) -> ScopedKeysConfig {
+    let mut config = ScopedKeysConfig::default();
+    config.scopes.insert(
+        scope.to_string(),
+        [(action.to_string(), BindingSource::One(keys.to_string()))]
+            .into_iter()
+            .collect(),
+    );
+    config
 }
 
 #[test]
 fn esc_on_an_empty_input_starts_reading() {
     let mut app = conversation(20);
-    let before = rows(&app, 80, 24);
+    let before = window_rows(&app);
 
     press(&mut app, KeyCode::Esc);
     press(&mut app, KeyCode::Char('k'));
 
-    let after = rows(&app, 80, 24);
+    let after = window_rows(&app);
     assert_eq!(after[1..20], before[..19], "the window moved up one line");
 }
 
@@ -144,4 +174,194 @@ fn narrowing_the_terminal_keeps_the_newest_line_in_view() {
 
     assert!(wide.contains("than a hundred does"), "{wide}");
     assert!(narrow.contains("than a hundred does"), "{narrow}");
+}
+
+fn start_reading(app: &mut App) {
+    rows(app, 80, 24);
+    press(app, KeyCode::Esc);
+}
+
+#[test]
+fn esc_with_something_typed_clears_it_first() {
+    let mut app = conversation(20);
+    app.input.text = "hello".into();
+    app.input.cursor = 5;
+    let before = window_rows(&app);
+
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Char('k'));
+
+    assert_eq!(app.input.text, "k");
+    assert_eq!(window_rows(&app), before);
+}
+
+#[test]
+fn esc_while_reading_goes_back_to_typing() {
+    let mut app = conversation(20);
+    start_reading(&mut app);
+
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Char('k'));
+
+    assert_eq!(app.input.text, "k");
+}
+
+#[test]
+fn j_and_k_move_one_line() {
+    let mut app = conversation(20);
+    let before = window_rows(&app);
+    start_reading(&mut app);
+
+    press(&mut app, KeyCode::Char('k'));
+    press(&mut app, KeyCode::Char('k'));
+    let up = window_rows(&app);
+    press(&mut app, KeyCode::Char('j'));
+    let back = window_rows(&app);
+
+    assert_eq!(up[2..20], before[..18], "two lines up");
+    assert_eq!(back[1..20], before[..19], "one line back down");
+}
+
+#[test]
+fn the_page_keys_move_by_their_vim_amounts() {
+    let mut app = conversation(20);
+    let before = window_rows(&app);
+    start_reading(&mut app);
+
+    press_with(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL);
+    let half = window_rows(&app);
+
+    assert_eq!(half[10..20], before[..10], "half of a 20-row window");
+}
+
+#[test]
+fn g_and_shift_g_jump_to_the_ends() {
+    let mut app = conversation(20);
+    let bottom = window_rows(&app);
+    start_reading(&mut app);
+
+    press(&mut app, KeyCode::Char('g'));
+    let top = window_rows(&app);
+    press(&mut app, KeyCode::Char('G'));
+
+    assert!(
+        top[..3].iter().any(|row| row.contains("question 0")),
+        "{top:?}"
+    );
+    assert_eq!(window_rows(&app), bottom, "back at the end");
+}
+
+#[test]
+fn reading_pauses_the_follow() {
+    let mut app = conversation(20);
+    start_reading(&mut app);
+    press(&mut app, KeyCode::Char('k'));
+    let paused = window_rows(&app);
+
+    app.messages
+        .push(DisplayMessage::new(MessageRole::Assistant, "brand new"));
+
+    assert_eq!(window_rows(&app), paused);
+    assert!(!rows(&app, 80, 24).join("\n").contains("brand new"));
+}
+
+#[test]
+fn coming_back_to_the_bottom_follows_again() {
+    let mut app = conversation(20);
+    start_reading(&mut app);
+    press(&mut app, KeyCode::Char('k'));
+
+    press(&mut app, KeyCode::Char('G'));
+    app.messages
+        .push(DisplayMessage::new(MessageRole::Assistant, "brand new"));
+
+    assert!(rows(&app, 80, 24).join("\n").contains("brand new"));
+}
+
+#[test]
+fn ctrl_d_never_quits() {
+    let mut app = conversation(1);
+
+    let event = handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+    );
+
+    assert!(!matches!(event, Some(AppEvent::Quit)), "{event:?}");
+}
+
+#[test]
+fn the_keys_are_rebindable() {
+    let mut app = conversation(20);
+    let before = window_rows(&app);
+    app.keymap
+        .override_scoped(&scoped_keys("navigate", "previous_item", "ctrl+p"));
+    start_reading(&mut app);
+
+    press_with(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL);
+
+    assert_eq!(window_rows(&app)[1..20], before[..19]);
+}
+
+fn right_column(rows: &[String], width: usize) -> String {
+    rows[..20]
+        .iter()
+        .map(|row| {
+            let padded = format!("{row:<width$}");
+            padded.chars().nth(width - 1).unwrap_or(' ')
+        })
+        .collect()
+}
+
+#[test]
+fn the_scrollbar_shows_while_you_move() {
+    let mut app = conversation(20);
+    let resting = right_column(&rows(&app, 80, 24), 80);
+    start_reading(&mut app);
+
+    press(&mut app, KeyCode::Char('k'));
+
+    let moving = right_column(&rows(&app, 80, 24), 80);
+    assert!(resting.trim().is_empty(), "at rest: {resting:?}");
+    assert!(!moving.trim().is_empty(), "while moving: {moving:?}");
+}
+
+#[test]
+fn sending_a_message_snaps_to_the_bottom() {
+    let mut app = conversation(20);
+    let bottom = window_rows(&app);
+    start_reading(&mut app);
+    press(&mut app, KeyCode::Char('k'));
+
+    press(&mut app, KeyCode::Esc);
+    for c in "hello".chars() {
+        press(&mut app, KeyCode::Char(c));
+    }
+    press(&mut app, KeyCode::Enter);
+
+    assert_eq!(window_rows(&app), bottom, "back at the newest line");
+}
+
+#[test]
+fn ctrl_c_stops_then_arms_then_quits() {
+    let mut app = conversation(1);
+    app.start_streaming();
+
+    let first = handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+    );
+    app.finish_streaming(None, None);
+    let second = handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+    );
+    let third = handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+    );
+
+    assert!(matches!(first, Some(AppEvent::Abort)), "{first:?}");
+    assert!(second.is_none(), "{second:?}");
+    assert!(matches!(third, Some(AppEvent::Quit)), "{third:?}");
 }
