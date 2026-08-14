@@ -7,13 +7,12 @@ use crossterm::cursor::{SetCursorStyle, Show};
 use crossterm::event::{
     self, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement};
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    supports_keyboard_enhancement,
+};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::Size;
-
-use crate::app::App;
-use crate::inline::Inline;
 
 use crate::terminal_policy::{ImageProbeMode, KeyboardEnhancementMode, TerminalPolicy};
 
@@ -73,7 +72,7 @@ pub(super) fn probe_image_picker(policy: TerminalPolicy) -> Option<ratatui_image
 pub(super) fn enter_tui_terminal(policy: TerminalPolicy) -> io::Result<()> {
     snapshot_original_terminal_state();
     enable_raw_mode()?;
-    apply_tty_modes(&mut io::stdout(), policy)?;
+    enter_screen(&mut io::stdout(), policy)?;
 
     std::thread::sleep(std::time::Duration::from_millis(50));
     while event::poll(std::time::Duration::ZERO)? {
@@ -91,6 +90,11 @@ pub(super) fn reapply_tui_modes_after_tool(policy: TerminalPolicy) {
     if let Err(error) = apply_tty_modes(&mut io::stdout(), policy) {
         tracing::debug!(?error, "failed to reapply tty modes after tool");
     }
+}
+
+fn enter_screen(out: &mut impl Write, policy: TerminalPolicy) -> io::Result<()> {
+    out.queue(EnterAlternateScreen)?;
+    apply_tty_modes(out, policy)
 }
 
 fn apply_tty_modes(out: &mut impl Write, policy: TerminalPolicy) -> io::Result<()> {
@@ -160,6 +164,7 @@ fn restore_tty_modes(out: &mut impl Write) {
     let _ = out.queue(event::DisableFocusChange);
     let _ = out.queue(event::DisableBracketedPaste);
     let _ = out.queue(SetCursorStyle::DefaultUserShape);
+    let _ = out.queue(LeaveAlternateScreen);
     let _ = out.queue(Show);
     let _ = out.queue(crossterm::style::ResetColor);
     let _ = out.flush();
@@ -262,11 +267,11 @@ mod tests {
     }
 
     #[test]
-    fn entering_the_ui_stays_on_the_main_screen() {
-        let out = written(|out| apply_tty_modes(out, quiet_policy()).unwrap());
+    fn mush_takes_a_screen_of_its_own() {
+        let out = written(|out| enter_screen(out, quiet_policy()).unwrap());
 
+        assert!(out.contains("\x1b[?1049h"), "alt screen: {out:?}");
         assert!(out.contains("\x1b[?2004h"), "bracketed paste: {out:?}");
-        assert!(!out.contains("?1049"), "alt screen: {out:?}");
         assert!(
             !out.contains("?1002"),
             "the wheel is the terminal's: {out:?}"
@@ -274,19 +279,11 @@ mod tests {
     }
 
     #[test]
-    fn leaving_the_ui_puts_the_modes_back_and_nothing_else() {
+    fn quitting_gives_the_shell_its_screen_back() {
         let out = written(restore_tty_modes);
 
+        assert!(out.contains("\x1b[?1049l"), "alt screen: {out:?}");
         assert!(out.contains("\x1b[?2004l"), "bracketed paste: {out:?}");
-        assert!(!out.contains("?1049"), "alt screen: {out:?}");
-    }
-
-    #[test]
-    fn a_terminal_that_wont_say_where_the_cursor_is_opens_at_the_bottom() {
-        let screen = Size::new(80, 24);
-
-        assert_eq!(opening_row(Ok((0, 7)), screen), 7);
-        assert_eq!(opening_row(Err(io::Error::other("no reply")), screen), 23);
     }
 
     #[test]
@@ -336,24 +333,11 @@ mod tests {
     }
 }
 
-pub(super) fn opening_row(position: io::Result<(u16, u16)>, screen: Size) -> u16 {
-    match position {
-        Ok((_, row)) => row,
-        Err(error) => {
-            tracing::debug!(?error, "no cursor position, opening at the bottom");
-            screen.height.saturating_sub(1)
-        }
-    }
-}
-
 pub(super) fn cleanup(
     terminal: &mut Terminal<
         super::size_cached_backend::SizeCachedBackend<CrosstermBackend<io::Stdout>>,
     >,
-    inline: &mut Inline,
-    app: &App,
 ) -> io::Result<()> {
-    inline.finish(app, &mut io::stdout())?;
     restore_terminal_state();
     terminal.show_cursor()?;
     Ok(())

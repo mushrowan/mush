@@ -1,11 +1,11 @@
-use std::io::{self, Write};
+use std::io;
 
 use ratatui::Terminal;
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::layout::Rect;
 
 use crate::app::{self, App};
-use crate::inline::Inline;
+use crate::screen::Screen;
 use crate::session::Session;
 use crate::ui::Ui;
 use crate::widgets;
@@ -15,7 +15,7 @@ use super::size_cached_backend::SizeCachedBackend;
 #[tracing::instrument(name = "draw_panes", skip_all)]
 pub(super) fn draw_panes(
     terminal: &mut Terminal<SizeCachedBackend<CrosstermBackend<io::Stdout>>>,
-    inline: &mut Inline,
+    screen: &mut Screen,
     session: &mut Session,
     settings: &crate::settings::ScopedSettings,
 ) -> io::Result<()> {
@@ -30,18 +30,11 @@ pub(super) fn draw_panes(
     session.app.pane_info = None;
     session.app.background_alert = None;
 
-    inline.follow_screen(terminal.backend().size()?);
-    let mut stdout = io::stdout();
-    if let Some(area) = inline.settle(&session.app, &mut stdout)? {
-        stdout.flush()?;
-        terminal.resize(area)?;
-    }
-
     terminal.draw(|frame| {
         let area = frame.area();
         let (cx, cy) = Ui::new(&session.app).cursor_position(area);
 
-        frame.render_widget(Ui::new(&session.app), area);
+        screen.render(&session.app, area, frame.buffer_mut());
 
         let focused_app = &session.app;
         let streaming_idle = focused_app.is_busy() && focused_app.input.text.is_empty();

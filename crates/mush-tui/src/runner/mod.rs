@@ -2,7 +2,6 @@ use std::io;
 
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::Rect;
 
 mod commands;
 mod config;
@@ -20,7 +19,7 @@ mod thinking_prefs;
 use mush_agent::tool::ToolRegistry;
 use mush_ai::registry::ApiRegistry;
 
-use crate::inline::Inline;
+use crate::screen::Screen;
 
 pub use self::config::{
     LiveToolOutput, ModelResolver, PaneSnapshot, ReloadCallback, ReloadedContext, SessionSaver,
@@ -37,7 +36,7 @@ use self::streams::{
     AgentStreams, StreamConfig, StreamDeps, StreamState, new_agent_streams, start_pending_streams,
 };
 use self::terminal::{
-    TerminalStateGuard, cleanup, enter_tui_terminal, install_panic_cleanup_hook, opening_row,
+    TerminalStateGuard, cleanup, enter_tui_terminal, install_panic_cleanup_hook,
     probe_image_picker, restore_terminal_state,
 };
 pub use self::thinking_prefs::{ThinkingPrefs, ThinkingPrefsSaver, canonical_dir};
@@ -86,15 +85,8 @@ pub async fn run_tui(
     let backend = SizeCachedBackend::new(CrosstermBackend::new(io::stdout()));
     let size_cache = backend.cache_handle();
     let sigwinch_task = spawn_sigwinch_listener(size_cache.resize_pending_flag());
-    let screen = crossterm::terminal::size().map(ratatui::layout::Size::from)?;
-    let top = opening_row(crossterm::cursor::position(), screen);
-    let mut inline = Inline::new(screen, top);
-    let mut terminal = Terminal::with_options(
-        backend,
-        ratatui::TerminalOptions {
-            viewport: ratatui::Viewport::Fixed(Rect::new(0, top, screen.width, 0)),
-        },
-    )?;
+    let mut screen = Screen::new();
+    let mut terminal = Terminal::new(backend)?;
     startup_phases.push(diag::StartupPhase::new(
         "after_terminal_new",
         terminal.size().map(|size| Some((size.width, size.height))),
@@ -118,7 +110,7 @@ pub async fn run_tui(
 
     draw_panes(
         &mut terminal,
-        &mut inline,
+        &mut screen,
         &mut runtime.session,
         &tui_config.settings,
     )?;
@@ -251,7 +243,7 @@ pub async fn run_tui(
             );
             draw_panes(
                 &mut terminal,
-                &mut inline,
+                &mut screen,
                 &mut runtime.session,
                 &tui_config.settings,
             )?;
@@ -260,7 +252,7 @@ pub async fn run_tui(
         }
     }
 
-    cleanup(&mut terminal, &mut inline, &runtime.session.app)?;
+    cleanup(&mut terminal)?;
     sigwinch_task.abort();
     terminal_guard.disarm();
     verify_terminal_restored(vec!["exit path: run_tui clean return".into()]);
