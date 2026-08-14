@@ -82,6 +82,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             return Some(AppEvent::Abort);
         }
         app.interaction.mode = AppMode::Navigate;
+        app.viewport.pause();
         return None;
     }
 
@@ -823,49 +824,35 @@ fn handle_navigate_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     }
     if is_cancel_key(app, key) {
         app.interaction.mode = AppMode::Normal;
+        app.viewport.follow();
         return None;
     }
 
     let page = app.viewport.page() as isize;
-    if app
-        .keymap
-        .matches_in(KeyScope::Navigate, Action::PreviousItem, key)
-    {
+    let matches = |action| app.keymap.matches_in(KeyScope::Navigate, action, key);
+    if matches(Action::PreviousItem) {
+        app.viewport.move_cursor(0, -1);
+    } else if matches(Action::NextItem) {
+        app.viewport.move_cursor(0, 1);
+    } else if matches(Action::CursorLeft) {
+        app.viewport.move_cursor(-1, 0);
+    } else if matches(Action::CursorRight) {
+        app.viewport.move_cursor(1, 0);
+    } else if matches(Action::LineUp) {
         app.viewport.scroll_by(-1);
-    } else if app
-        .keymap
-        .matches_in(KeyScope::Navigate, Action::NextItem, key)
-    {
+    } else if matches(Action::LineDown) {
         app.viewport.scroll_by(1);
-    } else if app
-        .keymap
-        .matches_in(KeyScope::Navigate, Action::HalfPageUp, key)
-    {
-        app.viewport.scroll_by(-page / 2);
-    } else if app
-        .keymap
-        .matches_in(KeyScope::Navigate, Action::HalfPageDown, key)
-    {
-        app.viewport.scroll_by(page / 2);
-    } else if app
-        .keymap
-        .matches_in(KeyScope::Navigate, Action::PageUp, key)
-    {
-        app.viewport.scroll_by(-page);
-    } else if app
-        .keymap
-        .matches_in(KeyScope::Navigate, Action::PageDown, key)
-    {
-        app.viewport.scroll_by(page);
-    } else if app
-        .keymap
-        .matches_in(KeyScope::Navigate, Action::NavigateTop, key)
-    {
+    } else if matches(Action::HalfPageUp) {
+        app.viewport.page_by(-page / 2);
+    } else if matches(Action::HalfPageDown) {
+        app.viewport.page_by(page / 2);
+    } else if matches(Action::PageUp) {
+        app.viewport.page_by(-page);
+    } else if matches(Action::PageDown) {
+        app.viewport.page_by(page);
+    } else if matches(Action::NavigateTop) {
         app.viewport.to_top();
-    } else if app
-        .keymap
-        .matches_in(KeyScope::Navigate, Action::NavigateBottom, key)
-    {
+    } else if matches(Action::NavigateBottom) {
         app.viewport.to_bottom();
     }
     None

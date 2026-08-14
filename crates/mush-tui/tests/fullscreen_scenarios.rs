@@ -76,12 +76,14 @@ fn scoped_keys(scope: &str, action: &str, keys: &str) -> ScopedKeysConfig {
 fn esc_on_an_empty_input_starts_reading() {
     let mut app = conversation(20);
     let before = window_rows(&app);
-
     press(&mut app, KeyCode::Esc);
+    let start = app.viewport.cursor_row();
+
     press(&mut app, KeyCode::Char('k'));
 
-    let after = window_rows(&app);
-    assert_eq!(after[1..20], before[..19], "the window moved up one line");
+    assert_eq!(app.viewport.cursor_row(), start - 1, "the cursor moved");
+    assert!(app.input.text.is_empty(), "the k was not typed");
+    assert_eq!(window_rows(&app), before, "the window held still");
 }
 
 #[test]
@@ -211,15 +213,20 @@ fn j_and_k_move_one_line() {
     let mut app = conversation(20);
     let before = window_rows(&app);
     start_reading(&mut app);
+    let start = app.viewport.cursor_row();
 
     press(&mut app, KeyCode::Char('k'));
     press(&mut app, KeyCode::Char('k'));
-    let up = window_rows(&app);
+    let up = app.viewport.cursor_row();
     press(&mut app, KeyCode::Char('j'));
-    let back = window_rows(&app);
 
-    assert_eq!(up[2..20], before[..18], "two lines up");
-    assert_eq!(back[1..20], before[..19], "one line back down");
+    assert_eq!(up, start - 2, "two rows up");
+    assert_eq!(app.viewport.cursor_row(), start - 1, "one row back down");
+    assert_eq!(
+        window_rows(&app),
+        before,
+        "inside the window, it holds still"
+    );
 }
 
 #[test]
@@ -295,10 +302,10 @@ fn the_keys_are_rebindable() {
     let mut app = conversation(20);
     let before = window_rows(&app);
     app.keymap
-        .override_scoped(&scoped_keys("navigate", "previous_item", "ctrl+p"));
+        .override_scoped(&scoped_keys("navigate", "line_up", "ctrl+y"));
     start_reading(&mut app);
 
-    press_with(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL);
+    press_with(&mut app, KeyCode::Char('y'), KeyModifiers::CONTROL);
 
     assert_eq!(window_rows(&app)[1..20], before[..19]);
 }
@@ -364,4 +371,90 @@ fn ctrl_c_stops_then_arms_then_quits() {
     assert!(matches!(first, Some(AppEvent::Abort)), "{first:?}");
     assert!(second.is_none(), "{second:?}");
     assert!(matches!(third, Some(AppEvent::Quit)), "{third:?}");
+}
+
+#[test]
+fn entering_navigation_stops_the_view_moving_on_its_own() {
+    let mut app = conversation(20);
+    start_reading(&mut app);
+    let reading = window_rows(&app);
+
+    app.messages
+        .push(DisplayMessage::new(MessageRole::Assistant, "brand new"));
+
+    assert_eq!(window_rows(&app), reading);
+}
+
+fn cursor(app: &App) -> (usize, usize) {
+    let c = app.viewport.cursor();
+    (c.line, c.column)
+}
+
+#[test]
+fn the_cursor_starts_at_the_bottom_left_of_the_window() {
+    let mut app = conversation(20);
+    let lines = rows(&app, 80, 24);
+
+    start_reading(&mut app);
+
+    assert_eq!(app.viewport.cursor_row(), 19, "{lines:?}");
+    assert_eq!(cursor(&app).1, 0);
+}
+
+fn cursor_onto_text(app: &mut App) {
+    let window = window_rows(app);
+    let Some(row) = window.iter().rposition(|row| row.trim().len() > 4) else {
+        panic!("a line with text on it: {window:?}");
+    };
+    for _ in row..window.len() - 1 {
+        press(app, KeyCode::Char('k'));
+    }
+}
+
+#[test]
+fn h_j_k_and_l_move_one_cell() {
+    let mut app = conversation(20);
+    start_reading(&mut app);
+    cursor_onto_text(&mut app);
+    let (line, column) = cursor(&app);
+
+    press(&mut app, KeyCode::Char('l'));
+
+    assert_eq!(cursor(&app), (line, column + 1));
+}
+
+#[test]
+fn the_cursor_stops_at_the_start_of_a_line() {
+    let mut app = conversation(20);
+    start_reading(&mut app);
+    cursor_onto_text(&mut app);
+
+    press(&mut app, KeyCode::Char('h'));
+
+    assert_eq!(cursor(&app).1, 0);
+}
+
+#[test]
+fn g_takes_the_cursor_to_the_last_line() {
+    let mut app = conversation(20);
+    start_reading(&mut app);
+    press_with(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL);
+
+    press(&mut app, KeyCode::Char('G'));
+    rows(&app, 80, 24);
+
+    assert_eq!(app.viewport.cursor_row(), 19);
+}
+
+#[test]
+fn leaving_navigation_snaps_back_to_the_newest_output() {
+    let mut app = conversation(20);
+    let bottom = window_rows(&app);
+    start_reading(&mut app);
+    press_with(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL);
+    assert_ne!(window_rows(&app), bottom);
+
+    press_with(&mut app, KeyCode::Char('['), KeyModifiers::CONTROL);
+
+    assert_eq!(window_rows(&app), bottom);
 }

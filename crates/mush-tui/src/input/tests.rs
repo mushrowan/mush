@@ -2104,12 +2104,14 @@ fn esc_while_navigating_goes_back_to_typing() {
 }
 
 #[test]
-fn k_moves_the_window_up_one_line_while_navigating() {
+fn k_moves_the_cursor_up_one_row_while_navigating() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.viewport.window(200, 20);
     handle_key(&mut app, key(KeyCode::Esc));
+    let start = app.viewport.cursor_row();
 
     handle_key(&mut app, key(KeyCode::Char('k')));
 
-    assert_eq!(app.viewport.window(200, 20), 179..199);
+    assert_eq!(app.viewport.cursor_row(), start - 1);
+    assert_eq!(app.viewport.window(200, 20), 180..200, "the window held");
 }

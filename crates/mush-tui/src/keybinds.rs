@@ -133,6 +133,8 @@ pub enum Action {
     ModelPickerDeleteSelectedStale,
     ModelPickerToggleFavourite,
     HalfPageDown,
+    LineDown,
+    LineUp,
     HalfPageUp,
     PageDown,
     PageUp,
@@ -172,6 +174,8 @@ impl Action {
             Self::ModelPickerDeleteSelectedStale => "model_picker_delete_selected_stale",
             Self::ModelPickerToggleFavourite => "model_picker_toggle_favourite",
             Self::HalfPageDown => "half_page_down",
+            Self::LineDown => "line_down",
+            Self::LineUp => "line_up",
             Self::HalfPageUp => "half_page_up",
             Self::PageDown => "page_down",
             Self::PageUp => "page_up",
@@ -214,6 +218,8 @@ impl Action {
         Self::ModelPickerDeleteSelectedStale,
         Self::ModelPickerToggleFavourite,
         Self::HalfPageDown,
+        Self::LineDown,
+        Self::LineUp,
         Self::HalfPageUp,
         Self::PageDown,
         Self::PageUp,
@@ -355,9 +361,12 @@ const fn default_scope_for_action(action: Action) -> KeyScope {
         | Action::PreviousItem
         | Action::QuitOrAbort
         | Action::SelectOrSpace => KeyScope::Shared,
-        Action::HalfPageDown | Action::HalfPageUp | Action::PageDown | Action::PageUp => {
-            KeyScope::Navigate
-        }
+        Action::HalfPageDown
+        | Action::HalfPageUp
+        | Action::LineDown
+        | Action::LineUp
+        | Action::PageDown
+        | Action::PageUp => KeyScope::Navigate,
         Action::SessionPickerToggleScope => KeyScope::SessionPicker,
         Action::ModelPickerDeleteAllStale
         | Action::ModelPickerDeleteSelectedStale
@@ -507,6 +516,32 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
         &[
             (KeyCode::End, KeyModifiers::NONE),
             (KeyCode::Char('G'), KeyModifiers::SHIFT),
+        ],
+    ),
+    (
+        KeyScope::Navigate,
+        Action::LineDown,
+        &[(KeyCode::Char('j'), KeyModifiers::CONTROL)],
+    ),
+    (
+        KeyScope::Navigate,
+        Action::LineUp,
+        &[(KeyCode::Char('k'), KeyModifiers::CONTROL)],
+    ),
+    (
+        KeyScope::Navigate,
+        Action::CursorLeft,
+        &[
+            (KeyCode::Char('h'), KeyModifiers::NONE),
+            (KeyCode::Left, KeyModifiers::NONE),
+        ],
+    ),
+    (
+        KeyScope::Navigate,
+        Action::CursorRight,
+        &[
+            (KeyCode::Char('l'), KeyModifiers::NONE),
+            (KeyCode::Right, KeyModifiers::NONE),
         ],
     ),
     (

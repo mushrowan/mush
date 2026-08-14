@@ -20,6 +20,7 @@ pub(super) fn draw_panes(
     settings: &crate::settings::ScopedSettings,
 ) -> io::Result<()> {
     terminal.backend_mut().flush()?;
+    super::terminal::set_cursor_shape(session.app.interaction.mode == app::AppMode::Navigate);
 
     session
         .app
@@ -37,6 +38,9 @@ pub(super) fn draw_panes(
         screen.render(&session.app, area, frame.buffer_mut());
 
         let focused_app = &session.app;
+        if let Some(cell) = screen.cursor_cell(focused_app, area) {
+            frame.set_cursor_position(cell);
+        }
         let streaming_idle = focused_app.is_busy() && focused_app.input.text.is_empty();
         if !streaming_idle
             && (focused_app.interaction.mode == app::AppMode::Normal

@@ -1,9 +1,10 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::text::Line;
 use ratatui::widgets::Widget;
 
 use crate::app::App;
@@ -15,6 +16,13 @@ use crate::widgets::tool_panels::{ToolPanels, tool_panels_height};
 
 pub const SCROLLBAR_FADE: Duration = Duration::from_millis(1200);
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Cursor {
+    pub line: usize,
+    pub column: usize,
+    wanted: usize,
+}
+
 #[derive(Debug)]
 pub struct Viewport {
     scroll_top: Cell<usize>,
@@ -22,6 +30,8 @@ pub struct Viewport {
     total: Cell<usize>,
     height: Cell<usize>,
     moved: Cell<Option<Instant>>,
+    cursor: Cell<Cursor>,
+    widths: RefCell<Vec<usize>>,
 }
 
 impl Default for Viewport {
@@ -32,11 +42,25 @@ impl Default for Viewport {
             total: Cell::new(0),
             height: Cell::new(0),
             moved: Cell::new(None),
+            cursor: Cell::new(Cursor::default()),
+            widths: RefCell::new(Vec::new()),
         }
     }
 }
 
 impl Viewport {
+    pub fn place(&self, lines: &[Line<'_>], height: usize) -> Range<usize> {
+        let window = self.window(lines.len(), height);
+        self.widths.replace(
+            lines[window.clone()]
+                .iter()
+                .map(|line| line.spans.iter().map(|s| s.content.chars().count()).sum())
+                .collect(),
+        );
+        self.hold_cursor_on_screen();
+        window
+    }
+
     pub fn window(&self, total: usize, height: usize) -> Range<usize> {
         self.total.set(total);
         self.height.set(height);
@@ -49,17 +73,75 @@ impl Viewport {
         top..total.min(top + height)
     }
 
+    pub fn pause(&self) {
+        self.following.set(false);
+        let last = self.window_end().saturating_sub(1);
+        self.cursor.set(Cursor {
+            line: last,
+            column: 0,
+            wanted: 0,
+        });
+    }
+
+    pub fn follow(&self) {
+        self.to_bottom();
+        self.following.set(true);
+    }
+
     pub fn scroll_by(&self, lines: isize) {
         let top = self.scroll_top.get().saturating_add_signed(lines);
         self.scroll_to(top);
+        self.hold_cursor_on_screen();
+    }
+
+    pub fn page_by(&self, lines: isize) {
+        self.scroll_by(lines);
+        self.move_cursor(0, lines);
+    }
+
+    pub fn move_cursor(&self, columns: isize, lines: isize) {
+        self.moved.set(Some(Instant::now()));
+        let mut cursor = self.cursor.get();
+        if columns != 0 {
+            cursor.column = cursor.column.saturating_add_signed(columns);
+            cursor.wanted = cursor.column;
+        }
+        if lines != 0 {
+            let line = cursor.line.saturating_add_signed(lines);
+            cursor.line = line.min(self.total.get().saturating_sub(1));
+            self.keep_in_view(cursor.line);
+        }
+        self.cursor.set(cursor);
+        self.clamp_cursor();
+    }
+
+    pub fn cursor_to(&self, line: usize) {
+        let mut cursor = self.cursor.get();
+        cursor.line = line.min(self.total.get().saturating_sub(1));
+        self.cursor.set(cursor);
+        self.keep_in_view(cursor.line);
+        self.clamp_cursor();
+    }
+
+    #[must_use]
+    pub fn cursor(&self) -> Cursor {
+        self.cursor.get()
+    }
+
+    #[must_use]
+    pub fn cursor_row(&self) -> u16 {
+        let row = self.cursor.get().line.saturating_sub(self.scroll_top.get());
+        u16::try_from(row).unwrap_or(u16::MAX)
     }
 
     pub fn to_top(&self) {
         self.scroll_to(0);
+        self.cursor_to(0);
     }
 
     pub fn to_bottom(&self) {
         self.scroll_to(self.max_scroll());
+        self.cursor_to(self.total.get().saturating_sub(1));
     }
 
     #[must_use]
@@ -70,13 +152,6 @@ impl Viewport {
     #[must_use]
     pub fn is_following(&self) -> bool {
         self.following.get()
-    }
-
-    fn scroll_to(&self, top: usize) {
-        let top = top.min(self.max_scroll());
-        self.scroll_top.set(top);
-        self.following.set(top >= self.max_scroll());
-        self.moved.set(Some(Instant::now()));
     }
 
     #[must_use]
@@ -94,6 +169,48 @@ impl Viewport {
         Some(top..(top + span).min(height))
     }
 
+    fn scroll_to(&self, top: usize) {
+        let top = top.min(self.max_scroll());
+        self.scroll_top.set(top);
+        self.following.set(top >= self.max_scroll());
+        self.moved.set(Some(Instant::now()));
+    }
+
+    fn keep_in_view(&self, line: usize) {
+        let top = self.scroll_top.get();
+        if line < top {
+            self.scroll_to(line);
+        } else if line >= top + self.page() {
+            self.scroll_to(line + 1 - self.page());
+        }
+    }
+
+    fn hold_cursor_on_screen(&self) {
+        let mut cursor = self.cursor.get();
+        let top = self.scroll_top.get();
+        cursor.line = cursor.line.clamp(top, self.window_end().saturating_sub(1));
+        self.cursor.set(cursor);
+        self.clamp_cursor();
+    }
+
+    fn clamp_cursor(&self) {
+        let mut cursor = self.cursor.get();
+        let width = self.line_width(cursor.line);
+        cursor.column = cursor.wanted.min(width.saturating_sub(1));
+        self.cursor.set(cursor);
+    }
+
+    fn line_width(&self, line: usize) -> usize {
+        let widths = self.widths.borrow();
+        line.checked_sub(self.scroll_top.get())
+            .and_then(|row| widths.get(row).copied())
+            .unwrap_or(0)
+    }
+
+    fn window_end(&self) -> usize {
+        self.total.get().min(self.scroll_top.get() + self.page())
+    }
+
     fn max_scroll(&self) -> usize {
         self.total.get().saturating_sub(self.height.get())
     }
@@ -108,6 +225,26 @@ impl Screen {
         Self::default()
     }
 
+    #[must_use]
+    pub fn cursor_cell(&self, app: &App, area: Rect) -> Option<(u16, u16)> {
+        if app.interaction.mode != crate::app::AppMode::Navigate {
+            return None;
+        }
+        let tools_h = tool_panels_height(&app.active_tools, area.width);
+        let input_h = input_height(&app.input, area.width);
+        let status_h = status_bar_height(app, area.width);
+        let window = layout(area, input_h, tools_h, status_h).messages;
+        let column = u16::try_from(app.viewport.cursor().column).unwrap_or(u16::MAX);
+        Some((
+            window.x + column.min(window.width.saturating_sub(1)),
+            window.y
+                + app
+                    .viewport
+                    .cursor_row()
+                    .min(window.height.saturating_sub(1)),
+        ))
+    }
+
     pub fn render(&mut self, app: &App, area: Rect, buf: &mut Buffer) {
         let tools_h = tool_panels_height(&app.active_tools, area.width);
         let input_h = input_height(&app.input, area.width);
@@ -118,7 +255,7 @@ impl Screen {
         let lines = transcript_lines(app, area.width);
         let window = app
             .viewport
-            .window(lines.len(), usize::from(regions.messages.height));
+            .place(&lines, usize::from(regions.messages.height));
         for (row, line) in regions.messages.rows().zip(&lines[window]) {
             line.render(row, buf);
         }
@@ -130,9 +267,7 @@ impl Screen {
         InputBox::new(app).render(regions.input, buf);
         StatusBar::new(app).render(regions.status, buf);
     }
-}
 
-impl Screen {
     fn render_scrollbar(&self, app: &App, area: Rect, buf: &mut Buffer) {
         let Some(thumb) = app.viewport.thumb(Instant::now()) else {
             return;
@@ -150,6 +285,10 @@ impl Screen {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn lines(widths: &[usize]) -> Vec<Line<'static>> {
+        widths.iter().map(|w| Line::raw("x".repeat(*w))).collect()
+    }
 
     #[test]
     fn a_following_window_ends_at_the_newest_line() {
@@ -210,5 +349,95 @@ mod tests {
         viewport.scroll_by(-10);
 
         assert_eq!(viewport.window(205, 20), 170..190);
+    }
+
+    #[test]
+    fn pausing_holds_the_view_against_new_output() {
+        let viewport = Viewport::default();
+        viewport.window(200, 20);
+
+        viewport.pause();
+
+        assert_eq!(viewport.window(205, 20), 180..200);
+    }
+
+    #[test]
+    fn the_cursor_starts_on_the_last_row_of_the_window() {
+        let viewport = Viewport::default();
+        viewport.place(&lines(&[10; 200]), 20);
+
+        viewport.pause();
+
+        assert_eq!(viewport.cursor().line, 199);
+        assert_eq!(viewport.cursor_row(), 19);
+    }
+
+    #[test]
+    fn the_cursor_stops_at_the_start_of_a_line() {
+        let viewport = Viewport::default();
+        viewport.place(&lines(&[10; 200]), 20);
+        viewport.pause();
+
+        viewport.move_cursor(-1, 0);
+
+        assert_eq!(viewport.cursor().column, 0);
+    }
+
+    #[test]
+    fn a_short_line_clamps_the_cursor_and_the_wanted_column_comes_back() {
+        let viewport = Viewport::default();
+        let transcript = lines(&[60, 12, 60]);
+        viewport.place(&transcript, 20);
+        viewport.pause();
+        viewport.cursor_to(0);
+        viewport.move_cursor(40, 0);
+
+        viewport.move_cursor(0, 1);
+        let clamped = viewport.cursor().column;
+        viewport.move_cursor(0, 1);
+
+        assert_eq!(clamped, 11);
+        assert_eq!(viewport.cursor().column, 40);
+    }
+
+    #[test]
+    fn moving_off_the_top_scrolls_one_line() {
+        let viewport = Viewport::default();
+        viewport.place(&lines(&[10; 200]), 20);
+        viewport.pause();
+        viewport.cursor_to(180);
+
+        viewport.move_cursor(0, -1);
+
+        assert_eq!(viewport.window(200, 20), 179..199);
+        assert_eq!(viewport.cursor_row(), 0);
+    }
+
+    #[test]
+    fn a_scroll_that_would_strand_the_cursor_parks_it() {
+        let viewport = Viewport::default();
+        let transcript = lines(&[10; 200]);
+        viewport.place(&transcript, 20);
+        viewport.pause();
+
+        viewport.scroll_by(1);
+        viewport.place(&transcript, 20);
+
+        assert_eq!(viewport.cursor().line, 199);
+        assert_eq!(viewport.cursor_row(), 19);
+    }
+
+    #[test]
+    fn a_scroll_under_the_cursor_keeps_its_line() {
+        let viewport = Viewport::default();
+        let transcript = lines(&[10; 200]);
+        viewport.place(&transcript, 20);
+        viewport.pause();
+        viewport.cursor_to(190);
+
+        viewport.scroll_by(-1);
+
+        assert_eq!(viewport.cursor().line, 190);
+        assert_eq!(viewport.cursor_row(), 11);
     }
 }

@@ -170,6 +170,15 @@ fn restore_tty_modes(out: &mut impl Write) {
     let _ = out.flush();
 }
 
+pub(super) fn set_cursor_shape(navigating: bool) {
+    let shape = if navigating {
+        SetCursorStyle::SteadyBlock
+    } else {
+        SetCursorStyle::BlinkingBar
+    };
+    let _ = io::stdout().queue(shape).and_then(Write::flush);
+}
+
 pub(super) fn restore_terminal_state() {
     restore_tty_modes(&mut io::stdout());
     let _ = disable_raw_mode();
