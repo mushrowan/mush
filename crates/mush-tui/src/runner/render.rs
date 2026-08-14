@@ -20,7 +20,7 @@ pub(super) fn draw_panes(
     settings: &crate::settings::ScopedSettings,
 ) -> io::Result<()> {
     terminal.backend_mut().flush()?;
-    super::terminal::set_cursor_shape(session.app.interaction.mode == app::AppMode::Navigate);
+    super::terminal::set_cursor_shape(session.app.interaction.mode.caret());
 
     session
         .app

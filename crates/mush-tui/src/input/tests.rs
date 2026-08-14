@@ -146,11 +146,12 @@ fn ctrl_v_emits_paste_image_when_streaming() {
 }
 
 #[test]
-fn escape_aborts_when_streaming() {
+fn escape_does_not_abort_when_streaming() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.stream.active = true;
     let event = handle_key(&mut app, key(KeyCode::Esc));
-    assert!(matches!(event, Some(AppEvent::Abort)));
+    assert!(event.is_none(), "{event:?}");
+    assert_eq!(app.interaction.mode, AppMode::ComposerNormal);
 }
 
 #[test]
@@ -161,7 +162,7 @@ fn escape_does_nothing_when_idle() {
 }
 
 #[test]
-fn escape_aborts_while_tool_runs_between_messages() {
+fn escape_does_not_abort_while_tool_runs_between_messages() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.stream.active = false;
     app.active_tools
@@ -176,10 +177,8 @@ fn escape_aborts_while_tool_runs_between_messages() {
     assert!(app.is_busy());
 
     let event = handle_key(&mut app, key(KeyCode::Esc));
-    assert!(
-        matches!(event, Some(AppEvent::Abort)),
-        "esc should abort while a tool is running, got {event:?}"
-    );
+    assert!(event.is_none(), "{event:?}");
+    assert_eq!(app.interaction.mode, AppMode::ComposerNormal);
 }
 
 #[test]
@@ -1700,12 +1699,13 @@ fn model_picker_overlay_ctrl_shift_d_arms_delete_all_stale() {
 }
 
 #[test]
-fn ctrl_bracket_aborts_streaming() {
+fn ctrl_bracket_does_not_abort_streaming() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.stream.active = true;
 
     let event = handle_key(&mut app, ctrl(KeyCode::Char('[')));
-    assert!(matches!(event, Some(AppEvent::Abort)));
+    assert!(event.is_none(), "{event:?}");
+    assert_eq!(app.interaction.mode, AppMode::ComposerNormal);
 }
 
 #[test]
@@ -2073,12 +2073,12 @@ fn login_picker_keys_swallowed_while_validating() {
 }
 
 #[test]
-fn esc_on_an_empty_input_enters_navigation() {
+fn esc_on_an_empty_input_enters_normal_on_the_composer() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
 
     handle_key(&mut app, key(KeyCode::Esc));
 
-    assert_eq!(app.interaction.mode, AppMode::Navigate);
+    assert_eq!(app.interaction.mode, AppMode::ComposerNormal);
 }
 
 #[test]
@@ -2096,6 +2096,7 @@ fn esc_leaves_what_is_typed_alone() {
 fn esc_while_navigating_goes_back_to_typing() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     handle_key(&mut app, key(KeyCode::Esc));
+    handle_key(&mut app, key(KeyCode::Esc));
 
     handle_key(&mut app, key(KeyCode::Esc));
 
@@ -2106,6 +2107,7 @@ fn esc_while_navigating_goes_back_to_typing() {
 fn k_moves_the_cursor_up_one_row_while_navigating() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.viewport.window(200, 20);
+    handle_key(&mut app, key(KeyCode::Esc));
     handle_key(&mut app, key(KeyCode::Esc));
     let start = app.viewport.cursor_row();
 

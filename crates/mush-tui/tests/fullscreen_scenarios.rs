@@ -3,7 +3,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use mush_ai::oauth::usage::{OAuthUsage, UsageWindow};
 use mush_ai::types::TokenCount;
 use mush_tui::AppEvent;
-use mush_tui::app::{App, DisplayMessage, MessageRole};
+use mush_tui::app::{App, Caret, DisplayMessage, MessageRole};
 use mush_tui::input::handle_key;
 use mush_tui::keybinds::{BindingSource, ScopedKeysConfig};
 use mush_tui::screen::Screen;
@@ -75,9 +75,10 @@ fn scoped_keys(scope: &str, action: &str, keys: &str) -> ScopedKeysConfig {
 }
 
 #[test]
-fn esc_on_an_empty_input_starts_reading() {
+fn esc_twice_on_an_empty_input_starts_reading() {
     let mut app = conversation(20);
     let before = window_rows(&app);
+    press(&mut app, KeyCode::Esc);
     press(&mut app, KeyCode::Esc);
     let start = app.viewport.cursor_row();
 
@@ -183,6 +184,23 @@ fn narrowing_the_terminal_keeps_the_newest_line_in_view() {
 fn start_reading(app: &mut App) {
     rows(app, 80, 24);
     press(app, KeyCode::Esc);
+    press(app, KeyCode::Esc);
+}
+
+#[test]
+fn esc_leaves_insert_without_interrupting_work() {
+    let mut app = conversation(20);
+    app.start_streaming();
+    rows(&app, 80, 24);
+
+    press(&mut app, KeyCode::Esc);
+    app.messages.push(DisplayMessage::new(
+        MessageRole::Assistant,
+        "cargo build line",
+    ));
+
+    assert_eq!(app.interaction.mode.caret(), Caret::ComposerBlock);
+    assert!(rows(&app, 80, 24).join("\n").contains("cargo build line"));
 }
 
 #[test]

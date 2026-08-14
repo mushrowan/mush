@@ -170,8 +170,8 @@ fn restore_tty_modes(out: &mut impl Write) {
     let _ = out.flush();
 }
 
-pub(super) fn set_cursor_shape(navigating: bool) {
-    let shape = if navigating {
+pub(super) fn set_cursor_shape(caret: crate::app::Caret) {
+    let shape = if caret.is_block() {
         SetCursorStyle::SteadyBlock
     } else {
         SetCursorStyle::BlinkingBar

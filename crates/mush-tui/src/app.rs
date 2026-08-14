@@ -1,7 +1,7 @@
 use mush_ai::types::*;
 use mush_session::SessionMeta;
 
-pub use crate::app_event::{AppEvent, AppMode};
+pub use crate::app_event::{AppEvent, AppMode, Caret};
 pub use crate::app_state::{
     CachedStatusBar, CompactionRecoveryAction, CompactionRecoveryState, CompletionState,
     InteractionState, NavigationState, RenderState, SearchState,

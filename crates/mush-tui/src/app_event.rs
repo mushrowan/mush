@@ -30,9 +30,24 @@ pub enum AppEvent {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Caret {
+    ComposerBar,
+    ComposerBlock,
+    Log,
+}
+
+impl Caret {
+    #[must_use]
+    pub fn is_block(self) -> bool {
+        matches!(self, Self::ComposerBlock | Self::Log)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppMode {
     Normal,
+    ComposerNormal,
     SessionPicker,
     ModelPicker,
     LoginPicker,
@@ -44,4 +59,15 @@ pub enum AppMode {
     Search,
     Settings,
     CompactionRecovery,
+}
+
+impl AppMode {
+    #[must_use]
+    pub fn caret(&self) -> Caret {
+        match self {
+            Self::Navigate => Caret::Log,
+            Self::ComposerNormal => Caret::ComposerBlock,
+            _ => Caret::ComposerBar,
+        }
+    }
 }

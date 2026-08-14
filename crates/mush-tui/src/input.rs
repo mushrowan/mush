@@ -60,6 +60,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     if app.interaction.mode == AppMode::Navigate {
         return handle_navigate_key(app, key);
     }
+    if app.interaction.mode == AppMode::ComposerNormal {
+        return handle_composer_normal_key(app, key);
+    }
 
     if app
         .keymap
@@ -73,11 +76,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         return Some(AppEvent::PasteImage);
     }
     if is_cancel_key(app, key) {
-        if app.is_busy() {
-            return Some(AppEvent::Abort);
-        }
-        app.interaction.mode = AppMode::Navigate;
-        app.viewport.pause();
+        app.interaction.mode = AppMode::ComposerNormal;
         return None;
     }
 
@@ -808,6 +807,20 @@ fn handle_quit_or_abort(app: &mut App) -> Option<AppEvent> {
     }
     app.confirm_quit_pending = true;
     app.status = Some("press ctrl+c again to exit".into());
+    None
+}
+
+fn handle_composer_normal_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
+    if app
+        .keymap
+        .matches(crate::keybinds::Action::QuitOrAbort, key)
+    {
+        return handle_quit_or_abort(app);
+    }
+    if is_cancel_key(app, key) {
+        app.interaction.mode = AppMode::Navigate;
+        app.viewport.pause();
+    }
     None
 }
 
