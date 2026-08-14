@@ -1,67 +1,23 @@
-//! merge static catalogue with discovered models.
-//!
-//! the static catalogue (in [`crate::models`]) is hand-maintained and
-//! contains every provider/model mush ships with. discovery adds models
-//! we learnt about from upstream `/v1/models` endpoints.
-//!
-//! three-tier precedence (highest wins):
-//! 1. **overrides** - user `models.json` plus shipped corrections for
-//!    routes whose upstream metadata is wrong. win over discovery
-//!    wholesale (the override is authoritative), but inherit the
-//!    discovered `raw` payload so provider extras still render.
-//! 2. **discovery** - the live `/v1/models` view. wins over the seed for
-//!    capability fields so upgrades (e.g. anthropic's 1M beta) show up.
-//!    cost is the exception: anthropic and openai `/v1/models` don't
-//!    return pricing, so a zero discovered cost keeps the seed's pricing.
-//! 3. **seed / stale** - the shipped static catalogue, plus
-//!    previously-discovered models absent from the latest fetch.
-//!
-//! provenance:
-//! - discovered-only models surface with [`ModelSource::Discovered`]
-//! - static-only models surface as [`ModelSource::Static`] - they're not
-//!   stale (they may be from a non-discoverable provider like groq)
-//! - models that were discovered before but absent from the latest fetch
-//!   surface with [`ModelSource::DiscoveredStale`]; they remain selectable
-//!   but the picker can highlight them and offer a delete action
-//! - overridden models surface with [`ModelSource::Override`]
-
 use std::collections::BTreeMap;
 
 use super::cache::DiscoveryCache;
 use crate::types::{Model, ModelCost};
 
-/// where a [`MergedModel`] came from in the merged catalogue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelSource {
-    /// only in the static catalogue (no discovery saw it - this is the
-    /// default for providers we don't run discovery against, like groq)
     Static,
-    /// returned by the most recent successful discovery fetch
     Discovered,
-    /// in the cache but absent from the most recent fetch for its
-    /// provider. likely deprecated/removed upstream.
     DiscoveredStale,
-    /// a manual or curated override that wins over discovery. covers user
-    /// `models.json` entries and the shipped corrections for routes whose
-    /// upstream metadata is wrong (e.g. gpt-5.5 codex reporting a 272K
-    /// input budget as its whole window when the marketed window is 400K)
     Override,
 }
 
-/// a model entry in the merged catalogue, paired with provenance.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MergedModel {
     pub model: Model,
     pub source: ModelSource,
-    /// raw upstream JSON for discovered entries; `None` for static-only
-    /// models. consumers reach for this through per-provider typed
-    /// accessors (e.g. [`crate::discovery::codex::extras`])
     pub raw: Option<serde_json::Value>,
 }
 
-/// merge a static catalogue with a discovery cache and a set of overrides.
-///
-/// see module docs for the three-tier precedence.
 #[must_use]
 pub fn merge(
     static_models: Vec<Model>,
@@ -71,7 +27,6 @@ pub fn merge(
     type Key = (String, String);
     let mut merged: BTreeMap<Key, MergedModel> = BTreeMap::new();
 
-    // seed with the static catalogue
     for model in static_models {
         let key = (model.provider.to_string(), model.id.as_str().to_string());
         merged.insert(
@@ -84,7 +39,6 @@ pub fn merge(
         );
     }
 
-    // overlay discovered entries
     for (provider_key, entry) in cache.entries() {
         let key = (
             provider_key.to_string(),
@@ -111,10 +65,6 @@ pub fn merge(
         );
     }
 
-    // overlay overrides on top of discovery. the override is
-    // authoritative (full win, including cost), but inherits the
-    // discovered `raw` payload so provider-specific extras (e.g. codex
-    // reasoning levels) still surface in the picker
     for model in overrides {
         let key = (model.provider.to_string(), model.id.as_str().to_string());
         let raw = merged.get(&key).and_then(|existing| existing.raw.clone());
@@ -131,8 +81,6 @@ pub fn merge(
     merged.into_values().collect()
 }
 
-/// when discovery returns zero cost (anthropic, openai), prefer the static catalogue's cost.
-/// when discovery has real numbers (openrouter), discovery wins.
 fn pick_cost(static_cost: &ModelCost, discovered_cost: &ModelCost) -> ModelCost {
     let pick = |static_v: f64, discovered_v: f64| {
         if discovered_v == 0.0 && static_v != 0.0 {
@@ -149,11 +97,6 @@ fn pick_cost(static_cost: &ModelCost, discovered_cost: &ModelCost) -> ModelCost 
     }
 }
 
-/// convenience: merge the *current* user catalogue (built-ins + user
-/// `models.json`) with the on-disk discovery cache.
-///
-/// fails open: if the cache file is unreadable, we just return the
-/// static catalogue wrapped in [`MergedModel`].
 #[must_use]
 pub fn merged_catalogue() -> Vec<MergedModel> {
     let seed = crate::models::all_models();
@@ -162,13 +105,11 @@ pub fn merged_catalogue() -> Vec<MergedModel> {
     merge(seed, &cache, overrides)
 }
 
-/// helper: extract just the [`Model`]s from a merge result.
 #[must_use]
 pub fn merged_models() -> Vec<Model> {
     merged_catalogue().into_iter().map(|m| m.model).collect()
 }
 
-/// look up a single merged entry by id.
 #[must_use]
 pub fn find_merged_model_by_id(id: &str) -> Option<MergedModel> {
     merged_catalogue()
@@ -176,12 +117,6 @@ pub fn find_merged_model_by_id(id: &str) -> Option<MergedModel> {
         .find(|m| m.model.id.as_str() == id)
 }
 
-/// convenience wrapper around [`find_merged_model_by_id`] that returns
-/// just the [`Model`] without provenance metadata.
-///
-/// use this when you only need the resolved model to drive a request
-/// (most runtime paths). callers that surface "discovered vs static" or
-/// stale entries should use [`find_merged_model_by_id`] directly.
 #[must_use]
 pub fn resolve_model_by_id(id: &str) -> Option<Model> {
     find_merged_model_by_id(id).map(|m| m.model)
@@ -246,8 +181,6 @@ mod tests {
 
     #[test]
     fn anthropic_zero_cost_falls_back_to_static_cost() {
-        // anthropic /v1/models returns no pricing so cost is zero.
-        // merge must keep the static catalogue's pricing.
         let static_a = anthropic_model("a", "A", 3.0);
         let discovered_a = anthropic_model("a", "A", 0.0);
 
@@ -265,7 +198,6 @@ mod tests {
 
     #[test]
     fn openrouter_discovered_pricing_wins_over_static() {
-        // openrouter discovery has real pricing - it should override.
         let static_a = Model {
             cost: ModelCost {
                 input: 99.0,
@@ -347,7 +279,6 @@ mod tests {
 
     #[test]
     fn merge_preserves_unrelated_static_providers() {
-        // groq (no discovery) and anthropic (discovered) should both surface
         let groq = Model {
             provider: Provider::Custom("groq".into()),
             ..anthropic_model("groq-llama", "Llama (Groq)", 0.5)
@@ -371,9 +302,6 @@ mod tests {
 
     #[test]
     fn override_wins_over_discovery() {
-        // a curated/manual override must beat a live discovered value.
-        // codex reports gpt-5.5's 272K input budget as its whole window;
-        // the override re-asserts the 400K marketed window.
         let mut discovered = anthropic_model("a", "Discovered", 0.0);
         discovered.context_window = TokenCount::new(272_000);
         let mut cache = DiscoveryCache::default();
@@ -395,9 +323,6 @@ mod tests {
 
     #[test]
     fn non_overridden_models_still_take_discovery_over_seed() {
-        // anthropic's 1M beta is a discovered upgrade over the 200K seed.
-        // models absent from the override set must keep taking discovery's
-        // value, so we don't regress that behaviour by adding the tier.
         let mut seed = anthropic_model("a", "Seed", 3.0);
         seed.context_window = TokenCount::new(200_000);
         let mut discovered = anthropic_model("a", "Discovered", 0.0);

@@ -1,8 +1,3 @@
-//! file watcher for incremental repo map updates
-//!
-//! watches the repository for file changes and debounces events
-//! into batched updates to the IncrementalRepoMap
-
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -13,22 +8,10 @@ use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use crate::Language;
 use crate::repo_map::{IncrementalRepoMap, RepoMap};
 
-/// debounce interval for file change events
 const DEBOUNCE_MS: u64 = 500;
 
-/// shared structured repo map that the watcher keeps up to date.
-/// readers acquire a brief read lock and clone the structured map
-/// (cheap: paths, ranks, symbol metadata) before rendering it
-/// per-call with their own [`RenderOptions`](crate::RenderOptions).
 pub type SharedRepoMap = Arc<RwLock<RepoMap>>;
 
-/// walk `root` and yield the directories that should be watched.
-///
-/// honours the same ignore rules as `discover_files` (`.gitignore`,
-/// `.ignore`, hidden files) so build outputs like `target/` and
-/// dependency trees like `node_modules/` never enter the inotify set.
-/// this cuts startup stat syscalls dramatically on large checkouts
-/// and eliminates ongoing add/remove churn during cargo builds.
 fn discover_watch_dirs(root: &Path) -> Vec<PathBuf> {
     let walker = ignore::WalkBuilder::new(root)
         .hidden(true)
@@ -47,13 +30,6 @@ fn discover_watch_dirs(root: &Path) -> Vec<PathBuf> {
     dirs
 }
 
-/// watches a repo and keeps a structured repo map current
-///
-/// the watcher runs in a background thread. consumers read the
-/// latest [`RepoMap`] from the shared [`SharedRepoMap`] and render
-/// it per-call. the initial build happens asynchronously so `start`
-/// returns immediately. use `is_ready` to check whether the first
-/// build has completed.
 pub struct RepoMapWatcher {
     _watcher: Arc<Mutex<Option<RecommendedWatcher>>>,
     map: SharedRepoMap,
@@ -61,12 +37,6 @@ pub struct RepoMapWatcher {
 }
 
 impl RepoMapWatcher {
-    /// start watching a directory
-    ///
-    /// returns immediately with an empty map. the initial treesitter
-    /// build runs in a background thread and publishes via the shared
-    /// map when complete. file change events are queued during
-    /// the build and processed afterwards.
     #[tracing::instrument(name = "repo_map_watcher", skip_all)]
     pub fn start(root: &Path) -> Option<Self> {
         let map: SharedRepoMap = Arc::new(RwLock::new(RepoMap::default()));
@@ -83,16 +53,12 @@ impl RepoMapWatcher {
         let ready_clone = ready.clone();
         let root_owned_for_build = root.to_path_buf();
 
-        // debounce channel: file watcher signals events arrived
         let (debounce_tx, debounce_rx) = std::sync::mpsc::channel::<()>();
 
-        // single background thread: initial build then debounce loop
         std::thread::spawn(move || {
-            // phase 1: build the initial repo map (the expensive part)
             let incr_map = IncrementalRepoMap::new(&root_owned_for_build);
             let initial = incr_map.map().clone();
 
-            // publish the initial map and store the structured incr
             if let Ok(mut guard) = map_clone.write() {
                 *guard = initial;
             }
@@ -100,7 +66,6 @@ impl RepoMapWatcher {
                 let mut guard = state_clone.lock().unwrap_or_else(|e| e.into_inner());
                 guard.incr_map = Some(incr_map);
 
-                // process any events that arrived during the build
                 let changed: Vec<PathBuf> = std::mem::take(&mut guard.pending_changed);
                 let removed: Vec<PathBuf> = std::mem::take(&mut guard.pending_removed);
                 if (!changed.is_empty() || !removed.is_empty())
@@ -119,7 +84,6 @@ impl RepoMapWatcher {
             ready_clone.store(true, Ordering::Release);
             tracing::debug!("repo map initial build complete");
 
-            // phase 2: debounce loop for file change events
             loop {
                 if debounce_rx.recv().is_err() {
                     break;
@@ -152,9 +116,6 @@ impl RepoMapWatcher {
         });
 
         let root_owned = root.to_path_buf();
-        // `Arc<Mutex<Option<...>>>` so the event callback can add new
-        // non-recursive watches when non-ignored subdirectories appear
-        // mid-session. populated immediately after construction
         let watcher_slot: Arc<Mutex<Option<RecommendedWatcher>>> = Arc::new(Mutex::new(None));
         let watcher_for_cb = watcher_slot.clone();
         let root_for_cb = root_owned.clone();
@@ -169,11 +130,6 @@ impl RepoMapWatcher {
                 return;
             }
 
-            // if a new directory was created inside a watched area and
-            // is not gitignored, start watching it too so events for
-            // files created inside it aren't missed. a fresh `ignore`
-            // walk rooted at the new dir tells us whether it survives
-            // the ignore rules
             if matches!(event.kind, EventKind::Create(_)) {
                 for path in &event.paths {
                     if !path.is_dir() {
@@ -201,8 +157,6 @@ impl RepoMapWatcher {
                 .collect();
 
             if relevant.is_empty() {
-                // still nudge the debounce so `add_new_files` runs and
-                // picks up files in a freshly created directory
                 if matches!(event.kind, EventKind::Create(_)) {
                     let _ = debounce_tx.send(());
                 }
@@ -221,10 +175,6 @@ impl RepoMapWatcher {
         })
         .ok()?;
 
-        // watch each non-ignored directory individually with
-        // `NonRecursive`. this avoids the recursive descent into
-        // target/, node_modules/, .git/ etc that dominated the
-        // inotify thread in profiling
         for dir in discover_watch_dirs(&root_owned) {
             let _ = watcher.watch(&dir, RecursiveMode::NonRecursive);
         }
@@ -238,16 +188,10 @@ impl RepoMapWatcher {
         })
     }
 
-    /// whether the initial build has completed
     pub fn is_ready(&self) -> bool {
         self.ready.load(Ordering::Acquire)
     }
 
-    /// get the shared structured map handle
-    ///
-    /// the map is updated by the background watcher thread.
-    /// readers should acquire a read lock briefly and clone the
-    /// snapshot before rendering it.
     pub fn map(&self) -> &SharedRepoMap {
         &self.map
     }
@@ -274,7 +218,6 @@ mod tests {
         .unwrap();
     }
 
-    /// helper: wait until the background build finishes
     fn wait_ready(watcher: &RepoMapWatcher, timeout: Duration) {
         let deadline = std::time::Instant::now() + timeout;
         while !watcher.is_ready() {
@@ -300,7 +243,6 @@ mod tests {
         setup_test_repo(dir.path());
 
         let watcher = RepoMapWatcher::start(dir.path()).unwrap();
-        // should not block: map starts empty, build happens in background
         let map = watcher.map().read().unwrap();
         assert!(
             !map.files.is_empty() || !watcher.is_ready(),
@@ -331,14 +273,8 @@ mod tests {
     fn watcher_ignores_gitignored_directories() {
         let dir = tempfile::tempdir().unwrap();
         setup_test_repo(dir.path());
-        // `.ignore` is honoured by the ignore crate without needing a git
-        // repo, and should propagate to the watch set too
         fs::write(dir.path().join(".ignore"), "target/\n").unwrap();
 
-        // pre-populate the ignored dir BEFORE starting the watcher so a
-        // recursive watch would find it during initial inotify setup.
-        // this mirrors the real-world case where cargo has already built
-        // the workspace by the time mush starts
         fs::create_dir_all(dir.path().join("target/debug")).unwrap();
         fs::write(
             dir.path().join("target/debug/build_script.rs"),
@@ -349,7 +285,6 @@ mod tests {
         let watcher = RepoMapWatcher::start(dir.path()).unwrap();
         wait_ready(&watcher, Duration::from_secs(10));
 
-        // sanity: initial map shouldn't contain the ignored dir either
         {
             let text = map_text(&watcher);
             assert!(
@@ -358,15 +293,12 @@ mod tests {
             );
         }
 
-        // now modify the file in the ignored dir. under the old recursive
-        // watch this triggers an event that enters the map
         fs::write(
             dir.path().join("target/debug/build_script.rs"),
             "pub fn junk_symbol_xyz() -> u32 { 42 }\n",
         )
         .unwrap();
 
-        // wait well past the debounce window
         std::thread::sleep(Duration::from_millis(DEBOUNCE_MS + 500));
 
         let text = map_text(&watcher);
@@ -388,7 +320,6 @@ mod tests {
         let watcher = RepoMapWatcher::start(dir.path()).unwrap();
         wait_ready(&watcher, Duration::from_secs(10));
 
-        // verify initial state
         {
             let text = map_text(&watcher);
             assert!(
@@ -397,14 +328,12 @@ mod tests {
             );
         }
 
-        // add a new file
         fs::write(
             dir.path().join("src/utils.rs"),
             "pub fn goodbye() -> &'static str { \"bye\" }\n",
         )
         .unwrap();
 
-        // wait for debounce + processing
         std::thread::sleep(Duration::from_millis(DEBOUNCE_MS + 500));
 
         let text = map_text(&watcher);

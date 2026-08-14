@@ -1,8 +1,3 @@
-//! display helpers for agent output
-
-/// truncate text to at most `max_chars` (unicode-aware), appending an ellipsis
-/// if anything was cut. consumers that render in narrow, non-wrapping widgets
-/// (like pane tool summaries) use this to keep output to a single line
 pub fn truncate_with_ellipsis(text: &str, max_chars: usize) -> String {
     let ellipsis = if max_chars >= 3 { "..." } else { "" };
     let keep = max_chars.saturating_sub(ellipsis.len());
@@ -23,25 +18,12 @@ pub fn truncate_with_ellipsis(text: &str, max_chars: usize) -> String {
     truncated
 }
 
-/// summarise tool arguments for compact display.
-///
-/// returns a tool-specific one-line preview (file path for `read`, the
-/// command for `bash`, etc). when the model sends args that don't carry
-/// the expected field (wrong field name, or an unknown tool), falls
-/// back to a compact `{key: value, ...}` preview of the raw args so the
-/// title bar always shows what was attempted instead of going blank.
-/// the same fallback is what [`crate::tool::parse_tool_args`] embeds in
-/// its error body, so the user sees a consistent shape either way
 pub fn summarise_tool_args(tool_name: &str, args: &serde_json::Value) -> String {
     extract_summary(tool_name, args)
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| crate::tool::preview_args(args))
 }
 
-/// per-tool summary extraction. returns `None` when the expected field
-/// is missing so the caller can apply a uniform fallback. tool-specific
-/// formatting (the `pat in path` shape for grep, the && collapse for
-/// bash) lives here, but the missing-field fallback does NOT
 fn extract_summary(tool_name: &str, args: &serde_json::Value) -> Option<String> {
     match tool_name.to_lowercase().replace('_', "").as_str() {
         "read" | "write" | "edit" => args["path"].as_str().map(str::to_string),
@@ -69,8 +51,6 @@ fn extract_summary(tool_name: &str, args: &serde_json::Value) -> Option<String> 
     }
 }
 
-/// collapse newlines in a bash command into ` && ` so the summary stays
-/// single-line. ratatui swallows `\n` inside a Span otherwise
 fn collapse_command_newlines(raw: &str) -> String {
     if raw.contains('\n') {
         raw.split('\n')
@@ -96,8 +76,6 @@ mod tests {
 
     #[test]
     fn bash_tool_returns_full_command() {
-        // `summarise_tool_args` no longer truncates; consumers that need a
-        // one-line preview (e.g. pane tool summaries) truncate explicitly
         let long_cmd = "—".repeat(100);
         let long = serde_json::json!({"command": long_cmd.clone()});
         let summary = summarise_tool_args("bash", &long);
@@ -120,9 +98,6 @@ mod tests {
 
     #[test]
     fn bash_tool_collapses_newlines() {
-        // models sometimes send multi-line commands like cd + echo
-        // newlines in the summary cause display glitches in the TUI
-        // because ratatui swallows \n inside a Span
         let multiline = serde_json::json!({"command": "cd /home/user/dev/project\necho hello"});
         let summary = summarise_tool_args("bash", &multiline);
         assert!(
@@ -147,11 +122,6 @@ mod tests {
 
     #[test]
     fn read_tool_shows_received_args_when_path_missing() {
-        // when a model sends the wrong field name (e.g. `file_path` instead
-        // of `path`), the tool will fail to parse its args. the summary
-        // should still show what was attempted so the user (and the model
-        // on the next turn) can see the mistake instead of staring at an
-        // empty title bar
         let args = serde_json::json!({"file_path": "src/main.rs"});
         let summary = summarise_tool_args("read", &args);
         assert!(

@@ -1,5 +1,3 @@
-//! agent tool trait and result types
-
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -9,7 +7,6 @@ use mush_ai::types::{
 };
 use serde::de::DeserializeOwned;
 
-/// result of executing an agent tool
 #[derive(Debug, Clone)]
 #[must_use]
 pub struct ToolResult {
@@ -18,7 +15,6 @@ pub struct ToolResult {
 }
 
 impl ToolResult {
-    /// convenience constructor for a text result
     pub fn text(text: impl Into<String>) -> Self {
         Self {
             content: vec![ToolResultContentPart::Text(TextContent {
@@ -28,7 +24,6 @@ impl ToolResult {
         }
     }
 
-    /// convenience constructor for an error result
     pub fn error(text: impl Into<String>) -> Self {
         Self {
             content: vec![ToolResultContentPart::Text(TextContent {
@@ -38,7 +33,6 @@ impl ToolResult {
         }
     }
 
-    /// convenience constructor for an image result
     pub fn image(data: String, mime_type: ImageMimeType) -> Self {
         Self {
             content: vec![ToolResultContentPart::Image(ImageContent {
@@ -50,81 +44,44 @@ impl ToolResult {
     }
 }
 
-/// how a tool's output should be truncated when it exceeds limits
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputLimit {
-    /// keep the start (file reads, directory listings, search results)
     Head,
-    /// keep the end (command output, logs)
     Tail,
 }
 
-/// trait for tools that the agent can invoke
-///
-/// tools are given a json arguments object and return a result.
-/// they can be cancelled via the abort signal.
 #[async_trait::async_trait]
 pub trait AgentTool: Send + Sync {
-    /// unique name for this tool
     fn name(&self) -> &str;
 
-    /// human-readable label for UI display
     fn label(&self) -> &str;
 
-    /// description for the LLM
     fn description(&self) -> &str;
 
-    /// json schema for the parameters
     fn parameters_schema(&self) -> serde_json::Value;
 
-    /// per-provider schema override. defaults to [`parameters_schema`].
-    /// override when the underlying model is RL'd on a specific tool
-    /// signature for one provider (e.g. claude code's read tool exposes
-    /// only `file_path` / `offset` / `limit`, so anthropic-bound calls
-    /// should mirror that)
     fn parameters_schema_for(&self, _api: Api) -> serde_json::Value {
         self.parameters_schema()
     }
 
-    /// per-provider description override. defaults to [`description`].
-    /// override alongside [`parameters_schema_for`] when a provider sees a
-    /// reduced schema: the prose shouldn't advertise fields the model
-    /// can't pass, or it gets lured into emitting them anyway
     fn description_for(&self, _api: Api) -> &str {
         self.description()
     }
 
-    /// execute the tool with the given arguments
     async fn execute(&self, args: serde_json::Value) -> ToolResult;
 
-    /// coerce `args` to the types [`Self::parameters_schema`] advertises,
-    /// then execute. this is how a model's tool call reaches a tool
     async fn call(&self, mut args: serde_json::Value) -> ToolResult {
         crate::de::coerce_to_schema(&mut args, &self.parameters_schema());
         self.execute(args).await
     }
 
-    /// how this tool's output should be truncated by the agent loop.
-    /// every tool must declare a direction explicitly: middle truncation
-    /// is not an option because it gutters whichever entry happens to
-    /// land in the dropped span (see web_search regression history).
     fn output_limit(&self) -> OutputLimit;
 }
 
 pub type SharedTool = Arc<dyn AgentTool>;
 
-/// max characters shown per field value in the invalid-args preview.
-/// short enough to keep the error readable in a terminal, long enough
-/// to let the model tell typical paths / strings apart
 const PREVIEW_VALUE_CHARS: usize = 40;
 
-/// render a compact preview of the args that failed to parse.
-///
-/// objects render as `{key: value, key: value}` with each value
-/// truncated to [`PREVIEW_VALUE_CHARS`] characters (with an ellipsis
-/// marker). non-object values stringify via serde_json directly,
-/// truncated the same way. the preview is best-effort debug output,
-/// so we don't try to round-trip or re-parse it
 pub(crate) fn preview_args(args: &serde_json::Value) -> String {
     match args {
         serde_json::Value::Object(map) => {
@@ -139,9 +96,6 @@ pub(crate) fn preview_args(args: &serde_json::Value) -> String {
 }
 
 fn truncate_preview(s: &str) -> Cow<'_, str> {
-    // `.chars().nth(N).is_some()` is O(N+1) instead of O(len): we only
-    // need to know "more than N chars?" not the exact count. returns
-    // `Cow::Borrowed` for short inputs to skip a heap allocation
     if s.chars().nth(PREVIEW_VALUE_CHARS).is_none() {
         return Cow::Borrowed(s);
     }
@@ -222,10 +176,6 @@ impl ToolRegistry {
         }
     }
 
-    /// remove a tool by name. returns the removed tool, or `None` if no
-    /// tool with that name was registered. preserves the relative order
-    /// of remaining tools so subsequent `iter()` calls don't gain a
-    /// surprising reshuffle
     pub fn remove(&mut self, name: &str) -> Option<SharedTool> {
         let key = ToolKey::new(name);
         let removed = self.tools.remove(&key)?;
@@ -283,11 +233,6 @@ mod tests {
 
     #[test]
     fn parse_tool_args_includes_received_args_preview() {
-        // when the model sends args that don't match the schema, include
-        // a compact preview of what was actually received so the agent
-        // (or a human reading the log) can tell what went wrong at a
-        // glance. particularly helpful for models that confuse similar
-        // tools and send the wrong shape
         #[derive(serde::Deserialize)]
         #[allow(dead_code)]
         struct Expected {
@@ -305,14 +250,11 @@ mod tests {
         let ToolResultContentPart::Text(text) = &err.content[0] else {
             panic!("expected text content in error");
         };
-        // the serde error is still there
         assert!(
             text.text.contains("invalid arguments"),
             "error should still say 'invalid arguments', got: {}",
             text.text
         );
-        // the received field names should appear so the model can see
-        // what it sent
         assert!(
             text.text.contains("patern"),
             "error should include the keys actually sent, got: {}",
@@ -327,10 +269,6 @@ mod tests {
 
     #[test]
     fn parse_tool_args_truncates_long_values_in_preview() {
-        // long strings are clipped to keep the preview readable at roughly
-        // 40 chars per field. this matters when a model sends a
-        // multi-kilobyte blob as the wrong field and the error would
-        // otherwise drown the terminal
         #[derive(serde::Deserialize)]
         #[allow(dead_code)]
         struct Expected {
@@ -346,8 +284,6 @@ mod tests {
         let ToolResultContentPart::Text(text) = &err.content[0] else {
             panic!("expected text content");
         };
-        // the full 500-char string must not appear verbatim; an ellipsis
-        // should indicate truncation
         assert!(
             !text.text.contains(&"x".repeat(100)),
             "long value should be truncated, got: {}",
@@ -443,10 +379,6 @@ mod tests {
 
     #[test]
     fn output_limit_choices_only_head_or_tail() {
-        // sanity: every concrete impl must compile-pick one direction.
-        // missing the trait method is a compile error (no default).
-        // the audit lives in mush-tools::tests::truncation_audit, this
-        // smoke test just pins the local fixtures to keep them honest
         let echo = EchoTool;
         assert_eq!(echo.output_limit(), OutputLimit::Head);
         let upper = UpperEchoTool;

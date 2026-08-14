@@ -1,5 +1,3 @@
-//! write tool - creates or overwrites files, auto-creating parent dirs
-
 use std::path::Path;
 use std::sync::Arc;
 
@@ -57,7 +55,6 @@ impl AgentTool for WriteTool {
     }
 
     fn output_limit(&self) -> mush_agent::tool::OutputLimit {
-        // single-line success/error message, never truncates in practice
         mush_agent::tool::OutputLimit::Head
     }
 

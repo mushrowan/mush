@@ -1,33 +1,14 @@
-//! openrouter `/credits` lookup
-//!
-//! returns the authenticated account's running tally of credits
-//! purchased and consumed. drives the optional balance display in
-//! the TUI status bar so the user knows whether their next turn will
-//! deduct from prepaid credits or roll over to byok.
-//!
-//! the SDK call lives in `openrouter_rs::api::credits`; we convert
-//! its non-exhaustive struct into a small mush-typed view so the
-//! runner doesn't import the SDK directly.
-
 use openrouter_rs::api::credits::CreditsData;
 
 use crate::types::Dollars;
 
-/// distilled balance snapshot for the authenticated openrouter
-/// account. only the fields mush actually consumes; if a future
-/// caller needs more, extend rather than expose the SDK type
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CreditsBalance {
-    /// total prepaid credits purchased over the account's lifetime
     pub total_credits: Dollars,
-    /// total credits consumed by all completed generations
     pub total_usage: Dollars,
 }
 
 impl CreditsBalance {
-    /// remaining credits = purchased - used. clamped at zero so a
-    /// usage spike that nudges the account into byok territory
-    /// doesn't display as a negative balance
     #[must_use]
     pub fn remaining(&self) -> Dollars {
         let raw = self.total_credits.get() - self.total_usage.get();
@@ -35,8 +16,6 @@ impl CreditsBalance {
     }
 }
 
-/// translate the SDK's [`CreditsData`] into mush's distilled view.
-/// kept separate from the network call so it's easy to fixture-test
 pub fn convert_credits(data: &CreditsData) -> CreditsBalance {
     CreditsBalance {
         total_credits: Dollars::new(data.total_credits),
@@ -44,11 +23,6 @@ pub fn convert_credits(data: &CreditsData) -> CreditsBalance {
     }
 }
 
-/// fetch the authenticated openrouter account's credit balance.
-/// the SDK call drives a fresh reqwest client internally; we don't
-/// share an http pool with it because the call rate is at most once
-/// per session refresh. error surfacing stays diagnostic-friendly via
-/// `to_string()` so callers can decide whether to log or surface
 pub async fn fetch_credits(api_key: &str) -> Result<CreditsBalance, CreditsLookupError> {
     use openrouter_rs::api::credits::get_credits;
     const BASE_URL: &str = "https://openrouter.ai/api/v1";
@@ -69,9 +43,6 @@ pub enum CreditsLookupError {
 mod tests {
     use super::*;
 
-    /// representative `/credits` response shape pulled from
-    /// openrouter's docs. account has $20 purchased, $7.50 consumed,
-    /// so the remaining balance should be $12.50
     const FIXTURE: &str = r#"{
         "total_credits": 20.0,
         "total_usage": 7.5
@@ -94,9 +65,6 @@ mod tests {
 
     #[test]
     fn remaining_clamps_at_zero_when_usage_exceeds_purchases() {
-        // accounts that switched to byok mid-month can show usage
-        // higher than the prepaid pool. don't render a negative
-        // remaining; the user already knows they're past the limit
         let body = r#"{
             "total_credits": 5.0,
             "total_usage": 12.34

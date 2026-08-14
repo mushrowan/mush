@@ -1,8 +1,3 @@
-//! edit tool - surgical find-and-replace edits
-//!
-//! finds exact text in a file and replaces it. the old text must match
-//! exactly including whitespace.
-
 use std::path::Path;
 use std::sync::Arc;
 
@@ -19,12 +14,10 @@ use crate::util::resolve_path;
 struct EditArgs {
     #[serde(alias = "file_path")]
     path: String,
-    /// one replacement, the shape most models reach for first
     #[serde(rename = "oldText", alias = "old_string")]
     old_text: Option<String>,
     #[serde(rename = "newText", alias = "new_string")]
     new_text: Option<String>,
-    /// several disjoint replacements in one call
     #[serde(default, deserialize_with = "mush_agent::de::json_seq")]
     edits: Vec<Replacement>,
     #[serde(
@@ -52,7 +45,6 @@ pub struct Replacement {
     pub replace_all: bool,
 }
 
-/// how many occurrences a replacement may take
 #[derive(Clone, Copy)]
 enum Matches {
     Exactly(usize),
@@ -72,7 +64,6 @@ enum EditArgsError {
 }
 
 impl EditArgs {
-    /// the path, the replacements to make, and how to match them
     fn into_opts(self) -> Result<(String, Vec<Replacement>, EditOpts), EditArgsError> {
         if self.end_line.is_some() && self.start_line.is_none() {
             return Err(EditArgsError::EndLineRequiresStartLine);
@@ -206,9 +197,6 @@ impl AgentTool for EditTool {
     }
 
     fn output_limit(&self) -> mush_agent::tool::OutputLimit {
-        // success/error message + diff preview, never long enough to
-        // trigger central truncation; head matches the rest of the
-        // file-mutating tools
         mush_agent::tool::OutputLimit::Head
     }
 
@@ -248,10 +236,6 @@ impl Default for EditOpts {
     }
 }
 
-/// the (old, new) pairs worth trying against `content`, loosest last.
-///
-/// a model rarely reproduces a file byte for byte, so each entry adapts
-/// the requested text to something the file might actually hold
 fn match_candidates(content: &str, old_text: &str, new_text: &str) -> Vec<(String, String)> {
     let mut candidates: Vec<(String, String)> = vec![(old_text.to_string(), new_text.to_string())];
 
@@ -271,7 +255,6 @@ fn match_candidates(content: &str, old_text: &str, new_text: &str) -> Vec<(Strin
 
     candidates.dedup();
 
-    // also try with/without trailing newline (LLMs often get this wrong)
     let mut extra = Vec::new();
     for (o, n) in &candidates {
         if o.ends_with('\n') && !content.contains(o.as_str()) {
@@ -286,7 +269,6 @@ fn match_candidates(content: &str, old_text: &str, new_text: &str) -> Vec<(Strin
     }
     candidates.extend(extra);
 
-    // trailing whitespace per-line: LLMs often omit trailing spaces/tabs on lines
     for actual_old in find_line_trimmed_matches(content, old_text) {
         if actual_old != old_text {
             let adapted_new = if actual_old.contains("\r\n") && !new_text.contains("\r\n") {
@@ -298,8 +280,6 @@ fn match_candidates(content: &str, old_text: &str, new_text: &str) -> Vec<(Strin
         }
     }
 
-    // models substitute smart quotes, dashes, nbsp and fullwidth forms
-    // for the ascii the file actually holds
     for actual_old in find_folded_matches(content, old_text) {
         candidates.push((actual_old, new_text.to_string()));
     }
@@ -308,10 +288,6 @@ fn match_candidates(content: &str, old_text: &str, new_text: &str) -> Vec<(Strin
     candidates
 }
 
-/// apply every replacement, each matched against the file as it was.
-///
-/// nothing is written unless all of them resolve, so a bad entry can't
-/// leave the file half-edited
 fn edit_file_batch(path: &Path, edits: &[Replacement], opts: &EditOpts) -> ToolResult {
     if let [only] = edits {
         let matches = if only.replace_all {
@@ -332,8 +308,6 @@ fn edit_file_batch(path: &Path, edits: &[Replacement], opts: &EditOpts) -> ToolR
         Err(e) => return ToolResult::error(format!("failed to read file: {e}")),
     };
 
-    // resolve every edit against the original, so one edit's output can
-    // never become another's input
     let mut splices: Vec<(usize, usize, String)> = Vec::new();
     for (i, edit) in edits.iter().enumerate() {
         if edit.old_text.is_empty() {
@@ -415,7 +389,6 @@ fn edit_file(path: &Path, old_text: &str, new_text: &str, opts: &EditOpts) -> To
         Err(e) => return ToolResult::error(format!("failed to read file as utf-8 text: {e}")),
     };
 
-    // when a line range is specified, extract the search region
     let (search_content, region_start_byte) = if let Some(start) = opts.start_line {
         let lines: Vec<&str> = content.split_inclusive('\n').collect();
         let start_idx = start.saturating_sub(1).min(lines.len());
@@ -453,10 +426,8 @@ fn edit_file(path: &Path, old_text: &str, new_text: &str, opts: &EditOpts) -> To
             continue;
         }
 
-        // apply replacements within the search region
         let replaced_region = search_content.replace(&match_old, &match_new);
 
-        // reconstruct full content
         let replaced = if opts.start_line.is_some() {
             let mut full = String::with_capacity(content.len() + replaced_region.len());
             full.push_str(&content[..region_start_byte]);
@@ -495,7 +466,6 @@ fn edit_file(path: &Path, old_text: &str, new_text: &str, opts: &EditOpts) -> To
     }
 
     if let (Some(found), Matches::Exactly(want)) = (mismatch_count, opts.matches) {
-        // find all match locations to help the caller add context
         let first_line = old_text.lines().next().unwrap_or(old_text);
         let match_lines: Vec<usize> = content
             .lines()
@@ -526,8 +496,6 @@ fn edit_file(path: &Path, old_text: &str, new_text: &str, opts: &EditOpts) -> To
         ));
     }
 
-    // a range that clips the match is likelier than a whitespace slip, and
-    // the near-miss below only searches the region
     if opts.start_line.is_some() && content.contains(old_text) {
         return ToolResult::error(format!(
             "oldText found in {} but outside{range_label}\n\
@@ -536,9 +504,7 @@ fn edit_file(path: &Path, old_text: &str, new_text: &str, opts: &EditOpts) -> To
         ));
     }
 
-    // try to provide helpful context about why the match failed
     let hint = find_near_miss(&search_content, old_text);
-    // near-miss lines are relative to the region, report them as file lines
     let line_offset = opts.start_line.unwrap_or(1) - 1;
     let display = path.display();
 
@@ -566,16 +532,11 @@ fn edit_file(path: &Path, old_text: &str, new_text: &str, opts: &EditOpts) -> To
 }
 
 enum NearMiss {
-    /// normalising whitespace would have matched, near this line
     WhitespaceDifference(usize),
-    /// the most similar lines from the file (line_number, line_content)
     SimilarLines(Vec<(usize, String)>),
-    /// nothing close found
     None,
 }
 
-/// fold the punctuation a model is liable to substitute when it echoes
-/// source back: smart quotes, unicode dashes and unicode spaces
 fn fold_char(c: char) -> char {
     match c {
         '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}' => '\'',
@@ -586,21 +547,14 @@ fn fold_char(c: char) -> char {
     }
 }
 
-/// one folded char and the source it came from
 #[derive(Clone, Copy)]
 struct FoldedChar {
     ch: char,
     from: usize,
     to: usize,
-    /// this char opens a source grapheme
     opens: bool,
 }
 
-/// NFKC-normalise per grapheme, then fold punctuation.
-///
-/// NFKC turns one grapheme into any number of chars, so each carries the
-/// byte range it came from and whether it opens that range. a match that
-/// starts or ends mid-grapheme is not a match
 fn fold(s: &str) -> Vec<FoldedChar> {
     let mut folded = Vec::new();
     let mut from = 0;
@@ -621,10 +575,7 @@ fn fold(s: &str) -> Vec<FoldedChar> {
     folded
 }
 
-/// the source text at every position where `old_text` matches once both
-/// sides are folded
 fn find_folded_matches(content: &str, old_text: &str) -> Vec<String> {
-    // ascii is NFKC-stable and folds to itself, so there is nothing to find
     if content.is_ascii() && old_text.is_ascii() {
         return Vec::new();
     }
@@ -652,11 +603,6 @@ fn find_folded_matches(content: &str, old_text: &str) -> Vec<String> {
     results
 }
 
-/// find substrings in content that match old_text when each line is trimEnd'd
-///
-/// slides a window of old_text's line count across content's lines, comparing
-/// each pair after stripping trailing spaces/tabs. yields the actual content
-/// substring (with its real whitespace) for each match position
 fn find_line_trimmed_matches(content: &str, old_text: &str) -> Vec<String> {
     let content_lines: Vec<&str> = content.split_inclusive('\n').collect();
     let search_lines: Vec<&str> = old_text.split_inclusive('\n').collect();
@@ -676,15 +622,12 @@ fn find_line_trimmed_matches(content: &str, old_text: &str) -> Vec<String> {
             }
         }
 
-        // all lines matched - extract the actual content substring
         let start: usize = content_lines[..i].iter().map(|l| l.len()).sum();
         let mut end: usize = content_lines[..i + search_lines.len()]
             .iter()
             .map(|l| l.len())
             .sum();
 
-        // if old_text doesn't end with a newline, trim the match to exclude
-        // the content line's trailing whitespace and newline
         if !old_text.ends_with('\n') {
             let last_content_line = content_lines[i + search_lines.len() - 1];
             let trimmed_len = last_content_line.trim_end().len();
@@ -701,15 +644,12 @@ fn find_line_trimmed_matches(content: &str, old_text: &str) -> Vec<String> {
     results
 }
 
-/// check if oldText nearly matches something in the file
 fn find_near_miss(content: &str, old_text: &str) -> NearMiss {
-    // check whitespace-normalised match
     let normalise = |s: &str| -> String { s.split_whitespace().collect::<Vec<_>>().join(" ") };
     let norm_old = normalise(old_text);
     if !norm_old.is_empty() {
         let norm_content = normalise(content);
         if norm_content.contains(&norm_old) {
-            // find approximate line number
             let line_num = content
                 .lines()
                 .enumerate()
@@ -723,7 +663,6 @@ fn find_near_miss(content: &str, old_text: &str) -> NearMiss {
         }
     }
 
-    // find most similar lines using first line of oldText
     let first_old_line = old_text.lines().next().unwrap_or("").trim();
     if first_old_line.len() < 4 {
         return NearMiss::None;
@@ -757,7 +696,6 @@ fn find_near_miss(content: &str, old_text: &str) -> NearMiss {
     }
 }
 
-/// simple similarity score between two strings (jaccard on character bigrams)
 fn line_similarity(a: &str, b: &str) -> f64 {
     if a.is_empty() || b.is_empty() {
         return 0.0;
@@ -780,7 +718,6 @@ fn line_similarity(a: &str, b: &str) -> f64 {
     intersection / union
 }
 
-/// strip common leading whitespace from both texts for readable diffs
 fn dedent_pair(old_text: &str, new_text: &str) -> (String, String) {
     let min_indent = old_text
         .lines()
@@ -810,15 +747,9 @@ fn dedent_pair(old_text: &str, new_text: &str) -> (String, String) {
     (strip(old_text), strip(new_text))
 }
 
-/// format a diff between old and new text for display
-///
-/// uses a proper line diff algorithm so only changed lines show as +/-.
-/// unchanged lines adjacent to changes are shown as context (no prefix).
-/// unchanged lines far from any change are omitted entirely
 fn format_edit_diff(old_text: &str, new_text: &str) -> String {
     let (old_text, new_text) = dedent_pair(old_text, new_text);
 
-    // addition-only: new text contains all of old text with extra content
     if let Some(added) = new_text.strip_prefix(old_text.as_str())
         && !added.trim().is_empty()
     {
@@ -845,10 +776,8 @@ fn format_edit_diff(old_text: &str, new_text: &str) -> String {
     let diff = TextDiff::from_lines(&old_text, &new_text);
     let mut result = String::new();
 
-    // collect all changes with their tags
     let changes: Vec<_> = diff.iter_all_changes().collect();
 
-    // find which lines are near an actual change (context window of 2)
     const CONTEXT: usize = 2;
     let mut dominated = vec![false; changes.len()];
     for (i, change) in changes.iter().enumerate() {
@@ -869,7 +798,6 @@ fn format_edit_diff(old_text: &str, new_text: &str) -> String {
                     result.push_str(&format!("  {}", change));
                     last_was_gap = false;
                 } else if !last_was_gap && i > 0 && i < changes.len() - 1 {
-                    // omitted lines between change groups
                     result.push_str("  …\n");
                     last_was_gap = true;
                 }
@@ -912,7 +840,6 @@ mod tests {
         assert!(content.contains("println!(\"world\")"));
         assert!(!content.contains("println!(\"hello\")"));
 
-        // output should contain diff
         let output = result
             .content
             .iter()
@@ -1022,9 +949,6 @@ mod tests {
 
     #[test]
     fn edit_on_empty_file_returns_error_does_not_panic() {
-        // regression: find_line_trimmed_matches used to panic with
-        // "index out of bounds: the len is 0 but the index is 0" when
-        // the file (or line-restricted region) was shorter than oldText
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("empty.txt");
         fs::write(&path, "").unwrap();
@@ -1035,8 +959,6 @@ mod tests {
 
     #[test]
     fn edit_oldtext_longer_than_file_returns_error_does_not_panic() {
-        // regression: same panic, but with non-empty file that's still
-        // shorter than oldText
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("short.txt");
         fs::write(&path, "single line\n").unwrap();
@@ -1052,7 +974,6 @@ mod tests {
 
     #[test]
     fn find_line_trimmed_matches_empty_content_does_not_panic() {
-        // direct unit test for the panic site
         let matches = find_line_trimmed_matches("", "anything");
         assert!(matches.is_empty());
     }
@@ -1090,7 +1011,6 @@ mod tests {
             "        deeply indented\n        old code",
             "        deeply indented\n        new code",
         );
-        // should strip the 8-space common indent
         assert!(diff.contains("- old code"));
         assert!(diff.contains("+ new code"));
         assert!(!diff.contains("        "));
@@ -1102,8 +1022,6 @@ mod tests {
             "    base\n        nested",
             "    base\n            more nested",
         );
-        // 4-space common indent stripped, relative indent preserved
-        // "base" is unchanged so it appears as context, not +/-
         assert!(diff.contains("  base"), "context line: {diff}");
         assert!(
             !diff.contains("- base"),
@@ -1132,11 +1050,9 @@ mod tests {
 
     #[test]
     fn diff_omits_unchanged_context_lines() {
-        // simulate what the edit tool does: oldText/newText include context
         let old = "## project tracking\n\n- todo.md is the canonical planning file\n\n## reference repos\n\n- pi-mono\n- opencode\n- codex";
         let new = "## project tracking\n\n- todo.md is the canonical planning file\n\n## gitignored local files\n\n- AGENTS.md\n- untracked-docs/\n- reference repos";
         let diff = format_edit_diff(old, new);
-        // unchanged lines should NOT appear with - or + prefix
         assert!(
             !diff.contains("- ## project tracking"),
             "unchanged line should not appear as removed: {diff}"
@@ -1149,7 +1065,6 @@ mod tests {
             !diff.contains("- - todo.md"),
             "unchanged line should not appear as removed: {diff}"
         );
-        // changed lines should still appear
         assert!(
             diff.contains("- ## reference repos"),
             "removed line should appear: {diff}"
@@ -1162,8 +1077,6 @@ mod tests {
 
     #[test]
     fn an_edit_matches_through_smart_punctuation() {
-        // models echo source back with the punctuation their tokeniser
-        // prefers, so match past it rather than erroring
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("quotes.rs");
         fs::write(&path, "let s = \"hi\";\nlet n = 1 - 2;\n").unwrap();
@@ -1180,8 +1093,6 @@ mod tests {
 
     #[test]
     fn an_edit_matches_through_a_fullwidth_form() {
-        // nfkc maps the fullwidth forms a cjk-context model reaches for
-        // onto the ascii the file holds
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("width.rs");
         fs::write(&path, "print(x);\n").unwrap();
@@ -1198,8 +1109,6 @@ mod tests {
 
     #[test]
     fn an_edit_matches_a_differently_composed_accent() {
-        // the file holds a decomposed e + combining acute, the model
-        // sends the composed character
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("accent.md");
         fs::write(&path, "cafe\u{301} au lait\n").unwrap();
@@ -1211,8 +1120,6 @@ mod tests {
 
     #[test]
     fn a_fold_match_cannot_start_mid_grapheme() {
-        // nfkc expands the ligature to "fi", but neither half is a place
-        // the source can be spliced
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ligature.md");
         fs::write(&path, "\u{fb01}ne\n").unwrap();
@@ -1224,8 +1131,6 @@ mod tests {
 
     #[test]
     fn a_folded_match_leaves_the_rest_of_the_file_alone() {
-        // fold to find the match, then splice the source bytes. prime
-        // rewrites the whole file in normalised form instead
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mixed.md");
         let untouched = "keep \u{fb01}ne \u{201c}quotes\u{201d} and cafe\u{301}\n";
@@ -1252,8 +1157,6 @@ mod tests {
 
     #[test]
     fn a_match_outside_the_range_says_so() {
-        // the hint used to come from a whitespace near-miss anywhere in the
-        // file, which points at the wrong line when the range is the problem
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ranged.rs");
         fs::write(&path, "one\ntwo\nthree\nfour\nfive\n").unwrap();
@@ -1292,7 +1195,6 @@ mod tests {
         src.push_str("let  x  =  1;\n");
         fs::write(&path, &src).unwrap();
 
-        // internal spacing differs, so only the normalised compare matches
         let result = edit_file(
             &path,
             "let x = 1;",
@@ -1322,8 +1224,6 @@ mod tests {
 
     #[test]
     fn an_edit_accepts_file_path() {
-        // anthropic-tuned models send file_path, matching claude code's
-        // signature. read already aliases it
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("aliased.rs");
         fs::write(&path, "before\n").unwrap();
@@ -1343,8 +1243,6 @@ mod tests {
 
     #[test]
     fn one_call_applies_several_edits() {
-        // pi's shape: many disjoint replacements in one round trip, each
-        // matched against the original content
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("many.rs");
         fs::write(&path, "one\ntwo\nthree\n").unwrap();
@@ -1366,8 +1264,6 @@ mod tests {
 
     #[test]
     fn edits_arrive_as_a_json_string() {
-        // some models send the array serialised. prime names opus 4.6 and
-        // glm-5.1
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("stringified.rs");
         fs::write(&path, "one\ntwo\nthree\n").unwrap();
@@ -1386,8 +1282,6 @@ mod tests {
 
     #[test]
     fn an_edit_accepts_claude_code_names() {
-        // claude code spells the same tool file_path / old_string /
-        // new_string, and anthropic models reach for it
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("named.rs");
         fs::write(&path, "before\n").unwrap();
@@ -1447,7 +1341,6 @@ mod tests {
 
     #[test]
     fn an_entry_accepts_claude_code_names() {
-        // multiedit's shape: edits[{old_string, new_string, replace_all}]
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("multi.rs");
         fs::write(&path, "one\ntwo\nthree\ntwo\n").unwrap();
@@ -1512,7 +1405,6 @@ mod tests {
     #[test]
     fn near_miss_whitespace_difference() {
         let content = "fn main() {\n    println!(\"hello\");\n}\n";
-        // extra spaces in the search text
         let old_text = "fn main() {\n        println!(\"hello\");\n}\n";
         match find_near_miss(content, old_text) {
             NearMiss::WhitespaceDifference(_) => {}
@@ -1524,7 +1416,6 @@ mod tests {
     #[test]
     fn near_miss_similar_lines() {
         let content = "fn process_data(input: &str) -> Result<(), Error> {\n    validate(input)?;\n    Ok(())\n}\n";
-        // slightly wrong return type
         let old_text = "fn process_data(input: &str) -> Result<(), MyError> {";
         match find_near_miss(content, old_text) {
             NearMiss::SimilarLines(lines) => {
@@ -1597,7 +1488,6 @@ mod tests {
         let path = dir.path().join("test.rs");
         fs::write(&path, "fn main() {\n    hello();\n}\n").unwrap();
 
-        // oldText without trailing newline should still match
         let result = edit_file(
             &path,
             "fn main() {\n    hello();\n}",
@@ -1615,7 +1505,6 @@ mod tests {
         let path = dir.path().join("test.rs");
         fs::write(&path, "hello world").unwrap();
 
-        // oldText with trailing newline when file doesn't have one
         let result = edit_file(
             &path,
             "hello world\n",
@@ -1631,10 +1520,8 @@ mod tests {
     fn edit_matches_with_trailing_whitespace_in_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.rs");
-        // file has trailing spaces on lines
         fs::write(&path, "fn main() {  \n    println!(\"hello\");  \n}\n").unwrap();
 
-        // oldText has no trailing spaces (as LLM would send)
         let result = edit_file(
             &path,
             "fn main() {\n    println!(\"hello\");\n}\n",
@@ -1674,7 +1561,6 @@ mod tests {
         let path = dir.path().join("test.txt");
         fs::write(&path, "foo  \nbar  \n").unwrap();
 
-        // oldText content differs, not just whitespace
         let result = edit_file(&path, "fox\nbaz\n", "replaced\n", &EditOpts::default());
         let text = extract_text(&result);
         assert!(text.contains("not found"));
@@ -1686,12 +1572,8 @@ mod tests {
         let path = dir.path().join("test.txt");
         fs::write(&path, "foo  \nbar\nfoo  \nbaz\n").unwrap();
 
-        // "foo\n" matches twice after trimming
         let result = edit_file(&path, "foo\n", "replaced\n", &EditOpts::default());
         let text = extract_text(&result);
-        // should fail - ambiguous (or succeed via exact if "foo\n" appears exactly once)
-        // "foo\n" doesn't appear exactly in the file (file has "foo  \n"), and
-        // trimmed match finds 2 positions, so it should fail
         assert!(
             text.contains("not found") || text.contains("expected 1"),
             "got: {text}"
@@ -1741,9 +1623,6 @@ mod tests {
         );
     }
 
-    /// init a git repo in a tempdir for the gitignore-hint tests.
-    /// returns None if `git` isn't available so the test passes on
-    /// minimal environments
     fn temp_git_repo_for_edit() -> Option<tempfile::TempDir> {
         let dir = tempfile::tempdir().ok()?;
         let status = std::process::Command::new("git")
@@ -1761,9 +1640,6 @@ mod tests {
 
     #[test]
     fn edit_success_appends_gitignore_hint_for_ignored_files() {
-        // when the model edits a file that's gitignored, the result
-        // text must call that out so the model doesn't claim it was
-        // "tracked" or "committed" in subsequent commit messages
         let Some(dir) = temp_git_repo_for_edit() else {
             return;
         };
@@ -1803,7 +1679,6 @@ mod tests {
         let path = dir.path().join("test.txt");
         fs::write(&path, "let x = 1;\nlet y = 2;\nlet x = 1;\nlet z = 3;\n").unwrap();
 
-        // "let x = 1;" appears on lines 1 and 3, but restrict to lines 2-4
         let result = edit_file(
             &path,
             "let x = 1;",
@@ -1820,7 +1695,6 @@ mod tests {
             extract_text(&result)
         );
         let content = fs::read_to_string(&path).unwrap();
-        // only line 3 should be replaced
         assert_eq!(content, "let x = 1;\nlet y = 2;\nlet x = 99;\nlet z = 3;\n");
     }
 
@@ -1831,7 +1705,6 @@ mod tests {
         fs::write(&path, "hello\nworld\n").unwrap();
 
         let tool = super::EditTool::new(dir.path().into());
-        // end_line without start_line - tested via tool execute
         let result = tool
             .execute(serde_json::json!({
                 "path": path.to_str().unwrap(),
@@ -1843,7 +1716,6 @@ mod tests {
         assert!(result.outcome.is_error());
         assert!(extract_text(&result).contains("requires start_line"));
 
-        // end < start
         let result = tool
             .execute(serde_json::json!({
                 "path": path.to_str().unwrap(),
@@ -1859,8 +1731,6 @@ mod tests {
 
     #[tokio::test]
     async fn edit_accepts_stringified_line_numbers() {
-        // models stringify integer args; the edit tool must accept
-        // start_line/end_line as numeric strings rather than reject them
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.txt");
         fs::write(&path, "let x = 1;\nlet x = 1;\nlet x = 1;\n").unwrap();
@@ -1881,7 +1751,6 @@ mod tests {
             extract_text(&result)
         );
         let content = fs::read_to_string(&path).unwrap();
-        // only line 2 should be replaced
         assert_eq!(content, "let x = 1;\nlet x = 9;\nlet x = 1;\n");
     }
 
@@ -1891,7 +1760,6 @@ mod tests {
         let path = dir.path().join("test.txt");
         fs::write(&path, "alpha  \nbeta  \ngamma\n").unwrap();
 
-        // oldText spans two lines, no trailing newline
         let result = edit_file(&path, "alpha\nbeta", "one\ntwo", &EditOpts::default());
         let text = extract_text(&result);
         assert!(!text.contains("not found"), "should match: {text}");

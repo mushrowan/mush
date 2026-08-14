@@ -1,11 +1,5 @@
-//! tree-sitter query patterns for symbol extraction per language
-//!
-//! each query uses capture names like `@definition.function` and `@name`
-//! so the symbol extractor can map captures to SymbolKind variants
-
 use crate::language::Language;
 
-/// get the symbol extraction query for a language
 pub fn query_for(language: Language) -> &'static str {
     match language {
         Language::Rust => RUST,
@@ -18,7 +12,6 @@ pub fn query_for(language: Language) -> &'static str {
         Language::Java => JAVA,
         Language::Bash => BASH,
         Language::Nix => NIX,
-        // data formats and markup: no meaningful symbols to extract
         Language::Json
         | Language::Toml
         | Language::Yaml
@@ -101,7 +94,6 @@ const JAVASCRIPT: &str = r#"
     value: (arrow_function)) @definition.function)
 "#;
 
-// typescript shares javascript's patterns plus type-specific ones
 const TYPESCRIPT: &str = r#"
 (function_declaration
   name: (identifier) @name) @definition.function

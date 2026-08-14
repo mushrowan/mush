@@ -1,7 +1,3 @@
-//! configuration loading
-//!
-//! reads from ~/.config/mush/config.toml (or $MUSH_CONFIG_DIR)
-
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -9,7 +5,6 @@ use mush_ai::types::{EffortLevel, ThinkingLevel};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
-/// deserialise thinking from bool (legacy) or ThinkingLevel string
 fn deserialise_thinking<'de, D: Deserializer<'de>>(
     d: D,
 ) -> Result<Option<ThinkingLevel>, D::Error> {
@@ -22,17 +17,7 @@ fn deserialise_thinking<'de, D: Deserializer<'de>>(
     })
 }
 
-/// wire format for the `thinking` field: accepts a bool (legacy) or a
-/// `ThinkingLevel` string. the resulting `Option<ThinkingLevel>` in
-/// [`Config`] is what the rest of the code sees.
-///
 /// TODO: this bool-or-enum legacy form generates an `anyOf` in the
-/// JSON Schema that nixcfg maps to `types.either bool (enum [...])`.
-/// the `either` form is usable but fiddly for nix users; a future
-/// refactor can drop the bool form, announce a one-line breaking
-/// change (`thinking = true` → `thinking = "high"`), and simplify
-/// the schema to just the enum. kept in option A shape for now per
-/// the migration plan
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(untagged)]
 enum ThinkingConfigWire {
@@ -43,7 +28,6 @@ enum ThinkingConfigWire {
 pub use mush_tui::StatusBarConfig;
 pub use mush_tui::TerminalPolicy;
 
-/// top-level config
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(extend("x-nixcfg-name" = "mush", "x-nixcfg-config-format" = "toml"))]
 #[serde(default)]
@@ -58,112 +42,51 @@ pub struct Config {
     pub cache_retention: Option<mush_ai::types::CacheRetention>,
     pub debug_cache: bool,
     pub system_prompt: Option<String>,
-    /// tracing filter string (e.g. "mush=debug,warn")
     pub log_filter: Option<String>,
-    /// how to display thinking text (hidden, collapse, expanded)
     pub thinking_display: mush_tui::ThinkingDisplay,
-    /// override anthropic adaptive thinking with fixed-budget mode for
-    /// adaptive-capable models. default: false (use adaptive when the
-    /// model supports it)
     #[serde(default)]
     pub force_budget_thinking: bool,
-    /// automatically compact conversation when approaching context limit (off by default)
     #[serde(default)]
     pub auto_compact: bool,
-    /// fork the session tree before auto-compacting (preserves uncompacted original)
     #[serde(default)]
     pub auto_fork_compact: bool,
-    /// prompt for confirmation before executing tools (off by default)
     pub confirm_tools: bool,
-    /// show dollar cost in status bar (off by default, toggle with /cost)
     pub show_cost: bool,
-    /// render per-message usage lines (off by default, same info is in the status bar)
     pub show_usage_lines: bool,
-    /// show the ↑/↓/R/W token counter segment in the status bar (off by default)
     pub show_token_counters: bool,
-    /// per-segment visibility toggles for the status bar
     #[serde(default)]
     pub status_bar: StatusBarConfig,
-    /// show cache warmth countdown and send desktop notifications (on by default)
     #[serde(default = "default_cache_timer")]
     pub cache_timer: bool,
-    /// terminal behaviour overrides
     pub terminal: TerminalPolicy,
     pub api_keys: ApiKeys,
     pub theme: mush_tui::ThemeConfig,
-    /// MCP server configurations keyed by name
     #[serde(default)]
     pub mcp: std::collections::HashMap<String, mush_mcp::McpServerConfig>,
-    /// use dynamic meta-tools for MCP instead of loading all schemas (default false)
     #[serde(default)]
     pub dynamic_mcp: bool,
-    /// lifecycle hooks
     #[serde(default)]
     pub hooks: HooksConfig,
-    /// repo map tool configuration
     #[serde(default)]
     pub repo_map: RepoMapConfig,
-    /// LSP integration settings
     #[serde(default)]
     pub lsp: LspConfig,
-    /// model tier aliases for `/model`
     #[serde(default)]
     pub model_tiers: HashMap<String, String>,
-    /// models the user has pinned as favourites, shown with a star in the
-    /// model picker and cycleable with alt+m. declaring any value here
-    /// locks imperative adds/removes (the tui picker rejects ctrl+f with a
-    /// toast) so config stays the single source of truth
     #[serde(default)]
     pub favourite_models: Vec<String>,
-    /// optional model id to use for compaction summaries.
-    /// defaults to the active model when unset. can be changed at runtime
-    /// with `/compaction-model <model-id>` or reset with
-    /// `/compaction-model same`.
     pub compaction_model: Option<String>,
-    /// provider-specific settings (anthropic betas, scope, etc.)
     #[serde(default)]
     pub settings: Settings,
-    /// configurable keybinds grouped by scope, for example
-    /// `[keys.normal]` and `[keys.model_picker]`.
     #[serde(default)]
     pub keys: mush_tui::KeysConfig,
-    /// characters that are forbidden in file edits/writes and bash
-    /// commands. `write`, `edit`, and `apply_patch` reject content
-    /// containing any of these; `bash` rejects commands containing them
-    /// too. each entry must be exactly one char (Unicode scalar). the
-    /// model can pass `allow_forbidden_chars: true` on a single call to
-    /// bypass when the char is genuinely required (verbatim quoting, or
-    /// sedding the char out of a file).
-    ///
-    /// example:
-    /// ```toml
-    /// forbidden_chars = ["—", "–", ";"]
-    /// ```
-    // schema renders as a plain string array rather than char (maxLength 1):
-    // nixcfg turns the length bound into a byte-length check, which rejects
-    // multibyte single chars like an em dash. serde still parses each entry
-    // into a `char`, so multi-char strings are rejected at load instead.
     #[serde(default)]
     #[schemars(with = "Vec<String>")]
     pub forbidden_chars: Vec<char>,
-    /// whole classes of characters to forbid in file edits/writes and bash
-    /// commands, for cases where listing every codepoint is impractical.
-    /// supported values: `emoji`, `arrows`. combines with `forbidden_chars`.
-    ///
-    /// example:
-    /// ```toml
-    /// forbidden_char_classes = ["emoji", "arrows"]
-    /// ```
     #[serde(default)]
     pub forbidden_char_classes: Vec<mush_tools::forbidden_chars::CharClass>,
-    /// images larger than this many megabytes are downscaled and
-    /// re-encoded by the `read` tool before being attached, instead of
-    /// failing the request (most providers reject oversized images, and
-    /// an oversized copy would otherwise sit in history and fail every
-    /// subsequent turn). defaults to 5.
     #[serde(default = "default_max_image_mb")]
     pub max_image_mb: u32,
-    /// web search provider config (exa default, optional searx instance).
     #[serde(default)]
     pub web_search: mush_tools::web_search::WebSearchConfig,
 }
@@ -219,21 +142,15 @@ impl Default for Config {
     }
 }
 
-/// scope for persisting settings changes made during a session
 pub type SettingsScope = mush_tui::settings::SettingsScope;
 
-/// session settings with scope control.
-/// `scope` determines where runtime changes (via `/settings`) get persisted
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(default)]
 pub struct Settings {
-    /// scope for runtime changes made via `/settings`
     pub scope: SettingsScope,
-    /// anthropic oauth beta flag toggles
     pub anthropic_betas: mush_ai::types::AnthropicBetas,
 }
 
-/// lifecycle hook config sections
 #[derive(Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(default)]
 pub struct HooksConfig {
@@ -244,18 +161,13 @@ pub struct HooksConfig {
     pub post_compaction: Vec<HookEntry>,
 }
 
-/// a single hook entry in config
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct HookEntry {
-    /// tool name pattern: "*" for all, "edit|write" for specific tools
     #[serde(default = "default_match")]
     pub r#match: String,
-    /// shell command to run
     pub command: String,
-    /// timeout in seconds (default 30)
     #[serde(default = "default_timeout")]
     pub timeout: u64,
-    /// whether failure blocks the operation (default false)
     #[serde(default)]
     pub blocking: bool,
 }
@@ -268,41 +180,25 @@ fn default_timeout() -> u64 {
     30
 }
 
-/// LSP integration configuration
 #[derive(Debug, Default, Deserialize, Serialize, JsonSchema, Clone, PartialEq, Eq)]
 #[serde(default)]
 pub struct LspConfig {
-    /// enable auto-injecting diagnostics after file-modifying tools (default false)
     pub diagnostics: bool,
-    /// custom server overrides, keyed by language name (e.g. "rust", "python")
     #[serde(default)]
     pub servers: HashMap<String, LspServerEntry>,
 }
 
-/// a custom LSP server config entry
 #[derive(Debug, Deserialize, Serialize, JsonSchema, Clone, PartialEq, Eq)]
 pub struct LspServerEntry {
-    /// command to run
     pub command: String,
-    /// command line arguments
     #[serde(default)]
     pub args: Vec<String>,
 }
 
-/// repo map tool configuration
-///
-/// the `repo_map` tool exposes a tree-sitter built structural overview
-/// of the codebase. it's an opt-in tool the model invokes on demand,
-/// not a system-prompt injection. the budget controls how much text
-/// the tool can return per call (well below the central tool-output cap)
 #[derive(Debug, Deserialize, Serialize, JsonSchema, Clone, PartialEq, Eq)]
 #[serde(default)]
 pub struct RepoMapConfig {
-    /// register the repo_map tool when running inside a vcs repo (default true)
     pub enabled: bool,
-    /// per-call rendering budget in tokens (default 8192). raise if the
-    /// model needs to see more of the map at once. caps at the central
-    /// tool-output cap regardless of this value
     pub budget: usize,
 }
 
@@ -316,7 +212,6 @@ impl Default for RepoMapConfig {
 }
 
 impl Config {
-    /// convert config hook entries into the agent's lifecycle hooks
     pub fn lifecycle_hooks(&self) -> mush_agent::LifecycleHooks {
         fn convert(entries: &[HookEntry]) -> Vec<mush_agent::LifecycleHook> {
             entries
@@ -352,35 +247,17 @@ impl Config {
     }
 }
 
-/// api key overrides from config file.
-///
-/// named fields cover the common paths used throughout the codebase.
-/// the flattened `other` map catches any additional provider name so
-/// users can add keys for groq, deepseek, xai, cerebras, mistral,
-/// together, deepinfra, etc. without a new named field each time
-///
-/// all key values are `ApiKey`, whose Debug/Display are redacted so
-/// secrets can't accidentally leak into trace output, panic messages,
-/// or captured error bodies. access the raw value via `ApiKey::expose`
 #[derive(Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(default)]
 pub struct ApiKeys {
     pub anthropic: Option<mush_ai::types::ApiKey>,
     pub openrouter: Option<mush_ai::types::ApiKey>,
     pub openai: Option<mush_ai::types::ApiKey>,
-    /// any other provider keyed by short name (groq, deepseek, xai, ...)
-    /// surfaces as a freeform submodule in the nix module so values can
-    /// be set imperatively from nix in addition to env vars
     #[serde(flatten)]
     pub other: HashMap<String, mush_ai::types::ApiKey>,
 }
 
 impl ApiKeys {
-    /// collect non-None keys into a provider → key map for the TUI
-    ///
-    /// returns `ApiKey` values so the caller has to explicitly call
-    /// `.expose()` to reach the raw secret, keeping the redaction
-    /// guarantee from the config struct through to the auth layer
     #[must_use]
     pub fn to_map(&self) -> HashMap<String, mush_ai::types::ApiKey> {
         let mut map = HashMap::new();
@@ -394,13 +271,11 @@ impl ApiKeys {
             map.insert("openai".into(), key.clone());
         }
         for (k, v) in &self.other {
-            // named fields take priority over flattened map entries
             map.entry(k.clone()).or_insert_with(|| v.clone());
         }
         map
     }
 
-    /// look up an api key by provider name (named field first, then `other`)
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&mush_ai::types::ApiKey> {
         match name {
@@ -412,7 +287,6 @@ impl ApiKeys {
     }
 }
 
-/// find the config directory
 pub fn config_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("MUSH_CONFIG_DIR") {
         PathBuf::from(dir)
@@ -425,14 +299,10 @@ pub fn config_dir() -> PathBuf {
     }
 }
 
-/// path to the config file
 pub fn config_path() -> PathBuf {
     config_dir().join("config.toml")
 }
 
-/// load config, returning default if file doesn't exist.
-/// also merges in persisted settings from `settings.toml` (global) and
-/// `<cwd>/.mush/settings.toml` (repo) so /settings changes round-trip.
 pub fn load_config() -> Config {
     let path = config_path();
     let mut config = if !path.exists() {
@@ -453,7 +323,6 @@ pub fn load_config() -> Config {
         }
     };
 
-    // layer persisted settings overrides (global first, then repo)
     let global = config_dir().join("settings.toml");
     if let Some(persisted) = try_load_persisted_settings(&global) {
         config.settings.anthropic_betas = persisted.anthropic_betas;
@@ -484,19 +353,10 @@ fn try_load_persisted_settings(
     }
 }
 
-// per-directory + per-model thinking level persistence
 fn thinking_prefs_path() -> PathBuf {
     mush_session::data_dir().join("thinking.json")
 }
 
-/// load the on-disk thinking prefs, prune entries pointing at directories
-/// that no longer exist, and return an empty map on any I/O or parse
-/// failure (the file is best-effort persistence, not authoritative).
-///
-/// the pre-`thinking-prefs-by-dir` flat shape (`{model_id: level}`) is a
-/// different schema and will fail to parse here. that's intentional:
-/// migration was deemed not worth the complexity, so the user just gets
-/// fresh defaults and the file rewrites itself on the next save.
 pub fn load_thinking_prefs() -> mush_tui::ThinkingPrefs {
     let path = thinking_prefs_path();
     if !path.exists() {
@@ -522,18 +382,10 @@ pub fn save_thinking_prefs(prefs: &mush_tui::ThinkingPrefs) {
     }
 }
 
-// per-directory last-model persistence
 fn last_model_path() -> PathBuf {
     mush_session::data_dir().join("last-model.json")
 }
 
-/// load the on-disk last-model map, prune entries pointing at deleted
-/// directories. returns an empty map on any I/O or parse failure (best
-/// effort, not authoritative).
-///
-/// the pre-`last-model-by-dir` shape was a plain text file at
-/// `last-model.txt`. that file is ignored on this path; we chose to
-/// drop instead of migrate (existing users start fresh per project).
 pub fn load_last_models() -> mush_tui::LastModels {
     let path = last_model_path();
     if !path.exists() {
@@ -557,14 +409,10 @@ pub fn save_last_models(last: &mush_tui::LastModels) {
     }
 }
 
-// favourite models persistence (imperative, opt-in)
-
 fn favourite_models_path() -> PathBuf {
     mush_session::data_dir().join("favourite-models.json")
 }
 
-/// load favourites written by `/favourite` runtime toggles. returns `Vec::new`
-/// if the file doesn't exist or can't be parsed
 pub fn load_favourite_models() -> Vec<String> {
     load_favourite_models_from(&favourite_models_path())
 }
@@ -579,8 +427,6 @@ pub(crate) fn load_favourite_models_from(path: &std::path::Path) -> Vec<String> 
         .unwrap_or_default()
 }
 
-/// persist favourites after an imperative toggle. callers should gate on
-/// the locked flag from [`resolve_favourites`] before calling
 pub fn save_favourite_models(models: &[String]) {
     save_favourite_models_to(&favourite_models_path(), models);
 }
@@ -594,9 +440,6 @@ pub(crate) fn save_favourite_models_to(path: &std::path::Path, models: &[String]
     }
 }
 
-/// pick the effective favourites list and whether imperative edits are locked.
-/// config (declarative) takes precedence when non-empty and locks the picker;
-/// otherwise the on-disk imperative list is live
 #[must_use]
 pub fn resolve_favourites(from_config: &[String], from_disk: Vec<String>) -> (Vec<String>, bool) {
     if from_config.is_empty() {
@@ -606,14 +449,10 @@ pub fn resolve_favourites(from_config: &[String], from_disk: Vec<String>) -> (Ve
     }
 }
 
-// recent models persistence (most-recently-used order, most recent first)
-
 fn recent_models_path() -> PathBuf {
     mush_session::data_dir().join("recent-models.json")
 }
 
-/// load the most-recently-used model list. returns `Vec::new` if the
-/// file doesn't exist or can't be parsed
 pub fn load_recent_models() -> Vec<String> {
     load_recent_models_from(&recent_models_path())
 }
@@ -628,7 +467,6 @@ pub(crate) fn load_recent_models_from(path: &std::path::Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// persist the most-recently-used model list after it changes
 pub fn save_recent_models(models: &[String]) {
     save_recent_models_to(&recent_models_path(), models);
 }
@@ -681,7 +519,6 @@ xai = "sk-xai-test"
             config.api_keys.openai.as_ref().map(|k| k.expose()),
             Some("sk-openai-test")
         );
-        // flattened extra providers picked up via the `other` map
         assert_eq!(
             config
                 .api_keys
@@ -696,9 +533,7 @@ xai = "sk-xai-test"
                 .map(mush_ai::types::ApiKey::expose),
             Some("sk-xai-test")
         );
-        // unknown providers fall through to None
         assert!(config.api_keys.get("unknown-provider").is_none());
-        // to_map merges named fields with `other`
         let map = config.api_keys.to_map();
         assert_eq!(map.get("groq").map(|k| k.expose()), Some("sk-groq-test"));
         assert_eq!(
@@ -709,9 +544,6 @@ xai = "sk-xai-test"
 
     #[test]
     fn api_keys_debug_output_redacts_secrets() {
-        // secrets must never leak into Debug output (trace!, dbg!, panic
-        // messages, etc). anthropic is a known field; xai-prefixed key
-        // goes through the `other` HashMap to cover both code paths
         let toml = r#"
 [api_keys]
 anthropic = "sk-ant-VERY-SECRET-DO-NOT-LEAK-abc123"
@@ -755,7 +587,6 @@ advisor = true
         assert!(!config.settings.anthropic_betas.context_1m);
         assert!(config.settings.anthropic_betas.redact_thinking);
         assert!(config.settings.anthropic_betas.advisor);
-        // unspecified fields keep their defaults
         assert!(config.settings.anthropic_betas.effort);
         assert!(config.settings.anthropic_betas.context_management);
         assert!(config.settings.anthropic_betas.advanced_tool_use);
@@ -871,9 +702,6 @@ image_probe = "disabled"
 
     #[test]
     fn cache_timer_default_matches_struct_default() {
-        // `#[serde(default)]` at struct level delegates to Default::default().
-        // keep the manual Default impl in sync with the field-level serde default
-        // so deserialising `""` matches constructing with `Config::default()`
         let from_empty: Config = toml::from_str("").unwrap();
         let from_default = Config::default();
         assert_eq!(from_empty.cache_timer, from_default.cache_timer);
@@ -911,7 +739,6 @@ image_probe = "disabled"
 
     #[test]
     fn load_missing_config_returns_default() {
-        // set config dir to a temp path that doesn't exist
         let config = Config::default();
         assert!(config.model.is_none());
     }
@@ -958,13 +785,11 @@ blocking = true
         assert_eq!(config.hooks.post_tool_use[0].r#match, "edit|write");
         assert_eq!(config.hooks.post_tool_use[0].timeout, 15);
         assert!(!config.hooks.post_tool_use[0].blocking);
-        // second hook gets defaults
         assert_eq!(config.hooks.post_tool_use[1].r#match, "*");
         assert_eq!(config.hooks.post_tool_use[1].timeout, 30);
         assert_eq!(config.hooks.stop.len(), 1);
         assert!(config.hooks.stop[0].blocking);
 
-        // conversion to agent types
         let lifecycle = config.lifecycle_hooks();
         assert_eq!(
             lifecycle

@@ -1,5 +1,3 @@
-//! content types for user, assistant, and tool result messages
-
 use serde::{Deserialize, Deserializer, Serialize};
 
 use super::newtypes::{ToolCallId, ToolName};
@@ -9,20 +7,18 @@ pub struct TextContent {
     pub text: String,
 }
 
-/// thinking block in an assistant message
 #[derive(Debug, Clone, PartialEq)]
 pub enum ThinkingContent {
-    /// normal thinking with text and optional signature for multi-turn continuity
     Thinking {
         thinking: String,
         signature: Option<String>,
     },
-    /// redacted thinking, opaque signature only
-    Redacted { data: String },
+    Redacted {
+        data: String,
+    },
 }
 
 impl ThinkingContent {
-    /// the thinking text, or a placeholder for redacted blocks
     pub fn text(&self) -> &str {
         match self {
             Self::Thinking { thinking, .. } => thinking,
@@ -30,7 +26,6 @@ impl ThinkingContent {
         }
     }
 
-    /// mutable access to the thinking text (only for non-redacted)
     pub fn text_mut(&mut self) -> Option<&mut String> {
         match self {
             Self::Thinking { thinking, .. } => Some(thinking),
@@ -38,7 +33,6 @@ impl ThinkingContent {
         }
     }
 
-    /// the signature, if any
     pub fn signature(&self) -> Option<&str> {
         match self {
             Self::Thinking { signature, .. } => signature.as_deref(),
@@ -46,7 +40,6 @@ impl ThinkingContent {
         }
     }
 
-    /// mutable access to the signature slot (only for non-redacted)
     pub fn signature_mut(&mut self) -> Option<&mut Option<String>> {
         match self {
             Self::Thinking { signature, .. } => Some(signature),
@@ -110,7 +103,6 @@ impl<'de> Deserialize<'de> for ThinkingContent {
     }
 }
 
-/// supported image mime types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ImageMimeType {
     #[serde(rename = "image/jpeg")]
@@ -134,7 +126,6 @@ impl ImageMimeType {
         }
     }
 
-    /// parse from file extension (defaults to png)
     #[must_use]
     pub fn from_extension(ext: &str) -> Self {
         match ext.to_lowercase().as_str() {
@@ -145,7 +136,6 @@ impl ImageMimeType {
         }
     }
 
-    /// parse from a mime type string, `None` when the api cannot carry it
     #[must_use]
     pub fn from_mime_type(mime: &str) -> Option<Self> {
         match mime.trim().to_lowercase().as_str() {
@@ -166,7 +156,6 @@ impl std::fmt::Display for ImageMimeType {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ImageContent {
-    /// base64 encoded image data
     pub data: String,
     pub mime_type: ImageMimeType,
 }
@@ -199,7 +188,6 @@ pub enum UserContent {
 }
 
 impl UserContent {
-    /// extract the text content, joining text parts if multipart
     #[must_use]
     pub fn text(&self) -> String {
         match self {

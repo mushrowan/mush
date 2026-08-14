@@ -1,38 +1,3 @@
-//! codex (chatgpt subscription) `/models` discovery
-//!
-//! codex's backend exposes a richer schema than the public `/v1/models`
-//! endpoint - same as anthropic plus reasoning levels, verbosity modes,
-//! truncation policy, and a hand-curated `display_name`/`description`
-//! pair. mush picks the cross-cutting fields to populate [`Model`] and
-//! preserves the original entry on `DiscoveredModel::raw` so a typed
-//! accessor (added in a follow-up commit) can extract codex-specific
-//! extras lazily.
-//!
-//! request:
-//! ```text
-//! GET https://chatgpt.com/backend-api/codex/models?client_version=<v>
-//! Authorization: Bearer <chatgpt access token>
-//! chatgpt-account-id: <account id from JWT>
-//! ```
-//!
-//! response (trimmed):
-//! ```json
-//! {
-//!   "models": [
-//!     {
-//!       "slug": "gpt-5",
-//!       "display_name": "GPT-5",
-//!       "description": "...",
-//!       "context_window": 1050000,
-//!       "input_modalities": ["text", "image"],
-//!       "supported_reasoning_levels": [...],
-//!       "default_reasoning_level": "medium",
-//!       "supports_reasoning_summaries": true
-//!     }
-//!   ]
-//! }
-//! ```
-
 use std::time::SystemTime;
 
 use semver::Version;
@@ -49,16 +14,11 @@ const DEFAULT_MAX_OUTPUT: u64 = 64_000;
 const MIN_DISCOVERY_CLIENT_VERSION: Version = Version::new(1, 0, 0);
 const PROVIDER_NAME: &str = "openai-codex";
 
-/// codex discovery client
 pub struct CodexDiscovery {
     client: crate::http::HttpClient,
     base_url: String,
-    /// chatgpt session access token
     access_token: ApiKey,
-    /// chatgpt-account-id header. when `None` we try to extract it from the
-    /// JWT payload at request time (codex's own convention)
     account_id: Option<String>,
-    /// `client_version` query param. mush uses its own crate version.
     client_version: String,
 }
 
@@ -134,7 +94,6 @@ impl ModelDiscovery for CodexDiscovery {
     }
 }
 
-/// parse the raw response body into [`DiscoveredModel`] entries.
 pub fn parse_codex_models(body: &str) -> Result<Vec<DiscoveredModel>, DiscoveryError> {
     let response: CodexModelsResponse =
         serde_json::from_str(body).map_err(|e| DiscoveryError::Malformed(e.to_string()))?;
@@ -172,17 +131,11 @@ fn entry_to_model(entry: CodexModelEntry) -> Model {
         .unwrap_or(DEFAULT_MAX_OUTPUT as i64)
         .max(0) as u64;
 
-    // a model is reasoning-capable if codex advertises any non-`none` level
     let reasoning = entry
         .supported_reasoning_levels
         .iter()
         .any(|preset| !preset.effort.eq_ignore_ascii_case("none"));
 
-    // map codex's `supported_reasoning_levels` to our levels, dropping the
-    // synthetic `none` entry (the cycler treats an empty supported set as
-    // "no reasoning" rather than walking through Off explicitly). unknown
-    // names are preserved as `ThinkingLevel::Other` so newly-added upstream
-    // levels are autodetected without a code change
     let supported_thinking_levels = entry
         .supported_reasoning_levels
         .iter()
@@ -208,7 +161,6 @@ fn entry_to_model(entry: CodexModelEntry) -> Model {
         base_url: "https://chatgpt.com/backend-api".into(),
         reasoning,
         input,
-        // chatgpt subscription has no per-token billing; cost stays zero
         cost: ModelCost {
             input: 0.0,
             output: 0.0,
@@ -224,9 +176,6 @@ fn entry_to_model(entry: CodexModelEntry) -> Model {
     }
 }
 
-/// extract the `chatgpt_account_id` claim from a chatgpt-issued JWT.
-/// duplicated from `crate::providers::openai_responses` to keep the
-/// discovery module self-contained; consolidate if a third caller appears.
 fn extract_account_id(token: &str) -> Option<String> {
     use base64::Engine;
     let payload_b64 = token.split('.').nth(1)?;
@@ -280,53 +229,23 @@ struct CodexReasoningPreset {
     effort: String,
 }
 
-/// option-C payoff: typed view onto codex's enriched fields, parsed
-/// lazily from `DiscoveredEntry::raw`. mush's [`Model`] only carries
-/// the cross-cutting fields; everything codex-specific lives here so
-/// consumers can opt in field-by-field without bloating the core type.
-///
-/// fields mirror codex's `ModelInfo` for the slice mush actually
-/// consumes today (description, reasoning levels, priority, visibility)
-/// plus an `additional_speed_tiers` hook for picker badges. unknown
-/// upstream fields stay in `raw` for future code paths.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct CodexModelExtras {
-    /// human-readable blurb codex pairs with each model
     pub description: Option<String>,
-    /// codex's recommended starting reasoning level for this model.
-    /// kept as a string (not mush's `ThinkingLevel` enum) so unknown
-    /// upstream values don't break parsing
     pub default_reasoning_level: Option<String>,
-    /// every reasoning level the model accepts. ordering matches the
-    /// upstream array, which codex authors curate from cheapest to
-    /// most expensive
     pub supported_reasoning_levels: Vec<ReasoningLevelPreset>,
-    /// whether the model emits a reasoning-summary block alongside its
-    /// final answer (mush could expose this in the thinking ui)
     pub supports_reasoning_summaries: bool,
-    /// codex's intra-catalogue priority (higher = preferred). picker
-    /// could honour this for "default" sort order
     pub priority: i32,
-    /// `default`, `internal`, `experimental`, …  picker can hide
-    /// non-`default` entries unless the user opts in
     pub visibility: Option<String>,
-    /// `fast`, … – picker badge candidates
     pub additional_speed_tiers: Vec<String>,
 }
 
-/// one row of `CodexModelExtras::supported_reasoning_levels`.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ReasoningLevelPreset {
     pub effort: String,
     pub description: String,
 }
 
-/// extract the typed extras view from a raw upstream entry. returns
-/// `None` when no raw blob is supplied (the entry was cached before
-/// raw-preservation landed) or when the JSON doesn't deserialise.
-///
-/// callers typically pass `entry.raw.as_ref()` for cache entries or
-/// `merged.raw.as_ref()` for entries from the merge step.
 #[must_use]
 pub fn extras(raw: Option<&serde_json::Value>) -> Option<CodexModelExtras> {
     let raw = raw?;
@@ -379,8 +298,6 @@ struct CodexExtrasReasoningPreset {
 mod tests {
     use super::*;
 
-    /// representative codex `/models` payload covering reasoning levels,
-    /// modalities, and the missing-display-name fallback path
     const FIXTURE: &str = r#"{
       "models": [
         {
@@ -430,9 +347,6 @@ mod tests {
 
     #[test]
     fn supported_thinking_levels_propagate_from_codex_extras() {
-        // codex's `supported_reasoning_levels` array drives the cycler's
-        // available choices. order matters (cheap → expensive) so the
-        // cycler walks the upstream-curated progression
         let models = parse_codex_models(FIXTURE).unwrap();
         let gpt54 = &models[0].model;
         assert_eq!(
@@ -448,9 +362,6 @@ mod tests {
 
     #[test]
     fn default_thinking_level_propagates_from_codex_extras() {
-        // when codex hints at a starting level, mush should respect it
-        // when switching to that model (one-shot, the user's per-cwd
-        // override still wins on subsequent runs)
         let models = parse_codex_models(FIXTURE).unwrap();
         let gpt54 = &models[0].model;
         assert_eq!(gpt54.default_thinking_level, Some(ThinkingLevel::Medium));
@@ -458,8 +369,6 @@ mod tests {
 
     #[test]
     fn legacy_codex_entry_with_only_none_level_has_empty_supported_levels() {
-        // a `none`-only entry isn't reasoning-capable; the cycler can't
-        // walk over it so we leave the supported set empty
         let models = parse_codex_models(FIXTURE).unwrap();
         let legacy = models
             .iter()
@@ -491,7 +400,6 @@ mod tests {
 
     #[test]
     fn cost_stays_zero_for_codex() {
-        // chatgpt subscription has no per-token billing exposed in /models
         let models = parse_codex_models(FIXTURE).unwrap();
         for m in &models {
             assert_eq!(m.model.cost.input, 0.0);
@@ -501,8 +409,6 @@ mod tests {
 
     #[test]
     fn parser_preserves_raw_entry_json() {
-        // codex's rich fields (supported_reasoning_levels, visibility,
-        // priority, …) are kept verbatim for a typed accessor to read later
         let models = parse_codex_models(FIXTURE).unwrap();
         let raw = models[0].raw.as_ref().expect("raw populated");
         assert_eq!(raw["slug"], "gpt-5.4");
@@ -522,8 +428,6 @@ mod tests {
 
     #[test]
     fn unknown_fields_are_ignored() {
-        // forward-compat: codex regularly adds new fields. unknown ones must
-        // round-trip through `raw` without breaking the typed parse
         let body = r#"{
           "models": [{
             "slug": "test",
@@ -575,7 +479,6 @@ mod tests {
 
     #[test]
     fn extras_tolerates_missing_fields() {
-        // bare-minimum entry with only `slug`, every optional field stays None / default
         let raw = serde_json::json!({ "slug": "tiny" });
         let extras = extras(Some(&raw)).unwrap();
         assert!(extras.description.is_none());

@@ -1,11 +1,3 @@
-//! the core agent loop
-//!
-//! streams an assistant response, extracts tool calls, executes tools,
-//! feeds results back, and repeats until the model stops or is aborted.
-//!
-//! supports steering (inject messages mid-run), follow-ups (continue after
-//! agent would stop), and context transforms (compact before each LLM call).
-
 use futures::StreamExt;
 use mush_ai::registry::{ApiRegistry, LlmContext, ToolDefinition};
 use mush_ai::stream::StreamEvent;
@@ -13,74 +5,66 @@ use mush_ai::types::*;
 
 use crate::tool::{ToolRegistry, ToolResult};
 
-/// events emitted by the agent loop for UI consumption
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum AgentEvent {
-    /// agent loop started
     AgentStart,
-    /// new turn starting (one LLM call + tool executions)
-    TurnStart { turn_index: usize },
-    /// assistant message streaming started
-    MessageStart { message: AssistantMessage },
-    /// streaming update (wraps the underlying stream event)
-    StreamEvent { event: StreamEvent },
-    /// assistant message streaming finished
-    MessageEnd { message: AssistantMessage },
-    /// tool execution starting
+    TurnStart {
+        turn_index: usize,
+    },
+    MessageStart {
+        message: AssistantMessage,
+    },
+    StreamEvent {
+        event: StreamEvent,
+    },
+    MessageEnd {
+        message: AssistantMessage,
+    },
     ToolExecStart {
         tool_call_id: ToolCallId,
         tool_name: ToolName,
         args: serde_json::Value,
     },
-    /// partial output from a running tool (e.g. bash streaming stdout)
     ToolOutput {
         tool_call_id: ToolCallId,
         tool_name: ToolName,
         output: String,
     },
-    /// tool execution finished
     ToolExecEnd {
         tool_call_id: ToolCallId,
         tool_name: ToolName,
         result: ToolResult,
     },
-    /// steering messages injected mid-run.
-    /// the actual messages are carried so consumers can persist them
-    /// to a conversation tree (else the cache prefix drifts on the
-    /// next stream when the tree-derived context omits them)
-    SteeringInjected { messages: Vec<Message> },
-    /// follow-up messages continuing the loop.
-    /// carries the messages for the same persistence reason as
-    /// [`AgentEvent::SteeringInjected`]
-    FollowUpInjected { messages: Vec<Message> },
-    /// lifecycle hook ran
+    SteeringInjected {
+        messages: Vec<Message>,
+    },
+    FollowUpInjected {
+        messages: Vec<Message>,
+    },
     HookRan {
         point: crate::hooks::HookPoint,
         result: crate::hooks::HookResult,
     },
-    /// context was transformed (e.g. compacted)
     ContextTransformed {
         before_count: usize,
         after_count: usize,
     },
-    /// turn finished
     TurnEnd {
         turn_index: usize,
         message: AssistantMessage,
     },
-    /// agent hit max turns limit
-    MaxTurnsReached { max_turns: usize },
-    /// agent loop finished
+    MaxTurnsReached {
+        max_turns: usize,
+    },
     AgentEnd,
-    /// error occurred
-    Error { error: String },
+    Error {
+        error: String,
+    },
 }
 
-/// default max turns before the agent stops (effectively unlimited)
 pub const DEFAULT_MAX_TURNS: usize = usize::MAX;
 
-/// boxed future for async callback return types
 pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
 #[derive(Debug, Clone)]
@@ -90,36 +74,22 @@ pub enum ContextTransformResult {
     Silent(Vec<Message>),
 }
 
-/// result of a tool confirmation check
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfirmAction {
-    /// execute the tool
     Allow,
-    /// skip this tool call, return default error to the model
     Deny,
-    /// skip this tool call with a specific reason (shown to the model)
     DenyWithReason(String),
 }
 
-/// extension point for agent loop lifecycle callbacks.
-/// all methods have default no-op implementations so callers only
-/// override what they need. use `NoopHooks` for the default
 pub trait AgentHooks: Send + Sync {
-    /// check for steering messages between tool calls.
-    /// if messages are returned, remaining tool calls are skipped and
-    /// these messages are added before the next LLM call
     fn get_steering(&self) -> BoxFuture<'static, Vec<Message>> {
         Box::pin(async { vec![] })
     }
 
-    /// check for follow-up messages when agent would otherwise stop.
-    /// if messages are returned, the agent continues with another turn
     fn get_follow_up(&self) -> BoxFuture<'static, Vec<Message>> {
         Box::pin(async { vec![] })
     }
 
-    /// transform the message context before each LLM call.
-    /// use for compaction, filtering, or other context management
     fn transform_context<'a>(
         &'a self,
         _messages: &'a [Message],
@@ -127,8 +97,6 @@ pub trait AgentHooks: Send + Sync {
         Box::pin(async { ContextTransformResult::Unchanged })
     }
 
-    /// confirm before executing a tool. return Allow to proceed,
-    /// Deny or DenyWithReason to skip
     fn confirm_tool(
         &self,
         _id: &ToolCallId,
@@ -139,11 +107,9 @@ pub trait AgentHooks: Send + Sync {
     }
 }
 
-/// default no-op hooks implementation
 pub struct NoopHooks;
 impl AgentHooks for NoopHooks {}
 
-/// closure type aliases for `ClosureHooks` fields
 pub type SteeringFn = Box<dyn Fn() -> BoxFuture<'static, Vec<Message>> + Send + Sync>;
 pub type TransformFn =
     Box<dyn Fn(&[Message]) -> BoxFuture<'_, ContextTransformResult> + Send + Sync>;
@@ -153,8 +119,6 @@ pub type ConfirmFn = Box<
         + Sync,
 >;
 
-/// callback-based hooks adapter. wraps optional closures into the
-/// `AgentHooks` trait. callers set only the fields they need
 #[derive(Default)]
 pub struct ClosureHooks {
     pub steering: Option<SteeringFn>,
@@ -201,62 +165,35 @@ impl AgentHooks for ClosureHooks {
     }
 }
 
-/// callback type for dynamic system prompt additions, called each turn
 pub type DynamicContext = std::sync::Arc<dyn Fn() -> Option<String> + Send + Sync>;
 
-/// callback type for file-triggered rule injection.
-/// given a file path from a tool call, returns any matching rule content
-/// that should be appended to the tool result.
 pub type FileRuleCallback =
     std::sync::Arc<dyn Fn(&std::path::Path) -> Option<String> + Send + Sync>;
 
-/// async callback for getting diagnostics after a file-modifying tool runs.
-/// receives the file path from tool arguments, returns formatted diagnostics
-/// to append to the tool result.
 pub type DiagnosticCallback =
     std::sync::Arc<dyn Fn(&std::path::Path) -> BoxFuture<'_, Option<String>> + Send + Sync>;
 
-/// injection callbacks for file rules, diagnostics, and dynamic context.
-/// grouped separately from core config since these are all optional
-/// extension points wired up by the host application.
 #[derive(Default, Clone)]
 pub struct AgentInjections {
-    /// user-configured lifecycle hooks (shell commands)
     pub lifecycle_hooks: crate::hooks::LifecycleHooks,
-    /// working directory for lifecycle hook commands
     pub cwd: Option<std::path::PathBuf>,
-    /// dynamic addition to system prompt, called before each LLM call.
-    /// used for repo map updates and other live context.
     pub dynamic_system_context: Option<DynamicContext>,
-    /// file-triggered rule injection. when a tool touches a file,
-    /// this callback is checked for matching rules to append.
     pub file_rules: Option<FileRuleCallback>,
-    /// LSP diagnostic injection. after file-modifying tools (write, edit,
-    /// apply_patch), queries the LSP server for diagnostics and appends them.
     pub lsp_diagnostics: Option<DiagnosticCallback>,
 }
 
-/// configuration for running the agent loop
 pub struct AgentConfig<'a> {
     pub model: Model,
     pub system_prompt: Option<String>,
     pub tools: ToolRegistry,
     pub registry: &'a ApiRegistry,
     pub options: StreamOptions,
-    /// max tool-calling turns before forced stop (default: unlimited)
     pub max_turns: usize,
     pub hooks: Box<dyn AgentHooks>,
-    /// injection callbacks and context
     pub injections: AgentInjections,
-    /// cooperative cancellation token. when cancelled, the agent loop
-    /// stops before the next turn or tool execution.
     pub cancel: Option<tokio_util::sync::CancellationToken>,
 }
 
-/// run the agent loop, yielding events as they happen
-///
-/// takes an initial set of messages and runs until the model stops
-/// producing tool calls (or hits an error/abort).
 pub fn agent_loop(
     config: AgentConfig<'_>,
     initial_messages: Vec<Message>,
@@ -267,7 +204,6 @@ pub fn agent_loop(
         let mut messages = initial_messages;
         let mut turn_index = 0;
 
-        // run pre-session hooks (once, before the first LLM call)
         if !config.injections.lifecycle_hooks.for_point(crate::hooks::HookPoint::PreSession).is_empty() {
             let results = config.injections.lifecycle_hooks
                 .run_all(crate::hooks::HookPoint::PreSession, config.injections.cwd.as_deref())
@@ -280,7 +216,6 @@ pub fn agent_loop(
                 };
             }
 
-            // if any pre-session hook produced output, inject it as context
             let all_output: String = results
                 .iter()
                 .filter(|r| !r.output.is_empty())
@@ -297,20 +232,15 @@ pub fn agent_loop(
             }
         }
 
-        // check for steering at start (user may have typed while waiting)
         let mut pending: Vec<Message> = config.hooks.get_steering().await;
 
-        // outer loop: continues when follow-up messages arrive
         'outer: loop {
-            // inner loop: process tool calls and steering
             loop {
-                // check cooperative cancellation before each turn
                 if config.cancel.as_ref().is_some_and(|t| t.is_cancelled()) {
                     tracing::info!("agent_loop cancelled before turn {turn_index}");
                     break 'outer;
                 }
 
-                // inject pending messages
                 if !pending.is_empty() {
                     let injected = pending.clone();
                     messages.append(&mut pending);
@@ -319,7 +249,6 @@ pub fn agent_loop(
 
                 yield AgentEvent::TurnStart { turn_index };
 
-                // apply context transform before LLM call
                 tracing::info_span!("agent_turn", turn = turn_index).in_scope(|| {
                     tracing::info!("turn started");
                 });
@@ -341,9 +270,6 @@ pub fn agent_loop(
                     }
                 };
 
-                // build LLM context. tools get the per-provider schema
-                // for the model we're about to call, so providers see the
-                // exact tool signature their model is RL'd on
                 let tool_defs: Vec<ToolDefinition> = config.tools.iter()
                     .map(|t| ToolDefinition {
                         name: t.name().to_string(),
@@ -351,7 +277,6 @@ pub fn agent_loop(
                         parameters: t.parameters_schema_for(config.model.api),
                     }).collect();
 
-                // compose system prompt from static base + dynamic suffix
                 let system_prompt = match (&config.system_prompt, &config.injections.dynamic_system_context) {
                     (Some(base), Some(suffix_fn)) => {
                         if let Some(suffix) = suffix_fn() {
@@ -369,21 +294,8 @@ pub fn agent_loop(
                     tools: tool_defs,
                 };
 
-                // stream the assistant response
                 tracing::debug!(turn = turn_index, model = %config.model.id, "streaming LLM response");
 
-                // retry transient errors with exponential backoff. count
-                // and backoff cap chosen so a typical "error decoding
-                // response body" gust gets up to 5 attempts spread over
-                // 1+2+4+8+16 = 31s of cooldown before bailing. the loop
-                // also covers consume-phase transient errors (anthropic
-                // 200 OK + mid-stream `overloaded_error` SSE event):
-                // when the stream ends with `StopReason::Error`, no
-                // content was emitted, and the error message looks
-                // transient, retry the whole call. yielded events from
-                // a failed attempt (MessageStart, Start, Done) are
-                // harmless because nothing in the consumer commits state
-                // on them when no deltas/tool calls were streamed
                 const MAX_RETRIES: u32 = 5;
                 const MAX_BACKOFF_SECS: u64 = 16;
                 let mut final_message: Option<AssistantMessage> = None;
@@ -447,13 +359,6 @@ pub fn agent_loop(
                                     partial_stop_reason = ?message.stop_reason,
                                     "LLM stream error"
                                 );
-                                // preserve the partial assistant message: yield
-                                // MessageEnd before Error so the TUI can render
-                                // whatever the model managed to stream and the
-                                // session captures it. without this, "error
-                                // decoding response body" mid-paragraph drops
-                                // the entire response, including any minutes
-                                // of useful work the model produced
                                 let partial = message.clone();
                                 if !partial.content.is_empty() {
                                     yield AgentEvent::MessageEnd { message: partial.clone() };
@@ -485,11 +390,6 @@ pub fn agent_loop(
                         yield AgentEvent::StreamEvent { event };
                     }
 
-                    // retry consume-phase failures: stream completed with
-                    // an error, no content was yielded, and the message
-                    // matches a known transient pattern (anthropic
-                    // overloaded, rate limit, upstream 5xx surfaced as
-                    // SSE error event, ...)
                     if let Some(msg) = &local_final
                         && msg.stop_reason == StopReason::Error
                         && !had_content
@@ -520,7 +420,6 @@ pub fn agent_loop(
                 yield AgentEvent::MessageEnd { message: assistant_msg.clone() };
                 messages.push(Message::Assistant(assistant_msg.clone()));
 
-                // extract tool calls
                 let tool_calls: Vec<&ToolCall> = assistant_msg
                     .content
                     .iter()
@@ -531,7 +430,6 @@ pub fn agent_loop(
                     .collect();
 
                 if tool_calls.is_empty() {
-                    // run stop hooks before declaring done
                     if !config.injections.lifecycle_hooks.for_point(crate::hooks::HookPoint::Stop).is_empty() {
                         let results = config.injections.lifecycle_hooks
                             .run_all(crate::hooks::HookPoint::Stop, config.injections.cwd.as_deref())
@@ -560,16 +458,14 @@ pub fn agent_loop(
                                 yield AgentEvent::MaxTurnsReached { max_turns: config.max_turns };
                                 break 'outer;
                             }
-                            continue; // re-enter inner loop
+                            continue;
                         }
                     }
 
                     yield AgentEvent::TurnEnd { turn_index, message: assistant_msg };
-                    break; // no tools, exit inner loop
+                    break;
                 }
 
-                // execute tool calls in parallel
-                // confirmations are checked sequentially (needs user interaction)
                 let mut confirmed: Vec<&ToolCall> = Vec::new();
                 for tc in &tool_calls {
                     {
@@ -600,7 +496,6 @@ pub fn agent_loop(
                 }
 
                 if !confirmed.is_empty() {
-                    // run pre-tool hooks and filter out blocked tools
                     let mut allowed: Vec<&ToolCall> = Vec::new();
                     for tc in &confirmed {
                         if !config.injections.lifecycle_hooks.for_point(crate::hooks::HookPoint::PreToolUse).is_empty() {
@@ -620,7 +515,6 @@ pub fn agent_loop(
                             }
 
                             if crate::hooks::has_blocking_failure(&hook_results) {
-                                // pre-hook blocked this tool, return feedback as tool result
                                 let feedback = crate::hooks::format_hook_results(
                                     &hook_results,
                                     crate::hooks::HookPoint::PreToolUse,
@@ -644,7 +538,6 @@ pub fn agent_loop(
                         allowed.push(tc);
                     }
 
-                    // emit start events for all allowed tools
                     for tc in &allowed {
                         yield AgentEvent::ToolExecStart {
                             tool_call_id: tc.id.clone(),
@@ -653,7 +546,6 @@ pub fn agent_loop(
                         };
                     }
 
-                    // check cancellation before executing tools
                     if config.cancel.as_ref().is_some_and(|t| t.is_cancelled()) {
                         tracing::info!("agent_loop cancelled before tool execution");
                         for tc in &allowed {
@@ -674,16 +566,6 @@ pub fn agent_loop(
                         break 'outer;
                     }
 
-                    // execute all allowed tools concurrently. calls that
-                    // mutate the same file are serialised within the same
-                    // group to avoid read-modify-write races (the bug
-                    // where the last writer wins and earlier edits are
-                    // silently lost). independent groups still run in
-                    // parallel. racing the batch against the cancel token
-                    // lets the user abort a long-running tool: tool
-                    // futures get dropped on cancel, which triggers
-                    // kill_on_drop on the bash child processes (see
-                    // mush-tools::bash)
                     let allowed_calls: Vec<ToolCall> =
                         allowed.iter().map(|&tc| tc.clone()).collect();
                     let tools_ref = &config.tools;
@@ -693,9 +575,6 @@ pub fn agent_loop(
                             crate::tool_grouping::file_path_key(tc.name.as_str(), &tc.arguments)
                         },
                         move |tc: ToolCall| {
-                            // tag the execution with its tool-call id so streaming
-                            // sinks (bash live output) attribute lines to the right
-                            // panel even when several tools run concurrently
                             let exec_id = tc.id.to_string();
                             crate::exec_context::TOOL_EXEC_ID
                                 .scope(exec_id, async move { execute_tool(tools_ref, &tc).await })
@@ -727,9 +606,7 @@ pub fn agent_loop(
                         None => futs.await,
                     };
 
-                    // emit results, run post-tool hooks, push to messages
                     for (tc, mut result) in allowed.iter().zip(results) {
-                        // run post-tool hooks
                         if !config.injections.lifecycle_hooks.for_point(crate::hooks::HookPoint::PostToolUse).is_empty() {
                             let hook_results = config.injections.lifecycle_hooks
                                 .run_for_tool(
@@ -746,7 +623,6 @@ pub fn agent_loop(
                                 };
                             }
 
-                            // append hook output to the tool result
                             if let Some(feedback) = crate::hooks::format_hook_results(
                                 &hook_results,
                                 crate::hooks::HookPoint::PostToolUse,
@@ -757,7 +633,6 @@ pub fn agent_loop(
                             }
                         }
 
-                        // check file rules for path-based tool calls
                         if let Some(ref file_rules) = config.injections.file_rules
                             && let Some(path) = extract_file_path(&tc.arguments)
                             && let Some(rule_text) = file_rules(&path)
@@ -767,7 +642,6 @@ pub fn agent_loop(
                             }));
                         }
 
-                        // inject LSP diagnostics for file-modifying tools
                         if let Some(ref lsp_diag) = config.injections.lsp_diagnostics
                             && is_file_modifying_tool(tc.name.as_str())
                             && let Some(path) = extract_file_path(&tc.arguments)
@@ -792,7 +666,6 @@ pub fn agent_loop(
                         }));
                     }
 
-                    // check steering after all tools complete
                     {
                         let steering = config.hooks.get_steering().await;
                         if !steering.is_empty() {
@@ -809,21 +682,14 @@ pub fn agent_loop(
                     break 'outer;
                 }
 
-                // if no pending steering, check for more
                 if pending.is_empty() {
                     pending = config.hooks.get_steering().await;
                 }
 
-                // if there are pending messages, the inner loop continues
-                // if not, we exit to check follow-ups
                 if pending.is_empty() {
-                    // no tool calls + no steering = agent wants to stop
-                    // but we already broke above if tool_calls is empty,
-                    // so here we always have tools and should continue
                 }
             }
 
-            // agent would stop. check for follow-ups
             {
                 let follow_up = config.hooks.get_follow_up().await;
                 if !follow_up.is_empty() {
@@ -834,7 +700,7 @@ pub fn agent_loop(
                 }
             }
 
-            break; // nothing more to do
+            break;
         }
 
         yield AgentEvent::AgentEnd;
@@ -843,16 +709,12 @@ pub fn agent_loop(
     Box::pin(stream)
 }
 
-/// extract a file path from tool call arguments
-///
-/// tools like read, write, edit, and apply_patch use a `path` field
 fn extract_file_path(args: &serde_json::Value) -> Option<std::path::PathBuf> {
     args.get("path")
         .and_then(|v| v.as_str())
         .map(std::path::PathBuf::from)
 }
 
-/// tools that modify files on disk (diagnostics are relevant after these)
 fn is_file_modifying_tool(name: &str) -> bool {
     matches!(
         name.to_lowercase().as_str(),
@@ -960,10 +822,6 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(execute_tool(&tools, &tc));
         assert!(result.outcome.is_error());
-        // the tool-not-found error should include the attempted args so a
-        // model (or human reading the log) can see which call was
-        // malformed. particularly useful when a misspelled tool name is
-        // masking a real operation the model was trying to perform.
         let text = match &result.content[0] {
             mush_ai::types::ToolResultContentPart::Text(t) => &t.text,
             _ => panic!("expected text content"),
@@ -996,7 +854,6 @@ mod tests {
         let tools = ToolRegistry::from_boxed(vec![Box::new(CounterTool)]);
         let rt = tokio::runtime::Runtime::new().unwrap();
 
-        // PascalCase should match snake_case tool
         let tc = ToolCall {
             id: "tc_1".into(),
             name: "Counter".into(),
@@ -1004,7 +861,6 @@ mod tests {
         };
         assert!(rt.block_on(execute_tool(&tools, &tc)).outcome.is_success());
 
-        // UPPERCASE should match
         let tc = ToolCall {
             id: "tc_2".into(),
             name: "COUNTER".into(),
@@ -1042,7 +898,6 @@ mod tests {
         let tools = ToolRegistry::from_boxed(vec![Box::new(WebSearchTool)]);
         let rt = tokio::runtime::Runtime::new().unwrap();
 
-        // PascalCase (what claude sends) should match web_search
         let tc = ToolCall {
             id: "tc_1".into(),
             name: "WebSearch".into(),
@@ -1050,7 +905,6 @@ mod tests {
         };
         assert!(rt.block_on(execute_tool(&tools, &tc)).outcome.is_success());
 
-        // lowercase no underscore should match
         let tc = ToolCall {
             id: "tc_2".into(),
             name: "websearch".into(),
@@ -1058,7 +912,6 @@ mod tests {
         };
         assert!(rt.block_on(execute_tool(&tools, &tc)).outcome.is_success());
 
-        // exact match still works
         let tc = ToolCall {
             id: "tc_3".into(),
             name: "web_search".into(),
@@ -1096,19 +949,12 @@ mod tests {
             stream.collect().await
         });
 
-        // should get AgentStart, TurnStart, Error, AgentEnd
         assert!(events.iter().any(|e| matches!(e, AgentEvent::Error { .. })));
         assert!(events.iter().any(|e| matches!(e, AgentEvent::AgentEnd)));
     }
 
     #[test]
     fn stream_error_with_partial_yields_message_end_before_error() {
-        // when a stream errors mid-response with partial content (e.g.
-        // "error decoding response body" after the model already streamed
-        // a paragraph), the agent loop must yield MessageEnd with the
-        // partial content BEFORE Error so the TUI can render it and the
-        // session captures what the model said. previously the partial
-        // was logged then dropped, nuking minutes of streaming work
         struct PartialErrorProvider;
 
         #[async_trait::async_trait]
@@ -1169,7 +1015,6 @@ mod tests {
         let events: Vec<AgentEvent> =
             rt.block_on(async { agent_loop(config, user_messages).collect().await });
 
-        // find the indices of MessageEnd and Error
         let msg_end = events
             .iter()
             .position(|e| matches!(e, AgentEvent::MessageEnd { .. }));
@@ -1183,7 +1028,6 @@ mod tests {
             "MessageEnd must come before Error so the TUI/session sees the partial content first"
         );
 
-        // the partial content must be preserved verbatim
         let AgentEvent::MessageEnd { message } = &events[msg_end] else {
             unreachable!()
         };
@@ -1241,7 +1085,6 @@ mod tests {
         let _events: Vec<AgentEvent> =
             rt.block_on(async { agent_loop(config, messages).collect().await });
 
-        // transform was called even though LLM will error (no provider)
         assert!(called.load(Ordering::SeqCst));
     }
 
@@ -1430,7 +1273,6 @@ mod tests {
         let events: Vec<AgentEvent> =
             rt.block_on(async { agent_loop(config, messages).collect().await });
 
-        // should get AgentStart then AgentEnd (no TurnStart, no Error)
         assert!(events.iter().any(|e| matches!(e, AgentEvent::AgentStart)));
         assert!(events.iter().any(|e| matches!(e, AgentEvent::AgentEnd)));
         assert!(
@@ -1588,15 +1430,6 @@ mod tests {
 
     #[test]
     fn overloaded_stream_error_triggers_retry_with_eventual_success() {
-        // when the underlying provider yields an SSE stream that ends in
-        // `StopReason::Error` with a transient error message ("Overloaded",
-        // "rate_limit", etc) and no streamed content, the agent loop must
-        // retry the whole stream call. anthropic in particular returns
-        // overloaded as either a 529 (already retried at the http layer)
-        // or as a mid-stream `error` event with `error.type =
-        // overloaded_error` (until now NOT retried). this test scripts
-        // the second case: first call yields the error stream, second
-        // call yields a successful stream
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1684,8 +1517,6 @@ mod tests {
             "provider should be called twice: first overloaded, second succeeds"
         );
 
-        // the user-visible final assistant message should be the
-        // successful retry, not the overloaded shell
         let last_message_end = events
             .iter()
             .rev()
@@ -1697,7 +1528,6 @@ mod tests {
         assert_eq!(last_message_end.stop_reason, StopReason::Stop);
         assert_eq!(last_message_end.text(), "hello after retry");
 
-        // no Error event should leak when the retry succeeded
         let error_count = events
             .iter()
             .filter(|e| matches!(e, AgentEvent::Error { .. }))

@@ -1,5 +1,3 @@
-//! MCP server connection management
-
 use std::io::IsTerminal;
 use std::time::Duration;
 
@@ -13,7 +11,6 @@ use tokio::process::Command;
 
 use crate::config::{McpServerConfig, McpServerType, build_http_config};
 
-/// error type for MCP operations
 #[derive(Debug, thiserror::Error)]
 pub enum McpError {
     #[error("connection failed: {0}")]
@@ -31,10 +28,6 @@ pub enum McpError {
 pub(crate) const DIM: &str = "2";
 pub(crate) const YELLOW: &str = "33";
 
-/// wrap a startup status line in an ansi code, or leave it alone
-///
-/// startup status goes to stderr before the tui takes over, so it has to
-/// survive being piped to a file without spraying escape bytes.
 fn status_line(text: &str, ansi: &str, colour: bool) -> String {
     if colour {
         format!("\x1b[{ansi}m{text}\x1b[0m")
@@ -43,7 +36,6 @@ fn status_line(text: &str, ansi: &str, colour: bool) -> String {
     }
 }
 
-/// report startup status on stderr, styled only for a real terminal
 pub(crate) fn report_status(text: &str, ansi: &str) {
     eprintln!(
         "{}",
@@ -51,20 +43,14 @@ pub(crate) fn report_status(text: &str, ansi: &str) {
     );
 }
 
-/// a live connection to an MCP server
 pub struct McpConnection {
     pub name: String,
     pub service: RunningService<RoleClient, ()>,
     pub tools: Vec<McpToolDef>,
-    /// per-request deadline, `None` to wait indefinitely
     timeout: Option<Duration>,
 }
 
 impl McpConnection {
-    /// connect to an MCP server
-    ///
-    /// the configured timeout bounds the whole handshake, otherwise a server
-    /// that spawns but never speaks would wedge startup forever.
     #[tracing::instrument(name = "mcp_connect", skip_all, fields(server = %name))]
     pub async fn connect(name: &str, config: &McpServerConfig) -> Result<Self, McpError> {
         if !config.enabled {
@@ -97,8 +83,6 @@ impl McpConnection {
                         for (k, v) in &env {
                             c.env(k, v);
                         }
-                        // a timed-out handshake drops the transport, which must
-                        // take the child with it rather than orphan it
                         c.kill_on_drop(true);
                     }),
                 )
@@ -119,7 +103,6 @@ impl McpConnection {
             }
         };
 
-        // list available tools
         let tools_result = service
             .list_tools(Default::default())
             .await
@@ -139,12 +122,6 @@ impl McpConnection {
         })
     }
 
-    /// call a tool on this server
-    ///
-    /// uses the cancellable request path so an expired deadline also tells
-    /// the server to stop working, rather than just abandoning the response.
-    /// progress notifications extend the deadline, which matters for tools
-    /// that stream updates while rendering.
     #[tracing::instrument(name = "mcp_call", skip_all, fields(tool = %name))]
     pub async fn call_tool(
         &self,

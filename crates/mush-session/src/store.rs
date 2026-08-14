@@ -1,13 +1,7 @@
-//! session persistence to disk
-//!
-//! sessions are stored as json files under `~/.local/share/mush/sessions/`.
-//! each session gets its own file named by session id.
-
 use std::path::{Path, PathBuf};
 
 use crate::session::{Session, SessionId, SessionMeta};
 
-/// errors from session store operations
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum StoreError {
     #[error("io error: {0}")]
@@ -23,12 +17,10 @@ pub enum StoreError {
     #[diagnostic(help("candidates: {}", matches.join(", ")))]
     AmbiguousId {
         prefix: String,
-        /// ids that share the prefix, for the caller to list
         matches: Vec<String>,
     },
 }
 
-/// file-based session store
 pub struct SessionStore {
     base_dir: PathBuf,
 }
@@ -46,7 +38,6 @@ pub struct IgnoredSessionFile {
 }
 
 impl SessionStore {
-    /// create a store using the default data directory
     pub fn default_dir() -> PathBuf {
         data_dir().join("sessions")
     }
@@ -55,7 +46,6 @@ impl SessionStore {
         Self { base_dir }
     }
 
-    /// ensure the sessions directory exists
     pub fn init(&self) -> Result<(), StoreError> {
         std::fs::create_dir_all(&self.base_dir)?;
         Ok(())
@@ -65,7 +55,6 @@ impl SessionStore {
         self.base_dir.join(format!("{id}.json"))
     }
 
-    /// save a session to disk
     pub fn save(&self, session: &Session) -> Result<(), StoreError> {
         self.init()?;
         let path = self.session_path(&session.meta.id);
@@ -74,7 +63,6 @@ impl SessionStore {
         Ok(())
     }
 
-    /// load a session by id
     pub fn load(&self, id: &SessionId) -> Result<Session, StoreError> {
         let path = self.session_path(id);
         if !path.exists() {
@@ -85,12 +73,6 @@ impl SessionStore {
         Ok(session)
     }
 
-    /// resolve a user-supplied id or id prefix to exactly one session.
-    ///
-    /// an exact id match always wins, so a session whose id is a prefix of
-    /// another is still reachable. otherwise the prefix has to identify a
-    /// single session, and ambiguity is reported with the candidates so
-    /// the caller can list them
     pub fn resolve(&self, prefix: &str) -> Result<SessionMeta, StoreError> {
         let sessions = self.list()?;
         if let Some(exact) = sessions.iter().find(|s| s.id.as_str() == prefix) {
@@ -114,7 +96,6 @@ impl SessionStore {
         })
     }
 
-    /// list all session metadata (without loading full messages)
     pub fn list(&self) -> Result<Vec<SessionMeta>, StoreError> {
         Ok(self.list_report()?.sessions)
     }
@@ -134,16 +115,11 @@ impl SessionStore {
             }
         }
 
-        // sort by updated_at descending (most recent first)
         sessions.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
         ignored.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(SessionListReport { sessions, ignored })
     }
 
-    /// enumerate session file paths without parsing them. cheap
-    /// readdir-only pass: callers that want to stream metadata
-    /// progressively (e.g. the TUI `/sessions` picker) drive json
-    /// parsing per-path off the hot path
     pub fn list_paths(&self) -> Result<Vec<PathBuf>, StoreError> {
         self.init()?;
         let mut paths = Vec::new();
@@ -158,7 +134,6 @@ impl SessionStore {
         Ok(paths)
     }
 
-    /// delete a session
     pub fn delete(&self, id: &SessionId) -> Result<(), StoreError> {
         let path = self.session_path(id);
         if path.exists() {
@@ -182,7 +157,6 @@ fn ignored_session_reason(error: &StoreError) -> String {
     }
 }
 
-/// load just the metadata from a session file without deserialising all messages
 pub fn load_meta(path: &Path) -> Result<SessionMeta, StoreError> {
     #[derive(serde::Deserialize)]
     struct MetaEnvelope {
@@ -194,10 +168,6 @@ pub fn load_meta(path: &Path) -> Result<SessionMeta, StoreError> {
     Ok(envelope.meta)
 }
 
-/// resolve the mush data directory
-///
-/// checks MUSH_DATA_DIR, XDG_DATA_HOME, HOME in order,
-/// falling back to .mush in the current directory
 pub fn data_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("MUSH_DATA_DIR") {
         PathBuf::from(dir)
@@ -224,8 +194,6 @@ mod tests {
 
     #[test]
     fn resolve_accepts_an_unambiguous_id_prefix() {
-        // every entry point that takes a session id from a human accepts
-        // a prefix, so the store owns that lookup rather than each caller
         let (_dir, store) = temp_store();
         let mut session = Session::new("test-model", "/tmp");
         session.meta.id = SessionId::from("abc123def456");
@@ -309,11 +277,6 @@ mod tests {
 
     #[test]
     fn system_prompt_round_trips() {
-        // the system prompt is part of the cached request prefix on the
-        // anthropic side. if we don't persist it with the session, a
-        // resumed session re-derives the prompt from current AGENTS.md
-        // and any drift busts the cache on the first call. round-trip
-        // through json must preserve the exact string
         let (_dir, store) = temp_store();
         let mut session = Session::new("test-model", "/tmp");
         session.system_prompt = Some("you are running inside mush\n\nproject context: foo".into());
@@ -328,8 +291,6 @@ mod tests {
 
     #[test]
     fn legacy_session_without_system_prompt_loads_with_none() {
-        // older session files were written before system_prompt existed.
-        // they must still load, deserialising the missing field as None
         let (dir, store) = temp_store();
         let id = SessionId::from("legacy");
         let legacy_json = format!(

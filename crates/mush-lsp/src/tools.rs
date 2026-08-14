@@ -1,10 +1,3 @@
-//! LSP-backed agent tools
-//!
-//! exposes LSP capabilities as tools the agent can call:
-//! - `lsp_diagnostics`: get type errors and warnings for a file
-//! - `lsp_hover`: get type/doc info at a position
-//! - `lsp_references`: find all references to a symbol
-
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -14,7 +7,6 @@ use serde_json::{Value, json};
 use crate::client::format_diagnostics;
 use crate::registry::LspRegistry;
 
-/// get LSP diagnostics for a file
 pub struct DiagnosticsTool {
     registry: Arc<LspRegistry>,
     cwd: PathBuf,
@@ -55,8 +47,6 @@ impl AgentTool for DiagnosticsTool {
     }
 
     fn output_limit(&self) -> mush_agent::tool::OutputLimit {
-        // diagnostics list grouped by file. head keeps the first
-        // diagnostics which are typically the most actionable
         mush_agent::tool::OutputLimit::Head
     }
 
@@ -81,12 +71,10 @@ impl AgentTool for DiagnosticsTool {
     }
 }
 
-/// create all LSP tools sharing a single registry
 pub fn lsp_tools(registry: Arc<LspRegistry>, cwd: PathBuf) -> Vec<Box<dyn AgentTool>> {
     vec![Box::new(DiagnosticsTool::new(registry, cwd))]
 }
 
-// same as mush_tools::util::resolve_path (can't depend on mush-tools here)
 fn resolve_path(cwd: &std::path::Path, path_str: &str) -> PathBuf {
     let p = PathBuf::from(path_str);
     if p.is_absolute() { p } else { cwd.join(p) }

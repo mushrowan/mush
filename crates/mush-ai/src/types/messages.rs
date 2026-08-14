@@ -1,5 +1,3 @@
-//! message types, usage tracking, and cost accounting
-
 use serde::{Deserialize, Deserializer, Serialize};
 
 use super::content::{AssistantContentPart, ToolResultContentPart, UserContent};
@@ -15,13 +13,10 @@ pub struct Usage {
 }
 
 impl Usage {
-    /// total tokens processed in this API call (all categories)
     pub fn total_tokens(&self) -> TokenCount {
         self.input_tokens + self.output_tokens + self.cache_read_tokens + self.cache_write_tokens
     }
 
-    /// total input tokens (context size for this call).
-    /// for anthropic: input_tokens is non-cached, cache_read + cache_write are the rest
     pub fn total_input_tokens(&self) -> TokenCount {
         self.input_tokens + self.cache_read_tokens + self.cache_write_tokens
     }
@@ -59,7 +54,6 @@ pub struct UserMessage {
 }
 
 impl UserMessage {
-    /// extract the text content of this message
     #[must_use]
     pub fn text(&self) -> String {
         self.content.text()
@@ -81,17 +75,11 @@ pub struct AssistantMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
     pub timestamp_ms: Timestamp,
-    /// upstream identifier for this generation, used for openrouter's
-    /// /generation cost reconciliation lookup. populated by streaming
-    /// providers that surface an id (openai-compatible, openrouter).
-    /// `None` for streams that don't expose one (anthropic native).
-    /// stays `None` on persisted/replayed messages from older sessions
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation_id: Option<String>,
 }
 
 impl AssistantMessage {
-    /// extract concatenated text content (excludes thinking and tool calls)
     #[must_use]
     pub fn text(&self) -> String {
         self.content
@@ -104,7 +92,6 @@ impl AssistantMessage {
             .join("")
     }
 
-    /// extract the thinking text, if any
     #[must_use]
     pub fn thinking(&self) -> Option<String> {
         self.content.iter().find_map(|p| match p {
@@ -114,7 +101,6 @@ impl AssistantMessage {
     }
 }
 
-/// whether a tool execution succeeded or failed
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[must_use]
@@ -141,7 +127,6 @@ impl From<bool> for ToolOutcome {
     }
 }
 
-/// deserialise from either `"outcome": "success"` or legacy `"is_error": true`
 fn deserialise_outcome<'de, D: Deserializer<'de>>(d: D) -> Result<ToolOutcome, D::Error> {
     #[derive(Deserialize)]
     #[serde(untagged)]
@@ -173,21 +158,12 @@ pub enum Message {
     ToolResult(ToolResultMessage),
 }
 
-/// pivot role used by [`find_recent_boundary`] to decide which messages
-/// count as turn boundaries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TurnPivot {
-    /// count user messages (provider sliding-window uses this)
     User,
-    /// count assistant messages (compaction observation masking uses this)
     Assistant,
 }
 
-/// scan `messages` from the end and return the index where the N most
-/// recent pivot messages begin. returns `None` if the list contains fewer
-/// than `keep` pivots, meaning "not enough turns to define a cutoff".
-///
-/// callers typically treat `None` as "no-op, don't trim/mask anything".
 #[must_use]
 pub fn find_recent_boundary(messages: &[Message], pivot: TurnPivot, keep: usize) -> Option<usize> {
     if keep == 0 {
@@ -358,25 +334,20 @@ mod tests {
 
     #[test]
     fn find_recent_boundary_locates_nth_pivot_from_end() {
-        // indices:            0       1       2       3       4         5       6
         let msgs = vec![
-            user("old"),    // 0
-            assistant(),    // 1
-            tool_result(),  // 2
-            user("mid"),    // 3
-            assistant(),    // 4
+            user("old"), // 0
+            assistant(),
+            tool_result(),
+            user("mid"), // 3
+            assistant(),
             user("recent"), // 5
-            assistant(),    // 6
+            assistant(),
         ];
 
-        // 3 most recent user messages: the oldest of those 3 is at idx 0
         assert_eq!(find_recent_boundary(&msgs, TurnPivot::User, 3), Some(0));
-        // 2 most recent user messages: boundary at idx 3 (user "mid")
         assert_eq!(find_recent_boundary(&msgs, TurnPivot::User, 2), Some(3));
-        // 1 most recent: user "recent" at idx 5
         assert_eq!(find_recent_boundary(&msgs, TurnPivot::User, 1), Some(5));
 
-        // assistants: 3 total. keep=3 → idx 1. keep=2 → idx 4. keep=1 → idx 6.
         assert_eq!(
             find_recent_boundary(&msgs, TurnPivot::Assistant, 3),
             Some(1)

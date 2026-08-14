@@ -1,36 +1,13 @@
-//! file writers with private permissions
-//!
-//! `~/.local/share/mush/` contains secrets: oauth tokens, session
-//! conversations (with potential api keys pasted by the user), stream
-//! error dumps (which may echo request bodies), tool output captures.
-//! all writes that create or overwrite those files should land with
-//! mode 0o600 so another local user on the machine can't read them.
-//!
-//! use [`write_private`] wherever mush writes a long-lived file under
-//! the data dir. ephemeral temp files (test fixtures, unit tests) are
-//! unaffected
-
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// write `contents` to `path` via an atomic, private replacement.
-///
-/// the writer creates a private temp file in the target directory,
-/// fsyncs it, then renames it over the destination. a crash mid-write
-/// leaves either the old complete file or the new complete file, never
-/// an empty/truncated destination from unlink-then-create. on unix the
-/// temp file is created with mode 0o600. on other platforms we still use
-/// the atomic temp-and-rename path, but do not manage platform ACLs.
 pub fn write_private(path: &Path, contents: impl AsRef<[u8]>) -> io::Result<()> {
     atomic_write(path, contents.as_ref(), true)
 }
 
-/// write non-secret state via the same atomic replacement path as
-/// [`write_private`]. use this for long-lived config/cache files where
-/// durability matters but mode 0o600 is not required.
 pub fn write_atomic(path: &Path, contents: impl AsRef<[u8]>) -> io::Result<()> {
     atomic_write(path, contents.as_ref(), false)
 }
@@ -67,9 +44,6 @@ fn parent_dir(path: &Path) -> &Path {
     }
 }
 
-/// copy the destination's existing mode onto the freshly written temp file
-/// so overwriting a file does not reset its permissions. private writes keep
-/// their locked-down 0o600 mode and are left untouched.
 fn preserve_existing_mode(dest: &Path, temp_path: &Path, private: bool) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -174,7 +148,6 @@ mod tests {
     fn write_private_overwrites_existing_file_with_mode_600() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("rotated.json");
-        // pre-existing file with loose permissions
         std::fs::write(&path, b"old").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
 

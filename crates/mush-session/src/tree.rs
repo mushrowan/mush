@@ -1,15 +1,7 @@
-//! session tree - append-only tree structure for conversation branching
-//!
-//! each entry has an id and parent_id forming a tree. a leaf pointer tracks
-//! the current position. appending creates a child of the leaf. branching
-//! moves the leaf to an earlier entry, so the next append starts a new branch.
-//! existing entries are never modified or deleted.
-
 use derive_more::Display;
 use mush_ai::types::*;
 use serde::{Deserialize, Serialize};
 
-/// unique entry identifier (8 hex chars)
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Display, Serialize, Deserialize)]
 pub struct EntryId(String);
 
@@ -43,7 +35,6 @@ impl Default for EntryId {
     }
 }
 
-/// a single entry in the session tree
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionEntry {
     pub id: EntryId,
@@ -52,44 +43,37 @@ pub struct SessionEntry {
     pub kind: EntryKind,
 }
 
-/// what kind of entry this is
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EntryKind {
-    /// a conversation message (user, assistant, or tool result)
-    Message { message: Message },
-    /// summary of an abandoned branch (injected when branching)
-    BranchSummary { summary: String, from_id: EntryId },
-    /// compaction summary replacing older entries
+    Message {
+        message: Message,
+    },
+    BranchSummary {
+        summary: String,
+        from_id: EntryId,
+    },
     Compaction {
         summary: String,
         first_kept_id: EntryId,
     },
 }
 
-/// tree node for getTree() - entry with its children
 #[derive(Debug, Clone)]
 pub struct TreeNode {
     pub entry: SessionEntry,
     pub children: Vec<TreeNode>,
 }
 
-/// one entry laid out for display, from [`SessionTree::rows`]
 #[derive(Debug, Clone)]
 pub struct TreeRow<'a> {
     pub entry: &'a SessionEntry,
-    /// how deeply nested in abandoned branches this entry is. the line
-    /// leading to the leaf is 0
     pub depth: usize,
-    /// whether the entry is on the branch the next message extends
     pub on_branch: bool,
-    /// whether the entry is the current leaf
     pub is_leaf: bool,
-    /// whether branches diverge here
     pub is_fork: bool,
 }
 
-/// append-only session tree with a leaf pointer
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionTree {
     entries: Vec<SessionEntry>,
@@ -115,9 +99,6 @@ fn push_context_message(
     }
 }
 
-/// render a single entry as the message it contributes to a conversation
-/// view. real messages pass through; branch and compaction markers become
-/// their synthetic summary user messages
 fn entry_to_message(entry: &SessionEntry) -> Message {
     match &entry.kind {
         EntryKind::Message { message } => message.clone(),
@@ -146,7 +127,6 @@ impl SessionTree {
         }
     }
 
-    /// append a message as child of current leaf, advance leaf
     pub fn append_message(&mut self, message: Message) -> EntryId {
         let entry = SessionEntry {
             id: EntryId::new(),
@@ -160,8 +140,6 @@ impl SessionTree {
         id
     }
 
-    /// start a new branch from an earlier entry.
-    /// moves the leaf pointer so the next append creates a child of that entry.
     pub fn branch(&mut self, from_id: &EntryId) -> bool {
         if self.by_id(from_id).is_some() {
             self.leaf_id = Some(from_id.clone());
@@ -171,7 +149,6 @@ impl SessionTree {
         }
     }
 
-    /// branch with a summary of the abandoned path
     pub fn branch_with_summary(
         &mut self,
         from_id: &EntryId,
@@ -196,20 +173,6 @@ impl SessionTree {
         Some(id)
     }
 
-    /// add a compaction marker at the current leaf summarising the first
-    /// `first_kept_context_index` context messages of the current branch.
-    /// existing entries are left in place so `/tree` and `/branch` can
-    /// still navigate back to pre-compaction state. the LLM context
-    /// produced by [`SessionTree::build_context`] will collapse to the
-    /// summary plus the messages from `first_kept_id` onward.
-    ///
-    /// `first_kept_context_index` indexes into the collapsed context
-    /// (exactly what [`SessionTree::build_context`] returns), so it stays
-    /// correct when the branch already holds a prior compaction: the new
-    /// marker folds the earlier summary into itself and keeps the recent
-    /// tail rather than re-expanding already-summarised history. returns
-    /// `None` if the index is out of range or lands on a prior compaction
-    /// summary (index 0 of an already-compacted branch, a no-op).
     pub fn compact_at_leaf(
         &mut self,
         summary: String,
@@ -218,9 +181,6 @@ impl SessionTree {
         let first_kept_id = {
             let context = self.context_entries();
             let entry = context.get(first_kept_context_index)?;
-            // the leading context entry can be a prior compaction node
-            // (its synthetic summary). that only happens at index 0, which
-            // would summarise nothing, so reject it.
             if matches!(entry.kind, EntryKind::Compaction { .. }) {
                 return None;
             }
@@ -242,22 +202,18 @@ impl SessionTree {
         Some(id)
     }
 
-    /// reset leaf to before any entries (next append creates a root)
     pub fn reset_leaf(&mut self) {
         self.leaf_id = None;
     }
 
-    /// get the current leaf id
     pub fn leaf_id(&self) -> Option<&EntryId> {
         self.leaf_id.as_ref()
     }
 
-    /// walk from leaf to root, returning entries in root-first order
     pub fn current_branch(&self) -> Vec<&SessionEntry> {
         self.branch_ending_at(self.leaf_id.as_ref())
     }
 
-    /// the branch an entry sits on, from root to that entry
     fn branch_ending_at(&self, id: Option<&EntryId>) -> Vec<&SessionEntry> {
         let index = self.build_index();
         let mut path = Vec::new();
@@ -274,8 +230,6 @@ impl SessionTree {
         path
     }
 
-    /// entries whose id starts with `prefix`. every candidate is
-    /// returned so an ambiguous prefix can be reported as such
     pub fn entries_matching_prefix(&self, prefix: &str) -> Vec<&SessionEntry> {
         let prefix = prefix.to_ascii_lowercase();
         self.entries
@@ -284,9 +238,6 @@ impl SessionTree {
             .collect()
     }
 
-    /// tool calls that would be left without a result if `id` became the
-    /// leaf. providers reject a context whose last assistant turn has an
-    /// unanswered call, so this gates branching
     pub fn unanswered_tool_calls(&self, id: &EntryId) -> Vec<ToolCallId> {
         let mut open: Vec<ToolCallId> = Vec::new();
         for entry in self.branch_ending_at(Some(id)) {
@@ -307,7 +258,6 @@ impl SessionTree {
         open
     }
 
-    /// closest ancestor of `id` that can be branched from
     pub fn nearest_branchable_ancestor(&self, id: &EntryId) -> Option<&EntryId> {
         let index = self.build_index();
         let mut current = index.get(&**id)?.parent_id.as_ref();
@@ -321,9 +271,6 @@ impl SessionTree {
         None
     }
 
-    /// every entry as a renderable row, root first. the line leading to
-    /// the leaf stays at depth 0 and abandoned branches nest above the
-    /// entry that replaced them
     pub fn rows(&self) -> Vec<TreeRow<'_>> {
         let on_branch: std::collections::HashSet<&str> =
             self.current_branch().into_iter().map(|e| &*e.id).collect();
@@ -354,9 +301,6 @@ impl SessionTree {
                 is_fork: kids.len() > 1,
             });
 
-            // the child continuing towards the leaf keeps the current
-            // depth. it goes on the stack first so the abandoned
-            // branches pop, and render, above it
             let main = kids
                 .iter()
                 .position(|kid| on_branch.contains(&*kid.id))
@@ -373,21 +317,14 @@ impl SessionTree {
         rows
     }
 
-    /// build the conversation messages for the current branch (what the LLM sees)
     pub fn build_context(&self) -> Vec<Message> {
         self.collect_context(None)
     }
 
-    /// build at most the first `limit` visible context messages
     pub fn build_context_prefix(&self, limit: usize) -> Vec<Message> {
         self.collect_context(Some(limit))
     }
 
-    /// build the full branch as messages for display, without collapsing
-    /// compacted history. every entry from root to leaf is rendered, so
-    /// resumed sessions show their whole scrollback while the LLM context
-    /// (from [`SessionTree::build_context`]) stays collapsed. compaction
-    /// and branch markers render as their synthetic summary messages
     pub fn build_display_history(&self) -> Vec<Message> {
         self.current_branch()
             .into_iter()
@@ -395,18 +332,10 @@ impl SessionTree {
             .collect()
     }
 
-    /// count visible context messages without cloning them
     pub fn context_len(&self) -> usize {
         self.context_entries().len()
     }
 
-    /// the branch entries that [`SessionTree::build_context`] turns into
-    /// messages, in order. collapses to the most recent compaction node's
-    /// summary (represented by the compaction entry itself, always first
-    /// when present) followed by the messages kept after it, then the
-    /// live tail. single source of truth for context ordering, shared by
-    /// `build_context`, `context_len`, and `compact_at_leaf` so their
-    /// indices cannot drift.
     fn context_entries(&self) -> Vec<&SessionEntry> {
         let branch = self.current_branch();
         let mut entries: Vec<&SessionEntry> = Vec::with_capacity(branch.len());
@@ -457,17 +386,14 @@ impl SessionTree {
         messages
     }
 
-    /// get all entries
     pub fn entries(&self) -> &[SessionEntry] {
         &self.entries
     }
 
-    /// get entry by id
     pub fn by_id(&self, id: &EntryId) -> Option<&SessionEntry> {
         self.entries.iter().find(|e| e.id == *id)
     }
 
-    /// get direct children of an entry
     pub fn children(&self, parent_id: &EntryId) -> Vec<&SessionEntry> {
         self.entries
             .iter()
@@ -475,7 +401,6 @@ impl SessionTree {
             .collect()
     }
 
-    /// get root entries (no parent)
     pub fn roots(&self) -> Vec<&SessionEntry> {
         self.entries
             .iter()
@@ -483,7 +408,6 @@ impl SessionTree {
             .collect()
     }
 
-    /// build the full tree structure
     pub fn tree(&self) -> Vec<TreeNode> {
         fn build_subtree<'a>(entry: &'a SessionEntry, all: &'a [SessionEntry]) -> TreeNode {
             let children: Vec<TreeNode> = all
@@ -504,7 +428,6 @@ impl SessionTree {
             .collect()
     }
 
-    /// find user message entries in the current branch (for navigation UI)
     pub fn user_messages_in_branch(&self) -> Vec<&SessionEntry> {
         self.current_branch()
             .into_iter()
@@ -519,7 +442,6 @@ impl SessionTree {
             .collect()
     }
 
-    /// number of entries
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -528,7 +450,6 @@ impl SessionTree {
         self.entries.is_empty()
     }
 
-    /// check if a given entry has multiple children (a branch point)
     pub fn is_branch_point(&self, id: &EntryId) -> bool {
         self.children(id).len() > 1
     }
@@ -597,10 +518,6 @@ mod tests {
         })
     }
 
-    /// a tree with one abandoned branch:
-    ///
-    ///   q0 - a0 - q1(abandoned) - a1(abandoned)
-    ///           \ q2 - a2 (current)
     fn forked_tree() -> SessionTree {
         let mut tree = SessionTree::new();
         tree.append_message(user_msg("q0"));
@@ -626,8 +543,6 @@ mod tests {
 
     #[test]
     fn an_ambiguous_prefix_reports_every_candidate() {
-        // the caller needs the candidates to render a "did you mean" list,
-        // so matching returns all of them rather than giving up
         let mut tree = SessionTree::new();
         tree.append_message(user_msg("q0"));
         tree.append_message(user_msg("q1"));
@@ -755,21 +670,16 @@ mod tests {
         let _u2 = tree.append_message(user_msg("tell me about rust"));
         let _a2 = tree.append_message(assistant_msg("rust is great"));
 
-        // branch from after the first user message
         assert!(tree.branch(&u1));
 
-        // now we're at u1, append a different question
         tree.append_message(assistant_msg("hey!"));
         tree.append_message(user_msg("tell me about python"));
 
-        // the branch should show: u1 -> a1_new -> u2_new
         let branch = tree.current_branch();
         assert_eq!(branch.len(), 3);
 
-        // original entries still exist
         assert_eq!(tree.len(), 6);
 
-        // tree should have a branch point at u1
         assert!(tree.is_branch_point(&u1));
     }
 
@@ -785,12 +695,10 @@ mod tests {
             .branch_with_summary(&u1, "discussed topic A briefly")
             .unwrap();
 
-        // leaf should be the summary entry
         assert_eq!(tree.leaf_id(), Some(&summary_id));
 
-        // context should include the branch summary
         let ctx = tree.build_context();
-        assert_eq!(ctx.len(), 2); // u1 + branch_summary
+        assert_eq!(ctx.len(), 2);
         if let Message::User(u) = &ctx[1] {
             match &u.content {
                 UserContent::Text(t) => assert!(t.contains("topic A briefly")),
@@ -823,7 +731,7 @@ mod tests {
         tree.append_message(user_msg("q2_v2"));
 
         let ctx = tree.build_context();
-        assert_eq!(ctx.len(), 3); // u1 -> a1_v2 -> q2_v2
+        assert_eq!(ctx.len(), 3);
     }
 
     #[test]
@@ -840,8 +748,6 @@ mod tests {
 
     #[test]
     fn compact_at_leaf_preserves_old_entries_and_collapses_context() {
-        // simulate a /compact: long conversation, then compact at index 3
-        // (keep last 2 messages, summarise the first 3)
         let mut tree = SessionTree::new();
         tree.append_message(user_msg("q1"));
         tree.append_message(assistant_msg("a1"));
@@ -855,14 +761,10 @@ mod tests {
             .compact_at_leaf("summary of q1/a1/q2/a2".into(), 4)
             .expect("compaction should succeed when index is in current branch");
 
-        // leaf moves to the compaction node
         assert_eq!(tree.leaf_id(), Some(&compaction_id));
 
-        // all six pre-compaction entries still in the tree (plus the new
-        // compaction node = 7 entries total). the user can /branch back
         assert_eq!(tree.entries().len(), entries_before + 1);
 
-        // LLM context now sees: synthetic summary message + last 2 kept messages
         let ctx = tree.build_context();
         assert_eq!(ctx.len(), 3);
         if let Message::User(u) = &ctx[0] {
@@ -874,7 +776,6 @@ mod tests {
         } else {
             panic!("expected first context message to be the summary");
         }
-        // first kept message is q3
         if let Message::User(u) = &ctx[1] {
             if let UserContent::Text(t) = &u.content {
                 assert_eq!(t.as_str(), "q3");
@@ -883,7 +784,6 @@ mod tests {
             panic!("expected q3 as first kept message");
         }
 
-        // sanity: the Compaction entry's first_kept_id points at the q3 entry
         if let EntryKind::Compaction { first_kept_id, .. } = &tree
             .by_id(&compaction_id)
             .expect("compaction entry present")
@@ -897,11 +797,6 @@ mod tests {
 
     #[test]
     fn repeated_compaction_collapses_without_reexpanding() {
-        // regression: the second /compact on an already-compacted branch
-        // must keep only the recent messages, not re-expand everything the
-        // first compaction already summarised away. the index passed to
-        // compact_at_leaf is relative to the *collapsed* context that
-        // build_context produces, not the raw root-to-leaf branch.
         let mut tree = SessionTree::new();
         for i in 0..20 {
             if i % 2 == 0 {
@@ -911,12 +806,10 @@ mod tests {
             }
         }
 
-        // first compaction: summarise the first 15, keep the last 5
         tree.compact_at_leaf("first summary".into(), 15)
             .expect("first compaction should succeed");
         assert_eq!(tree.build_context().len(), 6, "summary + 5 kept");
 
-        // conversation continues with 10 more messages
         for i in 20..30 {
             if i % 2 == 0 {
                 tree.append_message(user_msg(&format!("q{i}")));
@@ -924,11 +817,8 @@ mod tests {
                 tree.append_message(assistant_msg(&format!("a{i}")));
             }
         }
-        // collapsed context is now first-summary + 5 + 10 = 16
         assert_eq!(tree.build_context().len(), 16);
 
-        // second compaction: summarise the first 10 of the *collapsed*
-        // context (index 10 = "q24"), keep the last 6
         tree.compact_at_leaf("second summary".into(), 10)
             .expect("second compaction should succeed");
 
@@ -954,7 +844,6 @@ mod tests {
             "leading message must be the new summary, got {:?}",
             texts[0]
         );
-        // the 6 most recent real messages survive verbatim
         assert!(
             texts.iter().any(|t| t == "q24"),
             "kept window start q24 missing: {texts:?}"
@@ -963,7 +852,6 @@ mod tests {
             texts.iter().any(|t| t == "a29"),
             "kept window end a29 missing: {texts:?}"
         );
-        // anything the first compaction folded away must stay folded
         assert!(
             !texts.iter().any(|t| t == "q0" || t == "a15" || t == "a23"),
             "summarised history leaked back into context: {texts:?}"
@@ -990,10 +878,8 @@ mod tests {
         tree.compact_at_leaf("summary".into(), 4)
             .expect("compaction applies");
 
-        // the LLM context collapses to summary + last two messages
         assert_eq!(tree.build_context().len(), 3);
 
-        // the display history keeps every original message plus a banner
         let history = tree.build_display_history();
         assert_eq!(history.len(), 7, "6 originals + 1 compaction banner");
         assert_eq!(text_of(&history[0]), "q1");
@@ -1010,7 +896,6 @@ mod tests {
         tree.append_message(user_msg("q1"));
         tree.append_message(assistant_msg("a1"));
 
-        // only 2 messages in branch, index 5 is out of range
         assert!(tree.compact_at_leaf("summary".into(), 5).is_none());
     }
 
@@ -1041,8 +926,8 @@ mod tests {
         tree.append_message(assistant_msg("branch 2"));
 
         let nodes = tree.tree();
-        assert_eq!(nodes.len(), 1); // one root
-        assert_eq!(nodes[0].children.len(), 2); // two branches
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].children.len(), 2);
     }
 
     #[test]
@@ -1078,7 +963,6 @@ mod tests {
         tree.reset_leaf();
         assert!(tree.leaf_id().is_none());
 
-        // next append creates a new root
         tree.append_message(user_msg("second root"));
         let roots = tree.roots();
         assert_eq!(roots.len(), 2);

@@ -1,15 +1,9 @@
-//! session types and management
-//!
-//! a session holds the conversation history and metadata for a single
-//! agent interaction. sessions can be persisted, resumed, and branched.
-
 use crate::conversation::ConversationState;
 use mush_ai::types::{Message, ModelId, PaneId, Timestamp};
 use serde::{Deserialize, Serialize};
 
 pub use mush_ai::types::SessionId;
 
-/// metadata about a session
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMeta {
     pub id: SessionId,
@@ -21,7 +15,6 @@ pub struct SessionMeta {
     pub cwd: String,
 }
 
-/// per-pane session state for multi-pane persistence
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaneSession {
     pub pane_id: PaneId,
@@ -31,22 +24,13 @@ pub struct PaneSession {
     pub conversation: ConversationState,
 }
 
-/// a full session with messages and tree structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub meta: SessionMeta,
     #[serde(flatten)]
     pub conversation: ConversationState,
-    /// additional panes (empty for single-pane sessions)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub panes: Vec<PaneSession>,
-    /// system prompt sent on every request in this session.
-    /// persisted so resumed sessions reuse the exact prompt that was
-    /// cached on the provider side. when None, callers fall back to
-    /// the freshly-built prompt from AGENTS.md and friends. mutating
-    /// this mid-session would bust the prefix cache, so the only path
-    /// that updates it is `/reload` (explicit user action) or `/new`
-    /// (fresh session)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
 }
@@ -77,15 +61,10 @@ impl Session {
         self.meta.updated_at = Timestamp::now();
     }
 
-    /// get the conversation for the current branch (what the LLM sees)
     pub fn context(&self) -> Vec<Message> {
         self.conversation.context()
     }
 
-    /// set title from first user message if not already set
-    ///
-    /// collapses whitespace, strips leading slash commands/skill hints,
-    /// and truncates at a word boundary
     pub fn auto_title(&mut self) {
         if self.meta.title.is_some() {
             return;
@@ -111,13 +90,7 @@ impl Session {
     }
 }
 
-/// clean up raw user text into a readable session title
-///
-/// - strips leading `[relevant skills: ...]` hints injected by prompt enrichment
-/// - collapses all whitespace (newlines, tabs, runs of spaces) into single spaces
-/// - truncates at a word boundary, appending "…" if shortened
 fn clean_title(text: &str, max_len: usize) -> String {
-    // strip leading skill hints like "[relevant skills: foo, bar. ...]"
     let stripped = if text.starts_with("[relevant skills:") {
         text.find("]\n")
             .or_else(|| text.find("] "))
@@ -128,14 +101,12 @@ fn clean_title(text: &str, max_len: usize) -> String {
         text
     };
 
-    // collapse whitespace
     let collapsed: String = stripped.split_whitespace().collect::<Vec<_>>().join(" ");
 
     if collapsed.chars().count() <= max_len {
         return collapsed;
     }
 
-    // take up to max_len-1 chars, then find a word boundary to break at
     let truncated: String = collapsed.chars().take(max_len - 1).collect();
     let break_at = truncated.rfind(' ').unwrap_or(truncated.len());
     format!("{}…", &truncated[..break_at])
@@ -189,9 +160,8 @@ mod tests {
         }));
         session.auto_title();
         let title = session.meta.title.unwrap();
-        assert!(title.len() <= 81); // 80 + 1 for multi-byte …
+        assert!(title.len() <= 81);
         assert!(title.ends_with('…'));
-        // should break at a word boundary
         assert!(!title.trim_end_matches('…').ends_with(' '));
     }
 
@@ -284,7 +254,6 @@ mod tests {
         let json = serde_json::to_string(&session).unwrap();
         assert!(!json.contains("panes"));
 
-        // still deserialises fine (panes defaults to empty vec)
         let restored: Session = serde_json::from_str(&json).unwrap();
         assert!(restored.panes.is_empty());
     }

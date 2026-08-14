@@ -1,13 +1,6 @@
-//! human-readable reports for the `/mcp` command
-//!
-//! pure formatting over plain data so it stays testable without a live
-//! server, and so the TUI layer is only responsible for displaying the
-//! resulting string.
-
 use crate::catalogue::McpToolInfo;
 use crate::server::{McpServerStatus, ServerState};
 
-/// per-server connection status, one line each
 #[must_use]
 pub fn format_status(statuses: &[McpServerStatus]) -> String {
     if statuses.is_empty() {
@@ -37,7 +30,6 @@ pub fn format_status(statuses: &[McpServerStatus]) -> String {
     out
 }
 
-/// tool names and descriptions
 #[must_use]
 pub fn format_tools(tools: &[McpToolInfo], server: Option<&str>) -> String {
     if tools.is_empty() {
@@ -54,7 +46,6 @@ pub fn format_tools(tools: &[McpToolInfo], server: Option<&str>) -> String {
     out
 }
 
-/// json schema for one tool, or a pointer back to the listing
 #[must_use]
 pub fn format_schema(name: &str, schema: Option<&serde_json::Value>) -> String {
     match schema {
@@ -66,7 +57,6 @@ pub fn format_schema(name: &str, schema: Option<&serde_json::Value>) -> String {
     }
 }
 
-/// outcome of a redial
 #[must_use]
 pub fn format_reconnect(name: &str, state: Option<&ServerState>) -> String {
     match state {

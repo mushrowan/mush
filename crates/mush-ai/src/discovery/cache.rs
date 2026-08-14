@@ -1,18 +1,3 @@
-//! on-disk cache for discovery results.
-//!
-//! the cache is keyed by provider name and stores, for each model:
-//! - the [`Model`] as discovered (rich fields from the upstream `/v1/models`)
-//! - `last_seen_at` for stale detection
-//!
-//! per provider we track `fetched_at` - the timestamp of the most recent
-//! successful fetch. a cached model is "stale" if its `last_seen_at` is
-//! older than the provider's `fetched_at`, meaning the upstream stopped
-//! returning it (deprecation, removal).
-//!
-//! cache file lives at `${data_dir}/discovered-models.json`. data_dir
-//! resolution mirrors [`mush_session::data_dir`] so we share the
-//! `~/.local/share/mush/` (or `$XDG_DATA_HOME/mush/`) state directory.
-
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -22,43 +7,29 @@ use serde::{Deserialize, Serialize};
 use super::DiscoveryReport;
 use crate::types::Model;
 
-/// where the cache file lives within the mush data dir
 const CACHE_FILE: &str = "discovered-models.json";
 
-/// in-memory representation of the on-disk cache.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct DiscoveryCache {
-    /// per-provider sub-cache, keyed by [`crate::types::Provider`] display string.
-    /// using a string key keeps the file tolerant to provider variants we
-    /// haven't enumerated yet (custom providers).
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderCache>,
 }
 
-/// snapshot of a single provider's discovery state.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProviderCache {
-    /// timestamp of the most recent successful fetch for this provider
     pub fetched_at: SystemTime,
-    /// every model we've ever seen from this provider (even if a later
-    /// fetch dropped it - those become "stale" entries)
     pub models: Vec<DiscoveredEntry>,
 }
 
-/// one cached model entry plus discovery metadata.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DiscoveredEntry {
-    /// last time this exact model id was returned by a successful fetch
     pub last_seen_at: SystemTime,
     pub model: Model,
-    /// verbatim upstream entry; see [`super::DiscoveredModel::raw`]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw: Option<serde_json::Value>,
 }
 
 impl DiscoveryCache {
-    /// load the cache from disk, or return an empty cache when the file
-    /// is missing/unreadable. errors during deserialisation are surfaced.
     pub fn load(path: &Path) -> Result<Self, std::io::Error> {
         match std::fs::read_to_string(path) {
             Ok(contents) => serde_json::from_str(&contents)
@@ -68,7 +39,6 @@ impl DiscoveryCache {
         }
     }
 
-    /// persist the cache to disk, creating parent directories as needed.
     pub fn save(&self, path: &Path) -> Result<(), std::io::Error> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -78,14 +48,6 @@ impl DiscoveryCache {
         crate::private_io::write_atomic(path, json)
     }
 
-    /// merge a fresh discovery report into the cache.
-    ///
-    /// - models present in the report bump their `last_seen_at` to the
-    ///   report's `fetched_at` and have their `model` field overwritten
-    /// - models in the cache but absent from the report are kept (they
-    ///   become stale because their `last_seen_at` lags the new
-    ///   `fetched_at`).
-    /// - new models are appended.
     pub fn apply_report(&mut self, report: DiscoveryReport) {
         let provider_key = report.provider.to_string();
         let provider = self
@@ -116,15 +78,12 @@ impl DiscoveryCache {
         }
     }
 
-    /// iterator over (provider key, model entry) for every discovered model.
     pub fn entries(&self) -> impl Iterator<Item = (&str, &DiscoveredEntry)> + '_ {
         self.providers
             .iter()
             .flat_map(|(p, pc)| pc.models.iter().map(move |e| (p.as_str(), e)))
     }
 
-    /// whether a given entry is stale - the upstream stopped returning it
-    /// in the most recent fetch for that provider.
     #[must_use]
     pub fn is_stale(&self, provider_key: &str, model_id: &str) -> bool {
         let Some(provider) = self.providers.get(provider_key) else {
@@ -138,7 +97,6 @@ impl DiscoveryCache {
             .unwrap_or(false)
     }
 
-    /// remove a single model from the cache. returns true if it was found.
     pub fn remove_model(&mut self, provider_key: &str, model_id: &str) -> bool {
         let Some(provider) = self.providers.get_mut(provider_key) else {
             return false;
@@ -148,8 +106,6 @@ impl DiscoveryCache {
         provider.models.len() != len_before
     }
 
-    /// remove every stale entry from every provider. returns how many
-    /// entries were dropped.
     pub fn remove_all_stale(&mut self) -> usize {
         let mut removed = 0;
         for provider in self.providers.values_mut() {
@@ -162,16 +118,11 @@ impl DiscoveryCache {
     }
 }
 
-/// path to the cache file inside the mush data dir.
 #[must_use]
 pub fn cache_path() -> PathBuf {
     data_dir().join(CACHE_FILE)
 }
 
-/// resolve the mush data directory, mirroring `mush_session::data_dir`.
-///
-/// duplicated here because mush-ai cannot depend on mush-session
-/// (mush-session already depends on mush-ai).
 fn data_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("MUSH_DATA_DIR") {
         PathBuf::from(dir)
@@ -287,7 +238,6 @@ mod tests {
             fetched_at: t1,
             models: vec![make_model("a", "A"), make_model("b", "B")],
         });
-        // second fetch only returns A - B is now stale
         cache.apply_report(DiscoveryReport {
             provider: Provider::Anthropic,
             fetched_at: t2,
@@ -339,7 +289,6 @@ mod tests {
                 make_model("c", "C"),
             ],
         });
-        // second fetch only returns A; B and C are stale
         cache.apply_report(DiscoveryReport {
             provider: Provider::Anthropic,
             fetched_at: t2,
@@ -419,7 +368,6 @@ mod tests {
 
     #[test]
     fn cache_path_uses_data_dir_env() {
-        // unsafe set_var is acceptable in tests, racy across-test but serial-ish in practice
         let dir = tempfile::tempdir().unwrap();
         let saved = std::env::var("MUSH_DATA_DIR").ok();
         unsafe {

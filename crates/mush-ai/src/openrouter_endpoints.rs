@@ -1,36 +1,15 @@
-//! openrouter `/models/{author}/{slug}/endpoints` lookup
-//!
-//! returns the per-provider endpoints serving a given model, with
-//! supported_parameters telling us which providers handle explicit
-//! cache control. drives the optional `/endpoints` slash command and
-//! could later seed cache-timer state for openrouter-routed turns
-//! before /generation reconciles.
-
 use openrouter_rs::api::models::{Endpoint, EndpointData};
 
 use crate::types::TokenCount;
 
-/// distilled endpoint info for one provider serving a model. only
-/// the fields mush actually consumes; if a future caller needs more,
-/// extend rather than expose the SDK type
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelEndpoint {
-    /// upstream provider that serves this endpoint, e.g. "Anthropic",
-    /// "Amazon Bedrock", "Google Vertex". matches the case the SDK
-    /// returns; downstream lookup canonicalises before comparison
     pub provider_name: String,
-    /// max prompt+completion tokens the endpoint accepts
     pub context_length: TokenCount,
-    /// whether the endpoint accepts the `cache_control` request
-    /// parameter (anthropic-style explicit prompt caching)
     pub supports_cache_control: bool,
-    /// raw supported_parameters list as returned by openrouter, kept
-    /// for diagnostics and future feature detection without re-fetching
     pub supported_parameters: Vec<String>,
 }
 
-/// distilled endpoints response for a model. carries the model's
-/// canonical id and name plus its serving endpoints
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelEndpoints {
     pub id: String,
@@ -39,11 +18,6 @@ pub struct ModelEndpoints {
 }
 
 impl ModelEndpoints {
-    /// the unique provider name when exactly one endpoint accepts
-    /// explicit cache_control. used to seed the cache timer for
-    /// openrouter routes whose upstream is unambiguous up-front;
-    /// returns `None` for zero or multiple cache-capable endpoints
-    /// (we want /generation reconciliation to make the call instead)
     #[must_use]
     pub fn unique_caching_provider(&self) -> Option<&str> {
         let mut iter = self
@@ -60,8 +34,6 @@ impl ModelEndpoints {
     }
 }
 
-/// translate the SDK's [`EndpointData`] into mush's distilled view.
-/// kept separate from the network call so it's easy to fixture-test
 pub fn convert_endpoints(data: &EndpointData) -> ModelEndpoints {
     ModelEndpoints {
         id: data.id.clone(),
@@ -83,10 +55,6 @@ fn convert_endpoint(e: &Endpoint) -> ModelEndpoint {
     }
 }
 
-/// fetch the per-provider endpoint list for a model. `model_id` is
-/// the openrouter slug, `"author/slug"` (e.g. `"anthropic/claude-sonnet-4.5"`).
-/// surfaces parse failure as `InvalidModelId` so callers can fall back
-/// gracefully without retrying
 pub async fn fetch_endpoints(
     api_key: &str,
     model_id: &str,
@@ -101,9 +69,6 @@ pub async fn fetch_endpoints(
     Ok(convert_endpoints(&data))
 }
 
-/// split `"author/slug"` into its two parts. openrouter slugs always
-/// have exactly one `/`; anything else means we got a non-openrouter
-/// model id and should bail rather than guess
 fn split_model_id(id: &str) -> Result<(&str, &str), EndpointsLookupError> {
     let (author, rest) = id
         .split_once('/')
@@ -126,10 +91,6 @@ pub enum EndpointsLookupError {
 mod tests {
     use super::*;
 
-    /// representative `/models/{author}/{slug}/endpoints` response.
-    /// covers a model served by three providers: anthropic and vertex
-    /// support `cache_control`, fireworks does not. mush should pick
-    /// none of them as a unique caching provider since two qualify
     const FIXTURE_MULTI_CACHE: &str = r#"{
         "id": "anthropic/claude-sonnet-4.5",
         "name": "Claude Sonnet 4.5",
@@ -166,10 +127,6 @@ mod tests {
         ]
     }"#;
 
-    /// single caching provider variant: only anthropic supports
-    /// `cache_control`. mush should pick anthropic as the unique
-    /// caching provider so the cache timer seeds correctly without
-    /// waiting for /generation
     const FIXTURE_SINGLE_CACHE: &str = r#"{
         "id": "anthropic/claude-haiku-4.5",
         "name": "Claude Haiku 4.5",
@@ -229,9 +186,6 @@ mod tests {
 
     #[test]
     fn unique_caching_provider_returns_none_when_multiple_qualify() {
-        // anthropic and vertex both support cache_control - we don't
-        // want to guess which of the two will serve the next turn,
-        // so leave it to /generation reconciliation
         let data: EndpointData = serde_json::from_str(FIXTURE_MULTI_CACHE).expect("parses");
         let endpoints = convert_endpoints(&data);
         assert_eq!(endpoints.unique_caching_provider(), None);
@@ -239,9 +193,6 @@ mod tests {
 
     #[test]
     fn unique_caching_provider_returns_the_sole_qualifier() {
-        // single cache-capable endpoint means openrouter's sticky
-        // routing will deterministically land here for a cached turn,
-        // so we can seed up-front
         let data: EndpointData = serde_json::from_str(FIXTURE_SINGLE_CACHE).expect("parses");
         let endpoints = convert_endpoints(&data);
         assert_eq!(endpoints.unique_caching_provider(), Some("Anthropic"));
@@ -257,17 +208,14 @@ mod tests {
 
     #[test]
     fn split_model_id_rejects_malformed_inputs() {
-        // bare slug without author
         assert!(matches!(
             split_model_id("claude-sonnet-4.5"),
             Err(EndpointsLookupError::InvalidModelId(_))
         ));
-        // too many segments
         assert!(matches!(
             split_model_id("anthropic/claude/sonnet"),
             Err(EndpointsLookupError::InvalidModelId(_))
         ));
-        // empty halves
         assert!(matches!(
             split_model_id("/claude"),
             Err(EndpointsLookupError::InvalidModelId(_))

@@ -1,10 +1,3 @@
-//! web search tool with pluggable providers
-//!
-//! Exa is always available (the sane default). a SearXNG instance can be
-//! added via config, after which the model may pick between them with the
-//! `provider` argument. when only one provider exists the argument is not
-//! advertised and that provider is used unconditionally.
-
 use std::sync::Arc;
 
 use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
@@ -34,42 +27,28 @@ impl SearchType {
     }
 }
 
-/// web search configuration: which providers exist and which is default.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(default)]
 pub struct WebSearchConfig {
-    /// provider id used when the model doesn't pass `provider`. defaults to
-    /// the only configured provider (exa unless a searx instance is set).
-    /// set to `searx` to make a configured instance the default.
     pub default_provider: Option<String>,
-    /// a SearXNG instance to search against. when set, `searx` becomes a
-    /// selectable provider alongside exa.
     pub searx: Option<SearxConfig>,
 }
 
-/// SearXNG instance configuration.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct SearxConfig {
-    /// base url of the instance, e.g. `https://sear.example.com`.
     pub base_url: String,
-    /// optional auth sent with each query, for a locked-down instance.
     #[serde(default)]
     pub auth: Option<SearchAuth>,
 }
 
-/// auth to attach to a provider request.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SearchAuth {
-    /// HTTP basic auth.
     Basic { username: String, password: String },
-    /// `Authorization: Bearer <token>`.
     Bearer { token: String },
-    /// an arbitrary header, e.g. an api key.
     Header { name: String, value: String },
 }
 
-/// a single search backend.
 #[async_trait::async_trait]
 trait SearchProvider: Send + Sync {
     fn id(&self) -> &'static str;
@@ -215,7 +194,6 @@ impl SearchProvider for SearxProvider {
     }
 }
 
-/// compute the auth header (name, value) to attach to a provider request.
 fn auth_header(auth: Option<&SearchAuth>) -> Option<(String, String)> {
     use base64::Engine;
     match auth? {
@@ -271,8 +249,6 @@ struct WebSearchArgs {
     num_results: u32,
     #[serde(rename = "type", default)]
     search_type: SearchType,
-    /// which configured provider to use. validated against the tool's
-    /// providers in `execute`.
     #[serde(default)]
     provider: Option<String>,
 }
@@ -287,14 +263,10 @@ pub struct WebSearchTool {
 }
 
 impl WebSearchTool {
-    /// exa-only tool (the default when no `[web_search]` config is present).
     pub fn new(client: mush_ai::http::HttpClient) -> Self {
         Self::with_config(client, &WebSearchConfig::default())
     }
 
-    /// build providers from config. exa is always present; searx is added
-    /// when configured. the default provider is `default_provider` when it
-    /// names a present provider, else exa.
     pub fn with_config(client: mush_ai::http::HttpClient, config: &WebSearchConfig) -> Self {
         let mut providers: Vec<Arc<dyn SearchProvider>> = vec![Arc::new(ExaProvider {
             client: client.clone(),
@@ -359,7 +331,6 @@ impl AgentTool for WebSearchTool {
                 "description": "search type: auto (balanced, default), fast (quick)"
             }
         });
-        // only advertise provider selection when there's a real choice
         if self.providers.len() > 1
             && let serde_json::Value::Object(ref mut map) = props
         {
@@ -383,8 +354,6 @@ impl AgentTool for WebSearchTool {
     }
 
     fn output_limit(&self) -> mush_agent::tool::OutputLimit {
-        // ranked results: middle-truncation would gut a result entry from
-        // the list, head keeps the top hits intact
         mush_agent::tool::OutputLimit::Head
     }
 
@@ -549,7 +518,6 @@ mod tests {
             password: "p".into(),
         }))
         .unwrap();
-        // base64("u:p") == "dTpw"
         assert_eq!(basic, "Basic dTpw");
         let (name, value) = auth_header(Some(&SearchAuth::Header {
             name: "x-api-key".into(),

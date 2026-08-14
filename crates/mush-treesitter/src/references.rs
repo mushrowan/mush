@@ -1,16 +1,5 @@
-//! extract identifier references from parsed syntax trees
-//!
-//! walks a tree-sitter AST and collects all identifier-like nodes,
-//! used to build cross-file reference edges for the repo map
-
 use std::collections::HashSet;
 
-/// extract all identifier strings from a parsed syntax tree
-///
-/// collects text from nodes whose kind contains "identifier" or
-/// equals "name", which covers most tree-sitter grammars.
-/// filters out very short identifiers (single char) that are
-/// typically loop variables and not meaningful cross-file references.
 pub fn extract_references(source: &[u8], tree: &tree_sitter::Tree) -> HashSet<String> {
     let mut ids = HashSet::new();
     let mut cursor = tree.walk();
@@ -27,7 +16,6 @@ fn collect_identifiers(
         let node = cursor.node();
         let kind = node.kind();
 
-        // match identifier-like node types across all grammars
         let is_ident = kind.contains("identifier") || kind == "name";
         if is_ident
             && let Ok(text) = node.utf8_text(source)
@@ -100,10 +88,8 @@ def analyse(words):
         let tree = pool.parse(Language::Rust, source.as_bytes()).unwrap();
         let refs = extract_references(source.as_bytes(), &tree);
 
-        // single-char "x" and "f" should be filtered
         assert!(!refs.contains("x"), "single-char x should be filtered");
         assert!(!refs.contains("f"), "single-char f should be filtered");
-        // multi-char type should be present
         assert!(refs.contains("MyType"), "missing MyType: {refs:?}");
     }
 }

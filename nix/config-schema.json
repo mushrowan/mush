@@ -1,43 +1,35 @@
 {
   "$defs": {
     "AnthropicBetas": {
-      "description": "anthropic beta flags enabled via the `anthropic-beta` header on oauth\nrequests. api-key users don't typically need these; they're claude-code\nparity flags for oauth sessions.\n\ndefaults follow the policy agreed with mush's primary user:\n- `context_1m`, `effort`, `context_management` default to `true`\n- `redact_thinking`, `advisor`, `advanced_tool_use` default to `true`",
       "properties": {
         "advanced_tool_use": {
           "default": true,
-          "description": "`advanced-tool-use-2025-11-20` - advanced tool-use features",
           "type": "boolean"
         },
         "advisor": {
           "default": true,
-          "description": "`advisor-tool-2026-03-01` - claude-code advisor tool support",
           "type": "boolean"
         },
         "context_1m": {
           "default": true,
-          "description": "`context-1m-2025-08-07` - unlocks 1M context window on compatible models",
           "type": "boolean"
         },
         "context_management": {
           "default": true,
-          "description": "`context-management-2025-06-27` - server-side context edits",
           "type": "boolean"
         },
         "effort": {
           "default": true,
-          "description": "`effort-2025-11-24` - enables the `output_config.effort` request field",
           "type": "boolean"
         },
         "redact_thinking": {
           "default": true,
-          "description": "`redact-thinking-2026-02-12` - allows thinking redaction in responses",
           "type": "boolean"
         }
       },
       "type": "object"
     },
     "ApiKey": {
-      "description": "an API key (redacted in Debug/Display, non-empty when present)",
       "type": "string",
       "x-nixcfg-secret": true
     },
@@ -45,7 +37,6 @@
       "additionalProperties": {
         "$ref": "#/$defs/ApiKey"
       },
-      "description": "api key overrides from config file.\n\nnamed fields cover the common paths used throughout the codebase.\nthe flattened `other` map catches any additional provider name so\nusers can add keys for groq, deepseek, xai, cerebras, mistral,\ntogether, deepinfra, etc. without a new named field each time\n\nall key values are `ApiKey`, whose Debug/Display are redacted so\nsecrets can't accidentally leak into trace output, panic messages,\nor captured error bodies. access the raw value via `ApiKey::expose`",
       "properties": {
         "anthropic": {
           "anyOf": [
@@ -84,7 +75,6 @@
       "type": "object"
     },
     "Base24Palette": {
-      "description": "a base16 / base24 colour scheme. `base00`-`base0F` is the base16 set;\n`base10`-`base17` are the base24 additions (darker bgs + bright accents).\nevery field is optional so partial or base16-only schemes work. values\nare hex (`#rrggbb`), the same syntax the per-role overrides accept.",
       "properties": {
         "base00": {
           "default": null,
@@ -268,8 +258,7 @@
           },
           "type": "array"
         }
-      ],
-      "description": "a string or list-of-strings that deserialises into a `Binding`.\nthis is the wire format users see in config.toml"
+      ]
     },
     "CacheRetention": {
       "enum": [
@@ -280,19 +269,11 @@
       "type": "string"
     },
     "CharClass": {
-      "description": "a class of characters to forbid wholesale, for cases where listing\nevery codepoint by hand is impractical (emoji, arrow glyphs).\ncombine with the explicit `chars` set in [`ForbiddenChars`].",
-      "oneOf": [
-        {
-          "const": "emoji",
-          "description": "pictographic emoji. matches `Emoji=YES | Emoji_Component=YES` but\nexcludes ASCII (the `0-9`, `#`, `*` keycap bases carry `Emoji=YES`\nyet are ordinary code), so real source is never rejected.",
-          "type": "string"
-        },
-        {
-          "const": "arrows",
-          "description": "arrow glyphs from the Unicode arrow blocks (`→ ← ↑ ↓ ⇒ ⬆` etc).\nthe ASCII `->` is unaffected.",
-          "type": "string"
-        }
-      ]
+      "enum": [
+        "emoji",
+        "arrows"
+      ],
+      "type": "string"
     },
     "EffortLevel": {
       "anyOf": [
@@ -312,25 +293,20 @@
       ]
     },
     "HookEntry": {
-      "description": "a single hook entry in config",
       "properties": {
         "blocking": {
           "default": false,
-          "description": "whether failure blocks the operation (default false)",
           "type": "boolean"
         },
         "command": {
-          "description": "shell command to run",
           "type": "string"
         },
         "match": {
           "default": "*",
-          "description": "tool name pattern: \"*\" for all, \"edit|write\" for specific tools",
           "type": "string"
         },
         "timeout": {
           "default": 30,
-          "description": "timeout in seconds (default 30)",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -342,7 +318,6 @@
       "type": "object"
     },
     "HooksConfig": {
-      "description": "lifecycle hook config sections",
       "properties": {
         "post_compaction": {
           "default": [],
@@ -398,7 +373,6 @@
       "type": "string"
     },
     "KeysConfig": {
-      "description": "config-side type used by `KeysConfig` below. users put scoped tables\nunder `[keys]`, such as `[keys.normal]` and `[keys.model_picker]`.",
       "properties": {
         "edit": {
           "additionalProperties": {
@@ -439,11 +413,9 @@
       "type": "object"
     },
     "LspConfig": {
-      "description": "LSP integration configuration",
       "properties": {
         "diagnostics": {
           "default": false,
-          "description": "enable auto-injecting diagnostics after file-modifying tools (default false)",
           "type": "boolean"
         },
         "servers": {
@@ -451,25 +423,21 @@
             "$ref": "#/$defs/LspServerEntry"
           },
           "default": {},
-          "description": "custom server overrides, keyed by language name (e.g. \"rust\", \"python\")",
           "type": "object"
         }
       },
       "type": "object"
     },
     "LspServerEntry": {
-      "description": "a custom LSP server config entry",
       "properties": {
         "args": {
           "default": [],
-          "description": "command line arguments",
           "items": {
             "type": "string"
           },
           "type": "array"
         },
         "command": {
-          "description": "command to run",
           "type": "string"
         }
       },
@@ -479,13 +447,10 @@
       "type": "object"
     },
     "McpServerConfig": {
-      "description": "configuration for an MCP server",
       "oneOf": [
         {
-          "description": "local server spawned as a subprocess (stdio transport)",
           "properties": {
             "command": {
-              "description": "command and arguments to run the server",
               "items": {
                 "type": "string"
               },
@@ -503,14 +468,12 @@
           "type": "object"
         },
         {
-          "description": "remote server accessed over HTTP",
           "properties": {
             "headers": {
               "additionalProperties": {
                 "type": "string"
               },
               "default": {},
-              "description": "optional HTTP headers",
               "type": "object"
             },
             "type": {
@@ -518,7 +481,6 @@
               "type": "string"
             },
             "url": {
-              "description": "URL of the MCP server",
               "type": "string"
             }
           },
@@ -532,7 +494,6 @@
       "properties": {
         "enabled": {
           "default": true,
-          "description": "whether the server is enabled (default: true)",
           "type": "boolean"
         },
         "environment": {
@@ -540,12 +501,10 @@
             "type": "string"
           },
           "default": {},
-          "description": "environment variables to set (local servers only)",
           "type": "object"
         },
         "timeout": {
           "default": 30,
-          "description": "timeout in seconds for requests, 0 to wait indefinitely (default: 30)",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -554,28 +513,23 @@
       "type": "object"
     },
     "RepoMapConfig": {
-      "description": "repo map tool configuration\n\nthe `repo_map` tool exposes a tree-sitter built structural overview\nof the codebase. it's an opt-in tool the model invokes on demand,\nnot a system-prompt injection. the budget controls how much text\nthe tool can return per call (well below the central tool-output cap)",
       "properties": {
         "budget": {
           "default": 8192,
-          "description": "per-call rendering budget in tokens (default 8192). raise if the\nmodel needs to see more of the map at once. caps at the central\ntool-output cap regardless of this value",
           "format": "uint",
           "minimum": 0,
           "type": "integer"
         },
         "enabled": {
           "default": true,
-          "description": "register the repo_map tool when running inside a vcs repo (default true)",
           "type": "boolean"
         }
       },
       "type": "object"
     },
     "SearchAuth": {
-      "description": "auth to attach to a provider request.",
       "oneOf": [
         {
-          "description": "HTTP basic auth.",
           "properties": {
             "password": {
               "type": "string"
@@ -596,7 +550,6 @@
           "type": "object"
         },
         {
-          "description": "`Authorization: Bearer <token>`.",
           "properties": {
             "token": {
               "type": "string"
@@ -613,7 +566,6 @@
           "type": "object"
         },
         {
-          "description": "an arbitrary header, e.g. an api key.",
           "properties": {
             "name": {
               "type": "string"
@@ -636,7 +588,6 @@
       ]
     },
     "SearxConfig": {
-      "description": "SearXNG instance configuration.",
       "properties": {
         "auth": {
           "anyOf": [
@@ -647,11 +598,9 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "optional auth sent with each query, for a locked-down instance."
+          "default": null
         },
         "base_url": {
-          "description": "base url of the instance, e.g. `https://sear.example.com`.",
           "type": "string"
         }
       },
@@ -661,7 +610,6 @@
       "type": "object"
     },
     "Settings": {
-      "description": "session settings with scope control.\n`scope` determines where runtime changes (via `/settings`) get persisted",
       "properties": {
         "anthropic_betas": {
           "$ref": "#/$defs/AnthropicBetas",
@@ -672,78 +620,52 @@
             "context_management": true,
             "effort": true,
             "redact_thinking": true
-          },
-          "description": "anthropic oauth beta flag toggles"
+          }
         },
         "scope": {
           "$ref": "#/$defs/SettingsScope",
-          "default": "session",
-          "description": "scope for runtime changes made via `/settings`"
+          "default": "session"
         }
       },
       "type": "object"
     },
     "SettingsScope": {
-      "description": "scope for persisting settings changes made during a session",
-      "oneOf": [
-        {
-          "const": "global",
-          "description": "changes persist to `~/.config/mush/settings.toml` (global defaults)",
-          "type": "string"
-        },
-        {
-          "const": "disabled",
-          "description": "no runtime changes allowed; base config is authoritative",
-          "type": "string"
-        },
-        {
-          "const": "repo",
-          "description": "changes persist to `<repo>/.mush/settings.toml` (per-project)",
-          "type": "string"
-        },
-        {
-          "const": "session",
-          "description": "changes only apply to the current session, not persisted",
-          "type": "string"
-        }
-      ]
+      "enum": [
+        "global",
+        "disabled",
+        "repo",
+        "session"
+      ],
+      "type": "string"
     },
     "StatusBarConfig": {
-      "description": "toggles for individual status bar segments\n\neverything defaults on so existing setups are unaffected. per-field\n`show_cost` and `show_token_counters` live on `InteractionState`\n(separately toggleable at runtime via `/cost`), not here",
       "properties": {
         "show_background_alerts": {
           "default": true,
-          "description": "background pane notifications",
           "type": "boolean"
         },
         "show_context": {
           "default": true,
-          "description": "`<used>/<window>` context + cache warmth segment",
           "type": "boolean"
         },
         "show_cwd": {
           "default": true,
-          "description": "cwd in the right column",
           "type": "boolean"
         },
         "show_oauth_usage": {
           "default": true,
-          "description": "oauth 5h / 7d usage bars (claude code plan)",
           "type": "boolean"
         },
         "show_pane_indicator": {
           "default": true,
-          "description": "`[i/n]` pane indicator when multi-pane",
           "type": "boolean"
         },
         "show_status_messages": {
           "default": true,
-          "description": "ephemeral status messages from slash commands, tools, etc",
           "type": "boolean"
         },
         "show_thinking": {
           "default": true,
-          "description": "`thinking: <level>` segment",
           "type": "boolean"
         }
       },
@@ -763,7 +685,6 @@
       "type": "object"
     },
     "ThemeConfig": {
-      "description": "serialisable theme config (subset of colours)",
       "properties": {
         "assistant": {
           "default": null,
@@ -820,8 +741,7 @@
             "base15": null,
             "base16": null,
             "base17": null
-          },
-          "description": "a base16 / base24 palette applied before the per-role overrides above."
+          }
         },
         "status": {
           "default": null,
@@ -884,27 +804,15 @@
           "$ref": "#/$defs/ThinkingLevel"
         }
       ],
-      "description": "wire format for the `thinking` field: accepts a bool (legacy) or a\n`ThinkingLevel` string. the resulting `Option<ThinkingLevel>` in\n[`Config`] is what the rest of the code sees.\n\nTODO: this bool-or-enum legacy form generates an `anyOf` in the\nJSON Schema that nixcfg maps to `types.either bool (enum [...])`.\nthe `either` form is usable but fiddly for nix users; a future\nrefactor can drop the bool form, announce a one-line breaking\nchange (`thinking = true` → `thinking = \"high\"`), and simplify\nthe schema to just the enum. kept in option A shape for now per\nthe migration plan"
+      "description": "TODO: this bool-or-enum legacy form generates an `anyOf` in the"
     },
     "ThinkingDisplay": {
-      "description": "controls how thinking text is displayed",
-      "oneOf": [
-        {
-          "const": "hidden",
-          "description": "never show thinking text",
-          "type": "string"
-        },
-        {
-          "const": "collapse",
-          "description": "show while streaming, collapse to one-line preview when done",
-          "type": "string"
-        },
-        {
-          "const": "expanded",
-          "description": "always show thinking text expanded",
-          "type": "string"
-        }
-      ]
+      "enum": [
+        "hidden",
+        "collapse",
+        "expanded"
+      ],
+      "type": "string"
     },
     "ThinkingLevel": {
       "anyOf": [
@@ -920,17 +828,14 @@
           "type": "string"
         },
         {
-          "description": "any provider-defined effort level we don't model with a typed\nvariant (e.g. anthropic's `max`, or a future `ultra-max`). carries\nthe raw effort name so newly-added upstream levels are supported by\nautodetection without a code change. only appears on effort-based\nmodels, never on the budget-token ladder",
           "type": "string"
         }
       ]
     },
     "WebSearchConfig": {
-      "description": "web search configuration: which providers exist and which is default.",
       "properties": {
         "default_provider": {
           "default": null,
-          "description": "provider id used when the model doesn't pass `provider`. defaults to\nthe only configured provider (exa unless a searx instance is set).\nset to `searx` to make a configured instance the default.",
           "type": [
             "string",
             "null"
@@ -945,15 +850,13 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "a SearXNG instance to search against. when set, `searx` becomes a\nselectable provider alongside exa."
+          "default": null
         }
       },
       "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "top-level config",
   "properties": {
     "api_keys": {
       "$ref": "#/$defs/ApiKeys",
@@ -965,12 +868,10 @@
     },
     "auto_compact": {
       "default": false,
-      "description": "automatically compact conversation when approaching context limit (off by default)",
       "type": "boolean"
     },
     "auto_fork_compact": {
       "default": false,
-      "description": "fork the session tree before auto-compacting (preserves uncompacted original)",
       "type": "boolean"
     },
     "cache_retention": {
@@ -986,12 +887,10 @@
     },
     "cache_timer": {
       "default": true,
-      "description": "show cache warmth countdown and send desktop notifications (on by default)",
       "type": "boolean"
     },
     "compaction_model": {
       "default": null,
-      "description": "optional model id to use for compaction summaries.\ndefaults to the active model when unset. can be changed at runtime\nwith `/compaction-model <model-id>` or reset with\n`/compaction-model same`.",
       "type": [
         "string",
         "null"
@@ -999,7 +898,6 @@
     },
     "confirm_tools": {
       "default": false,
-      "description": "prompt for confirmation before executing tools (off by default)",
       "type": "boolean"
     },
     "debug_cache": {
@@ -1008,7 +906,6 @@
     },
     "dynamic_mcp": {
       "default": false,
-      "description": "use dynamic meta-tools for MCP instead of loading all schemas (default false)",
       "type": "boolean"
     },
     "effort": {
@@ -1024,7 +921,6 @@
     },
     "favourite_models": {
       "default": [],
-      "description": "models the user has pinned as favourites, shown with a star in the\nmodel picker and cycleable with alt+m. declaring any value here\nlocks imperative adds/removes (the tui picker rejects ctrl+f with a\ntoast) so config stays the single source of truth",
       "items": {
         "type": "string"
       },
@@ -1032,7 +928,6 @@
     },
     "forbidden_char_classes": {
       "default": [],
-      "description": "whole classes of characters to forbid in file edits/writes and bash\ncommands, for cases where listing every codepoint is impractical.\nsupported values: `emoji`, `arrows`. combines with `forbidden_chars`.\n\nexample:\n```toml\nforbidden_char_classes = [\"emoji\", \"arrows\"]\n```",
       "items": {
         "$ref": "#/$defs/CharClass"
       },
@@ -1040,7 +935,6 @@
     },
     "forbidden_chars": {
       "default": [],
-      "description": "characters that are forbidden in file edits/writes and bash\ncommands. `write`, `edit`, and `apply_patch` reject content\ncontaining any of these; `bash` rejects commands containing them\ntoo. each entry must be exactly one char (Unicode scalar). the\nmodel can pass `allow_forbidden_chars: true` on a single call to\nbypass when the char is genuinely required (verbatim quoting, or\nsedding the char out of a file).\n\nexample:\n```toml\nforbidden_chars = [\"—\", \"–\", \";\"]\n```",
       "items": {
         "type": "string"
       },
@@ -1048,7 +942,6 @@
     },
     "force_budget_thinking": {
       "default": false,
-      "description": "override anthropic adaptive thinking with fixed-budget mode for\nadaptive-capable models. default: false (use adaptive when the\nmodel supports it)",
       "type": "boolean"
     },
     "hooks": {
@@ -1059,8 +952,7 @@
         "pre_session": [],
         "pre_tool_use": [],
         "stop": []
-      },
-      "description": "lifecycle hooks"
+      }
     },
     "keys": {
       "$ref": "#/$defs/KeysConfig",
@@ -1070,12 +962,10 @@
         "normal": {},
         "pane": {},
         "shared": {}
-      },
-      "description": "configurable keybinds grouped by scope, for example\n`[keys.normal]` and `[keys.model_picker]`."
+      }
     },
     "log_filter": {
       "default": null,
-      "description": "tracing filter string (e.g. \"mush=debug,warn\")",
       "type": [
         "string",
         "null"
@@ -1086,12 +976,10 @@
       "default": {
         "diagnostics": false,
         "servers": {}
-      },
-      "description": "LSP integration settings"
+      }
     },
     "max_image_mb": {
       "default": 5,
-      "description": "images larger than this many megabytes are downscaled and\nre-encoded by the `read` tool before being attached, instead of\nfailing the request (most providers reject oversized images, and\nan oversized copy would otherwise sit in history and fail every\nsubsequent turn). defaults to 5.",
       "format": "uint32",
       "minimum": 0,
       "type": "integer"
@@ -1119,7 +1007,6 @@
         "$ref": "#/$defs/McpServerConfig"
       },
       "default": {},
-      "description": "MCP server configurations keyed by name",
       "type": "object"
     },
     "model": {
@@ -1134,7 +1021,6 @@
         "type": "string"
       },
       "default": {},
-      "description": "model tier aliases for `/model`",
       "type": "object"
     },
     "repo_map": {
@@ -1142,8 +1028,7 @@
       "default": {
         "budget": 8192,
         "enabled": true
-      },
-      "description": "repo map tool configuration"
+      }
     },
     "settings": {
       "$ref": "#/$defs/Settings",
@@ -1157,22 +1042,18 @@
           "redact_thinking": true
         },
         "scope": "session"
-      },
-      "description": "provider-specific settings (anthropic betas, scope, etc.)"
+      }
     },
     "show_cost": {
       "default": false,
-      "description": "show dollar cost in status bar (off by default, toggle with /cost)",
       "type": "boolean"
     },
     "show_token_counters": {
       "default": false,
-      "description": "show the ↑/↓/R/W token counter segment in the status bar (off by default)",
       "type": "boolean"
     },
     "show_usage_lines": {
       "default": false,
-      "description": "render per-message usage lines (off by default, same info is in the status bar)",
       "type": "boolean"
     },
     "status_bar": {
@@ -1185,8 +1066,7 @@
         "show_pane_indicator": true,
         "show_status_messages": true,
         "show_thinking": true
-      },
-      "description": "per-segment visibility toggles for the status bar"
+      }
     },
     "system_prompt": {
       "default": null,
@@ -1200,8 +1080,7 @@
       "default": {
         "image_probe": "auto",
         "keyboard_enhancement": "auto"
-      },
-      "description": "terminal behaviour overrides"
+      }
     },
     "theme": {
       "$ref": "#/$defs/ThemeConfig",
@@ -1258,16 +1137,14 @@
     },
     "thinking_display": {
       "$ref": "#/$defs/ThinkingDisplay",
-      "default": "expanded",
-      "description": "how to display thinking text (hidden, collapse, expanded)"
+      "default": "expanded"
     },
     "web_search": {
       "$ref": "#/$defs/WebSearchConfig",
       "default": {
         "default_provider": null,
         "searx": null
-      },
-      "description": "web search provider config (exa default, optional searx instance)."
+      }
     }
   },
   "title": "Config",

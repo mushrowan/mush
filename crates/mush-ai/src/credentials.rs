@@ -1,16 +1,3 @@
-//! credential storage for api-key based providers
-//!
-//! oauth credentials live in `oauth.json` (see [`crate::oauth`]) because
-//! they're rich (access + refresh + expiry). this module covers the
-//! simpler "single secret per provider" case for plain api-key auth
-//! (openrouter, openai, anthropic via key, custom providers).
-//!
-//! storage is abstracted behind [`CredentialStore`] so we can swap in
-//! the os-native keychain via [`keyring-core`] when available, falling
-//! back to a file at `~/.config/mush/api-keys.json` (mode 0o600) on
-//! headless / containerised hosts. callers shouldn't care which backend
-//! is active
-
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
@@ -28,41 +15,22 @@ pub enum CredentialError {
     Keyring(String),
 }
 
-/// platform-independent credential storage. callers identify each
-/// secret by a stable `provider_id` (e.g. `anthropic`, `openrouter`).
-/// implementations must be safe to share across threads
 pub trait CredentialStore: Send + Sync + std::fmt::Debug {
-    /// retrieve a stored secret. returns `Ok(None)` when no entry
-    /// exists, distinct from `Err` (which means the lookup itself
-    /// failed). secrets are returned as `ApiKey` so the redaction
-    /// guarantees flow through the auth pipeline
     fn get(&self, provider_id: &str) -> Result<Option<ApiKey>, CredentialError>;
 
-    /// store a secret, replacing any existing value for `provider_id`
     fn set(&self, provider_id: &str, secret: &str) -> Result<(), CredentialError>;
 
-    /// delete a stored secret. returns whether an entry was actually
-    /// removed (`false` when nothing was stored to begin with). a
-    /// no-op call is not an error
     fn remove(&self, provider_id: &str) -> Result<bool, CredentialError>;
 
-    /// short label describing the active backend (used in toasts and
-    /// debug dumps so users can see where their secrets ended up)
     fn backend(&self) -> &'static str;
 }
 
-/// file-based credential store at `~/.config/mush/api-keys.json` (mode
-/// 0o600 on unix). this is the universal fallback when the os keychain
-/// isn't available, and the only backend used in tests
 #[derive(Debug, Clone)]
 pub struct FileCredentialStore {
     path: PathBuf,
 }
 
 impl FileCredentialStore {
-    /// create a store backed by an explicit path. tests use this with
-    /// a `tempfile::tempdir`; runtime callers usually want
-    /// [`Self::default`] (via the `Default` trait)
     #[must_use]
     pub fn at(path: PathBuf) -> Self {
         Self { path }
@@ -137,9 +105,6 @@ impl CredentialStore for FileCredentialStore {
     }
 }
 
-/// resolve the on-disk path for the file fallback store. mirrors the
-/// logic [`crate::oauth::store`] uses for `oauth.json` so users have
-/// one config dir to back up
 fn default_credentials_path() -> PathBuf {
     if let Ok(dir) = std::env::var("MUSH_CONFIG_DIR") {
         PathBuf::from(dir).join("api-keys.json")
@@ -152,18 +117,12 @@ fn default_credentials_path() -> PathBuf {
     }
 }
 
-/// keyring-backed credential store using the os-native keychain. the
-/// backing platform store (Apple Keychain on macOS, Credential Store on
-/// Windows, kernel keyutils on Linux) is set as the keyring-core
-/// process-wide default by [`try_init_keyring`] before any access
 #[derive(Debug, Clone)]
 pub struct KeyringCredentialStore {
     service: &'static str,
 }
 
 impl KeyringCredentialStore {
-    /// service name used for every entry. credentials are keyed by
-    /// `(service, user)` where `user == provider_id`
     pub const SERVICE: &'static str = "mush";
 
     fn entry(&self, provider_id: &str) -> Result<keyring_core::Entry, CredentialError> {
@@ -200,10 +159,6 @@ impl CredentialStore for KeyringCredentialStore {
     }
 }
 
-/// install the platform-native keyring-core default store. returns
-/// whether installation succeeded - a `false` here means the caller
-/// should use the file fallback. failures are common on headless linux
-/// (no kernel keyutils session, or restricted containers) and harmless
 fn try_init_keyring() -> bool {
     #[cfg(target_os = "linux")]
     {
@@ -250,14 +205,8 @@ fn try_init_keyring() -> bool {
     }
 }
 
-/// the resolved credential store for this process. picked once via
-/// [`try_init_keyring`] (keyring if the os backend works, file fallback
-/// otherwise) and reused for every subsequent call. tests should
-/// construct a [`FileCredentialStore`] explicitly with a temp path
-/// instead of going through this global
 static DEFAULT_STORE: OnceLock<Arc<dyn CredentialStore>> = OnceLock::new();
 
-/// access the canonical store, initialising it on first use
 #[must_use]
 pub fn default_store() -> Arc<dyn CredentialStore> {
     DEFAULT_STORE
@@ -273,14 +222,11 @@ pub fn default_store() -> Arc<dyn CredentialStore> {
         .clone()
 }
 
-/// describe the active backend, e.g. for `/debug` output
 #[must_use]
 pub fn active_backend() -> &'static str {
     default_store().backend()
 }
 
-/// path used by [`FileCredentialStore::default`]. exposed for users so
-/// `/login` toasts can mention where the file landed
 #[must_use]
 pub fn fallback_file_path() -> PathBuf {
     default_credentials_path()
@@ -329,13 +275,11 @@ mod tests {
     #[test]
     fn file_store_remove_returns_false_when_missing() {
         let (_dir, store) = temp_store();
-        // never wrote anything for this provider id
         assert!(!store.remove("openrouter").unwrap());
     }
 
     #[test]
     fn file_store_keeps_other_entries_intact_on_remove() {
-        // removing one provider must not blow away the rest of the file
         let (_dir, store) = temp_store();
         store.set("openai", "k1").unwrap();
         store.set("openrouter", "k2").unwrap();
@@ -347,8 +291,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn file_store_writes_with_mode_600() {
-        // secrets must land with private permissions even when the
-        // parent directory is world-readable
         use std::os::unix::fs::PermissionsExt;
         let (_dir, store) = temp_store();
         store.set("anthropic", "secret").unwrap();
@@ -358,8 +300,6 @@ mod tests {
 
     #[test]
     fn file_store_handles_provider_ids_with_hyphens() {
-        // provider ids in the wild contain hyphens (`openai-codex`,
-        // `claude-pro-max`). they must round-trip cleanly through json
         let (_dir, store) = temp_store();
         store.set("openai-codex", "k").unwrap();
         store.set("anthropic-api", "k2").unwrap();
@@ -369,8 +309,6 @@ mod tests {
 
     #[test]
     fn file_store_handles_empty_file() {
-        // a zero-byte file (e.g. a botched write) shouldn't poison the
-        // store: load returns empty and subsequent writes succeed
         let (_dir, store) = temp_store();
         if let Some(parent) = store.path.parent() {
             std::fs::create_dir_all(parent).unwrap();

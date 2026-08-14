@@ -1,9 +1,3 @@
-//! api provider registry
-//!
-//! providers register streaming functions keyed by api type.
-//! models reference which api they use, and the registry resolves
-//! the right provider at call time.
-
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -11,10 +5,8 @@ use std::sync::Arc;
 use crate::stream::StreamEvent;
 use crate::types::{Api, Model, StreamOptions};
 
-/// a boxed stream of events from an LLM provider
 pub type EventStream = Pin<Box<dyn futures::Stream<Item = StreamEvent> + Send>>;
 
-/// errors from provider operations
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
 #[non_exhaustive]
 pub enum ProviderError {
@@ -57,10 +49,8 @@ impl From<reqwest_middleware::Error> for ProviderError {
     }
 }
 
-/// max bytes of API error body to include in the error message
 const MAX_ERROR_BODY: usize = 2000;
 
-/// truncate an error body for diagnostic display
 pub fn truncate_error_body(body: &str) -> String {
     if body.len() <= MAX_ERROR_BODY {
         body.to_string()
@@ -74,30 +64,15 @@ pub fn truncate_error_body(body: &str) -> String {
 }
 
 impl ProviderError {
-    /// whether this error is transient and worth retrying
     pub fn is_retryable(&self) -> bool {
         match self {
-            Self::Request(e) => {
-                // network errors, timeouts, connection resets
-                e.is_timeout() || e.is_connect() || e.is_request()
-            }
-            Self::ApiError { status, .. } => {
-                // rate limit, server errors, overloaded
-                status.as_u16() == 429 || status.as_u16() >= 500
-            }
+            Self::Request(e) => e.is_timeout() || e.is_connect() || e.is_request(),
+            Self::ApiError { status, .. } => status.as_u16() == 429 || status.as_u16() >= 500,
             _ => false,
         }
     }
 }
 
-/// whether an `AssistantMessage::error_message` from a stream that ended
-/// with `StopReason::Error` (no http error, but the provider surfaced a
-/// transient failure mid-stream) is worth retrying. covers anthropic's
-/// `overloaded_error` SSE event, openai's `rate_limit_exceeded`, and
-/// the generic upstream-overload patterns providers use when the
-/// connection accepted (200) before the failure surfaced. matched
-/// case-insensitively as a substring scan because each provider
-/// formats the surfaced message slightly differently
 #[must_use]
 pub fn is_retryable_stream_error_message(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
@@ -116,14 +91,12 @@ pub fn is_retryable_stream_error_message(message: &str) -> bool {
     .any(|pat| lower.contains(pat))
 }
 
-/// context passed to providers for each LLM call
 pub struct LlmContext {
     pub system_prompt: Option<String>,
     pub messages: Vec<crate::types::Message>,
     pub tools: Vec<ToolDefinition>,
 }
 
-/// minimal tool definition for the provider layer
 #[derive(Debug, Clone)]
 pub struct ToolDefinition {
     pub name: String,
@@ -131,7 +104,6 @@ pub struct ToolDefinition {
     pub parameters: serde_json::Value,
 }
 
-/// trait that LLM api providers implement
 #[async_trait::async_trait]
 pub trait ApiProvider: Send + Sync {
     fn api(&self) -> Api;
@@ -144,7 +116,6 @@ pub trait ApiProvider: Send + Sync {
     ) -> Result<EventStream, ProviderError>;
 }
 
-/// registry holding all available api providers
 #[derive(Default, Clone)]
 pub struct ApiRegistry {
     providers: HashMap<Api, Arc<dyn ApiProvider>>,
@@ -344,21 +315,16 @@ mod tests {
 
     #[test]
     fn retryable_stream_error_messages() {
-        // anthropic mid-stream overloaded error
         assert!(is_retryable_stream_error_message("Overloaded"));
-        // openai-style snake_case
         assert!(is_retryable_stream_error_message(
             "rate_limit_exceeded: please slow down"
         ));
-        // human-readable rate limit
         assert!(is_retryable_stream_error_message("rate limit reached"));
-        // 5xx surfaced as text
         assert!(is_retryable_stream_error_message(
             "internal_server_error from upstream"
         ));
         assert!(is_retryable_stream_error_message("Service Unavailable"));
         assert!(is_retryable_stream_error_message("Request timeout"));
-        // case-insensitive
         assert!(is_retryable_stream_error_message("OVERLOADED"));
     }
 

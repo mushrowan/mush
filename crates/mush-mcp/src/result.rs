@@ -1,17 +1,9 @@
-//! shared MCP result conversion
-
 use mush_agent::tool::ToolResult;
 use mush_ai::types::{
     ImageContent, ImageMimeType, TextContent, ToolOutcome, ToolResultContentPart,
 };
 use rmcp::model::{CallToolResult, ContentBlock, ResourceContents};
 
-/// convert an MCP `CallToolResult` into an agent `ToolResult`
-///
-/// content blocks keep their original order. text-like blocks (plain text,
-/// embedded text resources, resource links) are merged into runs so a
-/// narration split across several blocks reads as one message. images are
-/// forwarded natively when the api can carry the mime type.
 pub fn convert_call_result(result: CallToolResult) -> ToolResult {
     let mut content = Vec::new();
 
@@ -65,7 +57,6 @@ pub fn convert_call_result(result: CallToolResult) -> ToolResult {
     ToolResult { content, outcome }
 }
 
-/// append text, extending the trailing run rather than adding a new part
 fn push_text(content: &mut Vec<ToolResultContentPart>, text: &str) {
     match content.last_mut() {
         Some(ToolResultContentPart::Text(last)) => {
@@ -185,7 +176,6 @@ mod tests {
 
     #[test]
     fn structured_content_is_surfaced_when_there_is_no_text() {
-        // servers are allowed to answer with structuredContent alone
         let result: CallToolResult = serde_json::from_value(serde_json::json!({
             "content": [],
             "structuredContent": { "walls": 4 },

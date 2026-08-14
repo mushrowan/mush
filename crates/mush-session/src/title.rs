@@ -1,5 +1,3 @@
-//! LLM-based session title generation
-
 use mush_ai::Model;
 use mush_ai::oneshot;
 use mush_ai::registry::{ApiRegistry, LlmContext};
@@ -10,7 +8,6 @@ Generate a very short title (max 6 words) for this conversation. \
 The title should capture the main topic or task. \
 Reply with ONLY the title, no quotes, no punctuation at the end, all lowercase.";
 
-/// generate a title from the first few messages using an LLM
 pub async fn generate_title(
     mut messages: Vec<Message>,
     registry: &ApiRegistry,
@@ -37,7 +34,6 @@ pub async fn generate_title(
         }
     };
 
-    // clean up: remove quotes, trailing punctuation
     let title = title
         .trim()
         .trim_matches('"')

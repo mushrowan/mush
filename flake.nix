@@ -68,12 +68,6 @@
 
         craneLib = (inputs.crane.mkLib pkgs).overrideToolchain rustToolchainFor;
 
-        # crane's default filter strips non-rust files. two kinds of data
-        # file have to survive it:
-        #   - `tests/fixtures/` for integration tests that `include_str!`
-        #     vendored JSON (the openrouter openapi spec, etc)
-        #   - `snapshots/` for characterisation guards that assert a dump
-        #     stays byte-identical (the default keybindings table)
         src = pkgs.lib.cleanSourceWith {
           src = ./.;
           name = "source";
@@ -153,22 +147,6 @@
           echo "stall dumps: $MUSH_STALL_DIR" >&2
           echo "" >&2
 
-          # samply unwinds online and writes one compact profile on exit, so
-          # close stays fast. the old perf path ran perf record with a dwarf
-          # call-graph (~4kb of stack per sample) and then perf report/script
-          # synchronously on exit, which took minutes on a long session and
-          # left a truncated perf.data when killed. the summary below
-          # symbolicates the profile with addr2line against the recorded
-          # binary (samply's --unstable-presymbolicate was observed to map
-          # addresses to wrong symbols, so it is not used).
-          #
-          # samply (really its framehop unwinder) logs diagnostics like
-          # "Now we have two modules at the same start address" to stderr.
-          # mush draws its TUI to stdout, so that noise prints over the alt
-          # screen and garbles it. send samply's stderr to a file in the
-          # bundle instead. mush's own logs go to mush.log, not stderr, so
-          # the only thing captured is samply diagnostics plus any final
-          # panic/eyre report, surfaced after the run below.
           set +e
           ${pkgs.samply}/bin/samply record --save-only \
             --rate ''${MUSH_SAMPLY_RATE:-999} \

@@ -1,52 +1,3 @@
-//! truncation audit: what does the model actually see?
-//!
-//! the goal of this file is to be the single source of truth for
-//! "if a tool produces N lines / M bytes of output, what shows up in
-//! the assistant's tool-result message?". every truncation path the
-//! model can hit gets exercised here, with the resulting bytes pinned
-//! so accidental drift fails noisily.
-//!
-//! # the contract today
-//!
-//! - **central truncation** (`mush_agent::truncation::apply`) is the
-//!   last stop before the agent loop forwards a [`ToolResult`] to the
-//!   model. each tool declares its preferred direction via
-//!   [`AgentTool::output_limit`]:
-//!     - `Head`  → keep the first `MAX_LINES` / `MAX_BYTES` (most
-//!       structured/ranked output: ls, read, repo_map, skills,
-//!       web_fetch, web_search, find/glob/grep, edits)
-//!     - `Tail`  → keep the last `MAX_LINES` / `MAX_BYTES` (bash and
-//!       bash-status polling)
-//!
-//!   the trait method has no default: every tool picks one explicitly,
-//!   so a missing choice is a compile error rather than a silent
-//!   middle-truncation regression (see web_search history).
-//!
-//!   when central truncation kicks in, the full text is dumped to
-//!   `~/.local/share/mush/tool-output/tool_<unix_ms>.txt` and a hint
-//!   is folded into the preview pointing the model at that file.
-//!
-//! - **per-tool semantic truncation** runs *before* central
-//!   truncation. it's used when a tool can produce a more useful
-//!   summary than blind line-tail (e.g. read advertises `offset=N` to
-//!   continue, find/glob/grep say "narrow your search"). these tools
-//!   keep their own output well below the central caps so their hint
-//!   survives.
-//!
-//! - **display-only truncation** in `mush-tui` (`truncate_output`,
-//!   `… (N more lines)`) only affects what the human sees in the
-//!   chat preview. the model never sees it.
-//!
-//! # invariants every test pins
-//!
-//! 1. the model is told *something* was truncated (no silent loss)
-//! 2. the model is told *how to recover* (file path, offset hint, or
-//!    "narrow your search")
-//! 3. totals (line count or remaining count) are preserved so the
-//!    model can decide whether recovery is worth it
-//! 4. the recovery hint always survives extreme truncation
-//!    (max_lines = 1) without being mangled
-
 use mush_agent::tool::{AgentTool, OutputLimit, ToolResult};
 use mush_agent::truncation::{self, MAX_BYTES, MAX_LINES};
 use mush_ai::types::ToolResultContentPart;
@@ -55,8 +6,6 @@ use mush_tools::util;
 use pretty_assertions::assert_eq;
 use std::path::Path;
 use std::sync::Arc;
-
-// helpers
 
 fn extract_text(result: &ToolResult) -> String {
     result
@@ -77,8 +26,6 @@ fn make_lines(n: usize) -> String {
         .join("\n")
 }
 
-/// mask the non-deterministic `tool_<unix_ms>.txt` filename and the
-/// data-dir prefix so byte snapshots stay stable across test runs
 fn mask_saved_path(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -86,7 +33,6 @@ fn mask_saved_path(text: &str) -> String {
         out.push_str(&rest[..start]);
         out.push_str("Full output: <DATA_DIR>/tool-output/tool_<TS>.txt");
         rest = &rest[start + "Full output: ".len()..];
-        // skip past the path: ends at first ']' or whitespace boundary
         let end = rest.find([']', '\n', ' ']).unwrap_or(rest.len());
         rest = &rest[end..];
     }
@@ -94,8 +40,6 @@ fn mask_saved_path(text: &str) -> String {
     out
 }
 
-/// run a closure with `MUSH_DATA_DIR` pinned to a tempdir so saved
-/// output goes somewhere deterministic and isolated per-test
 #[allow(
     clippy::unwrap_used,
     reason = "test helper, panic on tmpdir failure is fine"
@@ -103,21 +47,11 @@ fn mask_saved_path(text: &str) -> String {
 fn with_data_dir<R>(f: impl FnOnce(&Path) -> R) -> R {
     let tmp = tempfile::tempdir().unwrap();
     // SAFETY: nextest runs each test in its own process, so mutating
-    // env here can't race with sibling tests
     unsafe {
         std::env::set_var("MUSH_DATA_DIR", tmp.path());
     }
     f(tmp.path())
 }
-
-// section: per-tool output_limit choices
-//
-// every `impl AgentTool` in the workspace must declare whether its
-// output is head-shaped (structured, ranked, file-like → keep the start)
-// or tail-shaped (log/process output → keep the end). there is no
-// fallback default on the trait: missing the choice is a compile error.
-// this test pins the current choices so refactors can't silently flip
-// a tool from Head to Tail (or vice versa) without updating the audit.
 
 #[test]
 fn audit_per_tool_output_limit_choices() {
@@ -129,8 +63,6 @@ fn audit_per_tool_output_limit_choices() {
     let http = mush_ai::http::client();
 
     let cases: Vec<(&str, OutputLimit, Box<dyn AgentTool>)> = vec![
-        // tail: bash and bash polling. errors and final results live at
-        // the end; head would lose them
         (
             "bash",
             OutputLimit::Tail,
@@ -141,8 +73,6 @@ fn audit_per_tool_output_limit_choices() {
             OutputLimit::Tail,
             Box::new(mush_tools::bash_status::BashStatusTool::new(bg)),
         ),
-        // head: file/list/structured-output tools. relevant content lives
-        // up top; tail would drop the entry the model wanted
         (
             "ls",
             OutputLimit::Head,
@@ -209,18 +139,12 @@ fn audit_per_tool_output_limit_choices() {
     }
 }
 
-// section: central truncation (the hint contract)
-
 #[test]
 fn audit_central_head_truncation() {
-    // 5000 lines through Head truncation: hint sits at the TOP of the
-    // preview so the model sees the recovery action before reading
-    // 2000 lines of output. preview body starts at line 0
     let big = make_lines(5000);
     let out = with_data_dir(|_| truncation::apply(ToolResult::text(big), OutputLimit::Head));
     let text = mask_saved_path(&extract_text(&out));
 
-    // structural pins
     assert!(
         text.starts_with('['),
         "hint at top, got prefix {:?}",
@@ -238,15 +162,11 @@ fn audit_central_head_truncation() {
         text.contains("\n\nline 0\nline 1\n"),
         "head preview body starts at line 0"
     );
-    // size sanity
     assert!(text.len() <= MAX_BYTES + 512, "preview within budget");
 }
 
 #[test]
 fn audit_central_tail_truncation() {
-    // 5000 lines through Tail (bash): hint comes FIRST, preview ends
-    // with the last lines. agents reading bash output care most about
-    // the end (errors, final results)
     let big = make_lines(5000);
     let out = with_data_dir(|_| truncation::apply(ToolResult::text(big), OutputLimit::Tail));
     let text = mask_saved_path(&extract_text(&out));
@@ -267,13 +187,8 @@ fn audit_central_tail_truncation() {
     assert!(text.ends_with("line 4999"), "tail kept last line");
 }
 
-// section: extreme cases
-
 #[test]
 fn audit_central_byte_overflow_truncation() {
-    // 1 huge line that exceeds MAX_BYTES on its own. byte-overflow must
-    // still emit the recovery hint AND a sampled head/tail of the line
-    // so the model can classify the content (base64? minified js?)
     let huge_line = "x".repeat(MAX_BYTES + 10000);
     let out = with_data_dir(|_| truncation::apply(ToolResult::text(huge_line), OutputLimit::Head));
     let text = mask_saved_path(&extract_text(&out));
@@ -294,8 +209,6 @@ fn audit_central_byte_overflow_truncation() {
 
 #[test]
 fn audit_central_extreme_budget_keeps_hint_intact() {
-    // budget of 1 line, regardless of direction: the hint still has
-    // every actionable phrase the model needs
     let big = make_lines(5000);
     for direction in [OutputLimit::Head, OutputLimit::Tail] {
         let out = with_data_dir(|_| {
@@ -310,15 +223,8 @@ fn audit_central_extreme_budget_keeps_hint_intact() {
     }
 }
 
-// section: per-tool semantic truncation
-
 #[tokio::test]
 async fn audit_read_tool_truncates_long_file_with_offset_hint() {
-    // a 5000-line file read through the read tool: model sees the
-    // first ~MAX_LINES lines with an `offset=` hint pointing at the
-    // exact line to resume from. importantly the read tool's own hint
-    // must fit *under* the central truncation cap, otherwise the
-    // central pass would obliterate it
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("big.txt");
     let body = make_lines(5000);
@@ -328,7 +234,6 @@ async fn audit_read_tool_truncates_long_file_with_offset_hint() {
     let raw = tool
         .execute(serde_json::json!({ "file_path": file.to_string_lossy() }))
         .await;
-    // route through the central pass exactly like the agent loop does
     let routed = truncation::apply(raw, tool.output_limit());
     let text = extract_text(&routed);
 
@@ -337,12 +242,10 @@ async fn audit_read_tool_truncates_long_file_with_offset_hint() {
         text.contains("more lines in file. Use offset="),
         "read hint"
     );
-    // central pass should not have stomped on the read hint
     assert!(
         !text.contains("Use the Grep tool to search or the Read tool"),
         "central truncation should not fire on a tidy read output:\n{text}"
     );
-    // read advertises a concrete next offset
     let next_offset_hint = text.lines().last().unwrap_or("");
     assert!(
         next_offset_hint.contains("Use offset=") && next_offset_hint.contains("to continue"),
@@ -352,11 +255,6 @@ async fn audit_read_tool_truncates_long_file_with_offset_hint() {
 
 #[test]
 fn audit_truncate_lines_helper_for_find_grep_glob() {
-    // util::truncate_lines is what find/glob/grep-like list outputs
-    // go through. cap is 200 results, hint says "narrow your search".
-    // there's no saved file path here: dropped results are *gone*
-    // from the model's view, the only recovery is a tighter pattern.
-    // this test exists to flag if anyone tries to rip the hint out
     let lines: Vec<String> = (0..500).map(|i| format!("file_{i}.rs")).collect();
     let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
     let out = util::truncate_lines(&refs, "matches");
@@ -372,8 +270,6 @@ fn audit_truncate_lines_helper_for_find_grep_glob() {
 
 #[test]
 fn audit_truncate_lines_under_cap_includes_count_header() {
-    // small input keeps the count header so the model can spot
-    // "exactly N matches" without re-counting the buffer itself
     let lines: Vec<String> = (0..3).map(|i| format!("hit {i}")).collect();
     let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
     let out = util::truncate_lines(&refs, "matches");
@@ -386,12 +282,8 @@ fn audit_truncate_lines_empty_says_no_results() {
     assert_eq!(out, "no matches found");
 }
 
-// section: max-byte / max-line constants
-
 #[test]
 fn audit_central_caps_match_documented_defaults() {
-    // pi-mono, opencode, codex all settled on ~2000 lines / ~50KB.
-    // pinning here so anyone bumping these has to update the audit
     assert_eq!(MAX_LINES, 2000);
     assert_eq!(MAX_BYTES, 50 * 1024);
 }

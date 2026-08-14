@@ -1,4 +1,3 @@
-//! ad-hoc dumper: prints what the model sees for each truncation path
 use mush_agent::tool::{AgentTool, OutputLimit, ToolResult};
 use mush_agent::truncation;
 use mush_ai::types::ToolResultContentPart;
@@ -41,7 +40,6 @@ fn banner(name: &str) {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tmp = tempfile::tempdir()?;
     // SAFETY: this is a single-threaded example binary; no other
-    // threads are reading env at this point
     unsafe {
         std::env::set_var("MUSH_DATA_DIR", tmp.path());
     }

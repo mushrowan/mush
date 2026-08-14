@@ -184,10 +184,6 @@ fn provider_managed_context_shrink_does_not_alarm_as_cache_bust() {
 
 #[test]
 fn bust_reason_history_reshaped_when_prefix_changes() {
-    // same model/thinking/effort between calls, but the messages_prefix
-    // fingerprint differs: someone mutated the conversation history
-    // (lost steering messages, branch reshuffle, manual prune). this
-    // should classify as HistoryReshaped, not Unexplained
     let mut stats = TokenStats::new(TokenCount::new(200_000));
     stats.update_with_config(
         &prev_usage(),
@@ -214,10 +210,6 @@ fn bust_reason_history_reshaped_when_prefix_changes() {
 
 #[test]
 fn bust_reason_prefers_explicit_config_change_over_history() {
-    // when both the model changed AND the prefix shifted, the model
-    // change is the higher-signal explanation: the prefix would have
-    // shifted anyway because anthropic keys cache by model id. preserve
-    // the existing precedence (model > thinking > effort > history)
     let mut stats = TokenStats::new(TokenCount::new(200_000));
     stats.update_with_config(
         &prev_usage(),
@@ -244,7 +236,6 @@ fn bust_reason_prefers_explicit_config_change_over_history() {
 
 #[test]
 fn plain_update_defaults_to_unexplained() {
-    // legacy callers without config context still detect busts
     let mut stats = TokenStats::new(TokenCount::new(200_000));
     stats.update(&prev_usage(), None);
     let anomalies = stats.update(&curr_usage(), None);
@@ -253,11 +244,6 @@ fn plain_update_defaults_to_unexplained() {
 
 #[test]
 fn dump_pins_referenced_request_snapshots() {
-    // when a bust dump references live request snapshots, those snapshots
-    // must be copied into a sibling dir so the forensic bundle survives
-    // the live ring's rotation. the written json should reference the
-    // pinned copies, not the live paths that may have been deleted by
-    // the time someone reads the bust file
     let tmp = tempfile::tempdir().unwrap();
     let bust_dir = tmp.path().join("cache-busts");
     let snap_dir = tmp.path().join("snapshots");
@@ -293,7 +279,6 @@ fn dump_pins_referenced_request_snapshots() {
     let bust_path = dump_cache_bust_diagnostic_in(&bust_dir, &diag).expect("dump succeeds");
     assert!(bust_path.exists(), "bust json written");
 
-    // pins live in a sibling dir named after the bust stem
     let pin_dir = bust_dir.join("bust-1776978542-snapshots");
     assert!(pin_dir.is_dir(), "pin dir created next to bust json");
 
@@ -302,7 +287,6 @@ fn dump_pins_referenced_request_snapshots() {
     assert!(pinned_curr.exists(), "curr snapshot copied");
     assert!(pinned_prev.exists(), "prev snapshot copied");
 
-    // the bust json should reference the pinned copies, not the live paths
     let body = std::fs::read_to_string(&bust_path).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
     let paths = parsed["recent_request_snapshots"].as_array().unwrap();
@@ -317,7 +301,6 @@ fn dump_pins_referenced_request_snapshots() {
         paths[0]
     );
 
-    // rotation of the live dir must not affect the pinned bundle
     std::fs::remove_file(&prev_snap).unwrap();
     std::fs::remove_file(&curr_snap).unwrap();
     assert!(pinned_curr.exists(), "pinned copy survives live deletion");

@@ -1,73 +1,39 @@
-//! session compaction
-//!
-//! when a conversation gets too long, older messages are replaced
-//! with a summary while keeping recent context intact. the summary
-//! is injected as a user message at the start of the compacted history.
-//!
-//! supports both structured (no LLM) and LLM-based summarisation.
-
 use mush_ai::registry::{ApiRegistry, LlmContext, is_retryable_stream_error_message};
 use mush_ai::types::*;
 
-/// how many recent messages to keep uncompacted
 const DEFAULT_KEEP_RECENT: usize = 10;
 
-/// how many recent assistant turns to keep full tool output for
 const DEFAULT_KEEP_OBSERVATIONS: usize = 5;
 
-/// maximum output tokens requested for LLM-generated compaction summaries
 const COMPACTION_MAX_OUTPUT_TOKENS: u64 = 8192;
 
-/// retry budget for transient compaction provider failures
 const COMPACTION_MAX_RETRIES: u32 = 5;
 
-/// maximum exponential backoff between compaction retry attempts
 const COMPACTION_MAX_BACKOFF_SECS: u64 = 16;
 
-/// rough chars-per-token ratio for estimation (LLM tokenisers average ~4)
 const CHARS_PER_TOKEN: usize = 4;
 
-/// rough char-equivalent for images in token estimation
 const IMAGE_CHAR_ESTIMATE: usize = 1000;
 
-/// prefix of the synthetic user message produced by compaction.
-/// kept public so display layers can detect and re-render the
-/// compaction summary distinctly (not as a user turn)
 pub const COMPACTION_SUMMARY_PREFIX: &str =
     "The conversation history before this point was compacted into the following summary:";
 
-/// result of compaction
 #[derive(Debug)]
 pub struct CompactionResult {
-    /// the compacted message list
     pub messages: Vec<Message>,
-    /// number of messages that were summarised
     pub summarised_count: usize,
-    /// the summary text that was generated
     pub summary: String,
-    /// diagnostic information about LLM compaction retries and fallback
     pub diagnostics: CompactionDiagnostics,
 }
 
-/// diagnostic information from an LLM compaction attempt.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct CompactionDiagnostics {
-    /// model that generated or attempted the summary
     pub model_id: String,
-    /// number of retry attempts after the initial request
     pub retries: u32,
-    /// number of oldest messages dropped from the summary request to
-    /// make a too-large compaction prompt fit the model context window
     pub trimmed_messages: usize,
-    /// fallback reason when LLM summarisation failed
     pub fallback_reason: Option<String>,
 }
 
-/// recoverable failure from an LLM compaction attempt.
-///
-/// carries enough context for the UI to ask the user whether to retry,
-/// apply the local structured fallback, or cancel without losing the
-/// original message list.
 #[derive(Debug, Clone)]
 pub struct CompactionFailureReport {
     messages: Vec<Message>,
@@ -181,14 +147,10 @@ impl CompactionDiagnostics {
     }
 }
 
-/// estimate token count for a message list (rough: chars / CHARS_PER_TOKEN)
 pub fn estimate_tokens(messages: &[Message]) -> usize {
     messages.iter().map(estimate_message_tokens).sum()
 }
 
-/// count the approximate character length of a message's content.
-/// images use a fixed estimate since their tokens come from the
-/// vision encoder, not character count.
 fn message_char_count(msg: &Message) -> usize {
     match msg {
         Message::User(u) => match &u.content {
@@ -231,23 +193,12 @@ fn estimate_message_tokens(msg: &Message) -> usize {
     message_char_count(msg) / CHARS_PER_TOKEN
 }
 
-/// mask old tool result outputs while preserving the action history
-///
-/// walks the message list and replaces tool result content beyond
-/// `keep_recent_turns` assistant turns with a brief summary. the
-/// tool call itself (in the assistant message) is preserved so the
-/// model can see what actions were taken without the bulky output.
-///
-/// returns the number of tool results that were masked and the
-/// estimated token savings
 pub fn mask_observations(
     messages: &mut [Message],
     keep_recent_turns: Option<usize>,
 ) -> ObservationMaskResult {
     let keep = keep_recent_turns.unwrap_or(DEFAULT_KEEP_OBSERVATIONS);
 
-    // find the cutoff: the index of the `keep`th assistant message from
-    // the end. everything before this index is "old" and gets masked
     let Some(cutoff_index) = find_recent_boundary(messages, TurnPivot::Assistant, keep) else {
         return ObservationMaskResult {
             masked_count: 0,
@@ -255,7 +206,6 @@ pub fn mask_observations(
         };
     };
 
-    // mask tool results before the cutoff
     let mut masked_count = 0;
     let mut tokens_saved = 0;
 
@@ -263,7 +213,6 @@ pub fn mask_observations(
         if let Message::ToolResult(tr) = msg {
             let old_tokens = estimate_message_tokens(&Message::ToolResult(tr.clone()));
 
-            // count lines in the original output
             let line_count: usize = tr
                 .content
                 .iter()
@@ -292,12 +241,9 @@ pub fn mask_observations(
     }
 }
 
-/// result of observation masking
 #[derive(Debug)]
 pub struct ObservationMaskResult {
-    /// number of tool results that had their content replaced
     pub masked_count: usize,
-    /// estimated tokens saved by masking
     pub tokens_saved: usize,
 }
 
@@ -321,11 +267,6 @@ fn truncate_with_ellipsis(text: &str, max_chars: usize) -> String {
     truncated
 }
 
-/// build a summary of messages that will be compacted
-///
-/// this produces a structured text summary. the actual LLM-based
-/// summarisation happens upstream - this function just formats the
-/// context for the summary prompt.
 pub fn build_compaction_prompt(messages: &[Message]) -> String {
     let mut parts = Vec::new();
 
@@ -388,15 +329,6 @@ pub fn build_compaction_prompt(messages: &[Message]) -> String {
     parts.join("\n")
 }
 
-/// build the full LLM prompt body for compaction.
-///
-/// emits two sections: a `<conversation>` block holding the messages
-/// to summarise, and (when non-empty) a `<recent_state>` block holding
-/// the kept-recent messages purely as context. the prompt instructs
-/// the LLM to summarise only the first section, using the second to
-/// understand current state - this prevents recently-completed tasks
-/// from being labelled "in progress" in the summary just because the
-/// summariser didn't see their resolution.
 pub fn build_compaction_request(old: &[Message], recent: &[Message]) -> String {
     let conversation_dump = build_compaction_prompt(old);
     if recent.is_empty() {
@@ -418,8 +350,6 @@ pub fn build_compaction_request(old: &[Message], recent: &[Message]) -> String {
     )
 }
 
-/// compact messages by replacing older ones with a pre-built summary.
-/// keeps the most recent `keep_recent` messages intact.
 pub fn compact_with_summary(
     messages: Vec<Message>,
     summary: &str,
@@ -437,16 +367,11 @@ pub fn compact_with_summary(
     }
 
     let split_at = messages.len() - keep;
-    // walk forward to a non-tool-result boundary to avoid orphaned
-    // tool_result messages that reference compacted-away tool_use blocks.
-    // both User and Assistant messages are valid split points, but
-    // ToolResult would create a dangling reference to a compacted tool call
     let split_at = messages[split_at..]
         .iter()
         .position(|m| !matches!(m, Message::ToolResult(_)))
         .map(|offset| split_at + offset);
     let Some(split_at) = split_at else {
-        // all kept messages are tool results (shouldn't happen), keep everything
         return CompactionResult {
             summarised_count: 0,
             summary: String::new(),
@@ -518,13 +443,8 @@ Use this EXACT format:
 Keep each section concise. Preserve exact file paths, function names, and error messages.";
 
 const FALLBACK_SUMMARY_HEADING: &str = "## Summary of earlier conversation";
-/// trigger compaction when context usage exceeds this percentage
 const COMPACTION_THRESHOLD: u64 = 95;
 
-/// check whether compaction is needed based on real API token counts
-///
-/// triggers at 95% of context window. also requires more than
-/// `DEFAULT_KEEP_RECENT` messages to avoid compacting tiny conversations.
 pub fn needs_compaction_at(
     context_tokens: TokenCount,
     context_window: TokenCount,
@@ -534,13 +454,6 @@ pub fn needs_compaction_at(
         && context_tokens.exceeds_fraction(context_window, COMPACTION_THRESHOLD, 100)
 }
 
-/// check whether compaction is needed for the current payload.
-///
-/// `context_tokens` is the api-reported input count from the last
-/// successful call, so it may be unavailable or stale after restoring a
-/// session. use the larger of the provider count and current estimate.
-/// callers that can track estimated growth since the last provider count
-/// should use [`needs_compaction_for_estimated_payload`] instead.
 pub fn needs_compaction_for_messages(
     context_tokens: TokenCount,
     context_window: TokenCount,
@@ -554,14 +467,6 @@ pub fn needs_compaction_for_messages(
     )
 }
 
-/// check compaction for a payload when the caller knows the rough token
-/// estimate that corresponded to `context_tokens`.
-///
-/// this catches growth since the last api call without double-counting the
-/// whole prompt: `context_tokens` is treated as the previous true provider
-/// count, and only estimated tokens beyond `baseline_estimated_tokens` are
-/// added to it. the full estimate still acts as a floor for restored sessions
-/// that have no useful API count yet.
 pub fn needs_compaction_for_estimated_payload(
     context_tokens: TokenCount,
     baseline_estimated_tokens: TokenCount,
@@ -577,8 +482,6 @@ pub fn needs_compaction_for_estimated_payload(
     needs_compaction_at(effective_tokens, context_window, message_count)
 }
 
-/// provider token count adjusted by estimated growth since that count
-/// was measured.
 pub fn compaction_tokens_for_estimated_payload(
     context_tokens: TokenCount,
     baseline_estimated_tokens: TokenCount,
@@ -590,26 +493,14 @@ pub fn compaction_tokens_for_estimated_payload(
     lag_adjusted_tokens.max(current_estimated_tokens)
 }
 
-/// result of the auto_compact escalation
 #[derive(Debug)]
 pub struct AutoCompactResult {
-    /// the compacted message list
     pub messages: Vec<Message>,
-    /// number of tool outputs masked (0 = no masking applied)
     pub masked_count: usize,
-    /// estimated tokens saved by masking
     pub mask_tokens_saved: usize,
-    /// number of messages that were summarised (0 = no LLM compaction)
     pub summarised_count: usize,
 }
 
-/// escalating auto-compaction: masking then LLM summarisation
-///
-/// 1. mask old tool outputs (cheap, no LLM call)
-/// 2. if still over budget, LLM summarisation of old turns
-///
-/// callers handle post-compaction hooks separately since that
-/// requires mush-agent types this crate doesn't depend on.
 pub async fn auto_compact(
     messages: Vec<Message>,
     context_tokens: TokenCount,
@@ -627,12 +518,10 @@ pub async fn auto_compact(
         };
     }
 
-    // step 1: mask old tool outputs
     let mut messages = messages;
     let mask_result = mask_observations(&mut messages, None);
 
     if mask_result.masked_count > 0 {
-        // re-check if we're still over budget after masking
         let threshold = (context_window.get() as usize) * COMPACTION_THRESHOLD as usize / 100;
         if estimate_tokens(&messages) < threshold {
             return AutoCompactResult {
@@ -644,7 +533,6 @@ pub async fn auto_compact(
         }
     }
 
-    // step 2: LLM summarisation
     let result = llm_compact(
         messages,
         registry,
@@ -663,14 +551,6 @@ pub async fn auto_compact(
     }
 }
 
-/// compact messages using an LLM to generate the summary.
-/// falls back to structured compaction if the LLM call fails.
-///
-/// `context_budget` is an optional target size for the generated
-/// summary. when set, it's appended to the system prompt as a soft
-/// instruction so the LLM aims to produce output within that budget.
-/// the value is a hint, not a hard cap. the fallback path ignores it
-/// since the structured fallback summary has a fixed shape
 pub async fn llm_compact(
     messages: Vec<Message>,
     registry: &ApiRegistry,
@@ -694,15 +574,6 @@ pub async fn llm_compact(
     }
 }
 
-/// compact messages using an LLM to generate the summary.
-///
-/// unlike [`llm_compact`], this does not apply the structured fallback
-/// automatically. callers can surface [`CompactionFailureReport`] to a UI
-/// and let the user decide whether to retry, fall back, or cancel.
-// the failure report intentionally carries the full message list (plus
-// diagnostics) so the UI can retry or fall back without losing context. the
-// Ok variant is comparably large, so boxing only the error would just add a
-// cold-path allocation without shrinking the Result.
 #[allow(clippy::result_large_err)]
 pub async fn try_llm_compact(
     messages: Vec<Message>,
@@ -780,9 +651,6 @@ fn compaction_context(
     recent_messages: &[Message],
     context_budget: Option<TokenCount>,
 ) -> LlmContext {
-    // recent kept messages are passed as context-only so the summariser
-    // knows the current state and doesn't mislabel recently-completed
-    // tasks as in-progress
     let request_body = build_compaction_request(old_messages, recent_messages);
     let system_prompt = match context_budget {
         Some(budget) => format!(
@@ -1006,7 +874,6 @@ fn compaction_stream_options(model: &Model, options: &StreamOptions) -> StreamOp
     compact_options
 }
 
-/// make a simple LLM call and collect the text response
 async fn call_for_text(
     registry: &ApiRegistry,
     model: &Model,
@@ -1217,7 +1084,6 @@ mod tests {
 
     #[test]
     fn estimate_uses_chars_per_token_ratio() {
-        // 40 chars / CHARS_PER_TOKEN(4) = 10 tokens
         let msg = user_msg(&"a".repeat(40));
         assert_eq!(estimate_message_tokens(&msg), 40 / CHARS_PER_TOKEN);
     }
@@ -1264,10 +1130,6 @@ mod tests {
 
     #[test]
     fn build_request_marks_recent_messages_as_context_only() {
-        // the headline fix: recent kept messages must be included in
-        // the prompt so the summariser knows what state the conversation
-        // is in, and labelled as context-only so the summariser doesn't
-        // include them in the summary itself
         let old = vec![
             user_msg("start task"),
             assistant_msg("calling tool to do task"),
@@ -1286,8 +1148,6 @@ mod tests {
             request.to_lowercase().contains("context"),
             "prompt must label the recent section as context: {request}"
         );
-        // explicit guidance that recent is NOT to be summarised. the
-        // exact phrasing can flex, but the intent must be discoverable
         let lower = request.to_lowercase();
         assert!(
             lower.contains("do not summarise")
@@ -1301,9 +1161,6 @@ mod tests {
 
     #[test]
     fn build_request_omits_recent_section_when_empty() {
-        // when there are no recent messages (e.g. compacting an entire
-        // history), don't emit a context-only section at all so the
-        // prompt stays minimal and the LLM doesn't see an empty wrapper
         let old = vec![user_msg("just one message")];
         let request = build_compaction_request(&old, &[]);
         let lower = request.to_lowercase();
@@ -1315,11 +1172,6 @@ mod tests {
 
     #[test]
     fn build_request_does_not_double_count_recent_in_old_section() {
-        // sanity: old and recent must be disjoint in the rendered
-        // output. we observe by ensuring a recent-only marker doesn't
-        // appear inside the <conversation> block (a regression where
-        // the function accidentally appended recent to old would fail
-        // this)
         let old = vec![user_msg("OLD_MARKER")];
         let recent = vec![user_msg("RECENT_MARKER")];
         let request = build_compaction_request(&old, &recent);
@@ -1354,12 +1206,9 @@ mod tests {
             .collect();
 
         let result = compact_with_summary(msgs, "this is the summary", Some(5));
-        // split_at starts at 15 (assistant), which is not a ToolResult
-        // so split happens there: 1 summary + 5 kept = 6
         assert_eq!(result.messages.len(), 6);
         assert_eq!(result.summarised_count, 15);
 
-        // first message should be the summary
         if let Message::User(u) = &result.messages[0] {
             if let UserContent::Text(t) = &u.content {
                 assert!(t.contains("summary"));
@@ -1381,8 +1230,7 @@ mod tests {
         ];
 
         let result = compact_with_summary(msgs, "old stuff", Some(2));
-        assert_eq!(result.messages.len(), 3); // 1 summary + 2 kept
-        // last two should be the recent messages
+        assert_eq!(result.messages.len(), 3);
         if let Message::User(u) = &result.messages[1] {
             if let UserContent::Text(t) = &u.content {
                 assert_eq!(t, "recent");
@@ -1394,7 +1242,6 @@ mod tests {
 
     #[test]
     fn needs_compaction_below_threshold() {
-        // 100 tokens used, 200k window, well under 95%
         assert!(!needs_compaction_at(
             TokenCount::new(100),
             TokenCount::new(200_000),
@@ -1404,7 +1251,6 @@ mod tests {
 
     #[test]
     fn needs_compaction_above_threshold() {
-        // 9600 tokens used, 10k window = 96%, over 95% threshold
         assert!(needs_compaction_at(
             TokenCount::new(9600),
             TokenCount::new(10_000),
@@ -1414,7 +1260,6 @@ mod tests {
 
     #[test]
     fn needs_compaction_too_few_messages() {
-        // high usage but only 8 messages, below DEFAULT_KEEP_RECENT
         assert!(!needs_compaction_at(
             TokenCount::new(9600),
             TokenCount::new(10_000),
@@ -1451,17 +1296,10 @@ mod tests {
 
     #[test]
     fn auto_compaction_keys_off_effective_window_not_displayed() {
-        // a route can display a larger total window than the input ceiling
-        // it honours (an input + output split). when effective_context_window
-        // is set, compaction must key off it so it fires before the provider
-        // errors, not at 95% of the larger displayed window. this guards the
-        // wiring of Model::compaction_window into the auto-compaction decision.
         let mut model = test_model();
         model.context_window = TokenCount::new(400_000);
         model.effective_context_window = Some(TokenCount::new(272_000));
 
-        // 260k is 95.6% of the 272k effective budget (compact) but only
-        // 65% of the 400k displayed window (would not compact)
         let tokens = TokenCount::new(260_000);
         assert!(
             needs_compaction_at(tokens, model.compaction_window(), 20),
@@ -1475,9 +1313,6 @@ mod tests {
 
     #[test]
     fn compact_skips_orphaned_tool_results() {
-        // simulate: user, assistant+tool_use, tool_result, user, assistant
-        // with keep=2, naive split would start at the tool_result,
-        // causing an API error. should advance past tool_result to user msg.
         let msgs = vec![
             user_msg("first"),
             assistant_msg("thinking"),
@@ -1494,19 +1329,14 @@ mod tests {
             assistant_msg("response"),
         ];
         let result = compact_with_summary(msgs, "summary", Some(2));
-        // should skip past the tool_result and start at "second" (user msg)
-        assert!(matches!(result.messages[0], Message::User(_))); // summary
-        assert!(matches!(result.messages[1], Message::User(_))); // "second"
+        assert!(matches!(result.messages[0], Message::User(_)));
+        assert!(matches!(result.messages[1], Message::User(_)));
         assert_eq!(result.summarised_count, 3);
     }
 
     #[test]
     fn compact_works_when_kept_range_has_no_user_messages() {
-        // this was the bug: if the last `keep` messages are all assistant+tool_result
-        // pairs (common in long tool-use chains), the old code returned unchanged
-        // because it only looked for User messages as boundaries
         let mut msgs = vec![user_msg("start"), assistant_msg("thinking")];
-        // add 10 assistant+tool_result pairs (20 messages)
         for i in 0..10 {
             msgs.push(assistant_msg(&format!("calling tool {i}")));
             msgs.push(Message::ToolResult(ToolResultMessage {
@@ -1521,20 +1351,14 @@ mod tests {
         }
         assert_eq!(msgs.len(), 22);
         let result = compact_with_summary(msgs, "summary of work", Some(5));
-        // split_at = 22-5 = 17. messages[17] is a ToolResult, so advances to
-        // 18 (assistant), which is not a ToolResult. kept = 4 + 1 summary = 5
         assert!(result.summarised_count > 0, "should have compacted");
         assert!(result.messages.len() < 22, "should have fewer messages");
-        // first message is the summary
         assert!(matches!(result.messages[0], Message::User(_)));
-        // no orphaned tool results: first non-summary message should be assistant
         assert!(matches!(result.messages[1], Message::Assistant(_)));
     }
 
     #[tokio::test]
     async fn llm_compact_fallback_on_no_provider() {
-        // with an empty registry, the LLM call will fail and it should
-        // fall back to structured compaction
         let registry = ApiRegistry::new();
         let model = Model::builder()
             .id("test".into())
@@ -1558,9 +1382,8 @@ mod tests {
             .collect();
 
         let result = llm_compact(msgs, &registry, &model, &options, Some(5), None).await;
-        // split_at = 15, which is an assistant msg (not ToolResult), so stays at 15
         assert_eq!(result.summarised_count, 15);
-        assert_eq!(result.messages.len(), 6); // 1 summary + 5 kept
+        assert_eq!(result.messages.len(), 6);
         assert!(result.summary.contains("Summary of earlier conversation"));
     }
 
@@ -1832,9 +1655,8 @@ mod tests {
             })
             .collect();
 
-        // simulate token counts: 40 messages, lots of tokens
         let estimated = estimate_tokens(&msgs);
-        let context_window = TokenCount::new((estimated * 100 / 96) as u64); // just barely over 95%
+        let context_window = TokenCount::new((estimated * 100 / 96) as u64);
         assert!(
             needs_compaction_at(
                 TokenCount::new(estimated as u64),
@@ -1844,11 +1666,9 @@ mod tests {
             "should need compaction: {estimated} tokens",
         );
 
-        // compact with a short summary
         let result = compact_with_summary(msgs, "brief summary", Some(keep));
         msgs = result.messages;
 
-        // right after compaction, shouldn't need it again
         let post_estimated = estimate_tokens(&msgs);
         assert!(
             !needs_compaction_at(
@@ -1860,7 +1680,6 @@ mod tests {
             msgs.len(),
         );
 
-        // add more messages until we exceed threshold again
         for i in 0..20 {
             msgs.push(user_msg(&format!(
                 "follow-up {i}: another detailed question to push the conversation back over the threshold"
@@ -1877,7 +1696,6 @@ mod tests {
             msgs.len(),
         );
 
-        // compact again
         let result2 =
             compact_with_summary(msgs, "updated summary including follow-ups", Some(keep));
         assert!(result2.summarised_count > 0);
@@ -1886,7 +1704,6 @@ mod tests {
 
     #[test]
     fn compaction_summary_replaces_prior_summary() {
-        // verify that re-compaction replaces the old summary, not stacks them
         let keep = 4;
 
         let msgs: Vec<Message> = (0..20)
@@ -1900,7 +1717,6 @@ mod tests {
             })
             .collect();
 
-        // first compaction
         let r1 = compact_with_summary(msgs, "first summary", Some(keep));
         let r1_first = match &r1.messages[0] {
             Message::User(u) => match &u.content {
@@ -1914,7 +1730,6 @@ mod tests {
             "first compaction should contain summary: {r1_first}"
         );
 
-        // add more messages
         let mut msgs2 = r1.messages;
         for i in 0..20 {
             msgs2.push(user_msg(&format!(
@@ -1925,10 +1740,8 @@ mod tests {
             )));
         }
 
-        // second compaction
         let r2 = compact_with_summary(msgs2, "second summary covering everything", Some(keep));
 
-        // should only have one summary message at the start
         let first_text = match &r2.messages[0] {
             Message::User(u) => match &u.content {
                 mush_ai::types::UserContent::Text(t) => Some(t.as_str()),
@@ -1966,7 +1779,6 @@ mod tests {
 
     #[test]
     fn mask_observations_basic() {
-        // 3 turns: old tool result should be masked, recent two kept
         let big_output = (0..50)
             .map(|i| format!("line {i}: some output text here"))
             .collect::<Vec<_>>()
@@ -1984,7 +1796,6 @@ mod tests {
 
         let result = mask_observations(&mut msgs, Some(2));
 
-        // first tool result (turn 1) should be masked
         assert_eq!(result.masked_count, 1);
         assert!(result.tokens_saved > 0);
 
@@ -2002,7 +1813,6 @@ mod tests {
             panic!("expected tool result at index 2");
         }
 
-        // second tool result (turn 2) should be kept
         if let Message::ToolResult(tr) = &msgs[5] {
             let text = &tr.content[0];
             if let ToolResultContentPart::Text(t) = text {
@@ -2040,9 +1850,7 @@ mod tests {
 
         mask_observations(&mut msgs, Some(1));
 
-        // message count unchanged
         assert_eq!(msgs.len(), 9);
-        // types preserved
         assert!(matches!(msgs[0], Message::User(_)));
         assert!(matches!(msgs[1], Message::Assistant(_)));
         assert!(matches!(msgs[2], Message::ToolResult(_)));
@@ -2069,7 +1877,6 @@ mod tests {
 
     #[test]
     fn mask_observations_default_threshold() {
-        // with default keep (5), need >5 assistant turns to trigger masking
         let mut msgs: Vec<Message> = Vec::new();
         for i in 0..7 {
             msgs.push(user_msg(&format!("q{i}")));
@@ -2078,7 +1885,6 @@ mod tests {
         }
 
         let result = mask_observations(&mut msgs, None);
-        // 7 turns, keep 5, so 2 should be masked
         assert_eq!(result.masked_count, 2);
     }
 }

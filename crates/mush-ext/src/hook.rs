@@ -1,12 +1,6 @@
-//! hook system for running extensions in order
-//!
-//! the hook runner manages a set of extensions and invokes their
-//! lifecycle methods in registration order.
-
 use crate::types::*;
 use mush_ai::types::Message;
 
-/// manages and invokes extensions
 #[derive(Default)]
 pub struct HookRunner {
     extensions: Vec<Box<dyn Extension>>,
@@ -26,7 +20,6 @@ impl HookRunner {
         &self.extensions
     }
 
-    /// run discovery across all extensions, merging results
     pub fn discover(&self, ctx: &ExtensionContext) -> DiscoveredResources {
         let mut merged = DiscoveredResources::default();
         for ext in &self.extensions {
@@ -39,7 +32,6 @@ impl HookRunner {
         merged
     }
 
-    /// run before-call transforms through all extensions in order
     pub fn before_call(
         &self,
         ctx: &ExtensionContext,
@@ -56,14 +48,12 @@ impl HookRunner {
         result
     }
 
-    /// notify all extensions that a turn completed
     pub fn turn_complete(&self, ctx: &ExtensionContext, messages: &[Message]) {
         for ext in &self.extensions {
             ext.on_turn_complete(ctx, messages);
         }
     }
 
-    /// notify all extensions that the session is ending
     pub fn session_end(&self, ctx: &ExtensionContext) {
         for ext in &self.extensions {
             ext.on_session_end(ctx);
@@ -194,7 +184,6 @@ mod tests {
         }));
 
         let result = runner.before_call(&test_ctx(), vec![], Some("base".into()));
-        // [B] should wrap [A] which wraps base
         let prompt = result.system_prompt.unwrap();
         assert!(prompt.starts_with("[B]"));
         assert!(prompt.contains("[A]"));

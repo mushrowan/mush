@@ -1,18 +1,3 @@
-//! lenient deserialisation helpers for tool arguments.
-//!
-//! tool-calling models routinely emit arguments as JSON strings: an integer
-//! as `"1030"`, a bool as `"true"`, an array as `"[{...}]"`. strict serde
-//! parsing rejects those with `invalid type: string`, which surfaces to the
-//! model as a confusing failure it tends to repeat.
-//!
-//! [`coerce_to_schema`] is the general answer: every tool advertises a JSON
-//! schema, so the types the model was told about are the types to coerce to.
-//! it runs on every tool call.
-//!
-//! the rest are per-field escape hatches for the same problem, via
-//! `#[serde(deserialize_with = "...")]`. pair [`opt_uint`] and [`json_seq`]
-//! with `#[serde(default)]` so an absent key stays empty.
-
 use std::fmt::Display;
 
 use serde::Deserialize;
@@ -44,8 +29,6 @@ where
     T::try_from(n).map_err(E::custom)
 }
 
-/// deserialize an unsigned integer that may arrive as a JSON number or a
-/// numeric string.
 pub fn uint<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: Deserializer<'de>,
@@ -56,9 +39,6 @@ where
     convert(to_u64(value)?)
 }
 
-/// deserialize an optional unsigned integer that may arrive as a JSON
-/// number, a numeric string, or null. pair with `#[serde(default)]` so an
-/// absent key becomes `None`.
 pub fn opt_uint<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: Deserializer<'de>,
@@ -71,8 +51,6 @@ where
     }
 }
 
-/// deserialize an array that may arrive as a JSON string holding one.
-/// pair with `#[serde(default)]` so an absent key becomes an empty vec.
 pub fn json_seq<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
 where
     D: Deserializer<'de>,
@@ -86,7 +64,6 @@ where
     serde_json::from_value(value).map_err(D::Error::custom)
 }
 
-/// take the structured value out of a JSON string spelling of it
 fn unstring(args: &mut serde_json::Value) {
     if let serde_json::Value::String(text) = args
         && let Ok(parsed) = serde_json::from_str(text)
@@ -95,10 +72,6 @@ fn unstring(args: &mut serde_json::Value) {
     }
 }
 
-/// rewrite `args` in place to the types `schema` advertises.
-///
-/// anything that won't coerce is left where it is, so the parse error the
-/// caller raises describes what the model sent
 pub fn coerce_to_schema(args: &mut serde_json::Value, schema: &serde_json::Value) {
     use serde_json::Value;
 

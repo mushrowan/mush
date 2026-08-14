@@ -1,9 +1,3 @@
-//! grep tool - pattern search using grep-searcher + ignore library crates
-//!
-//! replaces the previous rg subprocess with in-process search.
-//! uses `grep-regex` for pattern matching, `grep-searcher` for line-oriented
-//! search with context, and `ignore` for .gitignore-respecting directory walks.
-
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -64,7 +58,6 @@ const fn default_true() -> bool {
     true
 }
 
-/// per-file match cap in lines mode (same as old --max-count=50)
 const MAX_MATCHES_PER_FILE: u64 = 50;
 
 pub struct GrepTool {
@@ -155,7 +148,6 @@ impl AgentTool for GrepTool {
     }
 
     fn output_limit(&self) -> mush_agent::tool::OutputLimit {
-        // ranked match list with its own "narrow your search" hint
         mush_agent::tool::OutputLimit::Head
     }
 
@@ -187,7 +179,6 @@ impl AgentTool for GrepTool {
 }
 
 fn run_search(search_path: &Path, args: &GrepArgs) -> ToolResult {
-    // strip newlines from pattern - LLMs sometimes include literal newlines
     let pattern: String = args
         .pattern
         .chars()
@@ -198,7 +189,6 @@ fn run_search(search_path: &Path, args: &GrepArgs) -> ToolResult {
         return ToolResult::error("pattern is empty (after stripping newlines)");
     }
 
-    // build the regex matcher
     let mut builder = RegexMatcherBuilder::new();
     if matches!(args.mode, GrepMode::Literal) {
         builder.fixed_strings(true);
@@ -214,7 +204,6 @@ fn run_search(search_path: &Path, args: &GrepArgs) -> ToolResult {
         Err(e) => return ToolResult::error(format!("invalid pattern: {e}")),
     };
 
-    // collect files to search
     let files = match collect_files(search_path, args.include.as_deref(), args.include_hidden) {
         Ok(f) => f,
         Err(e) => return ToolResult::error(e.to_string()),
@@ -244,19 +233,15 @@ fn run_search(search_path: &Path, args: &GrepArgs) -> ToolResult {
     }
 }
 
-/// collect files to search, respecting .gitignore
 fn collect_files(
     search_path: &Path,
     include: Option<&str>,
     include_hidden: bool,
 ) -> io::Result<Vec<PathBuf>> {
-    // single file
     if search_path.is_file() {
         return Ok(vec![search_path.to_path_buf()]);
     }
 
-    // a missing root is a real error worth reporting clearly, unlike the
-    // transient per-entry failures we skip during the walk below
     if !search_path.exists() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -267,10 +252,6 @@ fn collect_files(
     let mut walk = WalkBuilder::new(search_path);
     walk.hidden(!include_hidden).git_ignore(true).parents(true);
 
-    // post-filter on the include glob with `globset` rather than the
-    // walker's OverrideBuilder: an override of `!*` also excludes
-    // directories, which stops recursion dead. this matches on basename
-    // and leaves the walk alone
     let include_matcher = include
         .map(|glob| {
             globset::Glob::new(glob)
@@ -281,10 +262,6 @@ fn collect_files(
 
     let mut files = Vec::new();
     for entry in walk.build() {
-        // skip entries the walker couldn't read (permission denied, broken
-        // symlinks, paths that vanished mid-walk) rather than aborting the
-        // whole search. matches ripgrep and our own find/glob tools. log at
-        // debug so the skipped paths are recoverable from mush.log
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
@@ -309,15 +286,12 @@ fn collect_files(
     Ok(files)
 }
 
-/// make a path relative to the search root for display
 fn display_path(path: &Path, search_root: &Path) -> String {
     path.strip_prefix(search_root)
         .unwrap_or(path)
         .display()
         .to_string()
 }
-
-// lines mode: collect matching lines with file:line:content format
 
 fn search_lines(
     matcher: &grep_regex::RegexMatcher,
@@ -344,7 +318,6 @@ fn search_lines(
             max_matches: MAX_MATCHES_PER_FILE,
             needs_separator: false,
         };
-        // errors (e.g. binary files, permission denied) are silently skipped
         let _ = searcher.search_path(matcher, file, &mut sink);
     }
 
@@ -356,7 +329,6 @@ fn search_lines(
     ToolResult::text(truncate_lines(&lines_ref, "matches"))
 }
 
-/// custom sink that formats output like `file:line:content`
 struct LineSink<'a> {
     path: &'a str,
     lines: &'a mut Vec<String>,
@@ -414,8 +386,6 @@ impl Sink for LineSink<'_> {
         Ok(true)
     }
 }
-
-// count mode: count matches per file
 
 fn search_count(
     matcher: &grep_regex::RegexMatcher,
@@ -486,8 +456,6 @@ fn search_count(
     }
 }
 
-// files mode: list files with any match
-
 fn search_files(
     matcher: &grep_regex::RegexMatcher,
     files: &[PathBuf],
@@ -508,7 +476,7 @@ fn search_files(
             file,
             grep_searcher::sinks::UTF8(|_, _| {
                 found = true;
-                Ok(false) // stop after first match
+                Ok(false)
             }),
         );
         if found {
@@ -569,7 +537,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_stringified_bool_reaches_grep() {
-        // the schema says boolean, so "false" is what the model meant
         let dir = temp_dir();
         fs::write(dir.path().join("test.txt"), "HELLO world\n").unwrap();
 
@@ -605,10 +572,6 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn grep_skips_unreadable_dir_instead_of_aborting() {
-        // a single unreadable subdirectory (permission denied, broken
-        // symlink, or a path that vanished mid-walk) must not abort the
-        // whole search. ripgrep skips bad entries and keeps going, so
-        // should we, otherwise grep fails with "failed to walk directory"
         use std::os::unix::fs::PermissionsExt;
 
         let dir = temp_dir();
@@ -618,8 +581,6 @@ mod tests {
         fs::write(locked.join("inner.txt"), "needle hidden").unwrap();
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
 
-        // under root, permissions are ignored so the walk never errors and
-        // this regression can't be exercised. detect that and skip
         if fs::read_dir(&locked).is_ok() {
             fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
             return;
@@ -633,7 +594,6 @@ mod tests {
             }))
             .await;
 
-        // restore perms so the tempdir can be cleaned up on drop
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
 
         let text = extract_text(&result);
@@ -649,8 +609,6 @@ mod tests {
 
     #[tokio::test]
     async fn grep_missing_path_reports_not_found() {
-        // a typo'd or missing search path should say so clearly, not a
-        // misleading "No matches found" or a raw walk error
         let dir = temp_dir();
         let missing = dir.path().join("does-not-exist");
         let tool = GrepTool::new(dir.path().into());
@@ -704,7 +662,6 @@ mod tests {
     #[tokio::test]
     async fn grep_include_hidden_still_respects_gitignore() {
         let dir = temp_dir();
-        // .gitignore only applies inside a git repo, same as ripgrep
         fs::create_dir(dir.path().join(".git")).unwrap();
         fs::write(dir.path().join(".gitignore"), "target/\n").unwrap();
         let target = dir.path().join("target");
@@ -745,9 +702,6 @@ mod tests {
         assert!(!text.contains("other"));
     }
 
-    /// regression: include glob must not suppress directory recursion. the
-    /// previous `!*` override excluded directories too, so searches rooted at
-    /// a parent directory returned no matches for files inside subdirectories.
     #[tokio::test]
     async fn grep_include_recurses_into_subdirectories() {
         let dir = temp_dir();
@@ -790,7 +744,6 @@ mod tests {
             .await;
         let text = extract_text(&result);
         assert!(text.contains("hello.world"));
-        // in literal mode, . is not a regex metachar, so helloXworld should not match
         assert!(!text.contains("helloXworld"));
     }
 
@@ -892,7 +845,6 @@ mod tests {
             }))
             .await;
         let text = extract_text(&result);
-        // sorted descending by count, with summary header
         assert!(text.contains("4 matches across 2 files"));
         assert!(text.contains("a.txt: 3"));
         assert!(text.contains("b.txt: 1"));
@@ -935,7 +887,6 @@ mod tests {
             .await;
         let text = extract_text(&result);
         assert!(text.contains("6 matches across 3 files (showing top 2)"));
-        // should have the top 2 by count, not all 3
         assert!(text.lines().filter(|l| l.contains(": ")).count() == 2);
     }
 
@@ -957,7 +908,6 @@ mod tests {
             }))
             .await;
         let text = extract_text(&result);
-        // 5+3+2+1 = 11 matches, 4 files, showing top 2
         assert!(text.contains("across 4 files"), "got: {text}");
         assert!(text.contains("showing top 2"), "got: {text}");
         assert_eq!(text.lines().filter(|l| l.contains(": ")).count(), 2);
@@ -1008,15 +958,11 @@ mod tests {
         assert_eq!(json["total_files"], 2);
         let files = json["files"].as_array().unwrap();
         assert_eq!(files.len(), 2);
-        // sorted desc by count
         assert!(files[0]["count"].as_u64().unwrap() >= files[1]["count"].as_u64().unwrap());
     }
 
     #[tokio::test]
     async fn grep_strips_trailing_unmatched_quote_and_notes_it() {
-        // same agent bug as find: `pattern: "foo\""` arrives with a
-        // trailing literal `"` that prevents any match. grep must clean
-        // it AND surface a note so the agent can self-correct
         let dir = temp_dir();
         fs::write(dir.path().join("test.txt"), "hello world\n").unwrap();
 

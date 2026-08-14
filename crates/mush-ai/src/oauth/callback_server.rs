@@ -1,16 +1,3 @@
-//! local http server for receiving an oauth loopback callback
-//!
-//! every browser-based provider mush supports registers a
-//! `http://localhost:<port><path>` redirect uri. after the user
-//! authorises, the provider redirects there with `code` (and usually
-//! `state`) query params. this module runs a short-lived http server to
-//! receive that callback so the user never has to copy a code back into
-//! the terminal.
-//!
-//! the browser connection is held open until the caller has finished
-//! its token exchange, so the page the user lands on can report the
-//! real outcome rather than an optimistic "done".
-
 use std::io;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -23,7 +10,6 @@ use super::OAuthError;
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_BUF_LIMIT: usize = 16 * 1024;
 
-/// query params extracted from an oauth callback request
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct CallbackParams {
     pub code: Option<String>,
@@ -33,8 +19,6 @@ pub struct CallbackParams {
 }
 
 impl CallbackParams {
-    /// the provider-reported failure, formatted for display, when the
-    /// callback carried one
     #[must_use]
     pub fn error_detail(&self) -> Option<String> {
         let error = self.error.clone()?;
@@ -45,16 +29,10 @@ impl CallbackParams {
     }
 }
 
-/// where a loopback callback server should listen and what it should
-/// accept
 #[derive(Debug, Clone)]
 pub struct CallbackConfig {
-    /// path the provider redirects to, e.g. `/auth/callback`
     pub path: String,
-    /// preferred port. an ephemeral port is used when it is taken
     pub port: u16,
-    /// oauth `state` expected back, for providers that echo one.
-    /// mismatches are refused with a 400 page
     pub expected_state: Option<String>,
 }
 
@@ -75,8 +53,6 @@ impl CallbackConfig {
     }
 }
 
-/// bound callback server. drive it to completion with
-/// [`Self::await_callback`]
 pub struct CallbackServer {
     listener: TcpListener,
     port: u16,
@@ -84,8 +60,6 @@ pub struct CallbackServer {
 }
 
 impl CallbackServer {
-    /// bind the configured port, falling back to an ephemeral one when
-    /// it is already in use
     pub async fn bind(config: CallbackConfig) -> Result<Self, OAuthError> {
         let listener = bind_listener(config.port).await?;
         let port = listener
@@ -109,8 +83,6 @@ impl CallbackServer {
         format!("http://localhost:{}{}", self.port, self.config.path)
     }
 
-    /// accept connections until the callback arrives. other paths get a
-    /// 404 and the server keeps listening
     pub async fn await_callback(self) -> Result<(CallbackParams, ResponseWriter), OAuthError> {
         loop {
             let (mut stream, _) = self.listener.accept().await.map_err(OAuthError::Io)?;
@@ -144,8 +116,6 @@ impl CallbackServer {
     }
 }
 
-/// holds the still-open browser connection so the caller can paint a
-/// success or error page once its token exchange settles
 pub struct ResponseWriter {
     stream: TcpStream,
 }
@@ -165,7 +135,6 @@ impl ResponseWriter {
     }
 }
 
-/// parse the request line "METHOD PATH HTTP/x.y" and return (method, path)
 fn parse_request_line(line: &str) -> Option<(&str, &str)> {
     let mut parts = line.split_whitespace();
     let method = parts.next()?;
@@ -173,7 +142,6 @@ fn parse_request_line(line: &str) -> Option<(&str, &str)> {
     Some((method, target))
 }
 
-/// split a request target into its path and parsed callback params
 fn parse_request_target(target: &str) -> (&str, CallbackParams) {
     let (path, query) = match target.split_once('?') {
         Some((p, q)) => (p, q),
@@ -198,11 +166,8 @@ fn parse_request_target(target: &str) -> (&str, CallbackParams) {
     (path, params)
 }
 
-/// outcome of inspecting a single incoming request
 enum RequestOutcome {
-    /// the callback arrived - exchange tokens and finish
     Callback(CallbackParams),
-    /// non-callback path (favicon, etc) - send 404 and keep listening
     NotFound,
 }
 
@@ -218,7 +183,6 @@ fn classify_request(buf: &[u8], callback_path: &str) -> Option<RequestOutcome> {
     }
 }
 
-/// build a small HTTP/1.1 response with the given status and html body
 fn build_html_response(status_line: &str, body: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(body.len() + 128);
     out.extend_from_slice(format!("HTTP/1.1 {status_line}\r\n").as_bytes());
@@ -393,8 +357,6 @@ mod tests {
 
     #[test]
     fn classify_request_matches_the_configured_path_only() {
-        // the path is per-provider, so classification must key off the
-        // configured value rather than a module constant
         let req = b"GET /callback?code=abc HTTP/1.1\r\nHost: localhost\r\n\r\n";
         assert!(matches!(
             classify_request(req, "/callback"),
@@ -484,8 +446,6 @@ mod tests {
 
     #[tokio::test]
     async fn server_without_expected_state_accepts_stateless_callback() {
-        // openrouter never echoes `state` back, so a server configured
-        // without one must not demand it
         let server = CallbackServer::bind(config()).await.expect("bind");
         let port = server.port();
 

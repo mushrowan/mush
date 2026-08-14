@@ -1,62 +1,39 @@
-//! extension types and trait definitions
-//!
-//! extensions can hook into the agent lifecycle, register custom tools,
-//! modify system prompts, and add commands.
-
 use std::path::PathBuf;
 
 use mush_agent::tool::ToolRegistry;
 use mush_ai::types::{Message, ModelId, SessionId};
 
-/// metadata about a loaded extension
 #[derive(Debug, Clone)]
 pub struct ExtensionMeta {
-    /// unique name for this extension
     pub name: String,
-    /// human-readable description
     pub description: String,
-    /// path the extension was loaded from
     pub path: PathBuf,
 }
 
-/// context available to extensions during lifecycle events
 pub struct ExtensionContext {
     pub cwd: PathBuf,
     pub model_id: ModelId,
     pub session_id: Option<SessionId>,
 }
 
-/// result of discovering resources (system prompt additions, tools, etc)
 #[derive(Default)]
 pub struct DiscoveredResources {
-    /// additional system prompt content to append
     pub system_prompt_additions: Vec<String>,
-    /// additional tool definitions (extensions can provide tools)
     pub tools: ToolRegistry,
 }
 
-/// result of a context transform (modify messages before sending to LLM)
 pub struct TransformResult {
     pub messages: Vec<Message>,
     pub system_prompt: Option<String>,
 }
 
-/// trait that extensions implement
-///
-/// all methods have default no-op implementations so extensions
-/// only need to override what they care about.
 pub trait Extension: Send + Sync {
-    /// extension metadata
     fn meta(&self) -> &ExtensionMeta;
 
-    /// called when a session starts, to discover resources like
-    /// system prompt additions, custom tools, etc
     fn on_discover(&self, _ctx: &ExtensionContext) -> DiscoveredResources {
         DiscoveredResources::default()
     }
 
-    /// called before each LLM call to transform the context
-    /// (e.g. inject skill instructions, modify system prompt)
     fn on_before_call(
         &self,
         _ctx: &ExtensionContext,
@@ -69,10 +46,8 @@ pub trait Extension: Send + Sync {
         }
     }
 
-    /// called after the agent completes a turn
     fn on_turn_complete(&self, _ctx: &ExtensionContext, _messages: &[Message]) {}
 
-    /// called when the session ends
     fn on_session_end(&self, _ctx: &ExtensionContext) {}
 }
 

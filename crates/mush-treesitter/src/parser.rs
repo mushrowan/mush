@@ -1,8 +1,3 @@
-//! thread-safe parser pool with one parser per language
-//!
-//! includes a file-level cache keyed by canonical path + mtime,
-//! so unchanged files are not re-parsed
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -11,7 +6,6 @@ use std::time::SystemTime;
 use crate::language::Language;
 use crate::symbols::{self, SymbolInfo};
 
-/// errors from parsing operations
 #[derive(Debug, thiserror::Error)]
 pub enum ParseError {
     #[error("unsupported language: {0}")]
@@ -24,7 +18,6 @@ pub enum ParseError {
     Io(#[from] std::io::Error),
 }
 
-/// cached parse result for a single file
 struct CachedTree {
     language: Language,
     source: Vec<u8>,
@@ -32,17 +25,12 @@ struct CachedTree {
     mtime: SystemTime,
 }
 
-/// lightweight handle returned from cache lookups
 struct CachedTreeRef {
     language: Language,
     source: Vec<u8>,
     tree: tree_sitter::Tree,
 }
 
-/// pool of tree-sitter parsers, one per language
-///
-/// parsers are created lazily on first use. file-level caching avoids
-/// re-parsing unchanged files (checked via mtime).
 pub struct ParserPool {
     parsers: Mutex<HashMap<Language, tree_sitter::Parser>>,
     tree_cache: Mutex<HashMap<PathBuf, CachedTree>>,
@@ -56,7 +44,6 @@ impl ParserPool {
         }
     }
 
-    /// parse source code for a given language (no caching)
     pub fn parse(
         &self,
         language: Language,
@@ -80,15 +67,11 @@ impl ParserPool {
         parser.parse(source, None).ok_or(ParseError::ParseFailed)
     }
 
-    /// parse a file, detecting language from its path.
-    /// uses the tree cache when the file's mtime hasn't changed.
     pub fn parse_file(&self, path: &Path) -> Result<(Language, tree_sitter::Tree), ParseError> {
         let cached = self.parse_file_cached(path)?;
         Ok((cached.language, cached.tree.clone()))
     }
 
-    /// parse a file and extract its symbols in one call.
-    /// uses the tree cache for unchanged files.
     pub fn symbols_from_file(
         &self,
         path: &Path,
@@ -99,15 +82,12 @@ impl ParserPool {
         Ok((cached.language, syms))
     }
 
-    /// shared cache-aware file parse. returns a reference-counted
-    /// handle into the cache entry (or a freshly parsed result).
     fn parse_file_cached(&self, path: &Path) -> Result<CachedTreeRef, ParseError> {
         let language = Language::detect(path)
             .ok_or_else(|| ParseError::UnsupportedLanguage(path.display().to_string()))?;
         let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let mtime = std::fs::metadata(path)?.modified().ok();
 
-        // check cache
         if let Some(mtime) = mtime
             && let Some(entry) = self
                 .tree_cache
@@ -147,20 +127,17 @@ impl ParserPool {
         })
     }
 
-    /// remove a file from the tree cache
     pub fn invalidate(&self, path: &Path) {
         let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let mut cache = self.tree_cache.lock().unwrap_or_else(|e| e.into_inner());
         cache.remove(&canon);
     }
 
-    /// clear the entire tree cache
     pub fn invalidate_all(&self) {
         let mut cache = self.tree_cache.lock().unwrap_or_else(|e| e.into_inner());
         cache.clear();
     }
 
-    /// number of files currently cached
     pub fn cached_file_count(&self) -> usize {
         self.tree_cache
             .lock()
@@ -236,7 +213,6 @@ mod tests {
         let pool = ParserPool::new();
         let source = b"fn a() {} fn b() {}";
         pool.parse(Language::Rust, source).unwrap();
-        // second parse reuses the cached parser
         pool.parse(Language::Rust, source).unwrap();
 
         let count = pool.parsers.lock().unwrap().len();
@@ -255,7 +231,6 @@ mod tests {
         pool.parse_file(&file).unwrap();
         assert_eq!(pool.cached_file_count(), 1);
 
-        // second call hits cache
         pool.parse_file(&file).unwrap();
         assert_eq!(pool.cached_file_count(), 1);
     }
@@ -270,10 +245,8 @@ mod tests {
         let (_, syms1) = pool.symbols_from_file(&file).unwrap();
         assert_eq!(syms1[0].name, "v1");
 
-        // ensure mtime actually advances (some filesystems have 1s granularity)
         std::thread::sleep(std::time::Duration::from_millis(50));
 
-        // rewrite with new content and bump mtime
         let mut f = std::fs::OpenOptions::new()
             .write(true)
             .truncate(true)
@@ -283,7 +256,6 @@ mod tests {
         f.flush().unwrap();
         drop(f);
 
-        // force a distinct mtime by setting it explicitly
         let future = SystemTime::now() + std::time::Duration::from_secs(10);
         filetime::set_file_mtime(&file, filetime::FileTime::from_system_time(future)).unwrap();
 
@@ -330,13 +302,11 @@ mod tests {
 
         let pool = ParserPool::new();
 
-        // first call parses and caches
         let (lang, syms) = pool.symbols_from_file(&file).unwrap();
         assert_eq!(lang, Language::Rust);
         assert_eq!(syms.len(), 2);
         assert_eq!(pool.cached_file_count(), 1);
 
-        // second call uses cache (same results)
         let (_, syms2) = pool.symbols_from_file(&file).unwrap();
         assert_eq!(syms2.len(), 2);
         assert_eq!(pool.cached_file_count(), 1);

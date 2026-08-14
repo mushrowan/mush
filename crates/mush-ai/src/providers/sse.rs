@@ -1,15 +1,6 @@
-//! shared SSE (server-sent events) parser
-//!
-//! incrementally parses byte chunks into SSE events.
-//! used by all three provider implementations to avoid duplicating
-//! the byte-buffer → line-split → event-boundary logic.
-
-/// a parsed SSE event (raw strings, not yet deserialised)
 #[derive(Debug, Clone)]
 pub struct SseRawEvent {
-    /// the event type (from `event:` line), if any
     pub event: Option<String>,
-    /// the data payload (from `data:` lines, joined with newlines)
     pub data: String,
 }
 
@@ -73,7 +64,6 @@ fn looks_like_secret(text: &str) -> bool {
         || text.starts_with("eyJ")
 }
 
-/// incrementally parses SSE from byte chunks
 pub struct SseParser {
     chunk_buf: Vec<u8>,
     line_buf: String,
@@ -95,7 +85,6 @@ impl SseParser {
         }
     }
 
-    /// push a chunk of bytes and return any complete SSE events
     pub fn push(&mut self, bytes: &[u8]) -> Vec<SseRawEvent> {
         self.chunk_buf.extend_from_slice(bytes);
         let mut events = Vec::new();
@@ -106,7 +95,6 @@ impl SseParser {
             let line = line.trim_end_matches('\r');
 
             if line.is_empty() {
-                // empty line = end of SSE event
                 if !self.line_buf.is_empty() {
                     events.push(SseRawEvent {
                         event: self.event_name.take(),
@@ -132,9 +120,6 @@ impl SseParser {
                 continue;
             }
 
-            // other SSE fields (id:, retry:) or non-prefixed lines
-            // anthropic sends raw `data: ...` lines but also lines without prefix
-            // when multi-line data is used. buffer them
             if !self.line_buf.is_empty() {
                 self.line_buf.push('\n');
             }
@@ -144,53 +129,35 @@ impl SseParser {
         events
     }
 
-    /// access any remaining buffered bytes (for error diagnostics)
     pub fn buffered_bytes(&self) -> &[u8] {
         &self.chunk_buf
     }
 }
 
-// shared SSE stream runner
-
 use crate::registry::EventStream;
 use crate::stream::StreamEvent;
 use crate::types::*;
 
-/// what the processor wants the stream runner to do after processing an event
 pub enum ProcessResult {
-    /// yield these events to the consumer
     Events(Vec<StreamEvent>),
-    /// nothing to yield (e.g. [DONE] or empty payload)
     Skip,
-    /// yield this event and stop the stream immediately
     Fatal(StreamEvent),
 }
 
-/// trait for provider-specific SSE event processing.
-/// the stream runner handles byte reading, SSE parsing, capture, logging,
-/// and error recovery. providers just implement event interpretation
 pub trait SseProcessor: Send + 'static {
-    /// process a single raw SSE event
     fn process(&mut self, raw: &SseRawEvent, output: &mut AssistantMessage) -> ProcessResult;
 
-    /// called when the byte stream ends normally. clean up open blocks,
-    /// adjust stop_reason, etc
     fn finish(&mut self, output: &mut AssistantMessage);
 
-    /// whether to emit a Start event before the main loop.
-    /// openai providers do this; anthropic emits Start from within process()
     fn emit_start(&self) -> bool {
         true
     }
 
-    /// label for tracing spans (e.g. "anthropic", "openai completions")
     fn label(&self) -> &'static str;
 }
 
 const MAX_CAPTURE_BYTES: usize = 128 * 1024;
 
-/// run an SSE stream, handling byte reading, parsing, capture, logging,
-/// and error snapshot. the processor handles event interpretation
 pub fn run_sse_stream(
     response: reqwest::Response,
     model_id: ModelId,

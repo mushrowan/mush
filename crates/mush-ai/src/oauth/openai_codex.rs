@@ -1,5 +1,3 @@
-//! openai codex oauth provider (chatgpt plus/pro subscription)
-
 use base64::Engine;
 use reqwest::Url;
 use serde::Deserialize;
@@ -304,9 +302,6 @@ fn timestamp_ms() -> u64 {
         .as_millis() as u64
 }
 
-/// in-progress codex login: holds the local callback server and the
-/// auth url to show the user. call [`Self::await_credentials`] to wait
-/// for the browser callback and complete the token exchange.
 pub struct CodexLoginSession {
     pub auth_url: String,
     pkce: PkceChallenge,
@@ -314,7 +309,6 @@ pub struct CodexLoginSession {
 }
 
 impl CodexLoginSession {
-    /// bind the local callback server and prepare the auth url
     pub async fn start() -> Result<Self, OAuthError> {
         let pkce = generate_pkce()?;
         let state = pkce.verifier.clone();
@@ -330,7 +324,6 @@ impl CodexLoginSession {
         })
     }
 
-    /// wait for the browser callback, exchange the code for tokens
     pub async fn await_credentials(self) -> Result<OAuthCredentials, OAuthError> {
         let redirect_uri = self.server.redirect_uri();
         let verifier = self.pkce.verifier;

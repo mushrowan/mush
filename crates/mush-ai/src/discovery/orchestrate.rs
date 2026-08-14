@@ -1,13 +1,3 @@
-//! orchestrate discovery across every provider with available credentials.
-//!
-//! produces a [`DiscoveryRunSummary`] suitable for log output or status-line
-//! feedback. providers without configured credentials are silently skipped
-//! (recorded as `skipped`), so this is safe to fire-and-forget at startup.
-//!
-//! the returned summary does *not* persist the cache - call
-//! [`DiscoveryRunSummary::apply_to_cache_and_save`] for that, or use the
-//! [`refresh_and_save`] convenience wrapper.
-
 use std::path::Path;
 use std::time::Duration;
 
@@ -21,7 +11,6 @@ use crate::auth::resolve_auth_from_default_sources;
 use crate::env;
 use crate::types::{ApiKey, Provider};
 
-/// per-provider outcome of one discovery run.
 #[derive(Debug)]
 pub struct DiscoveryRunResult {
     pub provider: Provider,
@@ -30,25 +19,20 @@ pub struct DiscoveryRunResult {
 
 #[derive(Debug)]
 pub enum DiscoveryOutcome {
-    /// the fetch succeeded and returned this many models
     Success {
         models: usize,
         report: DiscoveryReport,
     },
-    /// no credentials were configured for this provider
     Skipped,
-    /// the upstream returned an error
     Failed(DiscoveryError),
 }
 
-/// summary of a discovery run across all providers.
 #[derive(Debug, Default)]
 pub struct DiscoveryRunSummary {
     pub results: Vec<DiscoveryRunResult>,
 }
 
 impl DiscoveryRunSummary {
-    /// total number of models successfully fetched across providers
     #[must_use]
     pub fn total_models(&self) -> usize {
         self.results
@@ -60,7 +44,6 @@ impl DiscoveryRunSummary {
             .sum()
     }
 
-    /// providers that succeeded
     pub fn succeeded(&self) -> impl Iterator<Item = &Provider> + '_ {
         self.results.iter().filter_map(|r| match r.outcome {
             DiscoveryOutcome::Success { .. } => Some(&r.provider),
@@ -68,7 +51,6 @@ impl DiscoveryRunSummary {
         })
     }
 
-    /// providers that failed (with their error)
     pub fn failed(&self) -> impl Iterator<Item = (&Provider, &DiscoveryError)> + '_ {
         self.results.iter().filter_map(|r| match &r.outcome {
             DiscoveryOutcome::Failed(e) => Some((&r.provider, e)),
@@ -76,7 +58,6 @@ impl DiscoveryRunSummary {
         })
     }
 
-    /// providers that were skipped because no credentials were configured
     pub fn skipped(&self) -> impl Iterator<Item = &Provider> + '_ {
         self.results.iter().filter_map(|r| match r.outcome {
             DiscoveryOutcome::Skipped => Some(&r.provider),
@@ -84,8 +65,6 @@ impl DiscoveryRunSummary {
         })
     }
 
-    /// merge every successful report into the given cache.
-    /// failed/skipped providers are left untouched.
     pub fn apply_to_cache(&self, cache: &mut DiscoveryCache) {
         for result in &self.results {
             if let DiscoveryOutcome::Success { report, .. } = &result.outcome {
@@ -94,14 +73,12 @@ impl DiscoveryRunSummary {
         }
     }
 
-    /// load the on-disk cache, merge this summary's reports, write it back.
     pub fn apply_to_cache_and_save(&self, path: &Path) -> Result<(), std::io::Error> {
         let mut cache = DiscoveryCache::load(path).unwrap_or_default();
         self.apply_to_cache(&mut cache);
         cache.save(path)
     }
 
-    /// human-readable one-line summary for status messages.
     #[must_use]
     pub fn one_line(&self) -> String {
         let ok: Vec<_> = self.succeeded().map(Provider::to_string).collect();
@@ -122,15 +99,9 @@ impl DiscoveryRunSummary {
     }
 }
 
-/// run discovery across every provider with available credentials.
-///
-/// providers are queried sequentially to keep the request budget low and
-/// share the reqwest client. concurrent fetches would be marginally faster
-/// but invite rate limit pile-ups.
 pub async fn run_all_available(client: crate::http::HttpClient) -> DiscoveryRunSummary {
     let mut results = Vec::new();
 
-    // anthropic - api key or oauth token
     let anthropic_key = discovery_auth(&Provider::Anthropic).await.api_key;
     results.push(
         run_one(Provider::Anthropic, anthropic_key, |key| {
@@ -140,7 +111,6 @@ pub async fn run_all_available(client: crate::http::HttpClient) -> DiscoveryRunS
         .await,
     );
 
-    // openrouter - api key optional, /models works unauthenticated for the public catalogue
     let openrouter_key = env::env_api_key(&Provider::OpenRouter);
     let openrouter_present = openrouter_key.is_some();
     let d = OpenRouterDiscovery::new(client.clone(), "", openrouter_key);
@@ -149,7 +119,6 @@ pub async fn run_all_available(client: crate::http::HttpClient) -> DiscoveryRunS
         outcome: classify_outcome(d.fetch().await, openrouter_present),
     });
 
-    // openai - api key required
     let openai_provider = Provider::Custom("openai".into());
     let openai_key = resolve_auth_from_default_sources(&openai_provider)
         .await
@@ -162,7 +131,6 @@ pub async fn run_all_available(client: crate::http::HttpClient) -> DiscoveryRunS
         .await,
     );
 
-    // openai-codex (chatgpt subscription) - oauth token + chatgpt account id
     let codex_provider = Provider::Custom("openai-codex".into());
     let codex_auth = resolve_auth_from_default_sources(&codex_provider).await;
     results.push(
@@ -192,7 +160,6 @@ async fn discovery_auth(provider: &Provider) -> crate::auth::ResolvedAuth {
     }
 }
 
-/// shorthand: detect-or-skip + classify the outcome.
 async fn run_one<F, Fut>(
     provider: Provider,
     key: Option<ApiKey>,
@@ -209,9 +176,6 @@ where
     DiscoveryRunResult { provider, outcome }
 }
 
-/// classify a discovery fetch result. `creds_present` lets us distinguish
-/// "no creds" from "creds rejected by upstream" for openrouter (the only
-/// provider whose `/models` works unauthenticated).
 fn classify_outcome(
     res: Result<DiscoveryReport, DiscoveryError>,
     creds_present: bool,
@@ -226,10 +190,6 @@ fn classify_outcome(
     }
 }
 
-/// run discovery and persist the cache. used by the slash command and
-/// the optional startup spawn.
-///
-/// returns the summary so the caller can render status-line feedback.
 pub async fn refresh_and_save(client: crate::http::HttpClient) -> DiscoveryRunSummary {
     let summary = tokio::time::timeout(Duration::from_secs(30), run_all_available(client))
         .await

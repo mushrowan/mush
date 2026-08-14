@@ -1,5 +1,3 @@
-//! credential persistence to disk
-
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -7,22 +5,12 @@ use serde::{Deserialize, Serialize};
 
 use super::OAuthError;
 
-/// eager refresh buffer: credentials are treated as expired once their
-/// remaining lifetime drops below this threshold. prevents a request
-/// from landing with a token that expired in-flight, and gives us room
-/// to refresh before the actual deadline (mirrors opencode's approach)
 const REFRESH_BUFFER_MS: u64 = 5 * 60_000;
 
-/// stored oauth credentials. manual `Debug` impl redacts the tokens so
-/// they can't leak via tracing / dbg / assertion messages. explicit
-/// field access (`creds.access_token`) is still unrestricted because
-/// the HTTP code needs the bearer value - this is leak-prevention for
-/// logging, not a full `secrecy` crate style sealed wrapper
 #[derive(Clone, Serialize, Deserialize)]
 pub struct OAuthCredentials {
     pub access_token: String,
     pub refresh_token: String,
-    /// epoch ms when the access token expires
     pub expires_at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,
@@ -39,8 +27,6 @@ impl std::fmt::Debug for OAuthCredentials {
     }
 }
 
-/// format an oauth token for debug output: first 4 chars + `…` when long
-/// enough to recognise without leaking, else `***`. mirrors `ApiKey`
 fn redacted_token(token: &str) -> String {
     if token.chars().count() > 8 {
         let prefix: String = token.chars().take(4).collect();
@@ -51,14 +37,11 @@ fn redacted_token(token: &str) -> String {
 }
 
 impl OAuthCredentials {
-    /// whether the token is expired or close enough to expiry that we
-    /// should refresh proactively. see [`REFRESH_BUFFER_MS`]
     pub fn is_expired(&self) -> bool {
         timestamp_ms().saturating_add(REFRESH_BUFFER_MS) >= self.expires_at
     }
 }
 
-/// all stored credentials keyed by provider name
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct CredentialStore {
     #[serde(flatten)]
@@ -77,12 +60,10 @@ fn credentials_path() -> PathBuf {
     }
 }
 
-/// load credentials from disk
 pub fn load_credentials() -> Result<CredentialStore, OAuthError> {
     load_credentials_from(&credentials_path())
 }
 
-/// load credentials from a specific path
 pub fn load_credentials_from(path: &PathBuf) -> Result<CredentialStore, OAuthError> {
     if !path.exists() {
         return Ok(CredentialStore::default());
@@ -95,7 +76,6 @@ pub fn load_credentials_from(path: &PathBuf) -> Result<CredentialStore, OAuthErr
     Ok(store)
 }
 
-/// save credentials to disk with private permissions (0o600 on unix)
 pub fn save_credentials(store: &CredentialStore) -> Result<(), OAuthError> {
     save_credentials_to(&credentials_path(), store)
 }
@@ -137,7 +117,6 @@ mod tests {
             !dbg.contains("this-is-the-refresh-secret"),
             "refresh_token leaked in Debug: {dbg}"
         );
-        // non-secret fields should still surface
         assert!(
             dbg.contains("12345"),
             "expires_at missing from debug: {dbg}"
@@ -158,11 +137,10 @@ mod tests {
         };
         assert!(creds.is_expired());
 
-        // well beyond the eager refresh buffer
         let creds = OAuthCredentials {
             access_token: "test".into(),
             refresh_token: "test".into(),
-            expires_at: timestamp_ms() + 60 * 60_000, // 1 hour
+            expires_at: timestamp_ms() + 60 * 60_000,
             account_id: None,
         };
         assert!(!creds.is_expired());
@@ -170,12 +148,10 @@ mod tests {
 
     #[test]
     fn credentials_expired_within_refresh_buffer() {
-        // token that expires in 1 minute counts as "expired" for the
-        // purposes of the eager refresh threshold (5 min by default)
         let creds = OAuthCredentials {
             access_token: "test".into(),
             refresh_token: "test".into(),
-            expires_at: timestamp_ms() + 60_000, // 1 minute
+            expires_at: timestamp_ms() + 60_000,
             account_id: None,
         };
         assert!(
@@ -186,11 +162,10 @@ mod tests {
 
     #[test]
     fn credentials_not_expired_beyond_refresh_buffer() {
-        // token with > 5 minutes left should NOT be treated as expired
         let creds = OAuthCredentials {
             access_token: "test".into(),
             refresh_token: "test".into(),
-            expires_at: timestamp_ms() + 10 * 60_000, // 10 minutes
+            expires_at: timestamp_ms() + 10 * 60_000,
             account_id: None,
         };
         assert!(

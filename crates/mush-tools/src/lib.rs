@@ -23,20 +23,13 @@ use std::sync::Arc;
 
 use mush_agent::tool::{SharedTool, ToolRegistry};
 
-/// default timeout in seconds for foreground tools that wait for work to finish.
 pub const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 120;
 
-/// whether a model id should use the codex patch format instead of edit + write.
-/// GPT models (except gpt-4 and oss variants) are trained on the patch format
-/// and produce better edits with it.
 #[deprecated(note = "use Model::uses_patch_tool() instead")]
 pub fn uses_patch_tool(model_id: &str) -> bool {
     model_id.contains("gpt-") && !model_id.contains("oss") && !model_id.contains("gpt-4")
 }
 
-/// whether a model supports native parallel tool calls and doesn't need the
-/// batch tool. GPT/codex models use the responses API which handles parallel
-/// calls natively, and anthropic does too.
 #[deprecated(note = "use Model::supports_native_parallel_calls() instead")]
 pub fn supports_native_parallel_calls(model_id: &str) -> bool {
     model_id.contains("gpt-")
@@ -46,7 +39,6 @@ pub fn supports_native_parallel_calls(model_id: &str) -> bool {
         || model_id.starts_with("o4")
 }
 
-/// create the full set of built-in tools for a given working directory
 pub fn builtin_tools(cwd: Arc<Path>, http_client: mush_ai::http::HttpClient) -> ToolRegistry {
     let mut tools = builtin_tools_with_options(
         cwd,
@@ -61,7 +53,6 @@ pub fn builtin_tools(cwd: Arc<Path>, http_client: mush_ai::http::HttpClient) -> 
     tools
 }
 
-/// create built-in tools with an optional bash output sink for streaming
 pub fn builtin_tools_with_sink(
     cwd: Arc<Path>,
     output_sink: Option<bash::OutputSink>,
@@ -80,16 +71,6 @@ pub fn builtin_tools_with_sink(
     tools
 }
 
-/// create built-in tools with all options.
-/// when `use_patch` is true, apply_patch replaces edit + write (for GPT models).
-///
-/// `forbidden_chars` is enforced uniformly across `write`, `edit`, and
-/// `apply_patch` via the [`forbidden_chars::ForbiddenCharsGuard`]
-/// wrapper. when the validator is empty, the guard is a no-op and the
-/// inner tools are registered unwrapped.
-///
-/// does NOT include the batch tool. call `add_batch_tool` after registering
-/// all additional tools (skill, MCP, LSP) so batch can access them all.
 #[allow(clippy::too_many_arguments)]
 pub fn builtin_tools_with_options(
     cwd: Arc<Path>,
@@ -113,10 +94,6 @@ pub fn builtin_tools_with_options(
 
     let mut tools: Vec<SharedTool> = vec![
         Arc::new(read::ReadTool::new(cwd.clone()).with_max_image_bytes(max_image_bytes)),
-        // bash is guarded too, but with a hidden bypass: forbidden chars in a
-        // command are refused, yet `allow_forbidden_chars` stays out of the
-        // advertised schema so the model only reaches for it after a real block
-        // (e.g. the user asking it to sed a forbidden char out of a file)
         forbidden_chars::ForbiddenCharsGuard::maybe_wrap(
             bash_tool,
             forbidden_chars.clone(),
@@ -164,7 +141,6 @@ pub fn builtin_tools_with_options(
     ToolRegistry::from_shared(tools)
 }
 
-/// extract the command payload from a `bash` call's args
 fn bash_content_extractor() -> forbidden_chars::ContentExtractor {
     Arc::new(|args: &serde_json::Value| {
         args.get("command")
@@ -174,7 +150,6 @@ fn bash_content_extractor() -> forbidden_chars::ContentExtractor {
     })
 }
 
-/// extract the content payload from a `write` call's args
 fn write_content_extractor() -> forbidden_chars::ContentExtractor {
     Arc::new(|args: &serde_json::Value| {
         args.get("content")
@@ -184,9 +159,6 @@ fn write_content_extractor() -> forbidden_chars::ContentExtractor {
     })
 }
 
-/// extract `newText` from an `edit` call's args. only the new text is
-/// validated; `oldText` is left alone so the model can still match
-/// against existing forbidden content (e.g. to clean it up)
 fn edit_content_extractor() -> forbidden_chars::ContentExtractor {
     Arc::new(|args: &serde_json::Value| {
         args.get("newText")
@@ -196,11 +168,6 @@ fn edit_content_extractor() -> forbidden_chars::ContentExtractor {
     })
 }
 
-/// extract added/replacement content from an `apply_patch` call's
-/// args. parses the patch and gathers every line being introduced
-/// or replaced (full body for `Add`, `new_lines` for each chunk in
-/// `Update`). on parse failure returns empty so the inner tool can
-/// surface its own parse error
 fn apply_patch_content_extractor() -> forbidden_chars::ContentExtractor {
     Arc::new(|args: &serde_json::Value| {
         let Some(patch) = args.get("patch_text").and_then(|v| v.as_str()) else {
@@ -227,23 +194,10 @@ fn apply_patch_content_extractor() -> forbidden_chars::ContentExtractor {
     })
 }
 
-/// add the batch tool to a registry, giving it access to all currently
-/// registered tools. call this after all tools have been added so batch
-/// can dispatch to skill, MCP, LSP tools etc.
 pub fn add_batch_tool(registry: &mut ToolRegistry) {
     registry.register_shared(Arc::new(batch::BatchTool::new(registry.clone())));
 }
 
-/// reshape the model-dependent tools (apply_patch ↔ edit + write, batch)
-/// to match the active model. callers build the registry once at
-/// startup against an initial model, then call this on every stream so
-/// that switching models mid-session (`/model gpt-5`, `/model claude-...`)
-/// flips the toolset to whatever the current model expects.
-///
-/// this rebuilds apply_patch / edit / write from scratch with `cwd`
-/// because tool instances embed the cwd into their state and we don't
-/// have a way to re-key them. batch is rebuilt last so its inner
-/// snapshot of the registry sees the final aligned shape
 pub fn align_for_model(
     registry: &mut ToolRegistry,
     model: &mush_ai::types::Model,
@@ -308,8 +262,6 @@ mod tests {
 
     #[test]
     fn every_advertised_type_is_one_coercion_handles() {
-        // a schema type nothing coerces to is a hard failure the model
-        // cannot see coming
         fn types(schema: &serde_json::Value, found: &mut Vec<String>) {
             match schema {
                 serde_json::Value::Object(fields) => {
@@ -400,7 +352,6 @@ mod tests {
 
     #[tokio::test]
     async fn allow_forbidden_chars_bypass_works_uniformly() {
-        // every guarded tool must honour the same per-call override key
         let registry = registry_with_chars(false, ForbiddenChars::new(['—']));
         let write = registry.get("write").expect("write tool registered");
         let dir = tempfile::tempdir().unwrap();
@@ -420,10 +371,6 @@ mod tests {
 
     #[tokio::test]
     async fn empty_forbidden_chars_does_not_wrap() {
-        // when no chars are configured, the schema must NOT advertise
-        // allow_forbidden_chars (and the inner tool's deny_unknown_fields
-        // should reject it if accidentally passed). this catches
-        // regressions where the wrapper is applied unconditionally.
         let registry = registry_with_chars(false, ForbiddenChars::empty());
         let write = registry.get("write").expect("write tool registered");
         let schema = write.parameters_schema();
@@ -458,12 +405,10 @@ mod tests {
     async fn bash_is_guarded_but_hides_the_bypass_knob() {
         let registry = registry_with_chars(false, ForbiddenChars::new(['—']));
         let bash = registry.get("bash").expect("bash tool registered");
-        // unlike write/edit, bash must NOT advertise the bypass in its schema
         assert!(
             bash.parameters_schema()["properties"]["allow_forbidden_chars"].is_null(),
             "bash must keep the bypass field hidden from the schema"
         );
-        // but a forbidden char in the command is still refused
         let blocked = bash
             .execute(serde_json::json!({"command": "echo — dash"}))
             .await;
@@ -518,10 +463,6 @@ mod tests {
 
     #[test]
     fn align_for_model_swaps_edit_tools_when_switching_to_patch_model() {
-        // start with a claude-style registry (edit + write, no apply_patch).
-        // align it to a gpt model. apply_patch should appear, edit + write
-        // should disappear. covers the bug where switching model mid-session
-        // leaves the original (non-patch) tool set in place
         let cwd: Arc<std::path::Path> = Arc::from(std::env::temp_dir().as_path());
         let mut registry = builtin_tools_with_options(
             cwd.clone(),
@@ -567,8 +508,6 @@ mod tests {
 
     #[test]
     fn align_for_model_swaps_back_to_edit_write_for_non_patch_model() {
-        // mirror of the above: start with apply_patch (gpt-style) and align
-        // to a claude model. apply_patch goes, edit + write come back
         let cwd: Arc<std::path::Path> = Arc::from(std::env::temp_dir().as_path());
         let mut registry = builtin_tools_with_options(
             cwd.clone(),
@@ -600,10 +539,6 @@ mod tests {
 
     #[test]
     fn align_for_model_toggles_batch_tool_with_native_parallel_support() {
-        // models that support native parallel tool calls (gpt, codex,
-        // anthropic) shouldn't carry the batch tool. claude (anthropic)
-        // does support native parallel calls, but on openrouter slugs
-        // that don't, batch should remain. cover both directions
         let cwd: Arc<std::path::Path> = Arc::from(std::env::temp_dir().as_path());
         let mut registry = builtin_tools_with_options(
             cwd.clone(),
@@ -617,7 +552,6 @@ mod tests {
         add_batch_tool(&mut registry);
         assert!(registry.get("batch").is_some());
 
-        // gpt supports native parallel calls → batch should drop
         let gpt = model_with_id("gpt-5");
         assert!(gpt.supports_native_parallel_calls());
         align_for_model(&mut registry, &gpt, cwd.clone(), ForbiddenChars::empty());
@@ -626,7 +560,6 @@ mod tests {
             "batch should be removed for native-parallel models"
         );
 
-        // align to a non-native model brings batch back
         let mut openrouter_glm = model_with_id("z-ai/glm-4.6");
         openrouter_glm.provider = mush_ai::types::Provider::OpenRouter;
         assert!(!openrouter_glm.supports_native_parallel_calls());

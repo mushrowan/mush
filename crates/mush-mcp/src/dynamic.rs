@@ -1,12 +1,3 @@
-//! dynamic MCP tool loading
-//!
-//! meta-tools that let the agent discover and call MCP tools on demand
-//! instead of loading all schemas into context at startup.
-//!
-//! - `mcp_list_tools`: list tool names and descriptions
-//! - `mcp_get_schemas`: get full json schemas for selected tools
-//! - `mcp_call_tool`: call an MCP tool by name
-
 use std::sync::Arc;
 
 use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
@@ -16,7 +7,6 @@ use crate::catalogue::McpCatalogue;
 
 type SharedCatalogue = Arc<McpCatalogue>;
 
-// mcp_list_tools
 pub struct McpListToolsTool {
     catalogue: SharedCatalogue,
 }
@@ -52,8 +42,6 @@ impl AgentTool for McpListToolsTool {
         })
     }
     fn output_limit(&self) -> mush_agent::tool::OutputLimit {
-        // listing tool: structured top-of-output, head keeps the first
-        // server's tools intact
         mush_agent::tool::OutputLimit::Head
     }
     async fn execute(&self, args: serde_json::Value) -> ToolResult {
@@ -74,7 +62,6 @@ impl AgentTool for McpListToolsTool {
     }
 }
 
-// mcp_get_schemas
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GetSchemasArgs {
@@ -117,7 +104,6 @@ impl AgentTool for McpGetSchemasTool {
         })
     }
     fn output_limit(&self) -> mush_agent::tool::OutputLimit {
-        // schemas listed in requested order; head keeps the first ones
         mush_agent::tool::OutputLimit::Head
     }
     async fn execute(&self, args: serde_json::Value) -> ToolResult {
@@ -147,7 +133,6 @@ impl AgentTool for McpGetSchemasTool {
     }
 }
 
-// mcp_call_tool
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CallToolArgs {
@@ -195,8 +180,6 @@ impl AgentTool for McpCallToolTool {
         })
     }
     fn output_limit(&self) -> mush_agent::tool::OutputLimit {
-        // proxies through to a downstream MCP tool; same fallback as
-        // the static McpTool: head keeps any structured prefix
         mush_agent::tool::OutputLimit::Head
     }
     async fn execute(&self, args: serde_json::Value) -> ToolResult {
@@ -231,7 +214,6 @@ impl AgentTool for McpCallToolTool {
     }
 }
 
-/// create the three dynamic MCP meta-tools
 #[must_use]
 pub fn dynamic_mcp_tools(catalogue: McpCatalogue) -> Vec<Arc<dyn AgentTool>> {
     let catalogue: SharedCatalogue = Arc::new(catalogue);

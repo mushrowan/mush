@@ -1,8 +1,3 @@
-//! LSP client for communicating with a single language server
-//!
-//! handles spawning the server process, the initialize handshake,
-//! sending requests and notifications, and receiving responses.
-
 use std::collections::HashMap;
 use std::path::Path;
 use std::str::FromStr;
@@ -19,29 +14,19 @@ use crate::discovery::ServerConfig;
 use crate::error::LspError;
 use crate::transport;
 
-/// timeout for LSP requests (seconds)
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// an active LSP server connection
 pub struct LspClient {
-    /// server process handle
     _process: Child,
-    /// writer to server stdin (behind mutex for shared access)
     writer: Arc<Mutex<ChildStdin>>,
-    /// monotonically increasing request id
     next_id: AtomicI64,
-    /// pending requests waiting for responses
     pending: Arc<Mutex<HashMap<i64, oneshot::Sender<Value>>>>,
-    /// latest diagnostics per file URI
     diagnostics: Arc<Mutex<HashMap<Uri, Vec<Diagnostic>>>>,
-    /// workspace root
     root_uri: Uri,
-    /// background reader task handle
     _reader_task: tokio::task::JoinHandle<()>,
 }
 
 impl LspClient {
-    /// spawn a language server and perform the initialize handshake
     pub async fn start(config: &ServerConfig, root: &Path) -> Result<Self, LspError> {
         let root_uri = path_to_uri(root)?;
 
@@ -86,7 +71,6 @@ impl LspClient {
         Ok(client)
     }
 
-    /// send a JSON-RPC request and wait for the response
     pub async fn request(&self, method: &str, params: Value) -> Result<Value, LspError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let message = json!({
@@ -122,7 +106,6 @@ impl LspClient {
         Ok(response.get("result").cloned().unwrap_or(Value::Null))
     }
 
-    /// send a JSON-RPC notification (no response expected)
     pub async fn notify(&self, method: &str, params: Value) -> Result<(), LspError> {
         let message = json!({
             "jsonrpc": "2.0",
@@ -133,7 +116,6 @@ impl LspClient {
         transport::write_message(&mut writer, &message).await
     }
 
-    /// perform the initialize/initialized handshake
     async fn initialize(&mut self) -> Result<(), LspError> {
         let params = json!({
             "processId": std::process::id(),
@@ -160,7 +142,6 @@ impl LspClient {
         Ok(())
     }
 
-    /// notify the server about a file being opened
     pub async fn did_open(&self, path: &Path, text: &str) -> Result<(), LspError> {
         let uri = path_to_uri(path)?;
         let language_id = language_id_for_path(path);
@@ -178,7 +159,6 @@ impl LspClient {
         .await
     }
 
-    /// notify the server about a file changing (full sync)
     pub async fn did_change(&self, path: &Path, text: &str, version: i32) -> Result<(), LspError> {
         let uri = path_to_uri(path)?;
         self.notify(
@@ -194,14 +174,12 @@ impl LspClient {
         .await
     }
 
-    /// get the latest published diagnostics for a file
     pub async fn get_diagnostics(&self, path: &Path) -> Result<Vec<Diagnostic>, LspError> {
         let uri = path_to_uri(path)?;
         let diags = self.diagnostics.lock().await;
         Ok(diags.get(&uri).cloned().unwrap_or_default())
     }
 
-    /// send shutdown request and exit notification
     pub async fn shutdown(self) -> Result<(), LspError> {
         let _ = self.request("shutdown", Value::Null).await;
         let _ = self.notify("exit", Value::Null).await;
@@ -209,7 +187,6 @@ impl LspClient {
     }
 }
 
-/// format diagnostics as a human-readable string
 pub fn format_diagnostics(path: &Path, diagnostics: &[Diagnostic]) -> String {
     use std::fmt::Write;
 
@@ -237,7 +214,6 @@ pub fn format_diagnostics(path: &Path, diagnostics: &[Diagnostic]) -> String {
     out
 }
 
-/// spawn a background task that reads server messages and dispatches them
 fn spawn_reader(
     stdout: ChildStdout,
     pending: Arc<Mutex<HashMap<i64, oneshot::Sender<Value>>>>,
@@ -255,19 +231,16 @@ fn spawn_reader(
                 }
             }
         }
-        // cancel any pending requests
         let mut guard = pending.lock().await;
         guard.clear();
     })
 }
 
-/// route an incoming message to the right handler
 async fn dispatch_message(
     msg: Value,
     pending: &Mutex<HashMap<i64, oneshot::Sender<Value>>>,
     diagnostics: &Mutex<HashMap<Uri, Vec<Diagnostic>>>,
 ) {
-    // response to a request (has "id" but no "method")
     if let Some(id) = msg.get("id").and_then(|v| v.as_i64())
         && msg.get("method").is_none()
     {
@@ -278,7 +251,6 @@ async fn dispatch_message(
         return;
     }
 
-    // notification from the server
     if let Some(method) = msg.get("method").and_then(|v| v.as_str()) {
         match method {
             "textDocument/publishDiagnostics" => {
@@ -291,7 +263,6 @@ async fn dispatch_message(
                 }
             }
             "window/logMessage" | "window/showMessage" => {
-                // log but don't act on these
                 if let Some(msg_text) = msg
                     .get("params")
                     .and_then(|p| p.get("message"))

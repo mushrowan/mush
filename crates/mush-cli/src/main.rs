@@ -1,5 +1,3 @@
-//! mush cli - fast little robot harness 🍄
-
 use clap::Parser;
 use color_eyre::eyre::{Result, eyre};
 use futures::StreamExt;
@@ -29,51 +27,39 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
 
-    /// prompt to send (enables print mode, no TUI)
     #[arg(short, long, num_args = 1.., trailing_var_arg = true)]
     prompt: Vec<String>,
 
-    /// resume a previous session by id
     #[arg(short = 'c', long = "continue")]
     resume: Option<String>,
 
-    /// model id to use
     #[arg(short, long)]
     model: Option<String>,
 
-    /// enable extended thinking
     #[arg(long)]
     thinking: bool,
 
-    /// max output tokens
     #[arg(long)]
     max_tokens: Option<u64>,
 
-    /// max tool-calling turns before stopping
     #[arg(long)]
     max_turns: Option<usize>,
 
-    /// print cache-read/write debug lines when available
     #[arg(long)]
     debug_cache: bool,
 
-    /// system prompt override
     #[arg(long)]
     system: Option<String>,
 
-    /// disable tools (just chat)
     #[arg(long)]
     no_tools: bool,
 
-    /// don't save the session
     #[arg(long)]
     no_session: bool,
 
-    /// print startup timing breakdown
     #[arg(long, env = "MUSH_PROFILE_STARTUP")]
     profile_startup: bool,
 
-    /// enable chrome tracing timeline (requires profiling build)
     #[arg(long, env = "MUSH_TRACE")]
     trace: bool,
 
@@ -86,28 +72,12 @@ struct Cli {
 
 #[derive(clap::Subcommand)]
 enum Command {
-    /// log in to an oauth provider (e.g. mush login anthropic)
-    Login {
-        /// provider to log in to (e.g. anthropic)
-        provider: Option<String>,
-    },
-    /// log out from an oauth provider
-    Logout {
-        /// provider to log out from (e.g. anthropic)
-        provider: Option<String>,
-    },
-    /// list available models
+    Login { provider: Option<String> },
+    Logout { provider: Option<String> },
     Models,
-    /// list saved sessions
     Sessions,
-    /// show current configuration and auth status
     Status,
-    /// delete a saved session
-    Delete {
-        /// session id (prefix match)
-        id: String,
-    },
-    /// open config file in $EDITOR
+    Delete { id: String },
     Config,
 }
 
@@ -128,10 +98,8 @@ async fn main() -> Result<()> {
     let (_log_guards, log_buffer) = logging::init_logging(cfg.log_filter.as_deref(), cli.trace);
     tracing::info!("mush starting");
 
-    // clean up old tool output files
     mush_agent::truncation::cleanup();
 
-    // read from stdin if piped
     let stdin_prompt = if !atty::is(atty::Stream::Stdin) {
         let mut buf = String::new();
         std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
@@ -140,7 +108,6 @@ async fn main() -> Result<()> {
         None
     };
 
-    // combine stdin with -p flag
     let cli_prompt = if cli.prompt.is_empty() {
         None
     } else {
@@ -153,7 +120,6 @@ async fn main() -> Result<()> {
         (None, None) => None,
     };
 
-    // handle subcommands first
     match cli.command {
         Some(Command::Login { provider }) => return commands::login(provider).await,
         Some(Command::Logout { provider }) => return commands::logout(provider),
@@ -174,8 +140,6 @@ async fn main() -> Result<()> {
     }
 }
 
-/// load the session a `--resume` argument points at. accepts a full id
-/// or any unambiguous prefix, the same way `mush sessions delete` does
 fn resume_session(store: &SessionStore, id_or_prefix: &str) -> Result<Session> {
     let meta = store
         .resolve(id_or_prefix)
@@ -208,7 +172,6 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
         eprintln!("{report}");
     }
 
-    // session: resume or create new
     let cwd_str = setup.cwd.display().to_string();
     let store = SessionStore::new(SessionStore::default_dir());
     let mut session = if let Some(ref id) = cli.resume {
@@ -218,7 +181,6 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
     };
     setup.options.session_id = Some(session.meta.id.clone());
 
-    // add the user message
     let user_msg = Message::User(UserMessage {
         content: UserContent::Text(prompt),
         timestamp_ms: Timestamp::now(),
@@ -226,7 +188,6 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
     session.push_message(user_msg);
     session.auto_title();
 
-    // auto-compact when approaching context limit
     let (compact_model, compact_options) = setup
         .compaction_model
         .clone()
@@ -406,8 +367,6 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
 }
 
 async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
-    // shared state for streaming bash output to the TUI, keyed by exec id
-    // so concurrent tool calls don't clobber each other's panels
     let terminal_policy_overrides = cli.terminal_policy_overrides();
     let tool_output_live: mush_tui::runner::LiveToolOutput =
         std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
@@ -441,7 +400,6 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         eprintln!("{report}");
     }
 
-    // create or resume a session
     let cwd_str = setup.cwd.display().to_string();
     let session = if let Some(ref resume_id) = cli.resume {
         let store = SessionStore::new(SessionStore::default_dir());
@@ -462,18 +420,12 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
     let session_id = session.meta.id.clone();
     setup.options.session_id = Some(session_id.clone());
 
-    // resumed sessions reuse the system prompt that was cached on the
-    // provider side. without this the rebuilt prompt (from current
-    // AGENTS.md and skills) drifts and busts the prefix cache on the
-    // first call after resume. fresh sessions fall back to the just-built
-    // setup.system_prompt
     let system_prompt = session.system_prompt.clone().unwrap_or(setup.system_prompt);
 
     let theme = mush_tui::Theme::from_config(&setup.cfg.theme);
 
     let terminal_policy = setup.cfg.terminal.with_overrides(terminal_policy_overrides);
 
-    // build agent card before setup fields are moved into tui_config
     let agent_card = {
         let mut card = mush_agent::AgentCard::build(&setup.model.id, &setup.tools);
         card.capabilities = mush_agent::Capabilities {
@@ -661,7 +613,6 @@ mod tests {
     impl Drop for EnvGuard {
         fn drop(&mut self) {
             for (key, value) in self.saved.drain(..) {
-                // serialised by ENV_LOCK in each test
                 unsafe {
                     match value {
                         Some(value) => std::env::set_var(key, value),
@@ -678,7 +629,6 @@ mod tests {
             .map(|(key, _)| (*key, std::env::var(key).ok()))
             .collect::<Vec<_>>();
         for (key, value) in vars {
-            // serialised by ENV_LOCK in each test
             unsafe {
                 match value {
                     Some(value) => std::env::set_var(key, value),

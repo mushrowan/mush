@@ -1,5 +1,3 @@
-//! core message, model, and provider types
-
 mod content;
 mod messages;
 mod model;

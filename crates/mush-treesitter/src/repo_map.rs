@@ -1,12 +1,3 @@
-//! aider-style repository map using tree-sitter
-//!
-//! walks a repo, extracts definitions and references per file, builds
-//! a file-level graph, ranks by PageRank, and generates a concise
-//! text summary that fits within a token budget
-//!
-//! the map shows file paths with their most important symbol signatures,
-//! giving the LLM a high-level understanding of the codebase
-
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -16,13 +7,11 @@ use crate::references::extract_references;
 use crate::symbols::{self, SymbolInfo, SymbolKind};
 use crate::{Language, ParserPool};
 
-/// definitions and references extracted from a single file
 struct FileData {
     definitions: Vec<SymbolInfo>,
     references: HashSet<String>,
 }
 
-/// a ranked file entry in the repo map
 #[derive(Debug, Clone)]
 pub struct RankedFile {
     pub path: PathBuf,
@@ -30,27 +19,19 @@ pub struct RankedFile {
     pub symbols: Vec<SymbolInfo>,
 }
 
-/// the generated repo map
 #[derive(Debug, Clone, Default)]
 pub struct RepoMap {
-    /// files ranked by importance (highest first)
     pub files: Vec<RankedFile>,
 }
 
-/// rendering options for [`RepoMap::render`]
 #[derive(Debug, Clone, Copy)]
 pub struct RenderOptions {
-    /// soft cap on output bytes (~ 4 chars per token)
     pub max_chars: usize,
-    /// hard cap on number of files emitted; usize::MAX = no limit
     pub max_files: usize,
-    /// emit only `path: (N symbols, rank=...)` per file
     pub summary_only: bool,
 }
 
 impl RenderOptions {
-    /// default rendering: full symbol bodies, all files within the
-    /// byte budget
     #[must_use]
     pub fn for_chars(max_chars: usize) -> Self {
         Self {
@@ -60,7 +41,6 @@ impl RenderOptions {
         }
     }
 
-    /// rendering targeting a token count (4 chars per token)
     #[must_use]
     pub fn for_tokens(max_tokens: usize) -> Self {
         Self::for_chars(max_tokens * 4)
@@ -68,10 +48,6 @@ impl RenderOptions {
 }
 
 impl RepoMap {
-    /// keep only files whose path begins with `prefix` (path-component
-    /// boundary), preserving rank order. used by the repo_map tool to
-    /// scope the rendered output to a subtree before spending the
-    /// budget on it
     #[must_use]
     pub fn filter_path(&self, prefix: &str) -> Self {
         let prefix = prefix.trim_end_matches('/');
@@ -88,18 +64,11 @@ impl RepoMap {
         Self { files }
     }
 
-    /// number of files in the structured map. distinct from "files
-    /// rendered into the text" which depends on the budget
     #[must_use]
     pub fn file_count(&self) -> usize {
         self.files.len()
     }
 
-    /// render the repo map as a text string with the given options
-    ///
-    /// when files are dropped because of the budget, a footer line is
-    /// appended so the model knows the slice is incomplete and can
-    /// either narrow with `path` / `limit` or accept the trim
     #[must_use]
     pub fn render(&self, opts: RenderOptions) -> String {
         let mut output = String::new();
@@ -164,32 +133,22 @@ impl RepoMap {
         output
     }
 
-    /// format the repo map as a text string targeting `max_chars` of
-    /// output. retained for callers that don't need fine-grained
-    /// rendering control
     #[must_use]
     pub fn format(&self, max_chars: usize) -> String {
         self.render(RenderOptions::for_chars(max_chars))
     }
 
-    /// format the repo map targeting a token budget (4 chars per token)
     #[must_use]
     pub fn format_for_tokens(&self, max_tokens: usize) -> String {
         self.render(RenderOptions::for_tokens(max_tokens))
     }
 }
 
-/// build a repo map for a directory
-///
-/// walks all parseable files, extracts definitions and references,
-/// builds a file-level reference graph, ranks with PageRank, and
-/// returns the ranked map
 pub fn build_repo_map(root: &Path) -> RepoMap {
     let incr = IncrementalRepoMap::new(root);
     incr.current
 }
 
-/// rank symbols within a file by reference count and kind
 fn rank_symbols(
     definitions: &[SymbolInfo],
     def_index: &FxHashMap<&str, Vec<&PathBuf>>,
@@ -197,8 +156,6 @@ fn rank_symbols(
     let mut scored: Vec<(usize, &SymbolInfo)> = definitions
         .iter()
         .map(|sym| {
-            // score by how many files define this name (proxy for importance)
-            // higher-level constructs (structs, traits, classes) get a bonus
             let kind_bonus = match sym.kind {
                 SymbolKind::Class
                 | SymbolKind::Struct
@@ -224,9 +181,6 @@ fn rank_symbols(
     scored.into_iter().map(|(_, sym)| sym.clone()).collect()
 }
 
-/// simple PageRank implementation
-///
-/// iterative computation without external graph library deps
 fn pagerank(edges: &[(usize, usize)], n: usize, damping: f64, iterations: usize) -> Vec<f64> {
     if n == 0 {
         return vec![];
@@ -251,11 +205,6 @@ fn pagerank(edges: &[(usize, usize)], n: usize, damping: f64, iterations: usize)
     ranks
 }
 
-/// check whether a path is inside a VCS-managed repository
-///
-/// walks up from `path` looking for `.git` or `.jj` directories.
-/// returns false for bare directories (e.g. home dir) where a
-/// recursive walk would be unbounded and dangerous
 pub fn is_inside_repo(path: &Path) -> bool {
     let mut current = if path.is_absolute() {
         path.to_path_buf()
@@ -274,10 +223,8 @@ pub fn is_inside_repo(path: &Path) -> bool {
     }
 }
 
-/// options for controlling file discovery
 #[derive(Debug, Clone)]
 pub struct DiscoverOptions {
-    /// hard cap on files to discover (0 = no limit)
     pub max_files: usize,
 }
 
@@ -289,11 +236,6 @@ impl Default for DiscoverOptions {
     }
 }
 
-/// read the inotify watch limit and derive a reasonable file cap
-///
-/// uses half the inotify limit (since we're not the only watcher)
-/// capped to a hard maximum to prevent memory blowup even if
-/// the kernel limit is absurdly high
 fn default_max_files() -> usize {
     const HARD_MAX: usize = 50_000;
 
@@ -303,7 +245,6 @@ fn default_max_files() -> usize {
             .ok()
             .and_then(|s| s.trim().parse::<usize>().ok())
             .unwrap_or(HARD_MAX);
-        // use half the inotify limit, clamped to hard max
         (limit / 2).min(HARD_MAX)
     }
 
@@ -313,15 +254,13 @@ fn default_max_files() -> usize {
     }
 }
 
-/// walk a directory tree, respecting .gitignore, returning parseable files
 fn discover_files(root: &Path) -> Vec<PathBuf> {
     discover_files_with_options(root, &DiscoverOptions::default())
 }
 
-/// walk a directory tree with configurable limits
 fn discover_files_with_options(root: &Path, opts: &DiscoverOptions) -> Vec<PathBuf> {
     let walker = ignore::WalkBuilder::new(root)
-        .hidden(true) // skip hidden files
+        .hidden(true)
         .git_ignore(true)
         .git_global(true)
         .git_exclude(true)
@@ -356,7 +295,6 @@ fn discover_files_with_options(root: &Path, opts: &DiscoverOptions) -> Vec<PathB
     files
 }
 
-/// parse a single file and extract its definitions + references
 fn parse_file_data(pool: &ParserPool, path: &Path) -> Result<FileData, crate::ParseError> {
     let language = Language::detect(path)
         .ok_or_else(|| crate::ParseError::UnsupportedLanguage(path.display().to_string()))?;
@@ -369,8 +307,6 @@ fn parse_file_data(pool: &ParserPool, path: &Path) -> Result<FileData, crate::Pa
     })
 }
 
-/// parse a single file without a shared pool (for parallel use).
-/// creates or reuses a thread-local parser for the detected language.
 fn parse_file_standalone(path: &Path) -> Result<FileData, crate::ParseError> {
     use std::cell::RefCell;
 
@@ -389,8 +325,6 @@ fn parse_file_standalone(path: &Path) -> Result<FileData, crate::ParseError> {
     let tree = PARSERS.with_borrow_mut(|parsers| {
         let parser = parsers.entry(language).or_insert_with(|| {
             let mut p = tree_sitter::Parser::new();
-            // set_language only fails on ABI mismatch which would be a build
-            // error, not a runtime condition
             #[expect(clippy::expect_used, reason = "ABI mismatch is a build-time bug")]
             p.set_language(&ts_lang).expect("grammar version mismatch");
             p
@@ -406,8 +340,6 @@ fn parse_file_standalone(path: &Path) -> Result<FileData, crate::ParseError> {
     })
 }
 
-/// parse files in parallel using rayon with per-thread parsers.
-/// returns a map of path -> parsed data, skipping files that fail to parse.
 fn parse_files_parallel(files: &[PathBuf]) -> FxHashMap<PathBuf, FileData> {
     use rayon::prelude::*;
 
@@ -423,26 +355,17 @@ fn parse_files_parallel(files: &[PathBuf]) -> FxHashMap<PathBuf, FileData> {
         .collect()
 }
 
-/// persistent repo map that can be updated incrementally
-///
-/// holds parsed file data and a parser pool so only changed files
-/// need re-parsing. PageRank is re-run on the full graph after each
-/// update (it's fast enough for typical repo sizes).
 pub struct IncrementalRepoMap {
     root: PathBuf,
     pool: ParserPool,
     file_data: FxHashMap<PathBuf, FileData>,
     current: RepoMap,
-    /// fingerprint of the last edge graph we ran pagerank over
     last_edges_fp: u64,
-    /// cached ranks keyed by file path, reused when `last_edges_fp` matches
     last_ranks: FxHashMap<PathBuf, f64>,
-    /// total number of pagerank computations performed (diagnostic)
     pagerank_runs: u64,
 }
 
 impl IncrementalRepoMap {
-    /// build initial map by walking and parsing all files
     #[tracing::instrument(name = "repo_map_build", skip_all)]
     pub fn new(root: &Path) -> Self {
         let pool = ParserPool::new();
@@ -465,24 +388,14 @@ impl IncrementalRepoMap {
         }
     }
 
-    /// get the current repo map
     pub fn map(&self) -> &RepoMap {
         &self.current
     }
 
-    /// how many times pagerank has actually been computed since construction
-    ///
-    /// useful for diagnostics: a healthy edit loop should see this grow
-    /// slower than the number of `update` calls (incremental edits that
-    /// don't change the reference graph skip pagerank entirely)
     pub fn pagerank_runs(&self) -> u64 {
         self.pagerank_runs
     }
 
-    /// update after files changed or were removed
-    ///
-    /// re-parses changed files, removes deleted ones, and rebuilds
-    /// the graph. returns true if the map actually changed.
     pub fn update(&mut self, changed: &[PathBuf], removed: &[PathBuf]) -> bool {
         if changed.is_empty() && removed.is_empty() {
             return false;
@@ -498,11 +411,9 @@ impl IncrementalRepoMap {
         }
 
         for path in changed {
-            // invalidate cached parse tree so we get a fresh parse
             self.pool.invalidate(path);
 
             if !path.exists() {
-                // file was deleted between event and processing
                 if self.file_data.remove(path).is_some() {
                     any_change = true;
                 }
@@ -516,7 +427,6 @@ impl IncrementalRepoMap {
                 }
                 Err(e) => {
                     tracing::debug!("failed to re-parse {}: {e}", path.display());
-                    // remove stale data if we can't parse anymore
                     if self.file_data.remove(path).is_some() {
                         any_change = true;
                     }
@@ -545,7 +455,6 @@ impl IncrementalRepoMap {
         any_change
     }
 
-    /// add any newly discovered files (e.g. after a create event)
     pub fn add_new_files(&mut self) -> bool {
         let all_files = discover_files(&self.root);
         let mut new_files = Vec::new();
@@ -561,23 +470,12 @@ impl IncrementalRepoMap {
     }
 }
 
-/// result of a full `build_from_data` pass
 struct BuildOutcome {
     map: RepoMap,
-    /// fingerprint of the edge set (files keyed by relative path) used
-    /// to compute the ranks in `map`. stable across equivalent graphs
     edges_fp: u64,
-    /// ranks keyed by absolute file path, suitable for caching across
-    /// incremental updates
     ranks_by_path: FxHashMap<PathBuf, f64>,
 }
 
-/// shared core: build a RepoMap from pre-parsed file data
-///
-/// when `cached` is `Some((fp, ranks))` and the newly computed edge
-/// fingerprint matches `fp`, we reuse the cached per-path ranks instead
-/// of running pagerank. this is the hot-path for small edits that don't
-/// alter the reference graph (comments, formatting, renames of locals)
 fn build_from_data(
     root: &Path,
     file_data: &FxHashMap<PathBuf, FileData>,
@@ -591,7 +489,6 @@ fn build_from_data(
         };
     }
 
-    // build global definition index
     let mut def_index: FxHashMap<&str, Vec<&PathBuf>> = FxHashMap::default();
     for (path, data) in file_data {
         for sym in &data.definitions {
@@ -599,8 +496,6 @@ fn build_from_data(
         }
     }
 
-    // deterministic enumeration: sort by path so indices (and therefore
-    // the edge fingerprint) are stable across HashMap iteration orders
     let mut ordered_paths: Vec<&PathBuf> = file_data.keys().collect();
     ordered_paths.sort();
     let file_indices: FxHashMap<&PathBuf, usize> = ordered_paths
@@ -631,7 +526,6 @@ fn build_from_data(
 
     let edges_fp = edges_fingerprint(&ordered_paths, &edges);
 
-    // reuse cached ranks when the graph shape is identical
     let reused_ranks = cached
         .filter(|(prev_fp, prev_ranks)| *prev_fp == edges_fp && prev_ranks.len() == n)
         .and_then(|(_, prev_ranks)| {
@@ -677,11 +571,6 @@ fn build_from_data(
     }
 }
 
-/// fingerprint the edge graph so we can skip pagerank when unchanged
-///
-/// hashes both the node ordering (paths) and the deduped edge list so
-/// that any structural change -- a new reference, a new def, a removed
-/// file -- produces a different value
 fn edges_fingerprint(ordered_paths: &[&PathBuf], edges: &[(usize, usize)]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = rustc_hash::FxHasher::default();
@@ -702,7 +591,6 @@ mod tests {
     use std::fs;
 
     fn setup_test_repo(dir: &Path) {
-        // create a small multi-file rust project
         let src = dir.join("src");
         fs::create_dir_all(&src).unwrap();
 
@@ -775,7 +663,6 @@ impl Server {
 
         assert!(!map.files.is_empty(), "map should have files");
 
-        // all three files should be present
         let paths: Vec<_> = map
             .files
             .iter()
@@ -802,20 +689,17 @@ impl Server {
 
         let map = build_repo_map(dir.path());
 
-        // Config is used by both lib.rs and server.rs, so config.rs should rank well
         let config_entry = map
             .files
             .iter()
             .find(|f| f.path.display().to_string().contains("config.rs"))
             .expect("config.rs should be in the map");
 
-        // it should have a non-trivial rank
         assert!(
             config_entry.rank > 0.0,
             "config.rs should have positive rank"
         );
 
-        // Config struct should be among its symbols
         let sym_names: Vec<_> = config_entry
             .symbols
             .iter()
@@ -852,7 +736,7 @@ impl Server {
         setup_test_repo(dir.path());
 
         let map = build_repo_map(dir.path());
-        let text = map.format(100); // very small budget
+        let text = map.format(100);
 
         assert!(
             text.len() <= 200,
@@ -870,11 +754,9 @@ impl Server {
 
     #[test]
     fn pagerank_basic() {
-        // simple 3-node chain: 0→1→2
         let edges = vec![(0, 1), (1, 2)];
         let ranks = pagerank(&edges, 3, 0.85, 20);
 
-        // node 2 (sink) should have highest rank
         assert!(ranks[2] > ranks[1], "sink should rank highest");
         assert!(ranks[1] > ranks[0], "middle should rank higher than source");
     }
@@ -888,12 +770,10 @@ impl Server {
     #[test]
     fn pagerank_no_edges() {
         let ranks = pagerank(&[], 3, 0.85, 20);
-        // all nodes should have equal rank
         assert!((ranks[0] - ranks[1]).abs() < 1e-10);
         assert!((ranks[1] - ranks[2]).abs() < 1e-10);
     }
 
-    // incremental repo map tests
     #[test]
     fn incremental_matches_full_build() {
         let dir = tempfile::tempdir().unwrap();
@@ -902,14 +782,12 @@ impl Server {
         let full = build_repo_map(dir.path());
         let incr = IncrementalRepoMap::new(dir.path());
 
-        // same number of files
         assert_eq!(
             full.files.len(),
             incr.map().files.len(),
             "incremental should match full build"
         );
 
-        // same file paths (order may differ, so compare sets)
         let full_paths: HashSet<_> = full.files.iter().map(|f| f.path.clone()).collect();
         let incr_paths: HashSet<_> = incr.map().files.iter().map(|f| f.path.clone()).collect();
         assert_eq!(full_paths, incr_paths);
@@ -923,7 +801,6 @@ impl Server {
         let mut incr = IncrementalRepoMap::new(dir.path());
         let before = incr.map().format(10_000);
 
-        // add a new function to config.rs
         let config_path = dir.path().join("src/config.rs");
         fs::write(
             &config_path,
@@ -995,7 +872,6 @@ impl Config {
         let mut incr = IncrementalRepoMap::new(dir.path());
         let initial_count = incr.map().files.len();
 
-        // add a new file
         fs::write(
             dir.path().join("src/utils.rs"),
             r#"
@@ -1038,10 +914,8 @@ pub fn helper() -> String {
         setup_test_repo(dir.path());
 
         let mut incr = IncrementalRepoMap::new(dir.path());
-        // initial build runs pagerank exactly once
         assert_eq!(incr.pagerank_runs(), 1);
 
-        // touch config.rs with a comment (no def/ref changes)
         let config_path = dir.path().join("src/config.rs");
         let original = fs::read_to_string(&config_path).unwrap();
         fs::write(
@@ -1058,7 +932,6 @@ pub fn helper() -> String {
             "pagerank should be skipped when edge graph is unchanged"
         );
 
-        // now add a genuinely new reference that changes the graph
         fs::write(
             &config_path,
             r#"
@@ -1122,7 +995,6 @@ pub struct Config {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src");
         fs::create_dir_all(&src).unwrap();
-        // create 20 files
         for i in 0..20 {
             fs::write(src.join(format!("f{i}.rs")), format!("fn f{i}() {{}}")).unwrap();
         }
@@ -1163,7 +1035,6 @@ pub struct Config {
         let files = discover_files(dir.path());
         assert_eq!(files.len(), 3, "should find all code files");
 
-        // serial parse via existing path
         let pool = ParserPool::new();
         let mut serial: FxHashMap<PathBuf, FileData> = FxHashMap::default();
         for path in &files {
@@ -1172,7 +1043,6 @@ pub struct Config {
             }
         }
 
-        // parallel parse
         let parallel = parse_files_parallel(&files);
 
         assert_eq!(

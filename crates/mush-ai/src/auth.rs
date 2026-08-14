@@ -1,8 +1,3 @@
-//! shared auth resolution for runtime requests and model discovery.
-//!
-//! precedence matches the login picker and the request path:
-//! env > config > stored > oauth
-
 use std::collections::HashMap;
 use std::path::PathBuf;
 

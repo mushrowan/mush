@@ -1,5 +1,3 @@
-//! bash_status tool - poll background bash jobs for completion
-
 use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
 use serde::Deserialize;
 
@@ -10,11 +8,8 @@ const DEFAULT_POLL_TIMEOUT_SECS: u64 = 30;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StatusArgs {
-    /// job id returned by bash with background: true
     #[serde(rename = "job_id")]
     job_id: String,
-    /// how long to wait for the job to finish before returning
-    /// current status (default 30s, set to 0 for instant check)
     #[serde(
         default = "default_poll_timeout",
         deserialize_with = "mush_agent::de::uint"
@@ -87,7 +82,6 @@ impl AgentTool for BashStatusTool {
     }
 
     fn output_limit(&self) -> mush_agent::tool::OutputLimit {
-        // matches BashTool: bash output's signal lives at the end
         mush_agent::tool::OutputLimit::Tail
     }
 
@@ -97,7 +91,6 @@ impl AgentTool for BashStatusTool {
             Err(error) => return error,
         };
 
-        // reap expired jobs while we're here
         self.registry.reap_expired().await;
 
         let handle = match self.registry.get(&args.job_id).await {
@@ -119,7 +112,6 @@ impl AgentTool for BashStatusTool {
             return format_job_result(&mut state);
         }
 
-        // poll with timeout: check periodically until done or timeout
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(args.timeout);
         let poll_interval = tokio::time::Duration::from_millis(500);
 
@@ -163,10 +155,6 @@ fn format_job_result(state: &mut crate::background::JobState) -> ToolResult {
         JobStatus::Running => unreachable!("called format_job_result on running job"),
     };
 
-    // use the stable run-time duration recorded at finish time. polling
-    // a long-since-finished job must not show a duration that climbs
-    // with wall-clock; that masked `Status: timed_out` once and made
-    // the agent loop on bash_status thinking the job was still running
     let elapsed = state.run_duration().as_secs();
     let preamble = format!(
         "Exit code: {exit_code}\nStatus: {}\nDuration: {elapsed}s\n\n",
@@ -635,12 +623,6 @@ mod tests {
 
     #[tokio::test]
     async fn duration_reports_run_time_not_wall_clock_since_start() {
-        // a job that started 200s ago and finished after running for
-        // 30s should report "Duration: 30s" no matter when it's polled,
-        // not the 200s elapsed since `started`. losing this invariant
-        // masks `Status: timed_out` behind a duration that keeps
-        // climbing on every poll, making it look like the job is still
-        // running
         let registry = make_registry();
         let now = std::time::Instant::now();
         let started = now - std::time::Duration::from_secs(200);

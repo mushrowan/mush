@@ -1,8 +1,3 @@
-//! shared yaml frontmatter extraction
-
-/// extract the yaml text between `---` fences, returns (frontmatter, body_start_index)
-///
-/// body_start_index is the byte offset after the closing `---` fence
 pub fn extract(content: &str) -> Option<(&str, usize)> {
     let trimmed = content.trim_start();
     let offset = content.len() - trimmed.len();

@@ -1,9 +1,3 @@
-//! unix domain socket IPC for cross-process agent communication
-//!
-//! each mush session can listen on a UDS so other agents or tools
-//! can discover it and exchange messages. the socket path follows
-//! a convention: `$RUNTIME_DIR/mush/<session-id>.sock`
-
 pub mod listener;
 
 use std::path::PathBuf;
@@ -14,39 +8,27 @@ use crate::card::AgentCard;
 
 pub use listener::IpcListener;
 
-/// a message sent over the IPC channel
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IpcMessage {
-    /// unique message id
     pub id: String,
-    /// sender identifier
     pub from: String,
-    /// message type
     pub kind: IpcMessageKind,
 }
 
-/// types of IPC messages
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", content = "payload")]
 pub enum IpcMessageKind {
-    /// request the agent's card
     GetCard,
-    /// agent card response
     Card(AgentCard),
-    /// send a user message to the agent
     UserMessage { text: String },
-    /// acknowledge receipt
     Ack { message_id: String },
-    /// error response
     Error { message: String },
 }
 
-/// compute the socket path for a session
 pub fn socket_path(session_id: &str) -> PathBuf {
     mush_runtime_dir().join(format!("{session_id}.sock"))
 }
 
-/// list all active mush sockets (for discovery)
 pub fn discover_sockets() -> Vec<PathBuf> {
     let dir = mush_runtime_dir();
     let Ok(entries) = std::fs::read_dir(dir) else {

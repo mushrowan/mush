@@ -1,41 +1,25 @@
-//! lifecycle hooks: user-configured shell commands that run at
-//! specific points in the agent loop
-//!
-//! - PreToolUse: before a tool executes (can block)
-//! - PostToolUse: after a tool executes (linters, formatters)
-//! - Stop: before the agent declares done (test gates)
-
 use std::time::Duration;
 
 use tokio::process::Command;
 
-/// when in the lifecycle the hook fires
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HookPoint {
-    /// runs once at session start, before the first LLM call
     PreSession,
     PreToolUse,
     PostToolUse,
     Stop,
-    /// runs after context compaction (auto or manual)
     PostCompaction,
 }
 
-/// a user-configured lifecycle hook
 #[derive(Debug, Clone)]
 pub struct LifecycleHook {
-    /// which tools this applies to: "*" for all, "edit|write" for specific tools
     pub tool_match: String,
-    /// shell command to run
     pub command: String,
-    /// timeout (default 30s)
     pub timeout: Duration,
-    /// if true, failure blocks the operation and feeds output back to the model
     pub blocking: bool,
 }
 
 impl LifecycleHook {
-    /// whether this hook matches a given tool name
     pub fn matches_tool(&self, tool_name: &str) -> bool {
         if self.tool_match == "*" {
             return true;
@@ -46,17 +30,14 @@ impl LifecycleHook {
     }
 }
 
-/// result of running a lifecycle hook
 #[derive(Debug, Clone)]
 pub struct HookResult {
     pub success: bool,
     pub output: String,
     pub command: String,
-    /// whether this hook's failure should block the operation
     pub blocking: bool,
 }
 
-/// collection of lifecycle hooks by point
 #[derive(Debug, Clone, Default)]
 pub struct LifecycleHooks {
     hooks: std::collections::HashMap<HookPoint, Vec<LifecycleHook>>,
@@ -67,22 +48,18 @@ impl LifecycleHooks {
         self.hooks.values().all(|v| v.is_empty())
     }
 
-    /// get hooks for a specific point
     pub fn for_point(&self, point: HookPoint) -> &[LifecycleHook] {
         self.hooks.get(&point).map_or(&[], |v| v.as_slice())
     }
 
-    /// replace all hooks for a point
     pub fn set(&mut self, point: HookPoint, hooks: Vec<LifecycleHook>) {
         self.hooks.insert(point, hooks);
     }
 
-    /// add a single hook for a point
     pub fn push(&mut self, point: HookPoint, hook: LifecycleHook) {
         self.hooks.entry(point).or_default().push(hook);
     }
 
-    /// run all hooks at a point (not filtered by tool name)
     pub async fn run_all(
         &self,
         point: HookPoint,
@@ -95,10 +72,6 @@ impl LifecycleHooks {
         results
     }
 
-    /// run all matching hooks for a tool at a given lifecycle point
-    ///
-    /// returns results for hooks that produced output or failed.
-    /// hooks run sequentially (order matters for linters, etc.)
     pub async fn run_for_tool(
         &self,
         point: HookPoint,
@@ -116,7 +89,6 @@ impl LifecycleHooks {
     }
 }
 
-/// execute a single hook command
 async fn run_hook(hook: &LifecycleHook, cwd: Option<&std::path::Path>) -> HookResult {
     let mut cmd = Command::new("sh");
     cmd.arg("-c").arg(&hook.command);
@@ -164,7 +136,6 @@ async fn run_hook(hook: &LifecycleHook, cwd: Option<&std::path::Path>) -> HookRe
     }
 }
 
-/// format hook results into text suitable for injection into the conversation
 pub fn format_hook_results(results: &[HookResult], point: HookPoint) -> Option<String> {
     let failures: Vec<&HookResult> = results.iter().filter(|r| !r.success).collect();
     if failures.is_empty() {
@@ -192,7 +163,6 @@ pub fn format_hook_results(results: &[HookResult], point: HookPoint) -> Option<S
     Some(out)
 }
 
-/// whether any result is a blocking failure
 pub fn has_blocking_failure(results: &[HookResult]) -> bool {
     results.iter().any(|r| !r.success && r.blocking)
 }

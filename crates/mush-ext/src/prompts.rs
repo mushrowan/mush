@@ -1,18 +1,8 @@
-//! prompt template loading and substitution
-//!
-//! templates are markdown files with optional YAML frontmatter.
-//! they support positional arg substitution ($1, $2, $@).
-//! loaded from ~/.config/mush/prompts/ and .mush/prompts/.
-
 use std::path::{Path, PathBuf};
 
-/// a loaded prompt template
 #[derive(Debug, Clone)]
 pub struct PromptTemplate {
     pub name: String,
-    /// optional one-line label shown next to the name in the
-    /// slash-menu / `@`-picker. set via the yaml frontmatter
-    /// `description: ...` field. when `None`, pickers show only the name
     pub description: Option<String>,
     pub content: String,
     pub source: TemplateSource,
@@ -25,15 +15,9 @@ pub enum TemplateSource {
     Project,
 }
 
-/// substitute argument placeholders in template content
-///
-/// supports:
-/// - `$1`, `$2`, ... for positional args
-/// - `$@` or `$ARGUMENTS` for all args joined
 pub fn substitute_args(content: &str, args: &[&str]) -> String {
     let mut result = content.to_string();
 
-    // positional args first (before wildcards to avoid re-substitution)
     for (i, arg) in args.iter().enumerate() {
         let placeholder = format!("${}", i + 1);
         result = result.replace(&placeholder, arg);
@@ -46,9 +30,6 @@ pub fn substitute_args(content: &str, args: &[&str]) -> String {
     result
 }
 
-/// parse a markdown file as a prompt template. yaml frontmatter is
-/// stripped from the body so the model never sees it. an optional
-/// `description: ...` line in the frontmatter populates the picker label
 fn parse_template(path: &Path, source: TemplateSource) -> Option<PromptTemplate> {
     let raw = std::fs::read_to_string(path).ok()?;
     let name = path
@@ -68,10 +49,6 @@ fn parse_template(path: &Path, source: TemplateSource) -> Option<PromptTemplate>
     })
 }
 
-/// split an optional `---`-delimited yaml frontmatter block off the
-/// front of `text`. returns `(description, body)` where `description`
-/// is the frontmatter's `description: ...` value when present, and
-/// `body` is the text minus the frontmatter
 fn parse_frontmatter(text: &str) -> (Option<String>, String) {
     let Some(rest) = text.strip_prefix("---") else {
         return (None, text.to_string());
@@ -92,11 +69,9 @@ fn parse_frontmatter(text: &str) -> (Option<String>, String) {
     (description, body)
 }
 
-/// discover prompt templates from user and project directories
 pub fn discover_templates(cwd: &Path) -> Vec<PromptTemplate> {
     let mut templates = Vec::new();
 
-    // user templates: ~/.config/mush/prompts/
     if let Some(config) = std::env::var_os("XDG_CONFIG_HOME") {
         load_templates_from(
             &PathBuf::from(config).join("mush/prompts"),
@@ -111,7 +86,6 @@ pub fn discover_templates(cwd: &Path) -> Vec<PromptTemplate> {
         );
     }
 
-    // project templates: .mush/prompts/
     let project_dir = cwd.join(".mush/prompts");
     load_templates_from(&project_dir, TemplateSource::Project, &mut templates);
 
@@ -132,7 +106,6 @@ fn load_templates_from(dir: &Path, source: TemplateSource, templates: &mut Vec<P
     }
 }
 
-/// find a template by name from a list
 pub fn find_template<'a>(
     templates: &'a [PromptTemplate],
     name: &str,
@@ -192,8 +165,6 @@ mod tests {
 
     #[test]
     fn parse_frontmatter_without_description_returns_none() {
-        // frontmatter without a description: line still strips the
-        // frontmatter from the body but leaves the picker label unset
         let text = "---\nother: value\n---\n\nactual body";
         let (desc, body) = parse_frontmatter(text);
         assert!(desc.is_none());

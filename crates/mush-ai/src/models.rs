@@ -1,7 +1,3 @@
-//! built-in model catalogue
-//!
-//! static definitions for known models. users can override via models.json.
-
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
 use std::time::SystemTime;
@@ -37,7 +33,6 @@ static BUILTIN_MODELS: LazyLock<Vec<Model>> = LazyLock::new(|| {
 static USER_MODELS_CACHE: LazyLock<Mutex<Option<UserModelsCache>>> =
     LazyLock::new(|| Mutex::new(None));
 
-/// all built-in anthropic models
 #[must_use]
 pub fn anthropic_models() -> Vec<Model> {
     vec![
@@ -191,7 +186,6 @@ pub fn anthropic_models() -> Vec<Model> {
     ]
 }
 
-/// all built-in openrouter models (via openai-completions api)
 #[must_use]
 pub fn openrouter_models() -> Vec<Model> {
     vec![
@@ -282,7 +276,6 @@ pub fn openrouter_models() -> Vec<Model> {
     ]
 }
 
-/// all built-in openai api-key models (responses API)
 #[must_use]
 pub fn openai_models() -> Vec<Model> {
     vec![Model {
@@ -308,7 +301,6 @@ pub fn openai_models() -> Vec<Model> {
     }]
 }
 
-/// all built-in openai codex subscription models (chatgpt oauth)
 #[must_use]
 pub fn openai_codex_models() -> Vec<Model> {
     vec![
@@ -326,11 +318,6 @@ pub fn openai_codex_models() -> Vec<Model> {
                 cache_read: 0.0,
                 cache_write: 0.0,
             },
-            // codex markets a 400K window but reserves 128K for output, so
-            // the usable input budget is 272K. mush's context gauge measures
-            // input, so show the 272K you can actually fill (codex's /models
-            // reports this same 272K). the 400K total would understate how
-            // full the conversation really is
             context_window: TokenCount::new(272_000),
             effective_context_window: None,
             max_output_tokens: TokenCount::new(128_000),
@@ -404,10 +391,6 @@ pub fn openai_codex_models() -> Vec<Model> {
     ]
 }
 
-/// compact spec for building an OpenAI-compatible model entry.
-/// each field mirrors `Model` but skips the repeated constants
-/// (api = completions, provider wrapped, costs as ModelCost) to keep
-/// the provider bundle tables readable
 struct OaiModel {
     id: &'static str,
     name: &'static str,
@@ -452,9 +435,6 @@ impl OaiModel {
     }
 }
 
-/// all built-in groq models (openai-compatible, fast LPU inference).
-/// base url: https://api.groq.com/openai/v1
-/// env: GROQ_API_KEY
 #[must_use]
 pub fn groq_models() -> Vec<Model> {
     const BASE: &str = "https://api.groq.com/openai/v1";
@@ -556,9 +536,6 @@ pub fn groq_models() -> Vec<Model> {
     .collect()
 }
 
-/// all built-in deepseek models (openai-compatible).
-/// base url: https://api.deepseek.com
-/// env: DEEPSEEK_API_KEY
 #[must_use]
 pub fn deepseek_models() -> Vec<Model> {
     const BASE: &str = "https://api.deepseek.com";
@@ -595,9 +572,6 @@ pub fn deepseek_models() -> Vec<Model> {
     .collect()
 }
 
-/// all built-in xAI models (Grok, openai-compatible).
-/// base url: https://api.x.ai/v1
-/// env: XAI_API_KEY
 #[must_use]
 pub fn xai_models() -> Vec<Model> {
     const BASE: &str = "https://api.x.ai/v1";
@@ -647,9 +621,6 @@ pub fn xai_models() -> Vec<Model> {
     .collect()
 }
 
-/// all built-in cerebras models (openai-compatible, wafer-scale inference).
-/// base url: https://api.cerebras.ai/v1
-/// env: CEREBRAS_API_KEY
 #[must_use]
 pub fn cerebras_models() -> Vec<Model> {
     const BASE: &str = "https://api.cerebras.ai/v1";
@@ -712,9 +683,6 @@ pub fn cerebras_models() -> Vec<Model> {
     .collect()
 }
 
-/// all built-in mistral models (openai-compatible via la plateforme).
-/// base url: https://api.mistral.ai/v1
-/// env: MISTRAL_API_KEY
 #[must_use]
 pub fn mistral_models() -> Vec<Model> {
     const BASE: &str = "https://api.mistral.ai/v1";
@@ -777,9 +745,6 @@ pub fn mistral_models() -> Vec<Model> {
     .collect()
 }
 
-/// all built-in together ai models (openai-compatible, many open models).
-/// base url: https://api.together.xyz/v1
-/// env: TOGETHER_API_KEY
 #[must_use]
 pub fn together_models() -> Vec<Model> {
     const BASE: &str = "https://api.together.xyz/v1";
@@ -842,9 +807,6 @@ pub fn together_models() -> Vec<Model> {
     .collect()
 }
 
-/// all built-in deepinfra models (openai-compatible, cheap open models).
-/// base url: https://api.deepinfra.com/v1/openai
-/// env: DEEPINFRA_API_KEY
 #[must_use]
 pub fn deepinfra_models() -> Vec<Model> {
     const BASE: &str = "https://api.deepinfra.com/v1/openai";
@@ -907,19 +869,16 @@ pub fn deepinfra_models() -> Vec<Model> {
     .collect()
 }
 
-/// all built-in models across all providers
 #[must_use]
 pub fn all_models() -> Vec<Model> {
     BUILTIN_MODELS.clone()
 }
 
-/// all models including user overrides from models.json
 #[must_use]
 pub fn all_models_with_user() -> Vec<Model> {
     let mut models = all_models();
     let user = load_user_models();
 
-    // user models override builtins with matching id
     for um in user {
         if let Some(pos) = models.iter().position(|m| m.id == um.id) {
             models[pos] = um;
@@ -931,22 +890,11 @@ pub fn all_models_with_user() -> Vec<Model> {
     models
 }
 
-/// the override tier consumed by [`crate::discovery::merge`]: the user's
-/// manual `models.json` entries, which win over live discovery (see that
-/// module's precedence docs).
-///
-/// only user overrides live here. the shipped catalogue values stay in
-/// the seed tier so discovery can still upgrade them (e.g. anthropic's 1M
-/// beta). a curated entry that needs to beat discovery for a genuinely
-/// under-reported route can be added here later, but we don't ship blanket
-/// window corrections: codex `/models` reports the real usable input
-/// budget (e.g. 272K for gpt-5.5), so overriding it would overstate it.
 #[must_use]
 pub fn model_overrides() -> Vec<Model> {
     load_user_models()
 }
 
-/// find a model by provider and id (includes user models)
 #[must_use]
 pub fn find_model(provider: &Provider, id: &str) -> Option<Model> {
     all_models_with_user()
@@ -954,7 +902,6 @@ pub fn find_model(provider: &Provider, id: &str) -> Option<Model> {
         .find(|m| &m.provider == provider && m.id.as_str() == id)
 }
 
-/// find a model by id alone (first match, includes user models)
 #[must_use]
 pub fn find_model_by_id(id: &str) -> Option<Model> {
     all_models_with_user()
@@ -962,7 +909,6 @@ pub fn find_model_by_id(id: &str) -> Option<Model> {
         .find(|m| m.id.as_str() == id)
 }
 
-/// load user-defined models from ~/.config/mush/models.json
 fn load_user_models() -> Vec<Model> {
     let path = user_models_path();
     let metadata = std::fs::metadata(&path).ok();
@@ -1016,7 +962,6 @@ fn clear_user_models_cache() {
     }
 }
 
-/// list all models for a provider
 #[must_use]
 pub fn models_for_provider(provider: &Provider) -> Vec<Model> {
     all_models()
@@ -1025,7 +970,6 @@ pub fn models_for_provider(provider: &Provider) -> Vec<Model> {
         .collect()
 }
 
-/// calculate cost from usage and model pricing
 pub fn calculate_cost(model: &Model, usage: &Usage) -> Cost {
     let per_token = |rate: f64, tokens: TokenCount| -> Dollars {
         Dollars::new((rate / 1_000_000.0) * tokens.get() as f64)
@@ -1081,10 +1025,6 @@ mod tests {
 
     #[test]
     fn anthropic_4_6_and_4_7_models_advertise_adaptive_thinking() {
-        // claude opus 4.6, opus 4.7, and sonnet 4.6 use anthropic's
-        // adaptive thinking. older claude models use enabled+budget mode.
-        // capability lives on Model rather than a hardcoded id sniff so
-        // new releases can opt in by tweaking the catalogue
         let models = anthropic_models();
         let by_id: std::collections::HashMap<_, _> =
             models.iter().map(|m| (m.id.as_str(), m)).collect();
@@ -1097,7 +1037,6 @@ mod tests {
                 "{id} should advertise adaptive thinking"
             );
         }
-        // older models stay on budget mode
         for id in ["claude-opus-4-5", "claude-haiku-4-5"] {
             let model = by_id
                 .get(id)
@@ -1143,10 +1082,6 @@ mod tests {
 
     #[test]
     fn gpt_5_5_codex_ships_at_input_budget() {
-        // codex markets gpt-5.5 as 400K but reserves 128K for output, so
-        // the usable input budget (what mush's gauge measures) is 272K.
-        // ship that, not the marketing total, and don't set an effective
-        // window since display and compaction budget are the same here.
         let gpt55 = openai_codex_models()
             .into_iter()
             .find(|m| m.id.as_str() == "gpt-5.5")
@@ -1324,7 +1259,6 @@ mod tests {
 
     #[test]
     fn user_models_override_builtins() {
-        // simulate by calling the override logic directly
         let mut models = vec![Model {
             id: "test-model".into(),
             name: "Test".into(),
@@ -1510,14 +1444,12 @@ mod tests {
     #[test]
     fn user_models_path_uses_env() {
         let dir = tempfile::tempdir().unwrap();
-        // just test the path logic, not the actual env var
         let path = dir.path().join("mush/models.json");
         assert!(path.to_str().unwrap().ends_with("mush/models.json"));
     }
 
     #[test]
     fn calculate_cost_works() {
-        // opus 4.7: $5/MTok input, $25/MTok output
         let model = anthropic_models().into_iter().next().unwrap();
         let usage = Usage {
             input_tokens: TokenCount::new(1_000_000),

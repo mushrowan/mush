@@ -1,21 +1,14 @@
-//! startup profiling with phase timing
-//!
-//! when enabled via `--profile-startup` or `MUSH_PROFILE_STARTUP=1`,
-//! prints a breakdown of where startup time is spent
-
 use std::fmt;
 use std::time::{Duration, Instant};
 
 const BAR_WIDTH: usize = 30;
 
-/// collects named timing phases during startup
 pub struct PhaseTimer {
     start: Instant,
     last: Instant,
     phases: Vec<(String, Duration)>,
 }
 
-/// formatted report of startup phase timings
 pub struct StartupReport {
     phases: Vec<(String, Duration)>,
     total: Duration,
@@ -37,14 +30,12 @@ impl PhaseTimer {
         }
     }
 
-    /// end the current phase and record its duration
     pub fn phase(&mut self, name: impl Into<String>) {
         let now = Instant::now();
         self.phases.push((name.into(), now - self.last));
         self.last = now;
     }
 
-    /// finish timing and produce a report
     pub fn finish(self) -> StartupReport {
         let total = self.start.elapsed();
         StartupReport {

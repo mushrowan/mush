@@ -14,9 +14,6 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::widgets::Widget;
 
-/// renders the live block while the conversation length grows. the block
-/// holds the turn in flight and nothing else, so a cost that grows with
-/// message count means settled history is being touched again.
 fn bench_live_block_scaling(c: &mut Criterion) {
     let mut group = c.benchmark_group("live_block_scaling");
     let area = Rect::new(0, 0, 100, 40);
@@ -25,10 +22,6 @@ fn bench_live_block_scaling(c: &mut Criterion) {
         let app = conversation_app(count);
         let mut buf = Buffer::empty(area);
         group.throughput(Throughput::Elements(count as u64));
-        // warm syntect's lazy syntax-set load and the markdown/indent caches
-        // before timing. criterion's --profile-time skips warmup, so without
-        // this the profiled loop is dominated by the one-time syntax-set
-        // deserialize instead of the steady-state cached render we want.
         Ui::new(&app).render(area, &mut buf);
         group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, _| {
             b.iter(|| {

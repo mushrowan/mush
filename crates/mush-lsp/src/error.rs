@@ -1,6 +1,3 @@
-//! LSP error types
-
-/// errors from LSP operations
 #[derive(Debug, thiserror::Error)]
 pub enum LspError {
     #[error("transport error: {0}")]

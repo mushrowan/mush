@@ -1,36 +1,20 @@
-//! one-shot LLM calls
-//!
-//! some work is a single tool-free question with a text answer:
-//! compaction summaries, session titles. those callers want the text or a
-//! reason it never arrived, not a stream of events, and they all need the
-//! same failure classification so a rate limit is not mistaken for an
-//! empty answer.
-
 use futures::StreamExt;
 
 use crate::registry::{ApiRegistry, EventStream, LlmContext};
 use crate::stream::StreamEvent;
 use crate::types::{Model, StopReason, StreamOptions};
 
-/// why a one-shot call produced no text
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum OneshotError {
-    /// the request never reached a stream (network, auth, http status)
     #[error("request failed: {0}")]
     Request(String),
-    /// the provider accepted the request then surfaced a failure mid-stream
     #[error("stream error: {0}")]
     Stream(String),
-    /// the stream completed but carried no text at all
     #[error("stream completed without text")]
     EmptyResponse,
 }
 
 impl OneshotError {
-    /// whether retrying the same call could plausibly succeed. mirrors the
-    /// provider-level classification, so overloaded and rate-limited
-    /// mid-stream failures are worth another attempt while a refusal or an
-    /// empty answer is not
     #[must_use]
     pub fn is_retryable(&self) -> bool {
         match self {
@@ -40,11 +24,6 @@ impl OneshotError {
     }
 }
 
-/// drain a stream and return the assistant text it produced.
-///
-/// a mid-stream failure is reported rather than truncating silently, which
-/// is the difference between "the model answered nothing" and "the request
-/// was rate limited"
 pub async fn collect_stream_text(mut stream: EventStream) -> Result<String, OneshotError> {
     let mut text = String::new();
     while let Some(event) = stream.next().await {
@@ -78,7 +57,6 @@ pub async fn collect_stream_text(mut stream: EventStream) -> Result<String, Ones
     }
 }
 
-/// make a single tool-free call and return its text
 pub async fn collect_text(
     registry: &ApiRegistry,
     model: &Model,
@@ -135,8 +113,6 @@ mod tests {
 
     #[tokio::test]
     async fn reports_a_mid_stream_failure_instead_of_truncating() {
-        // the whole point: a rate limit that lands after a partial answer
-        // must not read as "the model said this much and stopped"
         let events = vec![
             delta("partial"),
             StreamEvent::Error {

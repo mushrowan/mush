@@ -1,5 +1,3 @@
-//! verify slash module split exposes parsing and execution from sub-modules
-
 use mush_tui::slash::{SlashAction, SlashParseError, parse};
 
 #[test]

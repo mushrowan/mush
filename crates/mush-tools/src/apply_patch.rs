@@ -1,23 +1,3 @@
-//! apply_patch tool - codex-style patch format for GPT models
-//!
-//! parses and applies the patch format that GPT models are trained on.
-//! replaces edit + write when using gpt-* models (not gpt-4, not oss variants).
-//!
-//! format:
-//! ```text
-//! *** Begin Patch
-//! *** Add File: path/to/new.rs
-//! +line one
-//! +line two
-//! *** Update File: path/to/existing.rs
-//! @@ fn some_context()
-//!  unchanged line
-//! -old line
-//! +new line
-//! *** Delete File: path/to/remove.rs
-//! *** End Patch
-//! ```
-
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
@@ -27,7 +7,6 @@ use serde::Deserialize;
 
 use crate::util::resolve_path;
 
-// types
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ApplyPatchArgs {
@@ -58,7 +37,6 @@ pub struct UpdateChunk {
     pub is_eof: bool,
 }
 
-// parser
 #[derive(Debug)]
 pub enum PatchError {
     MissingMarkers,
@@ -103,16 +81,13 @@ impl From<std::io::Error> for PatchError {
     }
 }
 
-/// strip heredoc wrapper if present
 fn strip_heredoc(input: &str) -> &str {
     let trimmed = input.trim();
-    // simple check: if it starts with cat <<'EOF' or <<EOF pattern, strip
     if let Some(rest) = trimmed.strip_prefix("cat ")
         && let Some(body_start) = rest.find('\n')
     {
         let header = &rest[..body_start];
         if header.contains("<<") {
-            // extract delimiter
             let delim = header
                 .split("<<")
                 .nth(1)
@@ -251,8 +226,6 @@ pub fn parse_patch(patch_text: &str) -> Result<Vec<Hunk>, PatchError> {
     Ok(hunks)
 }
 
-// application
-/// multi-pass line matching: exact, rstrip, trim, normalised unicode
 fn seek_sequence(lines: &[&str], pattern: &[String], start: usize, eof: bool) -> Option<usize> {
     if pattern.is_empty() || lines.len() < pattern.len() {
         return None;
@@ -266,7 +239,6 @@ fn seek_sequence(lines: &[&str], pattern: &[String], start: usize, eof: bool) ->
     ];
 
     for cmp in &comparators {
-        // if eof anchor, try from end first
         if eof && lines.len() >= pattern.len() {
             let from_end = lines.len() - pattern.len();
             if from_end >= start
@@ -293,7 +265,6 @@ fn seek_sequence(lines: &[&str], pattern: &[String], start: usize, eof: bool) ->
     None
 }
 
-/// normalise unicode punctuation to ascii equivalents
 fn normalise_unicode(s: &str) -> String {
     s.chars()
         .map(|c| match c {
@@ -307,7 +278,6 @@ fn normalise_unicode(s: &str) -> String {
         .replace('\u{2026}', "...")
 }
 
-/// compute replacements for a file's update chunks
 fn compute_replacements(
     original_lines: &[&str],
     file_path: &str,
@@ -330,7 +300,6 @@ fn compute_replacements(
             }
         }
 
-        // pure addition (no old lines to match)
         if chunk.old_lines.is_empty() {
             let insertion_idx = if !original_lines.is_empty()
                 && original_lines.last().is_some_and(|l| l.is_empty())
@@ -348,7 +317,6 @@ fn compute_replacements(
 
         let mut found = seek_sequence(original_lines, &pattern, line_idx, chunk.is_eof);
 
-        // retry without trailing empty line
         if found.is_none() && pattern.last().is_some_and(|l| l.is_empty()) {
             pattern.pop();
             if new_slice.last().is_some_and(|l| l.is_empty()) {
@@ -375,7 +343,6 @@ fn compute_replacements(
     Ok(replacements)
 }
 
-/// apply sorted replacements in reverse order
 fn apply_replacements(lines: &[&str], replacements: &[(usize, usize, Vec<String>)]) -> Vec<String> {
     let mut result: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
 
@@ -386,7 +353,6 @@ fn apply_replacements(lines: &[&str], replacements: &[(usize, usize, Vec<String>
     result
 }
 
-/// derive new file contents by applying update chunks
 fn derive_new_contents(file_path: &Path, chunks: &[UpdateChunk]) -> Result<String, PatchError> {
     let original = fs::read_to_string(file_path).map_err(|e| PatchError::ReadFile {
         path: file_path.display().to_string(),
@@ -394,7 +360,6 @@ fn derive_new_contents(file_path: &Path, chunks: &[UpdateChunk]) -> Result<Strin
     })?;
 
     let mut original_lines: Vec<&str> = original.split('\n').collect();
-    // drop trailing empty element for consistent line counting
     if original_lines.last().is_some_and(|l| l.is_empty()) {
         original_lines.pop();
     }
@@ -403,7 +368,6 @@ fn derive_new_contents(file_path: &Path, chunks: &[UpdateChunk]) -> Result<Strin
         compute_replacements(&original_lines, &file_path.display().to_string(), chunks)?;
     let mut new_lines = apply_replacements(&original_lines, &replacements);
 
-    // ensure trailing newline
     if new_lines.is_empty() || !new_lines.last().is_some_and(|l| l.is_empty()) {
         new_lines.push(String::new());
     }
@@ -411,7 +375,6 @@ fn derive_new_contents(file_path: &Path, chunks: &[UpdateChunk]) -> Result<Strin
     Ok(new_lines.join("\n"))
 }
 
-/// apply parsed hunks to the filesystem
 pub fn apply_hunks(cwd: &Path, hunks: &[Hunk]) -> Result<Vec<String>, PatchError> {
     let mut summary = Vec::new();
 
@@ -462,7 +425,6 @@ pub fn apply_hunks(cwd: &Path, hunks: &[Hunk]) -> Result<Vec<String>, PatchError
     Ok(summary)
 }
 
-// tool
 const DESCRIPTION: &str = "\
 Use the apply_patch tool to make file changes. The patch format supports creating, updating, \
 deleting, and moving files.\n\n\
@@ -525,8 +487,6 @@ impl AgentTool for ApplyPatchTool {
     }
 
     fn output_limit(&self) -> mush_agent::tool::OutputLimit {
-        // success summary + first lines of patched files; head keeps
-        // the per-file outcome list intact
         mush_agent::tool::OutputLimit::Head
     }
 
@@ -844,14 +804,12 @@ mod tests {
     #[test]
     fn apply_whitespace_tolerant_matching() {
         let dir = TempDir::new().unwrap();
-        // file has trailing spaces
         fs::write(dir.path().join("test.txt"), "line one  \nline two\n").unwrap();
 
         let hunks = vec![Hunk::Update {
             path: "test.txt".into(),
             move_path: None,
             chunks: vec![UpdateChunk {
-                // patch doesn't have trailing spaces
                 old_lines: vec!["line one".into()],
                 new_lines: vec!["LINE ONE".into()],
                 context: None,
@@ -892,7 +850,6 @@ mod tests {
     #[test]
     fn apply_eof_anchor_prefers_end_over_earlier_match() {
         let dir = TempDir::new().unwrap();
-        // "dupe" appears twice, eof anchor should match the last one
         fs::write(dir.path().join("test.txt"), "dupe\nother\ndupe\n").unwrap();
 
         let hunks = vec![Hunk::Update {
@@ -908,7 +865,6 @@ mod tests {
 
         apply_hunks(dir.path(), &hunks).unwrap();
         let content = fs::read_to_string(dir.path().join("test.txt")).unwrap();
-        // should replace the last occurrence
         assert_eq!(content, "dupe\nother\nreplaced\n");
     }
 
@@ -952,7 +908,6 @@ mod tests {
     #[test]
     fn apply_context_disambiguates_duplicate_lines() {
         let dir = TempDir::new().unwrap();
-        // same body line in two different functions
         fs::write(
             dir.path().join("test.rs"),
             "fn alpha() {\n    process();\n}\n\nfn beta() {\n    process();\n}\n",
@@ -972,7 +927,6 @@ mod tests {
 
         apply_hunks(dir.path(), &hunks).unwrap();
         let content = fs::read_to_string(dir.path().join("test.rs")).unwrap();
-        // alpha's process() should be untouched
         assert!(content.contains("fn alpha() {\n    process();\n}"));
         assert!(content.contains("fn beta() {\n    handle();\n}"));
     }
@@ -1081,9 +1035,6 @@ mod tests {
             chunks: vec![],
         }];
 
-        // no chunks = no content changes, just a rename
-        // this should fail because derive_new_contents has no changes
-        // but the original content is still read and written to the new path
         let result = apply_hunks(dir.path(), &hunks);
         assert!(result.is_ok());
         assert!(!dir.path().join("old.txt").exists());
@@ -1116,7 +1067,6 @@ mod tests {
     #[test]
     fn apply_unicode_normalisation_matching() {
         let dir = TempDir::new().unwrap();
-        // file uses unicode smart quotes
         fs::write(
             dir.path().join("test.txt"),
             "let msg = \u{201C}hello\u{201D};\n",
@@ -1127,7 +1077,6 @@ mod tests {
             path: "test.txt".into(),
             move_path: None,
             chunks: vec![UpdateChunk {
-                // patch uses ascii quotes (normalisation should match)
                 old_lines: vec!["let msg = \"hello\";".into()],
                 new_lines: vec!["let msg = \"world\";".into()],
                 context: None,
@@ -1201,7 +1150,6 @@ mod tests {
 
         let hunks = parse_patch(patch).unwrap();
         assert_eq!(hunks.len(), 3);
-        // only apply the first two (delete will fail on missing file)
         let mut results = Vec::new();
         for hunk in &hunks[..2] {
             match apply_hunks(dir.path(), std::slice::from_ref(hunk)) {

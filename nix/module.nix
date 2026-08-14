@@ -1,39 +1,6 @@
-# home-manager module for mush
-#
-# options under `programs.mush.settings.*` are generated from the rust
-# `Config` struct via nixcfg + a JSON Schema checked in at
-# `nix/config-schema.json`. a flake check re-runs the emitter and
-# diffs to stop drift.
-#
-# anything that isn't part of the runtime config (package choice,
-# AGENTS.md content, skill installer) stays hand-written at the
-# top level.
-#
-# usage:
-#   programs.mush = {
-#     enable = true;
-#     settings = {
-#       model = "claude-sonnet-4-20250514";
-#       thinking = "high";
-#       theme.assistant = "#7aa2f7";
-#       mcp.git = {
-#         type = "local";
-#         command = ["uvx" "mcp-server-git"];
-#       };
-#     };
-#     agentsMd = ''
 #       # global instructions
 #       - british spelling
 #     '';
-#     skills.rust-idioms = {
-#       description = "Rust idioms and best practices";
-#       content = "prefer Result over unwrap";
-#     };
-#     prompts.summarise = {
-#       description = "summarise the given jj change";
-#       content = "summarise change $1 in one paragraph.";
-#     };
-#   };
 self: {
   config,
   lib,
@@ -45,9 +12,6 @@ self: {
   nixcfg = self.inputs.nixcfg.lib;
   tomlFormat = pkgs.formats.toml {};
 
-  # -- skills installer -------------------------------------------------
-
-  # structured skill with separate description and content
   skillModule = lib.types.submodule {
     options = {
       description = lib.mkOption {
@@ -80,11 +44,8 @@ self: {
     };
   };
 
-  # accept either a raw SKILL.md string (with frontmatter) or a
-  # structured { description, content } attrset
   skillType = lib.types.either lib.types.str skillModule;
 
-  # normalise either form into the final SKILL.md text
   skillToText = name: skill:
     if lib.isString skill
     then skill
@@ -97,7 +58,6 @@ self: {
       ${skill.content}
     '';
 
-  # build xdg.configFile entries for a skill (SKILL.md + extra files)
   skillToFiles = name: skill:
     {
       "mush/skills/${name}/SKILL.md".text = skillToText name skill;
@@ -116,13 +76,6 @@ self: {
         ) (skill.files or {})
     );
 
-  # -- prompt template installer ----------------------------------------
-
-  # a prompt template is either a raw markdown string (with optional
-  # yaml frontmatter `description: ...`) or a structured
-  # { description?, content } attrset from which we synthesise the
-  # frontmatter. unlike skills, prompts are single flat files under
-  # `~/.config/mush/prompts/<name>.md` so no `files` attribute
   promptModule = lib.types.submodule {
     options = {
       description = lib.mkOption {
@@ -168,15 +121,10 @@ self: {
     "mush/prompts/${name}.md".text = promptToText name prompt;
   };
 
-  # -- schema → nix module ----------------------------------------------
-
   schemaModule = nixcfg.mkModule {
     inherit schema;
     prefix = ["programs"];
     settingsAttr = "settings";
-    # nix-only options that sit alongside `enable` (not part of the
-    # rust-side Config). package selection, AGENTS.md content, and the
-    # skills installer all belong here rather than in `settings`
     topLevelExtraOverrides = {
       package = {
         type = lib.types.package;
@@ -211,7 +159,6 @@ self: {
             rust-idioms = {
               description = "Rust idioms and best practices";
               content = '''
-                ## When to use me
                 Use when writing or reviewing Rust code.
               ''';
             };
@@ -249,9 +196,6 @@ self: {
     };
   };
 
-  # -- config.toml generation -------------------------------------------
-
-  # remove nulls + empty attrsets so the emitted toml stays tidy
   clean = attrs: let
     filtered = lib.filterAttrs (_: v: v != null) attrs;
     mapped = lib.mapAttrs (_: v:
@@ -262,20 +206,9 @@ self: {
   in
     lib.filterAttrs (_: v: !(lib.isAttrs v && v == {})) mapped;
 
-  # nixcfg renders schema properties as camelCase nix options (its default
-  # naming convention), so cfg.settings carries `cacheTimer`, `statusBar`,
-  # `postCompaction`, etc. the on-disk config.toml that mush's rust loader
-  # deserialises expects snake_case. `toConfigAttrs` walks the schema,
-  # renames recursively (including nested objects like status_bar and
-  # hooks), and applies the secret `_path` suffix convention. without
-  # this, every nix-managed setting was silently dropped on load
   parsedSchema = builtins.fromJSON (builtins.readFile schema);
   convertedSettings = nixcfg.toConfigAttrs {} parsedSchema cfg.settings;
 
-  # user-visible settings attrset (matches the on-disk `config.toml`
-  # layout one-to-one). override `api_keys` with mush's bespoke layout:
-  # nixcfg would write `api_keys.anthropic_path`, but the rust side reads
-  # `api_keys.anthropic` and lets the value stand in for a key/path
   tomlSettings = clean (
     (removeAttrs convertedSettings ["api_keys"])
     // lib.optionalAttrs (cfg.settings.apiKeys or {} != {}) {
@@ -287,9 +220,6 @@ self: {
     }
   );
 
-  # the schemaModule provides options + the `enable` toggle; this
-  # second module wires up the actual file outputs (config.toml,
-  # AGENTS.md, skills directory)
   configModule = _: {
     config = lib.mkIf cfg.enable {
       home.packages = [cfg.package];

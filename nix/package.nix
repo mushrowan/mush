@@ -31,12 +31,7 @@
     // (
       if enableProfiling
       then {
-        # use the profiling cargo profile (release + debug symbols)
         CARGO_PROFILE = "profiling";
-        # frame pointers let the profiler (samply/perf) unwind stacks
-        # through our own code. precompiled std and libc still lack them,
-        # so call graphs degrade once a stack crosses into them, but paths
-        # that stay within mush + its source-built deps unwind correctly.
         RUSTFLAGS = "-C force-frame-pointers=yes";
       }
       else {}
@@ -44,12 +39,6 @@
 
   cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
-  # emit the config schema from rust and diff it against the checked-in
-  # nix/config-schema.json. catches drift when any field in `Config` or
-  # its nested types changes without regenerating the schema.
-  #
-  # regenerate with:
-  #   cargo run -p mush-cli --bin mush-config-schema > nix/config-schema.json
   schemaEmitter = craneLib.buildPackage (commonArgs
     // {
       inherit cargoArtifacts;
@@ -102,11 +91,6 @@ in {
     touch $out
   '';
 
-  # unused-dependency check. cargo-shear reads the source rather than
-  # guessing from names, so it catches dev-dependencies nothing imports.
-  # runs through crane so `cargo metadata` resolves against the vendored
-  # registry instead of reaching for the network.
-  # fix with `cargo shear --fix`
   shear = craneLib.mkCargoDerivation (commonArgs
     // {
       cargoArtifacts = null;

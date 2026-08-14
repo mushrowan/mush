@@ -1,23 +1,3 @@
-//! openrouter oauth provider (PKCE web sign-in)
-//!
-//! openrouter's auth flow differs from anthropic/codex in two important
-//! ways:
-//!
-//! 1. the upstream redirect target uses a `callback_url` query param
-//!    (rather than a registered redirect_uri), and the PKCE proofs are
-//!    sent on the `/auth` URL itself (`code_challenge`,
-//!    `code_challenge_method`).
-//! 2. the exchange returns a permanent, user-controlled API key rather
-//!    than a refresh-token-style access token. there's no expiry and
-//!    no refresh: once issued the key is valid until the user revokes
-//!    it from openrouter's dashboard.
-//!
-//! we lean on the `openrouter-rs` SDK for the actual `auth/keys`
-//! exchange so we don't hand-roll the request shape, but everything
-//! around it (URL building, the localhost callback server, credential
-//! storage in mush's `oauth.json`) reuses the same primitives the
-//! anthropic and codex providers already share.
-
 use super::{
     AuthPrompt, BrowserLogin, OAuthCredentials, OAuthError, OAuthProvider, PkceChallenge,
     generate_pkce,
@@ -42,11 +22,6 @@ impl OAuthProvider for OpenRouterOAuth {
     }
 
     fn begin_login(&self) -> Result<(AuthPrompt, PkceChallenge), OAuthError> {
-        // mirror codex's trait surface: return a localhost callback
-        // URL that the better-UX path ([`OpenRouterLoginSession`])
-        // will also bind. paste-the-code flows can still extract the
-        // code from the browser URL bar after the redirect fails to
-        // connect, but the local-server path is preferred everywhere
         let pkce = generate_pkce()?;
         let url = build_auth_url(DEFAULT_REDIRECT_URI, &pkce);
         Ok((
@@ -81,9 +56,6 @@ impl OAuthProvider for OpenRouterOAuth {
         let input = code.to_string();
         let verifier = pkce.verifier.clone();
         Box::pin(async move {
-            // accept either a raw code or the full redirect URL the
-            // browser landed on. mirrors codex's "paste anything that
-            // includes ?code=..." UX
             let code = extract_code(&input).ok_or_else(|| {
                 OAuthError::TokenExchange("missing authorization code in pasted input".into())
             })?;
@@ -101,10 +73,6 @@ impl OAuthProvider for OpenRouterOAuth {
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<OAuthCredentials, OAuthError>> + Send + '_>,
     > {
-        // openrouter issues permanent api keys, there's no refresh
-        // flow. returning an error here ensures any code path that
-        // calls refresh on a (somehow) expired credential surfaces a
-        // clear failure rather than silently looping
         Box::pin(async move {
             Err(OAuthError::TokenRefresh(
                 "openrouter api keys do not expire and cannot be refreshed; \
@@ -115,9 +83,6 @@ impl OAuthProvider for OpenRouterOAuth {
     }
 }
 
-/// canonical openrouter authorize URL with PKCE proofs and the
-/// localhost callback the user will redirect back to. broken out so
-/// tests can pin the param shape without driving the whole flow
 fn build_auth_url(callback_url: &str, pkce: &PkceChallenge) -> String {
     let params = [
         ("callback_url", callback_url),
@@ -132,10 +97,6 @@ fn build_auth_url(callback_url: &str, pkce: &PkceChallenge) -> String {
     format!("{AUTHORIZE_URL}?{query}")
 }
 
-/// in-progress openrouter login: holds the local callback server and
-/// the auth url to show the user. call [`Self::await_credentials`] to
-/// wait for the browser callback and complete the token exchange.
-/// modelled after [`crate::oauth::openai_codex::CodexLoginSession`].
 pub struct OpenRouterLoginSession {
     pub auth_url: String,
     pkce: PkceChallenge,
@@ -143,7 +104,6 @@ pub struct OpenRouterLoginSession {
 }
 
 impl OpenRouterLoginSession {
-    /// bind the local callback server and prepare the auth url
     pub async fn start() -> Result<Self, OAuthError> {
         let pkce = generate_pkce()?;
         let server =
@@ -160,11 +120,6 @@ impl OpenRouterLoginSession {
         self.server.port()
     }
 
-    /// wait for the browser callback, exchange the code for a
-    /// permanent openrouter api key, and wrap it in our
-    /// [`OAuthCredentials`] envelope. the issued key never expires, so
-    /// `expires_at` is set to the far future to short-circuit any
-    /// future refresh attempts
     pub async fn await_credentials(self) -> Result<OAuthCredentials, OAuthError> {
         let pkce = self.pkce;
         let (params, writer) = self.server.await_callback().await?;
@@ -191,9 +146,6 @@ impl OpenRouterLoginSession {
     }
 }
 
-/// pull the `code` out of either a raw value or a full redirect URL.
-/// supports the same flexible paste behaviour codex's flow does, so
-/// users can hand us either copy form
 fn extract_code(input: &str) -> Option<String> {
     let value = input.trim();
     if value.is_empty() {
@@ -221,10 +173,6 @@ fn extract_code(input: &str) -> Option<String> {
     Some(value.to_string())
 }
 
-/// drive openrouter-rs's `auth/keys` exchange and translate the
-/// result into mush's credential envelope. kept as a standalone
-/// function so unit tests can swap the SDK call in the future without
-/// touching the session plumbing
 async fn exchange_code_for_key(
     code: &str,
     pkce: &PkceChallenge,
@@ -243,9 +191,6 @@ async fn exchange_code_for_key(
     Ok(OAuthCredentials {
         access_token: response.key,
         refresh_token: String::new(),
-        // openrouter keys are permanent; pin expiry to the far future
-        // so `is_expired` returns false and the refresh path stays
-        // unreachable for this provider
         expires_at: u64::MAX,
         account_id: response.user_id,
     })
@@ -264,10 +209,6 @@ mod tests {
 
     #[test]
     fn build_auth_url_carries_pkce_and_callback() {
-        // openrouter's PKCE flow expects the challenge + method on the
-        // `/auth` URL itself (not as a separate `state` param). the
-        // callback_url must round-trip url-encoded so colons and
-        // slashes survive
         let pkce = generate_pkce().expect("pkce generation should succeed");
         let url = build_auth_url("http://localhost:1456/auth/callback", &pkce);
         assert!(url.starts_with("https://openrouter.ai/auth?"));
@@ -278,10 +219,6 @@ mod tests {
 
     #[tokio::test]
     async fn login_session_starts_and_exposes_redirect_url() {
-        // session::start binds a localhost listener and folds its
-        // ephemeral port into the canonical /auth URL. callers only
-        // need to surface `auth_url` to the user; the rest of the
-        // flow drives itself off the bound socket
         let session = OpenRouterLoginSession::start()
             .await
             .expect("session start");

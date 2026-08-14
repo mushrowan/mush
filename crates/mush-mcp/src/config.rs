@@ -1,48 +1,35 @@
-//! MCP server configuration types
-
 use http::{HeaderName, HeaderValue};
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// configuration for an MCP server
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct McpServerConfig {
     #[serde(flatten)]
     pub server_type: McpServerType,
-    /// whether the server is enabled (default: true)
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// timeout in seconds for requests, 0 to wait indefinitely (default: 30)
     #[serde(default = "default_timeout")]
     pub timeout: u64,
-    /// environment variables to set (local servers only)
     #[serde(default)]
     pub environment: HashMap<String, String>,
 }
 
 impl McpServerConfig {
-    /// deadline for a single request, `None` when the user opted out with 0
     #[must_use]
     pub fn request_timeout(&self) -> Option<std::time::Duration> {
         (self.timeout > 0).then(|| std::time::Duration::from_secs(self.timeout))
     }
 }
 
-/// how to connect to the MCP server
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum McpServerType {
-    /// local server spawned as a subprocess (stdio transport)
     Local {
-        /// command and arguments to run the server
         command: Vec<String>,
     },
-    /// remote server accessed over HTTP
     Remote {
-        /// URL of the MCP server
         url: String,
-        /// optional HTTP headers
         #[serde(default)]
         headers: HashMap<String, String>,
     },
@@ -56,10 +43,6 @@ fn default_timeout() -> u64 {
     30
 }
 
-/// build the streamable-http transport config for a remote server
-///
-/// headers that cannot be represented on the wire are logged and skipped,
-/// since dropping one custom header is friendlier than refusing to connect.
 pub(crate) fn build_http_config(
     url: &str,
     headers: &HashMap<String, String>,

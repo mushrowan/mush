@@ -1,5 +1,3 @@
-//! bridge between MCP tools and the AgentTool trait
-
 use std::sync::Arc;
 
 use mush_agent::tool::{AgentTool, ToolResult};
@@ -7,15 +5,10 @@ use rmcp::model::Tool as McpToolDef;
 
 use crate::server::McpServer;
 
-/// wraps an MCP tool as an AgentTool for the agent loop
 pub struct McpTool {
-    /// server_name:tool_name
     full_name: String,
-    /// just the tool name (for display)
     tool_name: String,
-    /// tool definition from the MCP server
     definition: McpToolDef,
-    /// handle to the server, which survives reconnects
     server: Arc<McpServer>,
 }
 
@@ -47,7 +40,6 @@ impl AgentTool for McpTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        // convert the MCP input schema to a json value
         serde_json::to_value(&self.definition.input_schema).unwrap_or_else(|_| {
             serde_json::json!({
                 "type": "object",
@@ -57,9 +49,6 @@ impl AgentTool for McpTool {
     }
 
     fn output_limit(&self) -> mush_agent::tool::OutputLimit {
-        // unknown shape; head keeps any structured prefix (titles,
-        // status, the first list entries) which is usually where the
-        // signal lives
         mush_agent::tool::OutputLimit::Head
     }
 

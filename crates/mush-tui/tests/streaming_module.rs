@@ -59,8 +59,6 @@ fn typewriter_thinking_tracks_independently() {
 
 #[test]
 fn a_reply_starts_at_its_first_word() {
-    // models open a reply with a blank line or two. keeping them means
-    // the byte offsets into the stream don't survive the settle
     let mut stream = StreamingState::new();
     stream.start();
     stream.push_text("\n\nhello");

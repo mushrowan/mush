@@ -1,21 +1,11 @@
-//! live view over the tools advertised by every connected server
-//!
-//! shared by the dynamic meta-tools and the `/mcp` command so name
-//! resolution behaves identically for the model and for the user. reads
-//! through to the servers on every call, so a reconnect that changes a
-//! server's tool list is picked up without rebuilding anything.
-
 use std::sync::Arc;
 
 use crate::server::McpServer;
 
-/// one tool, as addressed by the agent
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpToolInfo {
     pub server: String,
-    /// `{server}_{tool}`, the name the agent calls
     pub full_name: String,
-    /// bare name as the server knows it
     pub tool_name: String,
     pub description: String,
 }
@@ -30,8 +20,6 @@ impl McpCatalogue {
         Self { servers }
     }
 
-    /// every tool, optionally narrowed to one server. case-insensitive on
-    /// the server name so `/mcp tools SweetHome3D` works
     pub async fn tools(&self, server: Option<&str>) -> Vec<McpToolInfo> {
         let filter = server.map(str::to_lowercase);
         let mut out = Vec::new();
@@ -61,7 +49,6 @@ impl McpCatalogue {
         out
     }
 
-    /// the server owning `full_name`, plus the bare tool name to call
     pub async fn resolve(&self, full_name: &str) -> Option<(Arc<McpServer>, String)> {
         let query = full_name.to_lowercase();
         for server in &self.servers {
@@ -75,7 +62,6 @@ impl McpCatalogue {
         None
     }
 
-    /// json schema for `full_name`
     pub async fn schema(&self, full_name: &str) -> Option<serde_json::Value> {
         let query = full_name.to_lowercase();
         for server in &self.servers {
@@ -91,7 +77,6 @@ impl McpCatalogue {
         None
     }
 
-    /// server names in configuration order
     #[must_use]
     pub fn server_names(&self) -> Vec<&str> {
         self.servers.iter().map(|s| s.name()).collect()
@@ -191,8 +176,6 @@ mod tests {
         assert!(catalogue().schema("git_nope").await.is_none());
     }
 
-    /// a tool whose name already contains underscores must still resolve,
-    /// since the split point comes from the server list, not from parsing
     #[tokio::test]
     async fn underscored_tool_names_round_trip() {
         let catalogue = McpCatalogue::new(vec![Arc::new(McpServer::with_tools(

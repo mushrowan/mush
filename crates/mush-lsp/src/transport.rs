@@ -1,17 +1,7 @@
-//! JSON-RPC transport over stdio with Content-Length framing
-//!
-//! the LSP protocol uses Content-Length headers to frame messages:
-//! ```text
-//! Content-Length: 42\r\n
-//! \r\n
-//! {"jsonrpc":"2.0","id":1,"method":"..."}
-//! ```
-
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 use crate::error::LspError;
 
-/// read a single JSON-RPC message from the server's stdout
 pub async fn read_message<R: tokio::io::AsyncRead + Unpin>(
     reader: &mut BufReader<R>,
 ) -> Result<serde_json::Value, LspError> {
@@ -25,7 +15,6 @@ pub async fn read_message<R: tokio::io::AsyncRead + Unpin>(
         .map_err(|e| LspError::Transport(format!("invalid JSON in message body: {e}")))
 }
 
-/// write a JSON-RPC message to the server's stdin
 pub async fn write_message(
     writer: &mut tokio::process::ChildStdin,
     message: &serde_json::Value,
@@ -48,7 +37,6 @@ pub async fn write_message(
     Ok(())
 }
 
-/// parse Content-Length from headers, returns the body size
 async fn read_headers<R: tokio::io::AsyncRead + Unpin>(
     reader: &mut BufReader<R>,
 ) -> Result<usize, LspError> {

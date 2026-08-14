@@ -1,5 +1,3 @@
-//! UDS listener: accepts connections and handles IPC messages
-
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -10,23 +8,16 @@ use crate::card::AgentCard;
 
 use super::{IpcMessage, IpcMessageKind};
 
-/// handle for a running IPC listener
 pub struct IpcListener {
-    /// socket path (cleaned up on drop)
     path: PathBuf,
-    /// background task handle
     _task: tokio::task::JoinHandle<()>,
 }
 
 impl IpcListener {
-    /// start listening on the given socket path.
-    /// responds to GetCard requests with the provided card.
     pub fn start(path: PathBuf, card: Arc<AgentCard>) -> std::io::Result<Self> {
-        // ensure parent directory exists
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        // remove stale socket
         let _ = std::fs::remove_file(&path);
 
         let listener = UnixListener::bind(&path)?;
@@ -111,7 +102,6 @@ mod tests {
         let card = Arc::new(AgentCard::build("test-model", &ToolRegistry::new()));
         let _listener = IpcListener::start(sock.clone(), card.clone()).unwrap();
 
-        // connect and send a GetCard request (listener is already bound)
         let stream = tokio::net::UnixStream::connect(&sock).await.unwrap();
         let (reader, mut writer) = stream.into_split();
 
@@ -148,7 +138,6 @@ mod tests {
         assert!(sock.exists());
 
         drop(listener);
-        // socket should be removed
         assert!(!sock.exists());
     }
 
@@ -157,11 +146,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("stale.sock");
 
-        // create a stale file
         std::fs::write(&sock, "stale").unwrap();
 
         let card = Arc::new(AgentCard::build("test", &ToolRegistry::new()));
         let _listener = IpcListener::start(sock.clone(), card).unwrap();
-        // should succeed despite stale file
     }
 }

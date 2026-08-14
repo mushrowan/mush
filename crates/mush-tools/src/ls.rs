@@ -1,5 +1,3 @@
-//! ls tool - directory listing with metadata
-
 use std::path::Path;
 use std::sync::Arc;
 
@@ -129,8 +127,6 @@ fn list_dir(path: &Path) -> ToolResult {
             ""
         };
 
-        // a directory's reported length is a filesystem block count, not a
-        // content size, so show a placeholder rather than a misleading number
         let size = if ft.as_ref().is_some_and(|t| t.is_dir()) {
             "-".to_string()
         } else {
@@ -195,9 +191,6 @@ mod tests {
 
     #[test]
     fn list_directory_shows_dir_placeholder_and_file_byte_size() {
-        // a directory's `len()` is a filesystem-dependent block count, not
-        // meaningful content size, so directories render a `-` placeholder
-        // while files show their real byte size
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir(dir.path().join("src")).unwrap();
         fs::write(dir.path().join("a.txt"), "hello").unwrap();
@@ -240,7 +233,6 @@ mod tests {
         let result = list_dir(dir.path());
         let text = extract_text(&result);
         let content_lines: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
-        // 500 entries + 1 hint line
         assert!(content_lines.len() <= MAX_ENTRIES + 1);
         assert!(text.contains("more entries"));
         assert!(text.contains("find or glob"));

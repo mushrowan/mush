@@ -1,8 +1,3 @@
-//! LSP server registry: one client per language, lazily spawned
-//!
-//! the registry maps languages to LSP clients. servers are only
-//! started when a file of that language is first touched.
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -15,21 +10,15 @@ use crate::client::LspClient;
 use crate::discovery::{self, ServerConfig};
 use crate::error::LspError;
 
-/// how long to wait for the server to publish diagnostics after a change
 const DIAGNOSTIC_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// manages LSP server lifecycles, one per language
 pub struct LspRegistry {
-    /// workspace root for all servers
     root: PathBuf,
-    /// active clients keyed by language
     clients: Arc<Mutex<HashMap<Language, LspClient>>>,
-    /// user-provided server config overrides (language -> config)
     overrides: HashMap<Language, ServerConfig>,
 }
 
 impl LspRegistry {
-    /// create a new registry rooted at the given workspace directory
     pub fn new(root: PathBuf) -> Self {
         Self {
             root,
@@ -38,14 +27,10 @@ impl LspRegistry {
         }
     }
 
-    /// add a user-configured server override for a language
     pub fn add_override(&mut self, config: ServerConfig) {
         self.overrides.insert(config.language, config);
     }
 
-    /// get diagnostics for a file, starting the LSP server if needed.
-    /// opens the file in the server, waits briefly for diagnostics,
-    /// then returns them. restarts the server on crash.
     pub async fn diagnostics_for_file(&self, path: &Path) -> Result<Vec<Diagnostic>, LspError> {
         let language = Language::detect(path)
             .ok_or_else(|| LspError::NoServer(format!("unknown language: {}", path.display())))?;
@@ -64,9 +49,6 @@ impl LspRegistry {
         self.wait_and_get_diagnostics(language, path).await
     }
 
-    /// notify a file changed and return updated diagnostics.
-    /// if no server is running for this language, does nothing.
-    /// removes crashed servers so they restart on next use.
     pub async fn notify_and_diagnose(
         &self,
         path: &Path,
@@ -89,12 +71,10 @@ impl LspRegistry {
         self.wait_and_get_diagnostics(language, path).await
     }
 
-    /// check if a server is running for a language
     pub async fn has_server_for(&self, language: Language) -> bool {
         self.clients.lock().await.contains_key(&language)
     }
 
-    /// shut down all active LSP servers
     pub async fn shutdown_all(self) {
         let mut clients = self.clients.lock().await;
         for (lang, client) in clients.drain() {
@@ -104,7 +84,6 @@ impl LspRegistry {
         }
     }
 
-    /// wait for diagnostics to be published, then retrieve them
     async fn wait_and_get_diagnostics(
         &self,
         language: Language,
@@ -119,7 +98,6 @@ impl LspRegistry {
         }
     }
 
-    /// propagate send result, evicting crashed servers
     fn send_or_evict(
         &self,
         clients: &mut HashMap<Language, LspClient>,
@@ -133,8 +111,6 @@ impl LspRegistry {
         result
     }
 
-    /// ensure an LSP client exists for the given language.
-    /// caller must hold the mutex lock.
     async fn ensure_client_locked<'a>(
         &self,
         clients: &'a mut HashMap<Language, LspClient>,

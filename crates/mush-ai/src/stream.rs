@@ -1,45 +1,50 @@
-//! streaming event types for LLM responses
-
 use crate::types::{AssistantMessage, StopReason};
 
-/// events emitted during assistant message streaming
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum StreamEvent {
-    /// stream started, initial partial message
-    Start { partial: AssistantMessage },
-    /// new text content block started
-    TextStart { content_index: usize },
-    /// incremental text
-    TextDelta { content_index: usize, delta: String },
-    /// text content block finished
-    TextEnd { content_index: usize, text: String },
-    /// thinking block started
-    ThinkingStart { content_index: usize },
-    /// incremental thinking
-    ThinkingDelta { content_index: usize, delta: String },
-    /// thinking block finished
+    Start {
+        partial: AssistantMessage,
+    },
+    TextStart {
+        content_index: usize,
+    },
+    TextDelta {
+        content_index: usize,
+        delta: String,
+    },
+    TextEnd {
+        content_index: usize,
+        text: String,
+    },
+    ThinkingStart {
+        content_index: usize,
+    },
+    ThinkingDelta {
+        content_index: usize,
+        delta: String,
+    },
     ThinkingEnd {
         content_index: usize,
         thinking: String,
     },
-    /// tool call started
-    ToolCallStart { content_index: usize },
-    /// incremental tool call arguments
-    ToolCallDelta { content_index: usize, delta: String },
-    /// tool call finished
+    ToolCallStart {
+        content_index: usize,
+    },
+    ToolCallDelta {
+        content_index: usize,
+        delta: String,
+    },
     ToolCallEnd {
         content_index: usize,
         id: String,
         name: String,
         arguments: serde_json::Value,
     },
-    /// stream completed successfully
     Done {
         reason: StopReason,
         message: AssistantMessage,
     },
-    /// stream ended with an error
     Error {
         reason: StopReason,
         message: AssistantMessage,
@@ -53,7 +58,6 @@ mod tests {
 
     #[test]
     fn stream_event_variants_are_constructable() {
-        // just verifying the types compile and can be instantiated
         let msg = AssistantMessage::builder()
             .model("test".into())
             .provider(Provider::Custom("test".into()))

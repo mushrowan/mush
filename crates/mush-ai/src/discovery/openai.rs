@@ -1,26 +1,3 @@
-//! openai /v1/models discovery
-//!
-//! openai's public listing endpoint is the most minimal of the three:
-//!
-//! ```json
-//! {
-//!   "object": "list",
-//!   "data": [
-//!     {"id": "gpt-5", "created": 1700000000, "object": "model", "owned_by": "openai"},
-//!     {"id": "text-embedding-3-large", ...}
-//!   ]
-//! }
-//! ```
-//!
-//! we get only `id`, `created`, and `owned_by`. no context window, no
-//! pricing, no reasoning hints. mush filters down to chat-capable
-//! reasoning models (gpt-*, o-series, codex) and relies on the static
-//! catalogue merge step (later commit) to backfill cost and limits.
-//!
-//! this provider corresponds to api-key access at `api.openai.com`.
-//! the chatgpt-subscription path (codex) uses a different backend with
-//! a richer response schema and lives in a separate module (todo).
-
 use std::time::SystemTime;
 
 use serde::Deserialize;
@@ -29,11 +6,9 @@ use super::{DiscoveredModel, DiscoveryError, DiscoveryReport, ModelDiscovery};
 use crate::types::{Api, ApiKey, InputModality, Model, ModelCost, Provider, TokenCount};
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
-/// rough fallback - real values come from the static catalogue merge step
 const DEFAULT_CONTEXT_WINDOW: u64 = 128_000;
 const DEFAULT_MAX_OUTPUT: u64 = 16_384;
 
-/// openai api-key discovery client
 pub struct OpenAiDiscovery {
     client: crate::http::HttpClient,
     base_url: String,
@@ -82,9 +57,6 @@ impl ModelDiscovery for OpenAiDiscovery {
     }
 }
 
-/// parse the raw response body into [`DiscoveredModel`] entries, filtering to
-/// chat-capable models. embeddings, image, audio, and moderation models
-/// are dropped because they're not usable from a coding-assistant TUI.
 pub fn parse_openai_models(body: &str) -> Result<Vec<DiscoveredModel>, DiscoveryError> {
     let response: OpenAiModelsResponse =
         serde_json::from_str(body).map_err(|e| DiscoveryError::Malformed(e.to_string()))?;
@@ -108,10 +80,6 @@ pub fn parse_openai_models(body: &str) -> Result<Vec<DiscoveredModel>, Discovery
         .collect()
 }
 
-/// chat-capable model id heuristic.
-///
-/// - include: `gpt-`, `o1`, `o3`, `o4`, `chatgpt-`, `codex-`
-/// - exclude: embeddings/image/audio/moderation models even if id begins with one of the above
 fn is_chat_capable(id: &str) -> bool {
     let blocked = [
         "embedding",
@@ -174,8 +142,6 @@ struct OpenAiModelEntry {
 mod tests {
     use super::*;
 
-    /// real-world-ish response covering chat models, reasoning models,
-    /// and the embedding/audio/image entries we want to filter out.
     const FIXTURE: &str = r#"{
       "object": "list",
       "data": [
@@ -232,9 +198,6 @@ mod tests {
 
     #[test]
     fn gpt5_and_gpt4o_default_to_non_reasoning() {
-        // mush's reasoning catalogue is overlaid by the static merge step,
-        // which knows gpt-5 reasons. discovery on its own can't tell from
-        // an id alone whether plain `gpt-5` reasons - so we stay conservative
         let models = parse_openai_models(FIXTURE).unwrap();
         let by_id: std::collections::HashMap<_, _> = models
             .iter()

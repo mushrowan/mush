@@ -1,8 +1,3 @@
-//! anthropic messages API provider
-//!
-//! streams responses via SSE from the anthropic messages endpoint.
-//! supports extended thinking, tool use, and image inputs.
-
 use std::path::PathBuf;
 
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue};
@@ -17,9 +12,6 @@ use crate::types::*;
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const API_VERSION: &str = "2023-06-01";
 const ANTHROPIC_DIRECT_API: &str = "api.anthropic.com";
-/// full `user-agent` value sent on oauth requests. bump the version when
-/// matching a newer claude-code release; keeping it close to upstream helps
-/// with any rate-limit or fingerprint-based treatment
 const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/2.1.177 (external, cli)";
 const CLAUDE_CODE_BILLING_HEADER: &str =
     "x-anthropic-billing-header: cc_version=2.1.177.154; cc_entrypoint=cli; cch=00000;";
@@ -28,10 +20,8 @@ const ADVISOR_TOOL_TYPE: &str = "advisor_20260301";
 const ADVISOR_TOOL_NAME: &str = "advisor";
 const DEFAULT_ADVISOR_MODEL: &str = "claude-opus-4-8";
 
-// stealth mode: mimic claude code's identity for oauth
 const CLAUDE_CODE_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 
-// claude code tool names (canonical casing)
 const CLAUDE_CODE_TOOLS: &[&str] = &[
     "Read",
     "Write",
@@ -68,7 +58,6 @@ const CLAUDE_CODE_CAPTURE_TOOL_ORDER: &[&str] = &[
     "Write",
 ];
 
-/// convert tool name to claude code canonical casing if it matches (case-insensitive)
 fn to_claude_code_name(name: &str) -> String {
     let normalised = super::normalize_tool_name(name);
     CLAUDE_CODE_TOOLS
@@ -85,7 +74,6 @@ fn claude_code_capture_tool_order(name: &str) -> Option<usize> {
         .position(|tool| super::normalize_tool_name(tool) == normalised)
 }
 
-/// convert claude code tool name back to our tool name using the tool definitions
 fn from_claude_code_name(name: &str, tools: &[ToolDefinition]) -> String {
     let normalised = super::normalize_tool_name(name);
     tools
@@ -117,15 +105,6 @@ impl ApiProvider for AnthropicProvider {
             .or_else(anthropic_api_key)
             .ok_or_else(|| ProviderError::MissingApiKey(Provider::Anthropic))?;
 
-        // long agent turns make many stream() calls all sharing the api_key
-        // that was baked in at turn start. for oauth tokens that's a problem:
-        // claude oauth access tokens expire (~1h) and long turns can outlive
-        // them mid-turn, producing a 401 from anthropic. re-resolve from the
-        // oauth store on every call so we pick up any refresh that happened
-        // since turn start. `get_anthropic_oauth_token` handles the refresh +
-        // 5-minute eager buffer internally. silently falls back to the
-        // existing key when the store is unreadable or credentials are
-        // missing (likely the user is on a plain api key)
         if api_key.is_oauth_token()
             && let Ok(Some(fresh)) = crate::oauth::get_anthropic_oauth_token().await
             && let Some(fresh_key) = ApiKey::new(fresh)
@@ -171,7 +150,6 @@ impl ApiProvider for AnthropicProvider {
                 HeaderValue::from_static(CLAUDE_CLI_USER_AGENT),
             );
             headers.insert("x-app", HeaderValue::from_static("cli"));
-            // claude-code sends this to bypass browser-env CORS checks on oauth
             headers.insert(
                 "anthropic-dangerous-direct-browser-access",
                 HeaderValue::from_static("true"),
@@ -194,8 +172,6 @@ impl ApiProvider for AnthropicProvider {
                 HeaderValue::from_static("v24.3.0"),
             );
             headers.insert("x-stainless-timeout", HeaderValue::from_static("600"));
-            // include session id for anthropic-side diagnostic correlation.
-            // format isn't validated by the server but we mirror claude code
             if let Some(sid) = &options.session_id
                 && let Ok(hv) = HeaderValue::from_str(sid.as_ref())
             {
@@ -231,13 +207,6 @@ impl ApiProvider for AnthropicProvider {
         };
         let call_id = crate::wire_log::next_call_id();
 
-        // snapshot the outgoing body for cache-bust triage. serialise
-        // once here so the fingerprint hashes the exact bytes that
-        // sibling sections end up on the wire. kept best-effort: a
-        // filesystem hiccup shouldn't affect the actual api call.
-        // deferred until after headers are built so the dump captures
-        // the full wire request including beta flags and version
-        // headers, which silently affect server-side cache scope
         if let Ok(body_json) = serde_json::to_string(&body) {
             let system_json = body
                 .system
@@ -290,11 +259,6 @@ impl ApiProvider for AnthropicProvider {
             .send()
             .await?;
 
-        // safety net: if anthropic returns 401 with an oauth token the
-        // cached credentials are stale somehow (clock skew, revoked refresh
-        // token, server-side hiccup). force-refresh once and retry the same
-        // request. on further failure we fall through to check_response so
-        // the user sees the real error
         let response = if response.status().as_u16() == 401 && is_oauth {
             tracing::warn!(
                 model = %model.id,
@@ -350,7 +314,6 @@ impl ApiProvider for AnthropicProvider {
     }
 }
 
-// request body construction
 #[derive(Serialize)]
 struct RequestBody {
     model: String,
@@ -524,9 +487,6 @@ fn build_request_body(
         })
     };
 
-    // when caching is active, preserve tool results to avoid busting the prefix cache.
-    // trimming old tool results shifts content in the message array, invalidating
-    // the cached prefix on every new user message
     let trimming = if cache_control.is_some() {
         ToolResultTrimming::Preserve
     } else {
@@ -562,11 +522,6 @@ fn build_request_body(
         }
         _ => None,
     };
-    // the effort string is the level's own wire name when the model
-    // advertises a ladder (the cycler then only offers supported levels).
-    // without that metadata we can't know the model's ceiling, so the
-    // open top (xhigh/max/Other) is clamped to `high`, which every
-    // effort-capable anthropic model accepts. `Off` yields no name
     let output_config = if model.reasoning {
         super::requested_effort(options)
             .as_ref()
@@ -576,14 +531,12 @@ fn build_request_body(
         None
     };
 
-    // temperature is incompatible with thinking
     let temperature = if thinking.is_none() {
         options.temperature.map(|t| t.value())
     } else {
         None
     };
 
-    // when thinking is enabled with budget, max_tokens must include the budget
     let effective_max_tokens =
         if let Some(ThinkingConfig::Enabled { budget_tokens, .. }) = &thinking {
             max_tokens.get().max(*budget_tokens + 1024)
@@ -873,8 +826,6 @@ fn anthropic_cache_control(
     }
 
     let is_direct = base_url.contains(ANTHROPIC_DIRECT_API);
-    // on claude.ai (oauth), 1h cache writes are included in the subscription
-    // so always use 1h. on API keys, only use 1h when explicitly requested
     let ttl = if is_direct && (is_oauth || retention == CacheRetention::Long) {
         Some("1h".to_string())
     } else {
@@ -888,12 +839,6 @@ fn anthropic_cache_control(
     })
 }
 
-/// the `output_config.effort` value for a request. uses the effort's own
-/// wire name when the model advertises an effort ladder (the cycler then
-/// only offers supported levels, so the value is always legal). without
-/// that metadata we can't know the model's ceiling, so the open top
-/// (`xhigh`/`max`/`Other`) is clamped to `high`, which every
-/// effort-capable anthropic model accepts.
 fn anthropic_effort(effort: &EffortLevel, supported: &[ThinkingLevel]) -> Option<String> {
     let name = effort.name();
     if supported.is_empty() {
@@ -914,8 +859,6 @@ fn thinking_budget(level: &ThinkingLevel, max_tokens: u64) -> u64 {
         ThinkingLevel::Minimal => 1024,
         ThinkingLevel::Low => base / 4,
         ThinkingLevel::Medium => base / 2,
-        // `Other` only appears on effort-based (adaptive) models, which
-        // never hit the budget path; treat it like High defensively
         ThinkingLevel::High | ThinkingLevel::Other(_) => base,
         ThinkingLevel::Xhigh => base * 2,
     }
@@ -935,7 +878,6 @@ fn convert_messages(
 
 use super::{MessageVisitor, maybe_trim_tool_output, walk_messages};
 
-/// raw conversion without orphan fixing
 fn convert_messages_raw(
     messages: &[Message],
     is_oauth: bool,
@@ -958,14 +900,6 @@ struct AnthropicVisitor {
 
 impl MessageVisitor for AnthropicVisitor {
     fn on_user(&mut self, user: &UserMessage) {
-        // always emit as a content block array, never a bare JSON string.
-        // apply_cache_control_to_last_cacheable_message inserts a cache_control
-        // field into the last block of the target message. if we emitted
-        // text as a string here, that function would have to wrap it in an
-        // array, then when cache_control moves to a newer message on the
-        // next request the old message reverts to a bare string. that
-        // format change alters the serialised prefix bytes and busts the
-        // anthropic prompt cache (which does byte-exact prefix matching)
         let content = match &user.content {
             UserContent::Text(text) => serde_json::json!([{
                 "type": "text",
@@ -1020,21 +954,6 @@ impl MessageVisitor for AnthropicVisitor {
                         "type": "redacted_thinking",
                         "data": data,
                     })),
-                    // anthropic's interleaved thinking emits a signature
-                    // that must be sent back verbatim across turns to
-                    // keep conversation state valid. adaptive thinking
-                    // sometimes emits only signature_delta with empty
-                    // thinking text (claude code's traffic shows the
-                    // same shape), so we preserve the block whenever a
-                    // signature exists, even with empty text.
-                    //
-                    // text-only thinking with no signature is an aborted
-                    // stream artefact: anthropic rejects thinking blocks
-                    // without signatures, so fall back to a text block
-                    // that still carries the user-visible reasoning.
-                    //
-                    // truly empty (no text, no signature) blocks carry
-                    // no information and get dropped
                     ThinkingContent::Thinking {
                         thinking,
                         signature,
@@ -1196,15 +1115,6 @@ fn anthropic_tool_id(id: &str) -> String {
     out
 }
 
-/// ensure tool_use/tool_result pairing is consistent.
-///
-/// handles both directions:
-/// - tool_use without tool_result: injects synthetic error results
-/// - tool_result without tool_use: strips the orphaned result
-///
-/// orphaned tool_results can appear after compaction removes an assistant
-/// message while its tool_results survive at the boundary, or from other
-/// message reordering during context transforms.
 fn fix_orphaned_tool_calls(messages: Vec<RequestMessage>) -> Vec<RequestMessage> {
     let mut result: Vec<RequestMessage> = Vec::new();
     let mut pending_tool_ids: Vec<String> = Vec::new();
@@ -1212,12 +1122,10 @@ fn fix_orphaned_tool_calls(messages: Vec<RequestMessage>) -> Vec<RequestMessage>
 
     for msg in messages {
         if msg.role == "assistant" {
-            // flush any orphaned tool calls from a previous assistant message
             inject_synthetic_results(&mut result, &pending_tool_ids, &seen_result_ids);
             pending_tool_ids.clear();
             seen_result_ids.clear();
 
-            // collect tool_use IDs from this assistant message
             if let serde_json::Value::Array(ref blocks) = msg.content {
                 for block in blocks {
                     if block.get("type").and_then(|t| t.as_str()) == Some("tool_use")
@@ -1240,7 +1148,6 @@ fn fix_orphaned_tool_calls(messages: Vec<RequestMessage>) -> Vec<RequestMessage>
                 .unwrap_or(false);
 
             if is_tool_result {
-                // check each tool_result references a known tool_use
                 if let Some(id) = msg
                     .content
                     .as_array()
@@ -1261,7 +1168,6 @@ fn fix_orphaned_tool_calls(messages: Vec<RequestMessage>) -> Vec<RequestMessage>
                     result.push(msg);
                 }
             } else {
-                // plain user message: flush any pending orphans first
                 if !pending_tool_ids.is_empty() {
                     inject_synthetic_results(&mut result, &pending_tool_ids, &seen_result_ids);
                     pending_tool_ids.clear();
@@ -1274,22 +1180,11 @@ fn fix_orphaned_tool_calls(messages: Vec<RequestMessage>) -> Vec<RequestMessage>
         }
     }
 
-    // flush any remaining orphans at the end
     inject_synthetic_results(&mut result, &pending_tool_ids, &seen_result_ids);
 
     result
 }
 
-/// apply cache control to the last cacheable message content block.
-///
-/// anthropic only looks back 20 content blocks from each breakpoint when
-/// finding prior cache writes. keeping the message breakpoint on the
-/// original user text during a long tool loop strands the cache entry outside
-/// that window, so the marker must move forward as the conversation grows.
-///
-/// user text content is always emitted as a content block array by
-/// convert_messages_raw, so this only needs the Array arm. the String arm
-/// is kept as a defensive fallback but should never trigger in practice
 fn apply_cache_control_to_last_cacheable_message(
     messages: &mut [RequestMessage],
     cache_control: Option<CacheControl>,
@@ -1313,8 +1208,6 @@ fn apply_cache_control_to_last_cacheable_message(
                     return;
                 }
             }
-            // defensive: convert_messages_raw always emits arrays for user text,
-            // but if something upstream changes, wrap rather than silently skip
             serde_json::Value::String(text) if !text.trim().is_empty() => {
                 let text = std::mem::take(text);
                 message.content = serde_json::json!([{
@@ -1360,8 +1253,6 @@ fn inject_synthetic_results(
     }
 }
 
-// SSE parsing
-/// raw SSE event from the anthropic stream
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 #[expect(dead_code)]
@@ -1465,8 +1356,6 @@ struct MessageDeltaData {
     stop_details: Option<StopDetailsData>,
 }
 
-/// structured detail on a `refusal` stop. always present on a refusal,
-/// but every field inside it can be null
 #[derive(Debug, Deserialize)]
 struct StopDetailsData {
     #[serde(default)]
@@ -1508,19 +1397,13 @@ impl super::sse::SseProcessor for AnthropicProcessor {
                     process_sse_event(event, output, &mut self.blocks, self.is_oauth, &self.tools);
                 super::sse::ProcessResult::Events(events)
             }
-            Err(_) => {
-                // [DONE] and empty payloads are expected
-                super::sse::ProcessResult::Skip
-            }
+            Err(_) => super::sse::ProcessResult::Skip,
         }
     }
 
-    fn finish(&mut self, _output: &mut AssistantMessage) {
-        // anthropic sends explicit message_stop events, no cleanup needed
-    }
+    fn finish(&mut self, _output: &mut AssistantMessage) {}
 
     fn emit_start(&self) -> bool {
-        // anthropic emits Start from within process() on message_start
         false
     }
 
@@ -1608,7 +1491,6 @@ fn process_sse_event(
                     events.push(StreamEvent::ThinkingStart { content_index });
                 }
                 ContentBlockData::ToolUse { id, name } => {
-                    // map claude code tool names back to our names
                     let resolved_name = if is_oauth {
                         from_claude_code_name(&name, tools)
                     } else {
@@ -1653,8 +1535,6 @@ fn process_sse_event(
             }
         }
         SseEvent::ContentBlockDelta { index: _, delta } => {
-            // find the block by checking from the end (anthropic sends index, but
-            // we track by our own vec position which should match)
             let content_index = blocks.len().saturating_sub(1);
 
             match delta {
@@ -1727,12 +1607,6 @@ fn process_sse_event(
                     }
                     StreamBlock::ToolCall { id, name, args_buf } => {
                         let arguments = serde_json::from_str(args_buf).unwrap_or_else(|err| {
-                            // a tool call whose accumulated argument buffer
-                            // doesn't parse is almost always a streaming bug
-                            // (deltas that never landed in args_buf), not a
-                            // model fault. surface it loudly so it isn't
-                            // silently degraded into an empty-args call. the
-                            // full delta sequence lives in the wire journal
                             tracing::warn!(
                                 tool = %name,
                                 tool_id = %id,
@@ -1743,7 +1617,6 @@ fn process_sse_event(
                             );
                             serde_json::Value::Object(Default::default())
                         });
-                        // update the output with final parsed args
                         if let Some(AssistantContentPart::ToolCall(tc)) =
                             output.content.get_mut(content_index)
                         {
@@ -1783,10 +1656,6 @@ fn process_sse_event(
     events
 }
 
-/// map an anthropic stop_reason, with a message for the ones that end a
-/// turn without a usable result. the documented set is end_turn,
-/// max_tokens, stop_sequence, tool_use, pause_turn, refusal, and
-/// model_context_window_exceeded
 fn map_stop_reason(
     reason: &str,
     details: Option<&StopDetailsData>,
@@ -1807,8 +1676,6 @@ fn map_stop_reason(
     }
 }
 
-/// user-facing text for a refusal, preferring anthropic's own explanation
-/// over the bare policy category
 fn refusal_message(details: Option<&StopDetailsData>) -> String {
     let detail = details.and_then(|d| {
         d.explanation
@@ -1977,12 +1844,10 @@ mod tests {
     #[test]
     fn oauth_beta_default_includes_expected_flags() {
         let header = AnthropicBetas::default().to_header_value();
-        // persistent flags always present
         assert!(header.contains("claude-code-20250219"), "header={header}");
         assert!(header.contains("oauth-2025-04-20"), "header={header}");
         assert!(header.contains("interleaved-thinking-2025-05-14"));
         assert!(header.contains("prompt-caching-scope-2026-01-05"));
-        // opt-in defaults per spec
         assert!(header.contains("context-1m-2025-08-07"));
         assert!(header.contains("effort-2025-11-24"));
         assert!(header.contains("context-management-2025-06-27"));
@@ -2021,7 +1886,6 @@ mod tests {
 
     #[test]
     fn thinking_budget_respects_minimum() {
-        // even with low max_tokens, budget should use base of 4096
         assert_eq!(thinking_budget(&ThinkingLevel::Low, 1024), 1024);
         assert_eq!(thinking_budget(&ThinkingLevel::Medium, 1024), 2048);
     }
@@ -2044,9 +1908,6 @@ mod tests {
 
     #[test]
     fn convert_image_only_message_omits_empty_text() {
-        // when user pastes an image with no text, the Parts vec contains
-        // an empty Text("") + Image. the empty text block must be filtered
-        // out or anthropic rejects with "text content blocks must be non-empty"
         let messages = vec![Message::User(UserMessage {
             content: UserContent::Parts(vec![
                 UserContentPart::Text(TextContent { text: "".into() }),
@@ -2061,7 +1922,6 @@ mod tests {
         let converted = convert_messages(&messages, false, None, ToolResultTrimming::SlidingWindow);
         assert_eq!(converted.len(), 1);
         let blocks = converted[0].content.as_array().expect("should be array");
-        // only the image block, no empty text
         assert_eq!(blocks.len(), 1, "empty text block should be filtered out");
         assert_eq!(blocks[0]["type"], "image");
     }
@@ -2171,7 +2031,6 @@ mod tests {
         )];
 
         let converted = convert_messages(&messages, false, None, ToolResultTrimming::SlidingWindow);
-        // assistant + synthetic tool_result for the orphaned tool_use
         assert_eq!(converted.len(), 2);
         assert_eq!(converted[0].role, "assistant");
 
@@ -2181,7 +2040,6 @@ mod tests {
         assert_eq!(blocks[1]["type"], "tool_use");
         assert_eq!(blocks[1]["id"], "tc_1");
 
-        // synthetic result
         assert_eq!(converted[1].role, "user");
         assert_eq!(converted[1].content[0]["type"], "tool_result");
         assert_eq!(converted[1].content[0]["tool_use_id"], "tc_1");
@@ -2236,13 +2094,6 @@ mod tests {
 
     #[test]
     fn empty_thinking_with_signature_preserves_block() {
-        // adaptive thinking emits only signature_delta with no thinking_delta:
-        // the block ends up with empty text but a non-empty signature.
-        // claude code's traffic shows {type: "thinking", thinking: "", signature}
-        // is sent back to anthropic verbatim. dropping the block (or its
-        // signature) violates the conversation invariant for interleaved
-        // thinking and the next turn sees a tool_use with no preceding
-        // thinking, which is when claude says "the thinking is cut off"
         let messages = vec![Message::Assistant(
             AssistantMessage::builder()
                 .content(vec![
@@ -2275,9 +2126,6 @@ mod tests {
 
     #[test]
     fn empty_thinking_without_signature_is_dropped() {
-        // genuinely empty thinking blocks (no text, no signature) carry
-        // no information for anthropic and should be dropped to avoid
-        // sending malformed `{type: thinking, thinking: ""}` blocks
         let messages = vec![Message::Assistant(
             AssistantMessage::builder()
                 .content(vec![
@@ -2353,18 +2201,15 @@ mod tests {
         ];
 
         let converted = convert_messages(&messages, false, None, ToolResultTrimming::SlidingWindow);
-        // assistant + real tool_result, no synthetic
         assert_eq!(converted.len(), 2);
         assert_eq!(converted[0].role, "assistant");
         assert_eq!(converted[1].role, "user");
         assert_eq!(converted[1].content[0]["tool_use_id"], "tc_1");
-        // the real result, not synthetic error
         assert_eq!(converted[1].content[0]["is_error"], false);
     }
 
     #[test]
     fn orphaned_tool_use_gets_synthetic_result() {
-        // assistant with tool_use followed by a user message (steering) - no tool_result
         let messages = vec![
             Message::Assistant(
                 AssistantMessage::builder()
@@ -2387,7 +2232,6 @@ mod tests {
         ];
 
         let converted = convert_messages(&messages, false, None, ToolResultTrimming::SlidingWindow);
-        // assistant + synthetic tool_result + user
         assert_eq!(converted.len(), 3);
         assert_eq!(converted[0].role, "assistant");
         assert_eq!(converted[1].role, "user");
@@ -2403,16 +2247,11 @@ mod tests {
 
     #[test]
     fn orphaned_tool_result_stripped() {
-        // tool_result referencing a tool_use that was compacted away.
-        // the tool_result should be stripped to prevent the API from
-        // rejecting the request with "unexpected tool_use_id"
         let messages = vec![
-            // after compaction: summary user message
             Message::User(UserMessage {
                 content: UserContent::Text("compacted summary".into()),
                 timestamp_ms: Timestamp::zero(),
             }),
-            // kept assistant with tool_use A
             Message::Assistant(
                 AssistantMessage::builder()
                     .content(vec![AssistantContentPart::ToolCall(ToolCall {
@@ -2427,7 +2266,6 @@ mod tests {
                     .timestamp_ms(Timestamp::zero())
                     .build(),
             ),
-            // orphaned tool_result: references tc_GONE which was compacted away
             Message::ToolResult(ToolResultMessage {
                 tool_call_id: "tc_GONE".into(),
                 tool_name: "bash".into(),
@@ -2437,7 +2275,6 @@ mod tests {
                 outcome: ToolOutcome::Success,
                 timestamp_ms: Timestamp::zero(),
             }),
-            // valid tool_result for tc_A
             Message::ToolResult(ToolResultMessage {
                 tool_call_id: "tc_A".into(),
                 tool_name: "read".into(),
@@ -2451,8 +2288,6 @@ mod tests {
 
         let converted = convert_messages(&messages, false, None, ToolResultTrimming::SlidingWindow);
 
-        // the orphaned tool_result (tc_GONE) should be stripped entirely.
-        // result: user(summary), assistant(tool_use A), user(tool_result A)
         assert_eq!(converted.len(), 3, "orphaned tool_result should be dropped");
         assert_eq!(converted[0].role, "user");
         assert_eq!(converted[1].role, "assistant");
@@ -2462,8 +2297,6 @@ mod tests {
 
     #[test]
     fn orphaned_tool_result_all_blocks_stripped() {
-        // when ALL tool_results after an assistant are orphaned, the entire
-        // message group should be stripped (not just individual blocks)
         let messages = vec![
             Message::Assistant(
                 AssistantMessage::builder()
@@ -2476,7 +2309,6 @@ mod tests {
                     .timestamp_ms(Timestamp::zero())
                     .build(),
             ),
-            // orphaned: the preceding assistant has no tool_uses
             Message::ToolResult(ToolResultMessage {
                 tool_call_id: "tc_stale".into(),
                 tool_name: "bash".into(),
@@ -2494,8 +2326,6 @@ mod tests {
 
         let converted = convert_messages(&messages, false, None, ToolResultTrimming::SlidingWindow);
 
-        // the orphaned tool_result should be dropped.
-        // result: assistant(text), user("continue")
         assert_eq!(converted.len(), 2, "orphaned tool_result should be dropped");
         assert_eq!(converted[0].role, "assistant");
         assert_eq!(converted[1].role, "user");
@@ -2538,7 +2368,6 @@ mod tests {
         let body = build_request_body(&model, &None, &[], &[], &options, false);
 
         assert!(body.thinking.is_some());
-        // temperature should be None when thinking is enabled
         assert!(body.temperature.is_none());
     }
 
@@ -2568,10 +2397,6 @@ mod tests {
 
     #[test]
     fn opus_4_6_uses_adaptive_thinking_with_effort() {
-        // an effort level we don't model with a typed variant (`max`)
-        // flows through verbatim as `output_config.effort` on an adaptive
-        // model that advertises it. this is the whole point of the
-        // hybrid: max is reachable without a dedicated enum variant
         let model = Model {
             id: "claude-opus-4-6".into(),
             name: "Claude Opus 4.6".into(),
@@ -2633,9 +2458,6 @@ mod tests {
 
     #[test]
     fn effort_clamps_to_high_without_a_discovered_ladder() {
-        // when the model advertises no effort ladder we can't know its
-        // ceiling, so the open top (Xhigh/max) is clamped to `high`,
-        // which every effort-capable model accepts
         let model = Model {
             id: "claude-opus-4-5".into(),
             name: "Claude Opus 4.5".into(),
@@ -2659,10 +2481,6 @@ mod tests {
 
     #[test]
     fn force_budget_overrides_adaptive_capability() {
-        // even on adaptive-capable models, force_budget_thinking on
-        // StreamOptions should produce ThinkingConfig::Enabled instead
-        // of Adaptive. lets users opt out of adaptive for cost
-        // predictability or A/B comparison
         let model = Model {
             id: "claude-opus-4-7".into(),
             name: "Claude Opus 4.7".into(),
@@ -2796,7 +2614,6 @@ mod tests {
         let mut output = test_output();
         let mut blocks = Vec::new();
 
-        // start
         let events = process_sse_event(
             SseEvent::ContentBlockStart {
                 index: 0,
@@ -2814,7 +2631,6 @@ mod tests {
             StreamEvent::TextStart { content_index: 0 }
         ));
 
-        // delta
         let events = process_sse_event(
             SseEvent::ContentBlockDelta {
                 index: 0,
@@ -2835,7 +2651,6 @@ mod tests {
             }
         ));
 
-        // another delta
         process_sse_event(
             SseEvent::ContentBlockDelta {
                 index: 0,
@@ -2849,7 +2664,6 @@ mod tests {
             &[],
         );
 
-        // stop
         let events = process_sse_event(
             SseEvent::ContentBlockStop { index: 0 },
             &mut output,
@@ -2862,7 +2676,6 @@ mod tests {
             other => panic!("expected TextEnd, got {other:?}"),
         }
 
-        // check output was updated
         match &output.content[0] {
             AssistantContentPart::Text(t) => assert_eq!(t.text, "hello world"),
             other => panic!("expected text, got {other:?}"),
@@ -3077,10 +2890,8 @@ mod tests {
         assert_eq!(to_claude_code_name("bash"), "Bash");
         assert_eq!(to_claude_code_name("webfetch"), "WebFetch");
         assert_eq!(to_claude_code_name("websearch"), "WebSearch");
-        // underscored names normalised to match claude code names
         assert_eq!(to_claude_code_name("web_fetch"), "WebFetch");
         assert_eq!(to_claude_code_name("web_search"), "WebSearch");
-        // unknown tools passed through as-is
         assert_eq!(to_claude_code_name("custom_tool"), "custom_tool");
     }
 
@@ -3154,8 +2965,6 @@ mod tests {
 
     #[test]
     fn anthropic_cache_control_oauth_always_1h() {
-        // on claude.ai (oauth), 1h cache writes are included in the
-        // subscription so we should always use ttl=1h
         let default = anthropic_cache_control("https://api.anthropic.com", None, true).unwrap();
         assert_eq!(default.ttl.as_deref(), Some("1h"));
 
@@ -3170,8 +2979,6 @@ mod tests {
 
     #[test]
     fn oauth_system_blocks_get_global_scope() {
-        // mirroring claude code: system prompt cache_control gets
-        // scope:"global" so it's shared across sessions
         let options = StreamOptions {
             cache_retention: None,
             ..Default::default()
@@ -3220,16 +3027,6 @@ mod tests {
         assert_eq!(blocks[0]["cache_control"]["type"], "ephemeral");
     }
 
-    /// the prefix sent to anthropic must be byte-stable across requests.
-    /// when cache_control moves from an old user message to a new one,
-    /// the old message's content format must not change. if UserContent::Text
-    /// is emitted as a bare JSON string and then wrapped into an array when
-    /// cache_control is applied, removing cache_control later (when the
-    /// marker moves forward) reverts the format from array to string,
-    /// changing the serialised prefix bytes and busting the cache.
-    ///
-    /// simulates two consecutive requests where cache_control moves from
-    /// M_old to M_new, then asserts M_old's content structure is identical.
     #[test]
     fn user_text_content_format_stable_across_cache_control_moves() {
         let cache = Some(CacheControl {
@@ -3238,7 +3035,6 @@ mod tests {
             scope: None,
         });
 
-        // request 1: only M_old, it gets cache_control
         let messages_r1 = vec![Message::User(UserMessage {
             content: UserContent::Text("hello".into()),
             timestamp_ms: Timestamp::zero(),
@@ -3250,7 +3046,6 @@ mod tests {
             ToolResultTrimming::Preserve,
         );
 
-        // request 2: M_old + assistant + M_new, cache_control moves to M_new
         let messages_r2 = vec![
             Message::User(UserMessage {
                 content: UserContent::Text("hello".into()),
@@ -3271,7 +3066,6 @@ mod tests {
         let converted_r2 =
             convert_messages(&messages_r2, false, cache, ToolResultTrimming::Preserve);
 
-        // strip cache_control from r1's M_old to compare content structure only
         let mut r1_content = converted_r1[0].content.clone();
         if let serde_json::Value::Array(blocks) = &mut r1_content {
             for block in blocks.iter_mut() {
@@ -3294,9 +3088,6 @@ mod tests {
 
     #[test]
     fn cache_control_on_recent_tool_result_block() {
-        // tool_result messages are role="user" in anthropic format, but
-        // cache_control belongs on the top-level tool_result object, not
-        // inside its nested content payload.
         let cache = Some(CacheControl {
             control_type: "ephemeral".into(),
             ttl: None,
@@ -3816,12 +3607,9 @@ mod tests {
             .build()
     }
 
-    /// build a conversation with enough turns for the sliding window boundary
-    /// to kick in, with a large tool result in the oldest turn
     fn messages_with_old_large_tool_result() -> Vec<Message> {
         let large_output = "x".repeat(3000);
         vec![
-            // turn 1: user + assistant + tool_call + tool_result (old)
             Message::User(UserMessage {
                 content: UserContent::Text("read foo.rs".into()),
                 timestamp_ms: Timestamp::zero(),
@@ -3849,7 +3637,6 @@ mod tests {
                 outcome: ToolOutcome::Success,
                 timestamp_ms: Timestamp::zero(),
             }),
-            // turns 2-4: three user messages to push turn 1 past the boundary
             Message::User(UserMessage {
                 content: UserContent::Text("thanks".into()),
                 timestamp_ms: Timestamp::zero(),
@@ -3870,7 +3657,6 @@ mod tests {
         let messages = messages_with_old_large_tool_result();
         let converted = convert_messages(&messages, false, None, ToolResultTrimming::SlidingWindow);
 
-        // find the tool result for tc_old
         let tool_result = converted
             .iter()
             .find(|m| {
@@ -3895,7 +3681,6 @@ mod tests {
         let messages = messages_with_old_large_tool_result();
         let converted = convert_messages(&messages, false, None, ToolResultTrimming::Preserve);
 
-        // find the tool result for tc_old
         let tool_result = converted
             .iter()
             .find(|m| {

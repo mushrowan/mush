@@ -1,5 +1,3 @@
-//! notify_user tool - send a desktop notification to the user
-
 use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
 use serde::Deserialize;
 
@@ -56,7 +54,6 @@ impl AgentTool for NotifyUserTool {
     }
 
     fn output_limit(&self) -> mush_agent::tool::OutputLimit {
-        // single-line ack, never truncates
         mush_agent::tool::OutputLimit::Head
     }
 
@@ -69,10 +66,6 @@ impl AgentTool for NotifyUserTool {
         let title = args.title;
         let body = args.body;
 
-        // use tokio::process here so the call doesn't block the executor
-        // if the notification daemon is slow or unavailable. fire-and-forget
-        // pw-play alongside, reaped in a detached task to avoid leaving
-        // `<defunct>` zombies behind.
         let mut notif_cmd = tokio::process::Command::new("notify-send");
         notif_cmd
             .arg("--app-name=mush")
@@ -93,9 +86,6 @@ impl AgentTool for NotifyUserTool {
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null());
             if let Ok(mut child) = sound_cmd.spawn() {
-                // tokio's global orphan queue reaps dropped children on
-                // SIGCHLD, but explicitly waiting in a task is clearer and
-                // doesn't rely on that implementation detail
                 tokio::spawn(async move {
                     let _ = child.wait().await;
                 });

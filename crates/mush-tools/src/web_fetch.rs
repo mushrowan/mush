@@ -1,9 +1,7 @@
-//! web fetch tool - fetch URL content and convert to markdown/text
-
 use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
 use serde::Deserialize;
 
-const MAX_RESPONSE_SIZE: usize = 5 * 1024 * 1024; // 5MB
+const MAX_RESPONSE_SIZE: usize = 5 * 1024 * 1024;
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const MAX_TIMEOUT_SECS: u64 = 120;
 

@@ -1,5 +1,3 @@
-//! shared setup helpers for both print and TUI modes
-
 use std::sync::Arc;
 
 use color_eyre::eyre::{Result, eyre};
@@ -11,11 +9,9 @@ use mush_session::compact;
 
 use crate::config;
 
-/// shared state built from CLI args + config, used by both print and TUI modes
 pub struct AppSetup {
     pub cfg: config::Config,
     pub model: Model,
-    /// separate model + options for compaction (None = use active model)
     pub compaction_model: Option<(Model, StreamOptions)>,
     pub registry: ApiRegistry,
     pub cwd: std::path::PathBuf,
@@ -26,17 +22,12 @@ pub struct AppSetup {
     pub debug_cache: bool,
     pub max_turns: usize,
     pub lifecycle_hooks: mush_agent::LifecycleHooks,
-    /// file-triggered rule injection callback
     pub file_rules: Option<mush_agent::FileRuleCallback>,
-    /// LSP diagnostic injection callback
     pub lsp_diagnostics: Option<mush_agent::DiagnosticCallback>,
-    /// shared http client for all network calls
     pub http_client: mush_ai::http::HttpClient,
-    /// live MCP servers, retained so `/mcp` can inspect and redial them
     pub mcp: Option<std::sync::Arc<mush_mcp::McpManager>>,
 }
 
-/// CLI args needed for shared setup (avoids depending on clap struct)
 pub struct SetupArgs {
     pub model: Option<String>,
     pub thinking: bool,
@@ -50,7 +41,6 @@ pub struct SetupArgs {
 }
 
 impl AppSetup {
-    /// build shared state from CLI args
     #[tracing::instrument(name = "startup", skip_all)]
     pub async fn init(args: SetupArgs) -> Result<(Self, Option<crate::timing::StartupReport>)> {
         let mut timer = args.timer;
@@ -61,9 +51,6 @@ impl AppSetup {
             t.phase("config");
         }
 
-        // canonicalise so the same project resolves to the same directory
-        // key across symlinks and relative paths. falls through to the raw
-        // cwd on filesystems that refuse the lookup
         let cwd = mush_tui::canonical_dir(&std::env::current_dir()?);
 
         let model_id = args.model.unwrap_or_else(|| default_model_id(&cfg, &cwd));
@@ -81,12 +68,6 @@ impl AppSetup {
         let http_client = mush_ai::http::wrap(
             reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::limited(10))
-                // give the network 60s to establish a tcp + tls connection.
-                // reqwest defaults to no connect timeout, which lets stalled
-                // proxies hang the agent indefinitely. retry/backoff lives in
-                // the agent loop, so a per-attempt cap is enough here. no
-                // overall request timeout: streaming responses can take many
-                // minutes
                 .connect_timeout(std::time::Duration::from_secs(60))
                 .build()
                 .expect("failed to build http client"),
@@ -162,7 +143,6 @@ impl AppSetup {
         }
 
         if !args.no_tools && model.supports_native_parallel_calls() {
-            // skip batch tool
         } else if !args.no_tools {
             mush_tools::add_batch_tool(&mut tools);
         }
@@ -218,11 +198,6 @@ fn init_builtin_tools(
     )
 }
 
-/// connect configured MCP servers and register their tools
-///
-/// returns the manager so `/mcp` can report status and redial. in dynamic
-/// mode the three meta-tools are registered even when nothing connected,
-/// so a later `/mcp reconnect` makes tools reachable without a restart.
 async fn init_mcp(
     cfg: &config::Config,
     no_tools: bool,
@@ -317,7 +292,6 @@ fn init_lsp(
     lsp_diagnostics
 }
 
-/// expand /template_name args... into template content
 pub fn expand_template(prompt: &str) -> String {
     if !prompt.starts_with('/') {
         return prompt.to_string();
@@ -342,7 +316,6 @@ pub fn expand_template(prompt: &str) -> String {
     }
 }
 
-/// enrich error messages with actionable suggestions
 pub fn format_error(error: &str) -> String {
     if error.contains("missing api key") {
         format!(
@@ -443,7 +416,6 @@ fn format_nested_agents(cwd: &std::path::Path, agents: &[loader::AgentsMd]) -> O
     Some(text.join("\n\n"))
 }
 
-/// build file context callback from nested AGENTS.md and `.mush/rules/`
 fn build_file_rules(cwd: &std::path::Path) -> Option<mush_agent::FileRuleCallback> {
     let rules = mush_ext::rules::discover_rules(cwd);
     let rule_index = if rules.is_empty() {
@@ -488,7 +460,6 @@ fn build_file_rules(cwd: &std::path::Path) -> Option<mush_agent::FileRuleCallbac
     }))
 }
 
-/// build LSP diagnostic callback and shared registry if enabled in config
 fn build_lsp_diagnostics(
     cwd: &std::path::Path,
     cfg: &config::Config,
@@ -502,7 +473,6 @@ fn build_lsp_diagnostics(
 
     let mut registry = mush_lsp::LspRegistry::new(cwd.to_path_buf());
 
-    // apply user-configured server overrides
     for (lang_name, entry) in &cfg.lsp.servers {
         if let Some(language) = parse_language_name(lang_name) {
             registry.add_override(mush_lsp::ServerConfig {
@@ -536,7 +506,6 @@ fn build_lsp_diagnostics(
     (Some(callback), Some(registry))
 }
 
-/// map config language name to mush-treesitter Language
 fn parse_language_name(name: &str) -> Option<mush_treesitter::Language> {
     match name.to_lowercase().as_str() {
         "rust" => Some(mush_treesitter::Language::Rust),
@@ -554,19 +523,6 @@ fn parse_language_name(name: &str) -> Option<mush_treesitter::Language> {
     }
 }
 
-/// resolve the thinking level from CLI flags, saved per-dir+model prefs,
-/// the per-model fallback, the model's own default, and the config-file
-/// fallback.
-///
-/// precedence (highest first):
-/// 1. `--think` CLI flag → `High`
-/// 2. saved preference for this `cwd + model.id`
-/// 3. saved preference for `model.id` in any other directory (most
-///    recent). lets a model the user has touched elsewhere carry their
-///    last pick instead of snapping back to upstream defaults
-/// 4. `model.default_thinking_level` (codex's recommended starting level)
-/// 5. `cfg.thinking` (global config default)
-/// 6. nothing → `None`
 pub fn resolve_thinking(
     cli_thinking: bool,
     model: &Model,
@@ -601,7 +557,6 @@ pub fn stream_options_from_config(
     }
 }
 
-/// resolve API key for a model: env > config > stored credentials > oauth
 pub async fn resolve_api_key(options: &mut StreamOptions, model: &Model, cfg: &config::Config) {
     if options.api_key.is_some() {
         return;
@@ -617,8 +572,6 @@ pub async fn resolve_api_key(options: &mut StreamOptions, model: &Model, cfg: &c
     options.account_id = resolved.account_id;
 }
 
-/// pick the default model based on per-cwd memory, then the model last
-/// used anywhere, then available auth
 pub fn default_model_id(cfg: &config::Config, cwd: &std::path::Path) -> String {
     if let Some(model) = &cfg.model {
         return model.clone();
@@ -631,10 +584,6 @@ pub fn default_model_id(cfg: &config::Config, cwd: &std::path::Path) -> String {
         return model.to_string();
     }
 
-    // no memory for this cwd yet: inherit the model last used anywhere
-    // rather than dropping straight to a hardcoded default. the recent
-    // list is most-recent first, so the first resolvable entry is the
-    // freshest still-valid choice.
     if let Some(model) = config::load_recent_models()
         .iter()
         .find(|id| mush_ai::discovery::resolve_model_by_id(id).is_some())
@@ -662,7 +611,6 @@ pub fn default_model_id(cfg: &config::Config, cwd: &std::path::Path) -> String {
     "claude-opus-4-7".into()
 }
 
-/// short model list for error messages
 pub fn list_models_short() -> String {
     mush_ai::discovery::merged_models()
         .iter()
@@ -671,8 +619,6 @@ pub fn list_models_short() -> String {
         .join("\n")
 }
 
-/// compact messages when approaching context limit.
-/// uses escalating strategy: observation masking first, then LLM summarisation.
 #[allow(clippy::too_many_arguments)]
 pub async fn auto_compact(
     messages: Vec<Message>,
@@ -710,7 +656,6 @@ pub async fn auto_compact(
 
     let mut messages = result.messages;
 
-    // post-compaction hooks (needs mush-agent types, so handled here)
     if let Some(hooks) = lifecycle_hooks
         && !hooks
             .for_point(mush_agent::HookPoint::PostCompaction)
@@ -900,8 +845,6 @@ mod tests {
             ("ANTHROPIC_OAUTH_TOKEN", None),
         ]);
 
-        // a fresh cwd with no recorded model should inherit the model
-        // last used anywhere rather than the hardcoded opus default
         config::save_recent_models(&["claude-opus-4-6".to_string()]);
 
         let cfg: config::Config = toml::from_str("").unwrap();
@@ -936,8 +879,6 @@ mod tests {
 
     #[test]
     fn resolve_thinking_prefers_per_dir_override_over_model_default() {
-        // user said "i want medium for this project"; that wins over the
-        // model's curated recommendation
         let dir = tempfile::tempdir().unwrap();
         let mut prefs = mush_tui::ThinkingPrefs::default();
         let model = dummy_model_with_default(Some(ThinkingLevel::High));
@@ -955,8 +896,6 @@ mod tests {
 
     #[test]
     fn resolve_thinking_falls_back_to_model_default_when_no_override() {
-        // codex hints `medium`; with no per-dir override and no config
-        // setting, the model's default applies
         let dir = tempfile::tempdir().unwrap();
         let prefs = mush_tui::ThinkingPrefs::default();
         let model = dummy_model_with_default(Some(ThinkingLevel::Medium));
@@ -969,8 +908,6 @@ mod tests {
 
     #[test]
     fn resolve_thinking_model_default_outranks_config_thinking() {
-        // a model-specific default is more targeted than the global
-        // config default, so it should win when both are set
         let dir = tempfile::tempdir().unwrap();
         let prefs = mush_tui::ThinkingPrefs::default();
         let model = dummy_model_with_default(Some(ThinkingLevel::High));
@@ -983,7 +920,6 @@ mod tests {
 
     #[test]
     fn resolve_thinking_falls_through_to_config_when_no_model_default() {
-        // uncurated model with no default; cfg.thinking takes over
         let dir = tempfile::tempdir().unwrap();
         let prefs = mush_tui::ThinkingPrefs::default();
         let model = dummy_model_with_default(None);
@@ -1011,10 +947,6 @@ effort = "low"
 
     #[test]
     fn resolve_thinking_falls_back_to_per_model_pref_from_other_dir() {
-        // user picked Medium for this model in a different project; when
-        // they switch back into a fresh dir without a per-dir entry, the
-        // per-model fallback should hand back Medium instead of the
-        // upstream default
         let other_dir = tempfile::tempdir().unwrap();
         let active_dir = tempfile::tempdir().unwrap();
         let mut prefs = mush_tui::ThinkingPrefs::default();
@@ -1025,8 +957,6 @@ effort = "low"
             ThinkingLevel::Medium,
         );
         let cfg: config::Config = toml::from_str("").unwrap();
-        // active_dir has no per-dir entry but the per-model fallback
-        // returns Medium from the other dir's pick
         assert_eq!(
             resolve_thinking(false, &model, &prefs, active_dir.path(), &cfg),
             Some(ThinkingLevel::Medium),
@@ -1071,9 +1001,6 @@ effort = "low"
 
     #[test]
     fn forbidden_chars_parses_from_toml() {
-        // each entry must be exactly one char (Unicode scalar), serde
-        // accepts a single-char string into a `char`. multi-char
-        // strings should fail to parse rather than silently truncate
         let cfg: config::Config = toml::from_str(r#"forbidden_chars = ["—", ";", "–"]"#).unwrap();
         assert_eq!(cfg.forbidden_chars, vec!['—', ';', '–']);
     }
@@ -1086,9 +1013,6 @@ effort = "low"
 
     #[test]
     fn forbidden_chars_rejects_multi_char_strings() {
-        // safety: a model couldn't sensibly comply with a "forbidden
-        // string" of length > 1 via the per-char validator, so reject
-        // the config rather than silently misbehave
         let result: Result<config::Config, _> = toml::from_str(r#"forbidden_chars = ["nope"]"#);
         assert!(
             result.is_err(),

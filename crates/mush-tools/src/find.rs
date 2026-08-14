@@ -1,5 +1,3 @@
-//! find tool - file search by name pattern
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

@@ -1,5 +1,3 @@
-//! read tool - reads file contents with optional offset/limit
-
 use std::path::Path;
 use std::sync::Arc;
 
@@ -12,19 +10,15 @@ use crate::util::resolve_path;
 
 use mush_agent::truncation::{MAX_BYTES, MAX_LINES};
 
-/// headroom so read's hint footer fits within the central truncation limit
 const CONTENT_LINE_HEADROOM: usize = 5;
-/// per-line length cap (chars). longer lines silently truncated
 const MAX_LINE_CHARS: usize = 500;
 
 const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "webp"];
 
-/// truncate a line to at most `max` chars
 fn truncate_line(line: &str, max: usize) -> &str {
     if line.len() <= max {
         return line;
     }
-    // find a char boundary at or before max
     &line[..line.floor_char_boundary(max)]
 }
 
@@ -198,8 +192,6 @@ impl ReadArgs {
 
 pub struct ReadTool {
     cwd: Arc<Path>,
-    /// images larger than this (bytes) are downscaled before being
-    /// attached. defaults to [`DEFAULT_MAX_IMAGE_BYTES`]
     max_image_bytes: usize,
 }
 
@@ -211,8 +203,6 @@ impl ReadTool {
         }
     }
 
-    /// override the image size cap (bytes) above which images are
-    /// downscaled. `None` keeps the default
     #[must_use]
     pub fn with_max_image_bytes(mut self, max_image_bytes: Option<usize>) -> Self {
         if let Some(max) = max_image_bytes {
@@ -239,10 +229,6 @@ impl AgentTool for ReadTool {
 
     fn description_for(&self, api: Api) -> &str {
         match api {
-            // anthropic sees claude code's reduced schema (file_path +
-            // offset + limit only, see parameters_schema_for), so the prose
-            // must not advertise span fields the model can't pass: it
-            // reaches for them anyway and stringifies the line numbers
             Api::AnthropicMessages => {
                 "Read a file's contents with 1-indexed line numbers. Supports text files and \
                  images (jpg, png, gif, webp). Images are returned as attachments. Use offset \
@@ -300,12 +286,6 @@ impl AgentTool for ReadTool {
 
     fn parameters_schema_for(&self, api: Api) -> serde_json::Value {
         match api {
-            // mirror claude code's read tool exactly: file_path + offset
-            // + limit only. claude models are RL'd on this signature, so
-            // exposing the full canonical schema (start_line, end_line,
-            // around_line, etc) just confuses them. the canonical handler
-            // accepts `file_path` via serde alias so internal logic stays
-            // unchanged
             Api::AnthropicMessages => serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -383,12 +363,10 @@ fn read_file(
         );
     }
 
-    // handle images
     if is_image(path) {
         return (read_image(path, max_image_bytes), 0);
     }
 
-    // read text file
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) => return (ToolResult::error(format!("failed to read file: {e}")), 0),
@@ -404,7 +382,6 @@ fn read_file(
         );
     }
 
-    // apply offset (1-indexed)
     let start = offset.unwrap_or(1).saturating_sub(1).min(total_lines);
     let content_max = MAX_LINES - CONTENT_LINE_HEADROOM;
     let max_lines = limit.unwrap_or(content_max).min(content_max);
@@ -425,7 +402,6 @@ fn read_file(
             bytes_written += 1;
         }
 
-        // format as L{n}: {content} with per-line length cap
         let line_num = i + 1;
         let display_line = truncate_line(line, MAX_LINE_CHARS);
         let formatted = format!("L{line_num}: {display_line}");
@@ -460,7 +436,6 @@ fn read_file(
             "end_line": end_line,
             "truncated": truncated,
             "size_bytes": size,
-            // content already has L{n}: prefixes
             "content": result,
         });
         if let Some(mtime) = modified {
@@ -472,16 +447,10 @@ fn read_file(
     }
 }
 
-/// default cap on attachment image size. images larger than this get
-/// downscaled and re-encoded so they fit. most providers reject oversized
-/// images, and an oversized copy would otherwise sit in the conversation
-/// and fail every subsequent request until the user manually rewinds
 const DEFAULT_MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 
-/// smallest longest-side we will downscale to before giving up
 const MIN_IMAGE_DIM: u32 = 64;
 
-/// a re-encoded, size-bounded image plus the metadata used in the note
 struct ResizedImage {
     bytes: Vec<u8>,
     mime: mush_ai::types::ImageMimeType,
@@ -489,15 +458,9 @@ struct ResizedImage {
     new_dimensions: (u32, u32),
 }
 
-/// downscale and re-encode `data` (as JPEG) until it fits within
-/// `max_bytes`. re-encoding alone often suffices for a large PNG; genuinely
-/// huge images are progressively downscaled. returns an error if the bytes
-/// can't be decoded as an image.
 fn resize_image_to_fit(data: &[u8], max_bytes: usize) -> Result<ResizedImage, String> {
     use image::ImageEncoder;
 
-    /// jpeg quality for the re-encode. 85 keeps screenshots/diagrams
-    /// legible while shrinking photos hard
     const QUALITY: u8 = 85;
 
     let img = image::load_from_memory(data).map_err(|error| error.to_string())?;
@@ -505,7 +468,6 @@ fn resize_image_to_fit(data: &[u8], max_bytes: usize) -> Result<ResizedImage, St
     let mut current = img;
 
     loop {
-        // jpeg has no alpha channel; flatten to rgb before encoding
         let rgb = current.to_rgb8();
         let (w, h) = rgb.dimensions();
 
@@ -523,8 +485,6 @@ fn resize_image_to_fit(data: &[u8], max_bytes: usize) -> Result<ResizedImage, St
             });
         }
 
-        // shrink the longest side by a quarter and retry. resize preserves
-        // aspect ratio, fitting within the box
         let nw = (w * 3 / 4).max(1);
         let nh = (h * 3 / 4).max(1);
         current = current.resize(nw, nh, image::imageops::FilterType::Triangle);
@@ -542,7 +502,6 @@ fn read_image(path: &Path, max_image_bytes: usize) -> ToolResult {
     use base64::Engine;
     let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
 
-    // small enough: attach as-is, preserving the original format
     if data.len() <= max_image_bytes {
         let ext = path
             .extension()
@@ -558,9 +517,6 @@ fn read_image(path: &Path, max_image_bytes: usize) -> ToolResult {
         };
     }
 
-    // too big: downscale so it fits. attaching the oversized image would
-    // make every subsequent request fail (the image sits in history), so
-    // the user would have to manually rewind. shrinking it avoids that
     let mb = |bytes: usize| bytes as f64 / 1_048_576.0;
     match resize_image_to_fit(&data, max_image_bytes) {
         Ok(resized) => {
@@ -587,8 +543,6 @@ fn read_image(path: &Path, max_image_bytes: usize) -> ToolResult {
                 outcome: mush_ai::types::ToolOutcome::Success,
             }
         }
-        // don't attach the oversized image even on failure, or it'll fail
-        // every future request. surface a note instead
         Err(e) => ToolResult::error(format!(
             "image is {:.1} MB, over the {:.0} MB limit, and could not be resized: {e}. \
              not attached.",
@@ -598,10 +552,6 @@ fn read_image(path: &Path, max_image_bytes: usize) -> ToolResult {
     }
 }
 
-/// write the resized image to a temp file so the agent can reference it
-/// later. best-effort: returns `None` on failure since the inline
-/// attachment is what actually matters. the filename includes a hash of
-/// the source path so different files don't collide
 fn write_resized_to_temp(original: &Path, bytes: &[u8]) -> Option<std::path::PathBuf> {
     use std::hash::{Hash, Hasher};
 
@@ -627,8 +577,6 @@ mod tests {
     }
 
     fn make_png(w: u32, h: u32) -> Vec<u8> {
-        // a high-frequency pattern so it doesn't compress down to nothing,
-        // forcing the resize path to actually downscale
         let img = image::ImageBuffer::from_fn(w, h, |x, y| {
             image::Rgb([
                 (x ^ y) as u8,
@@ -723,7 +671,6 @@ mod tests {
         let data = make_png(16, 16);
         fs::write(&file, &data).unwrap();
 
-        // a cap far above the tiny image: no resize, attached byte-for-byte
         let (result, _) = read_file(&file, None, None, false, 10_000_000);
         assert!(result.outcome.is_success());
 
@@ -738,10 +685,6 @@ mod tests {
 
     #[test]
     fn anthropic_schema_matches_claude_code_signature() {
-        // claude code's read tool exposes only file_path / offset / limit.
-        // serving the same minimal schema to anthropic-bound calls keeps
-        // claude models from tripping over the extra fields they aren't
-        // RL'd on
         let tool = ReadTool::new(Arc::from(Path::new("/tmp")));
         let schema = tool.parameters_schema_for(Api::AnthropicMessages);
         let props = schema
@@ -765,7 +708,6 @@ mod tests {
             .get("properties")
             .and_then(|p| p.as_object())
             .unwrap();
-        // full schema retains start_line / end_line / around_line etc
         assert!(props.contains_key("path"));
         assert!(props.contains_key("start_line"));
         assert!(props.contains_key("around_line"));
@@ -773,10 +715,7 @@ mod tests {
 
     #[test]
     fn parameters_schema_for_defaults_to_canonical() {
-        // the trait default returns parameters_schema(); other tools that
-        // don't override the per-provider hook get the same schema
         let tool = ReadTool::new(Arc::from(Path::new("/tmp")));
-        // openai responses also takes the canonical schema for now
         let schema = tool.parameters_schema_for(Api::OpenaiResponses);
         let props = schema
             .get("properties")
@@ -787,15 +726,11 @@ mod tests {
 
     #[test]
     fn anthropic_description_omits_span_fields() {
-        // anthropic's reduced schema only exposes file_path/offset/limit,
-        // so the prose must not advertise span fields the model can't pass,
-        // otherwise it reaches for them and stringifies the line numbers
         let tool = ReadTool::new(Arc::from(Path::new("/tmp")));
         let anthropic = tool.description_for(Api::AnthropicMessages);
         assert!(!anthropic.contains("start_line"), "got: {anthropic}");
         assert!(!anthropic.contains("end_line"));
         assert!(!anthropic.contains("around_line"));
-        // other apis and the canonical description still document them
         assert!(
             tool.description_for(Api::OpenaiCompletions)
                 .contains("start_line")
@@ -805,9 +740,6 @@ mod tests {
 
     #[tokio::test]
     async fn execute_accepts_file_path_alias() {
-        // claude (via anthropic schema) calls with `file_path`; the
-        // canonical handler still uses `path`. serde alias means both
-        // names round-trip to the same field
         let dir = temp_dir();
         let file = dir.path().join("alias.txt");
         fs::write(&file, "hello\nworld").unwrap();
@@ -830,7 +762,6 @@ mod tests {
         let (result, _) = read_file(&file, None, None, false, DEFAULT_MAX_IMAGE_BYTES);
         assert!(result.outcome.is_success());
         let text = extract_text(&result);
-        // output now has L{n}: prefixes
         assert!(text.contains("L1: line 1"));
         assert!(text.contains("L3: line 3"));
     }
@@ -975,11 +906,6 @@ mod tests {
 
     #[tokio::test]
     async fn read_accepts_stringified_line_numbers() {
-        // tool-calling models routinely emit integer args as JSON strings
-        // (e.g. "5" instead of 5), especially for fields the anthropic
-        // schema omits but the description advertises. the read tool must
-        // accept those rather than reject with "invalid type: string,
-        // expected usize"
         let dir = temp_dir();
         let file = dir.path().join("test.txt");
         let content: String = (1..=20)
@@ -1078,7 +1004,6 @@ mod tests {
             }))
             .await;
         let text = extract_text(&result);
-        // default context is 20 before + 20 after = lines 30-70
         assert!(text.contains("L30: line 30"));
         assert!(text.contains("L70: line 70"));
         assert!(!text.contains("L29:"));
@@ -1131,7 +1056,6 @@ mod tests {
 
         let (result, _) = read_file(&file, None, None, false, DEFAULT_MAX_IMAGE_BYTES);
         let text = extract_text(&result);
-        // should be capped at MAX_LINE_CHARS (500)
         assert!(text.starts_with("L1: "));
         let content = text.strip_prefix("L1: ").unwrap();
         assert_eq!(content.len(), 500);
@@ -1180,9 +1104,6 @@ mod tests {
 
     #[test]
     fn large_file_output_within_central_truncation_limits() {
-        // read's output for large files must fit within the central
-        // truncation limits so the central pass is a no-op and read's
-        // semantic hint ("[N more lines. Use offset=X]") survives
         let dir = temp_dir();
         let file = dir.path().join("big.txt");
         let content: String = (1..=5000)
@@ -1211,7 +1132,6 @@ mod tests {
              central truncation would strip read's hint"
         );
 
-        // verify the hint is present
         assert!(text.contains("more lines in file"));
         assert!(text.contains("offset="));
     }

@@ -1,9 +1,3 @@
-//! canonical conversation state
-//!
-//! conversation history is stored canonically as a session tree.
-//! flat message lists are derived views used for compatibility and
-//! for building the llm context for the current branch.
-
 use mush_ai::types::Message;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -53,8 +47,6 @@ impl ConversationState {
         self.tree.build_context()
     }
 
-    /// full branch history for display, without collapsing compacted
-    /// entries. see [`SessionTree::build_display_history`]
     pub fn display_history(&self) -> Vec<Message> {
         self.tree.build_display_history()
     }
@@ -95,11 +87,6 @@ impl ConversationState {
         self.tree.branch_with_summary(from_id, summary)
     }
 
-    /// add a compaction marker at the current leaf, summarising the
-    /// first `first_kept_context_index` context messages of the current
-    /// branch. existing tree entries are preserved so `/tree` and
-    /// `/branch` can navigate back to the pre-compaction state.
-    /// see [`SessionTree::compact_at_leaf`] for the index semantics
     pub fn compact_at_leaf(
         &mut self,
         summary: String,

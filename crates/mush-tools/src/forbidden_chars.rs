@@ -1,39 +1,14 @@
-//! forbidden-characters validator
-//!
-//! a small helper used by the `write` and `edit` tools to enforce a
-//! user-configured "alphabet of forbidden characters" on file content.
-//! the validator scans content character-by-character and reports the
-//! first offending occurrence with its line and column.
-//!
-//! configured via the `forbidden_chars` config key. each entry must be
-//! exactly one Unicode scalar (one char). example:
-//!
-//! ```toml
-//! forbidden_chars = ["—", "–", ";"]
-//! ```
-//!
-//! tools that produce text (`write`, `edit`) reject the call with a
-//! pointed error unless the model passes `allow_forbidden_chars: true`.
-
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use thiserror::Error;
 
-/// a class of characters to forbid wholesale, for cases where listing
-/// every codepoint by hand is impractical (emoji, arrow glyphs).
-/// combine with the explicit `chars` set in [`ForbiddenChars`].
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize, schemars::JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum CharClass {
-    /// pictographic emoji. matches `Emoji=YES | Emoji_Component=YES` but
-    /// excludes ASCII (the `0-9`, `#`, `*` keycap bases carry `Emoji=YES`
-    /// yet are ordinary code), so real source is never rejected.
     Emoji,
-    /// arrow glyphs from the Unicode arrow blocks (`→ ← ↑ ↓ ⇒ ⬆` etc).
-    /// the ASCII `->` is unaffected.
     Arrows,
 }
 
@@ -45,7 +20,6 @@ impl CharClass {
         }
     }
 
-    /// short human name used in the violation message.
     fn label(self) -> &'static str {
         match self {
             Self::Emoji => "emoji",
@@ -61,19 +35,15 @@ fn is_emoji(ch: char) -> bool {
 
 fn is_arrow(ch: char) -> bool {
     matches!(ch,
-        '\u{2190}'..='\u{21FF}'   // Arrows
-        | '\u{2794}'..='\u{27BF}' // Dingbats (heavy/curved arrows)
-        | '\u{27F0}'..='\u{27FF}' // Supplemental Arrows-A
-        | '\u{2900}'..='\u{297F}' // Supplemental Arrows-B
-        | '\u{2B05}'..='\u{2B07}' // black left/up/down arrows
-        | '\u{2B95}'              // black rightwards arrow
+        '\u{2190}'..='\u{21FF}'
+        | '\u{2794}'..='\u{27BF}'
+        | '\u{27F0}'..='\u{27FF}'
+        | '\u{2900}'..='\u{297F}'
+        | '\u{2B05}'..='\u{2B07}'
+        | '\u{2B95}'
     )
 }
 
-/// validator for a configured set of forbidden characters.
-///
-/// cheap to clone (internally `Arc`-shared). pass into tool
-/// constructors so every call re-uses the same shared set.
 #[derive(Debug, Clone)]
 pub struct ForbiddenChars {
     chars: Arc<HashSet<char>>,
@@ -81,12 +51,10 @@ pub struct ForbiddenChars {
 }
 
 impl ForbiddenChars {
-    /// build from an iterator of forbidden characters.
     pub fn new(chars: impl IntoIterator<Item = char>) -> Self {
         Self::with_classes(chars, std::iter::empty())
     }
 
-    /// build from explicit characters plus whole character classes.
     pub fn with_classes(
         chars: impl IntoIterator<Item = char>,
         classes: impl IntoIterator<Item = CharClass>,
@@ -97,22 +65,14 @@ impl ForbiddenChars {
         }
     }
 
-    /// validator that always passes.
     pub fn empty() -> Self {
         Self::new(std::iter::empty())
     }
 
-    /// whether the validator has anything to enforce. tools can short-
-    /// circuit the scan when this is true.
     pub fn is_empty(&self) -> bool {
         self.chars.is_empty() && self.classes.is_empty()
     }
 
-    /// scan `content` for the first forbidden character.
-    ///
-    /// reports 1-indexed line and column counted in Unicode scalars
-    /// (chars), not bytes, so the position lines up with what an
-    /// end-user / model sees in an editor.
     pub fn check(&self, content: &str) -> Result<(), ForbiddenCharError> {
         if self.is_empty() {
             return Ok(());
@@ -154,7 +114,6 @@ impl Default for ForbiddenChars {
     }
 }
 
-/// a forbidden character was found at a specific location.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error(
     "forbidden character {} (U+{:04X}) at line {line}, column {column}{}. \
@@ -165,12 +124,9 @@ pub struct ForbiddenCharError {
     pub ch: char,
     pub line: usize,
     pub column: usize,
-    /// which class matched, or `None` when the char was listed explicitly.
     pub class: Option<CharClass>,
 }
 
-/// describe a class match so the model knows it hit a whole category
-/// rather than a single configured char.
 fn class_suffix(class: Option<CharClass>) -> String {
     match class {
         Some(c) => format!(" (matches the forbidden {} class)", c.label()),
@@ -178,9 +134,6 @@ fn class_suffix(class: Option<CharClass>) -> String {
     }
 }
 
-/// render a char in a way that's unambiguous in error messages: visible
-/// chars print as `'X'`, control / whitespace chars print by name so
-/// the model isn't asked to find a character it can't see
 fn fmt_char(ch: char) -> String {
     match ch {
         '\n' => "'\\n' (newline)".into(),
@@ -192,48 +145,10 @@ fn fmt_char(ch: char) -> String {
     }
 }
 
-/// pulls the user-supplied text fragments out of a tool call's json
-/// args. each tool that produces file content provides its own
-/// extractor when wrapping under a [`ForbiddenCharsGuard`]:
-///
-/// - `write` returns `[args.content]`
-/// - `edit` returns `[args.newText]`
-/// - `apply_patch` parses the patch and returns each added/replaced
-///   line of content
-///
-/// returning an empty `Vec` skips validation (the inner tool will
-/// usually then fail with a parse error, surfacing the real issue).
 pub type ContentExtractor = std::sync::Arc<dyn Fn(&serde_json::Value) -> Vec<String> + Send + Sync>;
 
-/// json key on tool call args that bypasses the guard for a single
-/// call. the guard reads and consumes this key before delegating to
-/// the inner tool, so inner deserialisers using `deny_unknown_fields`
-/// stay happy without having to know about the policy
 pub const ALLOW_FORBIDDEN_CHARS_KEY: &str = "allow_forbidden_chars";
 
-/// wraps any `AgentTool` and enforces a forbidden-characters policy
-/// on the user-supplied text fragments extracted from each call's
-/// args. inner tools stay completely oblivious to the policy:
-///
-/// - validation runs before delegation; on a hit, the inner tool is
-///   never called and the call returns a [`ForbiddenCharError`]
-/// - the schema is augmented with an `allow_forbidden_chars` boolean
-///   so the model has a documented per-call escape hatch
-/// - the override flag is stripped from args before delegation so
-///   inner tools using `deny_unknown_fields` don't choke on it
-///
-/// the wrapper short-circuits when the configured set is empty: prefer
-/// [`ForbiddenCharsGuard::maybe_wrap`] which returns the inner tool
-/// untouched in that case so callers don't pay the wrapper tax for
-/// the no-config common case.
-/// whether the per-call bypass is advertised in the tool schema.
-///
-/// `write`/`edit`/`apply_patch` advertise it so the model has a
-/// documented escape hatch. `bash` keeps it [`Hidden`](Self::Hidden):
-/// the field still works and is named in the rejection message, but it
-/// is deliberately left out of the advertised schema so the model only
-/// reaches for it after a genuine block (e.g. the user asking it to
-/// `sed` a forbidden char out of a file).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BypassVisibility {
     Advertised,
@@ -262,9 +177,6 @@ impl ForbiddenCharsGuard {
         }
     }
 
-    /// wrap `inner` only when there's something to enforce. with an
-    /// empty validator, `inner` is returned unchanged so callers don't
-    /// need to special-case the no-config path
     pub fn maybe_wrap(
         inner: mush_agent::tool::SharedTool,
         chars: ForbiddenChars,
@@ -278,8 +190,6 @@ impl ForbiddenCharsGuard {
         }
     }
 
-    /// augment the schema with the bypass knob only when advertised.
-    /// hidden guards return the inner schema untouched.
     fn maybe_augment(&self, schema: serde_json::Value) -> serde_json::Value {
         match self.visibility {
             BypassVisibility::Advertised => augment_schema(schema),
@@ -288,10 +198,6 @@ impl ForbiddenCharsGuard {
     }
 }
 
-/// inject the `allow_forbidden_chars` knob into a tool's parameters
-/// schema. exposed as a free function so both `parameters_schema` and
-/// `parameters_schema_for(api)` can re-use it without duplicating the
-/// description text
 fn augment_schema(mut schema: serde_json::Value) -> serde_json::Value {
     let serde_json::Value::Object(ref mut top) = schema else {
         return schema;
@@ -374,8 +280,6 @@ mod tests {
         assert!(!fc.is_empty(), "a class alone is not empty");
         assert!(fc.check("ship it 🚀").is_err());
         assert!(fc.check("done ✅").is_err());
-        // Emoji=YES technically covers ASCII digits, '#', '*' (keycap bases);
-        // ordinary code must still pass
         assert!(fc.check("let x = 12; a[3] = *p; # note").is_ok());
     }
 
@@ -418,8 +322,6 @@ mod tests {
 
     #[test]
     fn reports_first_match_when_multiple_forbidden() {
-        // `;` comes before `—` in input order; we report the first
-        // occurrence, not the lexicographically smallest forbidden char
         let fc = ForbiddenChars::new(['—', ';']);
         let err = fc.check("a; b—c").unwrap_err();
         assert_eq!(err.ch, ';');
@@ -427,8 +329,6 @@ mod tests {
 
     #[test]
     fn column_counts_chars_not_bytes() {
-        // multi-byte chars before the offender shouldn't inflate the
-        // reported column. "café—" puts é at col 4, em dash at col 5
         let fc = ForbiddenChars::new(['—']);
         let err = fc.check("café—").unwrap_err();
         assert_eq!(err.column, 5);
@@ -462,7 +362,6 @@ mod tests {
 
     #[test]
     fn error_message_names_control_chars_by_descriptor() {
-        // \t shouldn't render literally in the message; we want a name
         let fc = ForbiddenChars::new(['\t']);
         let msg = fc.check("a\tb").unwrap_err().to_string();
         assert!(msg.contains("tab"), "expected `tab` descriptor: {msg}");
@@ -475,9 +374,6 @@ mod tests {
         assert!(cloned.check("foo—bar").is_err());
     }
 
-    /// minimal `AgentTool` that records what args it saw and returns
-    /// "ok". lets the guard tests verify both the validator behaviour
-    /// and what gets passed downstream
     struct RecordingTool {
         received: Mutex<Option<serde_json::Value>>,
     }
@@ -573,8 +469,6 @@ mod tests {
 
     #[tokio::test]
     async fn guard_strips_allow_forbidden_chars_before_delegating() {
-        // bypass flag must not leak through to the inner tool, otherwise
-        // inner deserialisers using deny_unknown_fields would reject it
         let (inner, guard) = record_with_guard(ForbiddenChars::new(['—']));
         let result = guard
             .execute(serde_json::json!({
@@ -593,9 +487,6 @@ mod tests {
 
     #[tokio::test]
     async fn guard_validates_every_extracted_string() {
-        // some extractors return multiple strings (e.g. apply_patch
-        // returning every added line). a forbidden char in any of
-        // them must block the call
         let inner: SharedTool = Arc::new(RecordingTool::new());
         let multi: ContentExtractor = Arc::new(|args| {
             args.get("lines")
@@ -636,15 +527,11 @@ mod tests {
             schema["properties"]["allow_forbidden_chars"]["type"],
             "boolean"
         );
-        // existing properties should still be present
         assert_eq!(schema["properties"]["content"]["type"], "string");
     }
 
     #[tokio::test]
     async fn hidden_guard_omits_schema_knob_but_still_enforces_and_bypasses() {
-        // bash uses a hidden guard: the bypass field must not appear in the
-        // advertised schema, yet the guard still blocks forbidden content and
-        // still honours the bypass flag when passed
         let inner: SharedTool = Arc::new(RecordingTool::new());
         let guard = ForbiddenCharsGuard::new(
             inner.clone(),
@@ -656,7 +543,6 @@ mod tests {
             guard.parameters_schema()["properties"]["allow_forbidden_chars"].is_null(),
             "hidden guard must not advertise the bypass field"
         );
-        // still enforces, and the rejection message names the hidden field
         let blocked = guard
             .execute(serde_json::json!({"content": "no — dash"}))
             .await;
@@ -664,7 +550,6 @@ mod tests {
             !blocked.outcome.is_success(),
             "hidden guard must still block"
         );
-        // still bypassable via the undocumented field
         let allowed = guard
             .execute(serde_json::json!({
                 "content": "with — em dash",
@@ -679,9 +564,6 @@ mod tests {
 
     #[test]
     fn maybe_wrap_returns_inner_unchanged_when_chars_empty() {
-        // tests don't have a way to compare SharedTool identity directly,
-        // so verify behaviourally: inner schema lacks the override knob
-        // when the validator is empty, and would have it after wrapping
         let inner: SharedTool = Arc::new(RecordingTool::new());
         let wrapped = ForbiddenCharsGuard::maybe_wrap(
             inner,

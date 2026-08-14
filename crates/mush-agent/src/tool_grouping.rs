@@ -1,26 +1,10 @@
-//! tool-call grouping for safe parallel execution
-//!
-//! when an agent emits multiple tool calls in a single turn, calls that
-//! mutate the same file must be serialised to avoid silent data loss
-//! (read-modify-write races where the last writer wins). this module
-//! provides the path-keying and grouping primitives used by both the
-//! `batch` tool and the agent loop's native parallel-call path.
-
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 
 use serde_json::Value;
 
-/// tool names that mutate a single file via a `path` argument
 const FILE_MUTATING: &[&str] = &["edit", "write"];
 
-/// return a normalised path key if the tool mutates a single file by
-/// path. returns `None` for tools that don't fit the (path-arg, single
-/// file) pattern (read-only tools, multi-file `apply_patch`, etc).
-///
-/// the returned string is a lexically-cleaned form of the input path so
-/// that `./foo.rs` and `foo.rs` map to the same key. it does not touch
-/// the filesystem (no symlink resolution) and does not collapse `..`.
 pub fn file_path_key(tool_name: &str, args: &Value) -> Option<String> {
     if !FILE_MUTATING
         .iter()
@@ -40,11 +24,6 @@ fn normalise_path_key(path: &str) -> String {
     cleaned.to_string_lossy().into_owned()
 }
 
-/// partition a list of items into groups where each group must be
-/// executed sequentially. items with the same key share a group; items
-/// with `None` keys get their own singleton group. groups are returned
-/// in the order their first item appears so caller-side ordering is
-/// preserved.
 pub fn group_by_path<T, F>(items: Vec<T>, key_fn: F) -> Vec<Vec<(usize, T)>>
 where
     F: Fn(&T) -> Option<String>,
@@ -68,13 +47,6 @@ where
     groups
 }
 
-/// run a list of items through `exec_fn`, executing items that share a
-/// path key sequentially within their group while running different
-/// groups concurrently. results come back in submission order so callers
-/// can zip them with the original input.
-///
-/// the closure receives the item by value because the inner futures need
-/// to own their input so the outer `join_all` can drive them concurrently.
 pub async fn execute_grouped<T, K, R, Fut, F>(items: Vec<T>, key_fn: K, exec_fn: F) -> Vec<R>
 where
     K: Fn(&T) -> Option<String>,
@@ -136,7 +108,6 @@ mod tests {
 
     #[test]
     fn file_path_key_for_apply_patch_returns_none() {
-        // apply_patch can touch many files - cannot be grouped by single path
         let args = json!({"patch_text": "..."});
         assert!(file_path_key("apply_patch", &args).is_none());
     }
@@ -223,7 +194,6 @@ mod tests {
         ];
         let groups = group_by_path(items, |(name, args)| file_path_key(name, args));
         assert_eq!(groups.len(), 2);
-        // z.rs group came first because it appears first
         assert_eq!(groups[0][0].0, 0);
         assert_eq!(groups[1][0].0, 1);
     }
@@ -237,11 +207,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn execute_grouped_serialises_same_path_calls() {
-        // simulate the read-modify-write race that motivates this fix.
-        // each call reads its file's counter, sleeps to widen the race
-        // window, then writes counter+1 back. without sequencing the
-        // two same-file calls would both read 0 and write 1, losing
-        // one increment. with sequencing both increments land.
         use std::collections::HashMap;
         use std::sync::Arc;
         use tokio::sync::Mutex;
@@ -271,7 +236,6 @@ mod tests {
         )
         .await;
 
-        // results come back in submission order
         assert_eq!(results, vec!["a", "b", "c"]);
 
         let final_counters = counters.lock().await.clone();
@@ -285,9 +249,6 @@ mod tests {
 
     #[tokio::test]
     async fn execute_grouped_runs_independent_calls_in_parallel() {
-        // sleep + record start time per call. independent calls (no
-        // shared path key) should overlap, so total wall time is closer
-        // to one delay than to N delays
         use std::time::{Duration, Instant};
         let start = Instant::now();
         let items: Vec<(&str, Value)> = (0..4)

@@ -1,8 +1,3 @@
-//! MCP server manager
-//!
-//! owns one [`McpServer`] handle per configured server and hands out the
-//! tool registry the agent loop consumes.
-
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -12,18 +7,11 @@ use crate::connection::{DIM, YELLOW, report_status};
 use crate::server::{McpServer, McpServerStatus, ServerState};
 use crate::tool::McpTool;
 
-/// manages connections to multiple MCP servers
 pub struct McpManager {
-    /// sorted by name so status output and tool ordering are stable
     servers: Vec<Arc<McpServer>>,
 }
 
 impl McpManager {
-    /// connect to all configured MCP servers
-    ///
-    /// failures are recorded on the server handle rather than dropped, so
-    /// `/mcp` can explain why something is missing and `/mcp reconnect`
-    /// can retry it later.
     #[tracing::instrument(name = "mcp_connect_all", skip_all)]
     pub async fn connect_all(configs: &HashMap<String, McpServerConfig>) -> Self {
         let mut names: Vec<&String> = configs.keys().collect();
@@ -47,7 +35,6 @@ impl McpManager {
         Self { servers }
     }
 
-    /// one `AgentTool` per MCP tool, for the static (non-dynamic) mode
     pub async fn tool_registry(&self) -> mush_agent::tool::ToolRegistry {
         let mut registry = mush_agent::tool::ToolRegistry::new();
         for server in &self.servers {
@@ -58,13 +45,11 @@ impl McpManager {
         registry
     }
 
-    /// live view over every server's tools
     #[must_use]
     pub fn catalogue(&self) -> McpCatalogue {
         McpCatalogue::new(self.servers.clone())
     }
 
-    /// display-ready status for every configured server
     pub async fn statuses(&self) -> Vec<McpServerStatus> {
         let mut out = Vec::with_capacity(self.servers.len());
         for server in &self.servers {
@@ -73,7 +58,6 @@ impl McpManager {
         out
     }
 
-    /// redial one server by name, case-insensitively
     pub async fn reconnect(&self, name: &str) -> Option<ServerState> {
         let query = name.to_lowercase();
         let server = self
@@ -83,7 +67,6 @@ impl McpManager {
         Some(server.reconnect().await)
     }
 
-    /// names of servers that are currently connected
     pub async fn connected_servers(&self) -> Vec<&str> {
         let mut out = Vec::new();
         for server in &self.servers {
@@ -106,7 +89,6 @@ mod tests {
     use crate::config::McpServerType;
     use std::time::Duration;
 
-    /// one local server keyed as `name`, running `command`
     fn local(name: &str, command: &[&str], timeout: u64) -> HashMap<String, McpServerConfig> {
         HashMap::from([(
             name.to_string(),
@@ -137,7 +119,6 @@ mod tests {
 
         assert!(manager.connected_servers().await.is_empty());
         assert!(manager.tool_registry().await.is_empty());
-        // still visible to `/mcp`, so a disabled server is not a mystery
         let statuses = manager.statuses().await;
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].state, ServerState::Disabled);
@@ -186,7 +167,6 @@ mod tests {
         assert!(matches!(state, ServerState::Failed { .. }));
     }
 
-    /// a server that spawns but never speaks must not wedge startup
     #[tokio::test]
     async fn silent_server_gives_up_after_the_configured_timeout() {
         let configs = local("hang", &["sleep", "60"], 1);

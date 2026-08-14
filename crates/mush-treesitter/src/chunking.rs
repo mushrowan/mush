@@ -1,42 +1,22 @@
-//! AST-aware chunking for embedding
-//!
-//! splits source files into semantic chunks using tree-sitter syntax
-//! trees. each chunk represents a meaningful code entity (function,
-//! struct, impl block) with parent context (imports, enclosing types)
-//! for embedding quality.
-//!
-//! falls back to recursive text splitting for non-parseable files.
-
 use std::path::{Path, PathBuf};
 
 use crate::symbols::{SymbolInfo, SymbolKind};
 use crate::{Language, ParserPool};
 
-/// a chunk of source code with metadata
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Chunk {
-    /// the chunk text (includes parent context preamble)
     pub text: String,
-    /// source file path
     pub file_path: PathBuf,
-    /// symbol name (if from a named entity)
     pub symbol_name: Option<String>,
-    /// symbol kind (if from a named entity)
     pub symbol_kind: Option<SymbolKind>,
-    /// start line in the original file (0-indexed)
     pub start_line: usize,
-    /// end line in the original file (0-indexed)
     pub end_line: usize,
 }
 
-/// chunking configuration
 #[derive(Debug, Clone)]
 pub struct ChunkOptions {
-    /// target chunk size in characters (soft limit)
     pub target_size: usize,
-    /// maximum chunk size (hard limit, chunks beyond this are split)
     pub max_size: usize,
-    /// whether to include parent context (imports, enclosing types)
     pub include_context: bool,
 }
 
@@ -50,11 +30,6 @@ impl Default for ChunkOptions {
     }
 }
 
-/// chunk a file using AST-aware splitting
-///
-/// parses the file with tree-sitter, extracts top-level entities,
-/// and produces chunks that respect syntactic boundaries. falls back
-/// to text-based splitting if the file cannot be parsed.
 pub fn chunk_file(path: &Path, opts: &ChunkOptions) -> Vec<Chunk> {
     let source = match std::fs::read(path) {
         Ok(s) => s,
@@ -75,7 +50,6 @@ pub fn chunk_file(path: &Path, opts: &ChunkOptions) -> Vec<Chunk> {
     }
 }
 
-/// chunk source that has already been parsed into a known language
 fn chunk_parsed(
     path: &Path,
     source_str: &str,
@@ -103,7 +77,6 @@ fn chunk_parsed(
 
     let mut chunks = Vec::new();
 
-    // one chunk per symbol
     for sym in &symbols {
         let body = join_lines(&lines, sym.start_line, sym.end_line);
         let text = prepend_preamble(&preamble, &body);
@@ -115,7 +88,6 @@ fn chunk_parsed(
         }
     }
 
-    // regions between symbols (e.g. standalone comments, constants)
     for (start, end, text) in uncovered_regions(&lines, &symbols) {
         if is_only_preamble(&text) {
             continue;
@@ -142,8 +114,6 @@ fn chunk_parsed(
     chunks
 }
 
-// helpers
-/// everything before the first non-import symbol (imports, module decls, etc)
 fn extract_preamble(lines: &[&str], symbols: &[SymbolInfo]) -> String {
     let first_def_line = symbols
         .iter()
@@ -189,7 +159,6 @@ fn make_chunk(path: &Path, text: String, sym: &SymbolInfo) -> Chunk {
     }
 }
 
-/// split a symbol that exceeds max_size into sub-chunks
 fn split_large_symbol(
     path: &Path,
     body: &str,
@@ -211,7 +180,6 @@ fn split_large_symbol(
         Some(&sym.name),
         Some(sym.kind),
         &ChunkOptions {
-            // account for prefix in each sub-chunk
             target_size: opts.target_size,
             max_size: opts.max_size,
             include_context: false,
@@ -225,7 +193,6 @@ fn split_large_symbol(
     .collect()
 }
 
-/// regions of source not covered by any extracted symbol
 fn uncovered_regions(lines: &[&str], symbols: &[SymbolInfo]) -> Vec<(usize, usize, String)> {
     let mut sorted: Vec<&SymbolInfo> = symbols.iter().collect();
     sorted.sort_by_key(|s| s.start_line);
@@ -249,7 +216,6 @@ fn uncovered_regions(lines: &[&str], symbols: &[SymbolInfo]) -> Vec<(usize, usiz
     regions
 }
 
-/// heuristic: text that's only imports/comments/whitespace
 fn is_only_preamble(text: &str) -> bool {
     text.trim().is_empty()
         || text.trim().lines().all(|line| {
@@ -266,7 +232,6 @@ fn is_only_preamble(text: &str) -> bool {
         })
 }
 
-/// shared line accumulator used by both text chunking and large-symbol splitting
 fn accumulate_lines(
     path: &Path,
     text: &str,
@@ -291,7 +256,6 @@ fn accumulate_lines(
             line.len() + 1
         };
 
-        // split at paragraph boundaries when over target
         let at_boundary = line.trim().is_empty() && !current.is_empty();
         if at_boundary && current.len() + addition > opts.target_size {
             chunks.push(Chunk {
@@ -306,7 +270,6 @@ fn accumulate_lines(
             continue;
         }
 
-        // hard split at max_size
         if !current.is_empty() && current.len() + addition > opts.max_size {
             chunks.push(Chunk {
                 text: std::mem::take(&mut current),
@@ -339,7 +302,6 @@ fn accumulate_lines(
     chunks
 }
 
-/// fallback: split plain text into chunks by paragraph boundaries
 pub fn chunk_text(path: &Path, text: &str, opts: &ChunkOptions) -> Vec<Chunk> {
     accumulate_lines(path, text, 0, None, None, opts)
 }
@@ -353,7 +315,6 @@ mod tests {
         ChunkOptions::default()
     }
 
-    // text fallback tests
     #[test]
     fn chunk_text_small_file() {
         let text = "hello world\nthis is a test";
@@ -387,7 +348,6 @@ mod tests {
         assert!(chunks.is_empty());
     }
 
-    // AST chunking tests
     #[test]
     fn chunk_rust_file_by_symbols() {
         let dir = tempfile::tempdir().unwrap();

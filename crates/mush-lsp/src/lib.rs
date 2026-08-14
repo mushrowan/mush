@@ -1,8 +1,3 @@
-//! LSP client integration for mush
-//!
-//! provides language server management for auto-diagnostics after file edits.
-//! spawns and manages LSP server processes, one per language, lazily started.
-
 pub mod client;
 pub mod discovery;
 pub mod error;

@@ -1,13 +1,3 @@
-//! batch tool - execute multiple tool calls in parallel
-//!
-//! each sub-call gets the same truncation treatment as a standalone call.
-//! the combined output targets the central truncation budget (MAX_BYTES)
-//! so the agent loop's final truncation pass is a no-op.
-//!
-//! calls that target the same file path (edit, write) are executed
-//! sequentially in the order they appear to avoid silent conflicts.
-//! all other calls run in parallel.
-
 use mush_agent::exec_context::{self, TOOL_EXEC_ID};
 use mush_agent::tool::{AgentTool, OutputLimit, ToolRegistry, ToolResult, parse_tool_args};
 use mush_agent::tool_grouping;
@@ -18,7 +8,6 @@ use serde::Deserialize;
 const MAX_CALLS: usize = 25;
 const MAX_TOTAL_OUTPUT: usize = mush_agent::truncation::MAX_BYTES;
 
-/// extract a "Full output: /path" reference from truncated tool output
 fn extract_file_path(text: &str) -> Option<&str> {
     for line in text.lines() {
         if let Some(pos) = line.find("Full output: ") {
@@ -33,8 +22,6 @@ fn extract_file_path(text: &str) -> Option<&str> {
 struct BatchArgs {
     #[serde(deserialize_with = "mush_agent::de::json_seq")]
     tool_calls: Vec<BatchCall>,
-    /// when true, run tool_calls strictly in submission order and stop
-    /// at the first failure. defaults to false (parallel / path-grouped)
     #[serde(default)]
     sequential: bool,
 }
@@ -137,9 +124,6 @@ impl AgentTool for BatchTool {
     }
 
     fn output_limit(&self) -> OutputLimit {
-        // batch's overall output is delimited per sub-call; head keeps
-        // the earliest sub-results which are most often the ones the
-        // model needs to see (especially when the batch is mostly reads)
         OutputLimit::Head
     }
 
@@ -162,15 +146,9 @@ impl AgentTool for BatchTool {
         }
 
         let total = params.tool_calls.len();
-        // the agent loop tagged this task with the batch's exec id; derive a
-        // per-sub-call id from it so each sub-call's live output streams into
-        // its own panel (the tui creates matching panels in start_batch_tool)
         let batch_id = exec_context::current_exec_id();
 
         let mut results: Vec<CallResult> = if params.sequential {
-            // sequential mode: one call at a time, abort remaining on first
-            // failure. the unrun tail is reported as "skipped" so the agent
-            // sees what didn't execute
             let mut out = Vec::with_capacity(total);
             let mut aborted = false;
             for (i, call) in params.tool_calls.into_iter().enumerate() {
@@ -200,11 +178,6 @@ impl AgentTool for BatchTool {
             }
             out
         } else {
-            // parallel mode: same-path file-mutating calls share a group
-            // (executed sequentially), everything else gets its own group
-            // (executed in parallel with all other groups). uses the
-            // shared mush_agent::tool_grouping helper so the agent loop
-            // and the batch tool apply identical serialisation rules
             let calls: Vec<(usize, BatchCall)> =
                 params.tool_calls.into_iter().enumerate().collect();
             let tools = &self.tools;
@@ -223,7 +196,6 @@ impl AgentTool for BatchTool {
         let mut success_count = 0;
         let mut error_count = 0;
 
-        // first pass: individually truncate each result and extract text
         let mut items: Vec<(usize, String, String, String)> = Vec::with_capacity(results.len());
         for (i, tool_name, limit, result) in &results {
             let truncated = match result {
@@ -261,19 +233,16 @@ impl AgentTool for BatchTool {
             items.push((*i, tool_name.clone(), header, item_text));
         }
 
-        // check if total exceeds budget
         let total_size: usize = items.iter().map(|(_, _, h, t)| h.len() + t.len() + 2).sum();
 
         let mut output = String::new();
         if total_size <= MAX_TOTAL_OUTPUT {
-            // everything fits, no truncation needed
             for (_, _, header, item_text) in &items {
                 output.push_str(header);
                 output.push_str(item_text);
                 output.push_str("\n\n");
             }
         } else {
-            // build full output and save to file
             let mut full_output = String::with_capacity(total_size + 256);
             for (_, _, header, item_text) in &items {
                 full_output.push_str(header);
@@ -282,8 +251,7 @@ impl AgentTool for BatchTool {
             }
             let saved_path = truncation::save_batch_output(&full_output);
 
-            // fair truncation: give each item a share of the budget
-            let overhead_per_item = 80; // header + truncation notice
+            let overhead_per_item = 80;
             let usable = MAX_TOTAL_OUTPUT.saturating_sub(items.len() * overhead_per_item + 256);
             let per_item_budget = usable / items.len();
 
@@ -292,7 +260,6 @@ impl AgentTool for BatchTool {
                 if item_text.len() <= per_item_budget {
                     output.push_str(item_text);
                 } else {
-                    // preserve any file path from individual truncation
                     let file_ref = extract_file_path(item_text);
                     let truncated = truncation::truncate_to_budget(item_text, per_item_budget);
                     output.push_str(truncated);
@@ -453,9 +420,6 @@ mod tests {
         assert!(text.contains("lines truncated"));
         assert!(text.contains("Full output:"));
         assert!(text.contains("line 0"));
-        // LargeTool declares Head, so the tail is dropped (matches what
-        // a standalone Head tool would produce: that's the contract this
-        // test name asserts)
         assert!(!text.contains("line 4999"));
     }
 
@@ -485,14 +449,12 @@ mod tests {
                 mush_agent::tool::OutputLimit::Head
             }
             async fn execute(&self, params: serde_json::Value) -> ToolResult {
-                // each call returns ~20KB with a unique marker
                 let idx = params.get("idx").and_then(|v| v.as_u64()).unwrap_or(0);
                 let text = format!("MARKER_{idx}\n{}", "x".repeat(20_000));
                 ToolResult::text(text)
             }
         }
 
-        // 10 calls x ~20KB = 200KB, should exceed the MAX_TOTAL_OUTPUT budget
         let calls: Vec<_> = (0..10)
             .map(|i| serde_json::json!({"tool": "big", "parameters": {"idx": i}}))
             .collect();
@@ -505,7 +467,6 @@ mod tests {
             _ => panic!("expected text"),
         };
 
-        // every tool should have a header (no tool completely omitted)
         for i in 0..10 {
             assert!(
                 text.contains(&format!("[{i}] big")),
@@ -513,25 +474,20 @@ mod tests {
             );
         }
 
-        // should mention the spillover file path
         assert!(
             text.contains("full output:"),
             "missing spillover file path: {text}"
         );
 
-        // each tool's output should be truncated, not just later ones
-        // count how many tools have their marker visible
         let markers_visible: Vec<bool> = (0..10)
             .map(|i| text.contains(&format!("MARKER_{i}")))
             .collect();
-        // all markers should be present (fair truncation keeps a preview of each)
         assert!(
             markers_visible.iter().all(|v| *v),
             "not all markers visible (fair truncation failed): {markers_visible:?}"
         );
 
         assert!(text.contains("batch: 10/10 succeeded, 0 failed"));
-        // inline output should be bounded
         assert!(
             text.len() < 150_000,
             "inline output too large: {} bytes",
@@ -562,7 +518,6 @@ mod tests {
             }
             async fn execute(&self, params: serde_json::Value) -> ToolResult {
                 let idx = params.get("idx").and_then(|v| v.as_u64()).unwrap_or(0);
-                // simulate individually-truncated output with a file path hint in the middle
                 let text = format!(
                     "{}\n\n[…500 lines truncated (1000 total). Full output: /tmp/tool_{idx}.txt]\n\n{}",
                     "x".repeat(15_000),
@@ -584,7 +539,6 @@ mod tests {
             _ => panic!("expected text"),
         };
 
-        // each tool's individual file path should survive batch truncation
         for i in 0..8 {
             assert!(
                 text.contains(&format!("/tmp/tool_{i}.txt")),
@@ -595,10 +549,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn same_file_edits_applied_in_order() {
-        // custom tool that reads a file, sleeps to widen the race window,
-        // then writes the replacement. without sequencing, the second call
-        // reads the original content before the first call writes, so one
-        // edit is silently lost
         struct SlowEdit {
             dir: std::path::PathBuf,
         }
@@ -627,7 +577,6 @@ mod tests {
                 let new = params["newText"].as_str().unwrap();
 
                 let content = std::fs::read_to_string(&path).unwrap();
-                // widen the race window so concurrent calls definitely overlap
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 let replaced = content.replacen(old, new, 1);
                 std::fs::write(&path, &replaced).unwrap();
@@ -671,9 +620,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn sequential_mode_runs_in_order_and_stops_on_first_failure() {
-        // a tool that records the order of calls and errors on the marked
-        // call. sequential=true should run calls strictly in submission
-        // order and refuse to execute anything after a failure
         use std::sync::Mutex;
 
         struct OrderTool {
@@ -728,7 +674,6 @@ mod tests {
             }))
             .await;
 
-        // only a and b should have actually run; c and d were skipped
         let log = log.lock().unwrap().clone();
         assert_eq!(
             log,
@@ -740,7 +685,6 @@ mod tests {
             ToolResultContentPart::Text(t) => &t.text,
             _ => panic!("expected text"),
         };
-        // all four entries appear in the output (either ran or skipped)
         for id in ["a", "b", "c", "d"] {
             assert!(
                 text.contains(&format!(
@@ -754,7 +698,6 @@ mod tests {
             text.contains("skipped after earlier failure"),
             "skipped entries should explain why: {text}"
         );
-        // summary counts: 1 success, 3 failures (b failed, c+d skipped-as-error)
         assert!(
             text.contains("1/4 succeeded"),
             "expected 1/4 succeeded in summary: {text}"
@@ -788,8 +731,6 @@ mod tests {
             }
             async fn execute(&self, params: serde_json::Value) -> ToolResult {
                 let id = params["id"].as_str().unwrap_or("?").to_string();
-                // short sleep so parallel-mode would interleave but
-                // sequential mode still observes strict order
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 self.log.lock().unwrap().push(id.clone());
                 ToolResult::text(format!("ran {id}"))
@@ -820,11 +761,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn same_file_edits_applied_in_order_with_different_path_syntax() {
-        // when the model emits the same file with different syntactic
-        // forms (e.g. "test.txt" and "./test.txt") the batch tool should
-        // still detect the conflict and serialise the calls. without
-        // path normalisation the two strings would key separate groups
-        // and race
         struct SlowEdit {
             dir: std::path::PathBuf,
         }
@@ -938,8 +874,6 @@ mod tests {
 
     #[test]
     fn batch_budget_matches_central_truncation_limit() {
-        // batch's total output budget must equal the central truncation
-        // MAX_BYTES so the central pass is a no-op for batch output
         assert_eq!(
             MAX_TOTAL_OUTPUT,
             mush_agent::truncation::MAX_BYTES,

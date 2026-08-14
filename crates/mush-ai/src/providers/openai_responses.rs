@@ -1,8 +1,3 @@
-//! openai responses API provider
-//!
-//! supports both direct openai `/responses` and codex subscription
-//! (`chatgpt.com/backend-api/codex/responses`) style endpoints.
-
 use base64::Engine;
 use reqwest::header::{
     AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT,
@@ -101,7 +96,6 @@ struct RequestBody {
     prompt_cache_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_cache_retention: Option<String>,
-    /// auto-truncate input when it exceeds the model's context window
     #[serde(skip_serializing_if = "Option::is_none")]
     truncation: Option<String>,
 }
@@ -130,16 +124,13 @@ fn build_request_body(
     options: &StreamOptions,
     is_codex: bool,
 ) -> RequestBody {
-    // codex: system prompt goes in top-level `instructions`, not in input
     let input_system_prompt = if is_codex { &None } else { system_prompt };
-    // openai responses API: always use sliding window (no explicit cache control)
     let input = convert_input_messages(
         model,
         input_system_prompt,
         messages,
         ToolResultTrimming::SlidingWindow,
     );
-    // codex endpoint requires `instructions` to be present, even if empty
     let instructions = if is_codex {
         Some(system_prompt.clone().unwrap_or_default())
     } else {
@@ -193,7 +184,6 @@ fn build_request_body(
     };
 
     let tool_fields = if converted_tools.is_some() {
-        // codex endpoint (chatgpt.com/backend-api) doesn't support parallel_tool_calls
         (
             Some("auto".into()),
             if is_codex { None } else { Some(true) },
@@ -208,7 +198,6 @@ fn build_request_body(
         stream: true,
         store: false,
         instructions,
-        // chatgpt.com/backend-api doesn't support max_output_tokens
         max_output_tokens: if is_codex {
             None
         } else {
@@ -226,8 +215,6 @@ fn build_request_body(
         include,
         prompt_cache_key,
         prompt_cache_retention,
-        // auto-truncate input to avoid context overflow errors
-        // codex endpoint (chatgpt.com/backend-api) doesn't support this param
         truncation: if is_codex { None } else { Some("auto".into()) },
     }
 }
@@ -264,18 +251,6 @@ fn convert_input_messages(
     fix_orphaned_function_calls(converted)
 }
 
-/// ensure function_call / function_call_output pairing is consistent.
-///
-/// handles both directions:
-/// - function_call without function_call_output: injects a synthetic
-///   output so openai responses doesn't reject the whole request with
-///   "No tool output found for function call <id>"
-/// - function_call_output without function_call: strips the orphan
-///
-/// orphans appear when a stream errors or the agent loop is cancelled
-/// mid-turn (the assistant message with the call is pushed before
-/// execution begins) or when compaction reshapes history across a tool
-/// boundary. mirrors the equivalent fix in the anthropic provider
 fn fix_orphaned_function_calls(items: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
     let mut out: Vec<serde_json::Value> = Vec::with_capacity(items.len());
     let mut pending: Vec<String> = Vec::new();
@@ -583,8 +558,6 @@ fn decode_jwt_payload(token: &str) -> Option<serde_json::Value> {
     serde_json::from_slice::<serde_json::Value>(&decoded).ok()
 }
 
-// typed event structs for hot-path deserialization (avoids serde_json::Value lookups)
-
 #[derive(serde::Deserialize)]
 struct DeltaEvent {
     #[serde(default)]
@@ -738,7 +711,6 @@ impl super::sse::SseProcessor for OpenAiResponsesProcessor {
             return super::sse::ProcessResult::Skip;
         }
         let events = process_sse_event(raw.event.as_deref(), data, output, &mut self.active);
-        // if any event is a fatal error, split it out
         for event in &events {
             if matches!(event, StreamEvent::Error { .. }) {
                 return super::sse::ProcessResult::Fatal(
@@ -787,11 +759,9 @@ fn process_sse_event(
 ) -> Vec<StreamEvent> {
     let mut events = Vec::new();
 
-    // for events without an explicit SSE event name, fall back to json "type" field
     let event_type = match event_name {
         Some(name) => name,
         None => {
-            // only parse enough to get the type field
             if let Some(start) = data.find("\"type\"") {
                 let rest = &data[start + 6..];
                 if let Some(colon) = rest.find(':') {
@@ -815,7 +785,6 @@ fn process_sse_event(
     };
 
     match event_type {
-        // delta events are the hot path, use typed deserialization
         "response.output_text.delta" | "response.refusal.delta" => {
             let Ok(ev) = serde_json::from_str::<DeltaEvent>(data) else {
                 return events;
@@ -869,7 +838,6 @@ fn process_sse_event(
                 });
             }
         }
-        // less frequent events
         "response.output_item.added" => {
             let Ok(ev) = serde_json::from_str::<OutputItemAddedEvent>(data) else {
                 return events;
@@ -1118,7 +1086,6 @@ pub fn benchmark_tool_call_deltas(chunk_count: usize, arg_bytes: usize) -> usize
         .cloned()
         .unwrap_or_else(|| full_json.clone());
 
-    // pre-build JSON strings (simulates SSE data arriving as &str)
     let added = format!(
         r#"{{"output_index":0,"item":{{"type":"function_call","call_id":"call_1","id":"item_1","name":"read","arguments":{}}}}}"#,
         serde_json::to_string(&first).unwrap_or_default()
@@ -1501,7 +1468,6 @@ mod tests {
             body.instructions.as_deref(),
             Some("you are a coding assistant")
         );
-        // system prompt should not appear in input messages
         assert!(body.input.is_empty());
     }
 
@@ -1531,7 +1497,6 @@ mod tests {
 
         let body = build_request_body(&model, &prompt, &[], &[], &options, false);
         assert!(body.instructions.is_none());
-        // system prompt should be in input as a developer message
         assert_eq!(body.input.len(), 1);
         assert_eq!(body.input[0]["role"], "developer");
     }
@@ -1586,13 +1551,6 @@ mod tests {
 
     #[test]
     fn orphaned_function_call_gets_synthetic_output() {
-        // simulates the bug rowan hit: an assistant turn emits a tool_call
-        // but the stream errored / agent cancelled before the tool result
-        // was produced and pushed. on the next request, openai responses
-        // rejects with "No tool output found for function call call_X".
-        // sanitisation must inject a synthetic function_call_output so the
-        // history stays valid without forcing the user to ditch the
-        // entire session
         let model = sample_codex_model();
         let messages = vec![
             Message::User(UserMessage {
@@ -1612,8 +1570,6 @@ mod tests {
                     })])
                     .build(),
             ),
-            // user message follows without a matching tool result,
-            // request was sent before the call could be executed
             Message::User(UserMessage {
                 content: UserContent::Text("retrying".into()),
                 timestamp_ms: Timestamp::zero(),
@@ -1631,7 +1587,6 @@ mod tests {
             })
             .collect();
 
-        // expect: user, function_call, synthetic function_call_output, user
         assert!(
             types.contains(&"function_call"),
             "expected function_call in {types:?}"
@@ -1689,8 +1644,6 @@ mod tests {
 
     #[test]
     fn orphaned_function_call_output_is_stripped() {
-        // tool result without a preceding assistant tool_call, would
-        // happen if compaction or session manipulation removed the call
         let model = sample_codex_model();
         let messages = vec![Message::ToolResult(ToolResultMessage {
             tool_call_id: "call_ghost".into(),

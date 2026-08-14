@@ -66,12 +66,10 @@ fn drain_incoming_appends_and_flips_loading() {
     };
     tx.send(older).unwrap();
     tx.send(newer).unwrap();
-    // small yield so producer side is visible to try_recv in every scheduler
     std::thread::sleep(Duration::from_millis(1));
 
     assert!(picker.drain_incoming());
     assert_eq!(picker.sessions.len(), 2);
-    // sorted newest-first regardless of arrival order
     assert_eq!(picker.sessions[0].title.as_deref(), Some("new"));
     assert_eq!(picker.sessions[1].title.as_deref(), Some("old"));
     assert!(
@@ -80,7 +78,6 @@ fn drain_incoming_appends_and_flips_loading() {
     );
 
     drop(tx);
-    // second drain detects disconnect and flips loading off
     assert!(
         picker.drain_incoming(),
         "loading state changes should request a redraw"

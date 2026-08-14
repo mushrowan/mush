@@ -1,19 +1,11 @@
-//! on-demand skill loader with caching
-//!
-//! skills are SKILL.md files discovered from AGENTS.md. their content
-//! is loaded lazily when requested and cached for the session.
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::loader::Skill;
 
-/// loads and caches skill file content
 #[derive(Debug, Default)]
 pub struct SkillLoader {
-    /// known skills (from AGENTS.md discovery)
     skills: Vec<Skill>,
-    /// cached content keyed by skill name
     cache: HashMap<String, String>,
 }
 
@@ -25,13 +17,11 @@ impl SkillLoader {
         }
     }
 
-    /// get a skill by name (case-insensitive)
     pub fn find(&self, name: &str) -> Option<&Skill> {
         let lower = name.to_lowercase();
         self.skills.iter().find(|s| s.name.to_lowercase() == lower)
     }
 
-    /// load skill content, returning cached if available
     pub fn load(&mut self, name: &str) -> Option<String> {
         if let Some(cached) = self.cache.get(name) {
             return Some(cached.clone());
@@ -43,8 +33,6 @@ impl SkillLoader {
         Some(content)
     }
 
-    /// load skill content and resolve any relative path references
-    /// against the skill directory
     pub fn load_with_context(&mut self, name: &str) -> Option<SkillContent> {
         let skill = self.find(name)?.clone();
         let content = self.load(name)?;
@@ -58,7 +46,6 @@ impl SkillLoader {
         })
     }
 
-    /// list all available skill names and descriptions
     pub fn list(&self) -> Vec<(&str, &str)> {
         self.skills
             .iter()
@@ -66,19 +53,16 @@ impl SkillLoader {
             .collect()
     }
 
-    /// whether a skill has been loaded into cache
     pub fn is_cached(&self, name: &str) -> bool {
         self.cache.contains_key(name)
     }
 }
 
-/// loaded skill with resolved context
 #[derive(Debug, Clone)]
 pub struct SkillContent {
     pub name: String,
     pub description: String,
     pub content: String,
-    /// directory containing the SKILL.md, for resolving relative paths
     pub skill_dir: Option<PathBuf>,
 }
 
@@ -140,7 +124,6 @@ mod tests {
         assert!(content.contains("cargo"));
         assert!(loader.is_cached("rust"));
 
-        // second load uses cache
         let cached = loader.load("rust").unwrap();
         assert_eq!(content, cached);
     }

@@ -1,9 +1,3 @@
-//! oauth credential management
-//!
-//! trait-based oauth provider registry. each provider implements the login
-//! flow (PKCE, device code, etc) and token refresh. credentials are
-//! persisted to ~/.config/mush/oauth.json.
-
 pub mod anthropic;
 pub mod callback_server;
 pub mod openai_codex;
@@ -49,18 +43,11 @@ impl From<reqwest_middleware::Error> for OAuthError {
     }
 }
 
-/// info needed to complete the oauth login
 pub struct AuthPrompt {
-    /// URL the user should open in their browser
     pub url: String,
-    /// instructions to show the user
     pub instructions: String,
 }
 
-/// an in-progress browser login. `auth_url` is what the user opens; the
-/// provider's loopback callback server is already listening by the time
-/// this exists, so [`Self::await_credentials`] resolves as soon as the
-/// browser lands on the redirect and the token exchange settles
 pub struct BrowserLogin {
     pub auth_url: String,
     completion: std::pin::Pin<
@@ -81,35 +68,24 @@ impl BrowserLogin {
         }
     }
 
-    /// wait for the browser to hit the loopback callback, then exchange
-    /// the code for credentials
     pub async fn await_credentials(self) -> Result<OAuthCredentials, OAuthError> {
         self.completion.await
     }
 }
 
-/// trait for oauth providers
 pub trait OAuthProvider: Send + Sync {
-    /// unique id (e.g. "anthropic")
     fn id(&self) -> &str;
 
-    /// human-readable name
     fn name(&self) -> &str;
 
-    /// start the login flow, returning the URL and instructions for the
-    /// paste-the-code fallback (used when no browser can reach this
-    /// machine, e.g. over ssh)
     fn begin_login(&self) -> Result<(AuthPrompt, PkceChallenge), OAuthError>;
 
-    /// bind a loopback callback server and prepare the browser login
-    /// that completes itself once the provider redirects back
     fn begin_browser_login(
         &self,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<BrowserLogin, OAuthError>> + Send + '_>,
     >;
 
-    /// exchange the user-provided code for credentials
     fn exchange_code(
         &self,
         code: &str,
@@ -118,7 +94,6 @@ pub trait OAuthProvider: Send + Sync {
         Box<dyn std::future::Future<Output = Result<OAuthCredentials, OAuthError>> + Send + '_>,
     >;
 
-    /// refresh expired credentials
     fn refresh_token(
         &self,
         refresh_token: &str,
@@ -126,13 +101,11 @@ pub trait OAuthProvider: Send + Sync {
         Box<dyn std::future::Future<Output = Result<OAuthCredentials, OAuthError>> + Send + '_>,
     >;
 
-    /// extract the api key from credentials
     fn api_key(&self, creds: &OAuthCredentials) -> String {
         creds.access_token.clone()
     }
 }
 
-// built-in provider registry
 fn builtin_providers() -> Vec<Box<dyn OAuthProvider>> {
     vec![
         Box::new(anthropic::AnthropicOAuth),
@@ -141,12 +114,10 @@ fn builtin_providers() -> Vec<Box<dyn OAuthProvider>> {
     ]
 }
 
-/// get a provider by id
 pub fn get_provider(id: &str) -> Option<Box<dyn OAuthProvider>> {
     builtin_providers().into_iter().find(|p| p.id() == id)
 }
 
-/// list all available provider ids and names
 pub fn list_providers() -> Vec<(&'static str, &'static str)> {
     vec![
         ("anthropic", "Anthropic (Claude Pro/Max)"),
@@ -162,7 +133,6 @@ fn available_provider_names() -> Vec<String> {
         .collect()
 }
 
-/// get a valid oauth token for a provider, refreshing and saving if needed
 pub async fn get_oauth_token(provider_id: &str) -> Result<Option<String>, OAuthError> {
     let provider = match get_provider(provider_id) {
         Some(p) => p,
@@ -191,10 +161,6 @@ pub async fn get_oauth_token(provider_id: &str) -> Result<Option<String>, OAuthE
     Ok(Some(token))
 }
 
-/// unconditionally refresh a provider's oauth token, bypassing the
-/// `is_expired` check. used as a safety net when a request comes back
-/// with 401 Unauthorized despite the cached expiry claiming the token
-/// is still valid (clock skew, server-side revocation, stale timestamp)
 pub async fn force_refresh_oauth_token(provider_id: &str) -> Result<Option<String>, OAuthError> {
     let provider = match get_provider(provider_id) {
         Some(p) => p,
@@ -218,9 +184,6 @@ pub async fn force_refresh_oauth_token(provider_id: &str) -> Result<Option<Strin
     Ok(Some(token))
 }
 
-/// remove a provider's saved oauth credentials. returns whether a
-/// credential entry was actually removed (false when nothing was
-/// stored to begin with). a no-op when no credential file exists yet
 pub fn remove_credentials(provider_id: &str) -> Result<bool, OAuthError> {
     let mut store = load_credentials()?;
     let removed = store.providers.remove(provider_id).is_some();
@@ -230,17 +193,14 @@ pub fn remove_credentials(provider_id: &str) -> Result<bool, OAuthError> {
     Ok(removed)
 }
 
-/// convenience: get anthropic oauth token
 pub async fn get_anthropic_oauth_token() -> Result<Option<String>, OAuthError> {
     get_oauth_token("anthropic").await
 }
 
-/// convenience: force-refresh anthropic oauth token (see [`force_refresh_oauth_token`])
 pub async fn force_refresh_anthropic_oauth_token() -> Result<Option<String>, OAuthError> {
     force_refresh_oauth_token("anthropic").await
 }
 
-/// convenience: get openai codex oauth token
 pub async fn get_openai_codex_oauth_token() -> Result<Option<String>, OAuthError> {
     get_oauth_token("openai-codex").await
 }
@@ -263,9 +223,6 @@ mod tests {
 
     #[test]
     fn list_providers_includes_openrouter() {
-        // openrouter joins the oauth catalogue once openrouter-sdk is
-        // wired in. the provider id matches the storage key in the
-        // credential store so /login can route consistently
         let providers = list_providers();
         assert!(providers.iter().any(|(id, _)| *id == "openrouter"));
     }
@@ -281,8 +238,6 @@ mod tests {
 
     #[tokio::test]
     async fn every_builtin_provider_offers_a_loopback_browser_login() {
-        // /login relies on this: no provider may be paste-only, or the
-        // picker would have to know which rows can auto-complete
         for provider in builtin_providers() {
             let login = provider
                 .begin_browser_login()

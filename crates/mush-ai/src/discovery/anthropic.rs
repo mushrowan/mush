@@ -1,37 +1,3 @@
-//! anthropic /v1/models discovery
-//!
-//! parses the response shape documented at
-//! <https://docs.anthropic.com/en/api/models-list>:
-//!
-//! ```json
-//! {
-//!   "data": [
-//!     {
-//!       "type": "model",
-//!       "id": "claude-opus-4-7",
-//!       "display_name": "Claude Opus 4.7",
-//!       "created_at": "2025-...",
-//!       "max_input_tokens": 1000000,
-//!       "max_tokens": 128000,
-//!       "capabilities": {
-//!         "thinking": {
-//!           "types": {
-//!             "adaptive": {"supported": true},
-//!             "enabled":  {"supported": true}
-//!           }
-//!         },
-//!         "image_input": {"supported": true}
-//!       }
-//!     }
-//!   ],
-//!   "has_more": false
-//! }
-//! ```
-//!
-//! anthropic doesn't return pricing, so [`ModelCost`] is filled with zeros.
-//! the merge step (later commit) backfills costs from the static catalogue
-//! when the model id matches a known one.
-
 use std::time::SystemTime;
 
 use serde::Deserialize;
@@ -46,7 +12,6 @@ const API_VERSION: &str = "2023-06-01";
 const DEFAULT_CONTEXT_WINDOW: u64 = 200_000;
 const DEFAULT_MAX_OUTPUT: u64 = 64_000;
 
-/// anthropic discovery client
 pub struct AnthropicDiscovery {
     client: crate::http::HttpClient,
     base_url: String,
@@ -102,11 +67,6 @@ impl ModelDiscovery for AnthropicDiscovery {
     }
 }
 
-/// parse the raw response body into [`DiscoveredModel`] entries.
-///
-/// pure function, no I/O, the entry point used by tests and by [`AnthropicDiscovery::fetch`].
-/// each entry's verbatim JSON is preserved on `DiscoveredModel::raw` so future code can
-/// access fields we don't promote to [`Model`] (e.g. `capabilities.pdf_input`).
 pub fn parse_anthropic_models(body: &str) -> Result<Vec<DiscoveredModel>, DiscoveryError> {
     let response: AnthropicModelsResponse =
         serde_json::from_str(body).map_err(|e| DiscoveryError::Malformed(e.to_string()))?;
@@ -142,9 +102,6 @@ fn entry_to_model(entry: AnthropicModelEntry) -> Model {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| entry.id.clone());
 
-    // effort levels are autodetected from the capability so the cycler
-    // walks exactly what the model supports. the API default is `high`
-    // when effort is available; fall back to the first level otherwise
     let supported_thinking_levels = caps
         .effort
         .as_ref()
@@ -207,10 +164,6 @@ struct AnthropicCapabilities {
     effort: Option<AnthropicEffortCaps>,
 }
 
-/// the `effort` capability: a `supported` flag plus one nested
-/// `{supported}` object per effort level (`low`, `medium`, `high`,
-/// `xhigh`, `max`, ...). the per-level keys are flattened so unknown
-/// future names are captured too
 #[derive(Deserialize, Debug, Default)]
 struct AnthropicEffortCaps {
     #[serde(default)]
@@ -220,13 +173,8 @@ struct AnthropicEffortCaps {
 }
 
 impl AnthropicEffortCaps {
-    /// canonical cheap→expensive order for the effort levels we know.
-    /// unknown supported levels are appended after, sorted for stable
-    /// output, so a new upstream name still shows up in the cycler
     const KNOWN_ORDER: &'static [&'static str] = &["low", "medium", "high", "xhigh", "max"];
 
-    /// the supported levels as an ordered ladder, or empty when effort
-    /// isn't supported (the model then uses the budget-token path)
     fn supported_levels(&self) -> Vec<ThinkingLevel> {
         if !self.supported {
             return Vec::new();
@@ -279,9 +227,6 @@ struct SupportedFlag {
 mod tests {
     use super::*;
 
-    /// canonical fixture that exercises every field we extract.
-    /// id, display_name, max_input_tokens, max_tokens, capabilities.thinking.adaptive,
-    /// capabilities.image_input. plus an entry without capabilities to test defaults.
     const FULL_FIXTURE: &str = r#"{
       "data": [
         {
@@ -371,10 +316,6 @@ mod tests {
 
     #[test]
     fn parses_effort_capability_into_supported_levels() {
-        // the effort capability is autodetected into the cycler's level
-        // ladder, in canonical cheap→expensive order. known names map to
-        // typed variants; `max` (and any future name) is captured as
-        // Other. unsupported levels are excluded
         let models = parse_anthropic_models(FULL_FIXTURE).unwrap();
         let opus = &models[0].model;
         assert_eq!(
@@ -389,8 +330,6 @@ mod tests {
         );
         assert_eq!(opus.default_thinking_level, Some(ThinkingLevel::High));
 
-        // a model with no effort capability keeps an empty ladder so the
-        // cycler falls back to the legacy budget-token walk
         let haiku = models
             .iter()
             .find(|m| m.model.id.as_str() == "claude-haiku-old")
@@ -401,7 +340,6 @@ mod tests {
 
     #[test]
     fn cost_defaults_to_zero_for_anthropic() {
-        // anthropic doesn't return pricing in /v1/models; static merge fills it later
         let models = parse_anthropic_models(FULL_FIXTURE).unwrap();
         for m in &models {
             assert_eq!(m.model.cost.input, 0.0);
@@ -419,7 +357,6 @@ mod tests {
 
     #[test]
     fn unknown_fields_are_ignored() {
-        // forward-compat: anthropic adds new fields, we shouldn't break
         let body = r#"{
           "data": [{
             "id": "claude-test",
@@ -435,7 +372,6 @@ mod tests {
 
     #[test]
     fn enabled_only_thinking_marks_reasoning_but_not_adaptive() {
-        // older models advertise enabled thinking only (budget mode)
         let body = r#"{
           "data": [{
             "id": "claude-old",
@@ -454,11 +390,6 @@ mod tests {
 
     #[test]
     fn parser_preserves_raw_entry_json() {
-        // option C: every discovered model carries the raw upstream JSON
-        // so future code can extract richer per-provider fields without
-        // a cache migration. anthropic's `capabilities.pdf_input` is the
-        // canary case here - we don't promote it to Model, but it's
-        // round-tripped intact.
         let body = r#"{
           "data": [{
             "id": "claude-test",

@@ -1,8 +1,3 @@
-//! openai chat completions API provider
-//!
-//! supports the standard /v1/chat/completions endpoint used by openai,
-//! openrouter, xai, groq, and many other providers.
-
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 
@@ -75,7 +70,6 @@ impl ApiProvider for OpenaiCompletionsProvider {
     }
 }
 
-// request body
 #[derive(Serialize)]
 struct RequestBody {
     model: String,
@@ -120,7 +114,6 @@ fn build_request_body(
 ) -> RequestBody {
     let mut all_messages = Vec::new();
 
-    // system message
     if let Some(prompt) = system_prompt {
         all_messages.push(serde_json::json!({
             "role": "system",
@@ -128,8 +121,6 @@ fn build_request_body(
         }));
     }
 
-    // openai has automatic caching so always use SlidingWindow
-    // (their caching handles prefix changes transparently)
     let mut visitor = OpenaiVisitor {
         trimming: ToolResultTrimming::SlidingWindow,
         out: &mut all_messages,
@@ -214,7 +205,6 @@ impl super::MessageVisitor for OpenaiVisitor<'_> {
     fn on_assistant(&mut self, asst: &AssistantMessage) {
         let mut msg_obj = serde_json::json!({ "role": "assistant" });
 
-        // text content
         let text_parts: Vec<&str> = asst
             .content
             .iter()
@@ -230,7 +220,6 @@ impl super::MessageVisitor for OpenaiVisitor<'_> {
             msg_obj["content"] = serde_json::json!(text_parts.join(""));
         }
 
-        // tool calls
         let tool_calls: Vec<serde_json::Value> = asst
             .content
             .iter()
@@ -275,7 +264,6 @@ impl super::MessageVisitor for OpenaiVisitor<'_> {
     }
 }
 
-// SSE parsing
 #[derive(Debug, Deserialize)]
 struct ChunkResponse {
     #[serde(default)]
@@ -349,11 +337,6 @@ impl ChunkDelta {
 
 #[derive(Debug, Deserialize)]
 struct ChunkToolCall {
-    /// openai's per-call index. parallel tool calls share a single
-    /// `tool_calls` array but each delta carries its own `index` so the
-    /// receiver can route partial-args chunks to the right call. mush
-    /// keys an in-flight `ToolBlock` by this value, falling back to 0
-    /// for providers that omit it on single-call streams
     #[serde(default)]
     index: Option<u64>,
     #[serde(default)]
@@ -388,20 +371,9 @@ struct PromptTokenDetails {
 
 use super::StreamBlock;
 
-/// in-flight tool call from openai chat completions. parallel calls each
-/// keep their own buffer so interleaved deltas (different `index`es in
-/// the same chunk or split across chunks) route to the right call.
-/// `id` and `name` aren't tracked here because they're already on the
-/// corresponding `AssistantContentPart::ToolCall` in `output.content`
-/// (recorded at start) so they don't need duplicating
 #[derive(Debug)]
 struct ToolBlock {
-    /// openai's `tool_calls[].index` for this call. used to disambiguate
-    /// parallel calls when their deltas interleave
     openai_index: u64,
-    /// position of the corresponding `AssistantContentPart::ToolCall`
-    /// inside `output.content`. recorded at start so deltas can address
-    /// the right entry without re-scanning
     content_index: usize,
     args_buf: String,
 }
@@ -461,15 +433,12 @@ fn process_chunk(
 ) -> Vec<StreamEvent> {
     let mut events = Vec::new();
 
-    // capture the openrouter generation id once. some chunks emit it,
-    // some don't; sticky-set it the first time we see one
     if output.generation_id.is_none()
         && let Some(id) = chunk.id
     {
         output.generation_id = Some(id);
     }
 
-    // handle usage
     if let Some(usage) = chunk.usage {
         let cached = usage
             .prompt_tokens_details
@@ -496,7 +465,6 @@ fn process_chunk(
         }
     }
 
-    // handle reasoning/thinking content
     if let Some(reasoning) = choice.delta.reasoning_delta() {
         match current {
             Some(StreamBlock::Thinking { text, .. }) => {
@@ -534,7 +502,6 @@ fn process_chunk(
         }
     }
 
-    // handle text content
     if let Some(text) = choice.delta.content
         && !text.is_empty()
     {
@@ -566,10 +533,6 @@ fn process_chunk(
         }
     }
 
-    // handle tool calls. parallel calls each get their own ToolBlock
-    // keyed by openai's `tool_calls[].index`. text/thinking is finished
-    // before the first tool block opens because chat completions never
-    // re-opens text after tool calls
     if let Some(tool_calls) = choice.delta.tool_calls {
         if matches!(
             current,
@@ -625,7 +588,6 @@ fn process_chunk(
     events
 }
 
-/// finish the current block, emitting end events and returning the content index
 fn finish_block_events(
     current: &mut Option<StreamBlock>,
     output: &mut AssistantMessage,
@@ -665,11 +627,6 @@ fn finish_block_events(
     Some(content_index)
 }
 
-/// flush all in-flight parallel tool calls without emitting events.
-/// called from the SSE processor's `finish` hook so the final
-/// `AssistantMessage` carries fully-parsed args even when the stream
-/// ends mid-call (or when openai never sends a terminal marker per
-/// tool, which it doesn't on chat completions)
 fn finish_tool_blocks_silent(tool_blocks: &mut Vec<ToolBlock>, output: &mut AssistantMessage) {
     for block in tool_blocks.drain(..) {
         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&block.args_buf)
@@ -681,8 +638,6 @@ fn finish_tool_blocks_silent(tool_blocks: &mut Vec<ToolBlock>, output: &mut Assi
     }
 }
 
-/// map an openai finish_reason, with a message for the ones that end a
-/// turn without a usable result
 fn map_stop_reason(reason: &str) -> (StopReason, Option<String>) {
     match reason {
         "stop" => (StopReason::Stop, None),
@@ -779,7 +734,6 @@ mod tests {
 
         assert_eq!(body.model, model.id.as_str());
         assert!(body.stream);
-        // system + user = 2 messages
         assert_eq!(body.messages.len(), 2);
         assert_eq!(body.messages[0]["role"], "system");
         assert_eq!(body.messages[1]["role"], "user");
@@ -878,7 +832,7 @@ mod tests {
         };
 
         let events = process_chunk(chunk, &mut output, &mut current, &mut tool_blocks);
-        assert!(events.len() >= 2); // TextStart + TextDelta
+        assert!(events.len() >= 2);
         assert!(matches!(events[0], StreamEvent::TextStart { .. }));
         assert!(matches!(events[1], StreamEvent::TextDelta { .. }));
         assert!(current.is_some());
@@ -890,7 +844,6 @@ mod tests {
         let mut current = None;
         let mut tool_blocks = Vec::new();
 
-        // reasoning chunk
         let chunk = ChunkResponse {
             id: None,
             choices: vec![ChunkChoice {
@@ -905,7 +858,6 @@ mod tests {
         process_chunk(chunk, &mut output, &mut current, &mut tool_blocks);
         assert!(matches!(current, Some(StreamBlock::Thinking { .. })));
 
-        // then text
         let chunk = ChunkResponse {
             id: None,
             choices: vec![ChunkChoice {
@@ -918,7 +870,6 @@ mod tests {
             usage: None,
         };
         let events = process_chunk(chunk, &mut output, &mut current, &mut tool_blocks);
-        // should have ThinkingEnd, TextStart, TextDelta
         assert!(
             events
                 .iter()
@@ -969,7 +920,6 @@ mod tests {
         let mut current = None;
         let mut tool_blocks = Vec::new();
 
-        // tool call start
         let chunk = ChunkResponse {
             id: None,
             choices: vec![ChunkChoice {
@@ -995,7 +945,6 @@ mod tests {
                 .any(|e| matches!(e, StreamEvent::ToolCallStart { .. }))
         );
 
-        // tool call arg continuation
         let chunk = ChunkResponse {
             id: None,
             choices: vec![ChunkChoice {
@@ -1016,8 +965,6 @@ mod tests {
         };
         process_chunk(chunk, &mut output, &mut current, &mut tool_blocks);
 
-        // mid-stream the args are still partial JSON, so the recorded
-        // arguments stay at the empty-object default
         match &output.content[0] {
             AssistantContentPart::ToolCall(tc) => {
                 assert_eq!(tc.arguments, serde_json::json!({}));
@@ -1025,8 +972,6 @@ mod tests {
             other => panic!("expected tool call, got {other:?}"),
         }
 
-        // finish: drains tool_blocks and parses the buffered JSON onto
-        // the existing ToolCall part
         finish_tool_blocks_silent(&mut tool_blocks, &mut output);
 
         match &output.content[0] {
@@ -1040,18 +985,10 @@ mod tests {
 
     #[test]
     fn parallel_tool_calls_with_interleaved_deltas_keep_args_separate() {
-        // openai chat completions streams parallel tool calls keyed by
-        // `tool_calls[].index`. for parallel calls the per-tool deltas
-        // can interleave, so each delta must be routed to the tool
-        // identified by its `index`, not appended to "the latest tool"
-        // tracked in a single slot. without index-aware routing, args
-        // for tool 0 leak into tool 1 (or vice versa) and one of the
-        // tools is silently dropped/emptied
         let mut output = test_output();
         let mut current = None;
         let mut tool_blocks = Vec::new();
 
-        // tool 0 starts (id + name, empty args)
         let chunk: ChunkResponse = serde_json::from_value(serde_json::json!({
             "choices": [{"delta": {"tool_calls": [
                 {"index": 0, "id": "call_a", "function": {"name": "WebSearch", "arguments": ""}}
@@ -1060,7 +997,6 @@ mod tests {
         .unwrap();
         process_chunk(chunk, &mut output, &mut current, &mut tool_blocks);
 
-        // tool 1 starts (id + name, empty args)
         let chunk: ChunkResponse = serde_json::from_value(serde_json::json!({
             "choices": [{"delta": {"tool_calls": [
                 {"index": 1, "id": "call_b", "function": {"name": "WebSearch", "arguments": ""}}
@@ -1069,7 +1005,6 @@ mod tests {
         .unwrap();
         process_chunk(chunk, &mut output, &mut current, &mut tool_blocks);
 
-        // tool 0 receives a partial-args delta (interleaved with tool 1)
         let chunk: ChunkResponse = serde_json::from_value(serde_json::json!({
             "choices": [{"delta": {"tool_calls": [
                 {"index": 0, "function": {"arguments": "{\"q\":\"foo\"}"}}
@@ -1078,7 +1013,6 @@ mod tests {
         .unwrap();
         process_chunk(chunk, &mut output, &mut current, &mut tool_blocks);
 
-        // tool 1 receives its partial-args delta
         let chunk: ChunkResponse = serde_json::from_value(serde_json::json!({
             "choices": [{"delta": {"tool_calls": [
                 {"index": 1, "function": {"arguments": "{\"q\":\"bar\"}"}}
@@ -1120,11 +1054,6 @@ mod tests {
 
     #[test]
     fn process_chunk_captures_top_level_id_for_generation_lookup() {
-        // openrouter (and any openai-compatible streamer) emits a
-        // top-level `id` on every chunk. that id is what feeds the
-        // /generation cost reconciliation lookup. capture it once and
-        // store it on the AssistantMessage so the post-stream handler
-        // can fire the lookup after the turn lands
         let mut output = test_output();
         let mut current = None;
         let mut tool_blocks = Vec::new();
@@ -1140,9 +1069,6 @@ mod tests {
 
     #[test]
     fn process_chunk_id_is_sticky_across_chunks() {
-        // openrouter sometimes emits a chunk without `id` mid-stream.
-        // once captured the id should not be cleared by a subsequent
-        // chunk that lacks one
         let mut output = test_output();
         let mut current = None;
         let mut tool_blocks = Vec::new();
@@ -1178,7 +1104,7 @@ mod tests {
         };
 
         process_chunk(chunk, &mut output, &mut current, &mut tool_blocks);
-        assert_eq!(output.usage.input_tokens, TokenCount::new(50)); // 150 - 100 cached
+        assert_eq!(output.usage.input_tokens, TokenCount::new(50));
         assert_eq!(output.usage.output_tokens, TokenCount::new(50));
         assert_eq!(output.usage.cache_read_tokens, TokenCount::new(100));
     }

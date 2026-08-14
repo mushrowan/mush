@@ -1,8 +1,3 @@
-//! semantic symbol extraction from parsed syntax trees
-//!
-//! walks a tree-sitter parse tree and extracts top-level symbols
-//! (functions, classes, structs, etc.) using per-language query patterns
-
 use std::path::{Path, PathBuf};
 
 use tree_sitter::StreamingIterator;
@@ -10,7 +5,6 @@ use tree_sitter::StreamingIterator;
 use crate::language::Language;
 use crate::queries;
 
-/// kind of symbol extracted from source code
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SymbolKind {
     Function,
@@ -54,31 +48,18 @@ impl std::fmt::Display for SymbolKind {
     }
 }
 
-/// a symbol extracted from source code
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymbolInfo {
-    /// symbol name
     pub name: String,
-    /// what kind of symbol
     pub kind: SymbolKind,
-    /// source file path (set when extracted via `symbols_from_file`)
     pub file_path: Option<PathBuf>,
-    /// start line (0-indexed)
     pub start_line: usize,
-    /// end line (0-indexed)
     pub end_line: usize,
-    /// start byte offset
     pub start_byte: usize,
-    /// end byte offset
     pub end_byte: usize,
-    /// the symbol's signature or first line (for display)
     pub signature: String,
 }
 
-/// extract symbols from source code for a given language
-///
-/// when `file_path` is provided, each symbol will carry the path
-/// (needed when indexing whole repos)
 pub fn extract_symbols(
     language: Language,
     source: &[u8],
@@ -164,7 +145,6 @@ fn symbol_kind_from_capture(capture_name: &str) -> Option<SymbolKind> {
     }
 }
 
-/// extract the first line of a node as its signature
 fn extract_signature(source: &[u8], node: &tree_sitter::Node) -> String {
     let start = node.start_byte();
     let end = node.end_byte().min(source.len());
@@ -172,7 +152,6 @@ fn extract_signature(source: &[u8], node: &tree_sitter::Node) -> String {
 
     let first_line = text.lines().next().unwrap_or("").trim();
 
-    // truncate at a char boundary
     if first_line.len() > 200 {
         let boundary = first_line
             .char_indices()
@@ -249,7 +228,6 @@ mod inner {}
         assert!(names.contains(&"MAX"), "missing MAX: {names:?}");
         assert!(names.contains(&"inner"), "missing inner: {names:?}");
 
-        // check kinds
         let point = symbols.iter().find(|s| s.name == "Point").unwrap();
         assert_eq!(point.kind, SymbolKind::Struct);
 
@@ -338,7 +316,7 @@ class Widget {
         let symbols = parse_and_extract(Language::Rust, &source);
 
         if let Some(sym) = symbols.first() {
-            assert!(sym.signature.len() <= 200 + 3); // 200 + "..."
+            assert!(sym.signature.len() <= 200 + 3);
         }
     }
 

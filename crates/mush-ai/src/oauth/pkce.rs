@@ -1,18 +1,14 @@
-//! PKCE (proof key for code exchange) utilities
-
 use base64::Engine;
 use sha2::Digest;
 
 use super::OAuthError;
 
-/// PKCE verifier + challenge pair
 #[derive(Debug, Clone)]
 pub struct PkceChallenge {
     pub verifier: String,
     pub challenge: String,
 }
 
-/// generate a PKCE code verifier and S256 challenge
 pub fn generate_pkce() -> Result<PkceChallenge, OAuthError> {
     let mut verifier_bytes = [0u8; 32];
     getrandom::fill(&mut verifier_bytes)

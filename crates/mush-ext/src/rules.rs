@@ -1,39 +1,26 @@
-//! per-file rule auto-attachment
-//!
-//! discovers rule files from `.mush/rules/` with glob patterns in
-//! yaml frontmatter. when a file path matches a rule's globs, the
-//! rule content is injected into context.
-
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
-/// a rule file with glob patterns and/or language triggers
 #[derive(Debug, Clone)]
 pub struct Rule {
     pub name: String,
     pub globs: Vec<String>,
-    /// tree-sitter language names that trigger this rule (e.g. "rust", "python")
     pub languages: Vec<String>,
     pub content: String,
     pub path: PathBuf,
 }
 
-/// index of rules for fast glob and language matching
 pub struct RuleIndex {
     rules: Vec<Rule>,
     globset: GlobSet,
-    /// which glob index maps to which rule index
     glob_to_rule: Vec<usize>,
-    /// language name → rule indices that match it
     lang_to_rules: std::collections::HashMap<String, Vec<usize>>,
-    /// rules already injected (by index), avoids duplication
     injected: Mutex<Vec<bool>>,
 }
 
 impl RuleIndex {
-    /// build from a list of rules, compiling globs and language mappings
     pub fn new(rules: Vec<Rule>) -> Self {
         let mut builder = GlobSetBuilder::new();
         let mut glob_to_rule = Vec::new();
@@ -71,9 +58,6 @@ impl RuleIndex {
         }
     }
 
-    /// check a file path and return any matching rules not yet injected
-    ///
-    /// matches by glob pattern and by detected language (via tree-sitter)
     pub fn match_file(&self, path: &Path) -> Vec<&Rule> {
         let mut injected = self.injected.lock().unwrap_or_else(|e| e.into_inner());
         let mut result = Vec::new();
@@ -117,27 +101,16 @@ impl RuleIndex {
         result
     }
 
-    /// check whether any rules exist
     pub fn is_empty(&self) -> bool {
         self.rules.is_empty()
     }
 }
 
-/// parse a rule file's yaml frontmatter for glob patterns
-///
-/// expects `---` fenced yaml with a `globs` field:
-/// ```text
-/// ---
-/// globs: ["*.py", "tests/**/*.py"]
-/// ---
-/// ```
-/// parse a rule file's yaml frontmatter for glob patterns
 pub fn parse_rule_frontmatter(content: &str) -> Option<Vec<String>> {
     let (frontmatter, _) = crate::frontmatter::extract(content)?;
     parse_globs(frontmatter)
 }
 
-/// parse a bracketed list value from frontmatter (e.g. `["*.py", "*.pyi"]`)
 fn parse_bracket_list(val: &str) -> Option<Vec<String>> {
     let val = val.trim();
     if val.starts_with('[') && val.ends_with(']') {
@@ -154,7 +127,6 @@ fn parse_bracket_list(val: &str) -> Option<Vec<String>> {
     None
 }
 
-/// extract globs from pre-extracted frontmatter text
 fn parse_globs(frontmatter: &str) -> Option<Vec<String>> {
     for line in frontmatter.lines() {
         let line = line.trim();
@@ -165,7 +137,6 @@ fn parse_globs(frontmatter: &str) -> Option<Vec<String>> {
     None
 }
 
-/// extract language names from pre-extracted frontmatter text
 fn parse_languages(frontmatter: &str) -> Option<Vec<String>> {
     for line in frontmatter.lines() {
         let line = line.trim();
@@ -176,13 +147,11 @@ fn parse_languages(frontmatter: &str) -> Option<Vec<String>> {
     None
 }
 
-/// scan `.mush/rules/` directory for rule files
 pub fn discover_rules(cwd: &Path) -> Vec<Rule> {
     let rules_dir = cwd.join(".mush/rules");
     scan_rules_dir(&rules_dir)
 }
 
-/// scan a directory for markdown rule files with glob/language frontmatter
 fn scan_rules_dir(dir: &Path) -> Vec<Rule> {
     let mut rules = Vec::new();
     let entries = match std::fs::read_dir(dir) {
@@ -209,7 +178,6 @@ fn scan_rules_dir(dir: &Path) -> Vec<Rule> {
         let globs = parse_globs(frontmatter).unwrap_or_default();
         let languages = parse_languages(frontmatter).unwrap_or_default();
 
-        // need at least one trigger
         if globs.is_empty() && languages.is_empty() {
             continue;
         }
@@ -317,11 +285,9 @@ use type hints
         }];
         let index = RuleIndex::new(rules);
 
-        // first match returns the rule
         let matched = index.match_file(Path::new("a.py"));
         assert_eq!(matched.len(), 1);
 
-        // second match for same rule returns nothing
         let matched = index.match_file(Path::new("b.py"));
         assert!(matched.is_empty());
     }
@@ -341,7 +307,6 @@ use type hints
         assert_eq!(matched.len(), 1);
         assert_eq!(matched[0].name, "web");
 
-        // already injected
         let matched = index.match_file(Path::new("lib.js"));
         assert!(matched.is_empty());
     }
@@ -360,7 +325,6 @@ use type hints
         let matched = index.match_file(Path::new("tests/unit/test_foo.py"));
         assert_eq!(matched.len(), 1);
 
-        // doesn't match files outside tests/
         assert!(index.match_file(Path::new("src/foo.py")).is_empty());
     }
 
@@ -393,7 +357,6 @@ use type hints
         assert_eq!(rules[0].name, "python");
         assert_eq!(rules[0].globs, vec!["*.py"]);
         assert!(rules[0].content.contains("use type hints"));
-        // frontmatter should be stripped
         assert!(!rules[0].content.contains("globs:"));
     }
 
@@ -419,7 +382,6 @@ use type hints
         assert_eq!(matched.len(), 1);
         assert_eq!(matched[0].name, "rust");
 
-        // python file should not match
         let index2 = RuleIndex::new(vec![Rule {
             name: "rust".into(),
             globs: vec![],
@@ -432,7 +394,6 @@ use type hints
 
     #[test]
     fn rule_matches_by_language_and_glob() {
-        // rule with both globs and languages should match either
         let rules = vec![Rule {
             name: "web".into(),
             globs: vec!["*.css".into()],
@@ -442,7 +403,6 @@ use type hints
         }];
         let index = RuleIndex::new(rules);
 
-        // matches via language
         let matched = index.match_file(Path::new("app.ts"));
         assert_eq!(matched.len(), 1);
         assert_eq!(matched[0].name, "web");

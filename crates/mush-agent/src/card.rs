@@ -1,53 +1,32 @@
-//! agent card: a JSON capability manifest
-//!
-//! loosely aligned with the A2A protocol's AgentCard concept.
-//! describes what a running mush session can do, for discovery
-//! by other agents or tools.
-
 use serde::{Deserialize, Serialize};
 
-/// a running agent's capability manifest
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentCard {
-    /// agent name
     pub name: String,
-    /// human-readable description
     pub description: String,
-    /// agent version (from cargo)
     pub version: String,
-    /// the LLM model powering this agent
     pub model: String,
-    /// available tools and their descriptions
     pub tools: Vec<ToolEntry>,
-    /// what this agent supports
     pub capabilities: Capabilities,
-    /// where to reach this agent (if serving)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
 }
 
-/// a tool entry in the agent card
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ToolEntry {
     pub name: String,
     pub description: String,
 }
 
-/// supported capabilities
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Capabilities {
-    /// supports streaming responses
     pub streaming: bool,
-    /// supports multi-pane agents
     pub multi_pane: bool,
-    /// supports inter-agent messaging
     pub messaging: bool,
-    /// supports LSP diagnostics
     pub lsp: bool,
 }
 
 impl AgentCard {
-    /// build a card from the current agent setup
     pub fn build(model_id: &str, tools: &crate::tool::ToolRegistry) -> Self {
         let tool_entries: Vec<ToolEntry> = tools
             .iter()
@@ -90,7 +69,6 @@ mod tests {
         assert_eq!(card.model, "claude-sonnet-4-20250514");
         assert!(card.tools.is_empty());
         assert!(card.url.is_none());
-        // url omitted from json when None
         assert!(!card.to_json().contains("url"));
     }
 

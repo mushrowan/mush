@@ -1,16 +1,8 @@
-//! extension and skill discovery
-//!
-//! finds AGENTS.md files and skill directories to build the
-//! system prompt with project context.
-
 use std::path::{Component, Path, PathBuf};
 
-/// discovered project context from AGENTS.md and skills
 #[derive(Debug, Default)]
 pub struct ProjectContext {
-    /// content of AGENTS.md files found
     pub agents_md: Vec<AgentsMd>,
-    /// skill files available
     pub skills: Vec<Skill>,
 }
 
@@ -27,7 +19,6 @@ pub struct Skill {
     pub path: PathBuf,
 }
 
-/// resolve the mush config directory (XDG-aware)
 fn resolve_config_dir() -> Option<PathBuf> {
     if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
         return Some(PathBuf::from(xdg).join("mush"));
@@ -35,19 +26,16 @@ fn resolve_config_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config/mush"))
 }
 
-/// derive config dir from an explicit home (for testing, no env vars)
 fn config_dir_from_home(home: &Path) -> PathBuf {
     home.join(".config/mush")
 }
 
-/// scan for AGENTS.md in the project directory and up to home
 pub fn find_agents_md(cwd: &Path) -> Vec<AgentsMd> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let config_dir = resolve_config_dir();
     find_agents_md_inner(cwd, home.as_deref(), config_dir.as_deref())
 }
 
-/// scan for nested AGENTS.md files between cwd and a target path
 pub fn find_nested_agents_md(cwd: &Path, target: &Path) -> Vec<AgentsMd> {
     let target_dir = if target.is_dir() {
         target
@@ -83,7 +71,6 @@ pub fn find_nested_agents_md(cwd: &Path, target: &Path) -> Vec<AgentsMd> {
     results
 }
 
-/// inner implementation with explicit home and config dir
 fn find_agents_md_inner(
     cwd: &Path,
     home: Option<&Path>,
@@ -91,7 +78,6 @@ fn find_agents_md_inner(
 ) -> Vec<AgentsMd> {
     let mut results = Vec::new();
 
-    // walk up from cwd to home
     let mut dir = Some(cwd.to_path_buf());
     while let Some(d) = dir {
         let agents_path = d.join("AGENTS.md");
@@ -104,7 +90,6 @@ fn find_agents_md_inner(
             });
         }
 
-        // stop at home directory
         if home.is_some_and(|h| d == h) {
             break;
         }
@@ -112,7 +97,6 @@ fn find_agents_md_inner(
         dir = d.parent().map(|p| p.to_path_buf());
     }
 
-    // also check ~/.config/mush/AGENTS.md (user-global)
     if let Some(cd) = config_dir {
         let mush_agents = cd.join("AGENTS.md");
         if mush_agents.is_file()
@@ -126,16 +110,13 @@ fn find_agents_md_inner(
         }
     }
 
-    // reverse so most specific (project-level) comes last
     results.reverse();
     results
 }
 
-/// find skills from the available_skills block in AGENTS.md content
 pub fn parse_skills_from_agents_md(content: &str) -> Vec<Skill> {
     let mut skills = Vec::new();
 
-    // look for <available_skills> block
     let Some(start) = content.find("<available_skills>") else {
         return skills;
     };
@@ -145,7 +126,6 @@ pub fn parse_skills_from_agents_md(content: &str) -> Vec<Skill> {
 
     let block = &content[start..end];
 
-    // parse each <skill> block
     let mut pos = 0;
     while let Some(skill_start) = block[pos..].find("<skill>") {
         let skill_start = pos + skill_start;
@@ -185,9 +165,6 @@ fn extract_tag(text: &str, tag: &str) -> Option<String> {
     }
 }
 
-/// parse SKILL.md frontmatter (yaml between `---` fences)
-///
-/// extracts `name` and `description` fields
 fn parse_skill_frontmatter(content: &str) -> Option<(String, String)> {
     let (frontmatter, _) = crate::frontmatter::extract(content)?;
 
@@ -205,10 +182,6 @@ fn parse_skill_frontmatter(content: &str) -> Option<(String, String)> {
     Some((name?, description?))
 }
 
-/// scan a directory for SKILL.md files in subdirectories
-///
-/// matches pi's discovery: each subdirectory containing a SKILL.md
-/// with valid frontmatter (name + description) is a skill
 fn scan_skills_dir(dir: &Path) -> Vec<Skill> {
     let mut skills = Vec::new();
     let entries = match std::fs::read_dir(dir) {
@@ -241,13 +214,6 @@ fn scan_skills_dir(dir: &Path) -> Vec<Skill> {
     skills
 }
 
-/// build the full project context for a working directory
-///
-/// discovers skills from:
-/// 1. `<available_skills>` blocks in AGENTS.md files (explicit)
-/// 2. `~/.config/mush/skills/` directory (user-global)
-/// 3. ancestor `.mush/skills/` directories between cwd and home
-/// discover project context once for both system prompt and skill tools
 #[tracing::instrument(name = "discover_context", skip_all)]
 pub fn discover_project_context(cwd: &Path) -> ProjectContext {
     let home = std::env::var_os("HOME").map(PathBuf::from);
@@ -255,7 +221,6 @@ pub fn discover_project_context(cwd: &Path) -> ProjectContext {
     discover_project_context_inner(cwd, home.as_deref(), config_dir.as_deref())
 }
 
-/// testable variant that accepts an explicit home directory
 pub fn discover_project_context_with_home(cwd: &Path, home: Option<&Path>) -> ProjectContext {
     let config_dir = home.map(config_dir_from_home);
     discover_project_context_inner(cwd, home, config_dir.as_deref())
@@ -301,21 +266,18 @@ fn discover_project_context_inner(
     let mut skills = Vec::new();
     let mut positions = std::collections::HashMap::new();
 
-    // explicit skills from AGENTS.md
     for agents in &agents_md {
         for skill in parse_skills_from_agents_md(&agents.content) {
             upsert_skill(&mut skills, &mut positions, skill);
         }
     }
 
-    // user-global skills directory (~/.config/mush/skills/)
     if let Some(cd) = config_dir {
         for skill in scan_skills_dir(&cd.join("skills")) {
             upsert_skill(&mut skills, &mut positions, skill);
         }
     }
 
-    // repo-local skills from ancestor .mush/skills/ directories
     for dir in ancestor_dirs_to_home(cwd, home) {
         for skill in scan_skills_dir(&dir.join(".mush/skills")) {
             upsert_skill(&mut skills, &mut positions, skill);
@@ -406,12 +368,10 @@ more content
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path();
 
-        // set up ~/.config/mush/AGENTS.md
         let mush_agents = home.join(".config/mush/AGENTS.md");
         std::fs::create_dir_all(mush_agents.parent().unwrap()).unwrap();
         std::fs::write(&mush_agents, "# mush agents").unwrap();
 
-        // set up ~/.config/mush/skills/
         let mush_skills = home.join(".config/mush/skills/rust");
         std::fs::create_dir_all(&mush_skills).unwrap();
         std::fs::write(
@@ -443,7 +403,6 @@ more content
         let cwd = home.join("project");
         std::fs::create_dir_all(&cwd).unwrap();
 
-        // set up .mush/skills/ (project-local)
         let skill_dir = cwd.join(".mush/skills/local-only");
         std::fs::create_dir_all(&skill_dir).unwrap();
         std::fs::write(
@@ -452,7 +411,6 @@ more content
         )
         .unwrap();
 
-        // use fake home so we don't pick up real skills
         let ctx = discover_project_context_with_home(&cwd, Some(home));
         assert!(
             ctx.skills.iter().any(|s| s.name == "local-only"),
@@ -561,9 +519,7 @@ more content
     #[test]
     fn scan_skills_dir_skips_invalid() {
         let dir = tempfile::tempdir().unwrap();
-        // dir without SKILL.md
         std::fs::create_dir_all(dir.path().join("empty")).unwrap();
-        // SKILL.md without frontmatter
         let bad = dir.path().join("bad");
         std::fs::create_dir_all(&bad).unwrap();
         std::fs::write(bad.join("SKILL.md"), "no frontmatter here").unwrap();

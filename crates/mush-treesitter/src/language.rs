@@ -1,8 +1,5 @@
-//! language detection from file extensions and names
-
 use std::path::Path;
 
-/// languages supported by the tree-sitter integration
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Language {
     Rust,
@@ -24,7 +21,6 @@ pub enum Language {
     Nix,
 }
 
-/// all supported languages
 pub const ALL: &[Language] = &[
     Language::Rust,
     Language::Python,
@@ -45,7 +41,6 @@ pub const ALL: &[Language] = &[
     Language::Nix,
 ];
 
-/// languages with meaningful symbol extraction (not data/markup formats)
 pub const CODE: &[Language] = &[
     Language::Rust,
     Language::Python,
@@ -60,7 +55,6 @@ pub const CODE: &[Language] = &[
     Language::Nix,
 ];
 
-/// data and markup formats (no symbol extraction)
 pub const DATA: &[Language] = &[
     Language::Json,
     Language::Toml,
@@ -71,7 +65,6 @@ pub const DATA: &[Language] = &[
 ];
 
 impl Language {
-    /// detect language from a file path (extension + filename heuristics)
     pub fn detect(path: &Path) -> Option<Self> {
         if let Some(name) = path.file_name().and_then(|n| n.to_str())
             && let Some(lang) = Self::from_filename(name)
@@ -83,7 +76,6 @@ impl Language {
         Self::from_extension(ext)
     }
 
-    /// map a file extension to a language
     pub fn from_extension(ext: &str) -> Option<Self> {
         match ext {
             "rs" => Some(Self::Rust),
@@ -107,7 +99,6 @@ impl Language {
         }
     }
 
-    /// map well-known filenames to a language
     fn from_filename(name: &str) -> Option<Self> {
         match name {
             "Makefile" | "makefile" | "GNUmakefile" => Some(Self::Bash),
@@ -120,7 +111,6 @@ impl Language {
         }
     }
 
-    /// get the tree-sitter language function, if the grammar is compiled in
     pub fn tree_sitter_language(self) -> Option<tree_sitter::Language> {
         match self {
             #[cfg(feature = "lang-rust")]
@@ -162,12 +152,10 @@ impl Language {
         }
     }
 
-    /// whether this is a code language (has meaningful symbol extraction)
     pub fn is_code(self) -> bool {
         CODE.contains(&self)
     }
 
-    /// human-readable name
     pub fn name(self) -> &'static str {
         match self {
             Self::Rust => "rust",
@@ -248,7 +236,6 @@ mod tests {
 
     #[test]
     fn c_vs_cpp_header_disambiguation() {
-        // .h defaults to C
         assert_eq!(Language::detect(Path::new("foo.h")), Some(Language::C));
         assert_eq!(Language::detect(Path::new("foo.hpp")), Some(Language::Cpp));
     }

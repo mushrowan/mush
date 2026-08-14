@@ -1,13 +1,3 @@
-//! standalone render-loop harness for profiling the live block's render
-//! hot path without criterion's setup, plotting, or process-spawning
-//! overhead polluting the profile.
-//!
-//! build and profile:
-//!   RUSTFLAGS="-C force-frame-pointers=yes" cargo build --release --example render_loop
-//!   samply record --save-only -- target/release/examples/render_loop
-//!
-//! env knobs: MUSH_PROFILE_MSGS (default 1024), MUSH_PROFILE_SECS (default 10).
-
 use std::time::{Duration, Instant};
 
 use mush_ai::types::TokenCount;
@@ -25,9 +15,6 @@ fn env_usize(key: &str, default: usize) -> usize {
 }
 
 fn build_app(message_count: usize) -> App {
-    // role mode: "u" all user, "a" all assistant, anything else alternates.
-    // plain mode (MUSH_PROFILE_PLAIN set) drops the code block so syntect /
-    // markdown highlighting is not exercised.
     let role_mode = std::env::var("MUSH_PROFILE_ROLE").unwrap_or_default();
     let plain = std::env::var_os("MUSH_PROFILE_PLAIN").is_some();
     let mut app = App::new("profile-model".into(), TokenCount::new(200_000));
@@ -65,8 +52,6 @@ fn main() {
     let area = Rect::new(0, 0, 100, 40);
     let mut buf = Buffer::empty(area);
 
-    // warm syntect's lazy syntax-set load and the markdown/indent caches so
-    // the timed loop is the steady-state cached render, not one-time init
     let warm_start = Instant::now();
     Ui::new(&app).render(area, &mut buf);
     let warm = warm_start.elapsed();

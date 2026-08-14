@@ -1,14 +1,10 @@
-//! api key resolution from environment variables
-
 use crate::types::{ApiKey, Provider};
 
-/// resolve an api key for a provider from environment variables
 pub fn env_api_key(provider: &Provider) -> Option<ApiKey> {
     let var_name = match provider {
         Provider::Anthropic => "ANTHROPIC_API_KEY",
         Provider::OpenRouter => "OPENROUTER_API_KEY",
         Provider::Custom(name) => {
-            // convention: PROVIDER_NAME_API_KEY (uppercase, hyphens to underscores)
             let var = format!("{}_API_KEY", name.to_uppercase().replace('-', "_"));
             return std::env::var(var).ok().and_then(ApiKey::new);
         }
@@ -16,7 +12,6 @@ pub fn env_api_key(provider: &Provider) -> Option<ApiKey> {
     std::env::var(var_name).ok().and_then(ApiKey::new)
 }
 
-/// check for anthropic oauth token (takes precedence over api key)
 pub fn anthropic_api_key() -> Option<ApiKey> {
     std::env::var("ANTHROPIC_OAUTH_TOKEN")
         .ok()
@@ -31,10 +26,6 @@ pub fn anthropic_api_key() -> Option<ApiKey> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // env var tests are unsafe in edition 2024 since set_var/remove_var
-    // are inherently racy. we wrap them in unsafe blocks and accept the risk
-    // since these tests run serially in practice.
 
     #[test]
     fn env_api_key_missing() {
@@ -51,7 +42,6 @@ mod tests {
 
     #[test]
     fn custom_provider_env_var_name() {
-        // just test the convention without touching env vars
         let name = "my-proxy";
         let expected = format!("{}_API_KEY", name.to_uppercase().replace('-', "_"));
         assert_eq!(expected, "MY_PROXY_API_KEY");

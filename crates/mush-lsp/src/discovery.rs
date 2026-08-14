@@ -1,24 +1,14 @@
-//! auto-detect installed LSP servers
-//!
-//! checks `$PATH` for common language server binaries and maps
-//! them to languages via mush-treesitter's `Language` enum.
-
 use std::path::PathBuf;
 
 use mush_treesitter::Language;
 
-/// an LSP server that can be spawned
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
-    /// language this server handles
     pub language: Language,
-    /// command to run (resolved from PATH or absolute)
     pub command: String,
-    /// command line arguments
     pub args: Vec<String>,
 }
 
-/// well-known LSP server binaries and their languages
 const KNOWN_SERVERS: &[(&str, Language, &[&str])] = &[
     ("rust-analyzer", Language::Rust, &[]),
     ("pyright-langserver", Language::Python, &["--stdio"]),
@@ -37,7 +27,6 @@ const KNOWN_SERVERS: &[(&str, Language, &[&str])] = &[
     ("bash-language-server", Language::Bash, &["start"]),
 ];
 
-/// discover available LSP servers by searching PATH
 pub fn discover() -> Vec<ServerConfig> {
     let dirs = path_dirs();
     let mut found: Vec<ServerConfig> = Vec::new();
@@ -56,7 +45,6 @@ pub fn discover() -> Vec<ServerConfig> {
     found
 }
 
-/// discover a server for a specific language
 pub fn discover_for_language(language: Language) -> Option<ServerConfig> {
     let dirs = path_dirs();
 
@@ -91,7 +79,6 @@ mod tests {
 
     #[test]
     fn known_servers_first_per_language_wins() {
-        // rust-analyzer should come before any other rust server
         let rust_entries: Vec<_> = KNOWN_SERVERS
             .iter()
             .filter(|(_, lang, _)| *lang == Language::Rust)
@@ -115,7 +102,6 @@ mod tests {
     #[test]
     fn is_in_path_works() {
         let dirs = vec![PathBuf::from("/usr/bin")];
-        // can't assume which binaries exist, but shouldn't panic
         let _ = is_in_path("sh", &dirs);
     }
 }

@@ -1,8 +1,3 @@
-//! end-to-end test of the wire-logging http middleware: spins a local
-//! one-shot server, sends a real request through `http::client()`, and
-//! asserts the journal captured the request and response (with the body
-//! buffered, redacted, and passed through to the caller intact).
-
 use mush_ai::http;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -37,7 +32,6 @@ async fn middleware_journals_request_and_response() {
     let url = format!("http://{addr}/v1/models");
     let resp = client.post(&url).body("hello-body").send().await.unwrap();
     assert_eq!(resp.status(), 200);
-    // the rebuilt response must still hand the caller the real bytes
     let text = resp.text().await.unwrap();
     assert!(
         text.contains("\"ok\":true"),
@@ -65,10 +59,8 @@ async fn middleware_journals_request_and_response() {
 
     assert_eq!(res["status"], 200);
     assert_eq!(res["body"]["ok"], true);
-    // secret-shaped value in the response body must be redacted
     assert_eq!(res["body"]["secret"], "<redacted>");
 
-    // request and response share one correlation id
     assert_eq!(req["call_id"], res["call_id"]);
 
     std::fs::remove_dir_all(&dir).ok();

@@ -1,9 +1,3 @@
-//! per-server handle and status
-//!
-//! tools hold a handle rather than a connection directly, so reconnecting
-//! swaps the live connection underneath them without touching the agent's
-//! tool registry.
-
 use std::sync::Arc;
 
 use rmcp::model::Tool as McpToolDef;
@@ -12,16 +6,10 @@ use tokio::sync::RwLock;
 use crate::config::{McpServerConfig, McpServerType};
 use crate::connection::{McpConnection, McpError};
 
-/// where a server stands right now
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServerState {
-    Connected {
-        tools: usize,
-    },
-    Failed {
-        error: String,
-    },
-    /// `enabled = false` in config, never dialled
+    Connected { tools: usize },
+    Failed { error: String },
     Disabled,
 }
 
@@ -31,7 +19,6 @@ impl ServerState {
         matches!(self, Self::Connected { .. })
     }
 
-    /// short word for display
     #[must_use]
     pub fn label(&self) -> &'static str {
         match self {
@@ -42,20 +29,15 @@ impl ServerState {
     }
 }
 
-/// a named MCP server, connected or not
 pub struct McpServer {
     name: String,
     config: McpServerConfig,
-    /// current connection, `None` while disconnected or failed
     connection: Arc<RwLock<Option<Arc<McpConnection>>>>,
-    /// tools advertised by the current connection, refreshed on reconnect
     tools: Arc<RwLock<Vec<McpToolDef>>>,
     state: Arc<RwLock<ServerState>>,
 }
 
 impl McpServer {
-    /// dial a configured server, recording failure rather than propagating
-    /// it so one broken server cannot stop the others from loading
     pub async fn connect(name: &str, config: &McpServerConfig) -> Self {
         let server = Self {
             name: name.to_string(),
@@ -70,8 +52,6 @@ impl McpServer {
         server
     }
 
-    /// replace the live connection, keeping the same handle so tools
-    /// already registered with the agent keep working
     pub async fn reconnect(&self) -> ServerState {
         if !self.config.enabled {
             return ServerState::Disabled;
@@ -109,7 +89,6 @@ impl McpServer {
         self.state.read().await.clone()
     }
 
-    /// how the server is reached, for display
     pub fn transport(&self) -> String {
         match &self.config.server_type {
             McpServerType::Local { command } => command.join(" "),
@@ -117,12 +96,10 @@ impl McpServer {
         }
     }
 
-    /// tool definitions advertised by the current connection
     pub async fn tools(&self) -> Vec<McpToolDef> {
         self.tools.read().await.clone()
     }
 
-    /// display-ready snapshot
     pub async fn status(&self) -> McpServerStatus {
         McpServerStatus {
             name: self.name.clone(),
@@ -131,13 +108,11 @@ impl McpServer {
         }
     }
 
-    /// call a tool on whichever connection is live now
     pub async fn call_tool(
         &self,
         tool: String,
         args: serde_json::Value,
     ) -> Result<rmcp::model::CallToolResult, McpError> {
-        // clone the Arc out so the lock is not held across the call
         let connection = self.connection.read().await.clone();
         match connection {
             Some(connection) => connection.call_tool(tool, args).await,
@@ -146,7 +121,6 @@ impl McpServer {
     }
 }
 
-/// display-ready snapshot of one server
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpServerStatus {
     pub name: String,
@@ -156,8 +130,6 @@ pub struct McpServerStatus {
 
 #[cfg(test)]
 impl McpServer {
-    /// a server that reports a fixed tool list without dialling anything.
-    /// tool calls on it always fail, so this suits catalogue tests only
     pub(crate) fn with_tools(name: &str, tools: Vec<McpToolDef>) -> Self {
         let count = tools.len();
         Self {

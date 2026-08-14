@@ -1,12 +1,3 @@
-//! dynamic model discovery
-//!
-//! providers expose a `/v1/models` endpoint that lists their currently
-//! available models. mush keeps a static catalogue (in [`crate::models`])
-//! but discovery lets us pick up new releases without a code change.
-//!
-//! each backend implements [`ModelDiscovery`]; tests rely on the
-//! pure-function parsers (`parse_*`) so we don't need a live network.
-
 pub mod anthropic;
 pub mod cache;
 pub mod codex;
@@ -28,7 +19,6 @@ use std::time::SystemTime;
 
 use crate::types::{Model, Provider};
 
-/// outcome of a discovery fetch for one provider
 #[derive(Debug, Clone)]
 pub struct DiscoveryReport {
     pub provider: Provider,
@@ -36,18 +26,9 @@ pub struct DiscoveryReport {
     pub models: Vec<DiscoveredModel>,
 }
 
-/// a model returned by a provider's `/v1/models` endpoint, paired
-/// with the verbatim upstream JSON it was parsed from.
-///
-/// the parsed [`Model`] has the cross-cutting fields mush cares about
-/// (id, name, context, cost, reasoning, …). `raw` keeps the original
-/// entry so providers with richer schemas (codex) can expose typed
-/// extras lazily without bloating [`Model`] or migrating the cache.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DiscoveredModel {
     pub model: Model,
-    /// verbatim upstream entry. `None` only for fixtures or providers
-    /// that don't carry per-model metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw: Option<serde_json::Value>,
 }
@@ -91,21 +72,14 @@ impl From<reqwest_middleware::Error> for DiscoveryError {
     }
 }
 
-/// fetch the list of models a provider currently offers
 pub trait ModelDiscovery: Send + Sync {
-    /// the provider this discovery instance describes
     fn provider(&self) -> Provider;
 
-    /// hit the upstream `/v1/models` endpoint and return parsed models
     fn fetch(
         &self,
     ) -> impl std::future::Future<Output = Result<DiscoveryReport, DiscoveryError>> + Send;
 }
 
-/// shared `send + classify + read body` step used by every provider's `fetch`.
-///
-/// returns the response body text on 2xx, an [`DiscoveryError::Auth`] on
-/// 401/403, and [`DiscoveryError::Upstream`] for anything else non-2xx.
 pub(crate) async fn execute_request(
     request: reqwest_middleware::RequestBuilder,
 ) -> Result<String, DiscoveryError> {

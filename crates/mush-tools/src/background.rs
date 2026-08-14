@@ -1,8 +1,3 @@
-//! background job registry for long-running bash commands
-//!
-//! allows the agent to spawn commands that run asynchronously and poll
-//! for results, keeping API cache warm between polls
-
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -10,10 +5,8 @@ use std::time::Instant;
 
 use tokio::sync::RwLock;
 
-/// hard cap on concurrent background jobs regardless of flags
 const MAX_CONCURRENT_JOBS: usize = 3;
 
-/// finished jobs older than this are reaped automatically
 const JOB_EXPIRY_SECS: u64 = 30 * 60;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,7 +24,6 @@ impl JobStatus {
     }
 }
 
-/// shared state for a single background job
 #[derive(Debug)]
 pub struct JobState {
     pub id: String,
@@ -42,19 +34,11 @@ pub struct JobState {
     pub stdout_consumed_bytes: usize,
     pub stderr_consumed_bytes: usize,
     pub started: Instant,
-    /// instant the status transitioned out of `Running`. `None` while
-    /// the job is still running. used to report a stable run-time
-    /// duration on subsequent polls instead of wall-clock-since-start
     pub finished: Option<Instant>,
     pub cwd: Arc<Path>,
 }
 
 impl JobState {
-    /// transition the job out of `Running`, recording the finish
-    /// instant so duration reporting stays stable across later polls.
-    /// callers should always go through this rather than mutating
-    /// `status` directly so the invariant `status != Running =>
-    /// finished.is_some()` cannot drift
     pub fn finish(&mut self, status: JobStatus) {
         debug_assert!(
             !status.is_running(),
@@ -64,9 +48,6 @@ impl JobState {
         self.finished = Some(Instant::now());
     }
 
-    /// time the job spent running. for finished jobs this is the gap
-    /// between `started` and `finished`; for in-flight jobs it's
-    /// wall-clock from `started` until now
     pub fn run_duration(&self) -> std::time::Duration {
         match self.finished {
             Some(finished) => finished.duration_since(self.started),
@@ -75,9 +56,6 @@ impl JobState {
     }
 }
 
-/// registry of active background jobs
-///
-/// thread-safe, shared between BashTool and BashStatusTool
 #[derive(Debug, Clone)]
 pub struct BackgroundJobRegistry {
     jobs: Arc<RwLock<HashMap<String, Arc<RwLock<JobState>>>>>,
@@ -101,8 +79,6 @@ impl JobKillHandle {
         #[cfg(unix)]
         unsafe {
             // SAFETY: negating the process group id targets the whole group.
-            // the id came from a freshly spawned child, and SIGKILL has no
-            // additional safety preconditions.
             libc::kill(-self.process_group_id, libc::SIGKILL);
         }
     }
@@ -117,7 +93,6 @@ impl BackgroundJobRegistry {
         }
     }
 
-    /// generate a unique job id
     pub fn next_id(&self) -> String {
         let n = self
             .counter
@@ -125,7 +100,6 @@ impl BackgroundJobRegistry {
         format!("bg_{n}")
     }
 
-    /// count of currently running jobs
     pub async fn running_count(&self) -> usize {
         let jobs = self.jobs.read().await;
         let mut count = 0;
@@ -137,10 +111,6 @@ impl BackgroundJobRegistry {
         count
     }
 
-    /// check whether a new background job can be started
-    ///
-    /// returns Ok(()) if allowed, Err with a message describing why not.
-    /// `concurrent` opts in to running alongside existing jobs (up to hard cap)
     pub async fn check_can_start(&self, concurrent: bool) -> Result<(), String> {
         let running = self.running_count().await;
 
@@ -152,7 +122,6 @@ impl BackgroundJobRegistry {
         }
 
         if running > 0 && !concurrent {
-            // find the first running job to tell the agent about it
             let jobs = self.jobs.read().await;
             for job in jobs.values() {
                 let state = job.read().await;
@@ -169,7 +138,6 @@ impl BackgroundJobRegistry {
         Ok(())
     }
 
-    /// register a new job and return its shared state handle
     pub async fn insert(&self, state: JobState) -> Arc<RwLock<JobState>> {
         let id = state.id.clone();
         let handle = Arc::new(RwLock::new(state));
@@ -198,28 +166,24 @@ impl BackgroundJobRegistry {
         self.kill_handles.write().await.remove(id);
     }
 
-    /// get a job's shared state by id
     pub async fn get(&self, id: &str) -> Option<Arc<RwLock<JobState>>> {
         self.jobs.read().await.get(id).cloned()
     }
 
-    /// remove expired jobs
     pub async fn reap_expired(&self) {
         let mut jobs = self.jobs.write().await;
         jobs.retain(|_, job_handle| {
-            // we can't await inside retain, so use try_read
             if let Ok(state) = job_handle.try_read() {
                 state.status.is_running()
                     || state
                         .finished
                         .is_none_or(|finished| finished.elapsed().as_secs() < JOB_EXPIRY_SECS)
             } else {
-                true // keep jobs we can't read (they're being written to)
+                true
             }
         });
     }
 
-    /// list all job ids and their statuses (for display)
     pub async fn list(&self) -> Vec<(String, String, JobStatus)> {
         let jobs = self.jobs.read().await;
         let mut result = Vec::new();
@@ -311,13 +275,11 @@ mod tests {
         let reg = BackgroundJobRegistry::new();
         let handle = reg.insert(make_job("bg_0", "echo done")).await;
 
-        // mark it complete
         handle
             .write()
             .await
             .finish(JobStatus::Done { exit_code: 0 });
 
-        // should now allow a new job without concurrent flag
         assert!(reg.check_can_start(false).await.is_ok());
     }
 

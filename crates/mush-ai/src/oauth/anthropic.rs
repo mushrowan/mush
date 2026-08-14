@@ -1,5 +1,3 @@
-//! anthropic oauth provider (claude pro/max)
-
 use super::{
     AuthPrompt, BrowserLogin, OAuthCredentials, OAuthError, OAuthProvider, PkceChallenge,
     generate_pkce,
@@ -84,8 +82,6 @@ impl OAuthProvider for AnthropicOAuth {
     }
 }
 
-/// wait for the loopback callback, then exchange its code against the
-/// same redirect uri the authorize request carried
 async fn await_browser_credentials(
     server: CallbackServer,
     pkce: PkceChallenge,
@@ -115,7 +111,6 @@ async fn await_browser_credentials(
     }
 }
 
-/// the console paste flow hands back `code#state` in one string
 fn split_code_and_state(input: &str) -> (String, String) {
     let (code, state) = input.split_once('#').unwrap_or((input, ""));
     (code.to_string(), state.to_string())
@@ -245,9 +240,6 @@ mod tests {
 
     #[tokio::test]
     async fn browser_login_points_the_redirect_at_the_bound_loopback_port() {
-        // the auto-completing flow swaps the console paste redirect for
-        // a loopback one, so the port in the url has to be the port the
-        // server actually bound (the preferred one may be taken)
         let login = AnthropicOAuth
             .begin_browser_login()
             .await

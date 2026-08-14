@@ -1,39 +1,3 @@
-//! openrouter /api/v1/models discovery
-//!
-//! openrouter exposes a richer schema than first-party providers - including
-//! pricing - so this is the only provider where discovery alone gives us
-//! a fully-populated [`ModelCost`].
-//!
-//! example response shape (trimmed):
-//!
-//! ```json
-//! {
-//!   "data": [{
-//!     "id": "anthropic/claude-sonnet-4",
-//!     "name": "Anthropic: Claude Sonnet 4",
-//!     "context_length": 1000000,
-//!     "architecture": {
-//!       "input_modalities": ["image", "text"],
-//!       "output_modalities": ["text"]
-//!     },
-//!     "pricing": {
-//!       "prompt": "0.000003",
-//!       "completion": "0.000015",
-//!       "input_cache_read": "0.0000003",
-//!       "input_cache_write": "0.00000375"
-//!     },
-//!     "top_provider": {
-//!       "context_length": 1000000,
-//!       "max_completion_tokens": 64000
-//!     },
-//!     "supported_parameters": ["reasoning", "tools", ...]
-//!   }]
-//! }
-//! ```
-//!
-//! pricing fields are dollars-per-token strings. mush stores cost as
-//! dollars-per-million-tokens, so we multiply by `1_000_000`.
-
 use std::time::SystemTime;
 
 use serde::Deserialize;
@@ -45,12 +9,9 @@ const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
 const DEFAULT_CONTEXT_WINDOW: u64 = 128_000;
 const DEFAULT_MAX_OUTPUT: u64 = 16_384;
 
-/// openrouter discovery client
 pub struct OpenRouterDiscovery {
     client: crate::http::HttpClient,
     base_url: String,
-    /// optional - openrouter `/models` works unauthenticated, but auth
-    /// gives access to private/preview models tied to the account
     api_key: Option<ApiKey>,
 }
 
@@ -97,7 +58,6 @@ impl ModelDiscovery for OpenRouterDiscovery {
     }
 }
 
-/// parse the raw response body into [`DiscoveredModel`] entries.
 pub fn parse_openrouter_models(body: &str) -> Result<Vec<DiscoveredModel>, DiscoveryError> {
     let response: OpenRouterModelsResponse =
         serde_json::from_str(body).map_err(|e| DiscoveryError::Malformed(e.to_string()))?;
@@ -169,8 +129,6 @@ fn entry_to_model(entry: OpenRouterModelEntry) -> Model {
     }
 }
 
-/// convert openrouter's `dollars-per-token` strings to mush's `dollars-per-million-tokens` floats.
-/// missing or unparseable fields default to zero (free / unknown).
 fn pricing_to_cost(pricing: OpenRouterPricing) -> ModelCost {
     let parse = |s: Option<String>| -> f64 {
         s.and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0) * 1_000_000.0
@@ -235,9 +193,6 @@ struct OpenRouterTopProvider {
 mod tests {
     use super::*;
 
-    /// real openrouter response excerpt covering pricing, modalities,
-    /// supported_parameters, top_provider, and the ones-with-missing-pieces
-    /// case (free model with no pricing field).
     const FIXTURE: &str = r#"{
       "data": [
         {
@@ -293,7 +248,6 @@ mod tests {
     fn pricing_converted_to_per_million_tokens() {
         let models = parse_openrouter_models(FIXTURE).unwrap();
         let sonnet = &models[0].model;
-        // 0.000003 dollars-per-token = 3.0 dollars-per-million
         assert!((sonnet.cost.input - 3.0).abs() < 0.001);
         assert!((sonnet.cost.output - 15.0).abs() < 0.001);
         assert!((sonnet.cost.cache_read - 0.3).abs() < 0.001);
@@ -358,8 +312,6 @@ mod tests {
 
     #[test]
     fn parser_preserves_raw_entry_json() {
-        // pricing is in the raw blob too; consumers can re-derive
-        // anything they want without going back to the upstream
         let models = parse_openrouter_models(FIXTURE).unwrap();
         let raw = models[0].raw.as_ref().expect("raw must be populated");
         assert_eq!(raw["id"], "anthropic/claude-sonnet-4");

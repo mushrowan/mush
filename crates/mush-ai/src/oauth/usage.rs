@@ -1,9 +1,3 @@
-//! anthropic oauth usage polling
-//!
-//! fetches rolling usage limits (5-hour and 7-day windows) from
-//! the undocumented /api/oauth/usage endpoint. results are cached
-//! to avoid hitting the aggressive rate limit.
-
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -16,17 +10,13 @@ const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const BETA_HEADER: &str = "oauth-2025-04-20";
 const MIN_POLL_INTERVAL: Duration = Duration::from_secs(180);
 
-/// a single usage window (5-hour or 7-day)
 #[derive(Debug, Clone)]
 pub struct UsageWindow {
-    /// percentage used (0.0 - 100.0)
     pub utilization: f32,
-    /// when the window resets (end of the rolling period)
     pub resets_at: DateTime<Utc>,
 }
 
 impl UsageWindow {
-    /// ideal pace: how far through the window we are, as a percentage
     pub fn pace(&self, window: chrono::TimeDelta) -> f32 {
         let now = Utc::now();
         let start = self.resets_at - window;
@@ -39,7 +29,6 @@ impl UsageWindow {
     }
 }
 
-/// usage data from the anthropic api
 #[derive(Debug, Clone)]
 pub struct OAuthUsage {
     pub five_hour: Option<UsageWindow>,
@@ -51,7 +40,6 @@ impl OAuthUsage {
     pub const SEVEN_DAY: chrono::TimeDelta = chrono::TimeDelta::weeks(1);
 }
 
-/// cached usage poller with a shared http client
 pub struct UsagePoller {
     cached: Arc<Mutex<Option<CachedResult>>>,
     client: crate::http::HttpClient,
@@ -75,10 +63,7 @@ impl UsagePoller {
         }
     }
 
-    /// get usage data, returning cached if fresh enough.
-    /// returns None if no oauth token is available or the api errors.
     pub async fn get_usage(&self) -> Option<OAuthUsage> {
-        // check cache under a short lock
         {
             let cache = self.cached.lock().ok()?;
             match cache.as_ref() {
@@ -109,9 +94,7 @@ impl UsagePoller {
             }
             Err(ref e) => {
                 tracing::debug!(%e, "usage fetch failed");
-                // cache the error so we don't retry every second
                 if let Ok(mut cache) = self.cached.lock() {
-                    // preserve stale data if we had it
                     let had_data = matches!(cache.as_ref(), Some(CachedResult::Ok { .. }));
                     if !had_data {
                         *cache = Some(CachedResult::Err {
@@ -119,7 +102,6 @@ impl UsagePoller {
                         });
                     }
                 }
-                // return stale data if available
                 self.cached.lock().ok().and_then(|c| match c.as_ref() {
                     Some(CachedResult::Ok { data, .. }) => Some(data.clone()),
                     _ => None,
@@ -128,7 +110,6 @@ impl UsagePoller {
         }
     }
 
-    /// force a refresh after an api call completes
     pub async fn refresh(&self) {
         if let Ok(usage) = self.fetch().await
             && let Ok(mut cache) = self.cached.lock()
@@ -185,7 +166,6 @@ impl UsagePoller {
     }
 }
 
-// response parsing
 #[derive(Deserialize)]
 struct RawUsageResponse {
     five_hour: Option<RawWindow>,

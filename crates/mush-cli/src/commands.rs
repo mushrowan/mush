@@ -1,5 +1,3 @@
-//! subcommand handlers for the mush CLI
-
 use color_eyre::eyre::{Result, eyre};
 
 use mush_ai::types::CacheRetention;
@@ -127,7 +125,6 @@ pub fn status(terminal_overrides: mush_tui::TerminalPolicyOverrides) -> Result<(
 
     println!("\x1b[1mmush status\x1b[0m\n");
 
-    // config
     let config_path = config::config_dir().join("config.toml");
     if config_path.exists() {
         println!("  config: {}", config_path.display());
@@ -135,23 +132,19 @@ pub fn status(terminal_overrides: mush_tui::TerminalPolicyOverrides) -> Result<(
         println!("  config: \x1b[2m(none, using defaults)\x1b[0m");
     }
 
-    // model
     let cwd = mush_tui::canonical_dir(&std::env::current_dir().unwrap_or_default());
     let model_id = default_model_id(&cfg, &cwd);
     println!("  model:  {model_id}");
 
-    // thinking
     let thinking = cfg
         .thinking
         .map(|l| format!("{l:?}").to_lowercase())
         .unwrap_or_else(|| "off".into());
     println!("  thinking: {thinking}");
 
-    // max turns
     let max_turns = cfg.max_turns.unwrap_or(mush_agent::DEFAULT_MAX_TURNS);
     println!("  max turns: {max_turns}");
 
-    // cache retention
     let cache_retention = cfg.cache_retention.unwrap_or(CacheRetention::Short);
     let cache_retention = match cache_retention {
         CacheRetention::None => "none",
@@ -167,7 +160,6 @@ pub fn status(terminal_overrides: mush_tui::TerminalPolicyOverrides) -> Result<(
     );
     println!("  image probe: {}", terminal.image_probe.as_str());
 
-    // auth status
     println!("\n\x1b[1mauth\x1b[0m\n");
 
     let has_anthropic_env = std::env::var("ANTHROPIC_API_KEY").is_ok();
@@ -217,8 +209,6 @@ pub fn status(terminal_overrides: mush_tui::TerminalPolicyOverrides) -> Result<(
         println!("\x1b[2m - not configured\x1b[0m");
     }
 
-    // additional openai-compatible providers. env vars follow the
-    // convention `{PROVIDER}_API_KEY` (matches `env_api_key` in mush-ai)
     for provider in [
         "groq",
         "deepseek",
@@ -241,7 +231,6 @@ pub fn status(terminal_overrides: mush_tui::TerminalPolicyOverrides) -> Result<(
         }
     }
 
-    // sessions
     let store = SessionStore::new(SessionStore::default_dir());
     let session_count = store.list().map(|s| s.len()).unwrap_or(0);
     println!("\n\x1b[1msessions\x1b[0m\n");
@@ -295,8 +284,6 @@ pub async fn login(provider_id: Option<String>) -> Result<()> {
 
     eprintln!("\n\x1b[32m✓ logged in to {}\x1b[0m", provider.name());
 
-    // refresh the discovery cache so the picker reflects whatever
-    // models the just-logged-in subscription exposes on next launch
     eprintln!("refreshing model catalogue...");
     let client = mush_ai::http::client();
     let summary = mush_ai::discovery::refresh_and_save(client).await;

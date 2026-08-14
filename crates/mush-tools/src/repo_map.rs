@@ -1,8 +1,3 @@
-//! repo map tool - exposes the tree-sitter repository map as an on-demand tool
-//!
-//! gives the agent a structural overview of the codebase (types, functions,
-//! traits, line counts) without reading source files
-
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -15,18 +10,11 @@ use thiserror::Error;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RepoMapArgs {
-    /// optional directory path prefix to filter by
     path: Option<String>,
-    /// optional cap on number of files emitted (default: as many as fit
-    /// the budget)
     #[serde(default, deserialize_with = "mush_agent::de::opt_uint")]
     limit: Option<usize>,
-    /// emit one line per file with no symbols (great for "list every
-    /// file under crates/foo")
     #[serde(default)]
     summary_only: bool,
-    /// seconds to wait for a lazy repo map build to finish before returning
-    /// a still-building status
     #[serde(
         default = "default_wait_timeout_secs",
         deserialize_with = "mush_agent::de::uint"
@@ -42,9 +30,6 @@ const fn default_wait_timeout_secs() -> u64 {
 pub struct RepoMapShared {
     map: Arc<RwLock<SharedRepoMap>>,
     state: Arc<RwLock<RepoMapState>>,
-    /// per-call rendering budget in tokens. tools render the structured
-    /// map fresh on each invocation against this budget so the
-    /// available view never goes stale relative to disk
     budget_tokens: usize,
 }
 
@@ -251,9 +236,6 @@ impl AgentTool for RepoMapTool {
         };
 
         if filtered.files.is_empty() {
-            // distinct from "didn't fit budget": this prefix has no
-            // matches in the parsed graph. say so explicitly so the
-            // model doesn't waste a turn raising `limit`
             let prefix = args.path.as_deref().unwrap_or("");
             return ToolResult::text(format!(
                 "no files match prefix '{prefix}' in the repo map. \
@@ -271,7 +253,6 @@ impl AgentTool for RepoMapTool {
     }
 
     fn output_limit(&self) -> OutputLimit {
-        // ranked structural overview, top entries are most useful
         OutputLimit::Head
     }
 }
@@ -356,20 +337,11 @@ mod tests {
 
     #[tokio::test]
     async fn filters_by_path_when_files_dropped_by_budget() {
-        // regression: when the rendering budget excluded the requested
-        // subtree from the map_text, the tool reported "no files found"
-        // even though the parsed graph had matching files. filter must
-        // run on the structured RepoMap before rendering, not on the
-        // already-rendered string
         let dir = tempfile::tempdir().unwrap();
         let crate_a = dir.path().join("crates/mush-a/src");
         let crate_b = dir.path().join("crates/mush-b/src");
         std::fs::create_dir_all(&crate_a).unwrap();
         std::fs::create_dir_all(&crate_b).unwrap();
-        // 30 files per crate; with a very tight budget only a handful
-        // can survive the pre-render. before this fix the survivors
-        // were chosen by rank, leaving entire crates unreachable via
-        // path filter
         for i in 0..30 {
             std::fs::write(
                 crate_a.join(format!("a{i}.rs")),
@@ -384,10 +356,6 @@ mod tests {
         }
         std::fs::create_dir(dir.path().join(".git")).unwrap();
 
-        // 64 tokens ≈ 256 chars, holds at most 2-3 file entries. with
-        // pre-render-then-filter, asking for crates/mush-b would return
-        // "no files found" because the renderer ran out of budget on
-        // the higher-ranked files
         let shared = RepoMapShared::lazy(dir.path().to_path_buf(), 64);
         let tool = RepoMapTool::new(shared);
         let result = tool
@@ -456,9 +424,6 @@ mod tests {
 
     #[tokio::test]
     async fn no_matches_for_path_disambiguates_from_budget_truncation() {
-        // distinct from "didn't fit budget": if the prefix has no
-        // matches in the parsed graph at all, say so explicitly so
-        // the model doesn't waste a turn raising `limit`
         let tool = make_tool(sample_map());
         let result = tool
             .execute(serde_json::json!({"path": "nonexistent/dir"}))
@@ -477,8 +442,6 @@ mod tests {
             .await;
         assert!(result.outcome.is_success());
         let text = result_text(&result);
-        // each file gets a single line with `(N symbols, rank=...)`,
-        // none of the per-symbol detail
         assert!(text.contains("crates/mush-ai/src/types.rs: (2 symbols"));
         assert!(text.contains("crates/mush-tools/src/read.rs: (2 symbols"));
         assert!(!text.contains("var ModelId"));
@@ -491,8 +454,6 @@ mod tests {
         let result = tool.execute(serde_json::json!({"limit": 1})).await;
         assert!(result.outcome.is_success());
         let text = result_text(&result);
-        // first file present, second + third dropped, footer mentions
-        // the count and recovery options
         assert!(text.contains("crates/mush-ai/src/types.rs"));
         assert!(!text.contains("crates/mush-ai/src/registry.rs"));
         assert!(text.contains("2 more files omitted"));

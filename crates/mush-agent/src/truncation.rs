@@ -1,10 +1,3 @@
-//! tool output truncation with file spillover
-//!
-//! when a tool result exceeds the max size, the full output is saved to a file
-//! and the model gets a truncated preview with a recovery hint.
-//! each tool declares its own `OutputLimit` via the trait method, so the agent
-//! loop picks the right strategy automatically.
-
 use std::path::PathBuf;
 
 use crate::tool::{OutputLimit, ToolResult};
@@ -15,7 +8,6 @@ pub const MAX_BYTES: usize = 50 * 1024;
 
 const RETENTION: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
 
-/// directory for saving full tool output
 fn output_dir() -> PathBuf {
     let base = if let Ok(dir) = std::env::var("MUSH_DATA_DIR") {
         PathBuf::from(dir)
@@ -29,8 +21,6 @@ fn output_dir() -> PathBuf {
     base.join("tool-output")
 }
 
-/// save full output to a file, returning the path.
-/// falls back to temp dir if the preferred location isn't writable
 fn save_full_output(content: &str) -> Option<PathBuf> {
     let primary = output_dir();
     let fallback = std::env::temp_dir().join("mush").join("tool-output");
@@ -51,7 +41,6 @@ fn save_full_output(content: &str) -> Option<PathBuf> {
     Some(path)
 }
 
-/// truncate text to a byte budget, breaking on the last line boundary
 pub fn truncate_to_budget(text: &str, budget: usize) -> &str {
     if text.len() <= budget {
         return text;
@@ -63,7 +52,6 @@ pub fn truncate_to_budget(text: &str, budget: usize) -> &str {
     }
 }
 
-/// save full batch output to a file (cap at 10MB to avoid runaway writes)
 pub fn save_batch_output(content: &str) -> Option<PathBuf> {
     const MAX_SAVE_BYTES: usize = 10 * 1024 * 1024;
     if content.len() > MAX_SAVE_BYTES {
@@ -78,7 +66,6 @@ pub fn save_batch_output(content: &str) -> Option<PathBuf> {
     }
 }
 
-/// clean up tool output files older than 7 days
 pub fn cleanup() {
     let dir = output_dir();
     let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -95,12 +82,10 @@ pub fn cleanup() {
     }
 }
 
-/// apply truncation based on the tool's declared output limit
 pub fn apply(result: ToolResult, limit: OutputLimit) -> ToolResult {
     apply_for_tool(result, limit, None)
 }
 
-/// apply truncation with tool-specific recovery guidance.
 pub fn apply_for_tool(
     result: ToolResult,
     limit: OutputLimit,
@@ -116,7 +101,6 @@ pub fn apply_for_tool(
     }
 }
 
-/// truncate with explicit options
 pub fn truncate(
     result: ToolResult,
     max_lines: usize,
@@ -174,8 +158,6 @@ fn truncate_for_tool(
             let (kept, _hit_bytes) = collect_head(&lines, max_lines, max_bytes);
             let omitted = total - kept.len();
             let preview = if kept.is_empty() && !lines.is_empty() {
-                // first line alone exceeded max_bytes; sample its head
-                // so the model can classify the content
                 let sample = sample_line_head(lines[0], max_bytes);
                 format!("{sample}\n[partial line]")
             } else {
@@ -188,7 +170,6 @@ fn truncate_for_tool(
             let (kept, _hit_bytes) = collect_tail(&lines, max_lines, max_bytes);
             let omitted = total - kept.len();
             let preview = if kept.is_empty() && !lines.is_empty() {
-                // last line alone exceeded max_bytes; sample its tail
                 let sample = sample_line_tail(lines[lines.len() - 1], max_bytes);
                 format!("[partial line]\n{sample}")
             } else {
@@ -199,7 +180,6 @@ fn truncate_for_tool(
         }
     };
 
-    // replace text parts with truncated version
     result
         .content
         .retain(|p| !matches!(p, ToolResultContentPart::Text(_)));
@@ -213,7 +193,6 @@ fn truncate_for_tool(
     result
 }
 
-/// collect lines from the start
 fn collect_head<'a>(lines: &[&'a str], max_lines: usize, max_bytes: usize) -> (Vec<&'a str>, bool) {
     let mut kept = Vec::new();
     let mut bytes = 0;
@@ -231,7 +210,6 @@ fn collect_head<'a>(lines: &[&'a str], max_lines: usize, max_bytes: usize) -> (V
     (kept, false)
 }
 
-/// collect lines from the end
 fn collect_tail<'a>(lines: &[&'a str], max_lines: usize, max_bytes: usize) -> (Vec<&'a str>, bool) {
     let mut kept = Vec::new();
     let mut bytes = 0;
@@ -271,9 +249,6 @@ fn actionable_hint(saved_path: &Option<PathBuf>, tool_name: Option<&str>) -> Str
     }
 }
 
-/// take a prefix of `line` that fits in `max_bytes`, snapped to a
-/// utf-8 char boundary. used when a single line exceeds the byte
-/// budget and we still want the model to see *some* of its content
 fn sample_line_head(line: &str, max_bytes: usize) -> &str {
     if line.len() <= max_bytes {
         return line;
@@ -285,8 +260,6 @@ fn sample_line_head(line: &str, max_bytes: usize) -> &str {
     &line[..end]
 }
 
-/// take a suffix of `line` that fits in `max_bytes`, snapped to a
-/// utf-8 char boundary
 fn sample_line_tail(line: &str, max_bytes: usize) -> &str {
     if line.len() <= max_bytes {
         return line;
@@ -352,12 +325,6 @@ mod tests {
 
     #[test]
     fn byte_overflow_preview_contains_partial_line_content() {
-        // a single line longer than MAX_BYTES used to render as just the
-        // hint with an empty preview, leaving the model with no clue
-        // what kind of content it was looking at (minified js? base64?
-        // a giant error string?). the preview must now include a sample
-        // of the actual line so the model can classify it without
-        // reaching for the saved file
         let huge = "x".repeat(MAX_BYTES + 10_000);
         for direction in [OutputLimit::Head, OutputLimit::Tail] {
             let out = apply(ToolResult::text(huge.clone()), direction);
@@ -367,9 +334,6 @@ mod tests {
                     preview.contains("xx"),
                     "{direction:?} preview should sample line content, got: {preview:?}"
                 );
-                // and the partial-line marker tells the model the line
-                // was clipped so it doesn't mistake "xxx" for the full
-                // value
                 assert!(
                     t.contains("[partial line]") || t.contains("[…line clipped]"),
                     "{direction:?} should mark the partial line, got: {t:?}"
@@ -380,9 +344,6 @@ mod tests {
 
     #[test]
     fn byte_overflow_preview_respects_byte_budget() {
-        // sampling from a partial line shouldn't push the preview over
-        // MAX_BYTES (otherwise we'd defeat the truncation we're trying
-        // to apply)
         let huge = "x".repeat(MAX_BYTES * 4);
         for direction in [OutputLimit::Head, OutputLimit::Tail] {
             let out = apply(ToolResult::text(huge.clone()), direction);
@@ -420,10 +381,6 @@ mod tests {
 
     #[test]
     fn hint_appears_at_top_for_all_directions() {
-        // every truncation direction must surface the recovery hint at
-        // the start of the preview. for bash (Tail) this is already the
-        // case; for Head this prevents the model from reading 2000
-        // lines before noticing there's more available
         let big = make_lines(5000);
         for direction in [OutputLimit::Head, OutputLimit::Tail] {
             let out = apply(ToolResult::text(big.clone()), direction);
@@ -510,8 +467,6 @@ mod tests {
 
     #[test]
     fn head_keeps_first_lines_after_top_hint() {
-        // after the top hint, the preview body must start at line 0
-        // (Head direction) so the model still sees the file's beginning
         let lines = make_lines(10);
         let out = truncate(ToolResult::text(lines), 3, usize::MAX, OutputLimit::Head);
         assert_text(&out, |t| {
@@ -522,10 +477,6 @@ mod tests {
             assert!(t.contains("7 lines truncated"));
         });
     }
-
-    // the hint text must always be complete and actionable in the truncated
-    // output. if the hint gets mangled or cut, agents loop forever trying to
-    // bash cat the saved file (which re-truncates, saving to another file, etc)
 
     const EXPECTED_HINT_FRAGMENTS: &[&str] = &["Full output:"];
 
@@ -559,7 +510,6 @@ mod tests {
 
     #[test]
     fn hint_survives_extreme_truncation() {
-        // even with a budget of 1 line, the hint must be complete
         let big = make_lines(5000);
         for direction in [OutputLimit::Head, OutputLimit::Tail] {
             let out = truncate(ToolResult::text(big.clone()), 1, usize::MAX, direction);
@@ -576,12 +526,8 @@ mod tests {
 
     #[test]
     fn hint_includes_file_path_when_saved() {
-        // isolate to a tempdir so tests don't pollute ~/.local/share/mush
-        // and don't race with parallel test processes hitting the same
-        // timestamp-ms filename in the shared tool-output directory
         let tmp = tempfile::tempdir().unwrap();
         // SAFETY: nextest runs each test in its own process so mutating
-        // env here can't race with sibling tests (they're separate procs)
         unsafe {
             std::env::set_var("MUSH_DATA_DIR", tmp.path());
         }
@@ -592,7 +538,6 @@ mod tests {
                 t.contains("Full output:"),
                 "missing 'Full output:' with file path"
             );
-            // path should end in .txt and contain tool-output
             assert!(
                 t.contains("tool-output/") && t.contains(".txt"),
                 "file path doesn't look right: {t}"
@@ -617,8 +562,6 @@ mod tests {
             });
         }
     }
-
-    // helpers
 
     fn make_lines(n: usize) -> String {
         (0..n)

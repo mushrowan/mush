@@ -10,26 +10,11 @@ use crate::types::{
     ToolResultTrimming, TurnPivot, UserMessage, find_recent_boundary,
 };
 
-/// max chars for tool results in older turns
 const TRIM_TOOL_OUTPUT_CHARS: usize = 1500;
-/// number of recent user messages whose tool results are kept at full size
 const RECENT_TURNS_TO_KEEP: usize = 3;
 
-/// global cap on the output budget (tokens) we ever request from a
-/// provider. some upstreams (notably openrouter for kimi-style models)
-/// advertise `max_completion_tokens` equal to the full context window,
-/// which makes any non-empty input overflow the request budget and 400.
-/// 32k matches opencode's default and is more than any single agent
-/// turn realistically produces. callers can still override per request
-/// via [`StreamOptions::max_tokens`]
 pub const MAX_OUTPUT_TOKENS_CAP: u64 = 32_000;
 
-/// resolve the output token budget to send for a request.
-///
-/// honours an explicit caller override in `options.max_tokens`,
-/// otherwise clamps the model's advertised `max_output_tokens` to
-/// [`MAX_OUTPUT_TOKENS_CAP`] so misleading provider metadata can't
-/// overflow the request. see the constant doc for context
 pub(crate) fn effective_max_output_tokens(model: &Model, options: &StreamOptions) -> u64 {
     if let Some(explicit) = options.max_tokens {
         return explicit.get();
@@ -37,7 +22,6 @@ pub(crate) fn effective_max_output_tokens(model: &Model, options: &StreamOptions
     model.max_output_tokens.get().min(MAX_OUTPUT_TOKENS_CAP)
 }
 
-/// format an error with its full source chain (e.g. "outer: middle: root cause")
 pub(crate) fn format_error_chain(err: &dyn std::error::Error) -> String {
     let mut msg = err.to_string();
     let mut source = err.source();
@@ -49,22 +33,16 @@ pub(crate) fn format_error_chain(err: &dyn std::error::Error) -> String {
     msg
 }
 
-/// find the message index at which "recent" turns begin (sliding window boundary)
 fn recent_boundary(messages: &[Message]) -> usize {
     find_recent_boundary(messages, TurnPivot::User, RECENT_TURNS_TO_KEEP).unwrap_or(0)
 }
 
-/// visitor over a slice of `Message` values, used by provider request
-/// builders to share the iteration + boundary tracking logic while keeping
-/// provider-specific emit decisions in focused trait impls
 pub(crate) trait MessageVisitor {
     fn on_user(&mut self, msg: &UserMessage);
     fn on_assistant(&mut self, msg: &AssistantMessage);
     fn on_tool_result(&mut self, msg: &ToolResultMessage, is_old_turn: bool);
 }
 
-/// walk messages dispatching to a visitor, passing `is_old_turn=true` for
-/// tool results before the sliding window boundary (see `recent_boundary`)
 pub(crate) fn walk_messages<V: MessageVisitor + ?Sized>(messages: &[Message], visitor: &mut V) {
     let boundary = recent_boundary(messages);
     for (i, msg) in messages.iter().enumerate() {
@@ -77,7 +55,6 @@ pub(crate) fn walk_messages<V: MessageVisitor + ?Sized>(messages: &[Message], vi
     }
 }
 
-/// trim a tool result string, keeping head and tail previews
 pub(crate) fn trim_tool_output(text: &str) -> String {
     if text.len() <= TRIM_TOOL_OUTPUT_CHARS {
         return text.to_string();
@@ -94,8 +71,6 @@ pub(crate) fn trim_tool_output(text: &str) -> String {
     )
 }
 
-/// conditionally trim a tool result based on whether it's in an old turn
-/// and the active trimming strategy
 pub(crate) fn maybe_trim_tool_output(
     text: &str,
     is_old_turn: bool,
@@ -108,17 +83,10 @@ pub(crate) fn maybe_trim_tool_output(
     }
 }
 
-/// normalise a tool name for case-insensitive, underscore-insensitive matching.
-/// `"web_search"` → `"websearch"`, `"WebSearch"` → `"websearch"`.
-/// shared by the anthropic provider (claude code name mapping) and
-/// `ToolKey` in mush-agent.
 pub fn normalize_tool_name(name: &str) -> String {
     name.to_lowercase().replace('_', "")
 }
 
-/// tracks state for a content block being streamed.
-/// shared across all three providers. the `signature` field on `Thinking`
-/// is only used by anthropic but harmless as `None` for openai providers.
 #[derive(Debug, Clone)]
 pub(crate) enum StreamBlock {
     Text {
@@ -136,9 +104,6 @@ pub(crate) enum StreamBlock {
     ServerSideTranscript,
 }
 
-/// map an effort level to an openai-style reasoning effort string.
-/// shared by the openai completions and openai responses providers.
-/// non-reasoning models yield `None`.
 pub(crate) fn openai_reasoning_effort(model: &Model, effort: &EffortLevel) -> Option<String> {
     if !model.reasoning {
         return None;
@@ -155,9 +120,6 @@ pub(crate) fn requested_effort(options: &StreamOptions) -> Option<EffortLevel> {
     })
 }
 
-/// check an HTTP response for errors, logging metadata and returning a typed
-/// error on non-success status. returns the response unchanged on success.
-/// shared by all three providers to avoid ~30 lines of identical boilerplate.
 pub(crate) async fn check_response(
     response: reqwest::Response,
     api_label: &'static str,
@@ -208,7 +170,6 @@ pub(crate) async fn check_response(
     Ok(response)
 }
 
-/// register all built-in api providers
 pub fn register_builtins(registry: &mut ApiRegistry, client: crate::http::HttpClient) {
     registry.register(Box::new(anthropic::AnthropicProvider {
         client: client.clone(),
@@ -266,7 +227,6 @@ mod tests {
             openai_reasoning_effort(&model, &EffortLevel::Xhigh),
             Some("xhigh".into())
         );
-        // unknown upstream levels flow through verbatim, no code change
         assert_eq!(
             openai_reasoning_effort(&model, &EffortLevel::Other("max".into())),
             Some("max".into())
@@ -341,8 +301,6 @@ mod tests {
             })
         }
 
-        // 4 user turns with tool results between them; boundary keeps the last
-        // 3 user turns "recent" so tr("t1") is the only old tool result
         let messages = vec![
             u("first"),
             a(),
@@ -399,7 +357,6 @@ mod tests {
     fn format_error_chain_includes_sources() {
         let inner = std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "unexpected eof");
         let outer: Box<dyn std::error::Error> = "decoding response body".to_string().into();
-        // simulate a chain by using a custom error
         #[derive(Debug)]
         struct Chained {
             msg: String,
@@ -423,7 +380,6 @@ mod tests {
         let result = super::format_error_chain(&chained);
         assert_eq!(result, "error decoding response body: unexpected eof");
 
-        // single error with no source
         let result = super::format_error_chain(&*outer);
         assert_eq!(result, "decoding response body");
     }
@@ -441,10 +397,6 @@ mod tests {
 
     #[test]
     fn effective_max_output_caps_runaway_advertised_value() {
-        // kimi-on-openrouter advertises max_completion_tokens equal to
-        // its full context window, which causes upstream 400s as soon
-        // as any input is supplied. cap to a sane global so the request
-        // always fits regardless of advertised metadata
         let model = model_with_output(262_142);
         let got = effective_max_output_tokens(&model, &options_default());
         assert!(got <= MAX_OUTPUT_TOKENS_CAP, "got {got}");
@@ -453,8 +405,6 @@ mod tests {
 
     #[test]
     fn effective_max_output_passes_through_when_under_cap() {
-        // most models advertise sensible max_output (e.g. 16k), well
-        // below the global cap. don't punish them by clamping further
         let model = model_with_output(8_192);
         let got = effective_max_output_tokens(&model, &options_default());
         assert_eq!(got, 8_192);
@@ -462,8 +412,6 @@ mod tests {
 
     #[test]
     fn effective_max_output_user_override_wins_over_cap() {
-        // explicit `max_tokens` from the caller represents an informed
-        // choice, so honour it verbatim even if it exceeds the cap
         let model = model_with_output(262_142);
         let opts = StreamOptions {
             max_tokens: Some(TokenCount::new(120_000)),

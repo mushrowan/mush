@@ -1,36 +1,21 @@
-//! task locking for shared-codebase multi-agent scenarios
-//!
-//! agents claim tasks by writing lock files to `.mush/tasks/`.
-//! each lock file is a JSON manifest identifying the agent and
-//! what it's working on. designed for cross-process coordination
-//! where multiple mush sessions share a codebase.
-
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-/// a claimed task
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TaskLock {
-    /// unique task identifier (used as filename)
     pub id: String,
-    /// human-readable description of the task
     pub description: String,
-    /// which agent claimed this (typically pid or session id)
     pub agent: String,
-    /// when the lock was acquired (unix timestamp)
     pub claimed_at: u64,
-    /// optional list of files this task intends to modify
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<String>,
 }
 
-/// manages task locks in a `.mush/tasks/` directory
 pub struct TaskStore {
     dir: PathBuf,
 }
 
-/// errors from task operations
 #[derive(Debug, thiserror::Error)]
 pub enum TaskError {
     #[error("task '{task}' already claimed by agent '{agent}'")]
@@ -48,14 +33,12 @@ pub enum TaskError {
 }
 
 impl TaskStore {
-    /// create a store rooted at `cwd/.mush/tasks`
     pub fn new(cwd: &Path) -> Self {
         Self {
             dir: cwd.join(".mush").join("tasks"),
         }
     }
 
-    /// claim a task. fails if already claimed by another agent
     pub fn claim(&self, lock: &TaskLock) -> Result<(), TaskError> {
         std::fs::create_dir_all(&self.dir)?;
 
@@ -75,7 +58,6 @@ impl TaskStore {
         Ok(())
     }
 
-    /// release a task. only the owning agent can release it
     pub fn release(&self, task_id: &str, agent: &str) -> Result<(), TaskError> {
         let path = self.lock_path(task_id);
         let existing = self.read_lock(&path)?.ok_or_else(|| TaskError::NotFound {
@@ -94,7 +76,6 @@ impl TaskStore {
         Ok(())
     }
 
-    /// list all currently claimed tasks
     pub fn list(&self) -> Result<Vec<TaskLock>, TaskError> {
         if !self.dir.exists() {
             return Ok(vec![]);
@@ -112,7 +93,6 @@ impl TaskStore {
         Ok(tasks)
     }
 
-    /// check if any claimed task overlaps with a given file path
     pub fn file_conflicts(&self, file: &str) -> Result<Vec<TaskLock>, TaskError> {
         Ok(self
             .list()?
@@ -177,7 +157,7 @@ mod tests {
         let lock = sample_lock("task-1", "agent-a");
 
         store.claim(&lock).unwrap();
-        store.claim(&lock).unwrap(); // should not error
+        store.claim(&lock).unwrap();
     }
 
     #[test]

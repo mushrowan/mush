@@ -1,8 +1,3 @@
-//! MCP (Model Context Protocol) client
-//!
-//! connects to MCP servers (local or remote) and exposes their
-//! tools as `AgentTool` implementations for the agent loop.
-
 pub mod catalogue;
 mod config;
 mod connection;
