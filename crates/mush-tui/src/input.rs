@@ -79,6 +79,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         app.interaction.mode = AppMode::ComposerNormal;
         return None;
     }
+    if app.keymap.matches(crate::keybinds::Action::FocusLog, key) {
+        return focus_log(app);
+    }
 
     if app
         .keymap
@@ -810,6 +813,12 @@ fn handle_quit_or_abort(app: &mut App) -> Option<AppEvent> {
     None
 }
 
+fn focus_log(app: &mut App) -> Option<AppEvent> {
+    app.interaction.mode = AppMode::Navigate;
+    app.viewport.pause();
+    None
+}
+
 fn handle_composer_normal_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     if app
         .keymap
@@ -817,9 +826,8 @@ fn handle_composer_normal_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> 
     {
         return handle_quit_or_abort(app);
     }
-    if is_cancel_key(app, key) {
-        app.interaction.mode = AppMode::Navigate;
-        app.viewport.pause();
+    if is_cancel_key(app, key) || app.keymap.matches(crate::keybinds::Action::FocusLog, key) {
+        return focus_log(app);
     }
     None
 }

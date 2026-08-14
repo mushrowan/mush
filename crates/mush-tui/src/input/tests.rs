@@ -2093,6 +2093,25 @@ fn esc_leaves_what_is_typed_alone() {
 }
 
 #[test]
+fn ctrl_o_focuses_the_log_from_insert() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+
+    handle_key(&mut app, ctrl(KeyCode::Char('o')));
+
+    assert_eq!(app.interaction.mode, AppMode::Navigate);
+}
+
+#[test]
+fn ctrl_o_focuses_the_log_from_normal_on_the_composer() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    handle_key(&mut app, key(KeyCode::Esc));
+
+    handle_key(&mut app, ctrl(KeyCode::Char('o')));
+
+    assert_eq!(app.interaction.mode, AppMode::Navigate);
+}
+
+#[test]
 fn esc_while_navigating_goes_back_to_typing() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     handle_key(&mut app, key(KeyCode::Esc));

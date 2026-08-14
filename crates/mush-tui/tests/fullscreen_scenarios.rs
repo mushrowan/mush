@@ -232,6 +232,16 @@ fn a_third_esc_returns_to_insert_with_the_view_where_i_left_it() {
 }
 
 #[test]
+fn ctrl_o_reaches_the_log_in_one_press() {
+    let mut app = conversation(20);
+    app.start_streaming();
+
+    press_with(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL);
+
+    assert_eq!(app.interaction.mode.caret(), Caret::Log);
+}
+
+#[test]
 fn the_composer_survives_the_whole_cycle() {
     let mut app = conversation(20);
     app.input.text = "explain the borrow checker".into();

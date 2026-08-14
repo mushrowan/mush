@@ -116,6 +116,7 @@ pub enum Action {
     CursorUp,
     EditSteering,
     EnterSearch,
+    FocusLog,
     PasteImage,
     QuitOrAbort,
     DeleteWordBackward,
@@ -164,6 +165,7 @@ impl Action {
             Self::DeleteToStart => "delete_to_start",
             Self::EditSteering => "edit_steering",
             Self::EnterSearch => "enter_search",
+            Self::FocusLog => "focus_log",
             Self::InsertNewline => "insert_newline",
             Self::NavigateBottom => "navigate_bottom",
             Self::NavigateTop => "navigate_top",
@@ -355,6 +357,7 @@ const fn default_scope_for_action(action: Action) -> KeyScope {
     match action {
         Action::Cancel
         | Action::Confirm
+        | Action::FocusLog
         | Action::NavigateBottom
         | Action::NavigateTop
         | Action::NextItem
@@ -422,6 +425,11 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
         KeyScope::Normal,
         Action::EnterSearch,
         &[(KeyCode::Char('f'), KeyModifiers::CONTROL)],
+    ),
+    (
+        KeyScope::Shared,
+        Action::FocusLog,
+        &[(KeyCode::Char('o'), KeyModifiers::CONTROL)],
     ),
     (
         KeyScope::Shared,
