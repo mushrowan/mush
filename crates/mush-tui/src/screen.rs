@@ -88,6 +88,11 @@ impl Viewport {
         self.following.set(true);
     }
 
+    pub fn resume(&self) {
+        self.following
+            .set(self.scroll_top.get() >= self.max_scroll());
+    }
+
     pub fn scroll_by(&self, lines: isize) {
         let top = self.scroll_top.get().saturating_add_signed(lines);
         self.scroll_to(top);
@@ -331,6 +336,29 @@ mod tests {
         viewport.scroll_by(-5);
 
         viewport.scroll_by(5);
+
+        assert!(viewport.is_following());
+    }
+
+    #[test]
+    fn leaving_the_log_scrolled_up_does_not_follow() {
+        let viewport = Viewport::default();
+        viewport.window(200, 20);
+        viewport.pause();
+        viewport.scroll_by(-5);
+
+        viewport.resume();
+
+        assert!(!viewport.is_following());
+    }
+
+    #[test]
+    fn leaving_the_log_at_the_tail_follows_again() {
+        let viewport = Viewport::default();
+        viewport.window(200, 20);
+        viewport.pause();
+
+        viewport.resume();
 
         assert!(viewport.is_following());
     }

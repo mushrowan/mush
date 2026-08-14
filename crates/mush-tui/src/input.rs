@@ -832,7 +832,7 @@ fn handle_navigate_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     }
     if is_cancel_key(app, key) {
         app.interaction.mode = AppMode::Normal;
-        app.viewport.follow();
+        app.viewport.resume();
         return None;
     }
 

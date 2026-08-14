@@ -204,6 +204,34 @@ fn esc_leaves_insert_without_interrupting_work() {
 }
 
 #[test]
+fn a_second_esc_moves_me_to_the_log() {
+    let mut app = conversation(20);
+    press(&mut app, KeyCode::Esc);
+
+    press(&mut app, KeyCode::Esc);
+
+    assert_eq!(app.interaction.mode.caret(), Caret::Log);
+}
+
+#[test]
+fn a_third_esc_returns_to_insert_with_the_view_where_i_left_it() {
+    let mut app = conversation(20);
+    let bottom = window_rows(&app);
+    start_reading(&mut app);
+    press_with(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL);
+    let scrolled = window_rows(&app);
+    assert_ne!(scrolled, bottom, "the view moved off the tail");
+
+    press(&mut app, KeyCode::Esc);
+    for c in "ok".chars() {
+        press(&mut app, KeyCode::Char(c));
+    }
+
+    assert_eq!(window_rows(&app), scrolled);
+    assert_eq!(app.input.text, "ok");
+}
+
+#[test]
 fn the_composer_survives_the_whole_cycle() {
     let mut app = conversation(20);
     app.input.text = "explain the borrow checker".into();
@@ -463,19 +491,6 @@ fn g_takes_the_cursor_to_the_last_line() {
     rows(&app, 80, 24);
 
     assert_eq!(app.viewport.cursor_row(), 19);
-}
-
-#[test]
-fn leaving_navigation_snaps_back_to_the_newest_output() {
-    let mut app = conversation(20);
-    let bottom = window_rows(&app);
-    start_reading(&mut app);
-    press_with(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL);
-    assert_ne!(window_rows(&app), bottom);
-
-    press_with(&mut app, KeyCode::Char('['), KeyModifiers::CONTROL);
-
-    assert_eq!(window_rows(&app), bottom);
 }
 
 #[test]
