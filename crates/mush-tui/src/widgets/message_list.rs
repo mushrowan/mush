@@ -142,6 +142,24 @@ fn streaming_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     lines
 }
 
+pub fn transcript_lines(app: &App, width: u16) -> Vec<Line<'static>> {
+    let style = MessageStyle {
+        theme: &app.theme,
+        show_usage: app.interaction.show_usage_lines,
+    };
+    let mut lines = Vec::new();
+    for msg in app.messages.iter().filter(|m| !m.queued) {
+        lines.extend(message_lines(msg, &style, width));
+        lines.push(Line::raw(""));
+    }
+    lines.extend(streaming_lines(app, width));
+    for msg in app.messages.iter().filter(|m| m.queued) {
+        lines.extend(message_lines(msg, &style, width));
+        lines.push(Line::raw(""));
+    }
+    lines
+}
+
 pub fn live_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     let style = MessageStyle {
         theme: &app.theme,

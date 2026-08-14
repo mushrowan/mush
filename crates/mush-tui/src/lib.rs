@@ -22,6 +22,7 @@ pub mod notify;
 pub mod path_utils;
 pub mod prompt_cache;
 pub mod runner;
+pub mod screen;
 pub mod scrollback;
 pub mod serving_provider;
 pub mod session;
