@@ -1,5 +1,3 @@
-//! message list widget - renders conversation history
-
 use mush_ai::types::TokenCount;
 #[cfg(test)]
 use ratatui::buffer::Buffer;
@@ -12,30 +10,14 @@ use ratatui::text::{Line, Span, Text};
 use crate::app::{App, DisplayMessage, DisplayToolCall, MessageRole, ToolCallStatus};
 use crate::widgets::shimmer::shimmer_spans;
 
-/// horizontal padding cells reserved around message body content.
-///
-/// the left side is the indent span (`" "`) prepended by `indent_line`.
-/// the right side is currently 0 (content may run flush to the right
-/// edge). changing this one constant rebalances every wrap/height
-/// calculation so the indent math stays declared in exactly one place
 pub(crate) const MESSAGE_INDENT_LEFT: usize = 1;
 pub(crate) const MESSAGE_INDENT_RIGHT: usize = 1;
 
-/// usable width for message body content given an outer column width.
-/// subtracts both the left indent and any right-side reservation so
-/// renderers and height estimators agree on wrap points
 #[must_use]
 pub(crate) fn message_content_width(outer_width: usize) -> usize {
     outer_width.saturating_sub(MESSAGE_INDENT_LEFT + MESSAGE_INDENT_RIGHT)
 }
 
-/// minimum leading-space count across non-empty lines.
-///
-/// Claude's thinking content commonly prefixes every line with a
-/// single space. when we then prepend our own indent span, the body
-/// visually appears shifted right relative to the header. strip the
-/// common prefix so relative indentation inside the thinking block
-/// is still preserved
 #[must_use]
 pub(crate) fn common_leading_space(text: &str) -> usize {
     text.lines()
@@ -45,9 +27,6 @@ pub(crate) fn common_leading_space(text: &str) -> usize {
         .unwrap_or(0)
 }
 
-/// drop up to `count` leading space characters from `line`. lines with
-/// fewer leading spaces than `count` have all their leading whitespace
-/// removed; non-space characters are left untouched
 #[must_use]
 pub(crate) fn drop_leading_spaces(line: &str, count: usize) -> &str {
     let mut end = 0;
@@ -92,12 +71,8 @@ fn content_hash_call_count() -> usize {
 }
 use crate::theme::Theme;
 
-/// height of an image body inside a user-message attachment cell (excludes
-/// the top border; the shared divider row with the message box is free)
 const ATTACH_INNER_H: u16 = 8;
 
-/// the in-flight reply, the tool-args preview, and the compaction label.
-/// redrawn every frame, so none of it is ever committed to scrollback
 fn streaming_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     if app.stream.active {
@@ -143,9 +118,7 @@ fn streaming_lines(app: &App, width: u16) -> Vec<Line<'static>> {
         }
     }
 
-    // streaming tool args (model is building tool call, not yet executing)
     if app.active_tools.is_empty() && !app.stream.tool_args.is_empty() {
-        // show a truncated preview of the args being built
         let preview = truncate_line(&app.stream.tool_args, 60);
         lines.push(Line::from(vec![
             Span::raw(" "),
@@ -154,7 +127,6 @@ fn streaming_lines(app: &App, width: u16) -> Vec<Line<'static>> {
         ]));
     }
 
-    // backgrounded /compact run: a single busy-label row
     if app.compacting {
         let dim = app.theme.dim;
         let mut spans = vec![Span::raw(" ")];
@@ -170,8 +142,6 @@ fn streaming_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     lines
 }
 
-/// everything below committed history: the live turn's messages, the
-/// streaming block, and any queued steering the user has typed ahead
 pub fn live_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     let style = MessageStyle {
         theme: &app.theme,
@@ -191,25 +161,17 @@ pub fn live_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     lines
 }
 
-/// everything a message needs to render itself, with no viewport state
 pub struct MessageStyle<'a> {
     pub theme: &'a Theme,
     pub show_usage: bool,
 }
 
-/// render one message to owned lines at `width`.
-///
-/// takes no `App`: selection, scroll position, and the line caches live
-/// in the caller, so these lines can go straight into the terminal's
-/// scrollback. image cells are reported but not drawn
 pub fn message_lines(
     msg: &DisplayMessage,
     style: &MessageStyle<'_>,
     width: u16,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    // image cells are positions for a live overlay to draw over, keyed by
-    // message index. scrollback can't host one, so both are discarded
 
     if matches!(msg.role, MessageRole::System) {
         lines.push(system_label_line(style.theme, None));
@@ -233,7 +195,6 @@ pub fn message_lines(
     lines
 }
 
-/// the `system` label, optionally behind a selection marker
 fn system_label_line(theme: &Theme, marker: Option<Span<'static>>) -> Line<'static> {
     let mut spans = Vec::new();
     spans.extend(marker);
@@ -241,11 +202,8 @@ fn system_label_line(theme: &Theme, marker: Option<Span<'static>>) -> Line<'stat
     Line::from(spans)
 }
 
-/// what sits between a label and what it qualifies in a header
 const HEADER_SEPARATOR: &str = " \u{b7} ";
 
-/// one line standing in for a collapsed thinking trace: the last bold
-/// section header, else the first line, stripped of markdown
 pub fn thinking_recap(thinking: &str) -> String {
     let mut lines = thinking.lines().map(str::trim).filter(|l| !l.is_empty());
     let source = lines
@@ -263,7 +221,6 @@ pub fn thinking_recap(thinking: &str) -> String {
     plain.trim_end_matches(':').trim_end().to_string()
 }
 
-/// a line that is one run of bold text, optionally ending with a colon
 fn is_bold_header(line: &str) -> bool {
     let Some(inner) = line
         .strip_prefix("**")
@@ -329,8 +286,6 @@ fn push_queued_lines(
     }
 }
 
-/// token and cost summary. held back while a tool is still running so it
-/// doesn't appear above the running tool panel
 fn push_usage_line(msg: &DisplayMessage, style: &MessageStyle<'_>, lines: &mut Vec<Line<'static>>) {
     if !style.show_usage || msg.is_live() {
         return;
@@ -359,13 +314,8 @@ fn push_usage_line(msg: &DisplayMessage, style: &MessageStyle<'_>, lines: &mut V
     lines.push(Line::styled(parts.join(" | "), style.theme.usage));
 }
 
-/// two columns of padding either side of the text
 const USER_PAD: usize = 2;
 
-/// the user's message as a tinted block.
-///
-/// attached images get a row of placeholder cells above the text for the
-/// overlay to draw into
 fn render_user_message_box(
     theme: &Theme,
     msg: &DisplayMessage,
@@ -393,9 +343,7 @@ fn render_user_message_box(
     lines.push(blank());
 }
 
-/// truncate a string to at most `max` characters (not bytes), adding ellipsis
 fn truncate_line(s: &str, max: usize) -> String {
-    // take first line, strip whitespace
     let line = s.lines().next().unwrap_or(s).trim();
     let char_count = line.chars().count();
     if char_count <= max {
@@ -411,9 +359,6 @@ fn render_streaming_markdown_cached(app: &App, source: &str, width: usize) -> Te
         return Text::default();
     }
 
-    // cache against the FULL stream buffer, not the visible (typewriter-truncated)
-    // portion. this way typewriter ticks don't invalidate the cache: we only
-    // re-parse when new deltas arrive
     let full = &app.stream.text;
 
     if let Some((cached_width, cached_source, cached)) =
@@ -421,7 +366,6 @@ fn render_streaming_markdown_cached(app: &App, source: &str, width: usize) -> Te
         && *cached_width == width
         && cached_source == full
     {
-        // cache hit: truncate the pre-rendered output to the visible char count
         return truncate_text(cached.clone(), source.chars().count());
     }
 
@@ -431,7 +375,6 @@ fn render_streaming_markdown_cached(app: &App, source: &str, width: usize) -> Te
     truncate_text(rendered, source.chars().count())
 }
 
-/// truncate a rendered Text to at most `max_chars` visible characters
 fn truncate_text(text: Text<'static>, max_chars: usize) -> Text<'static> {
     let total: usize = text.lines.iter().map(rendered_line_char_count).sum();
     if total <= max_chars {
@@ -449,7 +392,6 @@ fn truncate_text(text: Text<'static>, max_chars: usize) -> Text<'static> {
             remaining -= line_chars;
             result.push(line);
         } else {
-            // truncate this line's spans to fit
             let mut spans = Vec::new();
             let mut left = remaining;
             for span in line.spans {
@@ -519,7 +461,6 @@ fn push_completed_tool_box_lines(
     }
 }
 
-/// render a group of completed tool calls (same batch) as bordered boxes
 fn render_tool_box_group(
     tools: &[&DisplayToolCall],
     total_width: u16,
@@ -534,16 +475,12 @@ fn render_tool_box_group(
     }
 }
 
-/// two columns of padding either side of a panel's content
 const PANEL_PAD: usize = 2;
 
-/// width available to a panel's content
 fn panel_content_width(width: usize) -> usize {
     width.saturating_sub(PANEL_PAD * 2).max(1)
 }
 
-/// one row of a tool panel: `content` indented and padded out to `width`,
-/// all of it on the panel background
 fn push_panel_line(
     content: Vec<Span<'static>>,
     width: usize,
@@ -560,7 +497,6 @@ fn push_panel_line(
     lines.push(Line::from(spans));
 }
 
-/// one completed tool: a `name . status` header over its summary and output
 fn render_tool_panel(
     tc: &DisplayToolCall,
     width: usize,
@@ -693,7 +629,6 @@ fn tool_output_language(tc: &DisplayToolCall) -> Option<&'static str> {
     }
 }
 
-/// push a styled content line inside a bordered box, wrapping if needed
 fn push_box_content_line(
     text: &str,
     inner_width: usize,
@@ -794,9 +729,6 @@ fn flush_styled_chunk(chunk: &mut String, style: Style, current: &mut Vec<Span<'
     }
 }
 
-/// parse a read-tool output line of the form `L<n>: <content>`. returns
-/// the line number and content on success, `None` when the line doesn't
-/// start with `L<digits>: `
 #[must_use]
 pub(crate) fn parse_read_line(line: &str) -> Option<(u32, &str)> {
     let rest = line.strip_prefix('L')?;
@@ -809,9 +741,6 @@ pub(crate) fn parse_read_line(line: &str) -> Option<(u32, &str)> {
     Some((n, &rest[colon + 2..]))
 }
 
-/// widest line number across all `L<n>:` lines in a read-tool output
-/// preview. used for right-aligning the dim line-number gutter so
-/// numbers stack cleanly regardless of their digit count
 #[must_use]
 pub(crate) fn read_line_number_width(text: &str) -> usize {
     text.lines()
@@ -821,10 +750,6 @@ pub(crate) fn read_line_number_width(text: &str) -> usize {
         .unwrap_or(0)
 }
 
-/// minimum leading-space count across the `L<n>:` content in a read-tool
-/// output preview. blank content rows and non-matching rows are skipped
-/// so they don't collapse the result to zero. returns 0 when no matching
-/// non-blank rows are found
 #[must_use]
 pub(crate) fn read_min_content_indent(text: &str) -> usize {
     text.lines()
@@ -835,25 +760,15 @@ pub(crate) fn read_min_content_indent(text: &str) -> usize {
         .unwrap_or(0)
 }
 
-/// shared rendering state for a read-tool output block. groups the
-/// invariant-across-lines arguments that `push_read_content_line`
 /// otherwise takes individually (clippy::too_many_arguments).
-/// `indent` is stored by value (Span owns its string) so the ctx
-/// doesn't inherit the borrow lifetime from the outer call site
 struct ReadLineCtx<'a> {
     bg: Style,
     gutter_width: usize,
-    /// leading spaces common to every non-blank content row, stripped
-    /// before display so the smallest-indent row sits against the gutter
     strip_indent: usize,
     lang: Option<&'a str>,
     theme: &'a Theme,
 }
 
-/// push a read-tool output line inside a bordered box: the `L<n>:`
-/// prefix becomes a right-aligned dim gutter, the content is
-/// syntax-highlighted when `ctx.lang` is known. falls back to plain
-/// rendering for lines that don't match the `L<n>:` pattern
 fn push_read_content_line(
     text: &str,
     inner_width: usize,
@@ -865,10 +780,6 @@ fn push_read_content_line(
         return;
     };
 
-    // strip the shared leading indent so deeply nested code doesn't sit
-    // half-way across the preview box. only applied to non-blank rows so
-    // blank-content lines stay blank (their indent was already 0 or less
-    // than strip_indent by definition)
     let content = if content.len() >= ctx.strip_indent
         && content.as_bytes()[..ctx.strip_indent]
             .iter()
@@ -879,22 +790,17 @@ fn push_read_content_line(
         content
     };
 
-    // gutter: right-aligned line number followed by 2 spaces of separation
     let gutter = format!("{:>w$}  ", n, w = ctx.gutter_width);
     let gutter_width = text_cell_width(&gutter);
     let remaining_width = inner_width.saturating_sub(gutter_width);
 
-    // build content spans via syntect (bg-free, keeps terminal bg) or plain
     let content_spans: Vec<Span<'static>> = ctx
         .lang
         .and_then(|l| crate::syntax::highlight_line(content, l, ctx.theme))
         .unwrap_or_else(|| vec![Span::raw(content.to_string())]);
 
-    // measure content width so we can pad the tail
     let content_width = spans_cell_width(&content_spans);
 
-    // if content overflows the remaining width, fall back to wrapping
-    // without syntax highlighting (simpler and rare for read previews)
     if content_width > remaining_width {
         push_box_content_line(text, inner_width, ctx.bg, ctx.theme.dim, lines);
         return;
@@ -905,8 +811,6 @@ fn push_read_content_line(
     push_panel_line(spans, inner_width + PANEL_PAD * 2, ctx.bg, lines);
 }
 
-/// pre-wrap a styled line to `content_width`, prepending a 1-space indent
-/// to every resulting line (including continuations from wrapping)
 fn indent_line<'a>(line: Line<'a>, content_width: usize) -> Vec<Line<'a>> {
     #[cfg(test)]
     INDENT_LINE_CALLS.with(|c| c.set(c.get() + 1));
@@ -923,8 +827,6 @@ fn indent_line<'a>(line: Line<'a>, content_width: usize) -> Vec<Line<'a>> {
         return vec![Line::from(spans).style(line_style)];
     }
 
-    // flatten spans into (char, style, width) triples so word-boundary
-    // wrap logic doesn't have to track span boundaries separately
     let cells: Vec<(char, Style, usize)> = line
         .spans
         .iter()
@@ -937,10 +839,6 @@ fn indent_line<'a>(line: Line<'a>, content_width: usize) -> Vec<Line<'a>> {
         })
         .collect();
 
-    // walk cells, tracking last-space index within the current row so we
-    // can backtrack to it when the row overflows. when we do backtrack,
-    // the space itself is dropped so the next row doesn't start with a
-    // leading ghost space
     let mut rows: Vec<Vec<(char, Style)>> = Vec::new();
     let mut row: Vec<(char, Style, usize)> = Vec::new();
     let mut row_width: usize = 0;
@@ -949,8 +847,6 @@ fn indent_line<'a>(line: Line<'a>, content_width: usize) -> Vec<Line<'a>> {
     for (ch, style, w) in cells {
         if row_width + w > content_width && !row.is_empty() {
             if let Some(sp) = last_space {
-                // split at last space: [..sp] becomes a row, sp itself is
-                // dropped, [sp+1..] starts the next row
                 let tail: Vec<(char, Style, usize)> = row.drain(sp + 1..).collect();
                 let _space = row.pop();
                 rows.push(strip_row(&row));
@@ -975,8 +871,6 @@ fn indent_line<'a>(line: Line<'a>, content_width: usize) -> Vec<Line<'a>> {
         rows.push(strip_row(&row));
     }
 
-    // rebuild Line<'a> for each row, coalescing consecutive same-style chars
-    // into Span<'static> to minimise allocations downstream
     let mut result: Vec<Line<'a>> = Vec::with_capacity(rows.len());
     for cells in rows {
         let mut spans: Vec<Span<'a>> = vec![Span::raw(" ")];
@@ -1007,8 +901,6 @@ fn indent_line<'a>(line: Line<'a>, content_width: usize) -> Vec<Line<'a>> {
     result
 }
 
-/// drop any trailing spaces from a row so wrap boundaries don't leave
-/// ghost whitespace
 fn strip_row(row: &[(char, Style, usize)]) -> Vec<(char, Style)> {
     let end = row
         .iter()
@@ -1017,8 +909,6 @@ fn strip_row(row: &[(char, Style, usize)]) -> Vec<(char, Style)> {
     row[..end].iter().map(|(c, s, _)| (*c, *s)).collect()
 }
 
-/// wrap text to fit within `width` terminal cells, breaking at spaces first,
-/// then cell-wise for words longer than the width
 fn wrap_text(text: &str, width: usize) -> Vec<String> {
     if width == 0 || text.is_empty() {
         return vec![text.to_string()];
@@ -1035,17 +925,14 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
         let word_width = text_cell_width(word);
 
         if word_width > width {
-            // push current line first
             if !current.is_empty() {
                 lines.push(std::mem::take(&mut current));
                 current_width = 0;
             }
-            // cell-wrap the long word
             let chunks = split_word_by_cell_width(word, width);
             let last_index = chunks.len().saturating_sub(1);
             for (index, chunk) in chunks.into_iter().enumerate() {
                 if index == last_index {
-                    // last chunk becomes current line so next word can join
                     current_width = text_cell_width(&chunk);
                     current = chunk;
                 } else {
@@ -1096,7 +983,6 @@ fn split_word_by_cell_width(word: &str, width: usize) -> Vec<String> {
     chunks
 }
 
-/// the word a tool panel header ends with, and the colour it carries
 fn tool_status_label(tc: &DisplayToolCall, theme: &Theme) -> (&'static str, Color) {
     match tc.status {
         ToolCallStatus::Done => ("done", theme.tool_done.fg.unwrap_or(Color::Green)),
@@ -1105,7 +991,6 @@ fn tool_status_label(tc: &DisplayToolCall, theme: &Theme) -> (&'static str, Colo
     }
 }
 
-/// style for a line of tool output (diff-aware)
 fn diff_line_style(line: &str, theme: &Theme) -> Style {
     if line.starts_with("+ ") {
         theme.diff_added
@@ -1116,8 +1001,6 @@ fn diff_line_style(line: &str, theme: &Theme) -> Style {
     }
 }
 
-/// write borrowed lines directly to a buffer at a y offset.
-/// clips to the area height. returns the number of rows written.
 #[cfg(test)]
 fn write_lines_to_buf(lines: &[Line<'_>], buf: &mut Buffer, area: Rect, start_y: u16) -> u16 {
     let mut written = 0u16;

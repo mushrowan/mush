@@ -1,9 +1,3 @@
-//! lightweight markdown to ratatui text renderer
-//!
-//! handles the common patterns in LLM output: headings, bold, italic,
-//! inline code, code blocks, lists, and horizontal rules. not a full
-//! markdown parser, just enough for readable agent output.
-
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::buffer::CellWidth;
 use ratatui::style::{Color, Modifier, Style};
@@ -27,7 +21,6 @@ static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
 
 const MAX_HIGHLIGHTED_CODE_BLOCK_LINES: usize = 64;
 
-/// widest a thematic break is drawn, however wide the message is
 const HORIZONTAL_RULE_WIDTH: usize = 80;
 
 #[cfg(test)]
@@ -37,12 +30,10 @@ thread_local! {
     static HIGHLIGHT_CODE_BLOCK_CALLS: Cell<usize> = const { Cell::new(0) };
 }
 
-/// render a markdown string to styled ratatui Text
 pub fn render(source: &str, theme: &Theme) -> Text<'static> {
     render_with_width(source, theme, None)
 }
 
-/// render markdown with an optional target width for width-aware blocks.
 pub fn render_with_width(source: &str, theme: &Theme, width: Option<usize>) -> Text<'static> {
     render_with_options(source, theme, width, CodeHighlighting::Enabled)
 }
@@ -412,8 +403,6 @@ impl<'a> MarkdownRenderer<'a> {
         ));
     }
 
-    /// start a new block: finish the line in hand, and leave one blank
-    /// line between it and what came before
     fn separate(&mut self) {
         self.push_current_line();
         if !self.lines.is_empty() {
@@ -421,8 +410,6 @@ impl<'a> MarkdownRenderer<'a> {
         }
     }
 
-    /// the marker a line opens with: a list item's bullet, or the indent
-    /// that lines its continuations up under it
     fn line_opener(&mut self) -> Option<Span<'static>> {
         if let Some(marker) = self.pending_marker.take() {
             return Some(Span::styled(marker, self.theme.list_bullet));
@@ -627,10 +614,6 @@ fn render_records_with_tabled_width(records: &[Vec<String>], width: Option<usize
     let mut table = builder.build();
     table.with(TableStyle::sharp());
     if let Some(width) = width {
-        // Priority::max(true) shrinks the widest column first so a
-        // very long second column does not collapse the short first
-        // column to zero-width (and discard its content). keep_words
-        // avoids breaking words mid-token when there's room
         table.with(
             Width::wrap(width)
                 .keep_words(true)
@@ -769,7 +752,6 @@ fn pad_code_line(line: &str, width: usize) -> String {
     format!("{line}{}", " ".repeat(width.saturating_sub(line_width)))
 }
 
-/// highlight a code block using syntect
 fn highlight_code_block(
     code_lines: &[String],
     syntax: &SyntaxReference,
@@ -798,7 +780,6 @@ fn highlight_code_block(
     ]));
 
     for code_line in code_lines {
-        // append newline so syntect can track state across lines
         line_with_nl.clear();
         line_with_nl.push_str(code_line);
         line_with_nl.push('\n');
@@ -838,7 +819,6 @@ fn highlight_code_block(
     lines
 }
 
-/// convert syntect highlighting style to ratatui style
 fn syntect_to_style(style: highlighting::Style) -> Style {
     let mut s = Style::default();
     if style.foreground.a > 0 {
@@ -848,7 +828,6 @@ fn syntect_to_style(style: highlighting::Style) -> Style {
             style.foreground.b,
         ));
     }
-    // skip background (let terminal bg show through)
     let fs = style.font_style;
     if fs.contains(highlighting::FontStyle::BOLD) {
         s = s.add_modifier(Modifier::BOLD);
@@ -862,7 +841,6 @@ fn syntect_to_style(style: highlighting::Style) -> Style {
     s
 }
 
-/// parse inline markdown: **bold**, *italic*, `code`, ***bold italic***
 fn parse_inline(text: &str, theme: &Theme) -> Vec<Span<'static>> {
     #[cfg(test)]
     PARSE_INLINE_CALLS.with(|calls| calls.set(calls.get() + 1));
@@ -1077,7 +1055,6 @@ mod tests {
         let text = render("some **bold** text", &t());
         assert_eq!(text.lines.len(), 1);
         assert_eq!(text.lines[0].to_string(), "some bold text");
-        // the middle span should be bold
         assert_eq!(text.lines[0].spans.len(), 3);
         assert!(
             text.lines[0].spans[1]
@@ -1179,7 +1156,6 @@ mod tests {
     fn code_block_has_colour() {
         let text = render("```rust\nlet x = 42;\n```", &t());
         assert_eq!(text.lines.len(), 3);
-        // should have multiple spans (indentation + highlighted tokens)
         assert!(
             text.lines[1].spans.len() > 1,
             "expected syntax highlighting spans, got: {:?}",
@@ -1307,8 +1283,6 @@ mod tests {
 
     #[test]
     fn table_renders_as_aligned_grid() {
-        // L325: markdown tables should render as a readable box-drawing
-        // grid so LLM output with tables doesn't appear as raw pipes
         let source = "\
 | Name  | Age |
 |-------|-----|
@@ -1316,7 +1290,6 @@ mod tests {
 | Bob   | 25  |";
         let text = render(source, &t());
         let rendered: Vec<String> = text.lines.iter().map(Line::to_string).collect();
-        // 6 lines: top border, header, separator, row1, row2, bottom border
         assert_eq!(
             rendered.len(),
             6,
@@ -1340,15 +1313,12 @@ mod tests {
             rendered[5].starts_with('└') && rendered[5].contains('┴') && rendered[5].ends_with('┘')
         );
 
-        // columns should be aligned: header and data rows equal width
         assert_eq!(rendered[1].chars().count(), rendered[3].chars().count());
         assert_eq!(rendered[3].chars().count(), rendered[4].chars().count());
     }
 
     #[test]
     fn table_in_mixed_content() {
-        // a table appearing between prose should render as a grid and
-        // not disturb the surrounding paragraphs
         let source = "\
 here is a table:
 
@@ -1361,7 +1331,6 @@ done.";
         let rendered: Vec<String> = text.lines.iter().map(Line::to_string).collect();
         assert!(rendered.iter().any(|l| l.contains("here is a table:")));
         assert!(rendered.iter().any(|l| l.contains("done.")));
-        // 5 grid lines (top, header, sep, row, bottom)
         assert!(
             rendered.iter().filter(|l| l.starts_with('│')).count() == 2,
             "expected 2 grid content rows, got: {rendered:?}"
@@ -1370,8 +1339,6 @@ done.";
 
     #[test]
     fn incomplete_table_falls_back_to_plain() {
-        // a lone pipe line without a separator row is not a table and
-        // should render as regular prose, not a broken grid
         let source = "| just | one | line |";
         let text = render(source, &t());
         let rendered: Vec<String> = text.lines.iter().map(Line::to_string).collect();
@@ -1477,10 +1444,6 @@ done.";
 
     #[test]
     fn imbalanced_table_keeps_first_column_content() {
-        // when one column is much longer than the other, tabled's default
-        // wrap strategy used to collapse the shorter column to a width of
-        // ~2 chars and discard its text entirely. regression test: the
-        // shorter column's content must always survive the wrap pass.
         let source = "\
 | what the two vars actually mean today | actually configures |
 |---|---|

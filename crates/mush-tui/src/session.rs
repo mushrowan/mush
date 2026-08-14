@@ -1,6 +1,3 @@
-//! the conversation on screen: display state, session tree and the
-//! prompt waiting to go out
-
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -44,22 +41,14 @@ impl PendingPrompt {
     }
 }
 
-/// one conversation: its display, its session tree and its in-flight prompt
 pub struct Session {
     pub app: App,
     pub conversation: ConversationState,
     pub image_protos: HashMap<(usize, usize), ratatui_image::protocol::StatefulProtocol>,
     pub pending_prompt: Option<PendingPrompt>,
     pub steering_queue: Arc<Mutex<Vec<Message>>>,
-    /// inputs the user submitted while a /compact (or /fork-compact)
-    /// task was running. each entry is `(text, image_bytes)` mirroring
-    /// what UserSubmit would normally have done. drained by the
-    /// runtime once compaction lands so they replay as a fresh turn
-    /// instead of getting silently dropped or clobbering the input box
     pub pending_compaction_inputs: Vec<(String, Vec<PendingImage>)>,
-    /// user-facing label (auto-generated or manual)
     pub label: Option<String>,
-    /// whether an LLM title has already been generated
     pub title_generated: bool,
 }
 
@@ -77,7 +66,6 @@ impl Session {
         }
     }
 
-    /// resume from a stored conversation
     pub fn with_conversation(app: App, conversation: ConversationState) -> Self {
         Self {
             app,
@@ -91,10 +79,6 @@ impl Session {
         }
     }
 
-    /// stash a user submit while a /compact run is in flight.
-    /// records the (text, images) for later replay, surfaces a
-    /// queued (dimmed) bubble in the chat so the user sees it didn't
-    /// vanish, and clears the input buffer so they can keep typing
     pub fn queue_input_during_compaction(&mut self, text: String, images: Vec<PendingImage>) {
         let image_bytes: Vec<Vec<u8>> = images.iter().map(|image| image.data.clone()).collect();
         if image_bytes.is_empty() {
@@ -108,18 +92,12 @@ impl Session {
         self.app.input.cursor = 0;
     }
 
-    /// drain everything queued during the just-finished compaction.
-    /// also clears the queued bubbles from the display so the runtime
-    /// can render them as real (non-queued) user messages without
-    /// duplicates
     pub fn drain_compaction_inputs(&mut self) -> Vec<(String, Vec<PendingImage>)> {
         let drained = std::mem::take(&mut self.pending_compaction_inputs);
         let _ = self.app.take_queued_messages();
         drained
     }
 
-    /// mutable references to all major fields at once,
-    /// enabling the borrow checker to see disjoint borrows
     pub fn fields_mut(
         &mut self,
     ) -> (
@@ -134,15 +112,6 @@ impl Session {
         )
     }
 
-    /// ensure `image_protos` has a protocol for every `(msg_idx, tc_idx)`
-    /// referenced by `render_areas`, creating missing entries on demand
-    /// from the raw bytes stored on the matching message or tool call.
-    ///
-    /// this is a safety net for paths that register image render areas
-    /// without eagerly creating a protocol: session reloads (protocols
-    /// aren't persisted), steering submits with attached images, and
-    /// any future pushes via `push_user_message_with_images` from a
-    /// code path that forgets to poke `image_protos`
     pub fn ensure_image_protocols(
         &mut self,
         picker: &ratatui_image::picker::Picker,

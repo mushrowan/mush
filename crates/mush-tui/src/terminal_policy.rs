@@ -117,17 +117,6 @@ impl TerminalPolicy {
     }
 }
 
-/// snapshot of whether stdin/stdout/stderr are attached to a TTY.
-///
-/// the full TUI needs raw mode on stdin plus an alt-screen-capable stdout.
-/// on broken pty setups (piped stdin, CI, `mush < prompt.txt`, orphaned
-/// container shells without -t) one or both are redirected. running the TUI
-/// anyway leaks escape sequences into the output stream, hangs forever on
-/// terminal-probe responses, or silently swallows user input.
-///
-/// call `TtyEnvironment::detect()` before entering raw mode and use
-/// `is_tty()` / `broken_reason()` to decide whether to short-circuit with
-/// a helpful message instead
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TtyEnvironment {
     pub stdin: bool,
@@ -146,14 +135,11 @@ impl TtyEnvironment {
         }
     }
 
-    /// only a full TTY environment supports the TUI reliably
     #[must_use]
     pub const fn is_tty(self) -> bool {
         self.stdin && self.stdout
     }
 
-    /// human-readable explanation when the environment can't host the TUI.
-    /// returns `None` when the environment is fine
     #[must_use]
     pub fn broken_reason(self) -> Option<&'static str> {
         match (self.stdin, self.stdout) {
@@ -201,11 +187,7 @@ mod tests {
 
     #[test]
     fn tty_env_reports_stdout_stdin_pty_state() {
-        // under `cargo nextest run` stdout/stdin are redirected to pipes,
-        // so this exercises the non-tty branch. the helper should consult
-        // the real descriptors, not a mock
         let env = TtyEnvironment::detect();
-        // at least one of them is a pipe in test context
         assert!(!env.is_tty(), "expected non-tty under nextest");
         assert!(env.broken_reason().is_some());
     }

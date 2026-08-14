@@ -46,9 +46,6 @@ impl Drop for TerminalStateGuard {
 }
 
 pub(super) fn probe_image_picker(policy: TerminalPolicy) -> Option<ratatui_image::picker::Picker> {
-    // never probe on non-tty stdio: `from_query_stdio` writes escape
-    // queries and blocks reading the response. on a pipe or broken pty
-    // those bytes leak into the output stream and the read can hang
     let env = crate::terminal_policy::TtyEnvironment::detect();
     if !env.is_tty() {
         tracing::debug!(
@@ -78,9 +75,6 @@ pub(super) fn enter_tui_terminal(policy: TerminalPolicy) -> io::Result<()> {
     enable_raw_mode()?;
     apply_tty_modes(&mut io::stdout(), policy)?;
 
-    // give the terminal a moment to react to the enable bursts, then
-    // drain any response bytes (cursor probes, keyboard enhancement
-    // acknowledgements) that would otherwise surface as spurious events
     std::thread::sleep(std::time::Duration::from_millis(50));
     while event::poll(std::time::Duration::ZERO)? {
         let stale = event::read()?;
@@ -90,12 +84,6 @@ pub(super) fn enter_tui_terminal(policy: TerminalPolicy) -> io::Result<()> {
     Ok(())
 }
 
-/// re-apply the mode enables.
-///
-/// called after tool executions that may have touched `/dev/tty` or
-/// otherwise stripped our modes (e.g. bash running `stty sane`,
-/// `reset`, or a pager that pops kitty kbd flags and bracketed paste
-/// on exit)
 pub(super) fn reapply_tui_modes_after_tool(policy: TerminalPolicy) {
     if let Err(error) = enable_raw_mode() {
         tracing::debug!(?error, "failed to re-enable raw mode after tool");
@@ -105,8 +93,6 @@ pub(super) fn reapply_tui_modes_after_tool(policy: TerminalPolicy) {
     }
 }
 
-/// the mode enables that don't depend on raw mode: bracketed paste,
-/// focus change, mouse tracking, keyboard enhancement, cursor shape
 fn apply_tty_modes(out: &mut impl Write, policy: TerminalPolicy) -> io::Result<()> {
     out.queue(event::EnableBracketedPaste)?;
     out.queue(event::EnableFocusChange)?;
@@ -169,7 +155,6 @@ fn panic_payload_str(info: &std::panic::PanicHookInfo<'_>) -> String {
     }
 }
 
-/// put back everything [`apply_tty_modes`] set
 fn restore_tty_modes(out: &mut impl Write) {
     let _ = out.queue(PopKeyboardEnhancementFlags);
     let _ = out.queue(event::DisableFocusChange);
@@ -234,8 +219,6 @@ fn read_termios(fd: libc::c_int) -> Option<libc::termios> {
     use std::mem::MaybeUninit;
     let mut termios = MaybeUninit::<libc::termios>::uninit();
     // SAFETY: tcgetattr writes a termios value on success. we only read
-    // the value when the call returns zero. fd is provided by libc or test
-    // code and tcgetattr validates it before writing.
     let rc = unsafe { libc::tcgetattr(fd, termios.as_mut_ptr()) };
     if rc == 0 {
         // SAFETY: the successful tcgetattr call initialised termios.
@@ -253,7 +236,6 @@ fn set_stdin_termios(termios: &libc::termios) -> io::Result<()> {
 #[cfg(unix)]
 fn set_termios(fd: libc::c_int, termios: &libc::termios) -> io::Result<()> {
     // SAFETY: termios points to a valid termios snapshot captured from
-    // tcgetattr, and tcsetattr validates fd before applying it.
     let rc = unsafe { libc::tcsetattr(fd, libc::TCSANOW, termios) };
     if rc == 0 {
         Ok(())
@@ -341,7 +323,6 @@ mod tests {
         let mut master = 0;
         let mut slave = 0;
         // SAFETY: openpty initialises master/slave fds on success. the
-        // optional termios, winsize, and name pointers may be null.
         let rc = unsafe {
             libc::openpty(
                 &mut master,
@@ -355,8 +336,6 @@ mod tests {
     }
 }
 
-/// the row the block opens on: where the shell left the cursor, or the
-/// bottom of the screen when the terminal won't say
 pub(super) fn opening_row(position: io::Result<(u16, u16)>, screen: Size) -> u16 {
     match position {
         Ok((_, row)) => row,

@@ -1,5 +1,3 @@
-//! input box widget - text entry with cursor
-
 use std::cell::Ref;
 
 use ratatui::buffer::{Buffer, CellWidth};
@@ -10,7 +8,6 @@ use ratatui::widgets::{Block, Borders, Padding, Paragraph, Widget};
 
 use crate::app::{App, InputBuffer, PendingImage};
 
-/// display width of a char (0 for control chars, 2 for CJK/emoji, 1 otherwise)
 fn char_width(ch: char) -> usize {
     if ch.is_control() {
         return 0;
@@ -19,12 +16,10 @@ fn char_width(ch: char) -> usize {
     usize::from(ch.encode_utf8(&mut buf).cell_width())
 }
 
-/// expanded input with image placeholders replaced by display tokens
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExpandedInput {
     pub text: String,
     pub cursor: usize,
-    /// (start, end) byte ranges in `text` that are image tokens
     pub image_spans: Vec<(usize, usize)>,
 }
 
@@ -156,7 +151,6 @@ fn build_input_layout(
     }
 }
 
-/// format an image token for inline display
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InputLayoutSummary {
     pub total_lines: u16,
@@ -182,7 +176,6 @@ pub fn benchmark_build_input_layout(
 }
 
 fn image_token(index: usize, img: Option<&crate::app::PendingImage>) -> String {
-    // 1-indexed so users reading "the second image shows X" can count naturally
     let n = index + 1;
     match img.and_then(|i| i.dimensions) {
         Some((w, h)) => format!("[📷 #{n} {w}x{h}]"),
@@ -190,7 +183,6 @@ fn image_token(index: usize, img: Option<&crate::app::PendingImage>) -> String {
     }
 }
 
-/// expand image placeholders in input to display tokens, mapping cursor
 pub fn expand_input(
     input: &str,
     cursor: usize,
@@ -229,22 +221,13 @@ pub fn expand_input(
     }
 }
 
-/// a segment of text that fits on one visual line
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WrapSegment {
-    /// byte offset of start within the input line
     pub start: usize,
-    /// byte offset of end (exclusive) within the input line
     pub end: usize,
-    /// visual column width this segment occupies
     pub cols: usize,
 }
 
-/// compute word-wrapped segments for a single input line
-///
-/// breaks at whitespace boundaries when possible, falls back to
-/// character-level wrapping for words longer than the available width.
-/// `indent` is the column offset for the first segment (e.g. 2 for "> ")
 pub fn word_wrap_segments(text: &str, width: usize, indent: usize) -> Vec<WrapSegment> {
     if text.is_empty() {
         return vec![WrapSegment {
@@ -257,7 +240,6 @@ pub fn word_wrap_segments(text: &str, width: usize, indent: usize) -> Vec<WrapSe
     let mut segments = Vec::new();
     let mut seg_start: usize = 0;
     let mut col: usize = indent;
-    // (byte_offset_after_space, col_after_space) - where we'd resume on a new line
     let mut last_space: Option<(usize, usize)> = None;
 
     for (byte_pos, ch) in text.char_indices() {
@@ -266,11 +248,9 @@ pub fn word_wrap_segments(text: &str, width: usize, indent: usize) -> Vec<WrapSe
 
         if ch == ' ' {
             col += ch_cols;
-            // record the position AFTER this space as a potential wrap point
             last_space = Some((byte_pos + ch_bytes, col));
 
             if col >= width {
-                // space itself hits the boundary - wrap here
                 segments.push(WrapSegment {
                     start: seg_start,
                     end: byte_pos + ch_bytes,
@@ -284,7 +264,6 @@ pub fn word_wrap_segments(text: &str, width: usize, indent: usize) -> Vec<WrapSe
             col += ch_cols;
             if col >= width {
                 if let Some((sp_byte, sp_col)) = last_space.take() {
-                    // wrap at last space
                     segments.push(WrapSegment {
                         start: seg_start,
                         end: sp_byte,
@@ -293,7 +272,6 @@ pub fn word_wrap_segments(text: &str, width: usize, indent: usize) -> Vec<WrapSe
                     seg_start = sp_byte;
                     col -= sp_col;
                 } else {
-                    // no space found, hard wrap at this character boundary
                     let seg_end = byte_pos + ch_bytes;
                     segments.push(WrapSegment {
                         start: seg_start,
@@ -307,7 +285,6 @@ pub fn word_wrap_segments(text: &str, width: usize, indent: usize) -> Vec<WrapSe
         }
     }
 
-    // final segment
     segments.push(WrapSegment {
         start: seg_start,
         end: text.len(),
@@ -317,7 +294,6 @@ pub fn word_wrap_segments(text: &str, width: usize, indent: usize) -> Vec<WrapSe
     segments
 }
 
-/// compute cursor visual position in wrapped lines
 fn cursor_visual_position(
     expanded_text: &str,
     cursor: usize,
@@ -357,12 +333,10 @@ fn cursor_visual_position(
     (visual_line, visual_col)
 }
 
-/// visual wrapped line index for the cursor
 pub fn cursor_visual_line(expanded_text: &str, cursor: usize, content_width: usize) -> usize {
     cursor_visual_position(expanded_text, cursor, content_width).0
 }
 
-/// renders the input box at the bottom of the screen
 pub struct InputBox<'a> {
     app: &'a App,
 }
@@ -372,7 +346,6 @@ impl<'a> InputBox<'a> {
         Self { app }
     }
 
-    /// the cursor position within the input box (for terminal cursor placement)
     pub fn cursor_position(&self, area: Rect) -> (u16, u16) {
         let content_width = area.width.saturating_sub(2) as usize;
         if content_width == 0 {
@@ -398,8 +371,6 @@ impl<'a> InputBox<'a> {
 impl Widget for InputBox<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let streaming_idle = self.app.is_busy() && self.app.input.text.is_empty();
-        // 2 cols to match `"> "` so the cursor column doesn't jump when the
-        // stream starts or ends. `… ` = 1 cell ellipsis + 1 trailing space
         let prompt = if streaming_idle { "… " } else { "> " };
         let style = if streaming_idle {
             self.app.theme.dim
@@ -415,24 +386,19 @@ impl Widget for InputBox<'_> {
 
         let content_width = area.width.saturating_sub(2) as usize;
 
-        // border colour signals whose turn it is and whether there are unread messages
         let border_style = if self.app.navigation.has_unread && !streaming_idle {
             if self.app.input.text.is_empty() {
-                // empty input + unread: blink between active and highlight
                 if self.app.unread_flash_on() {
                     self.app.theme.scroll_indicator
                 } else {
                     self.app.theme.input_border_active
                 }
             } else {
-                // typing + unread: solid highlight
                 self.app.theme.scroll_indicator
             }
         } else if self.app.is_busy() {
-            // agent's turn: muted border
             self.app.theme.input_border
         } else {
-            // our turn, no unread: normal
             self.app.theme.input_border_active
         };
 
@@ -497,7 +463,6 @@ impl Widget for InputBox<'_> {
     }
 }
 
-/// split segment text at image token boundaries and style them differently
 fn styled_with_images(
     seg_text: &str,
     seg_global_start: usize,
@@ -574,19 +539,16 @@ mod tests {
 
     #[test]
     fn word_wrap_at_space() {
-        // "hello world" with width=10, indent=2
-        // "  hello " = 8 cols, then "world" = 5 cols
         let segs = word_wrap_segments("hello world", 10, 2);
         assert_eq!(segs.len(), 2);
         assert_eq!(segs[0].start, 0);
-        assert_eq!(segs[0].end, 6); // "hello " (includes trailing space)
+        assert_eq!(segs[0].end, 6);
         assert_eq!(segs[1].start, 6);
-        assert_eq!(segs[1].end, 11); // "world"
+        assert_eq!(segs[1].end, 11);
     }
 
     #[test]
     fn word_wrap_long_word_hard_break() {
-        // no spaces, falls back to character wrapping
         let segs = word_wrap_segments("abcdefghij", 6, 0);
         assert_eq!(segs.len(), 2);
         assert_eq!(
@@ -623,36 +585,28 @@ mod tests {
 
     #[test]
     fn word_wrap_multiple_lines() {
-        // "the quick brown fox" with width=12, indent=2
-        // line 0: "  the quick " (12 cols) -> wrap
-        // line 1: "brown fox" (9 cols)
         let segs = word_wrap_segments("the quick brown fox", 12, 2);
         assert_eq!(segs.len(), 2);
-        assert_eq!(segs[0].end, 10); // "the quick "
+        assert_eq!(segs[0].end, 10);
         assert_eq!(segs[1].start, 10);
         assert_eq!(segs[1].end, 19);
     }
 
     #[test]
     fn word_wrap_multibyte_chars() {
-        // ¬ is U+00AC: 2 bytes in UTF-8 but 1 display column
-        // "a¬b" = 3 display columns, 4 bytes
         let segs = word_wrap_segments("a¬b", 20, 0);
         assert_eq!(segs.len(), 1);
-        assert_eq!(segs[0].cols, 3); // 3 display columns, not 4 bytes
+        assert_eq!(segs[0].cols, 3);
     }
 
     #[test]
     fn cursor_position_multibyte_char() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        // "a¬b" - cursor after ¬ (byte offset 3, but visual col 2)
         app.input.text = "a¬b".into();
-        app.input.cursor = 3; // byte offset after ¬
+        app.input.cursor = 3;
         let input_box = InputBox::new(&app);
         let area = Rect::new(0, 10, 40, 3);
         let (x, _y) = input_box.cursor_position(area);
-        // col = 2 (prompt "> ") + 2 (display width of "a¬") = 4
-        // x = border(1) + 4 = 5
         assert_eq!(x, 5);
     }
 
@@ -685,13 +639,11 @@ mod tests {
             dimensions: Some((100, 200)),
         };
         let input = format!("hi{IMAGE_PLACEHOLDER}world");
-        let cursor = 2 + IMAGE_PLACEHOLDER.len_utf8(); // after the placeholder
+        let cursor = 2 + IMAGE_PLACEHOLDER.len_utf8();
         let expanded = expand_input(&input, cursor, &[img]);
-        // should expand to "hi[📷 100x200]world"
         assert!(expanded.text.starts_with("hi["));
         assert!(expanded.text.contains("100x200"));
         assert!(expanded.text.ends_with("world"));
-        // cursor should be mapped past the expanded token
         assert!(expanded.cursor > 2);
         assert_eq!(&expanded.text[expanded.cursor..], "world");
         assert_eq!(expanded.image_spans.len(), 1);
@@ -705,14 +657,12 @@ mod tests {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.input.text = "hello".into();
         app.input.cursor = 5;
-        // simulate pasting an image (inserts placeholder at cursor)
         app.input.add_image(ClipboardImage {
             bytes: vec![],
             mime_type: ImageMimeType::Png,
         });
         assert_eq!(app.input.images.len(), 1);
         assert!(app.input.text.contains(IMAGE_PLACEHOLDER));
-        // backspace should remove the placeholder and the image
         app.input.backspace();
         assert_eq!(app.input.images.len(), 0);
         assert!(!app.input.text.contains(IMAGE_PLACEHOLDER));
@@ -731,7 +681,6 @@ mod tests {
     fn input_box_has_no_side_borders() {
         let app = App::new("test".into(), TokenCount::new(200_000));
         let buf = render_input(&app, 40, 3);
-        // top and bottom should be horizontal rules
         let top_row: String = (0..40).map(|x| buf[(x, 0)].symbol().to_string()).collect();
         let bot_row: String = (0..40).map(|x| buf[(x, 2)].symbol().to_string()).collect();
         assert!(
@@ -742,7 +691,6 @@ mod tests {
             bot_row.contains("─"),
             "bottom should be horizontal rule: {bot_row}"
         );
-        // sides should NOT have │ border characters
         let left_mid = buf[(0, 1)].symbol();
         let right_mid = buf[(39, 1)].symbol();
         assert_ne!(left_mid, "│", "left side should not have border");
@@ -788,28 +736,20 @@ mod tests {
         let input_box = InputBox::new(&app);
         let area = Rect::new(0, 10, 40, 3);
         let (x, y) = input_box.cursor_position(area);
-        // col = 2 (prompt) + 3 = 5
-        assert_eq!(x, 6); // border + col
-        assert_eq!(y, 11); // border
+        assert_eq!(x, 6);
+        assert_eq!(y, 11);
     }
 
     #[test]
     fn cursor_position_wraps_at_word_boundary() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        // "this is a long prompt that wraps around!!!" in a 20-wide box
-        // content_width = 18
         app.input.text = "this is a long prompt that wraps around!!!".into();
         app.input.cursor = 42;
         let input_box = InputBox::new(&app);
         let area = Rect::new(0, 0, 20, 8);
         let (x, y) = input_box.cursor_position(area);
-        // word_wrap_segments("this is a long prompt that wraps around!!!", 18, 2):
-        // seg 0: "this is a long " (0..15), cols=17
-        // seg 1: "prompt that wraps " (15..33), cols=18
-        // seg 2: "around!!!" (33..42), cols=9
-        // cursor at byte 42 -> seg 2, offset=9, col=9
-        assert_eq!(y, 1 + 2); // border + line 2
-        assert_eq!(x, 1 + 9); // border + col 9
+        assert_eq!(y, 1 + 2);
+        assert_eq!(x, 1 + 9);
     }
 
     #[test]
@@ -831,8 +771,8 @@ mod tests {
         let input_box = InputBox::new(&app);
         let area = Rect::new(0, 0, 40, 5);
         let (x, y) = input_box.cursor_position(area);
-        assert_eq!(x, 1 + 5); // border + col
-        assert_eq!(y, 1 + 1); // border + line 1
+        assert_eq!(x, 1 + 5);
+        assert_eq!(y, 1 + 1);
     }
 
     #[test]
@@ -843,8 +783,8 @@ mod tests {
         let input_box = InputBox::new(&app);
         let area = Rect::new(0, 0, 40, 5);
         let (x, y) = input_box.cursor_position(area);
-        assert_eq!(x, 1); // border + col 0
-        assert_eq!(y, 2); // border + line 1
+        assert_eq!(x, 1);
+        assert_eq!(y, 2);
     }
 
     #[test]
@@ -874,13 +814,10 @@ mod tests {
     #[test]
     fn word_wrap_preserves_words_on_render() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        // in a 22-wide box (content_width=20), "hello world foo bar baz"
-        // should wrap at word boundaries, not mid-word
         app.input.text = "hello world foo bar baz".into();
         app.input.cursor = 23;
         let buf = render_input(&app, 22, 5);
         let content = buffer_to_string(&buf);
-        // "world" should not be split across lines
         assert!(
             content.contains("world"),
             "word 'world' should appear intact: {content}"

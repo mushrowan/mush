@@ -1,11 +1,3 @@
-//! popover overlay for the api-key entry prompt
-//!
-//! rendered on top of the [`super::login_picker`] widget while the
-//! picker is armed for entry or actively validating. the input row,
-//! status line and hint sit together in one small box so the user's eyes
-//! stay in one place across paste, validate and retry, rather than
-//! scanning between the top of the picker and the bottom toast
-
 use crate::login_picker::{EntryPrompt, LoginPickerState};
 use crate::theme::Theme;
 use ratatui::Frame;
@@ -14,15 +6,9 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding};
 
-/// height of the popover in rows (top border + 5 content rows + bottom border)
 const POPUP_HEIGHT: u16 = 7;
-/// width of the popover. wide enough to fit a sk-or-v1-... mask
-/// comfortably on most terminals
 const POPUP_WIDTH: u16 = 60;
 
-/// render the entry popover if the picker is in an entry / validating
-/// state. callers should invoke this after rendering the underlying
-/// picker so the box paints over the row list
 pub fn render(frame: &mut Frame, picker: &LoginPickerState, theme: &Theme) {
     let Some(prompt) = picker.entry.as_ref() else {
         return;
@@ -53,7 +39,6 @@ pub fn render(frame: &mut Frame, picker: &LoginPickerState, theme: &Theme) {
         return;
     }
 
-    // input row: » • • • • aligned to the inner area
     let mask: String = "•".repeat(prompt.buffer.chars().count());
     let input = Line::from(vec![
         Span::styled("» ", theme.dim),
@@ -61,15 +46,12 @@ pub fn render(frame: &mut Frame, picker: &LoginPickerState, theme: &Theme) {
     ]);
     frame.render_widget(input, Rect::new(inner.x, inner.y, inner.width, 1));
 
-    // status row sits two lines below the input so the eye reads it as
-    // a separate "what's happening" message rather than wrapped input
     let status_y = inner.y + 2;
     if status_y < inner.y + inner.height {
         let status = status_line(prompt, validating, theme);
         frame.render_widget(status, Rect::new(inner.x, status_y, inner.width, 1));
     }
 
-    // hint pinned to the bottom row of the box
     let hint_y = inner.y + inner.height.saturating_sub(1);
     if hint_y > status_y {
         let hint = if validating {
@@ -127,11 +109,8 @@ mod tests {
 
     #[test]
     fn no_render_when_no_entry_prompt_is_armed() {
-        // popover only paints when there's an active entry prompt; the
-        // picker renders normally otherwise
         let picker = LoginPickerState::new(vec![api_key_entry("openrouter", "OpenRouter")]);
         let buf = render_to_buffer(&picker, 80, 20);
-        // expect a blank buffer (no border chars)
         let content = buffer_to_string(&buf);
         assert!(
             !content.contains('┌') && !content.contains('└'),
@@ -141,8 +120,6 @@ mod tests {
 
     #[test]
     fn renders_lowercase_title_with_provider_name() {
-        // the title sets context for whose key the user is pasting.
-        // lowercase matches the rest of the project's voice
         let mut picker = LoginPickerState::new(vec![api_key_entry("openrouter", "OpenRouter")]);
         picker.arm_entry();
         let buf = render_to_buffer(&picker, 80, 20);

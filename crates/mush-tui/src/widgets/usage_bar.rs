@@ -1,36 +1,17 @@
-//! dual-layer usage bar using half-block characters
-//!
-//! renders two values (usage + pace) in a single row height.
-//! top half (▀) = usage, bottom half (▄) = pace.
-//! where both are filled: █ (fg = usage colour, bg = pace colour).
-//! where only usage is filled: ▀ (fg = usage colour).
-//! where only pace is filled: ▄ (fg = pace colour).
-//! where neither: ░ (dim).
-
 use ratatui::style::{Color, Style};
 use ratatui::text::Span;
 
-/// default bar width in characters
 pub const DEFAULT_BAR_WIDTH: usize = 20;
 
-/// colour for the pace (bottom) layer
 const PACE_COLOUR: Color = Color::DarkGray;
 
-/// dim colour for empty cells
 const EMPTY_COLOUR: Color = Color::DarkGray;
 
-/// generate spans for a dual-layer usage bar
-///
-/// `usage_pct` and `pace_pct` are 0.0 - 100.0.
-/// returns a vec of spans that can be inserted into a Line.
 #[must_use]
 pub fn render_usage_bar(usage_pct: f32, pace_pct: f32) -> Vec<Span<'static>> {
     render_usage_bar_width(usage_pct, pace_pct, DEFAULT_BAR_WIDTH)
 }
 
-/// variant of `render_usage_bar` with an explicit width, for fitting into
-/// narrow status bars. bars less than 4 wide look meaningless, so the
-/// minimum is clamped to 4
 #[must_use]
 pub fn render_usage_bar_width(usage_pct: f32, pace_pct: f32, width: usize) -> Vec<Span<'static>> {
     let width = width.max(4);
@@ -61,7 +42,6 @@ fn pct_to_cells(pct: f32, bar_width: usize) -> usize {
     ((pct / 100.0 * bar_width as f32).round() as usize).min(bar_width)
 }
 
-/// usage colour: green < 50%, yellow 50-80%, red > 80%
 fn colour_for_pct(pct: f32) -> Color {
     if pct >= 80.0 {
         Color::Red
@@ -105,19 +85,15 @@ mod tests {
 
     #[test]
     fn usage_ahead_of_pace() {
-        // 80% usage, 30% pace
         let spans = render_usage_bar(80.0, 30.0);
-        // first 6 cells: both filled (▀ with bg)
         for span in &spans[..6] {
             assert_eq!(span.content.as_ref(), "▀");
             assert_eq!(span.style.bg, Some(PACE_COLOUR));
         }
-        // cells 6-15: only usage (▀ without bg)
         for span in &spans[6..16] {
             assert_eq!(span.content.as_ref(), "▀");
             assert_eq!(span.style.bg, None);
         }
-        // cells 16-19: empty
         for span in &spans[16..] {
             assert_eq!(span.content.as_ref(), "░");
         }
@@ -125,18 +101,14 @@ mod tests {
 
     #[test]
     fn pace_ahead_of_usage() {
-        // 26% usage, 43% pace
         let spans = render_usage_bar(26.0, 43.0);
-        // first 5 cells: both (▀ with bg)
         for span in &spans[..5] {
             assert_eq!(span.content.as_ref(), "▀");
             assert_eq!(span.style.bg, Some(PACE_COLOUR));
         }
-        // cells 5-8: only pace (▄)
         for span in &spans[5..9] {
             assert_eq!(span.content.as_ref(), "▄");
         }
-        // rest: empty
         for span in &spans[9..] {
             assert_eq!(span.content.as_ref(), "░");
         }
@@ -155,10 +127,10 @@ mod tests {
     #[test]
     fn pct_to_cells_rounds() {
         assert_eq!(pct_to_cells(0.0, DEFAULT_BAR_WIDTH), 0);
-        assert_eq!(pct_to_cells(5.0, DEFAULT_BAR_WIDTH), 1); // 5% of 20 = 1
+        assert_eq!(pct_to_cells(5.0, DEFAULT_BAR_WIDTH), 1);
         assert_eq!(pct_to_cells(50.0, DEFAULT_BAR_WIDTH), 10);
         assert_eq!(pct_to_cells(100.0, DEFAULT_BAR_WIDTH), 20);
-        assert_eq!(pct_to_cells(2.4, DEFAULT_BAR_WIDTH), 0); // rounds to 0
-        assert_eq!(pct_to_cells(2.5, DEFAULT_BAR_WIDTH), 1); // rounds to 1
+        assert_eq!(pct_to_cells(2.4, DEFAULT_BAR_WIDTH), 0);
+        assert_eq!(pct_to_cells(2.5, DEFAULT_BAR_WIDTH), 1);
     }
 }

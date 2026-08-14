@@ -1,5 +1,3 @@
-//! input state and helpers
-
 use std::cell::{Cell, RefCell};
 
 use mush_ai::types::ImageMimeType;
@@ -7,31 +5,21 @@ use ratatui::layout::Rect;
 
 use crate::clipboard::ClipboardImage;
 
-/// an image attached to the next user message (not yet sent)
 #[derive(Debug, Clone)]
 pub struct PendingImage {
     pub data: Vec<u8>,
     pub mime_type: ImageMimeType,
-    /// image dimensions (width, height) if decoded
     pub dimensions: Option<(u32, u32)>,
 }
 
-/// user input buffer with cursor, images, and scroll state
 #[derive(Debug)]
 pub struct InputBuffer {
-    /// the input text
     pub text: String,
-    /// cursor byte position in text
     pub cursor: usize,
-    /// images attached to the next user message (not yet sent)
     pub images: Vec<PendingImage>,
-    /// current input scroll offset (lines from top)
     pub scroll: Cell<u16>,
-    /// total wrapped input lines (set during render by InputBox)
     pub total_lines: Cell<u16>,
-    /// visible input lines (set during render by InputBox)
     pub visible_lines: Cell<u16>,
-    /// latest input area rect (set during render by Ui)
     pub area: Cell<Rect>,
     pub(crate) layout_cache: RefCell<Option<crate::widgets::input_box::InputLayoutCache>>,
     #[cfg(test)]
@@ -61,7 +49,6 @@ impl InputBuffer {
         self.ensure_cursor_visible();
     }
 
-    /// insert a string at the cursor (used for bracketed paste)
     pub fn insert_str(&mut self, s: &str) {
         if s.is_empty() {
             return;
@@ -168,11 +155,6 @@ impl InputBuffer {
         self.ensure_cursor_visible();
     }
 
-    /// take the input text, clearing the buffer and returning text where
-    /// each IMAGE_PLACEHOLDER is replaced by a visible `[image N]` marker
-    /// (1-indexed). the markers let the LLM bind "the second image" style
-    /// references to the correct attachment even though images are sent
-    /// as separate content blocks
     pub fn take_text(&mut self) -> String {
         self.cursor = 0;
         self.scroll.set(0);
@@ -190,12 +172,10 @@ impl InputBuffer {
         out
     }
 
-    /// take pending images (clearing them from the buffer)
     pub fn take_images(&mut self) -> Vec<PendingImage> {
         std::mem::take(&mut self.images)
     }
 
-    /// add a clipboard image, inserting a placeholder at the cursor
     pub fn add_image(&mut self, image: ClipboardImage) {
         let dimensions = image::load_from_memory(&image.bytes)
             .ok()
@@ -210,7 +190,6 @@ impl InputBuffer {
         self.ensure_cursor_visible();
     }
 
-    /// remove the last pending image (and its placeholder in the input)
     pub fn remove_last_image(&mut self) {
         if self.images.pop().is_some()
             && let Some(pos) = self.text.rfind(IMAGE_PLACEHOLDER)
@@ -224,7 +203,6 @@ impl InputBuffer {
         }
     }
 
-    /// ensure input scroll keeps the cursor visible
     pub fn ensure_cursor_visible(&self) {
         let content_width = self.area.get().width.saturating_sub(2);
         let visible = self.visible_lines.get();
@@ -252,7 +230,6 @@ impl InputBuffer {
         self.scroll.set(current_scroll.min(max_scroll));
     }
 
-    /// scroll the input viewport by delta lines
     pub fn scroll_by(&self, delta: i16) {
         let visible = self.visible_lines.get();
         let total = self.total_lines.get();
@@ -262,7 +239,6 @@ impl InputBuffer {
         self.scroll.set(next);
     }
 
-    /// remove pending images whose placeholders fall within text[start..end]
     fn remove_images_in_range(&mut self, start: usize, end: usize) {
         let range = &self.text[start..end];
         if !range.contains(IMAGE_PLACEHOLDER) {
@@ -288,17 +264,13 @@ impl Default for InputBuffer {
     }
 }
 
-/// object replacement character, marks image positions in input text
-/// each occurrence maps to the Nth entry in pending_images (by order)
 pub const IMAGE_PLACEHOLDER: char = '\u{FFFC}';
 
-/// find the byte offset of the previous word boundary
 pub(crate) fn word_boundary_left(s: &str, cursor: usize) -> usize {
     let before = &s[..cursor];
     if before.is_empty() {
         return 0;
     }
-    // skip trailing whitespace and punctuation (non-word chars)
     let skip_end = before
         .char_indices()
         .rev()
@@ -308,7 +280,6 @@ pub(crate) fn word_boundary_left(s: &str, cursor: usize) -> usize {
     if skip_end == 0 {
         return 0;
     }
-    // now find start of the word
     before[..skip_end]
         .char_indices()
         .rev()
@@ -317,18 +288,14 @@ pub(crate) fn word_boundary_left(s: &str, cursor: usize) -> usize {
         .unwrap_or(0)
 }
 
-/// find the byte offset of the next word boundary
 pub(crate) fn word_boundary_right(s: &str, cursor: usize) -> usize {
     let after = &s[cursor..];
-    // skip current word chars, then skip whitespace
     let mut chars = after.char_indices();
-    // skip word chars
     let word_end = chars
         .by_ref()
         .find(|(_, c)| !c.is_alphanumeric() && *c != '_')
         .map(|(i, _)| i)
         .unwrap_or(after.len());
-    // skip whitespace/punctuation
     let past_ws = after[word_end..]
         .char_indices()
         .find(|(_, c)| c.is_alphanumeric() || *c == '_')

@@ -1,14 +1,6 @@
-//! fuzzy filter helper backed by [`nucleo_matcher`].
-//!
-//! shared between the session picker and the model picker so both get the
-//! same subsequence matching + scoring behaviour. keeps a single [`Matcher`]
-//! around so the internal buffers are reused across calls.
-
 use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 
-/// a reusable fuzzy matcher. holds onto its internal allocations so repeated
-/// filtering doesn't reallocate scratch buffers every keystroke
 pub struct FuzzyFilter {
     matcher: Matcher,
 }
@@ -33,10 +25,6 @@ impl FuzzyFilter {
         }
     }
 
-    /// score a single haystack string against the query. returns `Some(score)`
-    /// on match with higher being better, `None` if the query doesn't match.
-    /// empty queries match everything with score 0 so the caller preserves
-    /// the input order
     pub fn score(&mut self, haystack: &str, query: &str) -> Option<u32> {
         if query.is_empty() {
             return Some(0);
@@ -49,17 +37,11 @@ impl FuzzyFilter {
             Normalization::Smart,
             AtomKind::Fuzzy,
         );
-        // nucleo returns 0 for empty patterns which we handle above, so a
-        // real match is always >0. downstream callers rely on that invariant
         pattern
             .score(haystack, &mut self.matcher)
             .filter(|&s| s != 0)
     }
 
-    /// filter and rank a slice of items by `query`. returns indices into the
-    /// original slice sorted by score descending (highest first), with the
-    /// original order preserved among ties. empty query returns all indices
-    /// in original order
     pub fn filter<T, F>(&mut self, items: &[T], query: &str, key: F) -> Vec<usize>
     where
         F: Fn(&T) -> &str,
@@ -72,7 +54,6 @@ impl FuzzyFilter {
             .enumerate()
             .filter_map(|(i, item)| self.score(key(item), query).map(|s| (i, s)))
             .collect();
-        // stable sort: preserves original order for equal scores
         scored.sort_by_key(|b| std::cmp::Reverse(b.1));
         scored.into_iter().map(|(i, _)| i).collect()
     }
@@ -112,7 +93,6 @@ mod tests {
         let mut f = FuzzyFilter::new();
         let items = vec!["helper", "nothelp"];
         let indices = f.filter(&items, "help", |s| s);
-        // 'helper' starts with 'help' so should rank above 'nothelp'
         assert_eq!(indices.first(), Some(&0));
     }
 

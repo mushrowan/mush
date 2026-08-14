@@ -1,16 +1,3 @@
-//! terminal-state leak diagnostics
-//!
-//! after `run_tui` exits we sometimes see the host terminal left in a
-//! broken mode (raw input stuck on, mouse tracking still reporting,
-//! kitty kbd flags still pushed, etc). this module captures what we
-//! can observe at exit time and persists it to a per-session dump file
-//! so users can attach it when reporting the bug.
-//!
-//! dumps land under `<data_dir>/terminal-dumps/mush-term-<ts>-<pid>.txt`
-//! with mode 0o600. nothing secret is logged, but the dir also holds
-//! future diagnostics and secrets-adjacent context (`$TERM_PROGRAM`
-//! can leak the user's terminal emulator), so we default to owner-only
-
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -84,9 +71,6 @@ impl StartupPhase {
     }
 }
 
-/// snapshot of the real tty line discipline via `tcgetattr`. when
-/// `icanon` or `echo` are false we know the underlying tty is in a
-/// raw-ish state regardless of what crossterm's own flag says
 #[derive(Debug, Clone, Copy)]
 pub(super) struct TermiosProbe {
     pub icanon: bool,
@@ -385,7 +369,6 @@ fn current_timestamp() -> String {
 }
 
 fn current_tty() -> Option<String> {
-    // best-effort: read /proc/self/fd/0 on linux; on other unices skip
     #[cfg(target_os = "linux")]
     {
         std::fs::read_link("/proc/self/fd/0")
@@ -401,14 +384,9 @@ fn current_tty() -> Option<String> {
 #[cfg(unix)]
 fn probe_termios() -> Option<TermiosProbe> {
     use std::mem::MaybeUninit;
-    // probe stdin; if stdin isn't a tty (piped) this returns ENOTTY
-    // and we just report "unavailable". we don't open /dev/tty here
-    // because that would open a new handle and we want the truth about
-    // the fd we were actually reading from
     let fd: std::os::unix::io::RawFd = 0;
     let mut t = MaybeUninit::<libc::termios>::uninit();
     // SAFETY: tcgetattr writes a termios into the pointer on success.
-    // we only read the returned struct if the call succeeded
     let rc = unsafe { libc::tcgetattr(fd, t.as_mut_ptr()) };
     if rc != 0 {
         return None;
@@ -426,7 +404,6 @@ fn probe_termios() -> Option<TermiosProbe> {
     None
 }
 
-/// location for terminal-state dumps. lives alongside other mush data
 pub(super) fn default_dump_dir() -> PathBuf {
     mush_session::data_dir().join("terminal-dumps")
 }
@@ -497,10 +474,6 @@ fn is_idle_event_wait(state: &WatchdogState) -> bool {
     state.phase == "waiting_for_event" && state.active_streams == 0 && state.active_tools.is_empty()
 }
 
-/// run after restore_terminal_state. if raw mode is still reporting
-/// enabled, the terminal is likely broken from the user's POV: dump
-/// what we know to a file, log a warning, and echo the dump path to
-/// stderr so the user sees it in their shell right after mush exits
 pub(super) fn verify_terminal_restored(extra_notes: Vec<String>) {
     let raw_still = match crossterm::terminal::is_raw_mode_enabled() {
         Ok(v) => v,

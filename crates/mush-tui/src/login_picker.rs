@@ -1,14 +1,3 @@
-//! login picker state and filtering helpers
-//!
-//! mirrors [`crate::session_picker`] / [`crate::model_picker`]: a centred
-//! floating window activated by `/login` with no arg. lists every login
-//! provider mush knows about (oauth + api-key based), with a source
-//! badge per row so users can see where the active credential lives.
-//! enter starts a flow (oauth handshake or api-key entry) when logged
-//! out, or arms a y/n logout confirm when the row is mush-managed
-//! (oauth credentials or stored api key). env / config sourced rows
-//! refuse logout with a toast pointing at the source
-
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -17,79 +6,40 @@ use mush_ai::credentials::default_store;
 use mush_ai::login::{self, LoginMethod, LoginSource, SourceInputs};
 use mush_ai::types::ApiKey;
 
-/// one row in the picker
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoginEntry {
-    /// stable picker row id, matches `mush_ai::login::LoginProvider::id`
     pub id: String,
-    /// human-readable name shown in the row (e.g. "OpenRouter")
     pub name: String,
-    /// auth method this row uses (oauth flow vs api-key paste)
     pub method: LoginMethod,
-    /// where the credential currently comes from, or `None` for
-    /// logged-out rows. drives the badge column and logout policy
     pub source: Option<LoginSource>,
-    /// optional account id shown next to the row when the underlying
-    /// credential carries one (anthropic surfaces this for paid plans)
     pub account_id: Option<String>,
 }
 
 impl LoginEntry {
-    /// shorthand for "any credential is present"
     #[must_use]
     pub fn logged_in(&self) -> bool {
         self.source.is_some()
     }
 }
 
-/// state for the centred login picker overlay
 #[derive(Debug)]
 pub struct LoginPickerState {
     pub entries: Vec<LoginEntry>,
     pub filter: String,
     pub selected: usize,
-    /// short transient message shown in the picker footer
     pub toast: Option<String>,
-    /// when `Some`, the picker shows a y/n confirmation for logging out
-    /// of the row with this id. enter is disabled while armed
     pub confirm_logout: Option<String>,
-    /// when `Some`, the picker is collecting an api-key paste for the
-    /// row with this id. typing builds up `entry.buffer` (rendered as
-    /// `•` characters), enter saves, esc cancels
     pub entry: Option<EntryPrompt>,
-    /// when `Some`, an api key for the named row is being validated
-    /// against its provider. input is suppressed and the toast shows
-    /// progress until the runner clears it via
-    /// [`Self::finish_validation_success`] or
-    /// [`Self::finish_validation_failure`]
     pub validating: Option<String>,
-    /// snapshot of `[api_keys]` from the user's config.toml taken at
-    /// picker open time. used by [`Self::rebuild_sources`] to re-detect
-    /// `Config` source rows after a login/logout without re-plumbing
-    /// the runner. config edits made during a picker session aren't
-    /// reflected, which is fine because the picker is short-lived
     pub config_keys: HashMap<String, ApiKey>,
-    /// nucleo matcher reused across renders. `RefCell` because
-    /// `filtered_entries` takes `&self` for read-only paths but the
-    /// matcher needs `&mut`
     matcher: RefCell<FuzzyFilter>,
 }
 
-/// in-progress api-key entry. lives on the picker so the widget can
-/// render the prompt in place of the filter row, and the input handler
-/// can route keystrokes into the buffer
 #[derive(Debug, Clone)]
 pub struct EntryPrompt {
-    /// row id we're entering a key for
     pub entry_id: String,
-    /// display name of the row, for the prompt label
     pub provider_name: String,
-    /// typed characters so far. rendered masked with `•`
     pub buffer: String,
-    /// when the previous attempt was rejected, the reason lives here
-    /// so the popover widget can render it directly below the input
-    /// (rather than the bottom-of-picker toast, which sits too far
-    /// from where the user is looking)
     pub error_message: Option<String>,
 }
 
@@ -117,10 +67,6 @@ impl LoginPickerState {
         }
     }
 
-    /// re-resolve every row's source by reading the current oauth
-    /// store, env vars, snapshotted config keys, and credential store.
-    /// called after the picker mutates auth state (login or logout) so
-    /// the row repaints without a full rebuild from the runner
     pub fn rebuild_sources(&mut self) {
         let oauth_store = mush_ai::oauth::load_credentials().unwrap_or_default();
         let oauth_present: Vec<(String, Option<String>)> = oauth_store
@@ -135,8 +81,6 @@ impl LoginPickerState {
             credential_store: credential_store.as_ref(),
         };
         for entry in &mut self.entries {
-            // adapt to login::LoginProvider shape just to call
-            // resolve_source. cheap clones on the small hot path
             let provider = login::LoginProvider {
                 id: entry.id.clone(),
                 name: entry.name.clone(),
@@ -152,10 +96,6 @@ impl LoginPickerState {
         }
     }
 
-    /// arm a logout confirmation for the highlighted row, returning
-    /// whether the prompt was armed. logged-out rows skip arming;
-    /// env / config sourced rows show a toast pointing at the source
-    /// instead since mush doesn't manage those
     pub fn arm_logout(&mut self) -> bool {
         let Some(entry) = self.selected_entry().cloned() else {
             return false;
@@ -182,9 +122,6 @@ impl LoginPickerState {
         self.toast = None;
     }
 
-    /// arm an api-key entry prompt for the highlighted row. only
-    /// makes sense for `ApiKey` rows; oauth rows return `false`
-    /// without changing state so the caller can keep its own routing
     pub fn arm_entry(&mut self) -> bool {
         let Some(entry) = self.selected_entry() else {
             return false;
@@ -207,14 +144,6 @@ impl LoginPickerState {
         self.toast = None;
     }
 
-    /// move the picker into "validating" state. drops the typed buffer
-    /// (the runner has already taken its copy by now) and records the
-    /// row id so [`Self::finish_validation_success`] /
-    /// [`Self::finish_validation_failure`] can route the outcome back
-    /// to the right row even if the user has navigated away. the entry
-    /// prompt itself stays alive (with an empty buffer) so the popover
-    /// widget keeps rendering during the in-flight request, giving
-    /// the user continuous visual feedback
     pub fn begin_validation(&mut self, entry_id: &str, provider_name: &str) {
         self.entry = Some(EntryPrompt {
             entry_id: entry_id.to_string(),
@@ -226,19 +155,12 @@ impl LoginPickerState {
         self.toast = None;
     }
 
-    /// finalise a successful validation: clear the validating flag and
-    /// surface the runner-provided confirmation toast (which usually
-    /// includes any extra metadata returned by the provider, e.g. the
-    /// openrouter key label and remaining credit)
     pub fn finish_validation_success(&mut self, toast: impl Into<String>) {
         self.validating = None;
         self.entry = None;
         self.toast = Some(toast.into());
     }
 
-    /// finalise a failed validation: clear the validating flag,
-    /// re-arm the entry prompt with an empty buffer so the user can
-    /// retry, and show why the previous attempt was rejected
     pub fn finish_validation_failure(
         &mut self,
         entry_id: &str,
@@ -255,15 +177,11 @@ impl LoginPickerState {
         self.toast = None;
     }
 
-    /// snapshot of the row currently highlighted, after filtering
     fn selected_entry(&self) -> Option<&LoginEntry> {
         let visible = filtered_entries(self);
         visible.get(self.selected).copied()
     }
 
-    /// rebuild source flags from a fresh snapshot. callers pass the
-    /// new entries so we can pick up the latest sources without
-    /// rebuilding the picker state from scratch
     pub fn refresh_entries(&mut self, entries: Vec<LoginEntry>) {
         self.entries = entries;
         if self.selected >= self.entries.len() {
@@ -272,9 +190,6 @@ impl LoginPickerState {
     }
 }
 
-/// entries matching the current filter, in render order. empty filter
-/// keeps the natural catalogue order; otherwise fuzzy-rank by
-/// `id name account` so a typed query can find rows by either label
 #[must_use]
 pub fn filtered_entries(picker: &LoginPickerState) -> Vec<&LoginEntry> {
     if picker.filter.is_empty() {
@@ -388,9 +303,6 @@ mod tests {
 
     #[test]
     fn arm_logout_refuses_env_sourced_rows_with_helpful_toast() {
-        // mush doesn't own env vars, so the picker can't "log out" of
-        // them. it must point the user at the source instead of
-        // silently doing nothing
         let mut picker = LoginPickerState::new(vec![api_key_entry(
             "openrouter",
             "OpenRouter",
@@ -424,8 +336,6 @@ mod tests {
 
     #[test]
     fn arm_entry_arms_for_api_key_rows_only() {
-        // entering an api key only makes sense for ApiKey rows. oauth
-        // rows go through the browser flow on enter instead
         let mut picker = LoginPickerState::new(vec![
             oauth_entry("anthropic-pro-max", "Anthropic", None),
             api_key_entry("openrouter", "OpenRouter", None),
@@ -472,12 +382,6 @@ mod tests {
 
     #[test]
     fn begin_validation_clears_buffer_but_keeps_prompt_alive_for_popover() {
-        // while a validation is in flight the entered key must not
-        // linger in the buffer (it could leak to the next render of
-        // the popover). but the prompt itself stays alive so the
-        // popover widget keeps rendering during the roundtrip,
-        // giving the user continuous visual feedback. the in-flight
-        // row id sits on `validating` for the runner to correlate
         let mut picker =
             LoginPickerState::new(vec![api_key_entry("openrouter", "OpenRouter", None)]);
         picker.arm_entry();
@@ -500,11 +404,6 @@ mod tests {
 
     #[test]
     fn finish_validation_failure_restores_entry_prompt_for_retry() {
-        // a rejected key must put the user right back at the prompt so
-        // they can paste a corrected version without reopening the
-        // picker. the rejection lives inside the prompt itself so the
-        // popover widget can render it directly under the input box,
-        // instead of routing it through the bottom-of-picker toast
         let mut picker =
             LoginPickerState::new(vec![api_key_entry("openrouter", "OpenRouter", None)]);
         picker.arm_entry();

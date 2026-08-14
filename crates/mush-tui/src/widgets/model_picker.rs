@@ -1,9 +1,3 @@
-//! model picker overlay widget
-//!
-//! mirrors the session picker shape: a centred floating window with
-//! filter / hint / list. extras: two-tab header (all / ★ favourites)
-//! and per-row provider badge
-
 use crate::model_picker::{ModelPickerState, ModelPickerTab, filtered_models};
 use crate::theme::Theme;
 use crate::widgets::popup_layout::{PopupSize, centred_popup};
@@ -13,7 +7,6 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding};
 
-/// render the model picker as a centred overlay
 pub fn render(frame: &mut Frame, picker: &ModelPickerState, theme: &Theme) {
     let popup = centred_popup(
         frame.area(),
@@ -41,11 +34,9 @@ pub fn render(frame: &mut Frame, picker: &ModelPickerState, theme: &Theme) {
         return;
     }
 
-    // tab header: [ all ]  [ ★ favourites ]
     let tab_line = build_tab_header(picker, theme);
     frame.render_widget(tab_line, Rect::new(inner.x, inner.y, inner.width, 1));
 
-    // filter line
     let filter_line = Line::from(vec![
         Span::styled("filter: ", theme.dim),
         Span::styled(
@@ -59,7 +50,6 @@ pub fn render(frame: &mut Frame, picker: &ModelPickerState, theme: &Theme) {
     ]);
     frame.render_widget(filter_line, Rect::new(inner.x, inner.y + 1, inner.width, 1));
 
-    // hint line
     let hint = Line::from(vec![
         Span::styled("tab", theme.selection_marker),
         Span::styled(" switch · ", theme.dim),
@@ -74,13 +64,11 @@ pub fn render(frame: &mut Frame, picker: &ModelPickerState, theme: &Theme) {
     ]);
     frame.render_widget(hint, Rect::new(inner.x, inner.y + 2, inner.width, 1));
 
-    // model list
     let toast_rows = u16::from(picker.toast.is_some());
     let list_height = inner.height.saturating_sub(3 + toast_rows);
     let list_area = Rect::new(inner.x, inner.y + 3, inner.width, list_height);
     render_model_list(frame, picker, list_area, theme);
 
-    // toast pinned to the bottom of the popup
     if let Some(toast) = picker.toast.as_deref() {
         let toast_y = inner.y + inner.height.saturating_sub(1);
         frame.render_widget(
@@ -149,8 +137,6 @@ fn render_model_list(frame: &mut Frame, picker: &ModelPickerState, list_area: Re
             .map(|t| format!(" [{t}]"))
             .collect();
 
-        // right-side metadata: [provider] · display name. provider sits
-        // closest to the id so the model can be classified at a glance
         let provider_badge = format!("[{}]", model.provider);
         let display_suffix = if model.name.is_empty() {
             String::new()
@@ -212,8 +198,6 @@ mod tests {
 
     #[test]
     fn render_shows_tab_header_with_active_tab_marked() {
-        // the header must show both tabs and indicate which one is
-        // active. when the user toggles, the marker moves between them
         let mut picker = ModelPickerState::new(
             vec![model("a", "A", "anthropic")],
             vec!["a".into()],
@@ -231,18 +215,12 @@ mod tests {
         picker.toggle_tab();
         let buf = render_to_buffer(&picker, 80, 16);
         let content = buffer_to_string(&buf);
-        // both tabs still visible; we can't easily inspect styling but
-        // structurally both labels remain in the buffer
         assert!(content.contains("all"));
         assert!(content.contains("favourites"));
     }
 
     #[test]
     fn render_shows_provider_badge_per_row() {
-        // a key user complaint about the old picker: no way to tell
-        // which provider was serving each model. each row must surface
-        // a [<provider>] badge so anthropic vs openai vs codex etc. is
-        // obvious at a glance
         let picker = ModelPickerState::new(
             vec![
                 model("claude-opus", "Claude Opus", "anthropic"),
@@ -300,9 +278,6 @@ mod tests {
 
     #[test]
     fn render_shows_helpful_empty_state_in_favourites_tab() {
-        // when the user opens the favourites tab without ever starring
-        // anything, the picker should hint at how to fix that rather
-        // than just rendering an empty list
         let mut picker = ModelPickerState::new(
             vec![model("opus", "Claude Opus", "anthropic")],
             vec![],
@@ -320,8 +295,6 @@ mod tests {
 
     #[test]
     fn render_shows_keybind_hint_line() {
-        // the hint row teaches the keybinds the user needs without
-        // pulling up a help screen
         let picker = ModelPickerState::new(
             vec![model("opus", "Claude Opus", "anthropic")],
             vec![],

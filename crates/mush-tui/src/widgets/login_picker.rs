@@ -1,9 +1,3 @@
-//! login picker overlay widget
-//!
-//! mirrors the session picker shape: a centred floating window with
-//! filter / hint / list. each row shows a logged-in / logged-out badge
-//! and the optional account id
-
 use crate::login_picker::{LoginPickerState, filtered_entries};
 use crate::theme::Theme;
 use crate::widgets::popup_layout::{PopupSize, centred_popup};
@@ -13,7 +7,6 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding};
 
-/// render the login picker as a centred overlay
 pub fn render(frame: &mut Frame, picker: &LoginPickerState, theme: &Theme) {
     let popup = centred_popup(
         frame.area(),
@@ -41,8 +34,6 @@ pub fn render(frame: &mut Frame, picker: &LoginPickerState, theme: &Theme) {
         return;
     }
 
-    // filter line stays put even during entry / validating - the
-    // entry input lives in the popover overlay rendered last
     let prompt_line = Line::from(vec![
         Span::styled("filter: ", theme.dim),
         Span::styled(
@@ -56,9 +47,6 @@ pub fn render(frame: &mut Frame, picker: &LoginPickerState, theme: &Theme) {
     ]);
     frame.render_widget(prompt_line, Rect::new(inner.x, inner.y, inner.width, 1));
 
-    // hint line - keybinds for the picker. while the entry popover is
-    // up these are inert, but the popover paints over them so it's
-    // not worth toggling state to signal that
     let hint = Line::from(vec![
         Span::styled("ctrl+j/k", theme.selection_marker),
         Span::styled(" nav · ", theme.dim),
@@ -82,9 +70,6 @@ pub fn render(frame: &mut Frame, picker: &LoginPickerState, theme: &Theme) {
         );
     }
 
-    // overlay the entry popover last so it paints on top of the
-    // picker. only renders when the picker is actually collecting a
-    // key or validating one
     super::login_entry_popup::render(frame, picker, theme);
 }
 
@@ -116,9 +101,6 @@ fn render_list(frame: &mut Frame, picker: &LoginPickerState, list_area: Rect, th
         };
         let prefix = if is_selected { "▸ " } else { "  " };
         let logged_in = entry.logged_in();
-        // source-aware badge: shows where the credential lives so
-        // users see at a glance whether mush owns the secret or it's
-        // coming from env / config / oauth
         let badge_text = match entry.source.as_ref() {
             Some(source) => format!("{} ", source.badge()),
             None => "[logged out] ".into(),
@@ -129,9 +111,6 @@ fn render_list(frame: &mut Frame, picker: &LoginPickerState, list_area: Rect, th
             theme.dim
         };
 
-        // right-side metadata: account id when present, then row id
-        // (so the human name dominates the row and the slug sits with
-        // diagnostic info)
         let id_suffix = format!("  [{}]", entry.id);
         let account_suffix = entry
             .account_id
@@ -204,20 +183,11 @@ mod tests {
 
     #[test]
     fn render_does_not_panic_on_terminal_narrower_than_min_popup_width() {
-        // the popup width clamp had a 40-col floor with no buffer cap.
-        // on a 39-col terminal that produced a 40-wide popup whose
-        // right border landed at x=39, one past the buffer's last
-        // valid index (0..=38). ratatui's `Buffer::index_of` panicked
-        // with "index outside of buffer". the popup must always fit
-        // inside the available area, never overflow it
         let picker = LoginPickerState::new(vec![oauth_entry(
             "anthropic-pro-max",
             "Anthropic",
             Some(LoginSource::OAuth),
         )]);
-        // 39 cols was the exact width that triggered the user-reported
-        // panic. cover a couple of nearby narrow widths too so the
-        // off-by-one doesn't reappear with a tweaked clamp
         for width in [10u16, 20, 30, 39, 40] {
             let _ = render_to_buffer(&picker, width, 26);
         }
@@ -225,10 +195,6 @@ mod tests {
 
     #[test]
     fn render_shows_source_badge_per_row() {
-        // every row carries a source badge that names where the
-        // credential is coming from. a logged-out row says so, a
-        // logged-in oauth row tags `[oauth]`, an env-sourced row
-        // tags `[env]` and so on
         let picker = LoginPickerState::new(vec![
             oauth_entry("anthropic-pro-max", "Anthropic", Some(LoginSource::OAuth)),
             api_key_entry(
@@ -260,8 +226,6 @@ mod tests {
 
     #[test]
     fn render_shows_keybind_hint_line() {
-        // the hint row must teach the keybinds the user needs without
-        // pulling up a help screen
         let picker =
             LoginPickerState::new(vec![oauth_entry("anthropic-pro-max", "Anthropic", None)]);
         let buf = render_to_buffer(&picker, 80, 16);
@@ -313,10 +277,6 @@ mod tests {
 
     #[test]
     fn render_overlays_entry_popover_when_armed() {
-        // when the picker is collecting an api key, the entry popover
-        // paints on top of the picker so the input row, status, and
-        // hint live next to each other (no eye-darting between top of
-        // picker and bottom toast). typed characters render as •
         let mut picker =
             LoginPickerState::new(vec![api_key_entry("openrouter", "OpenRouter", None)]);
         picker.arm_entry();

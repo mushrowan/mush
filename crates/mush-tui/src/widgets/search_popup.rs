@@ -1,5 +1,3 @@
-//! floating search popup for conversation search
-
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -8,7 +6,6 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Widget}
 
 use crate::app::App;
 
-/// renders a floating search popup over the main UI
 pub struct SearchPopup<'a> {
     app: &'a App,
 }
@@ -21,7 +18,6 @@ impl<'a> SearchPopup<'a> {
 
 impl Widget for SearchPopup<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        // centre the popup, 60% width, up to 14 lines tall
         let width = (area.width * 3 / 5)
             .max(30)
             .min(area.width.saturating_sub(4));
@@ -30,7 +26,6 @@ impl Widget for SearchPopup<'_> {
         let y = (area.height.saturating_sub(height)) / 2;
         let popup = Rect::new(x, y, width, height);
 
-        // clear background
         Clear.render(popup, buf);
 
         let block = Block::default()
@@ -44,7 +39,6 @@ impl Widget for SearchPopup<'_> {
             return;
         }
 
-        // split: input line at top, results below
         let input_area = Rect::new(inner.x, inner.y, inner.width, 1);
         let divider_area = Rect::new(inner.x, inner.y + 1, inner.width, 1);
         let results_area = Rect::new(
@@ -54,7 +48,6 @@ impl Widget for SearchPopup<'_> {
             inner.height.saturating_sub(2),
         );
 
-        // input line
         let query_spans = vec![
             Span::styled("/ ", self.app.theme.search_border),
             Span::raw(&self.app.interaction.search.query),
@@ -62,7 +55,6 @@ impl Widget for SearchPopup<'_> {
         ];
         Paragraph::new(Line::from(query_spans)).render(input_area, buf);
 
-        // divider
         let match_count = self.app.interaction.search.matches.len();
         let divider_text = if self.app.interaction.search.query.is_empty() {
             "type to search".to_string()
@@ -74,7 +66,6 @@ impl Widget for SearchPopup<'_> {
         };
         Paragraph::new(Line::styled(divider_text, self.app.theme.dim)).render(divider_area, buf);
 
-        // results list
         let items: Vec<ListItem> = self
             .app
             .interaction
@@ -89,7 +80,6 @@ impl Widget for SearchPopup<'_> {
                     crate::app::MessageRole::Assistant => "assistant",
                     crate::app::MessageRole::System => "system",
                 };
-                // preview: first line of content, truncated
                 let preview = msg
                     .content
                     .lines()

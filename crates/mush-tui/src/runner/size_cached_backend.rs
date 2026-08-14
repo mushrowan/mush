@@ -1,26 +1,3 @@
-//! caching wrapper around a ratatui [`Backend`] that avoids per-frame
-//! `size()` / `window_size()` syscalls.
-//!
-//! `CrosstermBackend`'s `size()` implementation opens `/dev/tty` and
-//! runs `ioctl(TIOCGWINSZ)` on every invocation. ratatui's
-//! `Terminal::autoresize` calls it once per frame to detect resizes.
-//! profiling showed this accounted for ~3% of main-thread samples
-//! with the `File::open` alone at ~2.4%.
-//!
-//! [`SizeCachedBackend`] forwards every call to its inner backend except
-//! `size()` and `window_size()`, which are memoised. actual terminal
-//! resizes invalidate the cache via the handle returned by
-//! [`SizeCachedBackend::cache_handle`]. there are two invalidation paths:
-//!
-//! 1. the `Event::Resize` arm of the main event loop calls
-//!    [`CachedSizeState::invalidate`] directly. this is enough when the
-//!    loop drains terminal events promptly.
-//! 2. a sigwinch-driven async task flips an `Arc<AtomicBool>` obtained
-//!    via [`CachedSizeState::resize_pending_flag`]. `size()` /
-//!    `window_size()` consume the flag at the top of every call, so a
-//!    real os-level resize can never be hidden by a streaming burst
-//!    starving the event loop's resize-event processing.
-
 use std::cell::Cell;
 use std::ops::Range;
 use std::rc::Rc;
@@ -34,16 +11,6 @@ use ratatui::layout::{Position, Size};
 
 const SIZE_CACHE_TTL: Duration = Duration::from_millis(250);
 
-/// spawn a background task that flips `flag` to true on every
-/// `SIGWINCH`. wired into [`SizeCachedBackend`] so a real os-level resize
-/// can never be hidden by a streaming burst starving the event loop's
-/// `Event::Resize` processing.
-///
-/// the returned [`tokio::task::JoinHandle`] should be aborted at
-/// shutdown so the listener doesn't outlive `run_tui`. on non-unix
-/// platforms the task is a no-op (no SIGWINCH equivalent); cache
-/// freshness then relies entirely on `Event::Resize` draining via the
-/// main event loop.
 #[cfg(unix)]
 pub(super) fn spawn_sigwinch_listener(flag: Arc<AtomicBool>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -70,45 +37,25 @@ pub(super) fn spawn_sigwinch_listener(_flag: Arc<AtomicBool>) -> tokio::task::Jo
     tokio::spawn(async {})
 }
 
-/// shared cache slot for [`SizeCachedBackend`].
-///
-/// held by the backend itself and by any invalidation site (typically
-/// the event loop). interior mutability is enough because all access
-/// happens on the single UI thread.
 #[derive(Debug, Default)]
 pub struct CachedSizeState {
     size: Cell<Option<Size>>,
     window_size: Cell<Option<WindowSize>>,
     last_probe: Cell<Option<Instant>>,
-    /// flipped to true by the sigwinch listener task (or any other
-    /// off-thread observer) when the os reports a terminal resize.
-    /// consumed at the top of `size()` / `window_size()` so a stale
-    /// cache can never outlive a real resize even if `Event::Resize`
-    /// is still queued
     resize_pending: Arc<AtomicBool>,
 }
 
 impl CachedSizeState {
-    /// clear cached dimensions so the next `size()` / `window_size()`
-    /// call refetches from the underlying backend. should be invoked
-    /// on receiving a terminal resize event
     pub fn invalidate(&self) {
         self.size.set(None);
         self.window_size.set(None);
         self.last_probe.set(None);
     }
 
-    /// shareable handle to the resize-pending flag. callers that
-    /// observe os-level resize signals (e.g. sigwinch) can flip this
-    /// from any thread/task and the next backend size query will
-    /// refresh
     pub fn resize_pending_flag(&self) -> Arc<AtomicBool> {
         self.resize_pending.clone()
     }
 
-    /// atomically clear and return whether a resize was pending. on
-    /// `true`, callers should treat both cached values as stale and
-    /// refetch
     fn consume_resize_pending(&self) -> bool {
         self.resize_pending.swap(false, Ordering::AcqRel)
     }
@@ -123,24 +70,17 @@ impl CachedSizeState {
         self.last_probe.set(Some(Instant::now()));
     }
 
-    /// test helper: whether either cache slot currently holds a value.
-    /// used to assert that resize handlers actually invalidate the
-    /// cache without exposing the cells themselves
     #[cfg(test)]
     pub(crate) fn has_cached_size(&self) -> bool {
         self.size.get().is_some() || self.window_size.get().is_some()
     }
 
-    /// test helper: pre-populate the size cache so a follow-up
-    /// `invalidate()` has something observable to clear
     #[cfg(test)]
     pub(crate) fn set_size_for_test(&self, size: Size) {
         self.size.set(Some(size));
     }
 }
 
-/// wrapper around a ratatui [`Backend`] that memoises `size()` and
-/// `window_size()` until explicitly invalidated.
 pub struct SizeCachedBackend<B> {
     inner: B,
     state: Rc<CachedSizeState>,
@@ -154,7 +94,6 @@ impl<B> SizeCachedBackend<B> {
         }
     }
 
-    /// handle for invalidating the cache from elsewhere (event loop)
     pub fn cache_handle(&self) -> Rc<CachedSizeState> {
         self.state.clone()
     }
@@ -200,9 +139,6 @@ impl<B: Backend> Backend for SizeCachedBackend<B> {
 
     fn size(&self) -> Result<Size, Self::Error> {
         if self.state.consume_resize_pending() || !self.state.cached_size_is_fresh() {
-            // os reported a resize since the last query; bypass both
-            // caches so a follow-up window_size() in the same frame
-            // also refreshes
             let s = self.inner.size()?;
             self.state.size.set(Some(s));
             self.state.window_size.set(None);
@@ -231,7 +167,6 @@ impl<B: Backend> Backend for SizeCachedBackend<B> {
         }
         let s = self.inner.window_size()?;
         self.state.window_size.set(Some(s));
-        // keep `size` cache consistent with the fresh window_size
         self.state.size.set(Some(s.columns_rows));
         self.state.mark_probed_now();
         Ok(s)
@@ -259,8 +194,6 @@ mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
 
-    /// counts how many times `size()` / `window_size()` was actually
-    /// invoked on the inner backend, so we can verify the cache
     struct CountingBackend {
         inner: TestBackend,
         size_calls: Cell<u32>,
@@ -390,7 +323,6 @@ mod tests {
             "invalidate should force the next call to hit the inner backend"
         );
 
-        // subsequent calls come back from cache
         let _ = backend.size().unwrap();
         assert_eq!(backend.inner.size_calls.get(), 2);
     }
@@ -404,7 +336,6 @@ mod tests {
         let _ = backend.window_size().unwrap();
         assert_eq!(backend.inner.window_calls.get(), 1);
 
-        // size() should now read from the same cache (window_size stores it)
         let s = backend.size().unwrap();
         assert_eq!(s, Size::new(80, 25));
         assert_eq!(
@@ -432,7 +363,6 @@ mod tests {
             "flipping the resize_pending flag should force the next size() to refetch"
         );
 
-        // subsequent calls come back from cache until the next flip
         let _ = backend.size().unwrap();
         assert_eq!(backend.inner.size_calls.get(), 2);
     }

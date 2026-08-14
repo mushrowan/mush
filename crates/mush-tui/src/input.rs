@@ -1,14 +1,8 @@
-//! keyboard input handling
-//!
-//! maps crossterm key events to app mutations and events
-
 use crossterm::event::KeyEvent;
 
 use crate::app::{App, AppEvent, AppMode};
 use crate::session_picker::{SessionScope, filtered_sessions};
 
-// A trailing '\' escapes plain Enter into a literal newline, but only when the
-// cursor is at the end of the current line.
 fn should_escape_enter_to_newline(app: &App, key: KeyEvent) -> bool {
     if !crate::keybinds::is_plain_enter(key) || app.input.cursor == 0 {
         return false;
@@ -24,15 +18,6 @@ fn should_escape_enter_to_newline(app: &App, key: KeyEvent) -> bool {
 
     app.input.text[app.input.cursor..].starts_with('\n') || app.input.cursor == app.input.text.len()
 }
-/// handle a key event, mutating the app and optionally producing an event
-///
-/// dispatch layers (checked in order):
-/// 1. mode-specific handlers (picker, slash menu, scroll, search)
-/// 2. global keys (quit, abort, page scroll)
-/// 3. pane management (focus, split, resize) - works in all states
-/// 4. multiline enter (alt/shift+enter, ctrl+j)
-/// 5. streaming-only or idle-only keys (submit behaviour, mode switches)
-/// 6. shared editing (cursor, deletion, character input)
 pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     tracing::trace!(
         code = ?key.code,
@@ -45,7 +30,6 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         "key event"
     );
 
-    // 1. mode-specific dispatches
     if app.interaction.mode == AppMode::SessionPicker {
         return handle_picker_key(app, key);
     }
@@ -74,15 +58,6 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         return handle_compaction_recovery_key(app, key);
     }
 
-    // 2. global bindings
-    //
-    // ctrl+c semantics:
-    //   non-empty input → clear input + images
-    //   empty input + busy → abort the turn (no confirm)
-    //   empty input + idle, not armed → arm + status hint
-    //   empty input + idle, armed → quit
-    // any other key resets the armed flag so a stray earlier ctrl+c
-    // can't quit later
     if app
         .keymap
         .matches(crate::keybinds::Action::QuitOrAbort, key)
@@ -106,29 +81,13 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     }
     app.confirm_quit_pending = false;
 
-    // ctrl+v works in both idle and streaming so the user can stage
-    // images for mid-turn steering without aborting the stream
     if app.keymap.matches(crate::keybinds::Action::PasteImage, key) {
         return Some(AppEvent::PasteImage);
     }
-    // scroll / cancel cascade: esc (or ctrl+[) first jumps to bottom if
-    // scrolled up, only aborts once already anchored there. this applies
-    // even while streaming so users can re-anchor without cancelling a
-    // long turn. single check + internal branches avoids duplicate guards.
-    // we key off `is_busy()` rather than just `stream.active` so esc still
-    // works during the tool-execution window between an assistant
-    // `MessageEnd` and the next `TurnStart`, when text is no longer
-    // streaming but the agent is still cranking through tool calls
     if is_cancel_key(app, key) && app.is_busy() {
         return Some(AppEvent::Abort);
     }
 
-    // 3. pane management (works regardless of streaming state)
-
-    // alt+m / alt+shift+m cycle through favourite models. works while
-    // streaming so the user can hot-swap mid-turn without aborting.
-    // bindings come from the [keys] config; see keybinds.rs for
-    // cycle_favourite / cycle_favourite_backward
     if app
         .keymap
         .matches(crate::keybinds::Action::CycleFavouriteBackward, key)
@@ -148,7 +107,6 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         return None;
     }
 
-    // 4. multiline enter (before mode-specific enter handling)
     if app
         .keymap
         .matches(crate::keybinds::Action::InsertNewline, key)
@@ -157,12 +115,6 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         return None;
     }
 
-    // 5. edit_steering action: lift the last queued steering message
-    // back into the input for editing. the binding set is configurable
-    // via [keys] in config.toml. to avoid clobbering real typing,
-    // bindings without an Alt modifier require the input to be empty;
-    // Alt-prefixed bindings fire unconditionally because alt combos
-    // aren't produced by normal typing
     if app.has_queued_messages()
         && app
             .keymap
@@ -174,7 +126,6 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         }
     }
 
-    // 6. streaming vs idle dispatch
     if app.stream.active {
         handle_streaming_keys(app, key)
     } else {
@@ -182,7 +133,6 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     }
 }
 
-/// keys specific to streaming: enter submits to steering queue
 fn handle_streaming_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     if crate::keybinds::is_plain_enter(key) {
         if should_escape_enter_to_newline(app, key) {
@@ -195,8 +145,6 @@ fn handle_streaming_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         }
         let text = app.input.take_text();
         if text.starts_with('/') {
-            // try to parse. safe commands run immediately; unsafe ones get
-            // rejected with input restored so the user can resubmit later
             match crate::slash::parse(&text) {
                 Ok(action) if action.is_safe_during_stream() => {
                     return Some(AppEvent::SlashCommand { action });
@@ -226,9 +174,7 @@ fn handle_streaming_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     handle_editing(app, key)
 }
 
-/// keys specific to idle: mode switches, toggles, submit with slash parsing
 fn handle_idle_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
-    // mode switches: bindings come from the [keys] config
     if app
         .keymap
         .matches(crate::keybinds::Action::EnterSearch, key)
@@ -248,12 +194,7 @@ fn handle_idle_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     }
 
     match () {
-        // tab completion / slash menu
         _ if crate::keybinds::is_tab(key) || crate::keybinds::is_backtab(key) => {
-            // @-template expansion takes priority over generic tab completion
-            // so users can type `@review<tab>` and get the template content.
-            // bare `@` with no matching template falls through to normal
-            // tab behaviour so typing `@ ` in code/paths still works
             if try_expand_at_template(app) {
                 return None;
             }
@@ -271,7 +212,6 @@ fn handle_idle_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             None
         }
 
-        // submit (accept ghost text, parse slash commands)
         _ if app.keymap.matches(crate::keybinds::Action::Confirm, key) => {
             if should_escape_enter_to_newline(app, key) {
                 app.input.backspace();
@@ -302,7 +242,6 @@ fn handle_idle_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             })
         }
 
-        // delete-char-or-quit: quit on empty, delete char otherwise
         _ if app
             .keymap
             .matches(crate::keybinds::Action::DeleteCharOrQuit, key) =>
@@ -314,27 +253,15 @@ fn handle_idle_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             None
         }
 
-        // everything else falls through to shared editing
         _ => handle_editing(app, key),
     }
 }
 
-/// try expanding an `@name` prompt template adjacent to the cursor.
-///
-/// returns `true` when the trigger was found and a matching template
-/// got inserted (replacing the `@name` span in the input). returns
-/// `false` when there's no trigger or no matching template, so the
-/// caller can fall through to regular tab completion.
-///
-/// positional placeholders (`$1`, `$2`, `$@`) are inserted verbatim
-/// for now. a follow-up cycle will add slot-editing with tab/shift+tab
 fn try_expand_at_template(app: &mut App) -> bool {
     let Some(trigger) = crate::at_template::parse_at_trigger(&app.input.text, app.input.cursor)
     else {
         return false;
     };
-    // disjoint-field borrow: &app.completion.templates and
-    // &mut app.input.text don't alias, so no clone needed on content
     let Some(template) = crate::at_template::find_exact(&app.completion.templates, &trigger) else {
         return false;
     };
@@ -344,23 +271,16 @@ fn try_expand_at_template(app: &mut App) -> bool {
     true
 }
 
-/// replace the byte range `[start, end)` of `app.input.text` with
-/// `content`, then if the content has placeholders enter slot-edit
-/// mode parking the cursor at the first slot. shared by the exact-match
-/// path and the picker `enter` path so both routes get slot-editing for
-/// free
 fn insert_template(app: &mut App, start: usize, end: usize, content: &str) {
     let (clean, slot_offsets) = crate::at_template::strip_placeholders(content);
     app.input.text.replace_range(start..end, &clean);
 
     if slot_offsets.is_empty() {
-        // no placeholders: simple expansion, cursor at end of insertion
         app.input.cursor = start + clean.len();
         app.input.ensure_cursor_visible();
         return;
     }
 
-    // shift slot offsets into absolute byte positions in `input.text`
     let slots: Vec<usize> = slot_offsets.iter().map(|&o| start + o).collect();
     app.input.cursor = slots[0];
     app.input.ensure_cursor_visible();
@@ -370,9 +290,6 @@ fn insert_template(app: &mut App, start: usize, end: usize, content: &str) {
     app.status = Some(format!("slot 1/{slot_count} · tab to cycle, ⏎ to finish"));
 }
 
-/// open the @-template picker if the trigger word has prefix matches
-/// but no exact match. returns whether the picker was opened. callers
-/// should fall through to normal tab completion when this returns false
 fn try_open_at_picker(app: &mut App) -> bool {
     let Some(trigger) = crate::at_template::parse_at_trigger(&app.input.text, app.input.cursor)
     else {
@@ -396,14 +313,8 @@ fn try_open_at_picker(app: &mut App) -> bool {
     true
 }
 
-/// key handler while the `@`-template picker popup is open. tab and
-/// shift+tab cycle, enter inserts the selected template and closes,
-/// esc / ctrl+[ close without touching the input. typing characters
-/// narrows the filter; if the user types past every match the picker
-/// closes and the character still lands in the input
 fn handle_at_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     let Some(picker) = app.interaction.at_picker.as_mut() else {
-        // shouldn't happen, but recover gracefully
         app.interaction.mode = AppMode::Normal;
         return None;
     };
@@ -433,8 +344,6 @@ fn handle_at_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             key,
         ) =>
         {
-            // copy out the fields we need before replacing the input,
-            // since insertion mutates app.input via &mut
             let template = picker.matches[picker.selected].clone();
             let start = picker.trigger_start;
             let end = picker.trigger_end;
@@ -454,8 +363,6 @@ fn handle_at_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             None
         }
         _ if crate::keybinds::is_backspace(key) => {
-            // backspacing into the trigger narrows the filter. dropping
-            // back past the `@` closes the picker entirely
             app.input.backspace();
             refresh_at_picker(app);
             None
@@ -469,9 +376,6 @@ fn handle_at_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     }
 }
 
-/// re-evaluate the picker after the input changed mid-mode. closes the
-/// picker if the trigger has dissolved or no candidates match the new
-/// word; otherwise updates `matches` and clamps `selected`
 fn refresh_at_picker(app: &mut App) {
     let Some(trigger) = crate::at_template::parse_at_trigger(&app.input.text, app.input.cursor)
     else {
@@ -496,11 +400,6 @@ fn refresh_at_picker(app: &mut App) {
     }
 }
 
-/// key handler while the slot editor is active. tab cycles forward
-/// through slots, shift+tab cycles back, enter / esc exit the mode and
-/// keep the typed text in place. typing inserts at the cursor and
-/// shifts every later slot offset by the same byte count so they keep
-/// pointing at the right place
 fn handle_slot_edit_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     let Some(state) = app.interaction.slot_edit.as_ref() else {
         app.interaction.mode = AppMode::Normal;
@@ -543,9 +442,6 @@ fn handle_slot_edit_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             None
         }
         _ if crate::keybinds::is_backspace(key) => {
-            // shift later slots back by 1 if a byte gets removed. avoid
-            // deleting past the current slot's start so users can't
-            // accidentally chew through earlier verbatim template content
             let state = app.interaction.slot_edit.as_ref()?;
             let slot_start = state.slots[state.current];
             if app.input.cursor <= slot_start {
@@ -563,13 +459,10 @@ fn handle_slot_edit_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             shift_later_slots(app, cursor, inserted as isize);
             None
         }
-        // arrow keys, home/end, etc fall through silently so cursor
-        // movement keeps working without breaking slot-tracking
         _ => None,
     }
 }
 
-/// move the cursor to slot index `target` and update `current`
 fn jump_to_slot(app: &mut App, target: usize) {
     if let Some(state) = app.interaction.slot_edit.as_mut() {
         state.current = target;
@@ -584,10 +477,6 @@ fn jump_to_slot(app: &mut App, target: usize) {
     }
 }
 
-/// shift every slot strictly after `cutoff` by `delta` bytes. used
-/// after inserts and deletes inside the current slot so later slot
-/// offsets keep pointing at their actual position in the live input.
-/// strictly-greater so the current slot's own start byte stays put
 fn shift_later_slots(app: &mut App, cutoff: usize, delta: isize) {
     if let Some(state) = app.interaction.slot_edit.as_mut() {
         for slot in &mut state.slots {
@@ -598,7 +487,6 @@ fn shift_later_slots(app: &mut App, cutoff: usize, delta: isize) {
     }
 }
 
-/// shared text editing bindings (cursor movement, deletion, character input)
 fn handle_editing(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     if app
         .keymap
@@ -661,7 +549,6 @@ fn handle_editing(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         _ if crate::keybinds::is_backspace(key) => app.input.backspace(),
         _ if crate::keybinds::is_delete(key) => app.input.delete(),
 
-        // cursor movement
         _ if app.keymap.matches_in(
             crate::keybinds::KeyScope::Edit,
             crate::keybinds::Action::CursorLeft,
@@ -687,7 +574,6 @@ fn handle_editing(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             app.input.cursor_right()
         }
 
-        // character input
         _ if let Some(c) = crate::keybinds::typed_char(key) => app.input_char(c),
 
         _ => {}
@@ -695,7 +581,6 @@ fn handle_editing(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     None
 }
 
-/// handle keys in /settings overlay mode
 fn handle_settings_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     use crate::keybinds::{Action, KeyScope};
 
@@ -766,7 +651,6 @@ fn handle_compaction_recovery_key(app: &mut App, key: KeyEvent) -> Option<AppEve
     None
 }
 
-/// handle keys in session picker mode
 fn handle_search_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     use crate::keybinds::{Action, KeyScope};
 
@@ -825,7 +709,6 @@ fn handle_slash_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             app.close_slash_menu();
             None
         }
-        // enter accepts the highlighted command and closes the menu
         _ if app
             .keymap
             .matches_in(KeyScope::Normal, Action::Confirm, key) =>
@@ -840,7 +723,6 @@ fn handle_slash_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             app.close_slash_menu();
             None
         }
-        // tab cycles selection forward
         _ if app
             .keymap
             .matches_in(KeyScope::Normal, Action::NextItem, key) =>
@@ -853,7 +735,6 @@ fn handle_slash_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             }
             None
         }
-        // shift+backtab cycles backward with wrap
         _ if app
             .keymap
             .matches_in(KeyScope::Normal, Action::PreviousItem, key) =>
@@ -866,8 +747,6 @@ fn handle_slash_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             }
             None
         }
-        // navigate
-        // backspace: edit input and update filter
         _ if crate::keybinds::is_backspace(key) => {
             app.input.backspace();
             if app.input.text.is_empty() || !app.input.text.starts_with('/') {
@@ -877,7 +756,6 @@ fn handle_slash_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             }
             None
         }
-        // typing narrows the filter
         _ if let Some(c) = crate::keybinds::typed_char(key) => {
             app.input_char(c);
             app.update_slash_menu();
@@ -887,8 +765,6 @@ fn handle_slash_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     }
 }
 
-/// load the on-disk discovery cache, apply the confirmed deletion, save.
-/// returns the number of entries removed (0 when the target is missing).
 fn apply_delete_confirm(confirm: &crate::slash_menu::DeleteConfirm) -> usize {
     use mush_ai::discovery::{DiscoveryCache, cache_path};
     let path = cache_path();
@@ -907,9 +783,6 @@ fn apply_delete_confirm(confirm: &crate::slash_menu::DeleteConfirm) -> usize {
     removed
 }
 
-/// cycle to the next (direction=+1) or previous (direction=-1) favourite
-/// model relative to the currently active model. empty favourites → status
-/// message nudge + no event
 fn cycle_favourite_model(app: &mut App, direction: isize) -> Option<AppEvent> {
     let favs = &app.completion.favourite_models;
     if favs.is_empty() {
@@ -917,8 +790,6 @@ fn cycle_favourite_model(app: &mut App, direction: isize) -> Option<AppEvent> {
             Some("no favourite models yet, open /model and ★ some with ctrl+f".to_string());
         return None;
     }
-    // find current position. if current model isn't a favourite, start from
-    // -1 so the first step lands on index 0 (for +1) or the last (for -1)
     let current = favs.iter().position(|id| id == app.model_id.as_str());
     let len = favs.len();
     let next_idx = match (current, direction) {
@@ -928,17 +799,11 @@ fn cycle_favourite_model(app: &mut App, direction: isize) -> Option<AppEvent> {
     };
     let next_id = favs[next_idx].clone();
     if next_id == app.model_id.as_str() {
-        // single-favourite list and we're already on it; nothing to do
         return None;
     }
     Some(AppEvent::ModelSelected { model_id: next_id })
 }
 
-/// toggle favourite status on the currently-selected model row. returns
-/// ctrl+[ is byte 0x1B, indistinguishable from ESC on terminals without
-/// kitty's DISAMBIGUATE_ESCAPE_CODES. on terminals with it, crossterm reports
-/// ctrl+[ as (CONTROL, Char('[')). this helper treats them equivalently so
-/// users can cancel modals with either on any terminal
 fn is_cancel_key(app: &App, key: KeyEvent) -> bool {
     app.keymap.matches(crate::keybinds::Action::Cancel, key)
 }
@@ -957,7 +822,6 @@ fn handle_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             .keymap
             .matches(crate::keybinds::Action::SessionPickerToggleScope, key) =>
         {
-            // toggle scope between this dir and all dirs
             if let Some(ref mut picker) = app.interaction.session_picker {
                 picker.scope = match picker.scope {
                     SessionScope::ThisDir => SessionScope::AllDirs,
@@ -968,7 +832,6 @@ fn handle_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             None
         }
         _ if app.keymap.matches(crate::keybinds::Action::Confirm, key) => {
-            // select session, return a slash command that the runner handles
             if let Some(meta) = app.selected_session() {
                 let id = meta.id.to_string();
                 app.close_session_picker();
@@ -1024,14 +887,9 @@ fn handle_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     }
 }
 
-/// drive the centred `/model` picker overlay. mirrors
-/// [`handle_picker_key`] for sessions but adds ctrl+f (toggle
-/// favourite), ctrl+d (arm delete-stale prompt), and a confirmation
-/// flow that intercepts y/n while a delete is armed
 fn handle_model_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     use crate::keybinds::{Action, KeyScope};
 
-    // intercept y/n when a delete prompt is armed
     if app
         .interaction
         .model_picker
@@ -1155,10 +1013,6 @@ fn handle_model_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     }
 }
 
-/// star or un-star the highlighted model when ctrl+f is pressed in
-/// the overlay. respects `favourites_locked` (set when the user
-/// pinned favourites in config.toml). returns `PersistFavourites`
-/// when the list actually changed so the runner saves it
 fn toggle_overlay_favourite(app: &mut App) -> Option<AppEvent> {
     let picker = app.interaction.model_picker.as_mut()?;
     if picker.favourites_locked {
@@ -1188,9 +1042,6 @@ fn toggle_overlay_favourite(app: &mut App) -> Option<AppEvent> {
     Some(AppEvent::PersistFavourites)
 }
 
-/// drive y/n/esc when a delete-stale confirmation is armed in the
-/// overlay picker. y persists the deletion to the on-disk discovery
-/// cache and refreshes the visible model list; anything else cancels
 fn handle_model_picker_delete_confirm_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     let confirm = app
         .interaction
@@ -1221,11 +1072,6 @@ fn handle_model_picker_delete_confirm_key(app: &mut App, key: KeyEvent) -> Optio
     }
 }
 
-/// replace `app.completion.completions` and
-/// `app.completion.model_completions` from a freshly-merged catalogue
-/// slice. shared by every code path that needs the slash menu and
-/// model picker to reflect new discovery results (delete-stale,
-/// `/refresh-models`, post-login refresh) without restarting the app
 pub(crate) fn apply_model_completions(app: &mut App, merged: &[mush_ai::discovery::MergedModel]) {
     use crate::slash_menu::model_completion_from_merged;
     let new_completions: Vec<_> = merged.iter().map(model_completion_from_merged).collect();
@@ -1233,9 +1079,6 @@ pub(crate) fn apply_model_completions(app: &mut App, merged: &[mush_ai::discover
     app.completion.model_completions = new_completions;
 }
 
-/// load the on-disk discovery cache and apply it to the app's
-/// completion state. used after `/refresh-models` and after a login
-/// completes so newly-discovered models become selectable immediately
 pub(crate) fn reload_model_completions(app: &mut App) {
     let merged = mush_ai::discovery::merged_catalogue();
     apply_model_completions(app, &merged);
@@ -1249,9 +1092,6 @@ pub(crate) fn reload_model_completions(app: &mut App) {
     }
 }
 
-/// rebuild the model picker's catalogue from the freshly-mutated
-/// discovery cache and clamp `selected` so it stays valid when the
-/// deleted row vanishes
 fn refresh_model_picker_overlay_after_delete(app: &mut App) {
     reload_model_completions(app);
 
@@ -1265,15 +1105,7 @@ fn refresh_model_picker_overlay_after_delete(app: &mut App) {
     }
 }
 
-/// drive the centred `/login` picker overlay. esc/ctrl+c closes,
-/// ctrl+j/k or arrow keys navigate, type to filter, enter on a
-/// logged-out row emits a `SlashAction::Login` event for the runner
-/// to start the oauth flow, enter on a logged-in row arms a y/n
-/// logout confirmation. y while armed deletes the saved credentials
-/// in place
 fn handle_login_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
-    // suppress all input while a validation request is in flight. the
-    // runner will clear `validating` when it finishes
     if app
         .interaction
         .login_picker
@@ -1282,7 +1114,6 @@ fn handle_login_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     {
         return None;
     }
-    // intercept y/n while a logout confirm is armed
     if app
         .interaction
         .login_picker
@@ -1291,8 +1122,6 @@ fn handle_login_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     {
         return handle_login_picker_logout_confirm_key(app, key);
     }
-    // route keystrokes into the api-key buffer while entry mode is
-    // active. esc cancels, enter saves to the credential store
     if app
         .interaction
         .login_picker
@@ -1312,8 +1141,6 @@ fn handle_login_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             None
         }
         _ if app.keymap.matches(crate::keybinds::Action::Confirm, key) => {
-            // resolve the selected row's id + method without holding
-            // the immutable borrow into the mutating branches below
             let (id, method, logged_in) = {
                 let picker = app.interaction.login_picker.as_ref()?;
                 let visible = crate::login_picker::filtered_entries(picker);
@@ -1326,9 +1153,6 @@ fn handle_login_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
                 }
                 return None;
             }
-            // logged-out: oauth rows kick the runner via a SlashAction
-            // (so the existing oauth handshake fires). api-key rows arm
-            // the in-picker entry prompt instead - no event, no close
             match method {
                 mush_ai::login::LoginMethod::OAuth { oauth_provider_id } => {
                     app.close_login_picker();
@@ -1384,10 +1208,6 @@ fn handle_login_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     }
 }
 
-/// drive y/n/esc when a logout confirmation is armed in the login
-/// picker. y deletes the saved credentials (oauth tokens or stored
-/// api key, depending on the row's method) and refreshes the row
-/// state in place; anything else cancels the prompt
 fn handle_login_picker_logout_confirm_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     let entry_id = app
         .interaction
@@ -1414,9 +1234,6 @@ fn handle_login_picker_logout_confirm_key(app: &mut App, key: KeyEvent) -> Optio
     }
 }
 
-/// resolve a picker row's method back to a credential delete and run
-/// it. returns the user-facing toast describing the outcome. the row
-/// is identified by `entry_id` (matching `LoginEntry::id`)
 fn perform_logout(app: &App, entry_id: &str) -> String {
     use mush_ai::login::LoginMethod;
 
@@ -1449,9 +1266,6 @@ fn perform_logout(app: &App, entry_id: &str) -> String {
     }
 }
 
-/// drive an api-key entry prompt. typing builds the masked buffer,
-/// backspace pops a char, enter hands the buffer to the runner for
-/// async validation + save, esc cancels and returns to the picker
 fn handle_login_picker_entry_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     match (key.modifiers, key.code) {
         _ if app
@@ -1493,10 +1307,6 @@ fn handle_login_picker_entry_key(app: &mut App, key: KeyEvent) -> Option<AppEven
     }
 }
 
-/// snapshot the typed key, transition the picker to validating, and
-/// emit a [`AppEvent::ValidateAndSaveApiKey`] so the runner can hit
-/// the provider asynchronously. empty buffers short-circuit with a
-/// toast and no event so we never round-trip a blank key
 fn submit_login_picker_entry(app: &mut App) -> Option<AppEvent> {
     let picker = app.interaction.login_picker.as_mut()?;
     let prompt = picker.entry.as_ref()?;
@@ -1515,8 +1325,6 @@ fn submit_login_picker_entry(app: &mut App) -> Option<AppEvent> {
     })
 }
 
-/// re-read every credential source and update the picker rows so
-/// they reflect the new state after a login or logout
 fn refresh_login_picker_logged_in(picker: &mut crate::login_picker::LoginPickerState) {
     picker.rebuild_sources();
 }

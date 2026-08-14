@@ -1,12 +1,6 @@
-//! opening and closing the modal overlays
-//!
-//! each picker keeps its state in [`crate::app_state::InteractionState`]
-//! alongside the mode tag, so open and close have to move both together.
-
 use super::*;
 
 impl App {
-    /// open the slash command completion menu, filtering by current input
     pub fn open_slash_menu(&mut self) {
         let prefix = self.input.text.as_str();
         let matches = filter_command_matches(&self.completion.slash_commands, prefix);
@@ -18,7 +12,6 @@ impl App {
         self.interaction.mode = AppMode::SlashComplete;
     }
 
-    /// update the slash menu filter based on current input
     pub fn update_slash_menu(&mut self) {
         if let Some(ref mut menu) = self.completion.slash_menu {
             let prefix = self.input.text.as_str();
@@ -31,22 +24,16 @@ impl App {
         }
     }
 
-    /// close the slash menu and return to normal mode
     pub fn close_slash_menu(&mut self) {
         self.completion.slash_menu = None;
         self.interaction.mode = AppMode::Normal;
     }
 
-    /// open the session picker with the given sessions
     pub fn open_session_picker(&mut self, sessions: Vec<SessionMeta>, cwd: String) {
         self.interaction.session_picker = Some(SessionPickerState::new(sessions, cwd));
         self.interaction.mode = AppMode::SessionPicker;
     }
 
-    /// open the session picker backed by a streaming loader. sessions
-    /// arrive via the receiver and are drained into the picker by the
-    /// main event loop tick, so the overlay is visible immediately and
-    /// fills in as metadata parses
     pub fn open_session_picker_streaming(
         &mut self,
         incoming: std::sync::mpsc::Receiver<SessionMeta>,
@@ -56,30 +43,21 @@ impl App {
         self.interaction.mode = AppMode::SessionPicker;
     }
 
-    /// close the session picker
     pub fn close_session_picker(&mut self) {
         self.interaction.session_picker = None;
         self.interaction.mode = AppMode::Normal;
     }
 
-    /// get the currently selected session id (if picker is open)
     pub fn selected_session(&self) -> Option<&SessionMeta> {
         let picker = self.interaction.session_picker.as_ref()?;
         let filtered = filtered_sessions(picker);
         filtered.get(picker.selected).copied()
     }
 
-    /// open the centred model picker overlay. mirrors
-    /// [`Self::open_session_picker`] but for models, replacing the
-    /// old slash-menu-with-`model_mode` flow. seeds favourites and
-    /// the lock state from the user's current config so ★ markers
-    /// and ctrl+f behaviour reflect their settings.
     pub fn open_model_picker_overlay(&mut self) {
         self.open_model_picker_overlay_inner(false);
     }
 
-    /// open the model picker with codex's hidden entries (`internal`,
-    /// `experimental`) included. routed from `/model --all`.
     pub fn open_model_picker_overlay_all(&mut self) {
         self.open_model_picker_overlay_inner(true);
     }
@@ -104,24 +82,17 @@ impl App {
         self.interaction.mode = AppMode::ModelPicker;
     }
 
-    /// close the model picker overlay
     pub fn close_model_picker(&mut self) {
         self.interaction.model_picker = None;
         self.interaction.mode = AppMode::Normal;
     }
 
-    /// id of the highlighted model in the open picker, if any
     pub fn selected_model_id(&self) -> Option<String> {
         let picker = self.interaction.model_picker.as_ref()?;
         let filtered = crate::model_picker::filtered_models(picker);
         Some(filtered.get(picker.selected)?.id.clone())
     }
 
-    /// open the centred login picker overlay. mirrors
-    /// [`Self::open_session_picker`] / [`Self::open_model_picker_overlay`]
-    /// but for login providers. `config_keys` is snapshotted onto the
-    /// picker so source detection still works after a login/logout
-    /// without re-plumbing the runner
     pub fn open_login_picker(
         &mut self,
         entries: Vec<crate::login_picker::LoginEntry>,
@@ -133,7 +104,6 @@ impl App {
         self.interaction.mode = AppMode::LoginPicker;
     }
 
-    /// close the login picker overlay
     pub fn close_login_picker(&mut self) {
         self.interaction.login_picker = None;
         self.interaction.mode = AppMode::Normal;
@@ -160,7 +130,6 @@ impl App {
         self.interaction.mode = AppMode::Normal;
     }
 
-    /// provider id of the highlighted row in the open login picker, if any
     pub fn selected_login_provider(&self) -> Option<String> {
         let picker = self.interaction.login_picker.as_ref()?;
         let filtered = crate::login_picker::filtered_entries(picker);

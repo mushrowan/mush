@@ -11,11 +11,6 @@ use crate::app::{
 };
 use crate::batch_output::{parse_batch_output, truncate_output, truncate_output_large};
 
-/// extract the summary body from a compacted user message produced by
-/// `mush_session::compact::compact_with_summary`. the source text starts
-/// with `COMPACTION_SUMMARY_PREFIX` and wraps the summary in `<summary>`
-/// tags. returns `None` for non-compaction messages so the caller can fall
-/// through to the normal user-message path
 pub(crate) fn extract_compaction_summary(text: &str) -> Option<String> {
     let rest = text.strip_prefix(mush_session::COMPACTION_SUMMARY_PREFIX)?;
     let rest = rest.trim_start();
@@ -26,15 +21,10 @@ pub(crate) fn extract_compaction_summary(text: &str) -> Option<String> {
     Some(inner.trim().to_string())
 }
 
-/// format a compaction summary body with the visible banner used both
-/// when rendering historical compactions and when announcing a fresh one
 pub(crate) fn format_compaction_banner(summary: &str) -> String {
     format!("━ compacted summary ━\n\n{summary}")
 }
 
-/// decode any image parts on a user message back into raw bytes, in order.
-/// used on session reload so the attachment box renders with the same
-/// images that were attached when the message was first sent
 fn extract_user_images(user: &mush_ai::types::UserMessage) -> Vec<Vec<u8>> {
     use base64::Engine;
     use mush_ai::types::{UserContent, UserContentPart};
@@ -56,7 +46,6 @@ pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
     app.clear_display();
 
     let mut tool_call_positions = HashMap::<ToolCallId, (usize, usize)>::new();
-    // (tool_call_id, msg_idx, first_tc_idx, sub_call_count)
     let mut batch_tool_ids: Vec<(ToolCallId, usize, usize, usize)> = Vec::new();
     let mut batch_counter: u32 = 0;
     for message in conversation {
@@ -89,13 +78,10 @@ pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
                 for part in &assistant.content {
                     if let AssistantContentPart::ToolCall(tool_call) = part {
                         if tool_call.name.as_str().eq_ignore_ascii_case("batch") {
-                            // expand batch into individual sub-call entries
                             let sub_calls = tool_call.arguments["tool_calls"]
                                 .as_array()
                                 .cloned()
                                 .unwrap_or_default();
-                            // track the batch tool_call_id so apply_tool_result
-                            // can parse and distribute the combined output later
                             let first_tc_idx = tool_calls.len();
                             for sub in &sub_calls {
                                 let name = sub["tool"].as_str().unwrap_or("?").to_string();
@@ -109,8 +95,6 @@ pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
                                     batch: batch_counter,
                                 });
                             }
-                            // map the batch id to (msg_idx, first_tc_idx) with a
-                            // special marker so apply_tool_result knows to expand
                             batch_tool_ids.push((
                                 tool_call.id.clone(),
                                 msg_idx,
@@ -148,7 +132,6 @@ pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
                 });
             }
             Message::ToolResult(result) => {
-                // check if this is a batch result
                 if let Some(pos) = batch_tool_ids
                     .iter()
                     .position(|(id, _, _, _)| *id == result.tool_call_id)
@@ -163,16 +146,6 @@ pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
     }
 }
 
-/// reconstruct cumulative session stats by walking historical assistant
-/// messages and summing their recorded usage. used when loading a
-/// session from disk (initial resume or `/resume`) so the user sees
-/// "this session has cost $X.XX so far" instead of zero. NOT used for
-/// in-session rebuilds (/compact, /branch, /undo) where the live stats
-/// already track everything that's been spent and should not be reset.
-///
-/// also sets `prev_usage` to the most recent historical assistant's
-/// usage so the next live call's anomaly detector has a meaningful
-/// baseline to diff against.
 pub fn accumulate_session_stats(app: &mut App, conversation: &[Message]) {
     for message in conversation {
         if let Message::Assistant(assistant) = message {
@@ -180,13 +153,6 @@ pub fn accumulate_session_stats(app: &mut App, conversation: &[Message]) {
         }
     }
 
-    // a compacted context's kept tail carries assistant usage recorded
-    // against the pre-compaction (larger) context. leaving context_tokens
-    // and prev_usage at those stale values makes the status bar report the
-    // pre-compaction size after resume, as if the compaction never
-    // happened, and trips a false ContextDecrease on the next call. treat
-    // it like a fresh compaction: the current size is an estimate of the
-    // collapsed messages, with no live baseline to diff against.
     if context_is_compacted(conversation) {
         let estimate = mush_session::compact::estimate_tokens(conversation);
         app.stats
@@ -194,10 +160,6 @@ pub fn accumulate_session_stats(app: &mut App, conversation: &[Message]) {
     }
 }
 
-/// whether a resumed context has a compaction summary in it. its leading
-/// message is the synthetic summary emitted by
-/// `mush_session::SessionTree::build_context`, so the recorded usage of
-/// any assistant kept after it no longer matches the collapsed context.
 fn context_is_compacted(conversation: &[Message]) -> bool {
     conversation.iter().any(|message| match message {
         Message::User(user) => extract_compaction_summary(&user.text()).is_some(),
@@ -230,7 +192,6 @@ fn apply_tool_result(
     tool_call.output_preview = tool_result_preview(&result.tool_name, &result.content);
 }
 
-/// distribute a batch tool result to individual sub-call display entries
 fn apply_batch_result(
     app: &mut App,
     msg_idx: usize,
@@ -254,10 +215,6 @@ fn apply_batch_result(
         return;
     };
 
-    // batch-level error: the whole batch failed before producing
-    // per-sub-call sections (e.g. BatchArgs parse error). surface the
-    // real error text on every sub-call so reloaded sessions match the
-    // live event path's behaviour and the user can see what went wrong
     if sections.is_empty() && !text.trim().is_empty() {
         let preview = truncate_output(&text);
         for i in 0..count {
@@ -285,8 +242,6 @@ fn apply_batch_result(
             }
         }
     }
-    // mark any remaining unmatched sub-calls as errors so session reloads
-    // preserve the same signal as the live event path
     for i in sections.len()..count {
         if let Some(tc) = message.tool_calls.get_mut(first_tc + i) {
             tc.status = ToolCallStatus::Error;
@@ -316,10 +271,6 @@ fn tool_result_preview(
         .collect::<Vec<_>>()
         .join("");
     if !text.is_empty() {
-        // keep edit diffs at full length so reloaded sessions match the
-        // fresh-submit preview budget. other tools still cap at the
-        // generous single-tool line count so runaway logs don't blow up
-        // the message view
         if tool_name.as_str().eq_ignore_ascii_case("edit") {
             return Some(text);
         }
@@ -423,19 +374,9 @@ mod tests {
         );
     }
 
-    /// rebuild_display is a display-only primitive: it must never
-    /// mutate `app.stats`. previously it walked every assistant
-    /// message and called `app.stats.update(usage, None)` which (a)
-    /// double-counted live usage when run in-session for /compact,
-    /// /branch, /undo and (b) polluted `prev_usage` with a
-    /// historical assistant's value, causing false ContextDecrease
-    /// cache anomalies on the next live call. session-resume paths
-    /// that *do* want totals reconstructed call
-    /// `accumulate_session_stats` explicitly.
     #[test]
     fn rebuild_display_does_not_mutate_stats() {
         let mut app = app();
-        // pretend a previous live call already updated stats
         let live_usage = mush_ai::types::Usage {
             input_tokens: mush_ai::types::TokenCount::new(500),
             output_tokens: mush_ai::types::TokenCount::new(50),
@@ -532,13 +473,6 @@ mod tests {
         })
     }
 
-    /// resuming a compacted session must not report the pre-compaction
-    /// context size. the kept tail carries assistant usage recorded
-    /// against the (large) pre-compaction context, so naively replaying
-    /// that usage leaves `context_tokens` at the old size and the status
-    /// bar looks like the compaction was undone. a compacted resume is
-    /// treated like a fresh compaction: the context size is an estimate
-    /// of the collapsed messages and the live baseline is cleared.
     #[test]
     fn resume_of_compacted_session_uses_collapsed_context_size() {
         let mut app = app();
@@ -559,14 +493,9 @@ mod tests {
             app.stats.prev_usage().is_none(),
             "compacted resume must clear prev_usage so the next call does not trip a false ContextDecrease"
         );
-        // cumulative totals are still reconstructed
         assert!(app.stats.total_tokens > TokenCount::ZERO);
     }
 
-    /// a normal (uncompacted) resume keeps reporting the last call's real
-    /// input token count as the current context size, which is more
-    /// accurate than a char estimate. the compaction-aware reset must not
-    /// fire here.
     #[test]
     fn resume_of_uncompacted_session_keeps_last_call_context_size() {
         let mut app = app();
@@ -635,11 +564,6 @@ mod tests {
 
     #[test]
     fn batch_rebuild_with_top_level_error_shows_error_on_subcalls() {
-        // rebuild_display sibling of batch_end_with_top_level_error_shows
-        // _on_subcalls: when a session reload encounters a batch result
-        // that is a top-level error string (no `--- [N] ... ---` headers,
-        // typically from a BatchArgs parse failure), every sub-call entry
-        // should show the real error text and not the placeholder
         let mut app = app();
         let model = test_model();
         let conversation = vec![Message::Assistant(
@@ -714,12 +638,6 @@ mod tests {
 
     #[test]
     fn rebuild_display_restores_user_images_from_parts() {
-        // regression: a user message persisted with UserContent::Parts
-        // carrying image data used to rebuild with empty msg.images, so
-        // the attachment box would either not show or show blank after a
-        // session reload. rebuild_display must decode the base64 image
-        // bytes back onto the DisplayMessage so the render path can show
-        // them
         use base64::Engine;
         use mush_ai::types::{ImageContent, ImageMimeType, UserContentPart};
 

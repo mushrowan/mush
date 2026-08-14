@@ -1,5 +1,3 @@
-//! centred recovery picker for failed LLM compaction
-
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};

@@ -1,5 +1,3 @@
-//! TUI runner - wires terminal, agent loop, and event handling together
-
 use std::io;
 
 use ratatui::Terminal;
@@ -46,17 +44,12 @@ pub use self::thinking_prefs::{ThinkingPrefs, ThinkingPrefsSaver, canonical_dir}
 
 use self::diag::verify_terminal_restored;
 
-/// run the interactive TUI
 pub async fn run_tui(
     mut tui_config: TuiConfig,
     tools: &ToolRegistry,
     registry: &ApiRegistry,
     startup_discovery: Option<std::sync::mpsc::Receiver<DiscoveryUpdate>>,
 ) -> io::Result<()> {
-    // fail fast if we can't host a full TUI. piped stdin/stdout would
-    // otherwise leak raw-mode escape sequences into the output stream,
-    // hang on probe responses, or drop keyboard input. the matching fix
-    // for users is `mush -p` / `mush --print` for one-shot prompts
     let env = crate::terminal_policy::TtyEnvironment::detect();
     if !env.is_tty() {
         let reason = env.broken_reason().unwrap_or("unknown");
@@ -92,13 +85,7 @@ pub async fn run_tui(
 
     let backend = SizeCachedBackend::new(CrosstermBackend::new(io::stdout()));
     let size_cache = backend.cache_handle();
-    // listen for SIGWINCH off the main event loop so a fast-streaming
-    // burst can't starve `Event::Resize` processing and leave the size
-    // cache stale. flips `resize_pending` on the shared state; the
-    // backend's `size()` / `window_size()` consume it on the next call
     let sigwinch_task = spawn_sigwinch_listener(size_cache.resize_pending_flag());
-    // the block opens on the row the shell left the cursor on, and the
-    // first frame resizes the viewport to fit it
     let screen = crossterm::terminal::size().map(ratatui::layout::Size::from)?;
     let top = opening_row(crossterm::cursor::position(), screen);
     let mut inline = Inline::new(screen, top);
@@ -117,7 +104,6 @@ pub async fn run_tui(
         runtime.install_discovery_updates(rx);
     }
 
-    // start IPC listener if we have an agent card
     let _ipc_listener = tui_config.agent_card.as_ref().and_then(|card| {
         let card = std::sync::Arc::new(card.clone());
         let sock = mush_agent::ipc::socket_path(&std::process::id().to_string());
@@ -232,15 +218,11 @@ pub async fn run_tui(
 
         runtime.notify_cache_state(tui_config.cache_timer);
 
-        // finalise any background compaction tasks whose LLM call returned
-        // since the last iteration; if any did, force a redraw so the new
-        // summary, status, and token counter all show up immediately
         let compaction_finished = runtime.poll_pending_compactions(&tui_config).await;
 
         let maintenance_tick = last_draw.elapsed() >= std::time::Duration::from_secs(1)
             && runtime.needs_periodic_redraw(tui_config.cache_timer);
 
-        // redraw on state changes, or every ~1s while visible timers tick
         let should_draw = matches!(action, LoopAction::Redraw)
             || discovery_updated
             || compaction_finished

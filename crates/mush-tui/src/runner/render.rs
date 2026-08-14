@@ -54,8 +54,6 @@ pub(super) fn draw_panes(
             frame.set_cursor_position((cx, cy));
         }
 
-        // centred overlays paint over the whole focused area, the two
-        // input-anchored ones need the same layout the pane just used
         if let Some(ref picker) = focused_app.interaction.session_picker {
             widgets::session_picker::render(frame, picker, &focused_app.theme);
         }
@@ -87,9 +85,6 @@ pub(super) fn draw_panes(
     Ok(())
 }
 
-/// the input box's rect inside a pane, recomputed the same way the pane
-/// itself laid out. overlays anchored to the input (slash menu, at
-/// picker) need it, and getting it wrong floats them over the wrong row
 fn input_region(app: &App, pane_area: Rect) -> Rect {
     let input_h = crate::ui::input_height(&app.input, pane_area.width);
     let tools_h =

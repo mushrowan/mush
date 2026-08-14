@@ -1,9 +1,3 @@
-//! /settings floating menu widget
-//!
-//! renders a centred overlay listing the runtime settings. navigation is
-//! j/k or arrow keys; space/enter toggles the selected item (or cycles
-//! through scope values). esc closes the menu.
-
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -16,7 +10,6 @@ use crate::settings::{MenuItemKind, ScopedSettings, SettingsMenuState};
 use crate::theme::Theme;
 use crate::widgets::popup_layout::{PopupSize, centred_popup};
 
-/// render the settings overlay centred on the frame
 pub fn render(
     frame: &mut Frame,
     menu: &SettingsMenuState,
@@ -49,7 +42,6 @@ pub fn render(
         return;
     }
 
-    // hint line at the top
     let hint = Line::from(vec![
         Span::styled("↑↓/jk", theme.selection_marker),
         Span::styled(" nav  ", theme.dim),
@@ -60,15 +52,13 @@ pub fn render(
     ]);
     frame.render_widget(hint, Rect::new(inner.x, inner.y, inner.width, 1));
 
-    // divider
     if inner.height > 2 {
         let divider = Line::from(Span::styled("─".repeat(inner.width as usize), theme.dim));
         frame.render_widget(divider, Rect::new(inner.x, inner.y + 1, inner.width, 1));
     }
 
-    // items area + scrollbar column
     let items_y = inner.y + 2;
-    let items_height = inner.height.saturating_sub(3); // hint + divider + bottom desc
+    let items_height = inner.height.saturating_sub(3);
     let items_area = Rect::new(
         inner.x,
         items_y,
@@ -81,7 +71,6 @@ pub fn render(
     let visible = items_area.height as usize;
     let scroll_offset = clamp_scroll(menu.selected, menu.scroll_offset, visible, items.len());
 
-    // compute the longest label for alignment
     let label_width = items.iter().map(|k| k.label().len()).max().unwrap_or(0);
 
     for (i, item) in items.iter().enumerate().skip(scroll_offset).take(visible) {
@@ -109,7 +98,6 @@ pub fn render(
         } else if is_off {
             theme.dim
         } else {
-            // enum like scope
             Style::default().add_modifier(Modifier::BOLD)
         };
 
@@ -123,7 +111,6 @@ pub fn render(
         frame.render_widget(line, Rect::new(items_area.x, y, items_area.width, 1));
     }
 
-    // scrollbar (only render when content overflows)
     if items.len() > visible {
         let mut sb_state =
             ScrollbarState::new(items.len().saturating_sub(visible)).position(scroll_offset);
@@ -134,7 +121,6 @@ pub fn render(
         frame.render_stateful_widget(scrollbar, scrollbar_area, &mut sb_state);
     }
 
-    // description footer for the selected item
     if inner.height >= 4 {
         let desc = menu.current().description();
         let desc_line = Line::from(Span::styled(desc, theme.dim));
@@ -145,7 +131,6 @@ pub fn render(
     }
 }
 
-/// adjust scroll so the selected item stays visible
 fn clamp_scroll(selected: usize, current_offset: usize, visible: usize, total: usize) -> usize {
     if visible == 0 || total == 0 {
         return 0;
@@ -165,11 +150,8 @@ mod tests {
 
     #[test]
     fn clamp_scroll_keeps_selection_visible() {
-        // selection scrolls up: new offset tracks selection
         assert_eq!(clamp_scroll(0, 3, 5, 10), 0);
-        // selection within visible window: offset unchanged
         assert_eq!(clamp_scroll(4, 2, 5, 10), 2);
-        // selection scrolls down off the bottom: offset advances
         assert_eq!(clamp_scroll(8, 2, 5, 10), 4);
     }
 }

@@ -1,8 +1,3 @@
-//! watch config.toml for changes and reload theme
-//!
-//! uses `notify` to watch the config file. when it changes, reloads
-//! the theme config and sends it through a channel.
-
 use std::path::PathBuf;
 use std::sync::mpsc;
 
@@ -10,8 +5,6 @@ use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::theme::{Theme, ThemeConfig};
 
-/// start watching a config file for changes.
-/// returns a receiver that yields new themes when the file changes.
 pub fn watch_config(config_path: PathBuf) -> Option<(RecommendedWatcher, mpsc::Receiver<Theme>)> {
     let (tx, rx) = mpsc::channel();
     let path = config_path.clone();
@@ -26,7 +19,6 @@ pub fn watch_config(config_path: PathBuf) -> Option<(RecommendedWatcher, mpsc::R
     })
     .ok()?;
 
-    // watch the parent directory (some editors do atomic saves via rename)
     let watch_dir = config_path.parent().unwrap_or(&config_path);
     watcher.watch(watch_dir, RecursiveMode::NonRecursive).ok()?;
 
@@ -39,7 +31,6 @@ fn reload_theme(config_path: &std::path::Path) -> Option<Theme> {
     Some(crate::theme::auto_theme(&config.theme))
 }
 
-/// minimal config struct just for extracting the theme section
 #[derive(serde::Deserialize)]
 struct ConfigWithTheme {
     #[serde(default)]

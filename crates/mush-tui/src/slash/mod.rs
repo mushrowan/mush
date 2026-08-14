@@ -1,14 +1,9 @@
-//! slash command parsing types and entry point
-//!
-//! execution lives in `commands`, compaction in `compaction`
-
 pub mod commands;
 pub mod compaction;
 
 use mush_ai::types::{SessionId, TokenCount, TokenCountParseError};
 use thiserror::Error;
 
-// re-export commonly used items so callers can keep using `slash::handle` etc
 pub(crate) use commands::handle_login_start;
 pub use commands::{expand_template, handle, handle_export, rebuild_display};
 pub use compaction::{
@@ -17,16 +12,11 @@ pub use compaction::{
     fallback_applied_compaction, handle_compact, run_compaction, start_compaction,
 };
 
-/// what `/mcp` was asked for
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpQuery {
-    /// per-server connection status
     Status,
-    /// tool names and descriptions, optionally for one server
     Tools { server: Option<String> },
-    /// json schema for one tool
     Schema { tool: String },
-    /// redial one server, keeping registered tools pointed at it
     Reconnect { server: String },
 }
 
@@ -58,32 +48,19 @@ pub enum SlashAction {
     New,
     Model {
         model_id: Option<String>,
-        /// `true` when the user passed `/model --all` to opt into seeing
-        /// codex entries marked `internal` / `experimental`. ignored when
-        /// a `model_id` is supplied (the flag only affects the picker)
         show_all: bool,
     },
     Sessions,
     Resume {
-        /// `None` means "most recent session in the current cwd"
         session_id: Option<SessionId>,
     },
     Branch {
         index: Option<usize>,
     },
     Tree,
-    /// `/compact` - compact the active conversation. preserves the
-    /// pre-compaction tree (navigable via `/tree` + `/branch`) and the
-    /// visible scrollback. `context_budget` is an optional target
-    /// post-compaction summary size, parsed from `--context-budget`/`-b`
-    /// (e.g. `10k`, `1024`). when `None`, the summariser uses its
-    /// default behaviour
     Compact {
         context_budget: Option<TokenCount>,
     },
-    /// view or change the model used for compaction. None shows current,
-    /// `same` resets to the active model, any other string resolves as
-    /// a model id
     CompactionModel {
         model_id: Option<String>,
     },
@@ -95,36 +72,23 @@ pub enum SlashAction {
         query: String,
     },
     Cost,
-    /// fetch and display the authenticated openrouter account's
-    /// remaining credit balance + lifetime usage. async; rendered as
-    /// a system message in the focused pane
     Credits,
-    /// fetch and display the list of upstream providers serving a
-    /// model on openrouter, plus which of them accept `cache_control`.
-    /// async; rendered as a system message in the focused pane. arg
-    /// is the model id (`author/slug` form); empty defaults to the
-    /// pane's current model
     Endpoints {
         model_id: Option<String>,
     },
     Logs {
         count: usize,
     },
-    /// view or modify runtime settings (anthropic betas, scope)
     Settings {
         args: String,
     },
-    /// start an oauth login flow for a provider, or open the centred
-    /// login picker overlay when no provider is named
     Login {
         provider: Option<String>,
     },
-    /// complete the in-progress oauth login with the authorization code
     LoginComplete {
         code: String,
     },
     Card,
-    /// inspect configured MCP servers and the tools they advertise
     Mcp(McpQuery),
     TaskClaim {
         id: String,
@@ -134,20 +98,10 @@ pub enum SlashAction {
         id: String,
     },
     TaskList,
-    /// dump internal state for debugging (active panes, streams, token stats)
     Debug,
-    /// re-discover AGENTS.md and prompt templates without restart.
-    /// rebuilds the system prompt and slash menu, busting the provider
-    /// prefix cache as a side effect (intentional and explicit)
     Reload,
-    /// refresh the discovered-models cache by hitting `/v1/models` for
-    /// every provider with credentials configured. surfaces newly
-    /// released models in the static-catalogue + discovery merge.
     RefreshModels,
     Quit,
-    /// toggle whether the focused assistant message's thinking text is
-    /// expanded. a slash command rather than a keybind so the key stays
-    /// available for user binds
     ToggleThinkingExpanded,
     Other {
         name: String,
@@ -156,12 +110,6 @@ pub enum SlashAction {
 }
 
 impl SlashAction {
-    /// whether this command may run while the LLM is actively streaming.
-    ///
-    /// conservative default: allow. the block list covers actions that
-    /// mutate the conversation history or agent state in ways that would
-    /// corrupt an in-flight turn (clear, compact, branch switching, etc).
-    /// read-only and "apply on next turn" actions are safe to run anytime
     #[must_use]
     pub fn is_safe_during_stream(&self) -> bool {
         !matches!(
@@ -188,9 +136,6 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
         "keys" => Ok(SlashAction::Keys),
         "new" => Ok(SlashAction::New),
         "model" => {
-            // `--all` is the only flag we currently parse for the picker.
-            // when supplied, no model id follows. anything else routes to
-            // `model_id` so users keep the freedom to type slugs directly
             if args == "--all" {
                 Ok(SlashAction::Model {
                     model_id: None,
@@ -268,10 +213,6 @@ pub(crate) fn split_name_and_args(command: &str) -> (&str, &str) {
     }
 }
 
-/// parse the `--context-budget <value>` / `-b <value>` flag for the
-/// `/compact` command. accepts an empty arg list (no budget) or a
-/// single flag-value pair. anything else is rejected with the
-/// caller-supplied usage error.
 fn parse_context_budget(
     args: &str,
     usage: SlashParseError,
@@ -365,15 +306,11 @@ mod tests {
 
     #[test]
     fn mcp_status_is_safe_during_stream() {
-        // read-only, so it must not be blocked mid-turn
         assert!(SlashAction::Mcp(McpQuery::Status).is_safe_during_stream());
     }
 
     #[test]
     fn parse_thinking_expand_action() {
-        // ctrl+o used to be hardcoded to toggle the focused message's
-        // thinking visibility. it's been moved to a slash command so
-        // ctrl+o stays free for whatever the user wants to bind it to
         assert_eq!(
             parse("/thinking-expand").unwrap(),
             SlashAction::ToggleThinkingExpanded
@@ -382,7 +319,6 @@ mod tests {
 
     #[test]
     fn parse_compact_bare() {
-        // bare `/compact` keeps the historical no-arg behaviour
         assert_eq!(
             parse("/compact").unwrap(),
             SlashAction::Compact {
@@ -393,8 +329,6 @@ mod tests {
 
     #[test]
     fn parse_compact_with_context_budget() {
-        // `--context-budget` accepts plain ints and human suffixes
-        // (k = 1_000, m = 1_000_000) via TokenCount::from_str
         use mush_ai::types::TokenCount;
 
         assert_eq!(
@@ -414,7 +348,6 @@ mod tests {
     #[test]
     fn parse_compact_with_short_budget_flag() {
         use mush_ai::types::TokenCount;
-        // `-b` is the short form, same semantics as `--context-budget`
         assert_eq!(
             parse("/compact -b 5k").unwrap(),
             SlashAction::Compact {
@@ -425,11 +358,6 @@ mod tests {
 
     #[test]
     fn parse_fork_compact_is_no_longer_a_known_command() {
-        // /fork-compact and /fc used to map to SlashAction::ForkCompact.
-        // /compact now preserves the conversation tree natively (the
-        // behaviour /fork-compact used to claim) so the alternate
-        // command was removed. they now fall through to Other and the
-        // runner surfaces an "unknown command" message
         assert!(matches!(
             parse("/fork-compact").unwrap(),
             SlashAction::Other { .. }
@@ -481,9 +409,6 @@ mod tests {
 
     #[test]
     fn parse_model_all_flag_opens_picker_with_hidden_visible() {
-        // /model --all is the opt-in for showing internal/experimental codex
-        // entries that the default picker filters out. parse it as a flag
-        // distinct from a model id named "--all"
         assert_eq!(
             parse("/model --all").unwrap(),
             SlashAction::Model {
@@ -527,9 +452,6 @@ mod tests {
 
     #[test]
     fn parse_resume_no_arg_means_most_recent_in_cwd() {
-        // bare `/resume` is a quick "pick up where i left off" shortcut.
-        // the handler resolves None to the most recent session in the
-        // current cwd. an explicit id still works for surgical targeting
         assert_eq!(
             parse("/resume").unwrap(),
             SlashAction::Resume { session_id: None }
@@ -548,17 +470,11 @@ mod tests {
 
     #[test]
     fn parse_reload_command() {
-        // /reload is the explicit cache-bust button: refreshes AGENTS.md
-        // and template discovery so the user can pick up file edits
-        // without restarting mush. opt-in because it does bust the
-        // provider-side prefix cache by changing the system prompt
         assert_eq!(parse("/reload").unwrap(), SlashAction::Reload);
     }
 
     #[test]
     fn parse_refresh_models_command() {
-        // /refresh-models triggers an on-demand discovery fetch for every
-        // provider with creds, updating ~/.local/share/mush/discovered-models.json
         assert_eq!(
             parse("/refresh-models").unwrap(),
             SlashAction::RefreshModels

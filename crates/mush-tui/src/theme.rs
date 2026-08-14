@@ -1,43 +1,23 @@
-//! theme system - configurable colours for the TUI
-//!
-//! themes are loaded from config or auto-detected from the terminal
-//! background. falls back to sensible ANSI defaults that work on
-//! both dark and light terminals.
-
 use ratatui::style::{Color, Modifier, Style};
 use serde::Deserialize;
 
-/// how to render +/- lines in diffs.
-///
-/// `Highlight` tints the whole line with a subtle background colour so the
-/// change stands out like github or vscode. `Prefix` keeps only the
-/// `+`/`-` prefix + fg colour, matching classic diff output.
-///
-/// a future `Bar` variant could draw a coloured `▎` bar in the gutter with
-/// dim text, but the two styles below cover the main preferences
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DiffLineStyle {
-    /// classic: `+ text` / `- text` with fg colour only
     Prefix,
-    /// github/vscode style: whole-line bg tint for +/- lines
     #[default]
     Highlight,
 }
 
-/// the full colour theme for the TUI
 #[derive(Debug, Clone)]
 pub struct Theme {
-    // message labels
     pub user_label: Style,
     pub assistant_label: Style,
     pub system_label: Style,
 
-    // thinking
     pub thinking: Style,
     pub thinking_label: Style,
 
-    // markdown
     pub code_block: Style,
     pub inline_code: Style,
     pub heading: Style,
@@ -48,104 +28,69 @@ pub struct Theme {
     pub horizontal_rule: Style,
     pub link: Style,
 
-    // tool calls
     pub tool_running: Style,
     pub tool_done: Style,
     pub tool_error: Style,
     pub tool_output: Style,
 
-    // usage and stats
     pub usage: Style,
     pub status_model: Style,
     pub status_dim: Style,
 
-    // input box
     pub input_border: Style,
     pub input_border_active: Style,
 
-    // dim text (reusable across widgets)
     pub dim: Style,
 
-    // user message background
     pub user_msg_bg: Style,
 
-    // background grouping a tool call with its output
     pub tool_panel_bg: Style,
 
-    // code block selection highlight
     pub block_highlight_bg: Color,
 
-    // pane separator (unfocused)
     pub pane_separator: Style,
-    // pane separator (adjacent to focused)
     pub pane_separator_active: Style,
 
-    // selection indicator in scroll mode
     pub selection_marker: Style,
 
-    // scroll mode hint text
     pub scroll_hint: Style,
     pub scroll_indicator: Style,
 
-    // diff colouring in tool output
     pub diff_added: Style,
     pub diff_removed: Style,
-    /// intra-line highlight for word-level changes (differing tokens)
-    /// within a paired removed/added line
     pub diff_added_intra: Style,
     pub diff_removed_intra: Style,
-    /// subtle line-level bg for Highlight mode. applied to the whole row
-    /// (prefix + equal tokens + padding) while intra tokens use the
-    /// stronger `*_intra` bg on top
     pub diff_added_bg: Color,
     pub diff_removed_bg: Color,
-    /// how to render +/- lines (Prefix: fg only; Highlight: line bg tint)
     pub diff_line_style: DiffLineStyle,
-    /// style for the truncation footer ("… (N more lines)") inside a
-    /// diff block. full-row style so the footer reads as part of the
-    /// block instead of floating below the last coloured row
     pub diff_footer: Style,
 
-    // context pressure colours
     pub context_ok: Style,
     pub context_warn: Style,
     pub context_danger: Style,
     pub context_cold: Style,
 
-    // session picker
     pub picker_selected: Style,
     pub picker_title: Style,
 
-    // search popup
     pub search_border: Style,
     pub search_match: Style,
 
-    // tab bar
     pub tab_active: Style,
     pub tab_inactive: Style,
     pub tab_busy: Style,
 
-    // slash menu
     pub menu_selected_bg: Color,
     pub menu_description: Style,
 
-    // background alert
     pub alert: Style,
 
-    // confirm prompt
     pub confirm: Style,
 
-    // image label
     pub image_label: Style,
 
-    // unread indicator flash
     pub unread: Style,
 
-    /// shimmer palette: per-char colours cycled across busy labels
-    /// (thinking…, working, compacting…) so they read as alive without
-    /// adding extra glyphs. ordered, repeated, and offset by the tick
-    /// counter to produce a smooth left-to-right wave. empty disables
-    /// the effect (callers fall back to the underlying flat style)
     pub shimmer: Vec<Color>,
 }
 
@@ -156,10 +101,6 @@ impl Default for Theme {
 }
 
 impl Theme {
-    /// effective base style for a diff +/- line. in Highlight mode the
-    /// line-level bg is folded into the base fg; in Prefix mode the base
-    /// style is fg-only. used by `widgets::diff` for prefix, equal tokens
-    /// and padding so the whole row reads as a single tinted band
     #[must_use]
     pub fn diff_base_added(&self) -> Style {
         match self.diff_line_style {
@@ -168,7 +109,6 @@ impl Theme {
         }
     }
 
-    /// see [`Self::diff_base_added`]
     #[must_use]
     pub fn diff_base_removed(&self) -> Style {
         match self.diff_line_style {
@@ -177,7 +117,6 @@ impl Theme {
         }
     }
 
-    /// dark terminal defaults (ANSI colours that adapt to the palette)
     pub fn dark() -> Self {
         let dim = Style::default()
             .fg(Color::DarkGray)
@@ -225,7 +164,6 @@ impl Theme {
 
             dim,
 
-            // use indexed colour 236 (dark grey) for user bg on dark terms
             user_msg_bg: Style::default().bg(Color::Indexed(236)),
             tool_panel_bg: Style::default().bg(Color::Indexed(234)),
             block_highlight_bg: Color::Indexed(237),
@@ -239,22 +177,15 @@ impl Theme {
 
             diff_added: Style::default().fg(Color::Green),
             diff_removed: Style::default().fg(Color::Red),
-            // intra-highlight: lighter, less saturated green/red that pop
-            // against the very subtle whole-line bg tint below
             diff_added_intra: Style::default()
                 .fg(Color::Rgb(150, 210, 150))
                 .bg(Color::Rgb(25, 65, 35)),
             diff_removed_intra: Style::default()
                 .fg(Color::Rgb(230, 150, 150))
                 .bg(Color::Rgb(75, 30, 40)),
-            // whole-line bg in Highlight mode: very dark muted green / red,
-            // desaturated enough to sit gently on top of the background rather
-            // than the saturated primary-colour splashes we had before
             diff_added_bg: Color::Rgb(12, 38, 20),
             diff_removed_bg: Color::Rgb(50, 18, 24),
             diff_line_style: DiffLineStyle::Highlight,
-            // neutral dim-grey bg so the footer ties in with the diff
-            // block regardless of which +/- tint preceded it
             diff_footer: Style::default().fg(Color::DarkGray).bg(Color::Indexed(236)),
 
             context_ok: Style::default().fg(Color::Green),
@@ -289,25 +220,19 @@ impl Theme {
                 .fg(Color::Magenta)
                 .add_modifier(Modifier::ITALIC),
             unread: Style::default().fg(Color::Yellow),
-            // calm cyan→sky→purple→magenta→pink wave that reads against
-            // most dark terminal palettes. five perceptual key stops
-            // expanded by interpolation into 125 RGB stops so adjacent
-            // chars and slowed animation phases drift through the gradient
-            // rather than snapping between distant hues
             shimmer: crate::widgets::shimmer::interpolate_palette(
                 &[
-                    Color::Rgb(95, 255, 255), // pale cyan
-                    Color::Rgb(0, 175, 255),  // sky blue
-                    Color::Rgb(135, 95, 255), // light purple
-                    Color::Rgb(215, 95, 215), // pink-magenta
-                    Color::Rgb(255, 95, 175), // hot pink
+                    Color::Rgb(95, 255, 255),
+                    Color::Rgb(0, 175, 255),
+                    Color::Rgb(135, 95, 255),
+                    Color::Rgb(215, 95, 215),
+                    Color::Rgb(255, 95, 175),
                 ],
                 24,
             ),
         }
     }
 
-    /// light terminal defaults
     pub fn light() -> Self {
         let dim = Style::default().fg(Color::Gray).add_modifier(Modifier::DIM);
 
@@ -353,7 +278,6 @@ impl Theme {
 
             dim,
 
-            // use indexed colour 254 (light grey) for user bg on light terms
             user_msg_bg: Style::default().bg(Color::Indexed(254)),
             tool_panel_bg: Style::default().bg(Color::Indexed(253)),
             block_highlight_bg: Color::Indexed(253),
@@ -367,8 +291,6 @@ impl Theme {
 
             diff_added: Style::default().fg(Color::Green),
             diff_removed: Style::default().fg(Color::Red),
-            // light terminals: softer intra tints with darker fg so the
-            // changed tokens still pop against the whole-line bg
             diff_added_intra: Style::default()
                 .fg(Color::Rgb(25, 90, 40))
                 .bg(Color::Rgb(200, 240, 210)),
@@ -412,29 +334,22 @@ impl Theme {
                 .fg(Color::Magenta)
                 .add_modifier(Modifier::ITALIC),
             unread: Style::default().fg(Color::Yellow),
-            // light theme: deeper saturations so the wave still reads
-            // against a bright background. same key-stop sweep as dark
-            // but shifted toward darker hues, then expanded by
-            // interpolation into 125 stops for a smooth gradient
             shimmer: crate::widgets::shimmer::interpolate_palette(
                 &[
-                    Color::Rgb(0, 135, 175),  // teal
-                    Color::Rgb(0, 95, 175),   // ocean blue
-                    Color::Rgb(95, 95, 175),  // slate purple
-                    Color::Rgb(135, 95, 175), // muted purple
-                    Color::Rgb(215, 0, 135),  // bright pink
+                    Color::Rgb(0, 135, 175),
+                    Color::Rgb(0, 95, 175),
+                    Color::Rgb(95, 95, 175),
+                    Color::Rgb(135, 95, 175),
+                    Color::Rgb(215, 0, 135),
                 ],
                 24,
             ),
         }
     }
 
-    /// load theme from config, applying overrides on top of defaults
     pub fn from_config(config: &ThemeConfig) -> Self {
         let mut theme = Self::default();
 
-        // a base16/base24 palette sets the whole scheme; explicit per-role
-        // overrides below take priority over it
         apply_palette(&mut theme, &config.palette);
 
         if let Some(c) = config.user.as_deref().and_then(parse_colour) {
@@ -478,14 +393,8 @@ impl Theme {
     }
 }
 
-/// a base16 / base24 colour scheme. `base00`-`base0F` is the base16 set;
-/// `base10`-`base17` are the base24 additions (darker bgs + bright accents).
-/// every field is optional so partial or base16-only schemes work. values
-/// are hex (`#rrggbb`), the same syntax the per-role overrides accept.
 #[derive(Debug, Clone, Default, Deserialize, serde::Serialize, schemars::JsonSchema)]
 #[serde(default)]
-// field names mirror the base16/base24 spec exactly (base00..base17 with
-// uppercase hex), so config keys match schemes copied from the ecosystem
 #[allow(non_snake_case)]
 pub struct Base24Palette {
     pub base00: Option<String>,
@@ -514,11 +423,6 @@ pub struct Base24Palette {
     pub base17: Option<String>,
 }
 
-/// map a base16/base24 palette onto the semantic theme styles. only bases
-/// that are set take effect, and per-role overrides in [`ThemeConfig`] are
-/// applied afterwards so they win. the mapping follows the conventional
-/// base16 role assignments (08 red, 0A yellow, 0B green, 0C cyan, 0D blue,
-/// 0E magenta; 00-07 the mono ramp).
 fn apply_palette(theme: &mut Theme, p: &Base24Palette) {
     let c = |v: &Option<String>| v.as_deref().and_then(parse_colour);
     let fg = |col: Color| Style::default().fg(col);
@@ -595,7 +499,6 @@ fn apply_palette(theme: &mut Theme, p: &Base24Palette) {
     }
 }
 
-/// serialisable theme config (subset of colours)
 #[derive(Debug, Default, Deserialize, serde::Serialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ThemeConfig {
@@ -610,14 +513,11 @@ pub struct ThemeConfig {
     pub tool_error: Option<String>,
     pub status: Option<String>,
     pub border: Option<String>,
-    /// a base16 / base24 palette applied before the per-role overrides above.
     #[serde(default)]
     pub palette: Base24Palette,
 }
 
-/// parse a colour string into a ratatui Color
 fn parse_colour(s: &str) -> Option<Color> {
-    // named colours
     match s.to_lowercase().as_str() {
         "black" => return Some(Color::Black),
         "red" => return Some(Color::Red),
@@ -638,7 +538,6 @@ fn parse_colour(s: &str) -> Option<Color> {
         _ => {}
     }
 
-    // hex colour (#rrggbb)
     if let Some(hex) = s.strip_prefix('#')
         && hex.len() == 6
     {
@@ -648,7 +547,6 @@ fn parse_colour(s: &str) -> Option<Color> {
         return Some(Color::Rgb(r, g, b));
     }
 
-    // 256-colour index
     if let Ok(n) = s.parse::<u8>() {
         return Some(Color::Indexed(n));
     }
@@ -656,21 +554,17 @@ fn parse_colour(s: &str) -> Option<Color> {
     None
 }
 
-/// detect whether the terminal has a light background
 pub fn detect_background() -> bool {
-    // try COLORFGBG first (fast, no escape sequences)
     if let Ok(val) = std::env::var("COLORFGBG")
         && let Some(bg) = val.rsplit(';').next()
         && let Ok(n) = bg.parse::<u8>()
     {
-        // ANSI colours 0-6 and 8 are dark, 7 and 9-15 are light
         return n == 7 || n >= 9;
     }
 
     false
 }
 
-/// create a theme based on terminal background detection
 pub fn auto_theme(config: &ThemeConfig) -> Theme {
     let base = if detect_background() {
         Theme::light()
@@ -678,7 +572,6 @@ pub fn auto_theme(config: &ThemeConfig) -> Theme {
         Theme::dark()
     };
 
-    // apply config overrides on top of the auto-detected base
     let mut theme = base;
 
     if let Some(c) = config.user.as_deref().and_then(parse_colour) {
@@ -766,7 +659,6 @@ mod tests {
 
     #[test]
     fn base16_only_palette_themes_accents() {
-        // a scheme setting only base00-0F (no base24 extras) still applies
         let config = ThemeConfig {
             palette: Base24Palette {
                 base0A: Some("#ffff00".into()),
@@ -781,9 +673,7 @@ mod tests {
     #[test]
     fn dark_theme_uses_ansi_colours() {
         let theme = Theme::dark();
-        // no RGB values in the dark theme defaults
         assert_ne!(theme.user_msg_bg.bg, Some(Color::Rgb(52, 53, 65)));
-        // should use indexed colours instead
         assert_eq!(theme.user_msg_bg.bg, Some(Color::Indexed(236)));
     }
 
@@ -833,7 +723,6 @@ mod tests {
         let theme = Theme::from_config(&config);
         assert_eq!(theme.user_label.fg, Some(Color::Red));
         assert_eq!(theme.assistant_label.fg, Some(Color::Rgb(0, 255, 0)));
-        // unset values keep defaults
         assert_eq!(theme.tool_error.fg, Some(Color::Red));
     }
 

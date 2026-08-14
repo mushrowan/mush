@@ -1,12 +1,7 @@
-//! tests for message_list
-
 use super::*;
 use crate::test_support::buffer_to_string;
 use mush_ai::types::{Dollars, Usage};
 
-/// the whole conversation as the lines scrollback would hold, painted
-/// into a buffer so tests can read them back
-/// the whole conversation as the lines scrollback would hold
 fn all_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     let style = MessageStyle {
         theme: &app.theme,
@@ -21,7 +16,6 @@ fn all_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     lines
 }
 
-/// those lines painted into a buffer, so tests can read them back
 fn render_app(app: &App, width: u16, height: u16) -> Buffer {
     let area = Rect::new(0, 0, width, height);
     let mut buf = Buffer::empty(area);
@@ -85,18 +79,12 @@ fn write_lines_to_buf_starts_at_y_offset() {
 fn empty_app_renders() {
     let app = App::new("test".into(), TokenCount::new(200_000));
     let buf = render_app(&app, 40, 10);
-    // should be mostly empty
     let content = buffer_to_string(&buf);
     assert!(content.trim().is_empty());
 }
 
 #[test]
 fn compacting_renders_inline_busy_row_with_label() {
-    // when /compact is in flight the message list grows a single
-    // status row with the busy label, so the user sees what's
-    // happening even when the status bar is hidden or full of other
-    // text. without an active stream there would otherwise be no
-    // on-chat indication of work
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.compacting = true;
     let buf = render_app(&app, 40, 10);
@@ -140,8 +128,6 @@ fn assert_no_braille_spinner(content: &str) {
 
 #[test]
 fn compacting_row_disappears_once_flag_cleared() {
-    // sanity: clearing the flag must remove the row so post-
-    // compaction frames don't leave a ghost label in scrollback
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.compacting = true;
     let buf = render_app(&app, 40, 10);
@@ -173,7 +159,6 @@ fn a_user_message_is_a_tinted_block_with_no_border() {
         "user messages should not be boxed:\n{content}"
     );
 
-    // two columns of padding, and a tinted blank row above and below
     let body = find_buffer_row(&buf, |line| line.contains("hi clob"));
     assert_eq!(buffer_row(&buf, body).find("hi clob"), Some(2));
     for y in [body - 1, body, body + 1] {
@@ -217,11 +202,9 @@ fn streaming_shows_partial_text() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.start_streaming();
     app.push_text_delta("partial");
-    // tick several times to let typewriter catch up
     for _ in 0..10 {
         app.tick();
     }
-    // don't finish - still streaming
     let buf = render_app(&app, 40, 10);
     let content = buffer_to_string(&buf);
     assert!(content.contains("partial"));
@@ -261,7 +244,6 @@ fn usage_line_shows_reuse_and_write_ratios() {
     let buf = render_app(&app, 70, 10);
     let content = buffer_to_string(&buf);
     assert!(content.contains("320tok"));
-    // reuse = cache_read / total_input = 150/300 = 50%
     assert!(content.contains("reuse 50%"));
     assert!(content.contains("write 16%"));
     assert!(content.contains("$0.0012"));
@@ -269,9 +251,6 @@ fn usage_line_shows_reuse_and_write_ratios() {
 
 #[test]
 fn usage_line_reuse_reflects_cache_bust() {
-    // during a bust: cache_read drops, cache_write spikes.
-    // old formula (cache_read / (cache_read + input)) would show 99%,
-    // new formula (cache_read / total_input) correctly shows ~4%
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.interaction.show_usage_lines = true;
     app.messages.push(DisplayMessage {
@@ -286,7 +265,6 @@ fn usage_line_reuse_reflects_cache_bust() {
 
     let buf = render_app(&app, 70, 10);
     let content = buffer_to_string(&buf);
-    // 5000 / (5000 + 105000 + 50) = 4%, NOT 99%
     assert!(
         content.contains("reuse 4%"),
         "during a cache bust reuse should reflect total input, got: {content}"
@@ -295,7 +273,6 @@ fn usage_line_reuse_reflects_cache_bust() {
 
 #[test]
 fn usage_line_hidden_by_default_shown_when_enabled() {
-    // default: show_usage_lines = false, usage line must not render
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.messages.push(DisplayMessage {
         usage: Some(Usage {
@@ -318,7 +295,6 @@ fn usage_line_hidden_by_default_shown_when_enabled() {
         "usage line should be hidden by default, got: {hidden}"
     );
 
-    // flipping the toggle shows the usage line
     app.interaction.show_usage_lines = true;
     let shown = buffer_to_string(&render_app(&app, 70, 10));
     assert!(
@@ -329,10 +305,6 @@ fn usage_line_hidden_by_default_shown_when_enabled() {
 
 #[test]
 fn usage_line_deferred_while_tool_running() {
-    // MessageEnd attaches usage before tools complete; rendering the usage
-    // line immediately produces a "premature" line while the tool is still
-    // running in the active_tools panel. the usage line should stay hidden
-    // until every tool on the message finishes
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.interaction.show_usage_lines = true;
     app.messages.push(DisplayMessage {
@@ -360,7 +332,6 @@ fn usage_line_deferred_while_tool_running() {
         "usage line should be deferred while a tool is running, got: {running}"
     );
 
-    // once the tool finishes, the usage line appears
     app.messages[0].tool_calls[0].status = ToolCallStatus::Done;
     app.messages[0].tool_calls[0].output_preview = Some("ok".into());
     let done = buffer_to_string(&render_app(&app, 70, 12));
@@ -402,9 +373,6 @@ fn tool_calls_render() {
 
 #[test]
 fn edit_tool_renders_inline_diff_when_wide() {
-    // edit tool output defaults to inline even on a wide terminal. the
-    // old side-by-side threshold made small edits harder to scan by
-    // splitting the changed lines across the whole tool panel width
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.messages.push(DisplayMessage {
         tool_calls: vec![crate::app::DisplayToolCall {
@@ -432,8 +400,6 @@ fn edit_tool_renders_inline_diff_when_wide() {
 
 #[test]
 fn edit_tool_renders_inline_diff_when_narrow() {
-    // at narrow widths the diff falls back to inline: +/- lines stack
-    // vertically like the current default
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.messages.push(DisplayMessage {
         tool_calls: vec![crate::app::DisplayToolCall {
@@ -448,7 +414,6 @@ fn edit_tool_renders_inline_diff_when_narrow() {
     });
     let buf = render_app(&app, 60, 10);
     let content = buffer_to_string(&buf);
-    // no single row should have both sides: `hello` and `world` on different lines
     let any_row_with_both = content
         .lines()
         .any(|row| row.contains("println!(\"hello\")") && row.contains("println!(\"world\")"));
@@ -476,10 +441,6 @@ fn status_only_handles_streaming_thinking_label() {
 
 #[test]
 fn thinking_with_leading_space_does_not_double_indent() {
-    // Claude's thinking content typically starts each line with a single
-    // leading space. indent_line prepends its own space so without
-    // normalisation the body would render with two leading columns of
-    // whitespace, looking over-indented relative to the busy header
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.messages.push(DisplayMessage {
         thinking: Some(" I'm thinking about the problem\n I should reconsider".into()),
@@ -510,7 +471,6 @@ fn expanded_thinking_uses_thinking_style() {
     });
     let buf = render_app(&app, 60, 10);
 
-    // find a cell containing thinking text and check its colour
     let thinking_fg = app.theme.thinking.fg;
     let dim_fg = app.theme.dim.fg;
     assert_ne!(thinking_fg, dim_fg, "thinking and dim should differ");
@@ -520,7 +480,6 @@ fn expanded_thinking_uses_thinking_style() {
         .find(|&(x, y)| {
             let cell = &buf[(x, y)];
             cell.symbol() == "d" && {
-                // "deep" starts with d
                 let next = &buf[(x + 1, y)];
                 next.symbol() == "e"
             }
@@ -559,7 +518,6 @@ fn a_completed_tool_is_a_tinted_panel_with_a_status_header() {
     assert_eq!(buffer_row(&buf, header).trim_end(), "  bash · done");
     assert!(content.contains("cargo test"), "missing summary");
 
-    // header and body share one tint, two columns in
     let tint = app.theme.tool_panel_bg.bg.unwrap();
     let body = find_buffer_row(&buf, |line| line.contains("cargo test"));
     assert_eq!(buffer_row(&buf, body).find("cargo test"), Some(2));
@@ -673,15 +631,12 @@ fn tool_box_wraps_long_summary() {
         }],
         ..DisplayMessage::new(MessageRole::Assistant, "reading")
     });
-    // narrow box: path won't fit on one line
     let buf = render_app(&app, 40, 12);
     let content = buffer_to_string(&buf);
-    // full path should be visible (wrapped, not truncated)
     assert!(
         content.contains("message_list.rs"),
         "path end should be visible after wrapping"
     );
-    // no ellipsis
     assert!(!content.contains("…"), "should wrap, not truncate");
 }
 
@@ -735,7 +690,6 @@ fn read_tool_box_pads_halfwidth_dakuten_by_cells() {
     );
 }
 
-// read tool output syntax highlighting
 #[test]
 fn parse_read_line_extracts_number_and_content() {
     assert_eq!(parse_read_line("L1: fn main() {"), Some((1, "fn main() {")));
@@ -754,7 +708,6 @@ fn parse_read_line_returns_none_for_non_matching() {
 
 #[test]
 fn parse_read_line_handles_empty_content() {
-    // empty line in source still has the prefix but no content
     assert_eq!(parse_read_line("L5: "), Some((5, "")));
 }
 
@@ -775,7 +728,6 @@ fn common_leading_space_returns_min_across_non_empty_lines() {
     assert_eq!(common_leading_space(" a\n  b\n c"), 1);
     assert_eq!(common_leading_space("  a\n  b"), 2);
     assert_eq!(common_leading_space("a\n  b"), 0);
-    // blank lines ignored
     assert_eq!(common_leading_space(" a\n\n  b"), 1);
     assert_eq!(common_leading_space(""), 0);
 }
@@ -785,22 +737,18 @@ fn drop_leading_spaces_preserves_relative_indent() {
     assert_eq!(drop_leading_spaces(" hello", 1), "hello");
     assert_eq!(drop_leading_spaces("  nested", 1), " nested");
     assert_eq!(drop_leading_spaces("flush left", 1), "flush left");
-    // fewer spaces than count removes only what's there
     assert_eq!(drop_leading_spaces(" x", 3), "x");
-    // no-op on count=0
     assert_eq!(drop_leading_spaces("  body", 0), "  body");
 }
 
 #[test]
 fn read_min_content_indent_computes_min_leading_spaces() {
-    // min of 4/6/4 leading spaces across content is 4
     let text = "L1:     foo\nL2:       bar\nL3:     baz";
     assert_eq!(read_min_content_indent(text), 4);
 }
 
 #[test]
 fn read_min_content_indent_ignores_blank_content_lines() {
-    // blank content lines don't bias the min toward zero
     let text = "L1:     foo\nL2: \nL3:     bar";
     assert_eq!(read_min_content_indent(text), 4);
 }
@@ -819,10 +767,6 @@ fn read_min_content_indent_ignores_non_matching_lines() {
 
 #[test]
 fn read_tool_box_trims_shared_leading_indent() {
-    // regression: deeply nested code shown via the read tool used to
-    // render with the raw source indent, pushing content halfway across
-    // the preview box. the renderer must strip the common leading
-    // whitespace so the smallest-indent row sits against the gutter
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.messages.push(DisplayMessage {
         tool_calls: vec![crate::app::DisplayToolCall {
@@ -847,7 +791,6 @@ fn read_tool_box_trims_shared_leading_indent() {
         .lines()
         .find(|l| l.contains("fn main"))
         .expect("fn main row present");
-    // panel pad, a one-digit gutter and its separator
     let gap = fn_line.chars().take_while(|c| *c == ' ').count();
     assert!(
         gap <= 6,
@@ -858,9 +801,6 @@ fn read_tool_box_trims_shared_leading_indent() {
 
 #[test]
 fn read_tool_box_renders_dim_line_numbers_with_highlighted_content() {
-    // syntax-highlighted read output: line-number prefix dim, code
-    // portion carries syntect-derived fg (multiple distinct colours
-    // along the "fn main" row)
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.messages.push(DisplayMessage {
         tool_calls: vec![crate::app::DisplayToolCall {
@@ -875,7 +815,6 @@ fn read_tool_box_renders_dim_line_numbers_with_highlighted_content() {
     });
     let buf = render_app(&app, 120, 12);
 
-    // find the row containing "fn main" in the buffer
     let target_row = (0..buf.area.height)
         .find(|&y| {
             let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
@@ -883,7 +822,6 @@ fn read_tool_box_renders_dim_line_numbers_with_highlighted_content() {
         })
         .expect("no row containing 'fn main' in rendered output");
 
-    // gather fg colours along that row for non-space cells inside the box
     let mut fgs = std::collections::HashSet::new();
     for x in 0..buf.area.width {
         let cell = &buf[(x, target_row)];
@@ -1062,7 +1000,6 @@ fn plain_text(text: &Text<'_>) -> String {
 
 #[test]
 fn wrapped_assistant_lines_keep_indent() {
-    // 20 chars wide, message longer than 19 (content width = width - 1 indent)
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.messages.push(DisplayMessage::new(
         MessageRole::Assistant,
@@ -1070,7 +1007,6 @@ fn wrapped_assistant_lines_keep_indent() {
     ));
     let buf = render_app(&app, 20, 10);
     let text = buffer_to_string(&buf);
-    // every non-empty content line should start with a space (the indent)
     for line in text.lines() {
         let trimmed = line.trim_end();
         if trimmed.is_empty() {
@@ -1085,11 +1021,8 @@ fn wrapped_assistant_lines_keep_indent() {
 
 #[test]
 fn indent_line_breaks_at_word_boundary_when_possible() {
-    // "hello world foo" with content width 8 should break after "hello"
-    // (at the space) rather than mid-word as "hello wo\nrld foo"
     let line = Line::raw("hello world foo");
     let wrapped = indent_line(line, 8);
-    // inspect the produced lines' text content (ignore the leading space indent)
     let texts: Vec<String> = wrapped
         .iter()
         .map(|l| {
@@ -1099,8 +1032,6 @@ fn indent_line_breaks_at_word_boundary_when_possible() {
                 .collect::<String>()
         })
         .collect();
-    // each wrapped line includes the leading " " indent span
-    // strip it for assertion clarity
     let bodies: Vec<&str> = texts.iter().map(|s| s.trim_start_matches(' ')).collect();
     assert!(
         bodies.iter().all(|b| !b.ends_with(' ')),
@@ -1118,8 +1049,6 @@ fn indent_line_breaks_at_word_boundary_when_possible() {
 
 #[test]
 fn indent_line_falls_back_to_char_split_for_long_words() {
-    // a word longer than content width must still wrap char-wise
-    // (word-aware fallback); don't lose any characters
     let line = Line::raw("abcdefghijklmnop");
     let wrapped = indent_line(line, 5);
     let bodies: Vec<String> = wrapped
@@ -1146,24 +1075,20 @@ fn streaming_typewriter_ticks_dont_reparse_markdown() {
     app.start_streaming();
     app.push_text_delta("hello **world** and some more text here");
 
-    // advance typewriter so some text is visible
     app.tick();
 
     crate::markdown::reset_render_call_count();
 
-    // first render: cache miss, parses markdown once
     render_app(&app, 60, 20);
     let first_count = crate::markdown::render_call_count();
     assert!(first_count > 0, "should parse at least once");
 
-    // advance typewriter (changes visible text) and render again
     for _ in 0..5 {
         app.tick();
     }
     render_app(&app, 60, 20);
     let second_count = crate::markdown::render_call_count();
 
-    // should not have re-parsed: the full buffer hasn't changed
     assert_eq!(
         first_count, second_count,
         "typewriter ticks should not cause markdown re-parsing"
@@ -1180,10 +1105,8 @@ fn indented_cache_invalidates_on_width_change() {
         ));
     }
 
-    // first render at width 60
     render_app(&app, 60, 20);
 
-    // render at different width should recompute
     reset_indent_line_call_count();
     render_app(&app, 80, 20);
     let calls = indent_line_call_count();
@@ -1201,11 +1124,9 @@ fn content_hash_cached_across_renders() {
         "hello world with some **markdown**",
     ));
 
-    // first render computes the hash
     render_app(&app, 60, 20);
     reset_content_hash_calls();
 
-    // second render should reuse cached hash
     render_app(&app, 60, 20);
     let calls = content_hash_call_count();
     assert_eq!(
@@ -1213,11 +1134,6 @@ fn content_hash_cached_across_renders() {
         "second render should use cached hash, got {calls} calls"
     );
 }
-
-/// a width change reflows every message, so a viewport pinned by line
-/// count from either end of the document lands somewhere unrelated. the
-/// anchor names a message instead, so the message the user was reading
-/// stays on the viewport's top edge and `j` keeps stepping from there.
 
 #[test]
 fn streaming_markdown_cache_is_keyed_by_width() {
@@ -1262,8 +1178,6 @@ fn streaming_markdown_skips_syntax_highlighting() {
     );
     assert_eq!(crate::markdown::highlight_code_block_call_count(), 0);
 }
-
-// message_lines: the content renderer an inline viewport hands to scrollback
 
 fn plain_style(theme: &crate::theme::Theme) -> MessageStyle<'_> {
     MessageStyle {
@@ -1393,8 +1307,6 @@ fn a_running_tool_defers_the_usage_line() {
     assert!(!rendered_text(&lines).contains("150tok"));
 }
 
-// live region: everything below committed history, redrawn every frame
-
 fn live_text(app: &App, width: u16) -> String {
     rendered_text(&live_lines(app, width))
 }
@@ -1458,8 +1370,6 @@ fn a_turn_stays_live_until_the_next_one_starts() {
 
 #[test]
 fn a_recap_takes_the_last_bold_header() {
-    // reasoning summaries are a run of bold section headers. the last
-    // one is where the model got to
     assert_eq!(
         thinking_recap("**Weighing options**\n\nblah\n\n**Picking one**\n\nmore"),
         "Picking one"
@@ -1507,7 +1417,6 @@ fn a_long_recap_stays_on_one_line() {
     assert_eq!(rows, 1, "a collapsed trace is one row, got:\n{text}");
 }
 
-/// reveal everything the typewriter is holding back
 fn reveal(app: &mut App) {
     for _ in 0..200 {
         app.tick();

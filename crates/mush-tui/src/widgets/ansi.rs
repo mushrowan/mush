@@ -1,28 +1,8 @@
-//! ANSI SGR parsing for tool output previews
-//!
-//! bash tools often emit ANSI escape sequences (cargo errors in red,
-//! jj log bookmarks in blue, eza colours, ...). rendering the raw
-//! escapes as text looks like garbage, so we parse them into styled
-//! ratatui spans before pushing them into the tool preview box.
-//!
-//! this module is intentionally small: `ansi_lines` is the single
-//! entry point the renderer uses. lines with no escape sequences
-//! round-trip unchanged, so the cost for typical plain output is a
-//! trivial parse over ascii bytes.
-
 use ansi_to_tui::IntoText;
 use ratatui::style::Style;
 use ratatui::text::Span;
 
-/// convert a chunk of terminal output into per-line styled spans
-///
-/// any SGR escape sequences are parsed into `Style` attributes on the
-/// resulting spans. unrecognised or malformed escapes are silently
-/// dropped by the upstream parser, matching a typical terminal's
-/// forgiving behaviour. plain text with no escapes returns a single
-/// span per line carrying `default_style`
 pub fn ansi_lines(text: &str, default_style: Style) -> Vec<Vec<Span<'static>>> {
-    // fast path: no escape char at all means we can skip the parser
     if !text.contains('\x1b') {
         return text
             .lines()
@@ -38,18 +18,12 @@ pub fn ansi_lines(text: &str, default_style: Style) -> Vec<Vec<Span<'static>>> {
                 line.spans
                     .into_iter()
                     .map(|s| {
-                        // treat a `Reset` colour as "no override": the box's
-                        // default styling should take over, not the user's
-                        // terminal default (which our embedded pane has no
-                        // reason to mirror)
                         let style = merge_over_default(default_style, s.style);
                         Span::styled(s.content.into_owned(), style)
                     })
                     .collect()
             })
             .collect(),
-        // parser failure is extremely rare; fall back to stripping escapes
-        // naively so the user still sees readable content
         Err(_) => text
             .lines()
             .map(|l| vec![Span::styled(strip_ansi(l), default_style)])
@@ -57,8 +31,6 @@ pub fn ansi_lines(text: &str, default_style: Style) -> Vec<Vec<Span<'static>>> {
     }
 }
 
-/// overlay `sgr` onto `default_style`, treating `Color::Reset` in `sgr`
-/// as "fall back to default" rather than "clear to terminal default"
 fn merge_over_default(default_style: Style, sgr: Style) -> Style {
     use ratatui::style::Color;
     let mut out = default_style;
@@ -75,17 +47,11 @@ fn merge_over_default(default_style: Style, sgr: Style) -> Style {
     out
 }
 
-/// remove CSI/SGR escape sequences from a line of text
-///
-/// used on the parser's error path and anywhere styled rendering isn't
-/// feasible (e.g. side-by-side tool panels). handles the common
-/// `\x1b[...m` form plus bare `\x1b` bytes
 pub fn strip_ansi(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
         if c == '\x1b' {
-            // consume the rest of a CSI sequence up to an alpha terminator
             if chars.peek() == Some(&'[') {
                 chars.next();
                 for inner in chars.by_ref() {
@@ -123,7 +89,6 @@ mod tests {
         assert_eq!(lines.len(), 1);
         let joined: String = lines[0].iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(joined, "error: something broke");
-        // first span carries the red foreground
         assert_eq!(lines[0][0].style.fg, Some(Color::Red));
     }
 
@@ -157,7 +122,6 @@ mod tests {
     fn default_style_is_applied_to_plain_spans() {
         let style = Style::default().fg(Color::Gray);
         let lines = ansi_lines("\x1b[31mred\x1b[0m plain", style);
-        // "plain" span should inherit the default gray when no SGR set
         let plain = lines[0]
             .iter()
             .find(|s| s.content.contains("plain"))
@@ -173,7 +137,6 @@ mod tests {
 
     #[test]
     fn strip_ansi_handles_bare_escape_without_bracket() {
-        // lone ESC without a CSI intro should still be dropped
         assert_eq!(strip_ansi("pre\x1bpost"), "prepost");
     }
 

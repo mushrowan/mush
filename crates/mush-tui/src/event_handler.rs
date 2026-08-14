@@ -1,8 +1,3 @@
-//! agent event handling
-//!
-//! maps AgentEvents to App state mutations, managing conversation
-//! history, session tree, and image protocol state
-
 use mush_agent::{AgentEvent, summarise_tool_args};
 use mush_ai::ApiKey;
 use mush_ai::models;
@@ -12,7 +7,6 @@ use mush_session::ConversationState;
 
 use crate::app::App;
 
-/// mutable state shared across the event loop
 pub struct EventCtx<'a> {
     pub app: &'a mut App,
     pub conversation: &'a mut ConversationState,
@@ -85,7 +79,6 @@ pub fn handle_agent_event(
             if tool_name.as_str().eq_ignore_ascii_case("batch") {
                 app.end_batch_tool(tool_call_id, result.outcome, output_text);
             } else {
-                // extract image data from tool result (base64 → raw bytes)
                 let image_data = result.content.iter().find_map(|p| match p {
                     ToolResultContentPart::Image(img) => {
                         use base64::Engine;
@@ -95,7 +88,6 @@ pub fn handle_agent_event(
                     }
                     _ => None,
                 });
-                // create image protocol for inline rendering
                 if let Some(ref data) = image_data
                     && let Some(picker) = image_picker
                     && let Ok(dyn_image) = image::load_from_memory(data)
@@ -123,31 +115,20 @@ pub fn handle_agent_event(
             conversation.append_message(msg);
         }
         AgentEvent::TurnStart { .. } => {
-            // clear previous turn's tool panels (results are already inline in messages)
             app.active_tools.clear();
             if !app.stream.active {
                 app.start_streaming();
             }
         }
         AgentEvent::SteeringInjected { messages } => {
-            // mark queued display messages as no longer pending
             for msg in app.messages.iter_mut().rev().take(messages.len()) {
                 msg.queued = false;
             }
-            // persist injected steering into the conversation tree.
-            // without this the messages are visible to the LLM during
-            // this stream (the agent loop appended them to its internal
-            // vec) but absent from `conversation.context()` next stream,
-            // shifting the prefix bytes and busting the prompt cache.
-            // mirrors the existing `MessageEnd`/`ToolResult` handling
             for msg in messages {
                 conversation.append_message(msg.clone());
             }
         }
         AgentEvent::FollowUpInjected { messages } => {
-            // same persistence reason as `SteeringInjected`. follow-ups
-            // come from the same queue but fire when the agent would
-            // otherwise stop, so they need the same tree treatment
             for msg in messages {
                 conversation.append_message(msg.clone());
             }
@@ -180,11 +161,6 @@ pub fn handle_agent_event(
     }
 }
 
-/// settle a streamed assistant `MessageEnd` into app state. in-band
-/// errors (stop_reason=Error or non-empty error_message, e.g. anthropic
-/// `Overloaded`) surface as a system message and bypass stats, since
-/// the carrier message has no real usage data and would otherwise
-/// trip the context-decrease anomaly detector
 fn apply_message_end(app: &mut App, message: &AssistantMessage, model: &Model, debug_cache: bool) {
     if message.stop_reason == StopReason::Error || message.error_message.is_some() {
         let err = message
@@ -218,8 +194,6 @@ fn apply_message_end(app: &mut App, message: &AssistantMessage, model: &Model, d
     }
 }
 
-/// resolve API key and account ID for a model. mirrors the cli's
-/// `resolve_api_key`: env > config > stored credentials > oauth
 pub async fn resolve_auth_for_model(
     model: &Model,
     provider_api_keys: &std::collections::HashMap<String, mush_ai::ApiKey>,
@@ -292,15 +266,6 @@ mod auth_tests {
     }
 }
 
-/// compact messages when approaching context limit.
-/// `context_tokens` is the actual API-reported input token count from the last call.
-///
-/// uses escalating strategy:
-/// compact messages when approaching context limit
-///
-/// delegates escalation (masking then LLM summarisation) to
-/// `mush_session::compact::auto_compact`, then runs post-compaction
-/// hooks if configured.
 #[allow(clippy::too_many_arguments)]
 pub async fn auto_compact(
     messages: Vec<Message>,
@@ -338,7 +303,6 @@ pub async fn auto_compact(
 
     let mut messages = result.messages;
 
-    // post-compaction hooks (needs mush-agent types, so handled here)
     if let Some(hooks) = lifecycle_hooks
         && !hooks
             .for_point(mush_agent::HookPoint::PostCompaction)
@@ -350,7 +314,6 @@ pub async fn auto_compact(
     messages
 }
 
-/// run post-compaction hooks and inject output into context
 async fn inject_post_compaction_hooks(
     hooks: &mush_agent::LifecycleHooks,
     cwd: Option<&std::path::Path>,
@@ -381,18 +344,11 @@ async fn inject_post_compaction_hooks(
     }
 }
 
-/// max chars to keep in masked tool result text
 const MASK_TRUNCATE_LEN: usize = 200;
 
-/// max messages to carry into a forked pane
 const FORK_CONTEXT_LIMIT: usize = 30;
-/// number of recent tool results to preserve in forked context
 const FORK_MASK_RECENT: usize = 3;
 
-/// strip tool outputs to reduce context size while keeping cache prefixes stable
-///
-/// this applies a deterministic transform to every tool result, so adding new
-/// messages does not rewrite older masked content on later turns
 #[cfg(test)]
 fn mask_observations(messages: &mut [Message]) -> bool {
     let mut changed = false;
@@ -404,7 +360,6 @@ fn mask_observations(messages: &mut [Message]) -> bool {
     changed
 }
 
-/// truncate text parts in a tool result, keeping a prefix + size note
 fn mask_tool_result_content(content: &mut [ToolResultContentPart]) -> bool {
     let mut changed = false;
     for part in content.iter_mut() {
@@ -416,7 +371,6 @@ fn mask_tool_result_content(content: &mut [ToolResultContentPart]) -> bool {
                 changed = true;
             }
         }
-        // images are dropped entirely from old results
         if matches!(part, ToolResultContentPart::Image(_)) {
             *part = ToolResultContentPart::Text(TextContent {
                 text: "[image omitted]".into(),
@@ -427,11 +381,6 @@ fn mask_tool_result_content(content: &mut [ToolResultContentPart]) -> bool {
     changed
 }
 
-/// slim down a conversation for a forked pane.
-///
-/// keeps the first user message (initial context/instructions) and the
-/// most recent messages, aggressively masking tool outputs. this gives
-/// forked agents focused context without the full history
 pub fn slim_for_fork(messages: &[Message]) -> Vec<Message> {
     if messages.len() <= FORK_CONTEXT_LIMIT {
         let mut result = messages.to_vec();
@@ -441,12 +390,10 @@ pub fn slim_for_fork(messages: &[Message]) -> Vec<Message> {
 
     let mut result = Vec::with_capacity(FORK_CONTEXT_LIMIT + 2);
 
-    // keep first user message (often contains initial instructions)
     if let Some(first_user) = messages.iter().find(|m| matches!(m, Message::User(_))) {
         result.push(first_user.clone());
     }
 
-    // inject a note about trimmed context
     result.push(Message::User(UserMessage {
         content: UserContent::Text(format!(
             "[context trimmed: {} earlier messages omitted for focus]",
@@ -455,9 +402,7 @@ pub fn slim_for_fork(messages: &[Message]) -> Vec<Message> {
         timestamp_ms: Timestamp::now(),
     }));
 
-    // keep the most recent messages
     let recent_start = messages.len().saturating_sub(FORK_CONTEXT_LIMIT);
-    // avoid duplicating the first user message if it falls in the recent window
     for msg in &messages[recent_start..] {
         if result.len() == 1 && msg == &result[0] {
             continue;
@@ -469,7 +414,6 @@ pub fn slim_for_fork(messages: &[Message]) -> Vec<Message> {
     result
 }
 
-/// mask tool results with a configurable recent-preserve count
 fn mask_observations_with_limit(messages: &mut [Message], preserve_recent: usize) {
     let tool_positions: Vec<usize> = messages
         .iter()
@@ -546,27 +490,22 @@ mod tests {
     fn mask_truncates_long_results() {
         let long_text = "x".repeat(500);
         let mut msgs: Vec<Message> = Vec::new();
-        // 3 long results
         for _ in 0..3 {
             msgs.push(make_tool_result(&long_text));
         }
-        // interspersed user messages
         msgs.push(make_user("question"));
-        // 6 short results
         for i in 0..6 {
             msgs.push(make_tool_result(&format!("recent {i}")));
         }
 
         mask_observations(&mut msgs);
 
-        // long outputs should be truncated
         for msg in &msgs[..3] {
             let text = tool_text(msg);
             assert!(text.contains("truncated"));
             assert!(text.contains("500 chars total"));
             assert!(text.len() < 500);
         }
-        // last 6 tool results should be untouched
         for (i, msg) in msgs[4..].iter().enumerate() {
             assert_eq!(tool_text(msg), format!("recent {i}"));
         }
@@ -581,7 +520,6 @@ mod tests {
 
         mask_observations(&mut msgs);
 
-        // short outputs should remain unchanged
         for msg in &msgs {
             assert_eq!(tool_text(msg), "short");
         }
@@ -599,7 +537,6 @@ mod tests {
             outcome: ToolOutcome::Success,
             timestamp_ms: Timestamp::now(),
         })];
-        // add more messages to ensure neighbouring entries don't matter
         for _ in 0..6 {
             msgs.push(make_tool_result("recent"));
         }
@@ -613,7 +550,6 @@ mod tests {
     fn slim_for_fork_short_conversation() {
         let msgs: Vec<Message> = vec![make_user("hello"), make_tool_result("output")];
         let result = slim_for_fork(&msgs);
-        // short conversation should be kept as-is
         assert_eq!(result.len(), 2);
     }
 
@@ -621,7 +557,6 @@ mod tests {
     fn slim_for_fork_trims_long_conversation() {
         let mut msgs: Vec<Message> = Vec::new();
         msgs.push(make_user("initial instructions"));
-        // 40 tool results with long text
         for i in 0..40 {
             msgs.push(make_tool_result(&format!("{}: {}", i, "x".repeat(500))));
         }
@@ -629,14 +564,11 @@ mod tests {
 
         let result = slim_for_fork(&msgs);
 
-        // should be trimmed: first user + trim note + last 30
         assert!(result.len() <= FORK_CONTEXT_LIMIT + 3);
-        // first message should be preserved
         match &result[0] {
             Message::User(u) => assert!(u.text().contains("initial instructions")),
             _ => panic!("first message should be user"),
         }
-        // second should be the trim note
         match &result[1] {
             Message::User(u) => assert!(u.text().contains("context trimmed")),
             _ => panic!("second message should be trim note"),
@@ -646,14 +578,12 @@ mod tests {
     #[test]
     fn slim_for_fork_masks_aggressively() {
         let mut msgs: Vec<Message> = Vec::new();
-        // 10 tool results (under FORK_CONTEXT_LIMIT but enough to trigger masking)
         for _ in 0..10 {
             msgs.push(make_tool_result(&"y".repeat(500)));
         }
 
         let result = slim_for_fork(&msgs);
 
-        // only last FORK_MASK_RECENT (3) should have full output
         let full_outputs = result
             .iter()
             .filter(|m| {
@@ -690,7 +620,6 @@ mod tests {
         };
         handle_agent_event(&mut ctx, &event, &model, false, &None);
 
-        // error should appear as a system message, not in the status bar
         assert!(
             ctx.app.status.is_none(),
             "error should not be in status bar"
@@ -702,11 +631,6 @@ mod tests {
 
     #[test]
     fn steering_injection_persists_messages_to_conversation_tree() {
-        // regression: steering messages typed during streaming used to
-        // exist only in the agent's transient `messages` vec. on the
-        // next stream `conversation.context()` rebuilt from the tree
-        // and silently dropped them, shifting the prefix bytes and
-        // busting the prompt cache. event handler must persist them
         use crate::app::App;
         use mush_ai::types::{TokenCount, UserContent, UserMessage};
 
@@ -741,8 +665,6 @@ mod tests {
 
     #[test]
     fn follow_up_injection_persists_messages_to_conversation_tree() {
-        // follow-ups come from the same steering queue and need the
-        // same tree treatment so the next stream sees them
         use crate::app::App;
         use mush_ai::types::{TokenCount, UserContent, UserMessage};
 
@@ -837,21 +759,11 @@ mod tests {
 
     #[test]
     fn errored_message_end_surfaces_error_and_skips_stats() {
-        // regression: anthropic sometimes delivers an in-band error (e.g.
-        // `Overloaded`) via an SSE error event. the stream processor sets
-        // stop_reason=Error + error_message=Some(_) and the stream still
-        // finishes with a `Done` event carrying a zero-usage message. the
-        // old flow fed that phantom Usage::default() into stats, tripping
-        // a false-positive "context decreased: 32k → 0k without compact"
-        // system message, while the actual error was only written to the
-        // log. user saw confusing noise, not the real error.
         use crate::app::{App, MessageRole};
         use mush_ai::types::{TokenCount, Usage};
 
         let mut app = App::new("test".into(), TokenCount::new(200_000));
 
-        // seed prev usage so the anomaly detector has a baseline to
-        // compare against (this is what makes the old bug fire)
         let prev_usage = Usage {
             input_tokens: TokenCount::new(32_000),
             output_tokens: TokenCount::new(100),
@@ -864,7 +776,6 @@ mod tests {
         let mut image_protos = std::collections::HashMap::new();
         let model = mush_ai::models::all_models().first().unwrap().clone();
 
-        // errored assistant message: stop_reason=Error, zero usage
         let errored = AssistantMessage::builder()
             .model(model.id.clone())
             .provider(model.provider.clone())
@@ -886,7 +797,6 @@ mod tests {
             &None,
         );
 
-        // no "context decreased" anomaly should have fired
         let has_context_decrease = ctx
             .app
             .messages
@@ -897,7 +807,6 @@ mod tests {
             "zero-usage error message should not trigger context-decrease anomaly"
         );
 
-        // the real error should surface as a system message
         let has_error_msg = ctx
             .app
             .messages

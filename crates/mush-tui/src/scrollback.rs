@@ -1,5 +1,3 @@
-//! what the inline viewport has already handed to the terminal
-
 use std::io::{self, Write};
 
 use ratatui::prelude::IntoCrossterm;
@@ -9,28 +7,19 @@ use crate::app::App;
 use crate::display_types::{DisplayMessage, MessageRole};
 use crate::widgets::message_list::{MessageStyle, message_lines};
 
-/// label on the rule that separates two runs of committed history
 pub const REWRITE_RULE: &str = " history rewritten ";
 
-/// tracks what has gone to the terminal's scrollback, so each line is
-/// printed exactly once and never printed again
 #[derive(Debug, Default)]
 pub struct Scrollback {
     committed: usize,
-    /// bytes of the in-flight reply already handed over
     streamed: usize,
-    /// the message the in-flight reply settled into, and how much of it
-    /// went out early
     settled_head: Option<SettledHead>,
     generation: u64,
 }
 
-/// how much of the conversation a hand-over covers
 #[derive(Debug, Clone, Copy)]
 enum Cut {
-    /// only what can no longer reshape
     Settled,
-    /// all of it, in-flight reply included
     All,
 }
 
@@ -46,13 +35,6 @@ impl Scrollback {
         Self::default()
     }
 
-    /// lines for everything that has settled since the last call.
-    ///
-    /// a long reply hands over its head while its tail is still arriving,
-    /// since the live region can't outgrow the terminal. a rewrite
-    /// (`/compact`, `/branch`, `/undo`) rebuilds `app.messages` from the
-    /// conversation tree, and the terminal can't retract what it already
-    /// holds, so it draws a rule and starts a fresh run below it
     pub fn take_settled(
         &mut self,
         app: &App,
@@ -62,7 +44,6 @@ impl Scrollback {
         self.take(app, style, width, Cut::Settled)
     }
 
-    /// lines for everything left, so the live block can come down
     pub fn take_rest(
         &mut self,
         app: &App,
@@ -116,8 +97,6 @@ impl Scrollback {
         lines
     }
 
-    /// note which message the in-flight reply settled into, so its head
-    /// isn't handed over a second time
     fn claim_settled_head(&mut self, app: &App) {
         if app.stream.active || self.streamed == 0 {
             return;
@@ -133,7 +112,6 @@ impl Scrollback {
         self.streamed = 0;
     }
 
-    /// the blocks of the in-flight reply that can no longer reshape
     fn take_streamed(
         &mut self,
         app: &App,
@@ -165,8 +143,6 @@ impl Scrollback {
     }
 }
 
-/// the part of `msg` scrollback hasn't seen: everything but the first
-/// `head` bytes of its content, and no thinking, which went out with them
 fn tail_of(msg: &DisplayMessage, head: usize) -> DisplayMessage {
     DisplayMessage {
         thinking: None,
@@ -181,10 +157,6 @@ fn rewrite_rule(style: &MessageStyle<'_>, width: u16) -> Line<'static> {
     Line::styled(format!("{rule}{REWRITE_RULE}{rule}"), style.theme.dim)
 }
 
-/// print settled lines above the live region, where they become the
-/// terminal's own scrollback.
-///
-/// raw mode is on, so each line ends `\r\n`
 pub fn write_lines(out: &mut impl Write, lines: &[Line<'_>]) -> io::Result<()> {
     for line in lines {
         for span in &line.spans {
@@ -196,13 +168,6 @@ pub fn write_lines(out: &mut impl Write, lines: &[Line<'_>]) -> io::Result<()> {
     Ok(())
 }
 
-/// byte offset up to which streamed markdown can no longer reshape.
-///
-/// the live region can't outgrow the terminal, so a long reply has to
-/// commit its head while its tail is still arriving. a blank line ends a
-/// markdown block, so everything before the last blank line is final. a
-/// fence that hasn't closed holds back everything from its opening line,
-/// since the text inside it isn't a block yet
 #[must_use]
 pub fn settled_prefix(text: &str) -> usize {
     let mut fence: Option<&str> = None;
@@ -227,7 +192,6 @@ pub fn settled_prefix(text: &str) -> usize {
     settled
 }
 
-/// the run of backticks or tildes that opens a fence, if this line does
 fn fence_marker(trimmed: &str) -> Option<&'static str> {
     if trimmed.starts_with("```") {
         Some("```")
@@ -257,7 +221,6 @@ mod tests {
         app.finish_streaming(None, None);
     }
 
-    /// reveal everything the typewriter is holding back
     fn reveal(app: &mut App) {
         for _ in 0..200 {
             app.tick();
@@ -338,8 +301,6 @@ mod tests {
 
     #[test]
     fn a_rewrite_draws_a_rule_and_starts_again() {
-        // the rewritten conversation lands on the same commit point as the
-        // one it replaced, so only the generation tells them apart
         let theme = Theme::default();
         let mut app = app();
         finish_turn(&mut app, "first question", "first answer");
@@ -348,7 +309,6 @@ mod tests {
         let mut scrollback = Scrollback::new();
         scrollback.take_settled(&app, &style(&theme), 80);
 
-        // /compact rebuilds the display from the conversation tree
         app.clear_display();
         finish_turn(&mut app, "summary", "compacted");
         app.push_user_message("carry on");
@@ -392,8 +352,6 @@ mod tests {
 
     #[test]
     fn a_setext_heading_cannot_rewrite_settled_text() {
-        // the ==== retroactively turns the line above into a heading, so
-        // that line must not have been committed already
         let text = "para\n\nheading\n====\n";
         assert_eq!(&text[..settled_prefix(text)], "para\n\n");
     }

@@ -1,31 +1,3 @@
-//! configurable keybinds
-//!
-//! maps user-facing action names to key combinations parsed from the
-//! `[keys]` section of config.toml. actions with no entry in config
-//! fall back to their compiled-in default(s).
-//!
-//! the syntax is crokey's: `ctrl-k`, `alt-enter`, `shift-F6`, `esc`,
-//! `f12`, and so on. vscode-style `+` separators are accepted too and
-//! rewritten to `-` before parsing so users can write `ctrl+k` or
-//! `alt+m` if they prefer.
-//!
-//! ## config example
-//!
-//! ```toml
-//! [keys]
-//! cancel = ["esc", "ctrl+["]
-//! cycle_favourite = "alt+m"
-//! cycle_favourite_backward = "alt+shift+m"
-//! ```
-//!
-//! ## migration status
-//!
-//! this is the groundwork layer. today it handles the actions listed
-//! in [`Action`] only. the rest of `input.rs` still matches key events
-//! directly. new actions should land here first, and existing matches
-//! should migrate over time (preferably one action per commit so the
-//! diff stays readable).
-
 use std::collections::HashMap;
 use std::str::FromStr;
 
@@ -33,11 +5,6 @@ use crokey::KeyCombination;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde::{Deserialize, Deserializer};
 
-/// where a binding is active.
-///
-/// this mode/scoped shape is inspired by zellij's keybind model: each
-/// input mode has its own key table, with shared bindings layered on
-/// top where useful.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum KeyScope {
     Shared,
@@ -129,85 +96,38 @@ pub fn has_alt(key: KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::ALT)
 }
 
-/// a single named action the user can rebind. keep this enum alphabetised
-/// so the config key space stays predictable.
-///
-/// when adding a new variant: give it a default in [`KeyMap::default`] and
-/// migrate the matching key-event match in `input.rs` to call
-/// [`KeyMap::matches`] instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Action {
-    /// cycle forward through favourite models. default binding: `alt-m`
     CycleFavourite,
-    /// cycle backward through favourite models. default binding: `alt-shift-m`
     CycleFavouriteBackward,
-    /// cancel the current overlay or abort re-anchored busy output.
-    /// default bindings: `esc`, `ctrl-[`
     Cancel,
-    /// cycle through thinking levels (off → low → medium → high → xhigh).
-    /// default binding: `ctrl-t`
     CycleThinkingLevel,
     Confirm,
     CursorDown,
-    /// move the input cursor to the end of the line. default bindings:
-    /// `end`, `ctrl-e`
     CursorLineEnd,
-    /// move the input cursor to the start of the line. default bindings:
-    /// `home`, `ctrl-a`
     CursorLineStart,
-    /// move the input cursor one character left. default bindings:
-    /// `left`, `ctrl-b`
     CursorLeft,
-    /// move the input cursor one character right. default binding: `right`
     CursorRight,
-    /// move the input cursor one word left. default bindings:
-    /// `alt-left`, `ctrl-left`, `alt-b`
     CursorWordLeft,
-    /// move the input cursor one word right. default bindings:
-    /// `alt-right`, `ctrl-right`, `alt-f`
     CursorWordRight,
     CursorUp,
-    /// pop the last queued steering message back into the input for
-    /// editing. default bindings: `alt-k`, `up`, `ctrl-k` (the latter
-    /// two only fire when the input is empty)
     EditSteering,
-    /// enter fullscreen search mode. default binding: `ctrl-f`
     EnterSearch,
-    /// paste an image from the system clipboard. default binding: `ctrl-v`
     PasteImage,
-    /// clear input, abort a busy turn, or arm/confirm quit. default
-    /// binding: `ctrl-c`
     QuitOrAbort,
-    /// delete the word before the cursor. default bindings:
-    /// `ctrl-backspace`, `alt-backspace`, `ctrl-w`
     DeleteWordBackward,
-    /// delete the word after the cursor. default binding: `alt-d`
     DeleteWordForward,
-    /// delete the character under the cursor, or quit when the input is
-    /// empty. default binding: `ctrl-d`
     DeleteCharOrQuit,
-    /// delete from cursor to end of line. default binding: `ctrl-k`
     DeleteToEnd,
-    /// delete from cursor to start of line. default binding: `ctrl-u`
     DeleteToStart,
-    /// insert a literal newline in the input. default bindings:
-    /// `alt-enter`, `shift-enter`, `ctrl-j`
     InsertNewline,
     NavigateBottom,
     NavigateTop,
     NextItem,
     PreviousItem,
-    /// toggle the session picker between this directory and all
-    /// directories. default binding: `tab`
     SessionPickerToggleScope,
-    /// arm deletion for every stale model in the model picker. default
-    /// bindings: `ctrl-shift-d`, `alt-d`
     ModelPickerDeleteAllStale,
-    /// arm deletion for the selected stale model in the model picker.
-    /// default binding: `ctrl-d`
     ModelPickerDeleteSelectedStale,
-    /// toggle favourite for the selected model in the model picker.
-    /// default binding: `ctrl-f`
     ModelPickerToggleFavourite,
     SearchNext,
     SearchPrev,
@@ -215,7 +135,6 @@ pub enum Action {
 }
 
 impl Action {
-    /// toml-key form: the snake_case string users write in config.toml
     pub const fn config_key(self) -> &'static str {
         match self {
             Self::CycleFavourite => "cycle_favourite",
@@ -255,7 +174,6 @@ impl Action {
         }
     }
 
-    /// every variant, for iteration in default population and tests
     pub const ALL: &'static [Self] = &[
         Self::CycleFavourite,
         Self::CycleFavouriteBackward,
@@ -294,7 +212,6 @@ impl Action {
     ];
 }
 
-/// zero or more key combinations bound to a single action
 #[derive(Debug, Clone, Default)]
 pub struct Binding(pub Vec<KeyCombination>);
 
@@ -304,20 +221,11 @@ impl Binding {
         Self(vec![combo])
     }
 
-    /// parse "alt+k" / "alt-k" / ["esc", "ctrl+["] style strings into
-    /// a binding. the vscode-style `+` separator is normalised to `-`
-    /// before handing off to crokey so both flavours work
     pub fn parse_one(raw: &str) -> Result<KeyCombination, crokey::ParseKeyError> {
         let normalised = raw.replace('+', "-");
         crokey::parse(&normalised)
     }
 
-    /// does this binding fire for the given key event?
-    ///
-    /// both the incoming event and the stored combos are run through
-    /// crokey's `normalized()` first so `shift+m` vs uppercase `M`
-    /// differences between config syntax and crossterm's delivery
-    /// don't cause spurious misses
     #[must_use]
     pub fn matches(&self, key: KeyEvent) -> bool {
         let combo = KeyCombination::from(key).normalized();
@@ -325,8 +233,6 @@ impl Binding {
     }
 }
 
-/// a string or list-of-strings that deserialises into a `Binding`.
-/// this is the wire format users see in config.toml
 #[derive(Debug, Clone, Deserialize, serde::Serialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum BindingSource {
@@ -345,15 +251,12 @@ impl BindingSource {
     }
 }
 
-/// the full keymap: scope → action → binding
 #[derive(Debug, Clone)]
 pub struct KeyMap {
     bindings: HashMap<KeyScope, HashMap<Action, Binding>>,
 }
 
 impl KeyMap {
-    /// lookup the binding for an action. always returns Some for known
-    /// actions because defaults are populated at construction time
     #[must_use]
     pub fn binding(&self, action: Action) -> Option<&Binding> {
         self.binding_in(default_scope_for_action(action), action)
@@ -370,8 +273,6 @@ impl KeyMap {
         })
     }
 
-    /// binding registered for exactly this scope, with no fallback to
-    /// `Shared`. only the defaults dump and its guard need this
     #[must_use]
     pub(crate) fn binding_in_exact(&self, scope: KeyScope, action: Action) -> Option<&Binding> {
         self.bindings
@@ -379,7 +280,6 @@ impl KeyMap {
             .and_then(|bindings| bindings.get(&action))
     }
 
-    /// does the key event fire the given action?
     #[must_use]
     pub fn matches(&self, action: Action, key: KeyEvent) -> bool {
         self.matches_in(default_scope_for_action(action), action, key)
@@ -459,19 +359,11 @@ const fn default_scope_for_action(action: Action) -> KeyScope {
     }
 }
 
-/// one key combination in the defaults table
 type DefaultCombo = (KeyCode, KeyModifiers);
 
-/// one row of the defaults table: which action fires in which scope, and
-/// on which combinations
 type DefaultBinding = (KeyScope, Action, &'static [DefaultCombo]);
 
-/// the default keybindings, as data. the whole table is walked once at
-/// construction, so adding a binding means adding a row
 const DEFAULT_BINDINGS: &[DefaultBinding] = &[
-    // edit_steering: alt-k always, plus up / ctrl-k as aliases for when
-    // the input is empty (the empty check lives at the call site, not in
-    // the binding itself)
     (
         KeyScope::Normal,
         Action::EditSteering,
@@ -494,9 +386,6 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
         Action::CycleFavourite,
         &[(KeyCode::Char('m'), KeyModifiers::ALT)],
     ),
-    // crossterm delivers shift-m as KeyCode::Char('M') with the ALT
-    // modifier set (no explicit SHIFT), so that's how the binding must be
-    // declared to match incoming events
     (
         KeyScope::Normal,
         Action::CycleFavouriteBackward,
@@ -756,8 +645,6 @@ pub struct ScopedKeysConfig {
     pub scopes: HashMap<String, HashMap<String, BindingSource>>,
 }
 
-/// config-side type used by `KeysConfig` below. users put scoped tables
-/// under `[keys]`, such as `[keys.normal]` and `[keys.model_picker]`.
 #[derive(Debug, Default, Clone, serde::Serialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct KeysConfig {
@@ -852,9 +739,6 @@ mod tests {
 
     #[test]
     fn parse_one_accepts_vscode_plus_syntax() {
-        // config accepts vscode-style `+` as well as crokey's upstream
-        // `-`. the normalisation in parse_one means both land on the
-        // same KeyCombination
         let dash = Binding::parse_one("alt-k").unwrap();
         let plus = Binding::parse_one("alt+k").unwrap();
         assert_eq!(dash, plus);
@@ -890,16 +774,12 @@ mod tests {
         let alt_shift_m = KeyEvent::new(KeyCode::Char('M'), KeyModifiers::ALT);
         assert!(map.matches(Action::CycleFavourite, alt_m));
         assert!(map.matches(Action::CycleFavouriteBackward, alt_shift_m));
-        // not cross-bound
         assert!(!map.matches(Action::CycleFavourite, alt_shift_m));
         assert!(!map.matches(Action::CycleFavouriteBackward, alt_m));
     }
 
     #[test]
     fn default_keymap_has_toggle_actions() {
-        // ctrl+t used to be hardcoded in input.rs and is now
-        // configurable so users can rebind it without editing the
-        // source. defaults stay the same as before
         let map = KeyMap::default();
         assert!(map.matches(
             Action::CycleThinkingLevel,
@@ -1002,10 +882,8 @@ mod tests {
         );
         let warnings = map.override_scoped(&raw);
         assert!(warnings.is_empty(), "no warnings expected: {warnings:?}");
-        // the default triggers no longer match
         let alt_k = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::ALT);
         assert!(!map.matches(Action::EditSteering, alt_k));
-        // the override does
         let ctrl_e = KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL);
         assert!(map.matches(Action::EditSteering, ctrl_e));
     }
@@ -1109,8 +987,6 @@ mod tests {
 
     #[test]
     fn action_config_keys_are_unique_and_snake_case() {
-        // each action must have its own key, and the keys should be
-        // snake_case so TOML parsing without quotes works
         let mut seen = std::collections::HashSet::new();
         for action in Action::ALL {
             let key = action.config_key();
@@ -1130,9 +1006,6 @@ mod tests {
 mod default_table_snapshot {
     use super::*;
 
-    /// every default binding, flattened and sorted, as one string.
-    /// used as a characterisation guard when the defaults table changes
-    /// shape: the dump has to stay byte-identical
     fn dump(map: &KeyMap) -> String {
         let mut rows: Vec<String> = Vec::new();
         for scope in KeyScope::ALL {

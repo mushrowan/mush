@@ -107,7 +107,6 @@ async fn handle_streaming_iteration(
     let terminal_action;
     let mut tick_changed = false;
 
-    // wait for either an agent event or the frame tick
     tokio::select! {
         result = agent_streams.next() => {
             let drain_started = std::time::Instant::now();
@@ -119,8 +118,6 @@ async fn handle_streaming_iteration(
                 runtime.tick_streaming_text_panes();
             }
 
-            // drain all immediately-available events within this frame
-            // so we don't redraw between each one
             let mut drained_events = 0usize;
             loop {
                 if !should_continue_agent_drain(
@@ -144,15 +141,6 @@ async fn handle_streaming_iteration(
                 }
             }
 
-            // also drain any queued terminal events here so a resize
-            // arriving during a streaming burst gets its side-effects
-            // processed promptly (size cache invalidation, scroll
-            // baseline reset). without this the tick arm starves while
-            // agent events keep winning the select, and Event::Resize
-            // sits unprocessed for the duration of the burst. the
-            // SIGWINCH-driven cache flag covers ratatui's autoresize
-            // independently, but other resize side-effects still need
-            // the queued event to be drained
             let (session, mut deps) = input_parts(runtime, tui_config, registry, image_picker, size_cache);
             let action = handle_streaming_terminal_events(session, stream_state, &mut deps).await?;
             if matches!(action, LoopAction::Quit) {
@@ -250,7 +238,6 @@ fn trace_draw_reason(reason: &'static str) {
     tracing::trace!(target: "mush_tui::draw_reason", reason, "draw requested");
 }
 
-/// process a single agent event (extracted for reuse in drain loop)
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_agent_event(
     pane_id: mush_ai::types::PaneId,
@@ -262,7 +249,6 @@ async fn dispatch_agent_event(
     registry: &ApiRegistry,
     image_picker: &Option<ratatui_image::picker::Picker>,
 ) {
-    // drop events from stale streams (aborted or superseded)
     if !stream_state.is_current(pane_id, stream_gen) {
         return;
     }
@@ -298,10 +284,6 @@ async fn dispatch_agent_event(
     )
     .await;
 
-    // tools that touch /dev/tty (bash running `stty sane`, `reset`,
-    // a pager popping kitty kbd flags, etc) silently strip the modes
-    // we enabled at startup. restore them on every tool-end so the
-    // next redraw loop has a sane terminal underneath it
     if let AgentEvent::ToolExecEnd { tool_name, .. } = &event
         && tool_exec_may_touch_tty(tool_name.as_str())
     {
@@ -309,16 +291,10 @@ async fn dispatch_agent_event(
     }
 }
 
-/// tools whose execution can legitimately mutate the real tty state
-/// (via `/dev/tty` writes or child processes that take over input).
-/// keep this list narrow so we don't thrash the terminal after every
-/// tool call; bash is the only current offender worth handling
 fn tool_exec_may_touch_tty(tool_name: &str) -> bool {
     tool_name == "bash"
 }
 
-/// settle any oauth browser login whose callback has arrived, refreshing
-/// the model catalogue when one landed. returns whether anything changed
 async fn drain_browser_logins(
     session: &mut crate::session::Session,
     tui_config: &TuiConfig,
@@ -334,10 +310,6 @@ async fn drain_browser_logins(
     drained.settled
 }
 
-/// pull any freshly-loaded session metadata into each pane's picker
-/// state. the /sessions slash command kicks off a thread that parses
-/// session files off the event loop; the results land here on the next
-/// tick so the overlay populates progressively
 fn drain_session_picker(session: &mut crate::session::Session) -> bool {
     let mut changed = false;
     for pane in std::slice::from_mut(session) {

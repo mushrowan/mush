@@ -51,13 +51,9 @@ pub(super) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("quit", "exit mush"),
 ];
 
-/// how often the TUI calls into the usage poller (the poller itself
-/// has its own internal cache interval for actual HTTP requests)
 const USAGE_POLL_TICK: std::time::Duration = std::time::Duration::from_secs(60);
 
 pub enum DiscoveryUpdate {
-    /// startup discovery finished. reload the model catalogue for the
-    /// pickers. the summary line is only logged, not shown in the ui.
     Refreshed,
 }
 
@@ -68,10 +64,6 @@ pub(super) struct RunnerRuntime {
     pub thinking_saver: Option<ThinkingPrefsSaver>,
     pub lifecycle_hooks: mush_agent::LifecycleHooks,
     pub pending_prompt: Option<String>,
-    /// background compaction tasks keyed by pane. spawned by /compact
-    /// and /fork-compact so the LLM call doesn't block the input loop;
-    /// `poll_pending_compactions` finalises them on subsequent
-    /// iterations. one per pane (panes are independent contexts).
     pub pending_compactions: HashMap<PaneId, PendingCompaction>,
     usage_rx: Option<tokio::sync::mpsc::UnboundedReceiver<mush_ai::oauth::usage::OAuthUsage>>,
     _config_watcher: Option<RecommendedWatcher>,
@@ -108,7 +100,6 @@ impl RunnerRuntime {
 
         let (_config_watcher, config_rx) = watch_config(tui_config.config_path.as_ref());
 
-        // create usage poller if anthropic oauth credentials exist
         let usage_poller = tui_config.http_client.as_ref().and_then(|client| {
             mush_ai::oauth::load_credentials()
                 .ok()
@@ -213,11 +204,6 @@ impl RunnerRuntime {
             .collect()
     }
 
-    /// finalise any background compaction tasks whose LLM call has
-    /// returned. called once per main-loop iteration; returns `true` if
-    /// at least one task completed (so the caller can force a redraw).
-    /// tasks for panes that were closed during the compaction are
-    /// silently dropped.
     pub(super) async fn poll_pending_compactions(&mut self, tui_config: &TuiConfig) -> bool {
         let finished: Vec<PaneId> = self
             .pending_compactions
@@ -263,10 +249,6 @@ impl RunnerRuntime {
                         &mut pane.conversation,
                         result,
                     );
-                    // replay anything the user submitted while compaction
-                    // was running. multiple submits collapse into one combined
-                    // user turn so the agent sees a coherent prompt rather
-                    // than firing N back-to-back turns
                     replay_compaction_inputs(pane);
                     true
                 }
@@ -282,10 +264,6 @@ impl RunnerRuntime {
             }
         };
 
-        // a successful compaction rewrites the LLM context but, unlike a
-        // normal agent turn, isn't followed by an AgentEnd save. without
-        // persisting here the collapsed history is lost if the user quits
-        // before the next agent turn
         if applied && let Some(saver) = &tui_config.save_session {
             saver(streams::build_session_snapshot(&self.session, tui_config));
         }
@@ -321,7 +299,6 @@ impl RunnerRuntime {
         }
     }
 
-    /// drain completed oauth usage updates and distribute to all panes
     pub(super) fn poll_usage(&mut self) -> bool {
         let Some(rx) = &mut self.usage_rx else {
             return false;
@@ -365,11 +342,6 @@ fn spawn_usage_poller(
     rx
 }
 
-/// take any inputs queued during compaction and turn them into a
-/// fresh user turn. multiple queued submits collapse to one combined
-/// message (texts joined with blank lines, images concatenated in
-/// order) so the agent sees one coherent prompt instead of being
-/// pinged repeatedly. no-op when nothing was queued.
 pub(super) fn replay_compaction_inputs(pane: &mut Session) {
     let drained = pane.drain_compaction_inputs();
     if drained.is_empty() {
@@ -391,9 +363,6 @@ pub(super) fn replay_compaction_inputs(pane: &mut Session) {
     }
     pane.app.active_tools.clear();
     pane.app.start_streaming();
-    // take_pending_prompts drains every pane's slot, so setting just
-    // this pane's slot is enough; no need to thread the focused
-    // override through here
     pane.pending_prompt = Some(crate::session::PendingPrompt::with_images(combined, images));
 }
 
@@ -489,10 +458,6 @@ fn replay_conversation(app: &mut App, conversation: ConversationState) -> Conver
         return conversation;
     }
 
-    // render the full branch (whole scrollback), but reconstruct stats
-    // from the collapsed context so the token counters match what the LLM
-    // actually sees. the tree is returned intact so `/branch` and `/tree`
-    // still work after resume
     let history = conversation.display_history();
     crate::conversation_display::rebuild_display(app, &history);
     crate::conversation_display::accumulate_session_stats(app, &conversation.context());
@@ -587,10 +552,6 @@ mod tests {
 
     #[test]
     fn build_initial_app_zeroes_cache_ttl_when_model_lacks_caching() {
-        // a model with no cache_read/cache_write pricing has no prompt
-        // caching available upstream. the cache warmth timer would just
-        // count down nothing, so we suppress it by zeroing ttl_secs even
-        // when the user has cache_timer enabled in their config
         let mut config = test_config();
         config.model.cost.cache_read = 0.0;
         config.model.cost.cache_write = 0.0;
@@ -600,10 +561,6 @@ mod tests {
 
     #[test]
     fn build_initial_app_seeds_serving_provider_for_direct_routes() {
-        // direct routes know their serving provider up-front so the
-        // cache timer should reflect the correct per-provider TTL
-        // immediately. an openai model on the direct openai route
-        // should get the openai-specific TTL (10m), not the default
         let mut config = test_config();
         config.model.provider = Provider::Custom("openai".into());
         config.model.cost.cache_read = 1.25;
@@ -615,14 +572,12 @@ mod tests {
 
     #[test]
     fn build_initial_app_does_not_seed_serving_provider_for_openrouter() {
-        // openrouter routes start unknown until /generation reconciles
         let mut config = test_config();
         config.model.provider = Provider::OpenRouter;
         config.model.cost.cache_read = 0.3;
         config.model.cost.cache_write = 3.75;
         let app = build_initial_app(&config, Path::new("."));
         assert!(app.cache.last_serving_provider.is_none());
-        // openrouter default fallback (300s) since no learned provider
         assert_eq!(app.cache.ttl_secs, 300);
     }
 
@@ -643,11 +598,6 @@ mod tests {
         assert_eq!(app.status.as_deref(), Some("resumed session (2 messages)"));
     }
 
-    /// resuming a compacted session restores the full pre-compaction
-    /// scrollback (not just the collapsed summary) while keeping the LLM
-    /// context collapsed and the tree navigable. previously resume rebuilt
-    /// everything from `session.context()`, so the scrollback vanished and
-    /// `/branch` / `/tree` could not reach pre-compaction state.
     #[test]
     fn replay_conversation_restores_full_scrollback_after_compaction() {
         use mush_session::ConversationState;
@@ -666,9 +616,7 @@ mod tests {
         let mut app = build_initial_app(&config, Path::new("."));
         let resumed = replay_conversation(&mut app, source);
 
-        // LLM context stays collapsed
         assert_eq!(resumed.context().len(), collapsed_len);
-        // display restores the whole scrollback (24 messages + banner)
         assert!(
             app.messages.len() > collapsed_len,
             "resume must restore the full scrollback, got {} display rows vs {collapsed_len} collapsed",
@@ -681,7 +629,6 @@ mod tests {
                     && m.content.contains("compacted summary")),
             "the compaction banner should be shown"
         );
-        // the tree survives so /branch and /tree still work
         assert!(
             resumed
                 .tree()
@@ -694,10 +641,6 @@ mod tests {
 
     #[test]
     fn replay_compaction_inputs_collapses_into_single_streaming_turn() {
-        // post-compaction the runtime turns every queued submit into a
-        // fresh user turn. multiple texts join with a blank-line gap,
-        // queued bubbles disappear, streaming starts, and pending_prompt
-        // gets the combined string so the runner picks it up next loop
         let app = App::new("test".into(), TokenCount::new(200_000));
         let mut pane = Session::new(app);
         pane.queue_input_during_compaction("first thought".into(), vec![]);
@@ -714,8 +657,6 @@ mod tests {
                 .map(|prompt| prompt.text.as_str()),
             Some("first thought\n\nsecond thought")
         );
-        // the combined prompt should have been pushed as a real (non-
-        // queued) user message so it lands in conversation history
         assert!(
             pane.app
                 .messages
@@ -726,8 +667,6 @@ mod tests {
 
     #[test]
     fn replay_compaction_inputs_is_noop_when_nothing_queued() {
-        // common case: user waited out compaction without typing.
-        // nothing should fire, nothing should change
         let app = App::new("test".into(), TokenCount::new(200_000));
         let mut pane = Session::new(app);
 
@@ -791,11 +730,6 @@ mod tests {
 
     #[test]
     fn applied_compaction_persists_session() {
-        // a successful background `/compact` rewrites the LLM context but
-        // isn't followed by an agent turn, so handle_compaction_task_result
-        // must persist the session itself. otherwise the collapsed history
-        // is lost when the user quits before the next turn (and on resume
-        // the compaction "disappears")
         use std::sync::{Arc, Mutex};
 
         let mut msgs = Vec::new();

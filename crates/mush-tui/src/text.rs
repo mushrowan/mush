@@ -1,13 +1,3 @@
-//! shared text helpers for rendering previews
-//!
-//! keep width-aware truncation logic here so display code stays declarative
-//! and consistent about what "truncated" looks like
-
-/// truncate `s` to at most `max_width` terminal cells, appending `…`
-/// when truncation happened. returns an owned string in both cases for
-/// simple call sites
-///
-/// panics if `max_width == 0` because there's no room for even the `…`
 #[must_use]
 pub fn truncate_with_ellipsis(s: &str, max_width: usize) -> String {
     use ratatui::buffer::CellWidth;

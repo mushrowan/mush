@@ -1,11 +1,5 @@
-//! where the redrawn part of the inline ui sits on screen
-
 use ratatui::layout::{Rect, Size};
 
-/// the block at the bottom of the screen that mush redraws each frame.
-///
-/// settled history is printed above it and then belongs to the terminal,
-/// so the region tracks only its own top row and height
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LiveRegion {
     screen: Size,
@@ -33,23 +27,17 @@ impl LiveRegion {
         self.screen
     }
 
-    /// the last row of the screen, where a newline scrolls
     #[must_use]
     pub fn bottom_row(&self) -> u16 {
         self.screen.height.saturating_sub(1)
     }
 
-    /// put the block back where it was on a screen of a different size,
-    /// unplaced, so the next frame draws it from scratch
     pub fn reset(&mut self, screen: Size) {
         self.screen = screen;
         self.top = self.top.min(self.bottom_row());
         self.height = 0;
     }
 
-    /// put a block `height` tall below `lines` of history just printed at
-    /// the top of the old one, and say how far the caller still has to
-    /// scroll the screen to fit it
     pub fn advance(&mut self, lines: u16, height: u16) -> u16 {
         let cursor = self.top.saturating_add(lines).min(self.bottom_row());
         self.height = height.min(self.screen.height);
@@ -81,8 +69,6 @@ mod tests {
         region.advance(20, 4);
         assert_eq!(region.area(), Rect::new(0, 20, 80, 4));
 
-        // printing five lines from row 20 scrolled the screen twice on
-        // its own, and the block is still three rows short
         assert_eq!(region.advance(5, 4), 3);
         assert_eq!(region.area(), Rect::new(0, 20, 80, 4));
     }
@@ -93,11 +79,9 @@ mod tests {
         region.advance(10, 4);
         assert_eq!(region.area(), Rect::new(0, 10, 80, 4));
 
-        // rows 10..18 are free, so it grows in place
         assert_eq!(region.advance(0, 8), 0);
         assert_eq!(region.area(), Rect::new(0, 10, 80, 8));
 
-        // 20 rows from row 10 overshoots the screen by 6
         assert_eq!(region.advance(0, 20), 6);
         assert_eq!(region.area(), Rect::new(0, 4, 80, 20));
     }
@@ -112,10 +96,6 @@ mod tests {
     }
 }
 
-/// tripwires on the ratatui gaps that make mush own the history writes.
-///
-/// each one passes while the gap is open and fails when upstream closes
-/// it, so a version bump forces us back here to delete code
 #[cfg(test)]
 mod upstream_gaps {
     use ratatui::backend::TestBackend;
@@ -124,8 +104,6 @@ mod upstream_gaps {
     use ratatui::widgets::Widget;
     use ratatui::{Terminal, TerminalOptions, Viewport};
 
-    /// when this fails, drop `Scrollback`'s own emission and call
-    /// `insert_before`
     #[test]
     fn insert_before_ignores_a_fixed_viewport() {
         let mut terminal = Terminal::with_options(

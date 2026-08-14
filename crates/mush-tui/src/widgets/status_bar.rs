@@ -1,5 +1,3 @@
-//! status bar widget - model info, cost, token usage
-
 use ratatui::buffer::{Buffer, CellDiffOption, CellWidth};
 use ratatui::layout::{Constraint, HorizontalAlignment, Layout, Rect};
 use ratatui::text::{Line, Span};
@@ -28,7 +26,6 @@ pub(crate) fn left_spans_call_count() -> usize {
     LEFT_SPANS_CALLS.with(Cell::get)
 }
 
-/// format token count as human-readable (e.g. 45k, 200k, 1.2m)
 fn format_tokens(tokens: mush_ai::types::TokenCount) -> String {
     let n = tokens.get();
     if n >= 1_000_000 {
@@ -40,7 +37,6 @@ fn format_tokens(tokens: mush_ai::types::TokenCount) -> String {
     }
 }
 
-/// get the confirm prompt text (only shown during tool confirmation)
 fn confirm_text(app: &App) -> Option<String> {
     if app.interaction.mode != crate::app::AppMode::ToolConfirm {
         return None;
@@ -52,7 +48,6 @@ fn confirm_text(app: &App) -> Option<String> {
     })
 }
 
-/// width of the usage bars in the status bar. scales with window size
 fn usage_bar_width(total_width: u16) -> usize {
     if total_width >= 140 {
         20
@@ -65,21 +60,6 @@ fn usage_bar_width(total_width: u16) -> usize {
     }
 }
 
-/// builder that enforces consistent inter-section padding for
-/// the status bar's left side.
-///
-/// usage:
-///
-/// - `push_section(content)` starts a new logical section, prefixing
-///   ` │ ` between it and the previous section (no-op for the first
-///   section)
-/// - `push_inline(span)` appends a span to the current section
-///   without inserting a divider, used for items like ` ↑45k` and
-///   ` $1.23` that visually belong with the preceding info
-///
-/// the divider style is pinned to `theme.input_border` so the pipe
-/// tees cleanly into the input box's bottom border instead of looking
-/// like a stray bright glyph.
 struct StatusSpansBuilder {
     spans: Vec<Span<'static>>,
     sep: Span<'static>,
@@ -89,32 +69,23 @@ struct StatusSpansBuilder {
 impl StatusSpansBuilder {
     fn new(theme: &crate::theme::Theme) -> Self {
         Self {
-            // leading 1-col pad mirrors the trailing pad on the cwd
-            // side so the whole bar has symmetric edge padding
             spans: vec![Span::styled(" ", theme.dim)],
             sep: Span::styled(" │ ", theme.input_border),
             has_content: false,
         }
     }
 
-    /// start a new section. inserts ` │ ` if any prior section pushed
-    /// content, otherwise no-op
     fn section_break(&mut self) {
         if self.has_content {
             self.spans.push(self.sep.clone());
         }
     }
 
-    /// push a single span as part of the current section. callers
-    /// should call `section_break()` before the first span of a new
-    /// section; subsequent spans within the same section just call
-    /// `push_inline`
     fn push_inline(&mut self, span: Span<'static>) {
         self.spans.push(span);
         self.has_content = true;
     }
 
-    /// extend with multiple spans within the current section
     fn extend_inline(&mut self, spans: impl IntoIterator<Item = Span<'static>>) {
         for span in spans {
             self.push_inline(span);
@@ -131,7 +102,6 @@ struct LeftStatus {
     cache_timer_text: Option<String>,
 }
 
-/// build the left-side info spans
 fn left_status(app: &App, width: u16) -> LeftStatus {
     #[cfg(test)]
     LEFT_SPANS_CALLS.with(|c| c.set(c.get() + 1));
@@ -144,9 +114,6 @@ fn left_status(app: &App, width: u16) -> LeftStatus {
     let mut b = StatusSpansBuilder::new(&app.theme);
     let mut cache_timer_text = None;
 
-    // first section: pane indicator (if multi-pane) + model. these
-    // sit together with no divider between them so the indicator
-    // reads as a prefix on the model name
     if app.interaction.status_bar.show_pane_indicator
         && let Some((pane_idx, pane_count)) = app.pane_info
     {
@@ -172,8 +139,6 @@ fn left_status(app: &App, width: u16) -> LeftStatus {
         ));
     }
 
-    // token counters: inline within the previous section so they
-    // visually attach to the model/thinking info
     if app.interaction.show_token_counters {
         if app.stats.input_tokens > TokenCount::ZERO {
             b.push_inline(Span::styled(
@@ -209,14 +174,11 @@ fn left_status(app: &App, width: u16) -> LeftStatus {
             .context_tokens
             .percent_of(app.stats.context_window) as u64;
 
-        // colour by cache warmth, with context pressure overriding
         let cache_remaining = app.cache.remaining_secs();
         let cache_tiers = cache_warning_display_for_app(app);
         let ctx_style = if pct > 75 {
-            // context pressure always takes priority
             app.theme.context_danger
         } else if app.cache.ttl_secs == 0 {
-            // caching disabled for this provider/retention
             dim
         } else {
             match cache_remaining {
@@ -241,11 +203,9 @@ fn left_status(app: &App, width: u16) -> LeftStatus {
     }
 
     if app.interaction.show_cost && app.stats.total_cost > Dollars::ZERO {
-        // cost stays inline with the previous section for compactness
         b.push_inline(Span::styled(format!(" {}", app.stats.total_cost), dim));
     }
 
-    // oauth usage bars
     if app.interaction.status_bar.show_oauth_usage
         && app.oauth_usage_provider.as_deref() == Some("anthropic")
         && app.model_id.as_str().contains("claude")
@@ -277,9 +237,6 @@ fn left_status(app: &App, width: u16) -> LeftStatus {
     }
 
     if app.interaction.status_bar.show_status_messages {
-        // activity label takes priority over ephemeral hints during a
-        // turn so the status reflects what the agent is actually doing.
-        // when idle, the ephemeral status (if any) shows in its place
         if let Some(label) = app.activity_label() {
             b.section_break();
             b.extend_inline(crate::widgets::shimmer::shimmer_spans(
@@ -296,9 +253,6 @@ fn left_status(app: &App, width: u16) -> LeftStatus {
         }
     }
 
-    // scroll mode indicator
-
-    // background pane alerts
     if app.interaction.status_bar.show_background_alerts
         && let Some(ref alert) = app.background_alert
     {
@@ -387,11 +341,6 @@ fn cache_warning_display_for_app(app: &crate::app::App) -> Option<String> {
     )
 }
 
-/// ensure `app.render_state.status_bar_cache` is populated for `width`.
-///
-/// reuses the cache if the width matches. the cache is cleared by
-/// `draw_panes` at the start of each frame so state changes can't
-/// leak between frames
 fn ensure_status_bar_cache(app: &App, width: u16) {
     {
         let slot = app.render_state.status_bar_cache.borrow();
@@ -405,9 +354,6 @@ fn ensure_status_bar_cache(app: &App, width: u16) {
     let left_status = left_status(app, width);
     let spans = left_status.spans;
     let cache_timer_text = left_status.cache_timer_text;
-    // trailing space on the right side matches the leading space on the
-    // left (`Span::styled(" ", dim)` in left_spans) so the whole bar has
-    // symmetric 1-col padding instead of flush-right cwd
     let right_text = if app.interaction.status_bar.show_cwd {
         format!("{} ", truncate_path(&app.cwd, 30))
     } else {
@@ -444,8 +390,6 @@ fn spans_cell_width(spans: &[Span<'_>]) -> usize {
         .sum()
 }
 
-/// calculate how many lines the status bar needs (1 or 2, +1 for confirm prompt).
-/// the render pass uses the same logic to pack overflow spans onto a second line
 pub fn status_bar_height(app: &App, width: u16) -> u16 {
     ensure_status_bar_cache(app, width);
     app.render_state
@@ -456,7 +400,6 @@ pub fn status_bar_height(app: &App, width: u16) -> u16 {
         .unwrap_or(1)
 }
 
-/// renders the status bar
 pub struct StatusBar<'a> {
     app: &'a App,
 }
@@ -477,7 +420,6 @@ impl Widget for StatusBar<'_> {
             return;
         };
 
-        // split area: optional confirm line at the bottom, main area above
         let (main, confirm_area) = if let Some(confirm_str) = data.confirm.as_ref() {
             let [main, conf] =
                 Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
@@ -486,21 +428,15 @@ impl Widget for StatusBar<'_> {
             (area, None)
         };
 
-        // split main into left (wrapping content) and right (cwd, single line).
-        // right column has fixed width = cwd display width + 1 space gap, shrinks if needed.
-        // `…` (from truncate_path) and any unicode path components use display width
         let right_width = (data.right_text.as_str().cell_width() + 1).min(main.width / 2);
         let [left_area, right_area] =
             Layout::horizontal([Constraint::Min(1), Constraint::Length(right_width)]).areas(main);
 
-        // left: wrap spans across lines automatically using Paragraph::wrap.
-        // trim:false so our leading space (Span::raw(" ")) is preserved
         let left_paragraph =
             Paragraph::new(Line::from(data.spans.clone())).wrap(Wrap { trim: false });
         left_paragraph.render(left_area, buf);
         mark_cache_timer_cells(data.cache_timer_text.as_deref(), left_area, buf);
 
-        // right: right-align cwd on the first line of the right column
         if right_width > 0 {
             Paragraph::new(Line::from(vec![Span::styled(
                 data.right_text.clone(),
@@ -510,7 +446,6 @@ impl Widget for StatusBar<'_> {
             .render(right_area, buf);
         }
 
-        // confirm prompt on its own line at the bottom
         if let Some((conf_area, text)) = confirm_area {
             Paragraph::new(Line::from(vec![
                 Span::styled(" ", dim),
@@ -595,9 +530,6 @@ mod tests {
 
     #[test]
     fn status_bar_hides_token_counters_by_default() {
-        // the ↑/↓/R/W counters are noisy for most users. context tokens
-        // and cache state are already shown via the ctx/window segment,
-        // so hide them unless opted in via `show_token_counters`
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.stats.input_tokens = TokenCount::new(45_000);
         app.stats.output_tokens = TokenCount::new(12_000);
@@ -667,9 +599,6 @@ mod tests {
 
     #[test]
     fn status_bar_activity_verb_overrides_status_message() {
-        // when both an ephemeral status hint and an activity are present,
-        // the activity wins because it's the more relevant signal during
-        // a turn
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.status = Some("press ctrl+c again to exit".into());
         app.start_streaming();
@@ -700,7 +629,6 @@ mod tests {
     #[test]
     fn status_bar_single_line_normally() {
         let app = App::new("test".into(), TokenCount::new(200_000));
-        // without hotkey hints, even narrow terminals should fit in 1 line
         assert_eq!(status_bar_height(&app, 80), 1);
         assert_eq!(status_bar_height(&app, 200), 1);
     }
@@ -716,12 +644,10 @@ mod tests {
         app.stats.context_tokens = TokenCount::new(45_000);
         app.interaction.show_cost = true;
         app.stats.total_cost = Dollars::new(0.1234);
-        // narrow width forces wrapping
         let height = status_bar_height(&app, 40);
         assert_eq!(height, 2, "expected 2 lines for narrow width");
         let buf = render_status(&app, 40, height);
         let content = buffer_to_string(&buf);
-        // content that exists should still be visible somewhere
         assert!(
             content.contains("45k") || content.contains("200k"),
             "expected wrapped content, got: {content}"
@@ -730,10 +656,6 @@ mod tests {
 
     #[test]
     fn status_bar_height_uses_display_width_not_byte_length() {
-        // regression: content.len() sums bytes, so multi-byte unicode chars
-        // like │ ↑ ↓ R W (3 bytes each, 1 column wide) overshoot the width
-        // check and force a spurious 2-line status bar. ratatui's Paragraph::wrap
-        // uses display width so only renders 1 line, leaving a blank second line
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.interaction.show_token_counters = true;
         app.stats.input_tokens = TokenCount::new(45_000);
@@ -751,8 +673,6 @@ mod tests {
             "test scenario must have multi-byte chars: display={display_width}, bytes={byte_length}"
         );
 
-        // pick a width that fits display + cwd but would trip the byte-length check.
-        // right column = cwd + 1 trailing pad space + 1 gap from left-column.
         let right_width = app.cwd.chars().count() + 1;
         let width = (display_width + 2 + right_width) as u16;
         let height = status_bar_height(&app, width);
@@ -829,13 +749,11 @@ mod tests {
             }),
             seven_day: None,
         });
-        // spans at wide width should include the default 20-cell bar
         let wide_spans = left_spans(&app, 200);
         let wide_bar_cells = wide_spans
             .iter()
             .filter(|s| s.content.as_ref() == "▀" || s.content.as_ref() == "░")
             .count();
-        // spans at narrow width should have fewer bar cells
         let narrow_spans = left_spans(&app, 60);
         let narrow_bar_cells = narrow_spans
             .iter()
@@ -860,7 +778,6 @@ mod tests {
         app.cache.refresh();
         let buf = render_status(&app, 120, 1);
         let content = buffer_to_string(&buf);
-        // should show "10k/200k 4:59" or similar
         assert!(content.contains("10k/200k"));
         assert!(content.contains(":"));
     }
@@ -913,10 +830,6 @@ mod tests {
 
     #[test]
     fn status_bar_hides_cold_when_cache_timer_disabled() {
-        // when ttl_secs == 0 the idle timer is off: we shouldn't claim the
-        // cache is "cold" because we aren't tracking warmth at all. prior
-        // behaviour: refresh() with ttl=0 set last_active=Some, remaining_secs
-        // returned Some(0), suffix rendered as " cold" during active use
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.cache.ttl_secs = 0;
         app.stats.context_tokens = TokenCount::new(10_000);
@@ -945,7 +858,6 @@ mod tests {
         app.stats.context_tokens = TokenCount::new(10_000);
         let buf = render_status(&app, 120, 1);
         let content = buffer_to_string(&buf);
-        // model │ thinking │ context
         assert!(content.contains("│"), "missing │ separator: {content}");
         assert!(
             content.contains("thinking:"),
@@ -955,13 +867,8 @@ mod tests {
 
     #[test]
     fn status_bar_dividers_use_input_border_style() {
-        // the `│` divider between segments should match the prompt-box
-        // border colour so they tee into the input box border cleanly
-        // (vs. the dimmer `theme.dim` style which renders a noticeably
-        // brighter pipe than the surrounding box border in some
-        // terminals)
         let mut app = App::new("test-model".into(), TokenCount::new(200_000));
-        app.interaction.status_bar.show_thinking = true; // ensure at least one divider
+        app.interaction.status_bar.show_thinking = true;
         let buf = render_status(&app, 120, 1);
 
         let mut found = None;
@@ -1104,8 +1011,6 @@ mod tests {
         terminal.backend().buffer().clone()
     }
 
-    /// full Ui render so the height + render paths hit together,
-    /// mirroring what `draw_panes` does every frame
     fn render_full_ui(app: &App, width: u16, height: u16) -> Buffer {
         use crate::ui::Ui;
         let backend = TestBackend::new(width, height);
@@ -1113,7 +1018,6 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = frame.area();
-                // mirror draw_panes: height + cursor_position + render
                 let _ = crate::widgets::status_bar::status_bar_height(app, area.width);
                 let _ = Ui::new(app).cursor_position(area);
                 frame.render_widget(Ui::new(app), area);
@@ -1156,9 +1060,6 @@ mod tests {
 
     #[test]
     fn status_bar_right_side_has_symmetric_trailing_padding() {
-        // left side starts with a 1-col leading pad (Span::styled(" ", dim)).
-        // to look visually balanced, the right edge should also leave 1 col
-        // of breathing room between the cwd text and the rightmost column
         let mut app = App::new("test-model".into(), TokenCount::new(200_000));
         app.cwd = "~/dev/mush".into();
         let buf = render_status(&app, 60, 1);

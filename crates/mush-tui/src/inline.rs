@@ -1,6 +1,3 @@
-//! the inline viewport: settled history the terminal owns, a live block
-//! mush redraws
-
 use std::io::{self, Write};
 
 use crossterm::QueueableCommand;
@@ -14,8 +11,6 @@ use crate::scrollback::{Scrollback, write_lines};
 use crate::ui::{is_modal, live_height};
 use crate::widgets::message_list::MessageStyle;
 
-/// drives one frame of the inline ui: what settled goes to the terminal,
-/// and the live block follows it down the screen
 #[derive(Debug)]
 pub struct Inline {
     scrollback: Scrollback,
@@ -23,8 +18,6 @@ pub struct Inline {
 }
 
 impl Inline {
-    /// `top` is the row the cursor is on, so the block opens below
-    /// whatever the shell left on screen
     #[must_use]
     pub fn new(screen: Size, top: u16) -> Self {
         Self {
@@ -33,22 +26,17 @@ impl Inline {
         }
     }
 
-    /// where the block sits now
     #[must_use]
     pub fn area(&self) -> Rect {
         self.region.area()
     }
 
-    /// keep the block on a screen this size, placing it again when the
-    /// size changed under it
     pub fn follow_screen(&mut self, screen: Size) {
         if screen != self.region.screen() {
             self.region.reset(screen);
         }
     }
 
-    /// hand the rest of the conversation over and clear the block, so
-    /// the shell prompt lands after the last message
     pub fn finish(&mut self, app: &App, out: &mut impl Write) -> io::Result<()> {
         let area = self.region.area();
         let lines = self.scrollback.take_rest(app, &style_of(app), area.width);
@@ -58,9 +46,6 @@ impl Inline {
         out.flush()
     }
 
-    /// print what settled since the last frame, and say where the live
-    /// block goes when it has to be redrawn from scratch: it moved, it
-    /// resized, or the screen scrolled out from under it
     pub fn settle(&mut self, app: &App, out: &mut impl Write) -> io::Result<Option<Rect>> {
         let before = self.region.area();
         let lines = self
@@ -168,8 +153,6 @@ mod tests {
 
     #[test]
     fn a_frame_that_scrolls_the_screen_asks_for_a_resize() {
-        // pinned against the bottom, so settled lines scroll the screen
-        // out from under ratatui's back buffer
         let mut inline = Inline::new(Size::new(40, 12), 0);
         let mut app = app_mid_turn();
         let (_, placed) = settle(&mut inline, &app);
@@ -271,7 +254,6 @@ mod tests {
         assert_eq!(area.unwrap().height, 40);
     }
 
-    /// bare newlines: the ones that scroll the screen rather than end a line
     fn scrolls(written: &str) -> usize {
         written.matches('\n').count() - written.matches("\r\n").count()
     }

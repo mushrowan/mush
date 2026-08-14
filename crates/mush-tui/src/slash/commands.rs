@@ -1,7 +1,3 @@
-//! slash command execution
-//!
-//! parse types live in the parent module, compaction in `compaction`
-
 use std::fmt::Write;
 
 use mush_ai::models;
@@ -15,7 +11,6 @@ use crate::text::truncate_with_ellipsis;
 
 use super::SlashAction;
 
-/// handle a slash command, returning Some(prompt) if it should trigger the agent
 pub fn handle(
     app: &mut App,
     conversation: &mut ConversationState,
@@ -118,19 +113,9 @@ pub fn handle(
             app.status = Some("conversation cleared".into());
             None
         }
-        SlashAction::New => {
-            // handled in runner/commands.rs where save_session is available
-            None
-        }
-        SlashAction::Reload => {
-            // handled in runner/commands.rs where the reload callback +
-            // pane manager are available
-            None
-        }
-        SlashAction::RefreshModels => {
-            // handled in runner/commands.rs where the http client is available
-            None
-        }
+        SlashAction::New => None,
+        SlashAction::Reload => None,
+        SlashAction::RefreshModels => None,
         SlashAction::Tree => {
             show_tree(app, conversation);
             None
@@ -155,10 +140,6 @@ pub fn handle(
                         .into_owned();
                     let (tx, rx) = std::sync::mpsc::channel();
                     app.open_session_picker_streaming(rx, cwd);
-                    // load metas off the event loop so the picker opens
-                    // instantly even with hundreds of saved sessions. the
-                    // task is best-effort: on send failure the picker
-                    // was closed and we drop out silently
                     std::thread::spawn(move || {
                         for path in paths {
                             if let Ok(meta) = mush_session::load_meta(&path)
@@ -176,11 +157,6 @@ pub fn handle(
         SlashAction::Resume { session_id } => {
             let store = mush_session::SessionStore::new(mush_session::SessionStore::default_dir());
 
-            // bare `/resume` resolves to the most recent session whose
-            // cwd matches the current process. comparing the raw paths
-            // is fine: SessionMeta.cwd is what was passed to Session::new
-            // (rendered via Display), so a TuiConfig built with the same
-            // path produces a string-equal value
             let target_id = match session_id {
                 Some(id) => Some(id.clone()),
                 None => {
@@ -209,16 +185,9 @@ pub fn handle(
                     *conversation = session.conversation;
                     let messages = conversation.context();
                     rebuild_display(app, &messages);
-                    // /resume loads a different session from disk: stats
-                    // need to be reconstructed from the persisted history
                     app.stats.reset();
                     crate::conversation_display::accumulate_session_stats(app, &messages);
                     tui_config.session_id = id.clone();
-                    // keep the duplicated `options.session_id` consistent so any
-                    // path that still reads it directly sees the resumed id.
-                    // the wire request goes through `tui_config.stream_options()`
-                    // which already overrides this, but staleness here is a
-                    // foot-gun for any future caller that bypasses that helper
                     tui_config.options.session_id = Some(id);
                     if let Some(prompt) = session.system_prompt {
                         tui_config.system_prompt = Some(prompt);
@@ -261,15 +230,8 @@ pub fn handle(
             show_cost(app);
             None
         }
-        SlashAction::Credits => {
-            // async fetch is handled in runner/commands.rs after this
-            // returns. acknowledge here so the slash menu closes
-            None
-        }
-        SlashAction::Endpoints { .. } => {
-            // async fetch handled in runner/commands.rs after this returns
-            None
-        }
+        SlashAction::Credits => None,
+        SlashAction::Endpoints { .. } => None,
         SlashAction::Logs { count } => {
             if let Some(ref buf) = tui_config.log_buffer {
                 let entries = buf(*count);
@@ -291,16 +253,8 @@ pub fn handle(
             handle_compaction_model(app, tui_config, model_id.as_deref());
             None
         }
-        SlashAction::Login { provider: _ } => {
-            // async: the runner starts the browser handshake (or the
-            // paste fallback) once this returns
-            None
-        }
-        SlashAction::LoginComplete { code: _ } => {
-            // async completion is handled in runner/commands.rs after this
-            // returns. we just acknowledge here so the slash menu closes
-            None
-        }
+        SlashAction::Login { provider: _ } => None,
+        SlashAction::LoginComplete { code: _ } => None,
         SlashAction::Undo => {
             handle_undo(app, conversation);
             None
@@ -369,9 +323,6 @@ fn handle_compaction_model(app: &mut App, tui_config: &mut TuiConfig, model_id: 
     app.push_system_message(format!("compaction model: {}", id.as_str()));
 }
 
-/// dump internal state for troubleshooting. triggered by `/debug`.
-/// keep the output terse and markdown-formatted: callers paste it into
-/// bug reports and profiler session notes
 fn build_debug_dump(app: &App, session_id: &str) -> String {
     use std::fmt::Write as _;
 
@@ -603,23 +554,17 @@ fn handle_model_switch(
     args: &str,
 ) {
     let raw = args.trim();
-    // resolve tier name (e.g. "fast" -> "claude-3-5-haiku-...") or use as-is
     let id = tui_config
         .model_tiers
         .get(raw)
         .map(|s| s.as_str())
         .unwrap_or(raw);
-    // consult the merged catalogue so codex-discovered models surface
-    // alongside the static catalogue (otherwise codex slugs would
-    // bounce off as "unknown model")
     let merged = mush_ai::discovery::find_merged_model_by_id(id);
     if let Some(ref merged) = merged {
         let new_model = &merged.model;
         app.model_id = id.into();
         app.stats.context_window = new_model.context_window;
         app.supported_thinking_levels = new_model.supported_thinking_levels.clone();
-        // model switch invalidates any learned serving provider since
-        // the new model id may route to a different upstream entirely
         app.cache
             .seed_for_model(new_model, &tui_config.options, tui_config.cache_timer);
         let level = thinking_prefs
@@ -628,8 +573,6 @@ fn handle_model_switch(
             .or_else(|| new_model.default_thinking_level.clone())
             .unwrap_or(ThinkingLevel::Off);
         app.thinking_level = level.clone();
-        // record the switch under the canonical cwd so resuming the
-        // same project picks up where we left off
         let cwd = tui_config.cwd.clone();
         tui_config.last_models.set(cwd, id.to_string());
         if let Some(ref save_last_models) = tui_config.save_last_models {
@@ -695,17 +638,9 @@ pub(crate) fn show_cost(app: &mut App) {
     ));
 }
 
-/// handle `/settings [subcommand ...]`
-///
-/// supported forms:
-/// - `/settings` - show current scope and all anthropic beta toggles
-/// - `/settings scope <value>` - switch scope (global|disabled|repo|session)
-/// - `/settings betas <field> <bool>` - toggle an anthropic beta
-/// - `/settings reset` - restore defaults (session only)
 fn handle_settings(app: &mut App, tui_config: &mut TuiConfig, args: &str) {
     let args = args.trim();
     if args.is_empty() {
-        // no args: open the floating menu
         app.settings_menu = Some(crate::settings::SettingsMenuState::default());
         app.interaction.mode = crate::app::AppMode::Settings;
         return;
@@ -758,7 +693,6 @@ fn handle_settings(app: &mut App, tui_config: &mut TuiConfig, args: &str) {
                 app.push_system_message(format!("unknown beta field {field:?}"));
                 return;
             }
-            // sync to the in-flight StreamOptions so the next turn uses it
             tui_config.options.anthropic_betas = Some(tui_config.settings.anthropic_betas.clone());
 
             let persist_note = match crate::settings::persist(&tui_config.settings, &tui_config.cwd)
@@ -817,12 +751,6 @@ fn apply_beta_toggle(betas: &mut mush_ai::types::AnthropicBetas, field: &str, va
     true
 }
 
-/// kick off an oauth login flow in-TUI. when no provider id is given,
-/// opens the centred login picker overlay so the user can pick (or log
-/// out). with an explicit oauth provider id (`anthropic`, `openai-codex`)
-/// starts the browser handshake. with a known login-row id
-/// (`openrouter`, etc) opens the picker so the user can complete the
-/// flow there
 pub(crate) async fn handle_login_start(
     app: &mut App,
     tui_config: &TuiConfig,
@@ -836,9 +764,6 @@ pub(crate) async fn handle_login_start(
     };
 
     let Some(provider) = oauth::get_provider(&provider_id) else {
-        // not an oauth provider id. open the picker so the user can pick
-        // from the full catalogue, which is what `/login openrouter` and
-        // friends want
         if mush_ai::login::list_providers()
             .iter()
             .any(|p| p.id == provider_id)
@@ -866,9 +791,6 @@ pub(crate) async fn handle_login_start(
     }
 }
 
-/// open the browser and leave the loopback callback waiting. the runner
-/// picks the credentials up as soon as the provider redirects back, so
-/// there is nothing for the user to paste
 fn start_browser_login(
     app: &mut App,
     provider: &dyn mush_ai::oauth::OAuthProvider,
@@ -894,9 +816,6 @@ fn start_browser_login(
     ));
 }
 
-/// fallback for hosts where no browser can reach the loopback server
-/// (no port to bind, or the browser lives on another machine): show the
-/// url and wait for `/login-complete <code>`
 fn start_paste_login(
     app: &mut App,
     provider: &dyn mush_ai::oauth::OAuthProvider,
@@ -932,19 +851,11 @@ fn start_paste_login(
     });
 }
 
-/// build the picker entry list by joining `mush_ai::login::list_providers`
-/// with the user's current auth state (oauth tokens, env vars, config
-/// keys, stored api keys), then install it on `app` and switch to
-/// login picker mode
 fn open_login_picker_overlay(app: &mut App, tui_config: &TuiConfig) {
     let entries = build_login_entries(tui_config);
     app.open_login_picker(entries, tui_config.provider_api_keys.clone());
 }
 
-/// resolve every login provider's current source by combining the
-/// catalogue from `mush_ai::login` with the four sources mush
-/// understands. mirrors the auth resolution path so the picker shows
-/// the same view the agent will use
 pub(crate) fn build_login_entries(tui_config: &TuiConfig) -> Vec<crate::login_picker::LoginEntry> {
     use mush_ai::login;
 
@@ -1002,10 +913,6 @@ fn handle_undo(app: &mut App, conversation: &mut ConversationState) {
     }
 }
 
-/// shared helper: rebuild the display for a freshly rewritten
-/// conversation and clear the live token stats so the next live call
-/// doesn't trip a false `ContextDecrease` anomaly. used by /branch
-/// and /undo (any in-session rewrite that's not a compaction)
 fn rebuild_display_and_clear_live_stats(app: &mut App, conversation: &ConversationState) {
     let messages = conversation.context();
     rebuild_display(app, &messages);
@@ -1014,14 +921,7 @@ fn rebuild_display_and_clear_live_stats(app: &mut App, conversation: &Conversati
 }
 
 fn try_template(app: &mut App, name: &str, args: &str) -> Option<String> {
-    // templates are loaded at startup into `app.completion.templates`;
-    // use the cache instead of re-reading disk on every `/name` invocation
     let Some(tmpl) = mush_ext::find_template(&app.completion.templates, name) else {
-        // restore the typed slash command into the prompt so a user who
-        // accidentally started a real message with `/` (or hit
-        // autocomplete the wrong way) can edit the leading slash off
-        // and resubmit instead of losing the body. status bar tells
-        // them what happened
         app.input.text = if args.is_empty() {
             format!("/{name}")
         } else {
@@ -1044,7 +944,6 @@ fn try_template(app: &mut App, name: &str, args: &str) -> Option<String> {
     Some(expanded)
 }
 
-/// expand /template_name args... into template content
 pub fn expand_template(prompt: &str) -> String {
     if !prompt.starts_with('/') {
         return prompt.to_string();
@@ -1069,12 +968,10 @@ pub fn expand_template(prompt: &str) -> String {
     }
 }
 
-/// rebuild the TUI display from a conversation (used after branching/resuming)
 pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
     crate::conversation_display::rebuild_display(app, conversation);
 }
 
-/// export conversation to a markdown file
 pub fn handle_export(app: &mut App, conversation: &ConversationState, args: &str) {
     let path = if args.trim().is_empty() {
         std::path::PathBuf::from("conversation.md")
@@ -1158,7 +1055,6 @@ mod tests {
 
         let dump = build_debug_dump(&app, "test-session-id");
 
-        // structure
         assert!(dump.starts_with("```"));
         assert!(dump.ends_with("```"));
         for section in [
@@ -1175,7 +1071,6 @@ mod tests {
             );
         }
 
-        // key facts
         assert!(dump.contains("/home/user/project"));
         assert!(dump.contains("pane: 1/3"));
         assert!(dump.contains("claude-opus-4-7"));
@@ -1226,18 +1121,9 @@ mod tests {
         assert!(app.compaction_model_id.is_none());
     }
 
-    /// when an unknown slash command runs (e.g. the user accidentally
-    /// typed `/something hello world` because they meant a real message
-    /// but autocompleted the wrong way), the typed text must be
-    /// restored to the prompt instead of being eaten. previously
-    /// `try_template` just pushed "unknown command: /foo (try /help)"
-    /// and silently discarded the user's message body, which made it
-    /// look like the entire prompt vanished into the void
     #[test]
     fn try_template_restores_typed_text_when_command_unknown() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        // sanity: prompt starts empty (the runner takes the text out
-        // before dispatching)
         assert!(app.input.text.is_empty());
 
         let result = try_template(&mut app, "asdfgh", "hello world this is my real message");
@@ -1259,9 +1145,6 @@ mod tests {
         );
     }
 
-    /// the unknown-command path is also exercised when the typed slash
-    /// command takes no args at all (`/asdfgh`). restoring just the
-    /// `/name` token keeps the user able to fix the typo.
     #[test]
     fn try_template_restores_bare_slash_command_with_no_args() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));

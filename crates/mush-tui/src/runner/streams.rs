@@ -22,9 +22,6 @@ const USER_CANCELLED_TOOL_MESSAGE: &str = "user cancelled tool";
 
 use super::TuiConfig;
 
-/// monotonically increasing generation counter for stream identity.
-/// each new stream (or abort) advances the generation, so events from
-/// stale streams are silently dropped even if the abort marker was cleared.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) struct StreamGeneration(u64);
 
@@ -57,7 +54,6 @@ pub(super) struct StreamMeta {
     pub cancel: tokio_util::sync::CancellationToken,
 }
 
-/// minimum interval between incremental session saves
 const SESSION_SAVE_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(5);
 
 pub(super) struct StreamState {
@@ -68,8 +64,6 @@ pub(super) struct StreamState {
     session_dirty: bool,
 }
 
-/// owned configuration fields for stream creation, grouped from the
-/// formerly-21-field StreamDeps to reduce parameter count
 pub(super) struct StreamConfig {
     pub default_model: Model,
     pub system_prompt: Option<String>,
@@ -78,12 +72,7 @@ pub(super) struct StreamConfig {
     pub provider_api_keys: HashMap<String, mush_ai::ApiKey>,
     pub confirm_tools: bool,
     pub auto_compact: bool,
-    /// separate model + options for compaction (None = use active model)
     pub compaction_model: Option<(Model, StreamOptions)>,
-    /// forbidden-character set used to wrap the file-mutating tools.
-    /// kept here so `align_for_model` can rebuild the right tool set
-    /// (apply_patch ↔ edit + write) when the active model changes
-    /// mid-session
     pub forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars,
 }
 
@@ -100,7 +89,6 @@ impl StreamState {
             metas: HashMap::new(),
             generations: HashMap::new(),
             next_gen: 0,
-            // start in the past so the first save happens immediately
             last_session_save: std::time::Instant::now() - SESSION_SAVE_DEBOUNCE,
             session_dirty: false,
         }
@@ -143,12 +131,10 @@ impl StreamState {
         self.metas.remove(&pane_id);
     }
 
-    /// true when this generation matches the pane's current generation
     pub(super) fn is_current(&self, pane_id: PaneId, stream_gen: StreamGeneration) -> bool {
         self.generations.get(&pane_id) == Some(&stream_gen)
     }
 
-    /// save session if enough time has passed since the last save
     pub(super) fn save_session_debounced(
         &mut self,
         session: &Session,
@@ -158,9 +144,6 @@ impl StreamState {
         self.save_dirty_session(session, tui_config);
     }
 
-    /// flush pending session changes when the debounce interval has elapsed.
-    /// this keeps long streams checkpointed even if no further agent event
-    /// arrives after a message/tool boundary marks the session dirty
     pub(super) fn save_dirty_session(&mut self, session: &Session, tui_config: &super::TuiConfig) {
         if !self.session_dirty || self.last_session_save.elapsed() < SESSION_SAVE_DEBOUNCE {
             return;
@@ -172,7 +155,6 @@ impl StreamState {
         }
     }
 
-    /// unconditional save (for AgentEnd and other important checkpoints)
     pub(super) fn save_session_now(&mut self, session: &Session, tui_config: &super::TuiConfig) {
         if let Some(ref saver) = tui_config.save_session {
             saver(build_session_snapshot(session, tui_config));
@@ -256,14 +238,10 @@ pub(super) fn poll_live_tool_output(
     let Some(live) = live else {
         return false;
     };
-    // drain the per-exec-id lines so the map stays bounded and finished
-    // tools don't leave stale output behind
     let updates: Vec<(String, String)> = match live.lock() {
         Ok(mut guard) if !guard.is_empty() => guard.drain().collect(),
         _ => return false,
     };
-    // route each line to the focused pane's matching panel (by exec id), so
-    // concurrent tools stream into their own boxes instead of the last one
     let app = &mut session.app;
     let mut changed = false;
     for (exec_id, line) in updates {
@@ -272,7 +250,6 @@ pub(super) fn poll_live_tool_output(
     changed
 }
 
-/// cleanup and follow-up work when the agent finishes
 async fn handle_agent_end(
     session: &mut Session,
     stream_state: &mut StreamState,
@@ -347,9 +324,6 @@ pub(super) async fn handle_agent_event_side_effects(
         );
     }
 
-    // openrouter routes carry a generation id we use to learn the
-    // upstream that actually served the turn. update the cache timer
-    // so subsequent warmth countdowns use the right TTL
     if let AgentEvent::MessageEnd { message } = event
         && message.provider == Provider::OpenRouter
         && let Some(gen_id) = message.generation_id.clone()
@@ -361,7 +335,6 @@ pub(super) async fn handle_agent_event_side_effects(
         reconcile_openrouter_generation(session, pane_id, gen_id, &model, tui_config).await;
     }
 
-    // incremental save after meaningful state changes (debounced)
     if matches!(
         event,
         AgentEvent::MessageEnd { .. } | AgentEvent::ToolExecEnd { .. }
@@ -374,11 +347,6 @@ pub(super) async fn handle_agent_event_side_effects(
     }
 }
 
-/// fetch openrouter's `/generation` record for the just-completed
-/// turn and apply its `provider_name` to the pane's cache timer. on
-/// any failure (no api key, network error, missing field) we log and
-/// drop the result rather than block the user. apply_serving_provider
-/// then recomputes ttl_secs from the cycle 2.1 per-provider table
 async fn reconcile_openrouter_generation(
     session: &mut Session,
     _pane_id: PaneId,
@@ -417,9 +385,6 @@ async fn reconcile_openrouter_generation(
     }
 }
 
-/// compact the current branch when the conversation is approaching the
-/// context limit. uses the same tree-native path as `/compact` so the
-/// pre-compaction state stays navigable via `/tree` + `/branch`.
 async fn auto_compact(
     session: &mut Session,
     pane_id: PaneId,
@@ -487,14 +452,6 @@ pub(super) async fn abort_focused_stream(session: &mut Session, stream_state: &m
 
     let pane = &mut *session;
     pane.app.finish_streaming(None, None);
-    // queued steering messages live in two parallel structures: the
-    // display side (`app.messages` with queued=true, drained by
-    // `take_queued_messages`) and the runtime side (`steering_queue`
-    // holding the structured `Message::User` values that the agent
-    // loop consumes). they're populated 1:1 and consumed together via
-    // SteeringInjected. on abort we restore from the display side
-    // (which produces the user-visible text) and silently clear the
-    // runtime queue so it doesn't re-fire if the user resubmits
     let restored = pane.app.take_queued_messages();
     pane.steering_queue.lock().await.clear();
     if !restored.is_empty() {
@@ -576,9 +533,6 @@ pub(super) async fn submit_streaming_input(
     }
 }
 
-/// build a UserContent, folding any attached images into a parts payload
-/// alongside the text. returns `Text` when there are no images so the
-/// wire format stays minimal for the common case
 pub(crate) fn build_user_content(
     text: &str,
     images: &[crate::input_buffer::PendingImage],
@@ -625,9 +579,6 @@ pub(super) async fn edit_last_queued_steering(session: &mut Session, stream_stat
         if let Some(meta) = stream_state.meta(focused_id) {
             let mut steering_queue = meta.steering_queue.lock().await;
             let target = queued_text.trim();
-            // first try exact match, then trimmed match so the queue stays
-            // in sync even if the display content and the User message's
-            // joined text() drifted by whitespace
             let pos = steering_queue.iter().rposition(|message| {
                 if let Message::User(user_message) = message {
                     user_message.content.text() == queued_text
@@ -740,12 +691,6 @@ async fn start_stream_for_prompt<'a>(
     let mut tool_registry = tools.clone();
     tool_registry.extend_shared(extra_tools);
 
-    // align the model-dependent tools (apply_patch ↔ edit + write,
-    // batch) to the active model. without this, switching models
-    // mid-session leaves the original toolset in place: starting on
-    // gpt and switching to claude would leave claude with apply_patch
-    // and no edit tool. effective cwd respects worktree-pane overrides
-    // so the rebuilt tools target the right tree
     let effective_cwd = deps
         .injections
         .cwd
@@ -800,23 +745,12 @@ fn pane_model(session: &Session, default_model: &Model) -> Model {
     resolve_runtime_model(session.app.model_id.as_str(), default_model)
 }
 
-/// what a compaction run for one pane should use
 pub(super) struct CompactionTarget {
-    /// model that writes the summary. `/compaction-model` overrides it,
-    /// otherwise the pane's own model does the work
     pub model: Model,
-    /// options for that model, with fresh auth resolved
     pub options: StreamOptions,
-    /// input-token budget to compact against. always the pane's own
-    /// model, never the summariser's, since that is the window the
-    /// conversation has to fit into
     pub window: mush_ai::types::TokenCount,
 }
 
-/// resolve the summariser model, its auth and the budget for compacting
-/// `pane_id`. every compaction entry point (`/compact`, the recovery
-/// retry, auto-compaction) goes through here so a pane switched with
-/// `/model` compacts against its own window with its own model
 pub(super) async fn compaction_target(
     session: &Session,
     _pane_id: PaneId,
@@ -839,13 +773,6 @@ pub(super) async fn compaction_target(
     }
 }
 
-/// resolve a model id picked at runtime (via `/model` or a fork
-/// request) against the merged catalogue (static + user + discovered).
-///
-/// the static-only `find_model_by_id` would silently fall back to
-/// `default` for any openrouter-discovered slug, which made `/model
-/// z-ai/glm-5.1` quietly route to claude. the merged catalogue includes
-/// every discovery source, so the picked model survives the round trip.
 pub(super) fn resolve_runtime_model(id: &str, default: &Model) -> Model {
     mush_ai::discovery::resolve_model_by_id(id).unwrap_or_else(|| default.clone())
 }
@@ -1046,7 +973,6 @@ fn build_system_prompt(base_system_prompt: &Option<String>) -> Option<String> {
     base_system_prompt.clone()
 }
 
-/// snapshot the conversation for session persistence
 pub(crate) fn build_session_snapshot(
     session: &Session,
     tui_config: &super::TuiConfig,
@@ -1069,9 +995,6 @@ mod tests {
 
     #[tokio::test]
     async fn compaction_target_follows_the_pane_model_not_the_startup_one() {
-        // a pane switched with /model has its own context window and its
-        // own summariser. keying either off the startup model compacts
-        // against the wrong budget with the wrong model
         let catalogue = models::all_models_with_user();
         let startup = catalogue.first().expect("catalogue is never empty").clone();
         let switched = catalogue
@@ -1239,10 +1162,6 @@ mod tests {
 
     #[tokio::test]
     async fn submit_streaming_input_includes_pending_images_in_steering_queue() {
-        // ctrl+v during streaming stages images on the input buffer; the
-        // steering submit must flush them into the queued UserMessage so the
-        // next agent turn can see the image. regression: only the text was
-        // forwarded and the image silently vanished
         use crate::input_buffer::PendingImage;
         use mush_ai::types::ImageMimeType;
 
@@ -1294,7 +1213,6 @@ mod tests {
             }
         }
 
-        // input buffer images should be drained
         assert!(
             session.app.input.images.is_empty(),
             "pending images should be drained after submission"
@@ -1303,8 +1221,6 @@ mod tests {
 
     #[tokio::test]
     async fn submit_streaming_input_uses_text_only_when_no_images() {
-        // baseline: text-only submit still produces UserContent::Text, keeping
-        // the existing wire format unchanged when no images are attached
         let pane_id = PaneId::new(1);
         let mut session = Session::new(app());
         let mut stream_state = StreamState::new();
@@ -1337,12 +1253,6 @@ mod tests {
 
     #[tokio::test]
     async fn edit_last_queued_steering_replaces_queue_entry_not_duplicates() {
-        // regression: lifting a queued steering message, editing it, and
-        // resubmitting used to leave the ORIGINAL queue entry in place
-        // when the content-match lookup couldn't find it. the agent then
-        // saw both copies separated by a newline on the next turn (or on
-        // abort, which joins leftovers with \n). after lift+submit the
-        // queue should contain exactly the edited text, not both
         let pane_id = PaneId::new(1);
         let mut session = Session::new(app());
         let mut stream_state = StreamState::new();
@@ -1361,8 +1271,6 @@ mod tests {
             },
         );
 
-        // first submit: "original message "  (with trailing space to exercise
-        // whitespace-sensitive content match)
         submit_streaming_input(
             &mut session,
             &stream_state,
@@ -1376,9 +1284,6 @@ mod tests {
             "first submit puts one entry in queue"
         );
 
-        // lift: pulls the queued message back into input.text and should
-        // remove it from the steering queue. input is empty at this point
-        // so the preservation branch doesn't fire
         edit_last_queued_steering(&mut session, &stream_state).await;
         let queue_len_after_lift = steering_queue.lock().await.len();
         assert_eq!(
@@ -1391,7 +1296,6 @@ mod tests {
             "lifted text should land in the input buffer"
         );
 
-        // edit + resubmit
         session.app.input.text = "edited message".into();
         session.app.input.cursor = "edited message".len();
         let edited = session.app.input.take_text();
@@ -1589,13 +1493,11 @@ mod tests {
         assert!(poll_confirmation_prompt(&mut session, &mut stream_state).await);
         answer_confirmation(&mut session, &mut stream_state, false).await;
 
-        // reply channel gets `false` so the agent knows the tool was denied
         assert!(!reply_rx.await.unwrap());
         let app = &session.app;
         assert_eq!(app.interaction.mode, crate::app::AppMode::Normal);
         assert!(app.interaction.confirm_prompt.is_none());
         assert!(app.interaction.confirm_tool_call_id.is_none());
-        // status message mentions the denied tool so the user sees feedback
         assert_eq!(
             app.status.as_deref(),
             Some(format!("tool denied: {tool_call_id}").as_str())
@@ -1628,8 +1530,6 @@ mod tests {
 
     #[test]
     fn poll_live_tool_output_routes_each_exec_id_to_its_own_panel() {
-        // regression: with several active tools, all live output used to
-        // land in the last panel. each exec id must stream into its own.
         let mut session = Session::new(app());
         let a = ToolCallId::from("tc_a");
         let b = ToolCallId::from("tc_b");
@@ -1746,13 +1646,6 @@ mod tests {
 
     #[test]
     fn stream_options_uses_canonical_session_id_not_stale_options_field() {
-        // /resume and /new only update the top-level `session_id`. the
-        // wire request must derive `options.session_id` (which becomes
-        // the `x-claude-code-session-id` header on anthropic oauth)
-        // from that canonical field, not from the stale value left
-        // over in `options.session_id` at process startup. without
-        // this, every /resume sends the wrong cache key and busts the
-        // anthropic prompt cache.
         let canonical = mush_ai::types::SessionId::from("loaded-session");
         let stale = mush_ai::types::SessionId::from("fresh-process");
 
@@ -1787,10 +1680,8 @@ mod tests {
             },
         );
 
-        // abort (user presses Esc)
         stream_state.abort(pane_id);
 
-        // register a new stream (user submits new message)
         let (_tx2, rx2) = tokio::sync::mpsc::channel(1);
         let gen2 = stream_state.register_active(
             pane_id,
@@ -1806,13 +1697,11 @@ mod tests {
 
         assert_ne!(gen1, gen2, "generations must differ");
 
-        // old stream events should be rejected
         assert!(
             !stream_state.is_current(pane_id, gen1),
             "stale generation must be rejected"
         );
 
-        // new stream events should be accepted
         assert!(
             stream_state.is_current(pane_id, gen2),
             "current generation must be accepted"
@@ -1839,19 +1728,11 @@ mod tests {
 
         stream_state.abort(pane_id);
 
-        // after abort without new registration, old stream_gen is stale
         assert!(!stream_state.is_current(pane_id, stream_gen));
     }
 
     #[tokio::test]
     async fn abort_focused_stream_restores_queued_messages_without_duplicates() {
-        // when the user submits a message during streaming, it lands in
-        // BOTH the display-side queued messages list AND the runtime
-        // steering_queue. previously abort_focused_stream concatenated
-        // both sources into the input box, doubling each unprocessed
-        // message. this test pins that the input is restored exactly
-        // once per submitted message
-
         let pane_id = PaneId::new(1);
         let mut session = Session::new(app());
         let mut stream_state = StreamState::new();
@@ -1868,8 +1749,6 @@ mod tests {
                 cancel: tokio_util::sync::CancellationToken::new(),
             },
         );
-        // mark the pane as actively streaming so submit_streaming_input
-        // takes the queueing path rather than the cold-start path
         session.app.start_streaming();
 
         submit_streaming_input(
@@ -1887,7 +1766,6 @@ mod tests {
         )
         .await;
 
-        // sanity: both queues should contain the two messages right now
         assert_eq!(session.steering_queue.lock().await.len(), 2);
         assert_eq!(session.app.messages.iter().filter(|m| m.queued).count(), 2);
 
@@ -1898,7 +1776,6 @@ mod tests {
             restored_input, "first steer\nsecond steer",
             "abort must restore each queued message exactly once, got: {restored_input:?}"
         );
-        // both queues should now be empty
         assert!(session.steering_queue.lock().await.is_empty());
         assert!(!session.app.messages.iter().any(|m| m.queued));
     }
@@ -1971,11 +1848,6 @@ mod tests {
 
     #[test]
     fn build_session_snapshot_carries_system_prompt() {
-        // the system prompt is part of the cached request prefix on the
-        // anthropic side. persisting it with the session lets a resumed
-        // session reuse the exact prompt that was cached, instead of
-        // rebuilding from current AGENTS.md (which would bust the cache
-        // on the first call after resume)
         let session = Session::new(app());
         let mut config = test_tui_config();
         config.system_prompt = Some("you are running inside mush\nproject context: foo".into());
@@ -2002,33 +1874,24 @@ mod tests {
         let session = Session::new(app());
         let mut stream_state = StreamState::new();
 
-        // first call should save (debounce timer starts in the past)
         stream_state.save_session_debounced(&session, &config);
         assert_eq!(save_count.load(Ordering::Relaxed), 1);
 
-        // immediate second call should be debounced
         stream_state.save_session_debounced(&session, &config);
         assert_eq!(save_count.load(Ordering::Relaxed), 1);
 
-        // save_session_now bypasses debounce
         stream_state.save_session_now(&session, &config);
         assert_eq!(save_count.load(Ordering::Relaxed), 2);
     }
 
     #[test]
     fn pane_model_resolves_openrouter_discovered_id() {
-        // when the user picks an openrouter-discovered model via /model,
-        // pane_model must return that model at stream time. previously it
-        // looked up only the static catalogue and silently fell back to
-        // the default (claude), so glm requests went to anthropic instead
         use mush_ai::discovery::{DiscoveryCache, DiscoveryReport, cache_path};
         use mush_ai::types::{Api, BaseUrl, InputModality, ModelCost, Provider};
         use std::time::SystemTime;
 
         let tmp = tempfile::tempdir().unwrap();
         let saved = std::env::var("MUSH_DATA_DIR").ok();
-        // safety: nextest runs each test in its own process; env mutation
-        // is local to this run
         unsafe { std::env::set_var("MUSH_DATA_DIR", tmp.path()) };
 
         let glm_id = "z-ai/glm-5.1";
@@ -2088,7 +1951,6 @@ mod tests {
 
         let resolved = pane_model(&session, &default);
 
-        // restore env before asserting so a panic doesn't leak env
         unsafe {
             match saved {
                 Some(v) => std::env::set_var("MUSH_DATA_DIR", v),

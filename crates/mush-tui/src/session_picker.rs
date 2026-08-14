@@ -1,40 +1,24 @@
-//! session picker state and filtering helpers
-
 use std::cell::RefCell;
 use std::sync::mpsc;
 
 use crate::fuzzy::FuzzyFilter;
 use mush_session::SessionMeta;
 
-/// session picker scope
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionScope {
-    /// sessions from current working directory only
     ThisDir,
-    /// all sessions across all directories
     AllDirs,
 }
 
-/// state for the session picker overlay
 #[derive(Debug)]
 pub struct SessionPickerState {
     pub sessions: Vec<SessionMeta>,
     pub selected: usize,
     pub filter: String,
     pub scope: SessionScope,
-    /// current working directory for scope filtering
     pub cwd: String,
-    /// still receiving sessions from the background loader. UI renders
-    /// a "loading…" hint while this is true so the user knows more are
-    /// coming
     pub loading: bool,
-    /// background loader channel. sessions arrive asynchronously and
-    /// the main event loop drains them on every frame tick. `None` for
-    /// pickers opened with a pre-built session list (e.g. tests)
     incoming: Option<mpsc::Receiver<SessionMeta>>,
-    /// cached fuzzy matcher reused across filter calls. `RefCell` since
-    /// `filtered_sessions` takes `&self` for read-only render paths but
-    /// nucleo's scoring wants `&mut Matcher`
     matcher: RefCell<FuzzyFilter>,
 }
 
@@ -53,10 +37,6 @@ impl SessionPickerState {
         }
     }
 
-    /// open the picker with a background loader feeding sessions via
-    /// `incoming`. starts empty and `loading = true`; the caller drives
-    /// ingestion by calling [`SessionPickerState::drain_incoming`] every
-    /// frame tick
     #[must_use]
     pub fn new_streaming(incoming: mpsc::Receiver<SessionMeta>, cwd: String) -> Self {
         Self {
@@ -71,11 +51,6 @@ impl SessionPickerState {
         }
     }
 
-    /// drain any sessions already produced by the background loader
-    /// into the `sessions` vec, keeping `updated_at desc` ordering.
-    /// flips `loading` to `false` once the sender disconnects.
-    /// returns `true` when new sessions arrived this call, so callers
-    /// can request a redraw without polling every frame unconditionally
     pub fn drain_incoming(&mut self) -> bool {
         let Some(rx) = &self.incoming else {
             return false;
@@ -108,9 +83,6 @@ impl SessionPickerState {
     }
 }
 
-/// get sessions matching the current filter and scope. empty filter returns
-/// all scope-matched sessions in original order, otherwise fuzzy-ranks by
-/// title + id + cwd with highest score first
 #[must_use]
 pub fn filtered_sessions(picker: &SessionPickerState) -> Vec<&SessionMeta> {
     let scope_filtered: Vec<&SessionMeta> = match picker.scope {
@@ -126,8 +98,6 @@ pub fn filtered_sessions(picker: &SessionPickerState) -> Vec<&SessionMeta> {
         return scope_filtered;
     }
 
-    // score against the concatenation of searchable fields so a match in
-    // any of title/id/cwd contributes to the ranking
     let haystacks: Vec<String> = scope_filtered
         .iter()
         .map(|s| {

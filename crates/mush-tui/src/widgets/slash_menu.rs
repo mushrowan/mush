@@ -1,9 +1,3 @@
-//! slash command completion menu widget
-//!
-//! renders a popup above the input box showing matching slash commands
-//! with their descriptions. model selection lives on a separate centred
-//! overlay (see [`crate::widgets::model_picker`])
-
 use crate::slash_menu::SlashMenuState;
 use crate::theme::Theme;
 use ratatui::Frame;
@@ -12,11 +6,8 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding};
 
-/// render the slash menu as a popup above the input area
-/// most commands the popup shows at once
 const MAX_VISIBLE: usize = 12;
 
-/// rows the popup takes above the input box, borders included
 #[must_use]
 pub fn height(menu: &SlashMenuState) -> u16 {
     u16::try_from(MAX_VISIBLE.min(menu.matches.len()) + 2).unwrap_or(u16::MAX)
@@ -38,7 +29,6 @@ pub fn render(frame: &mut Frame, menu: &SlashMenuState, input_area: Rect, theme:
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
-    // scroll so selected item is visible
     let visible = inner.height as usize;
     let scroll = if menu.selected >= visible {
         menu.selected - visible + 1

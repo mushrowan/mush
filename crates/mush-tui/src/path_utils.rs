@@ -1,6 +1,3 @@
-//! path display utilities shared across widgets
-
-/// replace home dir prefix with ~
 #[must_use]
 pub fn shorten_path(path: &str) -> String {
     if let Some(home) = std::env::var_os("HOME") {
@@ -12,17 +9,12 @@ pub fn shorten_path(path: &str) -> String {
     path.to_string()
 }
 
-/// truncate a path from the beginning, keeping the tail
-/// e.g. "~/dev/some/deep/nested/project" with max 20 => "…/deep/nested/project"
 #[must_use]
 pub fn truncate_path(path: &str, max_len: usize) -> String {
     if path.chars().count() <= max_len {
         return path.to_string();
     }
-    // find a `/` near the truncation point to get a clean break
-    // paths are typically ASCII so byte arithmetic is safe, but use
-    // floor_char_boundary to avoid panics on unusual paths
-    let target = path.len().saturating_sub(max_len) + 1; // +1 for the `…`
+    let target = path.len().saturating_sub(max_len) + 1;
     let target = path.floor_char_boundary(target);
     match path[target..].find('/') {
         Some(pos) => format!("…{}", &path[target + pos..]),

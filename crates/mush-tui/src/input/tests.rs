@@ -1,5 +1,3 @@
-//! tests for input
-
 use super::*;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 use mush_ai::types::{ThinkingLevel, TokenCount};
@@ -24,12 +22,6 @@ fn ctrl(code: KeyCode) -> KeyEvent {
 
 #[test]
 fn apply_model_completions_populates_completion_state_from_merged_rows() {
-    // simulates the path after `/refresh-models` (or a fresh discovery
-    // fetch) writes new entries into the discovery cache: we hand the
-    // helper a hand-built merged-catalogue slice and expect both
-    // `completions` and `model_completions` to be replaced with the
-    // matching ids/rows. this is the bit that makes new chatgpt
-    // subscription models show up in the picker without an app restart
     use mush_ai::discovery::{MergedModel, ModelSource};
     use mush_ai::types::{Api, InputModality, Model, ModelCost, Provider, TokenCount};
 
@@ -79,8 +71,6 @@ fn apply_model_completions_populates_completion_state_from_merged_rows() {
 
 #[test]
 fn ctrl_c_with_empty_input_arms_quit_confirm() {
-    // first ctrl+c on an empty idle prompt arms a confirmation rather
-    // than quitting outright. status bar gets the hint
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     let event = handle_key(&mut app, ctrl(KeyCode::Char('c')));
     assert!(event.is_none());
@@ -110,8 +100,6 @@ fn ctrl_c_with_text_clears_input_without_quitting() {
 
 #[test]
 fn ctrl_c_clear_then_ctrl_c_arms_quit() {
-    // after clearing input, the prompt is empty so the next ctrl+c
-    // should arm the confirm (not quit immediately)
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.input.text = "stuff".into();
     app.input.cursor = 5;
@@ -126,20 +114,15 @@ fn any_other_key_resets_quit_confirm() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     let _ = handle_key(&mut app, ctrl(KeyCode::Char('c')));
     assert!(app.confirm_quit_pending);
-    // typing 'a' should reset the armed flag so the next ctrl+c
-    // re-arms instead of quitting
     let _ = handle_key(&mut app, key(KeyCode::Char('a')));
     assert!(!app.confirm_quit_pending);
     let event = handle_key(&mut app, ctrl(KeyCode::Char('c')));
-    // input is "a" now, so ctrl+c clears it
     assert!(event.is_none());
     assert!(app.input.text.is_empty());
 }
 
 #[test]
 fn ctrl_c_when_busy_aborts_without_confirm() {
-    // ctrl+c during a stream should abort the turn (UNIX SIGINT-ish),
-    // not quit the program
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.stream.active = true;
     let event = handle_key(&mut app, ctrl(KeyCode::Char('c')));
@@ -156,8 +139,6 @@ fn ctrl_v_emits_paste_image_when_idle() {
 
 #[test]
 fn ctrl_v_emits_paste_image_when_streaming() {
-    // regression: ctrl+v fell through to handle_editing during streaming
-    // so image paste only worked while idle, breaking image-based steering
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.stream.active = true;
     let event = handle_key(&mut app, ctrl(KeyCode::Char('v')));
@@ -181,12 +162,6 @@ fn escape_does_nothing_when_idle() {
 
 #[test]
 fn escape_aborts_while_tool_runs_between_messages() {
-    // between `MessageEnd` and the next `TurnStart`, `stream.active`
-    // flips to false even though the agent is still busy executing
-    // tools. esc used to only check `stream.active`, so the user had
-    // no way to cancel a long-running tool (e.g. a 15 minute bash
-    // call via bash_status polling). cancel should fire whenever
-    // the agent is busy, not only while text is streaming
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.stream.active = false;
     app.active_tools
@@ -286,9 +261,6 @@ fn ctrl_t_cycles_thinking_level() {
 
 #[test]
 fn ctrl_t_walks_only_curated_levels_when_supplied() {
-    // codex models advertise a curated `supported_thinking_levels` set.
-    // the cycler must walk those exactly (skipping Off when the model
-    // is reasoning-only) instead of the legacy hardcoded progression
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.supported_thinking_levels = vec![
         ThinkingLevel::Low,
@@ -301,19 +273,15 @@ fn ctrl_t_walks_only_curated_levels_when_supplied() {
     assert_eq!(app.thinking_level, ThinkingLevel::Medium);
     handle_key(&mut app, ctrl(KeyCode::Char('t')));
     assert_eq!(app.thinking_level, ThinkingLevel::High);
-    // wrap around to the first curated entry, not Off
     handle_key(&mut app, ctrl(KeyCode::Char('t')));
     assert_eq!(app.thinking_level, ThinkingLevel::Low);
 }
 
 #[test]
 fn ctrl_t_resets_to_first_curated_level_when_current_not_supported() {
-    // switching to a codex model from Xhigh on a generic one should
-    // land us on the model's first supported level, not stall on the
-    // unsupported one
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.supported_thinking_levels = vec![ThinkingLevel::Medium, ThinkingLevel::High];
-    app.thinking_level = ThinkingLevel::Xhigh; // not in the curated set
+    app.thinking_level = ThinkingLevel::Xhigh;
 
     handle_key(&mut app, ctrl(KeyCode::Char('t')));
     assert_eq!(app.thinking_level, ThinkingLevel::Medium);
@@ -321,9 +289,6 @@ fn ctrl_t_resets_to_first_curated_level_when_current_not_supported() {
 
 #[test]
 fn ctrl_o_no_longer_toggles_thinking_expanded() {
-    // moved to /thinking-expand. ctrl+o is no longer bound to
-    // anything by default so the keystroke falls through to the
-    // input editor (or future user binds)
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.start_streaming();
     app.push_thinking_delta("thoughts");
@@ -648,7 +613,6 @@ fn slash_commands_blocked_while_streaming() {
     app.input.cursor = app.input.text.len();
     let event = handle_key(&mut app, key(KeyCode::Enter));
     assert!(event.is_none(), "expected None, got {event:?}");
-    // input preserved so user can submit after streaming ends
     assert_eq!(app.input.text, "/compact");
     assert!(
         app.status
@@ -683,11 +647,9 @@ fn tab_completes_slash_commands() {
     handle_key(&mut app, key(KeyCode::Tab));
     assert_eq!(app.input.text, "/help");
 
-    // second tab cycles to next match
     handle_key(&mut app, key(KeyCode::Tab));
     assert_eq!(app.input.text, "/history");
 
-    // wraps around
     handle_key(&mut app, key(KeyCode::Tab));
     assert_eq!(app.input.text, "/help");
 }
@@ -725,7 +687,6 @@ fn tab_resets_on_typing() {
     handle_key(&mut app, key(KeyCode::Tab));
     assert_eq!(app.input.text, "/help");
 
-    // typing resets completion state
     handle_key(&mut app, key(KeyCode::Char('x')));
     assert_eq!(app.input.text, "/helpx");
 }
@@ -742,9 +703,6 @@ fn push_test_template(app: &mut App, name: &str, content: &str) {
 
 #[test]
 fn at_template_tab_expands_exact_match() {
-    // tab on `@review` where a template named "review" exists should
-    // replace the `@review` span with the template content. the rest
-    // of the input stays untouched
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     push_test_template(&mut app, "review", "please review the changes");
     app.input.text = "hi @review".into();
@@ -755,8 +713,6 @@ fn at_template_tab_expands_exact_match() {
 
 #[test]
 fn at_template_enter_sends_literal_without_expansion() {
-    // design pin: `@asdf<return>` sends `@asdf` verbatim,
-    // even when a template named `asdf` exists. only tab expands
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     push_test_template(&mut app, "asdf", "TEMPLATE CONTENT");
     app.input.text = "@asdf".into();
@@ -773,10 +729,6 @@ fn at_template_enter_sends_literal_without_expansion() {
 
 #[test]
 fn at_template_tab_falls_through_when_no_match() {
-    // tab on `@unknown` should NOT consume the keystroke: without a
-    // matching template the tab falls through to regular completion.
-    // today that just cycles generic completions (none here), but the
-    // input must stay intact
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     push_test_template(&mut app, "review", "irrelevant");
     app.input.text = "@missing".into();
@@ -787,8 +739,6 @@ fn at_template_tab_falls_through_when_no_match() {
 
 #[test]
 fn at_template_tab_opens_picker_when_multiple_prefix_matches() {
-    // d2: tab on `@rev` with two `rev*` templates and no exact match
-    // opens the AtPicker popup. input stays untouched until enter
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     push_test_template(&mut app, "review", "review body");
     push_test_template(&mut app, "review-pr", "review-pr body");
@@ -822,7 +772,6 @@ fn at_picker_tab_cycles_selection() {
     handle_key(&mut app, key(KeyCode::Tab));
     assert_eq!(app.interaction.at_picker.as_ref().unwrap().selected, 1);
 
-    // tab wraps from the end back to the top
     handle_key(&mut app, key(KeyCode::Tab));
     assert_eq!(app.interaction.at_picker.as_ref().unwrap().selected, 0);
 }
@@ -836,7 +785,6 @@ fn at_picker_shift_tab_cycles_backwards() {
     app.input.cursor = app.input.text.len();
     handle_key(&mut app, key(KeyCode::Tab));
 
-    // shift+tab from selected==0 wraps to the bottom
     handle_key(
         &mut app,
         KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
@@ -852,12 +800,10 @@ fn at_picker_enter_inserts_selected_template() {
     app.input.text = "hi @rev".into();
     app.input.cursor = app.input.text.len();
     handle_key(&mut app, key(KeyCode::Tab));
-    // cycle to the second match (review-pr)
     handle_key(&mut app, key(KeyCode::Tab));
 
     let event = handle_key(&mut app, key(KeyCode::Enter));
 
-    // enter inside the picker inserts and closes; it must NOT submit
     assert!(
         event.is_none(),
         "enter inside the picker must not submit, got {event:?}"
@@ -886,9 +832,6 @@ fn at_picker_esc_closes_without_touching_input() {
 
 #[test]
 fn at_picker_typing_narrows_matches() {
-    // typing while the picker is open extends the trigger word and
-    // narrows the candidate list. mirrors the slash menu UX so the
-    // user can keep refining without esc-ing first
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     push_test_template(&mut app, "review", "REVIEW");
     push_test_template(&mut app, "review-pr", "REVIEW PR");
@@ -897,7 +840,6 @@ fn at_picker_typing_narrows_matches() {
     app.input.cursor = app.input.text.len();
     handle_key(&mut app, key(KeyCode::Tab));
 
-    // type 'v' → @rev → drops `release`, keeps `review` + `review-pr`
     handle_key(&mut app, key(KeyCode::Char('v')));
 
     assert_eq!(app.input.text, "@rev");
@@ -916,15 +858,12 @@ fn at_picker_typing_narrows_matches() {
 
 #[test]
 fn at_picker_typing_past_all_matches_closes_and_keeps_text() {
-    // when the user types something that no template prefix-matches,
-    // the picker closes silently and the typed character stays put
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     push_test_template(&mut app, "review", "REVIEW");
     app.input.text = "@re".into();
     app.input.cursor = app.input.text.len();
     handle_key(&mut app, key(KeyCode::Tab));
 
-    // type 'z' → @rez → no template matches
     handle_key(&mut app, key(KeyCode::Char('z')));
 
     assert_eq!(app.input.text, "@rez");
@@ -934,15 +873,12 @@ fn at_picker_typing_past_all_matches_closes_and_keeps_text() {
 
 #[test]
 fn at_picker_backspace_past_at_sign_closes() {
-    // backspacing past the `@` dissolves the trigger entirely; the
-    // picker must close so we don't keep stale matches around
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     push_test_template(&mut app, "review", "REVIEW");
     push_test_template(&mut app, "review-pr", "REVIEW PR");
     app.input.text = "@r".into();
     app.input.cursor = app.input.text.len();
     handle_key(&mut app, key(KeyCode::Tab));
-    // backspace twice: @r → @ → empty (no trigger)
     handle_key(&mut app, key(KeyCode::Backspace));
     handle_key(&mut app, key(KeyCode::Backspace));
 
@@ -953,17 +889,12 @@ fn at_picker_backspace_past_at_sign_closes() {
 
 #[test]
 fn template_with_placeholders_enters_slot_edit_mode() {
-    // d3: expanding a template that contains `$1`/`$2`/`$@` should
-    // enter slot edit mode with placeholders stripped to empty slots
-    // and the cursor parked at the first slot
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     push_test_template(&mut app, "review", "review $1 with $2");
     app.input.text = "@review".into();
     app.input.cursor = app.input.text.len();
     handle_key(&mut app, key(KeyCode::Tab));
 
-    // template content "review $1 with $2" expands to "review  with "
-    // with two slots at byte offsets 7 and 13 of the input
     assert_eq!(app.input.text, "review  with ");
     assert_eq!(app.interaction.mode, AppMode::SlotEdit);
     let slot_state = app
@@ -978,7 +909,6 @@ fn template_with_placeholders_enters_slot_edit_mode() {
 
 #[test]
 fn template_without_placeholders_stays_in_normal_mode() {
-    // expanding a placeholder-free template must NOT enter slot mode
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     push_test_template(&mut app, "review", "plain content");
     app.input.text = "@review".into();
@@ -992,16 +922,12 @@ fn template_without_placeholders_stays_in_normal_mode() {
 
 #[test]
 fn slot_edit_typing_shifts_later_slot_offsets() {
-    // typing inside a slot pushes later slots' byte offsets right by
-    // the inserted byte count so tab still parks on the right place
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     push_test_template(&mut app, "review", "$1 then $2");
     app.input.text = "@review".into();
     app.input.cursor = app.input.text.len();
     handle_key(&mut app, key(KeyCode::Tab));
-    // initial slots: [0, 6] (after "$1" stripped: " then ", $2 lived at 8 → now 6)
 
-    // type "abc" into slot 0
     for c in "abc".chars() {
         handle_key(&mut app, key(KeyCode::Char(c)));
     }
@@ -1021,7 +947,6 @@ fn slot_edit_tab_jumps_to_next_slot() {
     for c in "abc".chars() {
         handle_key(&mut app, key(KeyCode::Char(c)));
     }
-    // cursor at slot 0 end (3), tab jumps to slot 1 (now at 9)
     handle_key(&mut app, key(KeyCode::Tab));
 
     let state = app.interaction.slot_edit.as_ref().unwrap();
@@ -1042,8 +967,6 @@ fn slot_edit_enter_exits_without_submitting() {
 
     let event = handle_key(&mut app, key(KeyCode::Enter));
 
-    // enter inside slot mode is "done filling slots", not submit.
-    // user gets a chance to add more text or hit enter again
     assert!(event.is_none(), "first enter must not submit");
     assert_eq!(app.input.text, "fix bug");
     assert_eq!(app.interaction.mode, AppMode::Normal);
@@ -1061,8 +984,6 @@ fn slot_edit_esc_keeps_typed_content_and_exits_mode() {
 
     handle_key(&mut app, key(KeyCode::Esc));
 
-    // esc bails out of slot mode but leaves whatever was typed.
-    // the user can keep editing in normal mode without weirdness
     assert_eq!(app.input.text, "fix x");
     assert_eq!(app.interaction.mode, AppMode::Normal);
     assert!(app.interaction.slot_edit.is_none());
@@ -1076,7 +997,6 @@ fn slot_edit_shift_tab_cycles_backwards_with_wrap() {
     app.input.cursor = app.input.text.len();
     handle_key(&mut app, key(KeyCode::Tab));
 
-    // shift+tab from slot 0 wraps to last slot
     handle_key(
         &mut app,
         KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
@@ -1092,7 +1012,6 @@ fn slot_edit_tab_from_last_slot_wraps_to_first() {
     app.input.cursor = app.input.text.len();
     handle_key(&mut app, key(KeyCode::Tab));
 
-    // tab → slot 1 → tab → wrap back to slot 0
     handle_key(&mut app, key(KeyCode::Tab));
     handle_key(&mut app, key(KeyCode::Tab));
     assert_eq!(app.interaction.slot_edit.as_ref().unwrap().current, 0);
@@ -1100,8 +1019,6 @@ fn slot_edit_tab_from_last_slot_wraps_to_first() {
 
 #[test]
 fn slot_edit_backspace_at_slot_start_is_a_noop() {
-    // protect verbatim template content: backspace at the start of
-    // the current slot must not delete the byte before it
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     push_test_template(&mut app, "review", "fix $1 now");
     app.input.text = "@review".into();
@@ -1167,15 +1084,12 @@ fn slash_menu_navigate_and_select() {
     app.input.cursor = 1;
     handle_key(&mut app, key(KeyCode::Tab));
 
-    // ctrl+j moves down
     handle_key(&mut app, ctrl(KeyCode::Char('j')));
     assert_eq!(app.completion.slash_menu.as_ref().unwrap().selected, 1);
 
-    // ctrl+k moves up
     handle_key(&mut app, ctrl(KeyCode::Char('k')));
     assert_eq!(app.completion.slash_menu.as_ref().unwrap().selected, 0);
 
-    // enter selects
     handle_key(&mut app, key(KeyCode::Enter));
     assert_eq!(app.interaction.mode, AppMode::Normal);
     assert_eq!(app.input.text, "/help");
@@ -1197,20 +1111,16 @@ fn slash_menu_tab_cycles_selection_with_wrap() {
     app.input.text = "/login".into();
     app.input.cursor = app.input.text.len();
 
-    // first tab opens the menu with selection 0
     handle_key(&mut app, key(KeyCode::Tab));
     assert_eq!(app.interaction.mode, AppMode::SlashComplete);
     assert_eq!(app.completion.slash_menu.as_ref().unwrap().selected, 0);
 
-    // subsequent tab advances selection
     handle_key(&mut app, key(KeyCode::Tab));
     assert_eq!(app.completion.slash_menu.as_ref().unwrap().selected, 1);
 
-    // tab at end wraps to 0
     handle_key(&mut app, key(KeyCode::Tab));
     assert_eq!(app.completion.slash_menu.as_ref().unwrap().selected, 0);
 
-    // shift+backtab moves back, wrapping past 0 to last
     let shift_backtab = KeyEvent {
         code: KeyCode::BackTab,
         modifiers: KeyModifiers::SHIFT,
@@ -1220,7 +1130,6 @@ fn slash_menu_tab_cycles_selection_with_wrap() {
     handle_key(&mut app, shift_backtab);
     assert_eq!(app.completion.slash_menu.as_ref().unwrap().selected, 1);
 
-    // tab no longer accepts, enter does. menu is still open
     assert!(app.completion.slash_menu.is_some());
 }
 
@@ -1240,7 +1149,6 @@ fn slash_menu_enter_accepts_and_closes() {
     app.input.text = "/login".into();
     app.input.cursor = app.input.text.len();
     handle_key(&mut app, key(KeyCode::Tab));
-    // advance to /login-complete
     handle_key(&mut app, key(KeyCode::Tab));
 
     handle_key(&mut app, key(KeyCode::Enter));
@@ -1339,11 +1247,9 @@ fn slash_menu_typing_filters() {
     app.input.cursor = 2;
     handle_key(&mut app, key(KeyCode::Tab));
 
-    // only /h* commands match
     let menu = app.completion.slash_menu.as_ref().unwrap();
     assert_eq!(menu.matches.len(), 2);
 
-    // type 'e' to narrow to /he*
     handle_key(&mut app, key(KeyCode::Char('e')));
     let menu = app.completion.slash_menu.as_ref().unwrap();
     assert_eq!(menu.matches.len(), 1);
@@ -1358,9 +1264,6 @@ fn input_reinsert_while_streaming_keeps_cursor_visible() {
     app.input.visible_lines.set(2);
     app.input.total_lines.set(8);
     app.input.scroll.set(0);
-    // use a blocked slash command so the input gets reinserted.
-    // `/new` is in the blocked-during-stream list and ignores trailing
-    // args, so it parses successfully into a non-safe action
     app.input.text = "/new a\nb\nc\nd".into();
     app.input.cursor = app.input.text.len();
 
@@ -1394,10 +1297,6 @@ fn alt(code: KeyCode) -> KeyEvent {
         state: KeyEventState::NONE,
     }
 }
-
-// ctrl+[ is the same byte as ESC in legacy terminal mode, but terminals
-// with kitty keyboard enhancement disambiguate them. these tests pin
-// that ctrl+[ cancels every modal the same way ESC does.
 
 #[test]
 fn ctrl_bracket_closes_slash_menu() {
@@ -1508,8 +1407,6 @@ fn test_sessions() -> Vec<mush_session::SessionMeta> {
     ]
 }
 
-/// seed an app with two anthropic models and one openai model so
-/// the model picker tests have a deterministic catalogue
 fn app_with_models() -> App {
     use crate::slash_menu::ModelCompletion;
     let mut app = App::new("test".into(), TokenCount::new(200_000));
@@ -1573,7 +1470,6 @@ fn model_picker_overlay_ctrl_j_k_navigate_visible_rows() {
     assert_eq!(app.interaction.model_picker.as_ref().unwrap().selected, 1);
     handle_key(&mut app, ctrl(KeyCode::Char('j')));
     assert_eq!(app.interaction.model_picker.as_ref().unwrap().selected, 2);
-    // can't go past the last row
     handle_key(&mut app, ctrl(KeyCode::Char('j')));
     assert_eq!(app.interaction.model_picker.as_ref().unwrap().selected, 2);
     handle_key(&mut app, ctrl(KeyCode::Char('k')));
@@ -1609,7 +1505,6 @@ fn model_picker_overlay_tab_switches_tabs() {
     let mut app = app_with_models();
     app.completion.favourite_models = vec!["gpt-5".into()];
     app.open_model_picker_overlay();
-    // favourites present, so the picker opens on the favourites tab
     assert_eq!(
         app.interaction.model_picker.as_ref().unwrap().tab,
         crate::model_picker::ModelPickerTab::Favourites
@@ -1631,7 +1526,6 @@ fn model_picker_overlay_tab_switches_tabs() {
 fn model_picker_overlay_enter_emits_model_action_and_closes() {
     let mut app = app_with_models();
     app.open_model_picker_overlay();
-    // navigate to the second row then press enter
     handle_key(&mut app, ctrl(KeyCode::Char('j')));
     let event = handle_key(&mut app, key(KeyCode::Enter));
     match event {
@@ -1698,7 +1592,6 @@ fn model_picker_overlay_ctrl_f_toggles_favourite_when_unlocked() {
     assert!(matches!(event, Some(AppEvent::PersistFavourites)));
     assert_eq!(app.completion.favourite_models, vec!["claude-opus-4"]);
 
-    // toggling again removes it
     handle_key(&mut app, ctrl(KeyCode::Char('f')));
     assert!(app.completion.favourite_models.is_empty());
 }
@@ -1724,9 +1617,6 @@ fn model_picker_overlay_ctrl_f_toasts_when_locked() {
     );
 }
 
-/// build an app whose model catalogue contains one fresh row and
-/// one stale row in that order, so tests can exercise ctrl+d and
-/// ctrl+shift+d
 fn app_with_one_stale_row() -> App {
     use crate::slash_menu::ModelCompletion;
     let mut app = App::new("test".into(), TokenCount::new(200_000));
@@ -1757,19 +1647,14 @@ fn app_with_one_stale_row() -> App {
 
 #[test]
 fn model_picker_overlay_ctrl_d_arms_confirm_only_for_stale_rows() {
-    // ctrl+d on a fresh row toasts a hint instead of arming a
-    // delete; on a stale row it arms a Single confirmation that
-    // n then cancels without mutating state
     let mut app = app_with_one_stale_row();
     app.open_model_picker_overlay();
 
-    // selected is 0 (fresh), ctrl+d should toast and not arm
     handle_key(&mut app, ctrl(KeyCode::Char('d')));
     let picker = app.interaction.model_picker.as_ref().unwrap();
     assert!(picker.confirm_delete.is_none());
     assert!(picker.toast.as_deref().unwrap().contains("only stale"));
 
-    // move selection to the stale row
     handle_key(&mut app, ctrl(KeyCode::Char('j')));
     handle_key(&mut app, ctrl(KeyCode::Char('d')));
     let picker = app.interaction.model_picker.as_ref().unwrap();
@@ -1778,7 +1663,6 @@ fn model_picker_overlay_ctrl_d_arms_confirm_only_for_stale_rows() {
         Some(crate::slash_menu::DeleteConfirm::Single { .. })
     ));
 
-    // n cancels the confirm without mutating state
     handle_key(&mut app, key(KeyCode::Char('n')));
     let picker = app.interaction.model_picker.as_ref().unwrap();
     assert!(picker.confirm_delete.is_none());
@@ -1833,9 +1717,6 @@ fn ctrl_bracket_aborts_streaming() {
 
 #[test]
 fn up_arrow_lifts_queued_when_input_empty_streaming() {
-    // user is streaming with a queued steering message. pressing Up
-    // on an empty input line should lift the queued message back
-    // into the input for editing, matching the behaviour of Alt+K
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.stream.active = true;
     app.push_queued_message("queued steering");
@@ -1862,8 +1743,6 @@ fn ctrl_k_lifts_queued_when_input_empty_streaming() {
 
 #[test]
 fn up_arrow_lifts_queued_when_input_empty_idle() {
-    // lift also works when the agent isn't streaming (queue may
-    // still have pending entries between turns)
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.stream.active = false;
     app.push_queued_message("queued steering");
@@ -1877,8 +1756,6 @@ fn up_arrow_lifts_queued_when_input_empty_idle() {
 
 #[test]
 fn ctrl_k_deletes_to_end_when_input_has_text() {
-    // classic emacs kill-line behaviour must still work when the
-    // user has typed something or when no queued message exists
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.input.text = "hello world".into();
     app.input.cursor = 5;
@@ -1897,11 +1774,8 @@ fn ctrl_k_deletes_to_end_when_input_has_text() {
 
 #[test]
 fn up_arrow_without_queued_does_not_emit_edit_steering() {
-    // without a queued message there's nothing to lift, so Up falls
-    // through to existing behaviour (no-op in editing mode)
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.stream.active = true;
-    // no queued messages pushed
 
     let event = handle_key(&mut app, key(KeyCode::Up));
     assert!(
@@ -1976,7 +1850,6 @@ fn login_picker_ctrl_j_k_navigate_visible_rows() {
     let mut app = app_with_login_picker();
     handle_key(&mut app, ctrl(KeyCode::Char('j')));
     assert_eq!(app.interaction.login_picker.as_ref().unwrap().selected, 1);
-    // can't navigate past the last row
     handle_key(&mut app, ctrl(KeyCode::Char('j')));
     assert_eq!(app.interaction.login_picker.as_ref().unwrap().selected, 1);
     handle_key(&mut app, ctrl(KeyCode::Char('k')));
@@ -1989,7 +1862,6 @@ fn login_picker_typing_filters_and_resets_selection() {
     handle_key(&mut app, ctrl(KeyCode::Char('j')));
     assert_eq!(app.interaction.login_picker.as_ref().unwrap().selected, 1);
 
-    // typing reorders the list and pushes selection back to the top
     for c in "codex".chars() {
         handle_key(&mut app, key(KeyCode::Char(c)));
     }
@@ -2007,11 +1879,7 @@ fn login_picker_typing_filters_and_resets_selection() {
 
 #[test]
 fn login_picker_enter_on_logged_out_oauth_emits_login_action_and_closes() {
-    // pressing enter on a logged-out oauth row should kick the
-    // existing login flow by emitting SlashAction::Login with the
-    // oauth provider id (so the existing handler can begin_login)
     let mut app = app_with_login_picker();
-    // navigate to logged-out row
     handle_key(&mut app, ctrl(KeyCode::Char('j')));
     let event = handle_key(&mut app, key(KeyCode::Enter));
     match event {
@@ -2026,8 +1894,6 @@ fn login_picker_enter_on_logged_out_oauth_emits_login_action_and_closes() {
 
 #[test]
 fn login_picker_enter_on_logged_out_api_key_arms_entry_prompt() {
-    // api-key rows don't kick a slash command - they arm the
-    // in-picker key entry prompt so the user can paste their key
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.open_login_picker(
         vec![api_key_login_entry("openrouter", "OpenRouter", None)],
@@ -2049,7 +1915,6 @@ fn login_picker_entry_typing_pushes_into_buffer() {
         vec![api_key_login_entry("openrouter", "OpenRouter", None)],
         std::collections::HashMap::new(),
     );
-    // arm entry mode
     handle_key(&mut app, key(KeyCode::Enter));
     for c in "sk-or-test".chars() {
         handle_key(&mut app, key(KeyCode::Char(c)));
@@ -2110,7 +1975,6 @@ fn login_picker_entry_esc_cancels_back_to_picker() {
         picker.entry.is_none(),
         "esc in entry mode must cancel the prompt, not close the picker"
     );
-    // picker itself stays open
     assert_eq!(app.interaction.mode, AppMode::LoginPicker);
 }
 
@@ -2122,8 +1986,6 @@ fn login_picker_entry_empty_save_shows_error_toast_and_keeps_open() {
         std::collections::HashMap::new(),
     );
     handle_key(&mut app, key(KeyCode::Enter));
-    // press enter without typing anything - must not write an
-    // empty key and must surface a helpful toast
     handle_key(&mut app, key(KeyCode::Enter));
     let picker = app.interaction.login_picker.as_ref().unwrap();
     assert!(
@@ -2139,10 +2001,7 @@ fn login_picker_entry_empty_save_shows_error_toast_and_keeps_open() {
 }
 #[test]
 fn login_picker_enter_on_logged_in_arms_logout_confirm() {
-    // logged-in row gets a logout confirmation instead of a login
-    // action. picker stays open while the user confirms
     let mut app = app_with_login_picker();
-    // logged-in row is at index 0
     let event = handle_key(&mut app, key(KeyCode::Enter));
     assert!(event.is_none(), "no event while confirm is pending");
     let picker = app.interaction.login_picker.as_ref().unwrap();
@@ -2170,11 +2029,6 @@ fn login_picker_n_cancels_logout_confirm() {
 
 #[test]
 fn login_picker_entry_enter_with_filled_buffer_emits_validate_event_and_begins_validating() {
-    // saving an api key must go through provider validation first.
-    // hitting enter with a typed buffer should hand the key off to
-    // the runner via an event AND immediately switch the picker to
-    // its validating state so the user gets feedback (no silent
-    // gap, no chance to retype while a request is in flight)
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.open_login_picker(
         vec![api_key_login_entry("openrouter", "OpenRouter", None)],
@@ -2194,19 +2048,12 @@ fn login_picker_entry_enter_with_filled_buffer_emits_validate_event_and_begins_v
     }
     let picker = app.interaction.login_picker.as_ref().unwrap();
     assert_eq!(picker.validating.as_deref(), Some("openrouter"));
-    // entry stays alive (with empty buffer) so the popover keeps
-    // rendering across the in-flight roundtrip
     let prompt = picker.entry.as_ref().expect("popover prompt should remain");
     assert!(prompt.buffer.is_empty());
 }
 
 #[test]
 fn login_picker_keys_swallowed_while_validating() {
-    // input must not mutate the picker while a validation is in
-    // flight. otherwise typing during the (typically sub-second)
-    // network roundtrip could spuriously re-arm the entry prompt
-    // or filter the row list, and the runner's state restore
-    // would race with user input
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.open_login_picker(
         vec![api_key_login_entry("openrouter", "OpenRouter", None)],
@@ -2226,9 +2073,6 @@ fn login_picker_keys_swallowed_while_validating() {
     let picker = app.interaction.login_picker.as_ref().unwrap();
     assert_eq!(picker.validating.as_deref(), Some("openrouter"));
     assert!(picker.filter.is_empty());
-    // entry prompt stays alive across the in-flight roundtrip so
-    // the popover renders continuously, but its buffer must stay
-    // empty (no typed key should be captured during validation)
     assert!(
         picker.entry.as_ref().is_some_and(|p| p.buffer.is_empty()),
         "entry buffer must not capture keystrokes while validating"

@@ -1,5 +1,3 @@
-//! tests for the app state machine
-
 use super::*;
 use crate::input_buffer::word_boundary_left;
 use crate::streaming::char_prefix;
@@ -86,7 +84,6 @@ fn char_prefix_slices_correctly() {
     assert_eq!(char_prefix("hello", 3), "hel");
     assert_eq!(char_prefix("hello", 5), "hello");
     assert_eq!(char_prefix("hello", 100), "hello");
-    // multi-byte chars
     assert_eq!(char_prefix("café", 3), "caf");
     assert_eq!(char_prefix("café", 4), "café");
 }
@@ -97,16 +94,13 @@ fn typewriter_advances_with_ticks() {
     app.start_streaming();
     app.push_text_delta("hello world");
 
-    // before any tick, nothing visible
     assert_eq!(app.visible_streaming_text(), "");
 
-    // one tick advances partway (exponential ease)
     app.tick();
     let visible = app.visible_streaming_text();
     assert!(!visible.is_empty());
     assert!(visible.len() < "hello world".len());
 
-    // enough ticks catch up fully
     for _ in 0..20 {
         app.tick();
     }
@@ -138,7 +132,6 @@ fn typewriter_resets_on_new_stream() {
     }
     assert_eq!(app.visible_streaming_text(), "first");
 
-    // new stream resets
     app.start_streaming();
     assert_eq!(app.visible_streaming_text(), "");
 }
@@ -147,7 +140,6 @@ fn typewriter_resets_on_new_stream() {
 fn tool_lifecycle() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.push_user_message("do something");
-    // simulate assistant message already pushed by finish_streaming
     app.messages
         .push(DisplayMessage::new(MessageRole::Assistant, ""));
 
@@ -168,7 +160,6 @@ fn tool_lifecycle() {
         Some("file1.txt\nfile2.txt"),
         None,
     );
-    // tool stays in active_tools as done (panel persists)
     assert_eq!(app.active_tools.len(), 1);
     assert_eq!(app.active_tools[0].status, ToolCallStatus::Done);
     assert_eq!(
@@ -176,12 +167,10 @@ fn tool_lifecycle() {
         ToolCallStatus::Done
     );
 
-    // tools persist through streaming turns (cleared on new user submit)
     app.start_streaming();
     assert_eq!(app.active_tools.len(), 1);
     assert_eq!(app.active_tools[0].status, ToolCallStatus::Done);
 
-    // explicitly clearing simulates user submitting new prompt
     app.active_tools.clear();
     assert!(app.active_tools.is_empty());
 }
@@ -191,7 +180,7 @@ fn ensure_cursor_visible_recomputes_total_when_stale() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.input.area.set(Rect::new(0, 0, 20, 8));
     app.input.visible_lines.set(2);
-    app.input.total_lines.set(2); // stale from previous render
+    app.input.total_lines.set(2);
     app.input.text = "one\ntwo\nthree\nfour\nfive".into();
     app.input.cursor = app.input.text.len();
 
@@ -324,7 +313,6 @@ fn truncate_output_large_allows_more_lines_than_small() {
         .map(|i| format!("line {i}"))
         .collect::<Vec<_>>()
         .join("\n");
-    // 30 lines: small cap (12) truncates, large cap (40) does not
     let small = truncate_output(&lines);
     let large = truncate_output_large(&lines);
     assert!(
@@ -360,17 +348,11 @@ fn tool_output_stored() {
 
 #[test]
 fn edit_tool_output_preserves_long_diffs_without_truncation() {
-    // regression: truncate_output_large caps at MAX_SINGLE_TOOL_LINES
-    // (40) which cut legitimate edit diffs in half even when the
-    // terminal had plenty of vertical room. edit diffs are bounded by
-    // the size of the change the user is reviewing, so they should
-    // render at full length and let the scroll viewport handle overflow
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.messages
         .push(DisplayMessage::new(MessageRole::Assistant, ""));
     let tool_call_id = ToolCallId::from("tc_edit");
     app.start_tool(&tool_call_id, "edit", "src/main.rs");
-    // a realistic 80-line edit diff
     let diff: String = (0..80_usize)
         .map(|i| {
             if i.is_multiple_of(3) {
@@ -417,20 +399,16 @@ fn batch_tool_expands_into_sub_calls() {
         ],
     );
 
-    // one live panel per sub-call, keyed by synthetic exec ids so each
-    // sub-call streams into its own panel
     assert_eq!(app.active_tools.len(), 3);
     assert_eq!(app.active_tools[0].name, "read");
     assert_eq!(app.active_tools[2].name, "bash");
     assert_eq!(app.active_tools[0].tool_call_id.as_str(), "tc_batch#0");
     assert_eq!(app.active_tools[2].tool_call_id.as_str(), "tc_batch#2");
-    // three display entries in the message
     let tcs = &app.messages.last().unwrap().tool_calls;
     assert_eq!(tcs.len(), 3);
     assert_eq!(tcs[0].name, "read");
     assert_eq!(tcs[1].name, "read");
     assert_eq!(tcs[2].name, "bash");
-    // all same batch
     assert_eq!(tcs[0].batch, tcs[1].batch);
     assert_eq!(tcs[1].batch, tcs[2].batch);
     assert!(tcs.iter().all(|t| t.status == ToolCallStatus::Running));
@@ -438,9 +416,6 @@ fn batch_tool_expands_into_sub_calls() {
 
 #[test]
 fn batch_sub_calls_stream_live_output_to_their_own_panels() {
-    // the bug being fixed: parallel sub-calls all dumped their live
-    // output into the last panel. each sub-call's synthetic exec id must
-    // route to its own panel.
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.messages
         .push(DisplayMessage::new(MessageRole::Assistant, ""));
@@ -506,15 +481,6 @@ batch: 1/2 succeeded, 1 failed";
 
 #[test]
 fn batch_end_with_top_level_error_shows_error_on_subcalls() {
-    // when the batch tool itself errors before producing per-sub-call
-    // sections (e.g. BatchArgs parse failure: missing `parameters` on
-    // one call, or extra fields rejected by deny_unknown_fields), the
-    // result is a single top-level error string with no `--- [N] ...
-    // ---` headers. previously every sub-call display entry fell
-    // through to the unhelpful "missing result in batch output"
-    // fallback, which hid the real error from the user. the actual
-    // error text should be surfaced on every sub-call instead so the
-    // user can see what actually went wrong
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.messages
         .push(DisplayMessage::new(MessageRole::Assistant, ""));
@@ -551,10 +517,6 @@ fn batch_end_with_top_level_error_shows_error_on_subcalls() {
 
 #[test]
 fn batch_end_with_error_outcome_marks_active_panel_error() {
-    // the live tool panels (active_tools) sit above the message history,
-    // one per sub-call. previously a single batch panel was unconditionally
-    // set to Done, so a failed batch still rendered a green check. each
-    // sub-call panel should reflect its own outcome from the parsed output.
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.messages
         .push(DisplayMessage::new(MessageRole::Assistant, ""));
@@ -626,7 +588,6 @@ fn toggle_thinking() {
     app.push_text_delta("answer");
     app.finish_streaming(None, None);
 
-    // starts expanded (default ThinkingDisplay::Expanded)
     assert!(app.messages[0].thinking_expanded);
 
     app.toggle_thinking_expanded();
@@ -640,20 +601,17 @@ fn toggle_thinking() {
 fn toggle_thinking_targets_last_assistant() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
 
-    // first assistant with thinking
     app.start_streaming();
     app.push_thinking_delta("old thoughts");
     app.push_text_delta("first");
     app.finish_streaming(None, None);
 
-    // second assistant with thinking
     app.start_streaming();
     app.push_thinking_delta("new thoughts");
     app.push_text_delta("second");
     app.finish_streaming(None, None);
 
     app.toggle_thinking_expanded();
-    // should toggle the latest one (was expanded, now collapsed)
     assert!(app.messages[0].thinking_expanded);
     assert!(!app.messages[1].thinking_expanded);
 }
@@ -775,7 +733,6 @@ fn session_picker_filter_is_fuzzy_subsequence() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.open_session_picker(sessions, "/tmp".into());
 
-    // "rpj" is a subsequence of "rust project" but not a substring
     let picker = app.interaction.session_picker.as_mut().unwrap();
     picker.filter = "rpj".into();
     let filtered = filtered_sessions(picker);
@@ -813,14 +770,12 @@ fn session_picker_scope_filter() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.open_session_picker(sessions, "/home/user/project".into());
 
-    // this dir: only the matching session
     let picker = app.interaction.session_picker.as_ref().unwrap();
     assert_eq!(picker.scope, SessionScope::ThisDir);
     let filtered = filtered_sessions(picker);
     assert_eq!(filtered.len(), 1);
     assert_eq!(filtered[0].title.as_deref(), Some("local session"));
 
-    // all dirs: both sessions
     let picker = app.interaction.session_picker.as_mut().unwrap();
     picker.scope = SessionScope::AllDirs;
     let filtered = filtered_sessions(picker);
@@ -834,7 +789,6 @@ fn streaming_tool_args_accumulate() {
     app.push_tool_args_delta("\"src/");
     assert_eq!(app.stream.tool_args, "{\"path\":\"src/");
 
-    // start_tool clears the buffer
     let tool_call_id = ToolCallId::from("tc_1");
     app.start_tool(&tool_call_id, "read", "src/main.rs");
     assert!(app.stream.tool_args.is_empty());
@@ -842,7 +796,6 @@ fn streaming_tool_args_accumulate() {
 
 #[test]
 fn word_boundary_left_skips_punctuation() {
-    // cursor after "hello." should delete back to start of "hello"
     assert_eq!(word_boundary_left("hello.", 6), 0);
     assert_eq!(word_boundary_left("foo hello.", 10), 4);
     assert_eq!(word_boundary_left("hello world.", 12), 6);
@@ -871,9 +824,7 @@ fn steering_message_ordered_after_assistant() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.start_streaming();
     app.push_text_delta("assistant reply");
-    // user sends steering while streaming
     app.push_queued_message("steer");
-    // assistant finishes
     app.finish_streaming(None, None);
 
     assert_eq!(app.messages.len(), 2);
@@ -885,18 +836,6 @@ fn steering_message_ordered_after_assistant() {
 
 #[test]
 fn tool_output_attaches_to_assistant_when_steering_queued_mid_tool() {
-    // regression: when the user queues a steering message while a tool
-    // is running, the queued user bubble sits at the end of
-    // app.messages. tool start/end used to push and look up via
-    // messages.last_mut(), which is the queued user bubble in this
-    // scenario instead of the assistant message that actually owns
-    // the tool call. the result: the tool_call entry never got its
-    // status flipped to Done and the output_preview was silently
-    // dropped, so when the steering eventually injected (queued ->
-    // actual) and the live panel cleared on the next TurnStart, the
-    // output had no visible home in the message history. tool calls
-    // must always attach to the assistant message owning the turn,
-    // not whatever happens to be last in the visible message list
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.push_user_message("do thing");
     app.start_streaming();
@@ -906,7 +845,6 @@ fn tool_output_attaches_to_assistant_when_steering_queued_mid_tool() {
     let tc_id = ToolCallId::from("tc_1");
     app.start_tool(&tc_id, "bash", "ls");
 
-    // user queues a steering message while the tool is mid-flight
     app.push_queued_message("also do this");
 
     app.end_tool(
@@ -951,16 +889,12 @@ fn tool_output_attaches_to_assistant_when_steering_queued_mid_tool() {
 
 #[test]
 fn tool_start_attaches_to_assistant_when_steering_already_queued() {
-    // companion regression: a queued steering message present at the
-    // moment a new tool starts must not become the parent of the new
-    // tool_call entry
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.push_user_message("do thing");
     app.start_streaming();
     app.push_text_delta("on it");
     app.finish_streaming(None, None);
 
-    // steering queued BEFORE any tool fires
     app.push_queued_message("also do this");
 
     let tc_id = ToolCallId::from("tc_1");
@@ -986,7 +920,6 @@ fn tool_start_attaches_to_assistant_when_steering_already_queued() {
 fn cache_ttl_secs_by_provider() {
     use super::cache_ttl_secs;
 
-    // anthropic: short = 5 min, long = 1 hour, none = 0
     assert_eq!(
         cache_ttl_secs(&Provider::Anthropic, Some(&CacheRetention::Short), false),
         300
@@ -999,9 +932,8 @@ fn cache_ttl_secs_by_provider() {
         cache_ttl_secs(&Provider::Anthropic, Some(&CacheRetention::None), false),
         0
     );
-    assert_eq!(cache_ttl_secs(&Provider::Anthropic, None, false), 300); // default = short
+    assert_eq!(cache_ttl_secs(&Provider::Anthropic, None, false), 300);
 
-    // oauth always gets 1h, regardless of retention setting
     assert_eq!(cache_ttl_secs(&Provider::Anthropic, None, true), 3600);
     assert_eq!(
         cache_ttl_secs(&Provider::Anthropic, Some(&CacheRetention::Short), true),
@@ -1009,7 +941,6 @@ fn cache_ttl_secs_by_provider() {
         "oauth should ignore Short retention and use 1h"
     );
 
-    // openrouter / custom: defaults to 300
     assert_eq!(cache_ttl_secs(&Provider::OpenRouter, None, false), 300);
     assert_eq!(
         cache_ttl_secs(&Provider::Custom("xai".into()), None, false),
@@ -1025,21 +956,17 @@ fn cache_remaining_countdown() {
     app.cache.ttl_secs = 300;
     app.cache.refresh();
     let remaining = app.cache.remaining_secs().unwrap();
-    // just refreshed, should be very close to 300
     assert!((298..=300).contains(&remaining));
 }
 
 #[test]
 fn pop_last_queued_message() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
-    // no queued messages returns none
     assert!(app.pop_last_queued_message().is_none());
 
-    // add some queued messages
     app.push_queued_message("first steering");
     app.push_queued_message("second steering");
 
-    // pops the last one
     assert_eq!(app.pop_last_queued_message().unwrap(), "second steering");
     assert_eq!(app.pop_last_queued_message().unwrap(), "first steering");
     assert!(app.pop_last_queued_message().is_none());
@@ -1051,10 +978,8 @@ fn pop_queued_skips_non_queued() {
     app.push_user_message("normal message");
     app.push_queued_message("steering msg");
 
-    // only pops the queued one
     assert_eq!(app.pop_last_queued_message().unwrap(), "steering msg");
     assert!(app.pop_last_queued_message().is_none());
-    // normal message still there
     assert_eq!(app.messages.len(), 1);
     assert!(!app.messages[0].queued);
 }
@@ -1062,7 +987,7 @@ fn pop_queued_skips_non_queued() {
 #[test]
 fn tool_call_status_is_copy() {
     let status = ToolCallStatus::Running;
-    let copied = status; // would fail if not Copy
+    let copied = status;
     assert_eq!(status, copied);
 }
 
@@ -1148,14 +1073,11 @@ fn streaming_state_visible_text_typewriter() {
     let mut stream = StreamingState::new();
     stream.start();
     stream.push_text("hello world");
-    // before advance, nothing visible
     assert_eq!(stream.visible_text(), "");
-    // advance once
     stream.advance_typewriter();
     let visible = stream.visible_text();
     assert!(!visible.is_empty());
     assert!(visible.len() <= "hello world".len());
-    // enough advances catch up
     for _ in 0..20 {
         stream.advance_typewriter();
     }
@@ -1196,14 +1118,10 @@ fn shimmer_phase_advances_with_animation_frames() {
 
 #[test]
 fn is_busy_during_tool_execution() {
-    // stream.active is false during tool execution (text streaming
-    // ended) but is_busy() should still return true when tools are
-    // running so input shortcuts can still abort the turn
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     assert!(!app.stream.active);
     assert!(!app.is_busy());
 
-    // simulate tool running with stream inactive
     app.active_tools
         .push(crate::display_types::ActiveToolState {
             tool_call_id: "test_1".into(),
@@ -1347,9 +1265,6 @@ fn activity_label_ignores_completed_tools() {
 
 #[test]
 fn compacting_makes_app_busy_with_label() {
-    // a backgrounded /compact run is real work, so is_busy() must
-    // include it (drives the animation tick) and activity_label()
-    // must surface it for the chat + status bar
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     assert!(!app.is_busy());
     assert_eq!(app.activity_label(), None);
@@ -1361,10 +1276,6 @@ fn compacting_makes_app_busy_with_label() {
 
 #[test]
 fn compacting_label_takes_precedence_over_streaming_and_tools() {
-    // compaction is a discrete, exclusive operation. if a user
-    // somehow ends up with both flags set the label should still
-    // read "compacting…" so the UI doesn't lie about what's
-    // happening
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.start_streaming();
     app.active_tools
@@ -1382,8 +1293,6 @@ fn compacting_label_takes_precedence_over_streaming_and_tools() {
 
 #[test]
 fn activity_label_prefers_tool_over_streaming() {
-    // when both apply, "using tool" wins since it's the more concrete
-    // signal and stream.active can persist across tool execution gaps
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.start_streaming();
     app.active_tools
@@ -1402,9 +1311,7 @@ fn activity_label_prefers_tool_over_streaming() {
 fn unread_flash_cycle_works() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.navigation.has_unread = true;
-    // at tick 0, flash should be on
     assert!(app.unread_flash_on());
-    // advance past the on-phase
     for _ in 0..UNREAD_FLASH_ON {
         app.tick();
     }
@@ -1447,10 +1354,10 @@ fn input_buffer_word_navigation() {
     buf.cursor = buf.text.len();
 
     buf.cursor_word_left();
-    assert_eq!(buf.cursor, 12); // before "foo"
+    assert_eq!(buf.cursor, 12);
 
     buf.cursor_word_left();
-    assert_eq!(buf.cursor, 6); // before "world"
+    assert_eq!(buf.cursor, 6);
 }
 
 #[test]
@@ -1489,7 +1396,6 @@ fn insert_str_empty_is_noop() {
     assert_eq!(buf.cursor, 3);
 }
 
-// cache anomaly detection tests
 #[test]
 fn detect_context_decrease() {
     let prev = Usage {
@@ -1575,7 +1481,6 @@ fn no_anomaly_on_first_call() {
 #[test]
 fn no_anomaly_after_reset() {
     let mut stats = TokenStats::new(TokenCount::new(200_000));
-    // simulate a call
     stats.update(
         &Usage {
             input_tokens: TokenCount::new(10_000),
@@ -1588,7 +1493,6 @@ fn no_anomaly_after_reset() {
 
     stats.reset();
 
-    // next call after reset should not detect anomalies
     let anomalies = stats.update(
         &Usage {
             input_tokens: TokenCount::new(5_000),
@@ -1607,7 +1511,6 @@ fn no_anomaly_after_reset() {
 #[test]
 fn stats_update_returns_anomalies() {
     let mut stats = TokenStats::new(TokenCount::new(200_000));
-    // first call: warm cache
     let a1 = stats.update(
         &Usage {
             input_tokens: TokenCount::new(5_000),
@@ -1619,7 +1522,6 @@ fn stats_update_returns_anomalies() {
     );
     assert!(a1.is_empty(), "first call should have no anomalies");
 
-    // second call: cache bust (cache_read drops to 0, cache_write spikes)
     let a2 = stats.update(
         &Usage {
             input_tokens: TokenCount::new(5_000),
@@ -1640,7 +1542,6 @@ fn stats_update_returns_anomalies() {
 fn finish_streaming_shows_system_message_on_cache_bust() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
 
-    // first call: warm cache
     app.start_streaming();
     app.push_text_delta("hello");
     app.finish_streaming(
@@ -1655,7 +1556,6 @@ fn finish_streaming_shows_system_message_on_cache_bust() {
 
     let before = app.messages.len();
 
-    // second call: cache bust
     app.start_streaming();
     app.push_text_delta("world");
     app.finish_streaming(
@@ -1668,7 +1568,6 @@ fn finish_streaming_shows_system_message_on_cache_bust() {
         None,
     );
 
-    // should have an extra system message about the cache bust
     let system_msgs: Vec<_> = app.messages[before..]
         .iter()
         .filter(|m| m.role == MessageRole::System)
@@ -1716,7 +1615,6 @@ fn cache_bust_diagnostic_writes_json_file() {
         recent_request_snapshots: Vec::new(),
     };
 
-    // test the dump function directly using internal helper
     std::fs::create_dir_all(&bust_dir).unwrap();
     let json = serde_json::to_string_pretty(&diag).unwrap();
     let path = bust_dir.join("bust-test.json");
@@ -1728,16 +1626,11 @@ fn cache_bust_diagnostic_writes_json_file() {
     assert_eq!(parsed["thinking_level"], "High");
     assert_eq!(parsed["prev_usage"]["cache_read_tokens"], 90_000);
     assert_eq!(parsed["curr_usage"]["cache_write_tokens"], 100_000);
-    // no snapshots set → field should be absent via skip_serializing_if
     assert!(parsed.get("recent_request_snapshots").is_none());
 }
 
 #[test]
 fn cache_bust_diagnostic_includes_request_snapshots_when_present() {
-    // when request snapshots are available at bust time, their
-    // paths should land in the json so a reader can diff them.
-    // the field is declared skip_serializing_if_empty, so presence
-    // in the json proves both the hookup and the serde contract
     let diag = CacheBustDiagnostic {
         timestamp: "1722470400".into(),
         secs_since_last_cache_activity: Some(10),
@@ -1773,7 +1666,6 @@ fn cache_bust_diagnostic_includes_request_snapshots_when_present() {
 fn finish_streaming_shows_system_message_on_context_decrease() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
 
-    // first call
     app.start_streaming();
     app.push_text_delta("hello");
     app.finish_streaming(
@@ -1788,7 +1680,6 @@ fn finish_streaming_shows_system_message_on_context_decrease() {
 
     let before = app.messages.len();
 
-    // second call: context decreased
     app.start_streaming();
     app.push_text_delta("world");
     app.finish_streaming(
@@ -1817,7 +1708,6 @@ fn finish_streaming_shows_system_message_on_context_decrease() {
 fn finish_streaming_no_system_message_on_normal_growth() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
 
-    // first call
     app.start_streaming();
     app.push_text_delta("hello");
     app.finish_streaming(
@@ -1832,7 +1722,6 @@ fn finish_streaming_no_system_message_on_normal_growth() {
 
     let before = app.messages.len();
 
-    // second call: normal growth
     app.start_streaming();
     app.push_text_delta("world");
     app.finish_streaming(
@@ -1944,9 +1833,6 @@ fn open_model_picker_overlay_is_noop_without_models() {
 
 #[test]
 fn open_model_picker_overlay_hides_internal_codex_entries_by_default() {
-    // codex marks some upstream entries as `internal` or `experimental`;
-    // the default overlay only shows production-ready models so users
-    // don't wade through every snapshot
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.completion.model_completions = vec![
         ModelCompletion {
@@ -1978,8 +1864,6 @@ fn open_model_picker_overlay_hides_internal_codex_entries_by_default() {
 
 #[test]
 fn open_model_picker_overlay_all_reveals_hidden_codex_entries() {
-    // /model --all routes to open_model_picker_overlay_all so internal
-    // entries surface alongside production ones, sorted by priority desc
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.completion.model_completions = vec![
         ModelCompletion {
@@ -2006,16 +1890,12 @@ fn open_model_picker_overlay_all_reveals_hidden_codex_entries() {
     app.open_model_picker_overlay_all();
     let picker = app.interaction.model_picker.as_ref().unwrap();
     let ids: Vec<&str> = picker.models.iter().map(|m| m.id.as_str()).collect();
-    // priority 99 first, then priority 1
     assert_eq!(ids, vec!["internal-snapshot", "gpt-5.4"]);
     assert!(picker.show_all, "show_all flag must be set");
 }
 
 #[test]
 fn login_picker_open_close() {
-    // /login with no arg should open a centred floating picker that
-    // mirrors the model / session pickers. opening sets the mode and
-    // populates state, closing reverts to Normal and drops state
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     let entries = vec![
         crate::login_picker::LoginEntry {
@@ -2058,10 +1938,6 @@ fn login_entry(id: &str, method: mush_ai::login::LoginMethod) -> crate::login_pi
 
 #[test]
 fn handle_paste_routes_into_login_picker_entry_buffer() {
-    // when the /login picker has armed an api-key entry prompt,
-    // bracketed-paste text must land in the picker's buffer rather
-    // than the main prompt input. otherwise pasted keys leak into
-    // the message box visible behind the overlay
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.open_login_picker(
         vec![login_entry(
@@ -2098,9 +1974,6 @@ fn handle_paste_inserts_into_main_input_by_default() {
 
 #[test]
 fn selected_login_provider_returns_filtered_id() {
-    // selected_login_provider must follow the filter so a typed query
-    // that reorders or hides rows still picks the visible row at
-    // `selected`. mirrors selected_session / selected_model_id
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.open_login_picker(
         vec![
@@ -2134,10 +2007,6 @@ fn selected_login_provider_returns_filtered_id() {
     );
 }
 
-// commit point: what an inline viewport can hand to the terminal's scrollback
-
-/// drive a turn the way the agent loop does: the user bubble, then the
-/// assistant bubble from MessageEnd, then any tools inside it
 fn finish_turn(app: &mut App, prompt: &str) {
     app.push_user_message(prompt);
     app.start_streaming();
@@ -2154,8 +2023,6 @@ fn a_fresh_app_has_nothing_to_commit() {
 fn the_whole_current_turn_stays_live() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     finish_turn(&mut app, "first question");
-    // [user, assistant]: thinking can still be toggled on the assistant
-    // and the next tool call lands inside it
     assert_eq!(app.commit_point(), 0);
 }
 
@@ -2175,8 +2042,6 @@ fn a_running_tool_holds_the_commit_point_back() {
     app.start_tool(&"tc_1".into(), "bash", "ls");
     app.push_user_message("third question");
 
-    // the second turn's assistant still owns a running tool, so it and
-    // everything after it stays live
     assert_eq!(app.commit_point(), 3);
 }
 

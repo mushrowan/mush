@@ -1,5 +1,3 @@
-//! side-by-side tool execution panels
-
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -10,10 +8,8 @@ use crate::app::{ActiveToolState, ToolCallStatus};
 use crate::path_utils::truncate_path;
 use crate::theme::Theme;
 
-/// minimum width per tool panel before stacking vertically
 const MIN_PANEL_WIDTH: u16 = 30;
 
-/// renders active tools as side-by-side panels
 pub struct ToolPanels<'a> {
     tools: &'a [ActiveToolState],
     theme: &'a Theme,
@@ -32,9 +28,6 @@ impl Widget for ToolPanels<'_> {
         }
 
         let n = self.tools.len();
-        // lay out as a grid: cols capped by area.width / MIN_PANEL_WIDTH,
-        // rows = ceil(n / cols). this gives 2x2 for 4 tools on mid-width
-        // terminals instead of a strict horizontal or vertical strip
         let max_cols = ((area.width / MIN_PANEL_WIDTH) as usize).max(1);
         let cols = n.min(max_cols);
         let rows = n.div_ceil(cols);
@@ -105,10 +98,6 @@ fn render_panel(tool: &ActiveToolState, theme: &Theme, area: Rect, buf: &mut Buf
 
     let mut lines: Vec<Line<'_>> = Vec::new();
 
-    // summary line: truncate to panel width since ratatui won't wrap for us.
-    // summarise_tool_args returns the full command; we cap it here.
-    // file-path tools (read/write/edit/ls) keep the tail (filename) so the
-    // interesting end stays visible; everything else keeps the head
     let summary = if is_path_summary_tool(&tool.name) {
         truncate_path(tool.summary.as_str(), inner.width as usize)
     } else {
@@ -116,7 +105,6 @@ fn render_panel(tool: &ActiveToolState, theme: &Theme, area: Rect, buf: &mut Buf
     };
     lines.push(Line::styled(summary, theme.dim));
 
-    // show output: live output for running, final output for done
     let output = match tool.status {
         ToolCallStatus::Running => tool.live_output.as_deref(),
         _ => tool.output.as_deref(),
@@ -140,9 +128,6 @@ fn render_panel(tool: &ActiveToolState, theme: &Theme, area: Rect, buf: &mut Buf
         .render(inner, buf);
 }
 
-/// tools whose `summary` field is a file path and should be truncated from
-/// the head (keeping the filename) when it overflows the panel width.
-/// matches normalisation done in `summarise_tool_args`
 fn is_path_summary_tool(name: &str) -> bool {
     matches!(
         name.to_lowercase().replace('_', "").as_str(),
@@ -150,7 +135,6 @@ fn is_path_summary_tool(name: &str) -> bool {
     )
 }
 
-/// compute the height needed for the tool panels area
 pub fn tool_panels_height(tools: &[ActiveToolState], area_width: u16) -> u16 {
     if tools.is_empty() {
         return 0;
@@ -159,7 +143,6 @@ pub fn tool_panels_height(tools: &[ActiveToolState], area_width: u16) -> u16 {
     let has_output = tools
         .iter()
         .any(|t| t.output.is_some() || t.live_output.is_some());
-    // grid layout: cols capped by area_width / MIN_PANEL_WIDTH, rows = ceil(n/cols)
     let max_cols = (area_width / MIN_PANEL_WIDTH).max(1) as usize;
     let cols = n.min(max_cols);
     let rows = n.div_ceil(cols);
@@ -223,7 +206,6 @@ mod tests {
                 output: None,
             },
         ];
-        // 80 wide: 40 each, > MIN_PANEL_WIDTH
         let buf = render_panels(&tools, 80, 5);
         let content = buffer_to_string(&buf);
         assert!(content.contains("Read"));
@@ -250,7 +232,6 @@ mod tests {
                 output: None,
             },
         ];
-        // 40 wide: 20 each, < MIN_PANEL_WIDTH, should stack
         let buf = render_panels(&tools, 40, 10);
         let content = buffer_to_string(&buf);
         assert!(content.contains("Read"));
@@ -259,8 +240,6 @@ mod tests {
 
     #[test]
     fn four_tools_render_as_2x2_grid_on_mid_width() {
-        // 80 wide: 80/30 = 2 cols, 4 tools → 2 rows of 2. both grid rows
-        // should show their respective tool names on the top border
         let make = |n: &str| ActiveToolState {
             tool_call_id: n.into(),
             name: n.into(),
@@ -270,14 +249,11 @@ mod tests {
             output: None,
         };
         let tools = vec![make("Aa"), make("Bb"), make("Cc"), make("Dd")];
-        // need enough height for 2 rows of 5 = 10 rows
         let buf = render_panels(&tools, 80, 10);
         let content = buffer_to_string(&buf);
         for name in &["Aa", "Bb", "Cc", "Dd"] {
             assert!(content.contains(name), "missing {name}");
         }
-        // first and second grid rows each have their own top border (with ┌
-        // corners). count how many rows contain "┌" markers
         let top_border_rows = content.lines().filter(|l| l.contains("┌")).count();
         assert_eq!(
             top_border_rows, 2,
@@ -344,8 +320,6 @@ mod tests {
 
     #[test]
     fn long_read_tool_path_truncates_from_head_keeping_filename() {
-        // a long path in a narrow panel should show `…/path/main.rs`,
-        // not a head-truncated path with the filename cut off
         let tools = vec![ActiveToolState {
             tool_call_id: "tc1".into(),
             name: "Read".into(),
@@ -394,7 +368,6 @@ mod tests {
                 output: None,
             },
         ];
-        // 3 tools on a 40-wide screen: 40/3 = 13 < 30, stacks
         assert_eq!(tool_panels_height(&tools, 40), 12);
     }
 }

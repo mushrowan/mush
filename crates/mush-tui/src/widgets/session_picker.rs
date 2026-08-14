@@ -1,5 +1,3 @@
-//! session picker overlay widget
-
 use crate::path_utils::shorten_path;
 use crate::session_picker::{SessionPickerState, SessionScope, filtered_sessions};
 use crate::theme::Theme;
@@ -10,7 +8,6 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding};
 
-/// render the session picker as a centred overlay
 pub fn render(frame: &mut Frame, picker: &SessionPickerState, theme: &Theme) {
     let popup = centred_popup(
         frame.area(),
@@ -24,10 +21,8 @@ pub fn render(frame: &mut Frame, picker: &SessionPickerState, theme: &Theme) {
         },
     );
 
-    // clear the area behind the popup
     frame.render_widget(Clear, popup);
 
-    // title shows current scope with loader status when streaming
     let title = match (picker.scope, picker.loading) {
         (SessionScope::ThisDir, false) => " sessions (this dir) ".to_string(),
         (SessionScope::AllDirs, false) => " sessions (all) ".to_string(),
@@ -47,7 +42,6 @@ pub fn render(frame: &mut Frame, picker: &SessionPickerState, theme: &Theme) {
         return;
     }
 
-    // filter line
     let filter_line = Line::from(vec![
         Span::styled("filter: ", theme.dim),
         Span::styled(
@@ -61,7 +55,6 @@ pub fn render(frame: &mut Frame, picker: &SessionPickerState, theme: &Theme) {
     ]);
     frame.render_widget(filter_line, Rect::new(inner.x, inner.y, inner.width, 1));
 
-    // hint line
     let scope_label = match picker.scope {
         SessionScope::ThisDir => "all dirs",
         SessionScope::AllDirs => "this dir",
@@ -78,13 +71,11 @@ pub fn render(frame: &mut Frame, picker: &SessionPickerState, theme: &Theme) {
     ]);
     frame.render_widget(hint, Rect::new(inner.x, inner.y + 1, inner.width, 1));
 
-    // session list
     let sessions = filtered_sessions(picker);
     let list_area = Rect::new(inner.x, inner.y + 2, inner.width, inner.height - 2);
 
     let show_cwd = picker.scope == SessionScope::AllDirs;
 
-    // scroll the view if selected item is below visible area
     let visible = list_area.height as usize;
     let scroll = if picker.selected >= visible {
         picker.selected - visible + 1
@@ -106,16 +97,14 @@ pub fn render(frame: &mut Frame, picker: &SessionPickerState, theme: &Theme) {
             Style::default()
         };
 
-        // build right-side metadata
         let cwd_display = if show_cwd {
             format!("{}  ", shorten_path(&meta.cwd))
         } else {
             String::new()
         };
         let meta_right = format!("{cwd_display}{msgs}  {age}");
-        let meta_width = meta_right.len() + 1; // +1 for spacing
+        let meta_width = meta_right.len() + 1;
 
-        // truncate title to fit
         let max_title = (list_area.width as usize).saturating_sub(prefix.len() + meta_width);
         let title_display = if title.chars().count() > max_title {
             let t: String = title

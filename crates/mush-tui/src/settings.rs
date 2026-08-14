@@ -1,12 +1,5 @@
-//! runtime settings: scope control and persistence helpers
-//!
-//! `SettingsScope` decides where runtime changes (made via `/settings`)
-//! get persisted. `ScopedSettings` is a convenience pair of scope + betas
-//! that the TUI holds and mutates as the user interacts with `/settings`
-
 use mush_ai::types::AnthropicBetas;
 
-/// scope for persisting settings changes made during a session
 #[derive(
     Debug,
     Clone,
@@ -20,13 +13,9 @@ use mush_ai::types::AnthropicBetas;
 )]
 #[serde(rename_all = "lowercase")]
 pub enum SettingsScope {
-    /// changes persist to `~/.config/mush/settings.toml` (global defaults)
     Global,
-    /// no runtime changes allowed; base config is authoritative
     Disabled,
-    /// changes persist to `<repo>/.mush/settings.toml` (per-project)
     Repo,
-    /// changes only apply to the current session, not persisted
     #[default]
     Session,
 }
@@ -53,7 +42,6 @@ impl SettingsScope {
     }
 }
 
-/// active runtime settings held by the TUI
 #[derive(Debug, Clone, Default)]
 pub struct ScopedSettings {
     pub scope: SettingsScope,
@@ -61,7 +49,6 @@ pub struct ScopedSettings {
 }
 
 impl SettingsScope {
-    /// return the next variant when cycling via space/enter in the menu
     #[must_use]
     pub fn cycle_next(self) -> Self {
         match self {
@@ -73,7 +60,6 @@ impl SettingsScope {
     }
 }
 
-/// menu item kinds surfaced by the /settings overlay
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuItemKind {
     Scope,
@@ -127,7 +113,6 @@ impl MenuItemKind {
         }
     }
 
-    /// toggle or cycle the underlying value. returns the new display value
     pub fn activate(self, settings: &mut ScopedSettings) -> String {
         match self {
             Self::Scope => {
@@ -164,7 +149,6 @@ impl MenuItemKind {
         }
     }
 
-    /// current display value for the given settings (without mutating)
     #[must_use]
     pub fn value(self, settings: &ScopedSettings) -> String {
         match self {
@@ -187,12 +171,9 @@ fn bool_str(b: bool) -> &'static str {
     if b { "on" } else { "off" }
 }
 
-/// ui state for the /settings floating menu
 #[derive(Debug, Clone, Default)]
 pub struct SettingsMenuState {
-    /// index of the currently selected row
     pub selected: usize,
-    /// scroll offset for long menus
     pub scroll_offset: usize,
 }
 
@@ -222,7 +203,6 @@ impl SettingsMenuState {
     }
 }
 
-/// serialisable form of `ScopedSettings` for persistence
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PersistedSettings {
     pub anthropic_betas: AnthropicBetas,
@@ -236,9 +216,6 @@ impl From<&ScopedSettings> for PersistedSettings {
     }
 }
 
-/// persist the current settings according to scope.
-/// returns Ok(Some(path)) on successful write, Ok(None) if scope is
-/// Session (no persistence), or Err on disabled/io failure
 pub fn persist(
     settings: &ScopedSettings,
     cwd: &std::path::Path,
@@ -339,6 +316,6 @@ mod tests {
         let body = std::fs::read_to_string(&path).unwrap();
         let loaded: PersistedSettings = toml::from_str(&body).unwrap();
         assert!(!loaded.anthropic_betas.context_1m);
-        assert!(loaded.anthropic_betas.effort); // other defaults preserved
+        assert!(loaded.anthropic_betas.effort);
     }
 }

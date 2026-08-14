@@ -1,10 +1,3 @@
-//! `@`-template picker popup
-//!
-//! renders a list of prompt-template candidates above the input area
-//! when the user pressed tab on a partial-match `@<word>`. mirrors the
-//! slash-command menu's shape so the visual language is consistent
-//! (selected row prefixed with `▸`, description in dim style).
-
 use crate::app_state::AtPickerState;
 use crate::theme::Theme;
 use ratatui::Frame;
@@ -13,11 +6,8 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding};
 
-/// render the picker as a popup above the input area
-/// most entries the popup shows at once
 const MAX_VISIBLE: usize = 12;
 
-/// rows the popup takes above the input box, borders included
 #[must_use]
 pub fn height(picker: &AtPickerState) -> u16 {
     u16::try_from(MAX_VISIBLE.min(picker.matches.len()) + 2).unwrap_or(u16::MAX)
@@ -39,7 +29,6 @@ pub fn render(frame: &mut Frame, picker: &AtPickerState, input_area: Rect, theme
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
-    // scroll so the selected item stays visible
     let visible = inner.height as usize;
     let scroll = if picker.selected >= visible {
         picker.selected - visible + 1

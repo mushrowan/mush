@@ -18,9 +18,7 @@ use super::{ThinkingPrefs, ThinkingPrefsSaver, TuiConfig};
 use crate::slash;
 
 pub(super) enum LoopAction {
-    /// nothing changed, skip redraw
     Continue,
-    /// state changed, redraw needed
     Redraw,
     Quit,
 }
@@ -46,9 +44,6 @@ pub(super) struct InputDeps<'a> {
     pub pending_compactions:
         &'a mut std::collections::HashMap<mush_ai::types::PaneId, crate::slash::PendingCompaction>,
     pub image_picker: &'a Option<ratatui_image::picker::Picker>,
-    /// handle to the Terminal backend's size cache so resize events
-    /// can invalidate it (ratatui's autoresize will then pick up the
-    /// new dimensions on the next frame)
     pub size_cache: &'a std::rc::Rc<super::size_cached_backend::CachedSizeState>,
 }
 
@@ -63,10 +58,6 @@ fn confirmation_answer(code: KeyCode) -> Option<bool> {
 fn trace_dropped_event(event: Event, phase: &str) {
     match event {
         Event::Key(key) => {
-            // non-press key events are suspicious with our keyboard enhancement
-            // setup (we only request DISAMBIGUATE_ESCAPE_CODES, not
-            // REPORT_EVENT_TYPES) so log at debug to help diagnose misparsed
-            // escape sequences
             tracing::debug!(
                 %phase,
                 code = ?key.code,
@@ -82,10 +73,6 @@ fn trace_dropped_event(event: Event, phase: &str) {
             tracing::debug!(%phase, "focus lost");
         }
         Event::Resize(w, h) => {
-            // a resize that lands in trace_dropped_event means the
-            // current phase didn't handle it - the size cache and
-            // scroll baselines won't be reset. warn-level so a real
-            // resize regression is visible without tweaking RUST_LOG
             tracing::warn!(
                 target: "mush_tui::resize",
                 %phase,
@@ -186,9 +173,6 @@ async fn handle_compaction_recovery_action(
             let pane = &mut *session;
             crate::slash::apply_applied_compaction(&mut pane.app, &mut pane.conversation, applied);
             super::runtime::replay_compaction_inputs(pane);
-            // persist the recovered compaction immediately, same reason as
-            // the background `/compact` path: nothing else saves it before
-            // the user might quit
             if let Some(saver) = &deps.tui_config.save_session {
                 saver(super::streams::build_session_snapshot(
                     session,
@@ -206,11 +190,6 @@ async fn handle_compaction_recovery_action(
     }
 }
 
-/// async resolution of a [`AppEvent::ValidateAndSaveApiKey`]: hit the
-/// upstream `/v1/models` (or `/auth/key` for openrouter) to confirm
-/// the key is live, persist it on success, and update the picker
-/// state so the row repaints with the new source. on failure the key
-/// is dropped and the picker's entry prompt is re-armed for retry
 async fn validate_and_save_api_key(app: &mut App, entry_id: &str, provider_name: &str, key: &str) {
     let outcome = run_validation_and_save(entry_id, key).await;
     let Some(picker) = app.interaction.login_picker.as_mut() else {
@@ -227,8 +206,6 @@ async fn validate_and_save_api_key(app: &mut App, entry_id: &str, provider_name:
     }
 }
 
-/// outcome of validate-then-save. carries the user-facing message so
-/// the caller doesn't need a second branch on what to display
 enum SaveOutcome {
     Saved(String),
     Failed(String),
@@ -247,9 +224,6 @@ async fn run_validation_and_save(entry_id: &str, key: &str) -> SaveOutcome {
     let client = mush_ai::http::client();
     let info = match validate_api_key(&client, &provider, key).await {
         Ok(info) => Some(info),
-        // no live-validation endpoint registered for this provider -
-        // fall through to a save without the sanity check rather
-        // than blocking the user
         Err(ValidationError::Unsupported(_)) => None,
         Err(err) => return SaveOutcome::Failed(err.to_string()),
     };
@@ -267,10 +241,6 @@ async fn run_validation_and_save(entry_id: &str, key: &str) -> SaveOutcome {
     SaveOutcome::Saved(format_save_toast(entry_id, store.backend(), info))
 }
 
-/// build the user-facing success toast. openrouter populates label,
-/// usage/limit, and is_free_tier on `/auth/key`. surface whichever of
-/// those is meaningful; suppress the "$0 used" line that fresh keys
-/// would otherwise produce
 fn format_save_toast(
     entry_id: &str,
     backend: &str,
@@ -289,12 +259,6 @@ fn format_save_toast(
     toast
 }
 
-/// pick the most informative budget descriptor for a key. priority:
-///
-/// 1. explicit limit + usage  → `$U/$L used`
-/// 2. nonzero usage           → `$U used`
-/// 3. free-tier flag          → `free tier`
-/// 4. nothing meaningful      → `None` so the caller skips the suffix
 fn budget_suffix(
     usage: Option<f64>,
     limit: Option<f64>,
@@ -316,9 +280,6 @@ fn budget_suffix(
     None
 }
 
-/// shared resize handler: invalidate the cached size so ratatui's
-/// `autoresize` refetches dimensions on the next frame. used by every code
-/// path that observes a `crossterm::event::Event::Resize`
 pub(super) fn apply_resize(size_cache: &std::rc::Rc<super::size_cached_backend::CachedSizeState>) {
     size_cache.invalidate();
     tracing::info!(target: "mush_tui::resize", "size cache invalidated");
@@ -345,8 +306,6 @@ pub(super) async fn handle_streaming_terminal_events(
                 changed = true;
             }
             Event::Resize(w, h) => {
-                // invalidate the size cache so ratatui's autoresize picks
-                // up the new dimensions on the next frame
                 apply_resize(deps.size_cache);
                 changed = true;
                 tracing::info!(
@@ -408,12 +367,6 @@ async fn handle_streaming_key_event(
             edit_last_queued_steering(session, stream_state).await;
         }
         AppEvent::SlashCommand { action } => {
-            // a slash command can reach the streaming iteration two ways:
-            // a safe command submitted mid-stream (filtered by
-            // `is_safe_during_stream` in `handle_streaming_keys`), or any
-            // command typed after an abort while the cancelled stream is
-            // still draining out of `agent_streams`. either way it must
-            // run rather than be dropped. mirrors the idle dispatch.
             let state_changed = handle_slash_action(
                 session,
                 action,
@@ -441,10 +394,6 @@ async fn handle_streaming_key_event(
     Ok(LoopAction::Redraw)
 }
 
-/// record the focused pane's model as most-recently-used. called when a
-/// message is actually sent so the favourites picker can sort by recency
-/// without alt+m cycling polluting the order. updates the in-memory list
-/// on both the config and the focused app, then persists via the saver
 fn record_model_use(session: &mut Session, tui_config: &mut TuiConfig) {
     let model_id = session.app.model_id.clone();
     let updated = crate::model_picker::promote_recent_model(&tui_config.recent_models, &model_id);
@@ -486,14 +435,6 @@ pub(super) async fn handle_idle_terminal_events(
                 } else {
                     match app_event {
                         AppEvent::UserSubmit { text, images } => {
-                            // a backgrounded compaction is going to call
-                            // `conversation.replace_messages(...)` on
-                            // completion, which would clobber any user
-                            // message appended while it's running. queue
-                            // the text (and any pending images) so the
-                            // runtime can replay them as a fresh turn
-                            // once compaction lands; the input box
-                            // clears so the user can keep typing
                             let pane_id = PaneId::new(1);
                             if deps.pending_compactions.contains_key(&pane_id) {
                                 let pane = &mut *session;
@@ -531,7 +472,6 @@ pub(super) async fn handle_idle_terminal_events(
                             pane.pending_prompt =
                                 Some(crate::session::PendingPrompt::with_images(expanded, images));
                             super::runtime::save_pane_pending_prompt(pane);
-                            // save the user message immediately so it survives crashes
                             if let Some(ref saver) = deps.tui_config.save_session {
                                 saver(super::streams::build_session_snapshot(
                                     session,
@@ -566,8 +506,6 @@ pub(super) async fn handle_idle_terminal_events(
                             apply_settings_toggle(session, deps.tui_config);
                         }
                         AppEvent::ModelSelected { model_id } => {
-                            // route through the same slash action so the
-                            // switch-model logic stays single-sourced
                             let state_changed = handle_slash_action(
                                 session,
                                 crate::slash::SlashAction::Model {
@@ -625,8 +563,6 @@ pub(super) async fn handle_idle_terminal_events(
     Ok(LoopAction::Redraw)
 }
 
-/// apply a toggle to the selected /settings menu item and sync the result
-/// into the live StreamOptions so the next turn picks up the change
 fn apply_settings_toggle(
     session: &mut crate::session::Session,
     tui_config: &mut crate::runner::TuiConfig,
@@ -637,11 +573,8 @@ fn apply_settings_toggle(
     };
     let item = menu.current();
     let new_value = item.activate(&mut tui_config.settings);
-    // mirror beta changes into the in-flight stream options so they take
-    // effect on the next LLM call
     tui_config.options.anthropic_betas = Some(tui_config.settings.anthropic_betas.clone());
 
-    // persist if scope requires it
     let persist_note = match crate::settings::persist(&tui_config.settings, &tui_config.cwd) {
         Ok(Some(path)) => format!(" (saved to {})", path.display()),
         Ok(None) => String::new(),
@@ -694,9 +627,6 @@ mod tests {
 
     #[test]
     fn apply_resize_invalidates_size_cache() {
-        // mid-streaming resize must mark the size cache stale so the
-        // next backend.size() refetches. observed by checking
-        // `has_cached_size()` flips false after the call
         let size_cache = Rc::new(CachedSizeState::default());
         size_cache.set_size_for_test(ratatui::layout::Size::new(80, 25));
         assert!(size_cache.has_cached_size());
@@ -769,15 +699,6 @@ mod tests {
 
     #[tokio::test]
     async fn slash_command_runs_during_streaming_iteration() {
-        // regression: aborting a turn flips `app.stream.active` to false,
-        // but the aborted agent stream can linger in `agent_streams` (the
-        // loop only observes cancellation before the next turn/tool), so
-        // the runner keeps driving the *streaming* iteration. `handle_key`
-        // then routes via the idle keymap (stream.active is false) and
-        // emits an `AppEvent::SlashCommand`, which the streaming key
-        // handler used to silently drop. typing `/compact` (or any slash
-        // command) right after an abort therefore did nothing. `/cost`
-        // stands in here as a cheap, synchronous, observable command.
         let mut session = Session::new(App::new("test".into(), TokenCount::new(200_000)));
         session.app.stream.active = false;
         assert!(!session.app.interaction.show_cost);
@@ -856,9 +777,6 @@ mod tests {
 
     #[test]
     fn format_save_toast_omits_zero_usage_when_no_limit_is_known() {
-        // a fresh openrouter key returns usage=0 and limit=null. that
-        // doesn't tell the user anything useful, so the toast should
-        // skip the "$0 used" suffix instead of polluting the message
         let toast = format_save_toast(
             "openrouter",
             "keyring",
@@ -879,8 +797,6 @@ mod tests {
 
     #[test]
     fn format_save_toast_marks_free_tier_keys() {
-        // openrouter exposes is_free_tier; surface it instead of (or
-        // alongside) usage so users on free plans get a useful badge
         let toast = format_save_toast(
             "openrouter",
             "keyring",

@@ -103,15 +103,11 @@ pub(super) async fn handle_slash_action(
             session.app.push_system_message(report);
         }
         SlashAction::New => {
-            // save current session before clearing
             if let Some(ref saver) = tui_config.save_session {
                 saver(super::streams::build_session_snapshot(session, tui_config));
             }
-            // start a new session with a fresh id
             let new_id = mush_ai::types::SessionId::new();
             tui_config.session_id = new_id.clone();
-            // keep the duplicated `options.session_id` consistent (see
-            // /resume handler in slash/commands.rs for the rationale)
             tui_config.options.session_id = Some(new_id);
             let pane = &mut *session;
             let (app, conversation, _) = pane.fields_mut();
@@ -174,10 +170,6 @@ pub(super) async fn handle_slash_action(
     state_changed
 }
 
-/// replace each pane's discovered prompt-template entries (the ones
-/// preceded by `/` in the slash menu and the @-trigger expansion list)
-/// with a freshly-discovered set. preserves the built-in slash commands
-/// because those don't change at runtime
 fn apply_reloaded_templates(session: &mut Session, templates: &[mush_ext::PromptTemplate]) {
     for pane in std::slice::from_mut(session) {
         let template_names: std::collections::HashSet<&str> = pane
@@ -214,10 +206,6 @@ fn apply_reloaded_templates(session: &mut Session, templates: &[mush_ext::Prompt
     }
 }
 
-/// answer a `/mcp` query against the live servers
-///
-/// every branch reads through the manager rather than a startup snapshot,
-/// so a `/mcp reconnect` is reflected by the next `/mcp tools`.
 async fn mcp_report(manager: Option<&mush_mcp::McpManager>, query: &slash::McpQuery) -> String {
     use mush_mcp::report;
     use slash::McpQuery;
@@ -256,13 +244,6 @@ pub(super) fn save_thinking_pref(
     }
 }
 
-/// finish the oauth flow started via /login: exchange the user-supplied
-/// code for credentials using the PKCE challenge stashed on the app.
-/// on success, save credentials so future runs can pick them up.
-///
-/// returns `true` when credentials were successfully exchanged and
-/// saved, so the caller can kick off a discovery refresh to pull in
-/// any models the just-logged-in subscription exposes
 pub(super) async fn complete_login(app: &mut crate::app::App, code: String) -> bool {
     use mush_ai::oauth;
 
@@ -284,7 +265,6 @@ pub(super) async fn complete_login(app: &mut crate::app::App, code: String) -> b
     let trimmed = code.trim();
     if trimmed.is_empty() {
         app.push_system_message("no code provided. usage: /login-complete <code>");
-        // keep pending_oauth so they can retry
         app.pending_oauth = Some(pending);
         return false;
     }
@@ -295,16 +275,12 @@ pub(super) async fn complete_login(app: &mut crate::app::App, code: String) -> b
         }
         Err(e) => {
             app.push_system_message(format!("oauth login failed: {e}"));
-            // restore pending state so user can try a different code
             app.pending_oauth = Some(pending);
             false
         }
     }
 }
 
-/// persist freshly exchanged oauth credentials and report the outcome in
-/// the pane. returns whether the save succeeded, which is also the
-/// signal to refresh the model catalogue
 fn save_login_credentials(
     app: &mut crate::app::App,
     provider_id: &str,
@@ -329,8 +305,6 @@ fn save_login_credentials(
     }
 }
 
-/// pull the model catalogue again after a successful login so any models
-/// the fresh subscription unlocks show up in the picker straight away
 pub(super) async fn refresh_models_after_login(session: &mut Session, tui_config: &TuiConfig) {
     let client = tui_config
         .http_client
@@ -348,17 +322,12 @@ pub(super) async fn refresh_models_after_login(session: &mut Session, tui_config
     session.app.status = None;
 }
 
-/// what a single drain pass settled
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(super) struct DrainedLogins {
-    /// credentials landed, so the model catalogue is worth refreshing
     pub saved: bool,
-    /// a flow finished either way, so the pane needs a redraw
     pub settled: bool,
 }
 
-/// take the outcome of any finished browser login, save its credentials
-/// and report it in the pane that started the flow
 pub(super) fn drain_finished_browser_logins(session: &mut Session) -> DrainedLogins {
     let mut drained = DrainedLogins::default();
     for pane in std::slice::from_mut(session) {
@@ -366,7 +335,6 @@ pub(super) fn drain_finished_browser_logins(session: &mut Session) -> DrainedLog
             continue;
         };
         let Some(outcome) = pending.poll() else {
-            // still waiting on the browser, put it back untouched
             pane.app.pending_browser_login = Some(pending);
             continue;
         };
@@ -395,15 +363,9 @@ pub(super) fn drain_finished_browser_logins(session: &mut Session) -> DrainedLog
     drained
 }
 
-/// resolve openrouter credentials and fetch the account's credit
-/// balance. on failure (no key, network error, etc.) push a
-/// diagnostic system message rather than panicking; the user can
-/// retry without losing chat state
 async fn handle_credits(pane: &mut crate::session::Session, tui_config: &TuiConfig) {
     use mush_ai::types::Provider;
 
-    // /credits is openrouter-specific; signal cleanly when invoked
-    // on a different provider so the user knows why nothing happened
     let openrouter_model = mush_ai::types::Model {
         provider: Provider::OpenRouter,
         ..tui_config.model.clone()
@@ -435,10 +397,6 @@ async fn handle_credits(pane: &mut crate::session::Session, tui_config: &TuiConf
     }
 }
 
-/// resolve openrouter credentials and fetch the per-provider endpoint
-/// list for a model. defaults to the pane's current model id when no
-/// argument is supplied. on failure pushes a diagnostic system message
-/// instead of panicking; this is a read-only inspection command
 async fn handle_endpoints(
     pane: &mut crate::session::Session,
     tui_config: &TuiConfig,
@@ -514,7 +472,6 @@ mod tests {
         Session::new(app)
     }
 
-    /// drain once the spawned flow has an outcome to report
     async fn drain_when_settled(session: &mut Session) -> DrainedLogins {
         for _ in 0..100 {
             let drained = drain_finished_browser_logins(session);
@@ -528,8 +485,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_finished_browser_login_saves_credentials_without_login_complete() {
-        // the whole point of the browser flow: the user authorises and
-        // mush picks the credentials up on its own
         let dir = tempfile::tempdir().unwrap();
         // SAFETY: nextest runs each test in its own process
         unsafe { std::env::set_var("MUSH_CONFIG_DIR", dir.path()) };
@@ -663,10 +618,6 @@ mod tests {
 
     #[test]
     fn apply_reloaded_templates_replaces_template_entries_only() {
-        // /reload swaps the discovered prompt-template entries for the
-        // freshly-found set. existing built-in slash commands (here
-        // /help) must survive untouched. stale templates must be
-        // removed from completions, slash_commands, and templates lists
         let mut session = pane_with_existing_template();
         let new_templates = vec![
             template("review", "review code"),

@@ -1,8 +1,3 @@
-//! app state and event loop
-//!
-//! the app holds all TUI state: messages being displayed, current input,
-//! streaming status, and scroll position.
-
 use mush_ai::types::*;
 use mush_session::SessionMeta;
 
@@ -31,22 +26,13 @@ pub use crate::streaming::StreamingState;
 
 use crate::slash_menu::{TabState, filter_command_matches};
 
-/// target cadence for streaming text and shimmer updates.
 pub(crate) const ANIMATION_FRAME_INTERVAL: std::time::Duration =
     std::time::Duration::from_millis(33);
 
-/// ticks in one full unread-flash cycle (~1 second at 60fps)
 const UNREAD_FLASH_CYCLE: u8 = 60;
 
-/// ticks the flash indicator stays "on" within each cycle
 const UNREAD_FLASH_ON: u8 = 30;
 
-/// truncate a tool's output for the preview/panel display.
-///
-/// edit diffs are preserved whole because they're bounded by the size of
-/// the change under review and the message viewport scrolls naturally
-/// for the rest. every other tool gets the generous single-tool cap so
-/// a runaway bash log or massive grep doesn't paint thousands of rows
 fn preview_for_tool(name: &str, output: &str) -> String {
     if name.eq_ignore_ascii_case("edit") {
         output.to_owned()
@@ -71,7 +57,6 @@ fn context_management_mode_for_model_id(
     }
 }
 
-/// controls how thinking text is displayed
 #[derive(
     Debug,
     Clone,
@@ -85,20 +70,12 @@ fn context_management_mode_for_model_id(
 )]
 #[serde(rename_all = "lowercase")]
 pub enum ThinkingDisplay {
-    /// never show thinking text
     Hidden,
-    /// show while streaming, collapse to one-line preview when done
     Collapse,
-    /// always show thinking text expanded
     #[default]
     Expanded,
 }
 
-/// pick the next thinking level. when `supported` is non-empty, walks
-/// the curated list (cheap → expensive) wrapping around. when empty,
-/// falls back to the legacy hardcoded cycle so uncurated models still
-/// respond to ctrl+t. unknown / out-of-list current levels reset to
-/// the first supported entry instead of stalling
 #[must_use]
 pub fn next_thinking_level(current: &ThinkingLevel, supported: &[ThinkingLevel]) -> ThinkingLevel {
     if supported.is_empty() {
@@ -119,94 +96,44 @@ pub fn next_thinking_level(current: &ThinkingLevel, supported: &[ThinkingLevel])
     }
 }
 
-/// the main app state
 pub struct App {
-    /// conversation messages for display
     pub messages: Vec<DisplayMessage>,
-    /// in-progress assistant response
     pub stream: StreamingState,
-    /// user input buffer with cursor, images, scroll
     pub input: InputBuffer,
-    /// model id being used
     pub model_id: ModelId,
-    /// token and cost tracking
     pub stats: TokenStats,
-    /// whether we should quit
     pub should_quit: bool,
-    /// status message (bottom bar)
     pub status: Option<String>,
-    /// currently executing tools (for side-by-side panel display)
     pub active_tools: Vec<ActiveToolState>,
-    /// steady animation frame counter
     tick_count: u64,
-    /// current thinking level
     pub thinking_level: ThinkingLevel,
-    /// the active model's curated thinking levels (drives the cycler).
-    /// empty when the model hasn't been curated; the cycler then falls
-    /// back to the legacy hardcoded walk
     pub supported_thinking_levels: Vec<ThinkingLevel>,
-    /// how to display thinking text
     pub thinking_display: ThinkingDisplay,
-    /// modal and prompt-related state
     pub interaction: InteractionState,
-    /// slash completion and tab cycling state
     pub completion: CompletionState,
-    /// selection and scroll navigation state
     pub navigation: NavigationState,
-    /// render caches and geometry from the last frame
     pub render_state: RenderState,
-    /// working directory (with ~ for home)
     pub cwd: String,
-    /// pane info: (this pane index 1-based, total panes), None when single pane
     pub pane_info: Option<(u16, u16)>,
-    /// background pane alert text (e.g. "pane 2: busy")
     pub background_alert: Option<String>,
-    /// prompt cache warmth tracking
     pub cache: CacheTimer,
-    /// batch counter for grouping parallel tool calls
     current_tool_batch: u32,
-    /// bumped every time the display is rebuilt from the conversation
-    /// tree. an inline viewport can't retract what it has already
-    /// printed, so it watches this to know its committed run is stale
     display_generation: u64,
-    /// oauth usage data (5h and 7d rolling windows)
     pub oauth_usage: Option<mush_ai::oauth::usage::OAuthUsage>,
-    /// provider id that produced `oauth_usage`.
-    /// prevents stale claude usage bars showing while a codex/openai pane is active
     pub oauth_usage_provider: Option<String>,
-    /// in-progress paste-the-code oauth flow started via /login when no
-    /// loopback callback server could be bound.
-    /// consumed when /login-complete fires with the authorization code
     pub pending_oauth: Option<PendingOAuth>,
-    /// browser oauth flow waiting on its loopback callback. the runner
-    /// drains this each frame, so no /login-complete is needed
     pub pending_browser_login: Option<crate::browser_login::PendingBrowserLogin>,
-    /// state for the /settings floating menu (only populated when
-    /// interaction.mode == AppMode::Settings)
     pub settings_menu: Option<crate::settings::SettingsMenuState>,
-    /// colour theme for all widgets
     pub theme: crate::theme::Theme,
-    /// keybind map: action → key combination(s)
     pub keymap: crate::keybinds::KeyMap,
-    /// armed state for ctrl+c quit confirmation. set on first ctrl+c
-    /// when the prompt is empty and idle, cleared by any other key
     pub confirm_quit_pending: bool,
-    /// true while a /compact or /fork-compact LLM call is running on
-    /// a background task. drives the busy label so the
-    /// user sees compaction as a discrete busy state and routes new
-    /// submits into the queued-message bubble instead of clobbering
-    /// the input buffer
     pub compacting: bool,
-    /// model used for explicit and automatic compaction, or None when
-    /// compaction uses the active pane model
     pub compaction_model_id: Option<ModelId>,
 }
 
 mod modals;
 mod streaming;
 
-/// state captured when /login starts an oauth flow, consumed when the user
-/// provides the authorization code via /login-complete
 #[derive(Debug, Clone)]
 pub struct PendingOAuth {
     pub provider_id: String,
@@ -261,15 +188,12 @@ impl App {
         }
     }
 
-    /// advance streaming text only. token events may arrive in bursts,
-    /// so keep them from changing the visual animation phase
     pub fn tick_streaming_text(&mut self) {
         if self.stream.active {
             self.stream.advance_typewriter();
         }
     }
 
-    /// advance visible animations on a steady timer
     pub fn tick_animation(&mut self) {
         self.tick_count = self.tick_count.wrapping_add(1);
         self.tick_streaming_text();
@@ -280,22 +204,14 @@ impl App {
         self.tick_animation();
     }
 
-    /// whether the unread flash indicator is in the "on" phase
-    /// cycles at ~1hz
     pub fn unread_flash_on(&self) -> bool {
         self.tick_count % u64::from(UNREAD_FLASH_CYCLE) < u64::from(UNREAD_FLASH_ON)
     }
 
-    /// phase offset for shimmer-styled labels. advances every animation
-    /// frame, with the palette providing enough intermediate colours to
-    /// keep movement slow and smooth
     pub fn shimmer_phase(&self) -> usize {
         self.tick_count as usize
     }
 
-    /// whether this pane currently has time-driven visual animation.
-    /// running tools animate the status-bar activity label even when the
-    /// provider stream is parked waiting for tool completion
     pub fn has_visible_animation(&self) -> bool {
         self.compacting
             || self.stream.active
@@ -303,24 +219,15 @@ impl App {
             || self.has_running_tool()
     }
 
-    /// whether a draw is useful even when no event arrived. this keeps
-    /// wall-clock UI affordances fresh without forcing a maintenance
-    /// redraw every idle second
     pub fn needs_periodic_redraw(&self, cache_timer_enabled: bool) -> bool {
         self.has_visible_animation()
             || (cache_timer_enabled && self.cache.remaining_secs().is_some())
     }
 
-    /// whether the agent is currently active (streaming or executing tools)
     pub fn is_busy(&self) -> bool {
         self.compacting || self.stream.active || self.has_running_tool()
     }
 
-    /// short label describing what the agent is currently doing, suitable
-    /// for the status bar. returns `None` when idle. tool execution wins
-    /// over streaming because tool calls are concrete activity even when
-    /// the assistant message is still flagged active during the gap
-    /// between message_end and the next turn_start
     pub fn activity_label(&self) -> Option<String> {
         if self.compacting {
             return Some("compacting…".into());
@@ -356,20 +263,17 @@ impl App {
             .map(|t| t.name.as_str())
     }
 
-    /// add a user message to the display
     pub fn push_user_message(&mut self, text: impl Into<String>) {
         self.messages
             .push(DisplayMessage::new(MessageRole::User, text));
     }
 
-    /// add a user message with attached images to the display
     pub fn push_user_message_with_images(&mut self, text: impl Into<String>, images: Vec<Vec<u8>>) {
         let mut msg = DisplayMessage::new(MessageRole::User, text);
         msg.images = images;
         self.messages.push(msg);
     }
 
-    /// remove all queued steering messages, returning their text content
     pub fn take_queued_messages(&mut self) -> Vec<String> {
         let mut texts = Vec::new();
         self.messages.retain(|m| {
@@ -383,7 +287,6 @@ impl App {
         texts
     }
 
-    /// add a queued steering message (shown dimmed until processed)
     pub fn push_queued_message(&mut self, text: impl Into<String>) {
         self.messages.push(DisplayMessage {
             queued: true,
@@ -391,8 +294,6 @@ impl App {
         });
     }
 
-    /// add a queued steering message carrying attached images, so the UI
-    /// reflects the pending image(s) on the queued bubble
     pub fn push_queued_message_with_images(
         &mut self,
         text: impl Into<String>,
@@ -404,26 +305,22 @@ impl App {
         self.messages.push(msg);
     }
 
-    /// remove the last queued steering message from display, return its text
     pub fn pop_last_queued_message(&mut self) -> Option<String> {
         let idx = self.messages.iter().rposition(|m| m.queued)?;
         let msg = self.messages.remove(idx);
         Some(msg.content)
     }
 
-    /// whether any queued steering messages are currently visible
     #[must_use]
     pub fn has_queued_messages(&self) -> bool {
         self.messages.iter().any(|m| m.queued)
     }
 
-    /// insert a character at the cursor (clears tab completion)
     pub fn input_char(&mut self, c: char) {
         self.completion.tab_state = None;
         self.input.insert_char(c);
     }
 
-    /// cycle through tab completions for the current input
     pub fn tab_complete(&mut self) {
         if let Some(ref mut state) = self.completion.tab_state {
             state.index = (state.index + 1) % state.matches.len();
@@ -465,7 +362,6 @@ impl App {
         self.input.ensure_cursor_visible();
     }
 
-    /// update search matches based on current query
     pub fn update_search(&mut self) {
         let q = self.interaction.search.query.to_lowercase();
         self.interaction.search.matches = if q.is_empty() {
@@ -478,7 +374,6 @@ impl App {
                 .map(|(i, _)| i)
                 .collect()
         };
-        // clamp selection
         if self.interaction.search.matches.is_empty() {
             self.interaction.search.selected = 0;
         } else if self.interaction.search.selected >= self.interaction.search.matches.len() {
@@ -486,8 +381,6 @@ impl App {
         }
     }
 
-    /// return ghost completion suffix for inline hint (dimmed text after cursor).
-    /// only shown when cursor is at end and no active tab cycle.
     pub fn ghost_text(&self) -> Option<&str> {
         if self.completion.tab_state.is_some() {
             return None;
@@ -496,9 +389,6 @@ impl App {
             return None;
         }
         let text = self.input.text.as_str();
-        // suppress ghost when the input is itself an exact slash command name,
-        // otherwise Enter would accept a longer sibling (e.g. /login submitting
-        // /login-complete) instead of running the typed command
         if let Some(rest) = text.strip_prefix('/')
             && self
                 .completion
@@ -527,11 +417,6 @@ impl App {
         candidate.filter(|s| !s.is_empty())
     }
 
-    /// clear display state without touching stats (for rebuild_display).
-    /// the conversation might be getting rewritten in-place (compact,
-    /// branch, undo) where the cumulative session totals are still
-    /// correct; only the rendered list of messages and scroll position
-    /// need to reset.
     pub(crate) fn clear_display(&mut self) {
         self.display_generation = self.display_generation.wrapping_add(1);
         self.messages.clear();
@@ -539,33 +424,21 @@ impl App {
         self.input.images.clear();
     }
 
-    /// clear all messages AND reset cumulative stats (for /clear, /new).
-    /// use `clear_display` if stats should be preserved
     pub fn clear_messages(&mut self) {
         self.clear_display();
         self.stats.reset();
     }
 
-    /// push a system message to the display
     pub fn push_system_message(&mut self, text: impl Into<String>) {
         self.messages
             .push(DisplayMessage::new(MessageRole::System, text));
     }
 
-    /// how many times the display has been rebuilt from the conversation
     #[must_use]
     pub fn display_generation(&self) -> u64 {
         self.display_generation
     }
 
-    /// index of the first message whose rendered lines can still change.
-    ///
-    /// everything below it is settled history that an inline viewport can
-    /// hand to the terminal's own scrollback. the live turn starts at the
-    /// last user message, since the assistant reply is inserted into it,
-    /// its thinking can still be toggled, and its tools can still be
-    /// running. a rewrite (`/compact`, `/branch`, `/undo`) resets this to
-    /// zero, which the inline runner treats as the start of a new run
     #[must_use]
     pub fn commit_point(&self) -> usize {
         let live_turn = self
@@ -581,7 +454,6 @@ impl App {
         live_turn.min(unsettled)
     }
 
-    /// toggle thinking text visibility for the last assistant message
     pub fn toggle_thinking_expanded(&mut self) {
         if let Some(msg) = self
             .messages
@@ -593,20 +465,11 @@ impl App {
         }
     }
 
-    /// cycle to the next thinking level. when the active model advertises
-    /// a curated `supported_thinking_levels` list, walk it (cheap →
-    /// expensive, wrapping around). otherwise fall back to the legacy
-    /// hardcoded cycle so uncurated models still respond to ctrl+t
     pub fn cycle_thinking_level(&mut self) {
         self.thinking_level =
             next_thinking_level(&self.thinking_level, &self.supported_thinking_levels);
     }
 
-    /// route a bracketed-paste payload to whatever input field is
-    /// currently active. without this, every paste lands in the main
-    /// prompt buffer even when an overlay (like the /login api-key
-    /// entry prompt) owns keyboard focus, leaking secrets into the
-    /// visible message box behind the overlay
     pub fn handle_paste(&mut self, text: &str) {
         if let Some(prompt) = self
             .interaction
