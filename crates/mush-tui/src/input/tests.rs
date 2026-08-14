@@ -2078,3 +2078,45 @@ fn login_picker_keys_swallowed_while_validating() {
         "entry buffer must not capture keystrokes while validating"
     );
 }
+
+#[test]
+fn esc_on_an_empty_input_enters_navigation() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+
+    handle_key(&mut app, key(KeyCode::Esc));
+
+    assert_eq!(app.interaction.mode, AppMode::Navigate);
+}
+
+#[test]
+fn esc_with_something_typed_clears_it_first() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.input.text = "hello".into();
+    app.input.cursor = 5;
+
+    handle_key(&mut app, key(KeyCode::Esc));
+
+    assert_eq!(app.interaction.mode, AppMode::Normal);
+    assert!(app.input.text.is_empty());
+}
+
+#[test]
+fn esc_while_navigating_goes_back_to_typing() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    handle_key(&mut app, key(KeyCode::Esc));
+
+    handle_key(&mut app, key(KeyCode::Esc));
+
+    assert_eq!(app.interaction.mode, AppMode::Normal);
+}
+
+#[test]
+fn k_moves_the_window_up_one_line_while_navigating() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.viewport.window(200, 20);
+    handle_key(&mut app, key(KeyCode::Esc));
+
+    handle_key(&mut app, key(KeyCode::Char('k')));
+
+    assert_eq!(app.viewport.window(200, 20), 179..199);
+}

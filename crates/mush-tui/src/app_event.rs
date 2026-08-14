@@ -40,7 +40,7 @@ pub enum AppMode {
     AtPicker,
     SlotEdit,
     ToolConfirm,
-    Scroll,
+    Navigate,
     Search,
     Settings,
     CompactionRecovery,

@@ -57,35 +57,32 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     if app.interaction.mode == AppMode::CompactionRecovery {
         return handle_compaction_recovery_key(app, key);
     }
+    if app.interaction.mode == AppMode::Navigate {
+        return handle_navigate_key(app, key);
+    }
 
     if app
         .keymap
         .matches(crate::keybinds::Action::QuitOrAbort, key)
     {
-        if !app.input.text.is_empty() || !app.input.images.is_empty() {
-            app.input.take_text();
-            app.input.take_images();
-            app.confirm_quit_pending = false;
-            return None;
-        }
-        if app.is_busy() {
-            app.confirm_quit_pending = false;
-            return Some(AppEvent::Abort);
-        }
-        if app.confirm_quit_pending {
-            return Some(AppEvent::Quit);
-        }
-        app.confirm_quit_pending = true;
-        app.status = Some("press ctrl+c again to exit".into());
-        return None;
+        return handle_quit_or_abort(app);
     }
     app.confirm_quit_pending = false;
 
     if app.keymap.matches(crate::keybinds::Action::PasteImage, key) {
         return Some(AppEvent::PasteImage);
     }
-    if is_cancel_key(app, key) && app.is_busy() {
-        return Some(AppEvent::Abort);
+    if is_cancel_key(app, key) {
+        if !app.input.text.is_empty() || !app.input.images.is_empty() {
+            app.input.take_text();
+            app.input.take_images();
+            return None;
+        }
+        if app.is_busy() {
+            return Some(AppEvent::Abort);
+        }
+        app.interaction.mode = AppMode::Navigate;
+        return None;
     }
 
     if app
@@ -802,6 +799,81 @@ fn cycle_favourite_model(app: &mut App, direction: isize) -> Option<AppEvent> {
         return None;
     }
     Some(AppEvent::ModelSelected { model_id: next_id })
+}
+
+fn handle_quit_or_abort(app: &mut App) -> Option<AppEvent> {
+    if !app.input.text.is_empty() || !app.input.images.is_empty() {
+        app.input.take_text();
+        app.input.take_images();
+        app.confirm_quit_pending = false;
+        return None;
+    }
+    if app.is_busy() {
+        app.confirm_quit_pending = false;
+        return Some(AppEvent::Abort);
+    }
+    if app.confirm_quit_pending {
+        return Some(AppEvent::Quit);
+    }
+    app.confirm_quit_pending = true;
+    app.status = Some("press ctrl+c again to exit".into());
+    None
+}
+
+fn handle_navigate_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
+    use crate::keybinds::{Action, KeyScope};
+
+    if app.keymap.matches(Action::QuitOrAbort, key) {
+        return handle_quit_or_abort(app);
+    }
+    if is_cancel_key(app, key) {
+        app.interaction.mode = AppMode::Normal;
+        return None;
+    }
+
+    let page = app.viewport.page() as isize;
+    if app
+        .keymap
+        .matches_in(KeyScope::Navigate, Action::PreviousItem, key)
+    {
+        app.viewport.scroll_by(-1);
+    } else if app
+        .keymap
+        .matches_in(KeyScope::Navigate, Action::NextItem, key)
+    {
+        app.viewport.scroll_by(1);
+    } else if app
+        .keymap
+        .matches_in(KeyScope::Navigate, Action::HalfPageUp, key)
+    {
+        app.viewport.scroll_by(-page / 2);
+    } else if app
+        .keymap
+        .matches_in(KeyScope::Navigate, Action::HalfPageDown, key)
+    {
+        app.viewport.scroll_by(page / 2);
+    } else if app
+        .keymap
+        .matches_in(KeyScope::Navigate, Action::PageUp, key)
+    {
+        app.viewport.scroll_by(-page);
+    } else if app
+        .keymap
+        .matches_in(KeyScope::Navigate, Action::PageDown, key)
+    {
+        app.viewport.scroll_by(page);
+    } else if app
+        .keymap
+        .matches_in(KeyScope::Navigate, Action::NavigateTop, key)
+    {
+        app.viewport.to_top();
+    } else if app
+        .keymap
+        .matches_in(KeyScope::Navigate, Action::NavigateBottom, key)
+    {
+        app.viewport.to_bottom();
+    }
+    None
 }
 
 fn is_cancel_key(app: &App, key: KeyEvent) -> bool {

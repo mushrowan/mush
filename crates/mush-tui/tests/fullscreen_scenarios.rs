@@ -1,7 +1,9 @@
 use chrono::{TimeDelta, Utc};
+use crossterm::event::{KeyCode, KeyEvent};
 use mush_ai::oauth::usage::{OAuthUsage, UsageWindow};
 use mush_ai::types::TokenCount;
 use mush_tui::app::{App, DisplayMessage, MessageRole};
+use mush_tui::input::handle_key;
 use mush_tui::screen::Screen;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -34,6 +36,22 @@ fn rows(app: &App, width: u16, height: u16) -> Vec<String> {
                 .to_string()
         })
         .collect()
+}
+
+fn press(app: &mut App, code: KeyCode) {
+    handle_key(app, KeyEvent::from(code));
+}
+
+#[test]
+fn esc_on_an_empty_input_starts_reading() {
+    let mut app = conversation(20);
+    let before = rows(&app, 80, 24);
+
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Char('k'));
+
+    let after = rows(&app, 80, 24);
+    assert_eq!(after[1..20], before[..19], "the window moved up one line");
 }
 
 #[test]

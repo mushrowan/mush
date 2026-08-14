@@ -17,6 +17,7 @@ pub enum KeyScope {
     SlotEdit,
     Settings,
     Search,
+    Navigate,
 }
 
 impl KeyScope {
@@ -32,6 +33,7 @@ impl KeyScope {
             Self::SlotEdit => "slot_edit",
             Self::Settings => "settings",
             Self::Search => "search",
+            Self::Navigate => "navigate",
         }
     }
 
@@ -46,6 +48,7 @@ impl KeyScope {
         Self::SlotEdit,
         Self::Settings,
         Self::Search,
+        Self::Navigate,
     ];
 }
 
@@ -129,6 +132,10 @@ pub enum Action {
     ModelPickerDeleteAllStale,
     ModelPickerDeleteSelectedStale,
     ModelPickerToggleFavourite,
+    HalfPageDown,
+    HalfPageUp,
+    PageDown,
+    PageUp,
     SearchNext,
     SearchPrev,
     SelectOrSpace,
@@ -164,6 +171,10 @@ impl Action {
             Self::ModelPickerDeleteAllStale => "model_picker_delete_all_stale",
             Self::ModelPickerDeleteSelectedStale => "model_picker_delete_selected_stale",
             Self::ModelPickerToggleFavourite => "model_picker_toggle_favourite",
+            Self::HalfPageDown => "half_page_down",
+            Self::HalfPageUp => "half_page_up",
+            Self::PageDown => "page_down",
+            Self::PageUp => "page_up",
             Self::SearchNext => "search_next",
             Self::SearchPrev => "search_prev",
             Self::SelectOrSpace => "select_or_space",
@@ -202,6 +213,10 @@ impl Action {
         Self::ModelPickerDeleteAllStale,
         Self::ModelPickerDeleteSelectedStale,
         Self::ModelPickerToggleFavourite,
+        Self::HalfPageDown,
+        Self::HalfPageUp,
+        Self::PageDown,
+        Self::PageUp,
         Self::SearchNext,
         Self::SearchPrev,
         Self::SelectOrSpace,
@@ -340,6 +355,9 @@ const fn default_scope_for_action(action: Action) -> KeyScope {
         | Action::PreviousItem
         | Action::QuitOrAbort
         | Action::SelectOrSpace => KeyScope::Shared,
+        Action::HalfPageDown | Action::HalfPageUp | Action::PageDown | Action::PageUp => {
+            KeyScope::Navigate
+        }
         Action::SessionPickerToggleScope => KeyScope::SessionPicker,
         Action::ModelPickerDeleteAllStale
         | Action::ModelPickerDeleteSelectedStale
@@ -489,6 +507,32 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
         &[
             (KeyCode::End, KeyModifiers::NONE),
             (KeyCode::Char('G'), KeyModifiers::SHIFT),
+        ],
+    ),
+    (
+        KeyScope::Navigate,
+        Action::HalfPageDown,
+        &[(KeyCode::Char('d'), KeyModifiers::CONTROL)],
+    ),
+    (
+        KeyScope::Navigate,
+        Action::HalfPageUp,
+        &[(KeyCode::Char('u'), KeyModifiers::CONTROL)],
+    ),
+    (
+        KeyScope::Navigate,
+        Action::PageDown,
+        &[
+            (KeyCode::Char('f'), KeyModifiers::CONTROL),
+            (KeyCode::PageDown, KeyModifiers::NONE),
+        ],
+    ),
+    (
+        KeyScope::Navigate,
+        Action::PageUp,
+        &[
+            (KeyCode::Char('b'), KeyModifiers::CONTROL),
+            (KeyCode::PageUp, KeyModifiers::NONE),
         ],
     ),
     (

@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::ops::Range;
 
 use ratatui::buffer::Buffer;
@@ -11,37 +12,74 @@ use crate::widgets::message_list::transcript_lines;
 use crate::widgets::status_bar::StatusBar;
 use crate::widgets::tool_panels::{ToolPanels, tool_panels_height};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 pub struct Viewport {
-    scroll_top: usize,
-    following: bool,
+    scroll_top: Cell<usize>,
+    following: Cell<bool>,
+    total: Cell<usize>,
+    height: Cell<usize>,
 }
 
 impl Default for Viewport {
     fn default() -> Self {
         Self {
-            scroll_top: 0,
-            following: true,
+            scroll_top: Cell::new(0),
+            following: Cell::new(true),
+            total: Cell::new(0),
+            height: Cell::new(0),
         }
     }
 }
 
 impl Viewport {
-    pub fn window(&mut self, total: usize, height: usize) -> Range<usize> {
-        let max_scroll = total.saturating_sub(height);
-        if self.following {
-            self.scroll_top = max_scroll;
+    pub fn window(&self, total: usize, height: usize) -> Range<usize> {
+        self.total.set(total);
+        self.height.set(height);
+        let top = if self.following.get() {
+            self.max_scroll()
         } else {
-            self.scroll_top = self.scroll_top.min(max_scroll);
-        }
-        self.scroll_top..total.min(self.scroll_top + height)
+            self.scroll_top.get().min(self.max_scroll())
+        };
+        self.scroll_top.set(top);
+        top..total.min(top + height)
+    }
+
+    pub fn scroll_by(&self, lines: isize) {
+        let top = self.scroll_top.get().saturating_add_signed(lines);
+        self.scroll_to(top);
+    }
+
+    pub fn to_top(&self) {
+        self.scroll_to(0);
+    }
+
+    pub fn to_bottom(&self) {
+        self.scroll_to(self.max_scroll());
+    }
+
+    #[must_use]
+    pub fn page(&self) -> usize {
+        self.height.get().max(1)
+    }
+
+    #[must_use]
+    pub fn is_following(&self) -> bool {
+        self.following.get()
+    }
+
+    fn scroll_to(&self, top: usize) {
+        let top = top.min(self.max_scroll());
+        self.scroll_top.set(top);
+        self.following.set(top >= self.max_scroll());
+    }
+
+    fn max_scroll(&self) -> usize {
+        self.total.get().saturating_sub(self.height.get())
     }
 }
 
 #[derive(Debug, Default)]
-pub struct Screen {
-    viewport: Viewport,
-}
+pub struct Screen {}
 
 impl Screen {
     #[must_use]
@@ -57,7 +95,7 @@ impl Screen {
         app.input.area.set(regions.input);
 
         let lines = transcript_lines(app, area.width);
-        let window = self
+        let window = app
             .viewport
             .window(lines.len(), usize::from(regions.messages.height));
         for (row, line) in regions.messages.rows().zip(&lines[window]) {
@@ -84,5 +122,36 @@ mod tests {
     #[test]
     fn a_transcript_shorter_than_the_window_starts_at_the_top() {
         assert_eq!(Viewport::default().window(6, 20), 0..6);
+    }
+
+    #[test]
+    fn scrolling_up_pauses_the_follow() {
+        let viewport = Viewport::default();
+        viewport.window(200, 20);
+
+        viewport.scroll_by(-1);
+
+        assert_eq!(viewport.window(200, 20), 179..199);
+        assert!(!viewport.is_following());
+    }
+
+    #[test]
+    fn scrolling_back_to_the_bottom_follows_again() {
+        let viewport = Viewport::default();
+        viewport.window(200, 20);
+        viewport.scroll_by(-5);
+
+        viewport.scroll_by(5);
+
+        assert!(viewport.is_following());
+    }
+
+    #[test]
+    fn a_paused_window_stays_put_as_the_transcript_grows() {
+        let viewport = Viewport::default();
+        viewport.window(200, 20);
+        viewport.scroll_by(-10);
+
+        assert_eq!(viewport.window(205, 20), 170..190);
     }
 }
