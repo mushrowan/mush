@@ -11,7 +11,7 @@ pub use crate::batch_output::{
 };
 pub use crate::display_types::{
     ActiveToolState, Block, BlockKind, CodeBlock, DisplayMessage, DisplayToolCall, ImageRenderArea,
-    MessageRole, MessageRowRange, ToolCallStatus,
+    MessageRole, MessageRowRange, Messages, ToolCallStatus,
 };
 pub use crate::input_buffer::{IMAGE_PLACEHOLDER, InputBuffer, PendingImage};
 pub use crate::prompt_cache::{
@@ -97,7 +97,7 @@ pub fn next_thinking_level(current: &ThinkingLevel, supported: &[ThinkingLevel])
 }
 
 pub struct App {
-    pub messages: Vec<DisplayMessage>,
+    pub messages: Messages,
     pub stream: StreamingState,
     pub input: InputBuffer,
     pub model_id: ModelId,
@@ -145,7 +145,7 @@ pub struct PendingOAuth {
 impl App {
     pub fn new(model_id: ModelId, context_window: TokenCount) -> Self {
         Self {
-            messages: Vec::new(),
+            messages: Messages::default(),
             stream: StreamingState::new(),
             input: InputBuffer::new(),
             model_id,
@@ -457,7 +457,7 @@ impl App {
     }
 
     pub fn toggle_thinking_expanded(&mut self) {
-        if let Some(msg) = self
+        if let Some(mut msg) = self
             .messages
             .iter_mut()
             .rev()

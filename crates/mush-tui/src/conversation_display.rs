@@ -181,7 +181,7 @@ fn apply_tool_result(
         return;
     };
 
-    let Some(message) = app.messages.get_mut(msg_idx) else {
+    let Some(mut message) = app.messages.get_mut(msg_idx) else {
         return;
     };
     let Some(tool_call) = message.tool_calls.get_mut(tc_idx) else {
@@ -211,7 +211,7 @@ fn apply_batch_result(
 
     let sections = parse_batch_output(&text);
 
-    let Some(message) = app.messages.get_mut(msg_idx) else {
+    let Some(mut message) = app.messages.get_mut(msg_idx) else {
         return;
     };
 

@@ -3,9 +3,11 @@ use std::hint::black_box;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use mush_ai::types::{ImageMimeType, TokenCount};
 use mush_tui::app::{
-    App, DisplayMessage, IMAGE_PLACEHOLDER, InputBuffer, MessageRole, PendingImage,
+    App, DisplayMessage, DisplayToolCall, IMAGE_PLACEHOLDER, InputBuffer, MessageRole,
+    PendingImage, ToolCallStatus,
 };
 use mush_tui::markdown;
+use mush_tui::screen::Screen;
 use mush_tui::theme::Theme;
 use mush_tui::ui;
 use mush_tui::ui::Ui;
@@ -31,6 +33,64 @@ fn bench_live_block_scaling(c: &mut Criterion) {
         });
     }
     group.finish();
+}
+
+fn bench_transcript_scaling(c: &mut Criterion) {
+    let mut group = c.benchmark_group("transcript_scaling");
+    let area = Rect::new(0, 0, 100, 40);
+
+    for &count in &[16usize, 64, 256, 1024] {
+        let app = conversation_app(count);
+        let mut screen = Screen::new();
+        let mut buf = Buffer::empty(area);
+        group.throughput(Throughput::Elements(count as u64));
+        screen.render(&app, area, &mut buf);
+        group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, _| {
+            b.iter(|| {
+                screen.render(black_box(&app), area, &mut buf);
+                black_box(&buf);
+            })
+        });
+    }
+    group.finish();
+}
+
+fn bench_transcript_with_tool_output(c: &mut Criterion) {
+    let mut group = c.benchmark_group("transcript_with_tool_output");
+    let area = Rect::new(0, 0, 100, 40);
+
+    for &count in &[64usize, 256] {
+        let app = tool_heavy_app(count);
+        let mut screen = Screen::new();
+        let mut buf = Buffer::empty(area);
+        group.throughput(Throughput::Elements(count as u64));
+        screen.render(&app, area, &mut buf);
+        group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, _| {
+            b.iter(|| {
+                screen.render(black_box(&app), area, &mut buf);
+                black_box(&buf);
+            })
+        });
+    }
+    group.finish();
+}
+
+fn tool_heavy_app(message_count: usize) -> App {
+    let mut app = conversation_app(message_count);
+    let output = code_block_body_fixture(10);
+    for (i, mut msg) in app.messages.iter_mut().enumerate() {
+        if matches!(msg.role, MessageRole::Assistant) {
+            msg.tool_calls.push(DisplayToolCall {
+                name: "read".into(),
+                summary: format!("crates/mush-tui/src/widgets/message_list{i}.rs"),
+                status: ToolCallStatus::Done,
+                output_preview: Some(output.clone()),
+                image_data: None,
+                batch: 0,
+            });
+        }
+    }
+    app
 }
 
 fn conversation_app(message_count: usize) -> App {
@@ -178,6 +238,8 @@ fn input_fixture() -> (String, Vec<PendingImage>) {
 
 criterion_group!(
     benches,
+    bench_transcript_scaling,
+    bench_transcript_with_tool_output,
     bench_live_block_scaling,
     bench_markdown,
     bench_code_blocks,

@@ -121,7 +121,7 @@ pub fn handle_agent_event(
             }
         }
         AgentEvent::SteeringInjected { messages } => {
-            for msg in app.messages.iter_mut().rev().take(messages.len()) {
+            for mut msg in app.messages.iter_mut().rev().take(messages.len()) {
                 msg.queued = false;
             }
             for msg in messages {

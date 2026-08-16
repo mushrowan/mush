@@ -9,6 +9,7 @@ use ratatui::text::{Line, Span, Text};
 
 use crate::app::{App, DisplayMessage, DisplayToolCall, MessageRole, ToolCallStatus};
 use crate::widgets::shimmer::shimmer_spans;
+use std::cell::Ref;
 
 pub(crate) const MESSAGE_INDENT_LEFT: usize = 1;
 pub(crate) const MESSAGE_INDENT_RIGHT: usize = 1;
@@ -48,6 +49,17 @@ thread_local! {
     static INDENT_LINE_CALLS: Cell<usize> = const { Cell::new(0) };
     static COUNT_ESTIMATED_LINES_CALLS: Cell<usize> = const { Cell::new(0) };
     static CONTENT_HASH_CALLS: Cell<usize> = const { Cell::new(0) };
+    static MESSAGE_BUILD_CALLS: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_message_build_count() {
+    MESSAGE_BUILD_CALLS.with(|c| c.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn message_build_count() -> usize {
+    MESSAGE_BUILD_CALLS.with(Cell::get)
 }
 
 #[cfg(test)]
@@ -142,6 +154,49 @@ fn streaming_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     lines
 }
 
+pub(crate) struct TranscriptGuards<'a> {
+    blank: Line<'static>,
+    settled: Vec<Ref<'a, [Line<'static>]>>,
+    streaming: Vec<Line<'static>>,
+    queued: Vec<Ref<'a, [Line<'static>]>>,
+}
+
+impl TranscriptGuards<'_> {
+    pub(crate) fn flatten(&self) -> Vec<&Line<'static>> {
+        let mut lines = Vec::new();
+        for chunk in &self.settled {
+            lines.extend(chunk.iter());
+            lines.push(&self.blank);
+        }
+        lines.extend(self.streaming.iter());
+        for chunk in &self.queued {
+            lines.extend(chunk.iter());
+            lines.push(&self.blank);
+        }
+        lines
+    }
+}
+
+pub(crate) fn transcript_guards(app: &App, width: u16) -> TranscriptGuards<'_> {
+    let style = MessageStyle {
+        theme: &app.theme,
+        show_usage: app.interaction.show_usage_lines,
+    };
+    let chunks = |queued: bool| {
+        app.messages
+            .iter()
+            .filter(move |m| m.queued == queued)
+            .map(|m| cached_message_lines(m, &style, width))
+            .collect()
+    };
+    TranscriptGuards {
+        blank: Line::raw(""),
+        settled: chunks(false),
+        streaming: streaming_lines(app, width),
+        queued: chunks(true),
+    }
+}
+
 pub fn transcript_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     let style = MessageStyle {
         theme: &app.theme,
@@ -189,6 +244,43 @@ pub fn message_lines(
     style: &MessageStyle<'_>,
     width: u16,
 ) -> Vec<Line<'static>> {
+    cached_message_lines(msg, style, width).to_vec()
+}
+
+pub(crate) fn cached_message_lines<'a>(
+    msg: &'a DisplayMessage,
+    style: &MessageStyle<'_>,
+    width: u16,
+) -> Ref<'a, [Line<'static>]> {
+    let fresh = msg
+        .line_cache
+        .borrow()
+        .as_ref()
+        .is_some_and(|cache| cache.width == width && cache.show_usage == style.show_usage);
+    if !fresh {
+        let lines = build_message_lines(msg, style, width);
+        msg.line_cache
+            .replace(Some(crate::display_types::LineCache {
+                width,
+                show_usage: style.show_usage,
+                lines,
+            }));
+    }
+    Ref::map(msg.line_cache.borrow(), |cache| {
+        cache
+            .as_ref()
+            .map_or(&[][..], |cache| cache.lines.as_slice())
+    })
+}
+
+fn build_message_lines(
+    msg: &DisplayMessage,
+    style: &MessageStyle<'_>,
+    width: u16,
+) -> Vec<Line<'static>> {
+    #[cfg(test)]
+    MESSAGE_BUILD_CALLS.with(|c| c.set(c.get() + 1));
+
     let mut lines = Vec::new();
 
     if matches!(msg.role, MessageRole::System) {

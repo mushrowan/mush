@@ -1,7 +1,7 @@
 use super::*;
 
 impl App {
-    fn current_turn_message_mut(&mut self) -> Option<&mut DisplayMessage> {
+    fn current_turn_message_mut(&mut self) -> Option<crate::display_types::MessageMut<'_>> {
         self.messages
             .iter_mut()
             .rfind(|m| m.role == MessageRole::Assistant)
@@ -49,7 +49,7 @@ impl App {
         });
         self.stream.tool_args.clear();
         let batch_idx = self.current_tool_batch;
-        if let Some(turn) = self.current_turn_message_mut() {
+        if let Some(mut turn) = self.current_turn_message_mut() {
             turn.tool_calls.push(DisplayToolCall {
                 name: name.to_string(),
                 summary: summary.to_string(),
@@ -83,7 +83,7 @@ impl App {
             });
         }
         let batch_idx = self.current_tool_batch;
-        if let Some(turn) = self.current_turn_message_mut() {
+        if let Some(mut turn) = self.current_turn_message_mut() {
             for (name, sub_summary) in sub_calls {
                 turn.tool_calls.push(DisplayToolCall {
                     name: name.clone(),
@@ -133,7 +133,7 @@ impl App {
             }
         }
 
-        if let Some(turn) = self.current_turn_message_mut() {
+        if let Some(mut turn) = self.current_turn_message_mut() {
             let running: Vec<usize> = turn
                 .tool_calls
                 .iter()
@@ -191,7 +191,7 @@ impl App {
             tool.output = output.map(|o| preview_for_tool(name, o));
             tool.live_output = None;
         }
-        if let Some(turn) = self.current_turn_message_mut()
+        if let Some(mut turn) = self.current_turn_message_mut()
             && let Some(tc) = turn.tool_calls.iter_mut().rfind(|t| t.name == name)
         {
             tc.status = status;

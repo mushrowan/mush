@@ -1,5 +1,7 @@
 use mush_ai::types::{Dollars, ModelId, ToolCallId, ToolOutcome, Usage};
 use ratatui::layout::Rect;
+use ratatui::text::Line;
+use std::cell::RefCell;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodeBlock {
@@ -21,7 +23,93 @@ pub struct Block {
     pub kind: BlockKind,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct Messages(Vec<DisplayMessage>);
+
+impl std::ops::Deref for Messages {
+    type Target = [DisplayMessage];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl From<Vec<DisplayMessage>> for Messages {
+    fn from(messages: Vec<DisplayMessage>) -> Self {
+        Self(messages)
+    }
+}
+
+impl FromIterator<DisplayMessage> for Messages {
+    fn from_iter<I: IntoIterator<Item = DisplayMessage>>(iter: I) -> Self {
+        Self(iter.into_iter().collect())
+    }
+}
+
+impl Messages {
+    pub fn push(&mut self, message: DisplayMessage) {
+        self.0.push(message);
+    }
+
+    pub fn insert(&mut self, index: usize, message: DisplayMessage) {
+        self.0.insert(index, message);
+    }
+
+    pub fn remove(&mut self, index: usize) -> DisplayMessage {
+        self.0.remove(index)
+    }
+
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    pub fn retain(&mut self, keep: impl FnMut(&DisplayMessage) -> bool) {
+        self.0.retain(keep);
+    }
+
+    pub fn get_mut(&mut self, index: usize) -> Option<MessageMut<'_>> {
+        self.0.get_mut(index).map(MessageMut)
+    }
+
+    pub fn last_mut(&mut self) -> Option<MessageMut<'_>> {
+        self.0.last_mut().map(MessageMut)
+    }
+
+    pub fn iter_mut(&mut self) -> impl DoubleEndedIterator<Item = MessageMut<'_>> {
+        self.0.iter_mut().map(MessageMut)
+    }
+}
+
+pub struct MessageMut<'a>(&'a mut DisplayMessage);
+
+impl std::ops::Deref for MessageMut<'_> {
+    type Target = DisplayMessage;
+
+    fn deref(&self) -> &Self::Target {
+        self.0
+    }
+}
+
+impl std::ops::DerefMut for MessageMut<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0
+    }
+}
+
+impl Drop for MessageMut<'_> {
+    fn drop(&mut self) {
+        self.0.invalidate();
+    }
+}
+
 #[derive(Debug, Clone)]
+pub struct LineCache {
+    pub width: u16,
+    pub show_usage: bool,
+    pub lines: Vec<Line<'static>>,
+}
+
+#[derive(Debug)]
 pub struct DisplayMessage {
     pub role: MessageRole,
     pub content: String,
@@ -33,6 +121,25 @@ pub struct DisplayMessage {
     pub model_id: Option<ModelId>,
     pub queued: bool,
     pub images: Vec<Vec<u8>>,
+    pub(crate) line_cache: RefCell<Option<LineCache>>,
+}
+
+impl Clone for DisplayMessage {
+    fn clone(&self) -> Self {
+        Self {
+            role: self.role.clone(),
+            content: self.content.clone(),
+            tool_calls: self.tool_calls.clone(),
+            thinking: self.thinking.clone(),
+            thinking_expanded: self.thinking_expanded,
+            usage: self.usage,
+            cost: self.cost,
+            model_id: self.model_id.clone(),
+            queued: self.queued,
+            images: self.images.clone(),
+            line_cache: RefCell::new(None),
+        }
+    }
 }
 
 impl DisplayMessage {
@@ -49,7 +156,12 @@ impl DisplayMessage {
             model_id: None,
             queued: false,
             images: Vec::new(),
+            line_cache: RefCell::new(None),
         }
+    }
+
+    pub fn invalidate(&mut self) {
+        self.line_cache.get_mut().take();
     }
 
     #[must_use]

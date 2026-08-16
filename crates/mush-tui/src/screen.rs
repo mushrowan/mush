@@ -10,7 +10,7 @@ use ratatui::widgets::Widget;
 use crate::app::App;
 use crate::ui::{input_height, layout, status_bar_height};
 use crate::widgets::input_box::InputBox;
-use crate::widgets::message_list::transcript_lines;
+use crate::widgets::message_list::transcript_guards;
 use crate::widgets::status_bar::StatusBar;
 use crate::widgets::tool_panels::{ToolPanels, tool_panels_height};
 
@@ -49,12 +49,22 @@ impl Default for Viewport {
 }
 
 impl Viewport {
-    pub fn place(&self, lines: &[Line<'_>], height: usize) -> Range<usize> {
+    pub fn place<L: std::borrow::Borrow<Line<'static>>>(
+        &self,
+        lines: &[L],
+        height: usize,
+    ) -> Range<usize> {
         let window = self.window(lines.len(), height);
         self.widths.replace(
             lines[window.clone()]
                 .iter()
-                .map(|line| line.spans.iter().map(|s| s.content.chars().count()).sum())
+                .map(|line| {
+                    line.borrow()
+                        .spans
+                        .iter()
+                        .map(|s| s.content.chars().count())
+                        .sum()
+                })
                 .collect(),
         );
         self.hold_cursor_on_screen();
@@ -269,7 +279,8 @@ impl Screen {
         let regions = layout(area, input_h, tools_h, status_h);
         app.input.area.set(regions.input);
 
-        let lines = transcript_lines(app, area.width);
+        let transcript = transcript_guards(app, area.width);
+        let lines = transcript.flatten();
         let window = app
             .viewport
             .place(&lines, usize::from(regions.messages.height));

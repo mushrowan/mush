@@ -8,7 +8,7 @@ fn all_lines(app: &App, width: u16) -> Vec<Line<'static>> {
         show_usage: app.interaction.show_usage_lines,
     };
     let mut lines = Vec::new();
-    for msg in &app.messages {
+    for msg in app.messages.iter() {
         lines.extend(message_lines(msg, &style, width));
         lines.push(Line::raw(""));
     }
@@ -332,8 +332,10 @@ fn usage_line_deferred_while_tool_running() {
         "usage line should be deferred while a tool is running, got: {running}"
     );
 
-    app.messages[0].tool_calls[0].status = ToolCallStatus::Done;
-    app.messages[0].tool_calls[0].output_preview = Some("ok".into());
+    let mut msg = app.messages.get_mut(0).expect("message");
+    msg.tool_calls[0].status = ToolCallStatus::Done;
+    msg.tool_calls[0].output_preview = Some("ok".into());
+    drop(msg);
     let done = buffer_to_string(&render_app(&app, 70, 12));
     assert!(
         done.contains("320tok"),
@@ -1229,15 +1231,18 @@ fn a_system_message_gets_a_label() {
 #[test]
 fn a_collapsed_trace_is_one_line() {
     let theme = crate::theme::Theme::default();
-    let mut msg = DisplayMessage::new(MessageRole::Assistant, "the answer");
-    msg.thinking = Some("**Working it out**\n\nfirst i consider\nthen i decide".into());
+    let trace = |expanded: bool| {
+        let mut msg = DisplayMessage::new(MessageRole::Assistant, "the answer");
+        msg.thinking = Some("**Working it out**\n\nfirst i consider\nthen i decide".into());
+        msg.thinking_expanded = expanded;
+        rendered_text(&message_lines(&msg, &plain_style(&theme), 60))
+    };
 
-    let collapsed = rendered_text(&message_lines(&msg, &plain_style(&theme), 60));
+    let collapsed = trace(false);
     assert!(collapsed.contains("Working it out"), "{collapsed}");
     assert!(!collapsed.contains("then i decide"), "{collapsed}");
 
-    msg.thinking_expanded = true;
-    let expanded = rendered_text(&message_lines(&msg, &plain_style(&theme), 60));
+    let expanded = trace(true);
     assert!(expanded.contains("then i decide"), "{expanded}");
 }
 
@@ -1452,4 +1457,33 @@ fn queued_steering_sits_below_the_reply() {
     let reply = text.find("the reply").expect("reply should render");
     let steering = text.find("steering").expect("steering should render");
     assert!(reply < steering, "got:\n{text}");
+}
+
+fn drawn_conversation(count: usize) -> (App, crate::screen::Screen, Buffer) {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    for i in 0..count {
+        app.push_user_message(format!("question {i}"));
+        app.messages.push(DisplayMessage::new(
+            MessageRole::Assistant,
+            format!("## answer {i}\n\nwith **bold** and `code` in it"),
+        ));
+    }
+    let mut screen = crate::screen::Screen::new();
+    let mut buf = Buffer::empty(Rect::new(0, 0, 100, 40));
+    screen.render(&app, buf.area, &mut buf);
+    (app, screen, buf)
+}
+
+#[test]
+fn reading_an_unchanged_conversation_rebuilds_nothing() {
+    let (mut app, mut screen, mut buf) = drawn_conversation(195);
+    crate::input::handle_key(
+        &mut app,
+        crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Char('j')),
+    );
+    reset_message_build_count();
+
+    screen.render(&app, buf.area, &mut buf);
+
+    assert_eq!(message_build_count(), 0);
 }
