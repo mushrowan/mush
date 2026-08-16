@@ -1012,15 +1012,15 @@ mod tests {
     }
 
     fn render_full_ui(app: &App, width: u16, height: u16) -> Buffer {
-        use crate::ui::Ui;
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
+        let mut screen = crate::screen::Screen::new();
         terminal
             .draw(|frame| {
                 let area = frame.area();
                 let _ = crate::widgets::status_bar::status_bar_height(app, area.width);
-                let _ = Ui::new(app).cursor_position(area);
-                frame.render_widget(Ui::new(app), area);
+                let _ = crate::ui::Ui::new(app).cursor_position(area);
+                screen.render(app, area, frame.buffer_mut());
             })
             .unwrap();
         terminal.backend().buffer().clone()

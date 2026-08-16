@@ -1,14 +1,9 @@
-use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::widgets::Widget;
 
-use crate::app::{App, AppMode};
+use crate::app::App;
 use crate::widgets::input_box::InputBox;
-use crate::widgets::search_popup::SearchPopup;
-use crate::widgets::status_bar::StatusBar;
 pub use crate::widgets::status_bar::status_bar_height;
-use crate::widgets::tool_panels::{ToolPanels, tool_panels_height};
-use crate::widgets::{at_picker, slash_menu};
+use crate::widgets::tool_panels::tool_panels_height;
 
 pub struct Ui<'a> {
     app: &'a App,
@@ -51,43 +46,6 @@ pub fn input_height(input: &crate::app::InputBuffer, area_width: u16) -> u16 {
     (layout.total_lines + 2).min(12)
 }
 
-#[must_use]
-pub fn live_height(app: &App, width: u16) -> u16 {
-    let content = u16::try_from(crate::widgets::message_list::live_lines(app, width).len())
-        .unwrap_or(u16::MAX);
-    content
-        .saturating_add(completion_height(app))
-        .saturating_add(tool_panels_height(&app.active_tools, width))
-        .saturating_add(input_height(&app.input, width))
-        .saturating_add(status_bar_height(app, width))
-}
-
-#[must_use]
-pub fn is_modal(app: &App) -> bool {
-    app.interaction.session_picker.is_some()
-        || app.interaction.model_picker.is_some()
-        || app.interaction.login_picker.is_some()
-        || app.interaction.compaction_recovery.is_some()
-        || app.settings_menu.is_some()
-        || app.interaction.mode == AppMode::Search
-}
-
-fn completion_height(app: &App) -> u16 {
-    let slash = app.completion.slash_menu.as_ref().map(slash_menu::height);
-    let at = app.interaction.at_picker.as_ref().map(at_picker::height);
-    slash.or(at).unwrap_or(0)
-}
-
-fn render_live(app: &App, area: Rect, buf: &mut Buffer) {
-    let lines = crate::widgets::message_list::live_lines(app, area.width);
-    let height = usize::from(area.height);
-    let skip = lines.len().saturating_sub(height);
-    let rows = area.rows().skip(height - (lines.len() - skip));
-    for (row, line) in rows.zip(lines.into_iter().skip(skip)) {
-        line.render(row, buf);
-    }
-}
-
 pub fn layout(area: Rect, input_h: u16, tools_h: u16, status_h: u16) -> LayoutRegions {
     if tools_h > 0 {
         let chunks = Layout::default()
@@ -125,50 +83,6 @@ pub fn layout(area: Rect, input_h: u16, tools_h: u16, status_h: u16) -> LayoutRe
     }
 }
 
-impl Widget for Ui<'_> {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        let input_h = input_height(&self.app.input, area.width);
-        let tools_h = tool_panels_height(&self.app.active_tools, area.width);
-        let status_h = status_bar_height(self.app, area.width);
-        let regions = layout(area, input_h, tools_h, status_h);
-        self.app.input.area.set(regions.input);
-        render_live(self.app, regions.messages, buf);
-        if let Some(tools_area) = regions.tools {
-            ToolPanels::new(&self.app.active_tools, &self.app.theme).render(tools_area, buf);
-        }
-        InputBox::new(self.app).render(regions.input, buf);
-        StatusBar::new(self.app).render(regions.status, buf);
-        join_status_dividers(&regions, buf);
-
-        if self.app.interaction.mode == AppMode::Search {
-            SearchPopup::new(self.app).render(area, buf);
-        }
-    }
-}
-
-fn join_status_dividers(regions: &LayoutRegions, buf: &mut Buffer) {
-    if regions.status.height == 0 || regions.input.height == 0 {
-        return;
-    }
-    let input_bottom_y = regions.input.y + regions.input.height - 1;
-    let status_top_y = regions.status.y;
-    if status_top_y != input_bottom_y + 1 {
-        return;
-    }
-    let x_start = regions.status.x;
-    let x_end = regions.status.x + regions.status.width;
-    for x in x_start..x_end {
-        let status_cell = &buf[(x, status_top_y)];
-        if status_cell.symbol() != "│" {
-            continue;
-        }
-        let border_cell = &mut buf[(x, input_bottom_y)];
-        if border_cell.symbol() == "─" {
-            border_cell.set_symbol("┬");
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,6 +90,7 @@ mod tests {
     use mush_ai::types::{Dollars, TokenCount};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
 
     #[test]
     fn input_height_short_text() {
@@ -222,6 +137,15 @@ mod tests {
         let input = app.input.area.get();
         assert!(input.height > 0);
         assert!(input.y > 0);
+    }
+
+    fn render_full(app: &App, width: u16, height: u16) -> Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let mut screen = crate::screen::Screen::new();
+        terminal
+            .draw(|frame| screen.render(app, frame.area(), frame.buffer_mut()))
+            .unwrap();
+        terminal.backend().buffer().clone()
     }
 
     #[test]
@@ -320,125 +244,6 @@ mod tests {
         assert_eq!(
             cy, expected_y,
             "cursor should be on the new line, not the previous one"
-        );
-    }
-
-    fn render_full(app: &App, width: u16, height: u16) -> Buffer {
-        let backend = TestBackend::new(width, height);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| {
-                let area = frame.area();
-                frame.render_widget(Ui::new(app), area);
-            })
-            .unwrap();
-        terminal.backend().buffer().clone()
-    }
-
-    #[test]
-    fn status_bar_dividers_tee_into_input_box_border() {
-        let app = App::new("claude-sonnet-4".into(), TokenCount::new(200_000));
-        let buf = render_full(&app, 120, 24);
-
-        let mut status_row = None;
-        for y in 0..buf.area.height {
-            for x in 0..buf.area.width {
-                if buf[(x, y)].symbol() == "│" {
-                    status_row = Some((x, y));
-                    break;
-                }
-            }
-            if status_row.is_some() {
-                break;
-            }
-        }
-        let (pipe_x, pipe_y) = status_row.expect("no status bar `│` divider rendered");
-        let border_cell = buf[(pipe_x, pipe_y - 1)].symbol().to_string();
-        assert_eq!(
-            border_cell, "┬",
-            "input bottom border above divider at col {pipe_x} should be `┬`, was `{border_cell}`"
-        );
-    }
-
-    #[test]
-    fn an_idle_live_region_has_no_content_rows() {
-        let app = App::new("test".into(), TokenCount::new(200_000));
-        let height = live_height(&app, 80);
-        let expected = input_height(&app.input, 80) + status_bar_height(&app, 80);
-        assert_eq!(height, expected);
-    }
-
-    #[test]
-    fn a_streaming_reply_makes_the_live_region_taller() {
-        let mut app = App::new("test".into(), TokenCount::new(200_000));
-        let idle = live_height(&app, 80);
-        app.start_streaming();
-        app.push_text_delta("an answer\n\nwith two paragraphs");
-        for _ in 0..80 {
-            app.tick_streaming_text();
-        }
-        assert!(live_height(&app, 80) > idle);
-    }
-
-    #[test]
-    fn an_open_slash_menu_makes_room_for_itself() {
-        let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.completion.slash_commands = vec![crate::slash_menu::SlashCommand {
-            name: "login".into(),
-            description: "start oauth".into(),
-        }];
-        let idle = live_height(&app, 80);
-
-        app.input.text = "/".into();
-        app.open_slash_menu();
-        let menu = app.completion.slash_menu.as_ref().expect("a menu");
-
-        assert_eq!(
-            live_height(&app, 80),
-            idle + crate::widgets::slash_menu::height(menu)
-        );
-    }
-
-    #[test]
-    fn an_idle_block_still_has_room_for_the_prompt() {
-        let app = App::new("test".into(), TokenCount::new(200_000));
-        let height = live_height(&app, 60);
-
-        let text = drawn(Ui::new(&app), 60, height);
-
-        assert!(text.contains("> "), "the input box lost its row:\n{text}");
-    }
-
-    fn drawn(ui: Ui<'_>, width: u16, height: u16) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal.draw(|f| f.render_widget(ui, f.area())).unwrap();
-        buffer_to_string(terminal.backend().buffer())
-    }
-
-    fn app_mid_turn() -> App {
-        let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.push_user_message("settled question");
-        app.start_streaming();
-        app.push_text_delta("settled answer");
-        app.finish_streaming(None, None);
-        app.push_user_message("live question");
-        app.start_streaming();
-        app.push_text_delta("live answer");
-        for _ in 0..200 {
-            app.tick();
-        }
-        app
-    }
-
-    #[test]
-    fn the_ui_draws_only_the_live_turn() {
-        let app = app_mid_turn();
-        let text = drawn(Ui::new(&app), 60, 20);
-
-        assert!(text.contains("live answer"), "got:\n{text}");
-        assert!(
-            !text.contains("settled answer"),
-            "scrollback owns it:\n{text}"
         );
     }
 }

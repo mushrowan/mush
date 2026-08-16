@@ -2,10 +2,8 @@ use std::time::{Duration, Instant};
 
 use mush_ai::types::TokenCount;
 use mush_tui::app::{App, DisplayMessage, MessageRole};
-use mush_tui::ui::Ui;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::widgets::Widget;
 
 fn env_usize(key: &str, default: usize) -> usize {
     std::env::var(key)
@@ -51,9 +49,10 @@ fn main() {
     let app = build_app(msgs);
     let area = Rect::new(0, 0, 100, 40);
     let mut buf = Buffer::empty(area);
+    let mut screen = mush_tui::screen::Screen::new();
 
     let warm_start = Instant::now();
-    Ui::new(&app).render(area, &mut buf);
+    screen.render(&app, area, &mut buf);
     let warm = warm_start.elapsed();
 
     eprintln!("warm-up render took {warm:.2?}");
@@ -63,7 +62,7 @@ fn main() {
     let loop_start = Instant::now();
     while Instant::now() < deadline {
         for _ in 0..512 {
-            Ui::new(&app).render(area, &mut buf);
+            screen.render(&app, area, &mut buf);
             frames += 1;
         }
     }

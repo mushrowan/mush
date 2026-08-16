@@ -10,30 +10,9 @@ use mush_tui::markdown;
 use mush_tui::screen::Screen;
 use mush_tui::theme::Theme;
 use mush_tui::ui;
-use mush_tui::ui::Ui;
 use mush_tui::widgets::input_box::benchmark_build_input_layout;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::widgets::Widget;
-
-fn bench_live_block_scaling(c: &mut Criterion) {
-    let mut group = c.benchmark_group("live_block_scaling");
-    let area = Rect::new(0, 0, 100, 40);
-
-    for &count in &[16usize, 64, 256, 1024] {
-        let app = conversation_app(count);
-        let mut buf = Buffer::empty(area);
-        group.throughput(Throughput::Elements(count as u64));
-        Ui::new(&app).render(area, &mut buf);
-        group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, _| {
-            b.iter(|| {
-                Ui::new(black_box(&app)).render(area, &mut buf);
-                black_box(&buf);
-            })
-        });
-    }
-    group.finish();
-}
 
 fn bench_transcript_scaling(c: &mut Criterion) {
     let mut group = c.benchmark_group("transcript_scaling");
@@ -240,7 +219,6 @@ criterion_group!(
     benches,
     bench_transcript_scaling,
     bench_transcript_with_tool_output,
-    bench_live_block_scaling,
     bench_markdown,
     bench_code_blocks,
     bench_input_layout
