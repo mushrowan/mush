@@ -1487,3 +1487,74 @@ fn reading_an_unchanged_conversation_rebuilds_nothing() {
 
     assert_eq!(message_build_count(), 0);
 }
+
+#[test]
+fn a_token_rebuilds_only_the_message_it_landed_on() {
+    let (mut app, mut screen, mut buf) = drawn_conversation(195);
+    reset_message_build_count();
+
+    app.messages
+        .last_mut()
+        .expect("message")
+        .content
+        .push_str(" checker");
+    screen.render(&app, buf.area, &mut buf);
+
+    assert_eq!(message_build_count(), 1);
+    assert!(buffer_to_string(&buf).contains(" checker"));
+}
+
+#[test]
+fn narrowing_the_terminal_rebuilds_every_message_once() {
+    let (app, mut screen, _) = drawn_conversation(195);
+    let mut narrow = Buffer::empty(Rect::new(0, 0, 80, 40));
+    reset_message_build_count();
+
+    screen.render(&app, narrow.area, &mut narrow);
+    let first = message_build_count();
+    reset_message_build_count();
+    screen.render(&app, narrow.area, &mut narrow);
+
+    assert_eq!(first, 390);
+    assert_eq!(message_build_count(), 0);
+}
+
+#[test]
+fn a_tool_result_rebuilds_only_the_message_that_owns_it() {
+    let (mut app, mut screen, mut buf) = drawn_conversation(195);
+    reset_message_build_count();
+
+    app.messages
+        .last_mut()
+        .expect("message")
+        .tool_calls
+        .push(crate::app::DisplayToolCall {
+            name: "bash".into(),
+            summary: "cargo build".into(),
+            status: ToolCallStatus::Done,
+            output_preview: Some("compiled in 4.2s".into()),
+            image_data: None,
+            batch: 0,
+        });
+    screen.render(&app, buf.area, &mut buf);
+
+    assert_eq!(message_build_count(), 1);
+    assert!(buffer_to_string(&buf).contains("compiled in 4.2s"));
+}
+
+#[test]
+fn expanding_a_thinking_block_rebuilds_only_that_message() {
+    let (mut app, mut screen, mut buf) = drawn_conversation(195);
+    app.messages.get_mut(200).expect("message").thinking =
+        Some("**weighing it up**\n\nthe long way round".into());
+    screen.render(&app, buf.area, &mut buf);
+    reset_message_build_count();
+
+    app.messages
+        .get_mut(200)
+        .expect("message")
+        .thinking_expanded = true;
+    screen.render(&app, buf.area, &mut buf);
+
+    assert_eq!(message_build_count(), 1);
+}
