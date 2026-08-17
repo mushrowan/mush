@@ -100,6 +100,7 @@ fn enter_screen(out: &mut impl Write, policy: TerminalPolicy) -> io::Result<()> 
 fn apply_tty_modes(out: &mut impl Write, policy: TerminalPolicy) -> io::Result<()> {
     out.queue(event::EnableBracketedPaste)?;
     out.queue(event::EnableFocusChange)?;
+    out.queue(event::EnableMouseCapture)?;
     enable_keyboard_enhancement(out, policy.keyboard_enhancement);
     out.queue(SetCursorStyle::BlinkingBar)?;
     out.flush()
@@ -160,6 +161,7 @@ fn panic_payload_str(info: &std::panic::PanicHookInfo<'_>) -> String {
 }
 
 fn restore_tty_modes(out: &mut impl Write) {
+    let _ = out.queue(event::DisableMouseCapture);
     let _ = out.queue(PopKeyboardEnhancementFlags);
     let _ = out.queue(event::DisableFocusChange);
     let _ = out.queue(event::DisableBracketedPaste);
@@ -281,10 +283,8 @@ mod tests {
 
         assert!(out.contains("\x1b[?1049h"), "alt screen: {out:?}");
         assert!(out.contains("\x1b[?2004h"), "bracketed paste: {out:?}");
-        assert!(
-            !out.contains("?1002"),
-            "the wheel is the terminal's: {out:?}"
-        );
+        assert!(out.contains("\x1b[?1000h"), "mouse reports: {out:?}");
+        assert!(out.contains("\x1b[?1006h"), "sgr mouse encoding: {out:?}");
     }
 
     #[test]
@@ -293,6 +293,7 @@ mod tests {
 
         assert!(out.contains("\x1b[?1049l"), "alt screen: {out:?}");
         assert!(out.contains("\x1b[?2004l"), "bracketed paste: {out:?}");
+        assert!(out.contains("\x1b[?1000l"), "wheel reports: {out:?}");
     }
 
     #[test]

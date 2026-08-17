@@ -1,10 +1,10 @@
 use chrono::{TimeDelta, Utc};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use mush_ai::oauth::usage::{OAuthUsage, UsageWindow};
 use mush_ai::types::TokenCount;
 use mush_tui::AppEvent;
 use mush_tui::app::{App, Caret, DisplayMessage, MessageRole};
-use mush_tui::input::handle_key;
+use mush_tui::input::{handle_key, handle_mouse};
 use mush_tui::keybinds::{BindingSource, ScopedKeysConfig};
 use mush_tui::screen::Screen;
 use ratatui::Terminal;
@@ -645,4 +645,27 @@ fn a_row_with_a_stitched_cluster_is_never_trusted_stale() {
         trusted.is_empty(),
         "row {row} still diffs against a model the terminal disagrees with: {trusted:?}"
     );
+}
+
+fn wheel(app: &mut App, kind: MouseEventKind, column: u16, row: u16) {
+    handle_mouse(
+        app,
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        },
+    );
+}
+
+#[test]
+fn one_notch_up_moves_the_log_back_one_line() {
+    let mut app = conversation(30);
+    let before = window_rows(&app);
+
+    wheel(&mut app, MouseEventKind::ScrollUp, 10, 5);
+
+    let after = window_rows(&app);
+    assert_eq!(after[1..], before[..before.len() - 1]);
 }

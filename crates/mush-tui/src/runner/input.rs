@@ -301,6 +301,10 @@ pub(super) async fn handle_streaming_terminal_events(
                     LoopAction::Continue => {}
                 }
             }
+            Event::Mouse(mouse) => {
+                crate::input::handle_mouse(&mut session.app, mouse);
+                changed = true;
+            }
             Event::Paste(text) => {
                 session.app.handle_paste(&text);
                 changed = true;
@@ -538,6 +542,9 @@ pub(super) async fn handle_idle_terminal_events(
                         _ => {}
                     }
                 }
+            }
+            Event::Mouse(mouse) => {
+                crate::input::handle_mouse(&mut session.app, mouse);
             }
             Event::Paste(text) => {
                 session.app.handle_paste(&text);

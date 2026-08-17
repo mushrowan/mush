@@ -2134,3 +2134,25 @@ fn k_moves_the_cursor_up_one_row_while_navigating() {
     assert_eq!(app.viewport.cursor_row(), start - 1);
     assert_eq!(app.viewport.window(200, 20), 180..200, "the window held");
 }
+
+fn wheel(kind: crossterm::event::MouseEventKind, column: u16, row: u16) -> MouseEvent {
+    MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    }
+}
+
+#[test]
+fn a_wheel_notch_up_scrolls_the_log_back() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.viewport.window(200, 20);
+
+    handle_mouse(
+        &mut app,
+        wheel(crossterm::event::MouseEventKind::ScrollUp, 0, 0),
+    );
+
+    assert_eq!(app.viewport.window(200, 20), 179..199);
+}

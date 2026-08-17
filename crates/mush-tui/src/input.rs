@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 
 use crate::app::{App, AppEvent, AppMode};
 use crate::session_picker::{SessionScope, filtered_sessions};
@@ -133,6 +133,13 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     } else {
         handle_idle_keys(app, key)
     }
+}
+
+pub fn handle_mouse(app: &mut App, event: MouseEvent) -> Option<AppEvent> {
+    if event.kind == MouseEventKind::ScrollUp {
+        app.viewport.scroll_by(-1);
+    }
+    None
 }
 
 fn handle_streaming_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
