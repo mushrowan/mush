@@ -669,3 +669,16 @@ fn one_notch_up_moves_the_log_back_one_line() {
     let after = window_rows(&app);
     assert_eq!(after[1..], before[..before.len() - 1]);
 }
+
+#[test]
+fn one_notch_down_moves_the_log_forward_one_line() {
+    let mut app = conversation(30);
+    window_rows(&app);
+    wheel(&mut app, MouseEventKind::ScrollUp, 10, 5);
+    let before = window_rows(&app);
+
+    wheel(&mut app, MouseEventKind::ScrollDown, 10, 5);
+
+    let after = window_rows(&app);
+    assert_eq!(after[..after.len() - 1], before[1..]);
+}

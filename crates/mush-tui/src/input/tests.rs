@@ -2156,3 +2156,17 @@ fn a_wheel_notch_up_scrolls_the_log_back() {
 
     assert_eq!(app.viewport.window(200, 20), 179..199);
 }
+
+#[test]
+fn a_wheel_notch_down_scrolls_the_log_forward() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.viewport.window(200, 20);
+    app.viewport.scroll_by(-5);
+
+    handle_mouse(
+        &mut app,
+        wheel(crossterm::event::MouseEventKind::ScrollDown, 0, 0),
+    );
+
+    assert_eq!(app.viewport.window(200, 20), 176..196);
+}
