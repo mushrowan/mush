@@ -755,3 +755,25 @@ fn wheeling_up_during_a_stream_parks_the_log() {
 
     assert_eq!(window_rows(&app), parked);
 }
+
+#[test]
+fn wheeling_back_to_the_bottom_follows_again() {
+    let mut app = conversation(30);
+    app.start_streaming();
+    stream(&mut app, 0..40);
+    window_rows(&app);
+    for _ in 0..5 {
+        wheel(&mut app, MouseEventKind::ScrollUp, 10, 5);
+    }
+
+    for _ in 0..5 {
+        wheel(&mut app, MouseEventKind::ScrollDown, 10, 5);
+    }
+    stream(&mut app, 40..80);
+
+    assert!(
+        window_rows(&app).contains(&" streamed 79".to_string()),
+        "{:?}",
+        window_rows(&app)
+    );
+}
