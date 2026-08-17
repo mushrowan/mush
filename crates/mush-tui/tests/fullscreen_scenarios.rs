@@ -682,3 +682,18 @@ fn one_notch_down_moves_the_log_forward_one_line() {
     let after = window_rows(&app);
     assert_eq!(after[..after.len() - 1], before[1..]);
 }
+
+#[test]
+fn the_wheel_never_changes_mode() {
+    let mut app = conversation(30);
+    press(&mut app, KeyCode::Char('h'));
+    let before = window_rows(&app);
+
+    for _ in 0..3 {
+        wheel(&mut app, MouseEventKind::ScrollUp, 10, 5);
+    }
+    press(&mut app, KeyCode::Char('i'));
+
+    assert_eq!(window_rows(&app)[3..], before[..before.len() - 3]);
+    assert_eq!(app.input.text, "hi");
+}
