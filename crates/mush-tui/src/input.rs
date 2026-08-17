@@ -136,6 +136,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
 }
 
 pub fn handle_mouse(app: &mut App, event: MouseEvent) -> Option<AppEvent> {
+    if !app.interaction.mode.scrolls_the_log() {
+        return None;
+    }
     let notch = match event.kind {
         MouseEventKind::ScrollUp => -1,
         MouseEventKind::ScrollDown => 1,

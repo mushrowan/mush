@@ -2170,3 +2170,46 @@ fn a_wheel_notch_down_scrolls_the_log_forward() {
 
     assert_eq!(app.viewport.window(200, 20), 176..196);
 }
+
+#[test]
+fn the_wheel_is_dead_while_an_overlay_is_up() {
+    for mode in [
+        AppMode::SessionPicker,
+        AppMode::ModelPicker,
+        AppMode::LoginPicker,
+        AppMode::SlashComplete,
+        AppMode::AtPicker,
+        AppMode::SlotEdit,
+        AppMode::ToolConfirm,
+        AppMode::Search,
+        AppMode::Settings,
+        AppMode::CompactionRecovery,
+    ] {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.viewport.window(200, 20);
+        app.interaction.mode = mode.clone();
+
+        handle_mouse(
+            &mut app,
+            wheel(crossterm::event::MouseEventKind::ScrollUp, 0, 0),
+        );
+
+        assert_eq!(app.viewport.window(200, 20), 180..200, "mode {mode:?}");
+    }
+}
+
+#[test]
+fn the_wheel_lives_in_the_log_and_composer_modes() {
+    for mode in [AppMode::Normal, AppMode::ComposerNormal, AppMode::Navigate] {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.viewport.window(200, 20);
+        app.interaction.mode = mode.clone();
+
+        handle_mouse(
+            &mut app,
+            wheel(crossterm::event::MouseEventKind::ScrollUp, 0, 0),
+        );
+
+        assert_eq!(app.viewport.window(200, 20), 179..199, "mode {mode:?}");
+    }
+}

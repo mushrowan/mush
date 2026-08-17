@@ -63,6 +63,11 @@ pub enum AppMode {
 
 impl AppMode {
     #[must_use]
+    pub fn scrolls_the_log(&self) -> bool {
+        matches!(self, Self::Normal | Self::ComposerNormal | Self::Navigate)
+    }
+
+    #[must_use]
     pub fn caret(&self) -> Caret {
         match self {
             Self::Navigate => Caret::Log,

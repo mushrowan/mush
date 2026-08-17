@@ -7,6 +7,7 @@ use mush_tui::app::{App, Caret, DisplayMessage, MessageRole};
 use mush_tui::input::{handle_key, handle_mouse};
 use mush_tui::keybinds::{BindingSource, ScopedKeysConfig};
 use mush_tui::screen::Screen;
+use mush_tui::slash_menu::ModelCompletion;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::{Buffer, CellDiffOption};
@@ -696,4 +697,30 @@ fn the_wheel_never_changes_mode() {
 
     assert_eq!(window_rows(&app)[3..], before[..before.len() - 3]);
     assert_eq!(app.input.text, "hi");
+}
+
+fn with_model_picker_open(exchanges: usize) -> App {
+    let mut app = conversation(exchanges);
+    app.completion.model_completions = vec![ModelCompletion {
+        id: "claude-opus-4-5".into(),
+        name: "Claude Opus 4.5".into(),
+        provider: "anthropic".into(),
+        stale: false,
+        description: None,
+        speed_tiers: Vec::new(),
+        priority: 0,
+        visibility: None,
+    }];
+    app.open_model_picker_overlay();
+    app
+}
+
+#[test]
+fn an_open_picker_swallows_the_wheel() {
+    let mut app = with_model_picker_open(30);
+    let before = window_rows(&app);
+
+    wheel(&mut app, MouseEventKind::ScrollUp, 10, 5);
+
+    assert_eq!(window_rows(&app), before);
 }
