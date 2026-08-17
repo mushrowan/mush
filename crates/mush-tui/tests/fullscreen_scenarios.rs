@@ -1,5 +1,5 @@
 use chrono::{TimeDelta, Utc};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use mush_ai::oauth::usage::{OAuthUsage, UsageWindow};
 use mush_ai::types::TokenCount;
 use mush_tui::AppEvent;
@@ -815,4 +815,22 @@ fn the_notch_size_is_configurable() {
     wheel(&mut app, MouseEventKind::ScrollUp, 10, 5);
 
     assert_eq!(window_rows(&app)[5..], before[..before.len() - 5]);
+}
+
+#[test]
+fn sideways_wheel_and_middle_click_are_ignored() {
+    let mut app = conversation(30);
+    let before = window_rows(&app);
+
+    for kind in [
+        MouseEventKind::ScrollLeft,
+        MouseEventKind::ScrollRight,
+        MouseEventKind::Down(MouseButton::Middle),
+        MouseEventKind::Up(MouseButton::Middle),
+    ] {
+        wheel(&mut app, kind, 10, 5);
+    }
+
+    assert_eq!(window_rows(&app), before);
+    assert!(app.input.text.is_empty());
 }
