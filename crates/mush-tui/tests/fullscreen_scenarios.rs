@@ -734,3 +734,24 @@ fn the_wheel_over_the_composer_does_nothing() {
 
     assert_eq!(window_rows(&app), before);
 }
+
+fn stream(app: &mut App, lines: std::ops::Range<usize>) {
+    for i in lines {
+        app.push_text_delta(&format!("streamed {i}\n"));
+        app.tick_animation();
+    }
+}
+
+#[test]
+fn wheeling_up_during_a_stream_parks_the_log() {
+    let mut app = conversation(30);
+    app.start_streaming();
+    stream(&mut app, 0..40);
+    window_rows(&app);
+
+    wheel(&mut app, MouseEventKind::ScrollUp, 10, 5);
+    let parked = window_rows(&app);
+    stream(&mut app, 40..80);
+
+    assert_eq!(window_rows(&app), parked);
+}
