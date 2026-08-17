@@ -795,3 +795,13 @@ fn the_wheel_stops_at_the_top() {
         "{before:?}"
     );
 }
+
+#[test]
+fn a_transcript_shorter_than_the_log_ignores_the_wheel() {
+    let mut app = conversation(1);
+    let before = window_rows(&app);
+
+    wheel(&mut app, MouseEventKind::ScrollUp, 10, 5);
+
+    assert_eq!(window_rows(&app), before);
+}
