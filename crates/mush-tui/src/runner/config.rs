@@ -115,6 +115,7 @@ impl TuiConfig {
         app.interaction.show_usage_lines = self.show_usage_lines;
         app.interaction.show_token_counters = self.show_token_counters;
         app.interaction.status_bar = self.status_bar_config.clone();
+        app.interaction.mouse_scroll_lines = self.terminal_policy.mouse_scroll_lines;
         app.completion.favourite_models = self.favourite_models.clone();
         app.completion.favourites_locked = self.favourites_locked;
         app.completion.recent_models = self.recent_models.clone();
@@ -182,5 +183,21 @@ impl TuiConfig {
             mcp: None,
             forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_configured_notch_reaches_the_app() {
+        let mut config = TuiConfig::for_test();
+        config.terminal_policy.mouse_scroll_lines = 5;
+        let mut app = crate::app::App::new("test".into(), mush_ai::types::TokenCount::new(200_000));
+
+        config.seed_app(&mut app);
+
+        assert_eq!(app.interaction.mouse_scroll_lines, 5);
     }
 }

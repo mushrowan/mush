@@ -97,12 +97,28 @@ pub struct TerminalPolicyOverrides {
 }
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, serde::Serialize, schemars::JsonSchema,
+    Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize, schemars::JsonSchema,
 )]
 #[serde(default)]
 pub struct TerminalPolicy {
     pub keyboard_enhancement: KeyboardEnhancementMode,
     pub image_probe: ImageProbeMode,
+    #[serde(default = "default_mouse_scroll_lines")]
+    pub mouse_scroll_lines: usize,
+}
+
+fn default_mouse_scroll_lines() -> usize {
+    1
+}
+
+impl Default for TerminalPolicy {
+    fn default() -> Self {
+        Self {
+            keyboard_enhancement: KeyboardEnhancementMode::default(),
+            image_probe: ImageProbeMode::default(),
+            mouse_scroll_lines: default_mouse_scroll_lines(),
+        }
+    }
 }
 
 impl TerminalPolicy {
@@ -113,6 +129,7 @@ impl TerminalPolicy {
                 .keyboard_enhancement
                 .unwrap_or(self.keyboard_enhancement),
             image_probe: overrides.image_probe.unwrap_or(self.image_probe),
+            mouse_scroll_lines: self.mouse_scroll_lines,
         }
     }
 }
@@ -160,6 +177,7 @@ mod tests {
         let policy = TerminalPolicy::default();
         assert_eq!(policy.keyboard_enhancement, KeyboardEnhancementMode::Auto);
         assert_eq!(policy.image_probe, ImageProbeMode::Auto);
+        assert_eq!(policy.mouse_scroll_lines, 1);
     }
 
     #[test]

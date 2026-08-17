@@ -168,6 +168,7 @@ pub struct InteractionState {
     pub at_picker: Option<AtPickerState>,
     pub slot_edit: Option<SlotEditState>,
     pub compaction_recovery: Option<CompactionRecoveryState>,
+    pub mouse_scroll_lines: usize,
 }
 
 impl Default for InteractionState {
@@ -184,6 +185,7 @@ impl Default for InteractionState {
             show_usage_lines: false,
             show_token_counters: false,
             status_bar: StatusBarConfig::default(),
+            mouse_scroll_lines: 1,
             at_picker: None,
             slot_edit: None,
             compaction_recovery: None,

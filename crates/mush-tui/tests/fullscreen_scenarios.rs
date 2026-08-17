@@ -805,3 +805,14 @@ fn a_transcript_shorter_than_the_log_ignores_the_wheel() {
 
     assert_eq!(window_rows(&app), before);
 }
+
+#[test]
+fn the_notch_size_is_configurable() {
+    let mut app = conversation(30);
+    app.interaction.mouse_scroll_lines = 5;
+    let before = window_rows(&app);
+
+    wheel(&mut app, MouseEventKind::ScrollUp, 10, 5);
+
+    assert_eq!(window_rows(&app)[5..], before[..before.len() - 5]);
+}

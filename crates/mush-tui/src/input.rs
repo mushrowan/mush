@@ -146,9 +146,10 @@ pub fn handle_mouse(app: &mut App, event: MouseEvent) -> Option<AppEvent> {
     if !over_log {
         return None;
     }
+    let lines = isize::try_from(app.interaction.mouse_scroll_lines).unwrap_or(1);
     let notch = match event.kind {
-        MouseEventKind::ScrollUp => -1,
-        MouseEventKind::ScrollDown => 1,
+        MouseEventKind::ScrollUp => -lines,
+        MouseEventKind::ScrollDown => lines,
         _ => return None,
     };
     app.viewport.scroll_by(notch);

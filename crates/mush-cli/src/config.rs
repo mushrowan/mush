@@ -641,6 +641,18 @@ image_probe = "disabled"
     }
 
     #[test]
+    fn parse_mouse_scroll_lines() {
+        let config: Config = toml::from_str(
+            r#"
+[terminal]
+mouse_scroll_lines = 5
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.terminal.mouse_scroll_lines, 5);
+    }
+
+    #[test]
     fn terminal_policy_defaults_match_tui_defaults() {
         let config: Config = toml::from_str("").unwrap();
         assert_eq!(config.terminal, TerminalPolicy::default());

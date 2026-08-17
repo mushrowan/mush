@@ -2230,3 +2230,16 @@ fn a_notch_outside_the_log_is_dead() {
 
     assert_eq!(app.viewport.window(200, 20), 180..200);
 }
+
+#[test]
+fn a_notch_moves_the_configured_number_of_lines() {
+    let mut app = app_with_log();
+    app.interaction.mouse_scroll_lines = 5;
+
+    handle_mouse(
+        &mut app,
+        wheel(crossterm::event::MouseEventKind::ScrollUp, 0, 0),
+    );
+
+    assert_eq!(app.viewport.window(200, 20), 175..195);
+}

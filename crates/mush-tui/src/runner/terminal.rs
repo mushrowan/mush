@@ -268,6 +268,7 @@ mod tests {
         TerminalPolicy {
             keyboard_enhancement: KeyboardEnhancementMode::Disabled,
             image_probe: ImageProbeMode::Disabled,
+            ..TerminalPolicy::default()
         }
     }
 
