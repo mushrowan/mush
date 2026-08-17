@@ -1,6 +1,8 @@
 use super::*;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 use mush_ai::types::{ThinkingLevel, TokenCount};
+use ratatui::layout::Rect;
+use ratatui::text::Line;
 
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent {
@@ -2135,6 +2137,13 @@ fn k_moves_the_cursor_up_one_row_while_navigating() {
     assert_eq!(app.viewport.window(200, 20), 180..200, "the window held");
 }
 
+fn app_with_log() -> App {
+    let app = App::new("test".into(), TokenCount::new(200_000));
+    app.viewport
+        .place(&vec![Line::raw("x"); 200], Rect::new(0, 0, 80, 20));
+    app
+}
+
 fn wheel(kind: crossterm::event::MouseEventKind, column: u16, row: u16) -> MouseEvent {
     MouseEvent {
         kind,
@@ -2146,8 +2155,7 @@ fn wheel(kind: crossterm::event::MouseEventKind, column: u16, row: u16) -> Mouse
 
 #[test]
 fn a_wheel_notch_up_scrolls_the_log_back() {
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-    app.viewport.window(200, 20);
+    let mut app = app_with_log();
 
     handle_mouse(
         &mut app,
@@ -2159,8 +2167,7 @@ fn a_wheel_notch_up_scrolls_the_log_back() {
 
 #[test]
 fn a_wheel_notch_down_scrolls_the_log_forward() {
-    let mut app = App::new("test".into(), TokenCount::new(200_000));
-    app.viewport.window(200, 20);
+    let mut app = app_with_log();
     app.viewport.scroll_by(-5);
 
     handle_mouse(
@@ -2185,8 +2192,7 @@ fn the_wheel_is_dead_while_an_overlay_is_up() {
         AppMode::Settings,
         AppMode::CompactionRecovery,
     ] {
-        let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.viewport.window(200, 20);
+        let mut app = app_with_log();
         app.interaction.mode = mode.clone();
 
         handle_mouse(
@@ -2201,8 +2207,7 @@ fn the_wheel_is_dead_while_an_overlay_is_up() {
 #[test]
 fn the_wheel_lives_in_the_log_and_composer_modes() {
     for mode in [AppMode::Normal, AppMode::ComposerNormal, AppMode::Navigate] {
-        let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.viewport.window(200, 20);
+        let mut app = app_with_log();
         app.interaction.mode = mode.clone();
 
         handle_mouse(
@@ -2212,4 +2217,16 @@ fn the_wheel_lives_in_the_log_and_composer_modes() {
 
         assert_eq!(app.viewport.window(200, 20), 179..199, "mode {mode:?}");
     }
+}
+
+#[test]
+fn a_notch_outside_the_log_is_dead() {
+    let mut app = app_with_log();
+
+    handle_mouse(
+        &mut app,
+        wheel(crossterm::event::MouseEventKind::ScrollUp, 10, 21),
+    );
+
+    assert_eq!(app.viewport.window(200, 20), 180..200);
 }

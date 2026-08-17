@@ -724,3 +724,13 @@ fn an_open_picker_swallows_the_wheel() {
 
     assert_eq!(window_rows(&app), before);
 }
+
+#[test]
+fn the_wheel_over_the_composer_does_nothing() {
+    let mut app = conversation(30);
+    let before = window_rows(&app);
+
+    wheel(&mut app, MouseEventKind::ScrollUp, 10, 21);
+
+    assert_eq!(window_rows(&app), before);
+}

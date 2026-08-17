@@ -32,6 +32,7 @@ pub struct Viewport {
     moved: Cell<Option<Instant>>,
     cursor: Cell<Cursor>,
     widths: RefCell<Vec<usize>>,
+    area: Cell<Rect>,
 }
 
 impl Default for Viewport {
@@ -44,6 +45,7 @@ impl Default for Viewport {
             moved: Cell::new(None),
             cursor: Cell::new(Cursor::default()),
             widths: RefCell::new(Vec::new()),
+            area: Cell::new(Rect::default()),
         }
     }
 }
@@ -52,9 +54,10 @@ impl Viewport {
     pub fn place<L: std::borrow::Borrow<Line<'static>>>(
         &self,
         lines: &[L],
-        height: usize,
+        area: Rect,
     ) -> Range<usize> {
-        let window = self.window(lines.len(), height);
+        self.area.set(area);
+        let window = self.window(lines.len(), usize::from(area.height));
         self.widths.replace(
             lines[window.clone()]
                 .iter()
@@ -136,6 +139,11 @@ impl Viewport {
         self.cursor.set(cursor);
         self.keep_in_view(cursor.line);
         self.clamp_cursor();
+    }
+
+    #[must_use]
+    pub fn area(&self) -> Rect {
+        self.area.get()
     }
 
     #[must_use]
@@ -281,9 +289,7 @@ impl Screen {
 
         let transcript = transcript_guards(app, area.width);
         let lines = transcript.flatten();
-        let window = app
-            .viewport
-            .place(&lines, usize::from(regions.messages.height));
+        let window = app.viewport.place(&lines, regions.messages);
         for (row, line) in regions.messages.rows().zip(&lines[window]) {
             line.render(row, buf);
             redraw_stitched_row(row, buf);
@@ -315,8 +321,21 @@ impl Screen {
 mod tests {
     use super::*;
 
+    fn log_area(height: u16) -> Rect {
+        Rect::new(0, 0, 80, height)
+    }
+
     fn lines(widths: &[usize]) -> Vec<Line<'static>> {
         widths.iter().map(|w| Line::raw("x".repeat(*w))).collect()
+    }
+
+    #[test]
+    fn placing_records_the_log_area() {
+        let viewport = Viewport::default();
+
+        viewport.place(&lines(&[10; 200]), Rect::new(0, 3, 80, 20));
+
+        assert_eq!(viewport.area(), Rect::new(0, 3, 80, 20));
     }
 
     #[test]
@@ -416,7 +435,7 @@ mod tests {
     #[test]
     fn the_cursor_starts_on_the_last_row_of_the_window() {
         let viewport = Viewport::default();
-        viewport.place(&lines(&[10; 200]), 20);
+        viewport.place(&lines(&[10; 200]), log_area(20));
 
         viewport.pause();
 
@@ -427,7 +446,7 @@ mod tests {
     #[test]
     fn the_cursor_stops_at_the_start_of_a_line() {
         let viewport = Viewport::default();
-        viewport.place(&lines(&[10; 200]), 20);
+        viewport.place(&lines(&[10; 200]), log_area(20));
         viewport.pause();
 
         viewport.move_cursor(-1, 0);
@@ -439,7 +458,7 @@ mod tests {
     fn a_short_line_clamps_the_cursor_and_the_wanted_column_comes_back() {
         let viewport = Viewport::default();
         let transcript = lines(&[60, 12, 60]);
-        viewport.place(&transcript, 20);
+        viewport.place(&transcript, log_area(20));
         viewport.pause();
         viewport.cursor_to(0);
         viewport.move_cursor(40, 0);
@@ -455,7 +474,7 @@ mod tests {
     #[test]
     fn moving_off_the_top_scrolls_one_line() {
         let viewport = Viewport::default();
-        viewport.place(&lines(&[10; 200]), 20);
+        viewport.place(&lines(&[10; 200]), log_area(20));
         viewport.pause();
         viewport.cursor_to(180);
 
@@ -469,11 +488,11 @@ mod tests {
     fn a_scroll_that_would_strand_the_cursor_parks_it() {
         let viewport = Viewport::default();
         let transcript = lines(&[10; 200]);
-        viewport.place(&transcript, 20);
+        viewport.place(&transcript, log_area(20));
         viewport.pause();
 
         viewport.scroll_by(1);
-        viewport.place(&transcript, 20);
+        viewport.place(&transcript, log_area(20));
 
         assert_eq!(viewport.cursor().line, 199);
         assert_eq!(viewport.cursor_row(), 19);
@@ -483,7 +502,7 @@ mod tests {
     fn a_scroll_under_the_cursor_keeps_its_line() {
         let viewport = Viewport::default();
         let transcript = lines(&[10; 200]);
-        viewport.place(&transcript, 20);
+        viewport.place(&transcript, log_area(20));
         viewport.pause();
         viewport.cursor_to(190);
 

@@ -139,6 +139,13 @@ pub fn handle_mouse(app: &mut App, event: MouseEvent) -> Option<AppEvent> {
     if !app.interaction.mode.scrolls_the_log() {
         return None;
     }
+    let over_log = app.viewport.area().contains(ratatui::layout::Position {
+        x: event.column,
+        y: event.row,
+    });
+    if !over_log {
+        return None;
+    }
     let notch = match event.kind {
         MouseEventKind::ScrollUp => -1,
         MouseEventKind::ScrollDown => 1,
