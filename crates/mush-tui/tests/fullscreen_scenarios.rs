@@ -777,3 +777,21 @@ fn wheeling_back_to_the_bottom_follows_again() {
         window_rows(&app)
     );
 }
+
+#[test]
+fn the_wheel_stops_at_the_top() {
+    let mut app = conversation(30);
+    window_rows(&app);
+    for _ in 0..200 {
+        wheel(&mut app, MouseEventKind::ScrollUp, 10, 5);
+    }
+    let before = window_rows(&app);
+
+    wheel(&mut app, MouseEventKind::ScrollUp, 10, 5);
+
+    assert_eq!(window_rows(&app), before);
+    assert!(
+        before.iter().any(|row| row.contains("question 0")),
+        "{before:?}"
+    );
+}
