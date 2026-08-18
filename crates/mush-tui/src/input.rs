@@ -919,6 +919,14 @@ fn handle_visual_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     None
 }
 
+fn current_row(app: &App) -> String {
+    let line = app.viewport.cursor().line;
+    crate::selection::transcript_rows(app)
+        .get(line)
+        .cloned()
+        .unwrap_or_default()
+}
+
 fn selection_kind_for(app: &App, key: KeyEvent) -> Option<crate::screen::SelectionKind> {
     use crate::keybinds::{Action, KeyScope};
     use crate::screen::SelectionKind;
@@ -940,6 +948,12 @@ fn handle_log_motion(app: &mut App, key: KeyEvent) {
     let matches = |action| app.keymap.matches_in(KeyScope::Navigate, action, key);
     if matches(Action::CursorLineStart) {
         app.viewport.cursor_to_column(0);
+    } else if matches(Action::CursorFirstNonBlank) {
+        let column = crate::motion::first_non_blank(&current_row(app));
+        app.viewport.cursor_to_column(column);
+    } else if matches(Action::CursorLineEnd) {
+        let column = crate::motion::last_cell(&current_row(app));
+        app.viewport.cursor_to_column(column);
     } else if matches(Action::PreviousItem) {
         app.viewport.move_cursor(0, -1);
     } else if matches(Action::NextItem) {

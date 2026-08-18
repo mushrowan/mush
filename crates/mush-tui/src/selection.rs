@@ -68,13 +68,17 @@ pub(crate) fn strip_common_indent(text: &str) -> String {
         .join("\n")
 }
 
-pub(crate) fn selected_text(app: &App, strip_indent: bool) -> Option<String> {
-    let range = app.viewport.selection()?;
-    let lines = crate::widgets::message_list::transcript_guards(app, app.viewport.area().width)
+pub(crate) fn transcript_rows(app: &App) -> Vec<String> {
+    crate::widgets::message_list::transcript_guards(app, app.viewport.area().width)
         .flatten()
         .iter()
         .map(std::string::ToString::to_string)
-        .collect::<Vec<_>>();
+        .collect()
+}
+
+pub(crate) fn selected_text(app: &App, strip_indent: bool) -> Option<String> {
+    let range = app.viewport.selection()?;
+    let lines = transcript_rows(app);
     let text = text_for(&lines, &range, app.viewport.selection_kind());
     Some(if strip_indent {
         strip_common_indent(&text)

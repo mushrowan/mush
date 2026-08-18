@@ -143,6 +143,7 @@ pub enum Action {
     SearchNext,
     SearchPrev,
     SelectOrSpace,
+    CursorFirstNonBlank,
     StartSelection,
     StartLineSelection,
     StartBlockSelection,
@@ -190,6 +191,7 @@ impl Action {
             Self::SearchNext => "search_next",
             Self::SearchPrev => "search_prev",
             Self::SelectOrSpace => "select_or_space",
+            Self::CursorFirstNonBlank => "cursor_first_non_blank",
             Self::StartSelection => "start_selection",
             Self::StartLineSelection => "start_line_selection",
             Self::StartBlockSelection => "start_block_selection",
@@ -241,6 +243,7 @@ impl Action {
         Self::SearchNext,
         Self::SearchPrev,
         Self::SelectOrSpace,
+        Self::CursorFirstNonBlank,
         Self::StartSelection,
         Self::StartLineSelection,
         Self::StartBlockSelection,
@@ -389,6 +392,7 @@ const fn default_scope_for_action(action: Action) -> KeyScope {
         | Action::LineUp
         | Action::PageDown
         | Action::PageUp
+        | Action::CursorFirstNonBlank
         | Action::StartSelection
         | Action::StartLineSelection
         | Action::StartBlockSelection
@@ -559,6 +563,16 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
         KeyScope::Navigate,
         Action::CursorLineStart,
         &[(KeyCode::Char('0'), KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Navigate,
+        Action::CursorFirstNonBlank,
+        &[(KeyCode::Char('^'), KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Navigate,
+        Action::CursorLineEnd,
+        &[(KeyCode::Char('$'), KeyModifiers::NONE)],
     ),
     (
         KeyScope::Navigate,

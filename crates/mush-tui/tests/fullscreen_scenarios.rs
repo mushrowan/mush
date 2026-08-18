@@ -1250,3 +1250,24 @@ fn zero_goes_to_the_first_cell_of_the_row() {
 
     assert_eq!(caret(&app), Some((0, 6)));
 }
+
+#[test]
+fn caret_goes_to_the_first_non_blank() {
+    let mut app = log_on_indented_hello();
+    press(&mut app, KeyCode::Char('l'));
+    assert_eq!(caret(&app), Some((7, 6)));
+
+    press(&mut app, KeyCode::Char('^'));
+
+    assert_eq!(caret(&app), Some((3, 6)));
+}
+
+#[test]
+fn dollar_goes_to_the_last_cell() {
+    let mut app = log_on_indented_hello();
+    press(&mut app, KeyCode::Char('0'));
+
+    press(&mut app, KeyCode::Char('$'));
+
+    assert_eq!(caret(&app), Some((7, 6)));
+}
