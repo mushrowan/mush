@@ -358,6 +358,19 @@ mod copy_tests {
     }
 
     #[test]
+    fn with_no_system_tool_the_text_still_goes_out_as_osc_52() {
+        let env = Environment {
+            ssh: false,
+            tool: None,
+        };
+        let mut out = Vec::new();
+
+        copy("world", &env, &mut out).unwrap();
+
+        assert_eq!(String::from_utf8(out).unwrap(), "\x1b]52;c;d29ybGQ=\x07");
+    }
+
+    #[test]
     fn on_ssh_the_text_goes_out_as_osc_52() {
         let env = Environment {
             ssh: true,
