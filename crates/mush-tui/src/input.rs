@@ -954,6 +954,34 @@ fn selection_kind_for(app: &App, key: KeyEvent) -> Option<crate::screen::Selecti
 }
 
 fn handle_log_motion(app: &mut App, key: KeyEvent) {
+    if take_count_digit(app, key) {
+        return;
+    }
+    let count = app.interaction.pending_count.take().unwrap_or(1);
+    for _ in 0..count {
+        run_log_motion(app, key);
+    }
+}
+
+fn take_count_digit(app: &mut App, key: KeyEvent) -> bool {
+    let KeyCode::Char(c) = key.code else {
+        return false;
+    };
+    if !key.modifiers.is_empty() {
+        return false;
+    }
+    let Some(digit) = c.to_digit(10).map(|d| d as usize) else {
+        return false;
+    };
+    let pending = app.interaction.pending_count;
+    if digit == 0 && pending.is_none() {
+        return false;
+    }
+    app.interaction.pending_count = Some(pending.unwrap_or(0) * 10 + digit);
+    true
+}
+
+fn run_log_motion(app: &mut App, key: KeyEvent) {
     use crate::keybinds::{Action, KeyScope};
 
     let page = app.viewport.page() as isize;

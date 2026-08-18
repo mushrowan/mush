@@ -1353,3 +1353,16 @@ fn a_word_motion_crosses_into_the_next_row() {
 
     assert_eq!(caret(&app), Some((1, 7)));
 }
+
+#[test]
+fn a_count_repeats_a_motion() {
+    let mut app = log_on("hello world");
+    press(&mut app, KeyCode::Char('k'));
+    press(&mut app, KeyCode::Char('k'));
+    assert_eq!(caret(&app), Some((1, 4)));
+
+    press(&mut app, KeyCode::Char('3'));
+    press(&mut app, KeyCode::Char('k'));
+
+    assert_eq!(caret(&app), Some((1, 1)));
+}

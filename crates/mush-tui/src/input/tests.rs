@@ -2304,3 +2304,16 @@ fn esc_leaves_visual_mode_for_the_log() {
     assert_eq!(app.interaction.mode, AppMode::Navigate);
     assert_eq!(app.viewport.selection(), None);
 }
+
+#[test]
+fn a_digit_holds_a_count_for_the_next_motion() {
+    let mut app = app_with_log();
+    app.interaction.mode = AppMode::Navigate;
+    app.viewport.cursor_to(190);
+
+    handle_key(&mut app, key(KeyCode::Char('3')));
+    handle_key(&mut app, key(KeyCode::Char('j')));
+
+    assert_eq!(app.viewport.cursor().line, 193);
+    assert_eq!(app.interaction.pending_count, None);
+}
