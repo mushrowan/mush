@@ -145,6 +145,7 @@ pub enum Action {
     SelectOrSpace,
     StartSelection,
     Yank,
+    YankRaw,
 }
 
 impl Action {
@@ -189,6 +190,7 @@ impl Action {
             Self::SelectOrSpace => "select_or_space",
             Self::StartSelection => "start_selection",
             Self::Yank => "yank",
+            Self::YankRaw => "yank_raw",
             Self::PasteImage => "paste_image",
             Self::QuitOrAbort => "quit_or_abort",
             Self::SelectAll => "select_all",
@@ -237,6 +239,7 @@ impl Action {
         Self::SelectOrSpace,
         Self::StartSelection,
         Self::Yank,
+        Self::YankRaw,
         Self::PasteImage,
         Self::QuitOrAbort,
         Self::SelectAll,
@@ -381,7 +384,8 @@ const fn default_scope_for_action(action: Action) -> KeyScope {
         | Action::PageDown
         | Action::PageUp
         | Action::StartSelection
-        | Action::Yank => KeyScope::Navigate,
+        | Action::Yank
+        | Action::YankRaw => KeyScope::Navigate,
         Action::SessionPickerToggleScope => KeyScope::SessionPicker,
         Action::ModelPickerDeleteAllStale
         | Action::ModelPickerDeleteSelectedStale
@@ -552,6 +556,11 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
         KeyScope::Navigate,
         Action::Yank,
         &[(KeyCode::Char('y'), KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Navigate,
+        Action::YankRaw,
+        &[(KeyCode::Char('Y'), KeyModifiers::SHIFT)],
     ),
     (
         KeyScope::Navigate,

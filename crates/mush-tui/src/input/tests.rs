@@ -2270,3 +2270,19 @@ fn motions_move_the_head_of_the_selection() {
     assert_eq!(app.interaction.mode, AppMode::Visual);
     assert_eq!(app.viewport.selection(), Some((190, 0)..=(191, 1)));
 }
+
+#[test]
+fn capital_y_skips_the_indent_strip() {
+    let mut app = app_with_log();
+    app.interaction.mode = AppMode::Visual;
+    app.viewport.cursor_to(190);
+    app.viewport.start_selection();
+
+    let event = handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT),
+    );
+
+    assert!(matches!(event, Some(AppEvent::Copy { .. })), "{event:?}");
+    assert_eq!(app.interaction.mode, AppMode::Navigate);
+}

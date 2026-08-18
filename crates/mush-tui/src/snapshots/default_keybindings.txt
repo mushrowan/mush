@@ -24,6 +24,7 @@ navigate::page_down = Ctrl-f | PageDown
 navigate::page_up = Ctrl-b | PageUp
 navigate::start_selection = v
 navigate::yank = y
+navigate::yank_raw = Shift-y
 normal::cycle_favourite = Alt-m
 normal::cycle_favourite_backward = Alt-Shift-m
 normal::cycle_thinking_level = Ctrl-t

@@ -909,11 +909,13 @@ fn handle_visual_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     if app.keymap.matches(Action::QuitOrAbort, key) {
         return handle_quit_or_abort(app);
     }
-    if app.keymap.matches_in(KeyScope::Navigate, Action::Yank, key) {
-        let text = crate::selection::selected_text(app)?;
-        app.viewport.clear_selection();
-        app.interaction.mode = AppMode::Navigate;
-        return Some(AppEvent::Copy { text });
+    for (action, strip_indent) in [(Action::Yank, true), (Action::YankRaw, false)] {
+        if app.keymap.matches_in(KeyScope::Navigate, action, key) {
+            let text = crate::selection::selected_text(app, strip_indent)?;
+            app.viewport.clear_selection();
+            app.interaction.mode = AppMode::Navigate;
+            return Some(AppEvent::Copy { text });
+        }
     }
     handle_log_motion(app, key);
     None

@@ -38,14 +38,19 @@ pub(crate) fn strip_common_indent(text: &str) -> String {
         .join("\n")
 }
 
-pub(crate) fn selected_text(app: &App) -> Option<String> {
+pub(crate) fn selected_text(app: &App, strip_indent: bool) -> Option<String> {
     let range = app.viewport.selection()?;
     let lines = crate::widgets::message_list::transcript_guards(app, app.viewport.area().width)
         .flatten()
         .iter()
         .map(std::string::ToString::to_string)
         .collect::<Vec<_>>();
-    Some(strip_common_indent(&text_for(&lines, &range)))
+    let text = text_for(&lines, &range);
+    Some(if strip_indent {
+        strip_common_indent(&text)
+    } else {
+        text
+    })
 }
 
 #[cfg(test)]

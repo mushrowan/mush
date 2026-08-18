@@ -946,3 +946,18 @@ fn a_selection_over_two_rows_highlights_both() {
     assert_eq!(cells.last(), Some(&(9, 7)));
     assert_eq!(cells.len(), 8 + 10);
 }
+
+#[test]
+fn capital_y_copies_the_rows_as_they_are_drawn() {
+    let mut app = log_with_indented_hello();
+
+    let event = handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT),
+    );
+
+    assert!(
+        matches!(&event, Some(AppEvent::Copy { text }) if text == "   hello\n     hello"),
+        "{event:?}"
+    );
+}
