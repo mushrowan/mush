@@ -961,3 +961,16 @@ fn capital_y_copies_the_rows_as_they_are_drawn() {
         "{event:?}"
     );
 }
+
+#[test]
+fn capital_y_does_nothing_outside_a_selection() {
+    let mut app = log_with_world();
+
+    let event = handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT),
+    );
+
+    assert!(event.is_none(), "{event:?}");
+    assert!(selected_cells(&app).is_empty());
+}
