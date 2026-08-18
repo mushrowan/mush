@@ -144,6 +144,15 @@ impl Viewport {
         self.clamp_cursor();
     }
 
+    pub fn cursor_to_column(&self, column: usize) {
+        let mut cursor = self.cursor.get();
+        cursor.column = column;
+        cursor.wanted = column;
+        self.cursor.set(cursor);
+        self.clamp_cursor();
+        self.moved.set(Some(Instant::now()));
+    }
+
     pub fn cursor_to(&self, line: usize) {
         let mut cursor = self.cursor.get();
         cursor.line = line.min(self.total.get().saturating_sub(1));
@@ -407,6 +416,18 @@ mod tests {
 
     fn lines(widths: &[usize]) -> Vec<Line<'static>> {
         widths.iter().map(|w| Line::raw("x".repeat(*w))).collect()
+    }
+
+    #[test]
+    fn the_cursor_can_be_put_on_a_column() {
+        let viewport = Viewport::default();
+        viewport.place(&lines(&[10; 200]), log_area(20));
+        viewport.cursor_to(190);
+        viewport.move_cursor(7, 0);
+
+        viewport.cursor_to_column(0);
+
+        assert_eq!(viewport.cursor().column, 0);
     }
 
     #[test]

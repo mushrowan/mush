@@ -1217,3 +1217,36 @@ fn esc_drops_a_linewise_selection() {
     assert!(event.is_none(), "{event:?}");
     assert!(selected_cells(&app).is_empty());
 }
+
+fn caret(app: &App) -> Option<(u16, u16)> {
+    rows(app, 80, 24);
+    Screen::new().cursor_cell(app, Rect::new(0, 0, 80, 24))
+}
+
+fn log_on_indented_hello() -> App {
+    let mut app = conversation(1);
+    app.messages.push(DisplayMessage::new(
+        MessageRole::Assistant,
+        "  hello\n    hello",
+    ));
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Esc);
+    rows(&app, 80, 24);
+    for _ in 0..6 {
+        press(&mut app, KeyCode::Char('j'));
+    }
+    for _ in 0..6 {
+        press(&mut app, KeyCode::Char('l'));
+    }
+    app
+}
+
+#[test]
+fn zero_goes_to_the_first_cell_of_the_row() {
+    let mut app = log_on_indented_hello();
+    assert_eq!(caret(&app), Some((6, 6)));
+
+    press(&mut app, KeyCode::Char('0'));
+
+    assert_eq!(caret(&app), Some((0, 6)));
+}

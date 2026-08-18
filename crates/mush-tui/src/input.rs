@@ -938,7 +938,9 @@ fn handle_log_motion(app: &mut App, key: KeyEvent) {
 
     let page = app.viewport.page() as isize;
     let matches = |action| app.keymap.matches_in(KeyScope::Navigate, action, key);
-    if matches(Action::PreviousItem) {
+    if matches(Action::CursorLineStart) {
+        app.viewport.cursor_to_column(0);
+    } else if matches(Action::PreviousItem) {
         app.viewport.move_cursor(0, -1);
     } else if matches(Action::NextItem) {
         app.viewport.move_cursor(0, 1);

@@ -557,6 +557,11 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
     ),
     (
         KeyScope::Navigate,
+        Action::CursorLineStart,
+        &[(KeyCode::Char('0'), KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Navigate,
         Action::StartSelection,
         &[(KeyCode::Char('v'), KeyModifiers::NONE)],
     ),
