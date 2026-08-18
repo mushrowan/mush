@@ -1017,3 +1017,27 @@ fn capital_v_highlights_the_whole_row() {
     let row: Vec<(u16, u16)> = (0..6).map(|x| (x, 6)).collect();
     assert_eq!(selected_cells(&app), row);
 }
+
+#[test]
+fn a_motion_in_linewise_mode_adds_whole_rows() {
+    let mut app = conversation(1);
+    app.messages.push(DisplayMessage::new(
+        MessageRole::Assistant,
+        "  hello\n    hello",
+    ));
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Esc);
+    rows(&app, 80, 24);
+    for _ in 0..6 {
+        press(&mut app, KeyCode::Char('j'));
+    }
+    press_with(&mut app, KeyCode::Char('V'), KeyModifiers::SHIFT);
+
+    press(&mut app, KeyCode::Char('j'));
+
+    let expected: Vec<(u16, u16)> = (0..8)
+        .map(|x| (x, 6))
+        .chain((0..10).map(|x| (x, 7)))
+        .collect();
+    assert_eq!(selected_cells(&app), expected);
+}
