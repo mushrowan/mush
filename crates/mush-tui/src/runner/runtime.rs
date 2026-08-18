@@ -461,7 +461,7 @@ fn replay_conversation(app: &mut App, conversation: ConversationState) -> Conver
     let history = conversation.display_history();
     crate::conversation_display::rebuild_display(app, &history);
     crate::conversation_display::accumulate_session_stats(app, &conversation.context());
-    app.status = Some(format!("resumed session ({} messages)", history.len()));
+    app.status = Some(format!("resumed session ({} messages)", history.len()).into());
     conversation
 }
 
@@ -595,7 +595,10 @@ mod tests {
         assert_eq!(conversation.context(), messages);
         assert_eq!(app.messages.len(), 2);
         assert!(app.stats.total_tokens > TokenCount::ZERO);
-        assert_eq!(app.status.as_deref(), Some("resumed session (2 messages)"));
+        assert_eq!(
+            app.status.as_ref().map(|s| s.text.as_str()),
+            Some("resumed session (2 messages)")
+        );
     }
 
     #[test]

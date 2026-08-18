@@ -126,7 +126,7 @@ pub(super) async fn handle_slash_action(
             let reloaded = reload(cwd);
             tui_config.system_prompt = Some(reloaded.system_prompt);
             apply_reloaded_templates(session, &reloaded.templates);
-            session.app.status = Some(format!(
+            session.app.status = Some(crate::app_state::Status::from(format!(
                 "reloaded AGENTS.md and {n} prompt template{s}",
                 n = reloaded.templates.len(),
                 s = if reloaded.templates.len() == 1 {
@@ -134,7 +134,7 @@ pub(super) async fn handle_slash_action(
                 } else {
                     "s"
                 },
-            ));
+            )));
         }
         SlashAction::RefreshModels => {
             let client = tui_config

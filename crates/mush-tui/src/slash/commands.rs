@@ -193,7 +193,7 @@ pub fn handle(
                         tui_config.system_prompt = Some(prompt);
                     }
                     let title = session.meta.title.as_deref().unwrap_or("untitled");
-                    app.status = Some(format!("resumed: {title}"));
+                    app.status = Some(format!("resumed: {title}").into());
                 }
                 Err(e) => app.push_system_message(format!("failed to load session: {e}")),
             }
@@ -543,7 +543,7 @@ fn handle_branch(app: &mut App, conversation: &mut ConversationState, n: usize) 
             conversation.reset_leaf();
         }
         rebuild_display_and_clear_live_stats(app, conversation);
-        app.status = Some(format!("branched before: {preview}"));
+        app.status = Some(format!("branched before: {preview}").into());
     }
 }
 
@@ -807,7 +807,7 @@ fn start_browser_login(
         name = provider.name(),
         url = login.auth_url,
     ));
-    app.status = Some(format!("waiting for {} sign-in…", provider.name()));
+    app.status = Some(format!("waiting for {} sign-in…", provider.name()).into());
     app.pending_oauth = None;
     app.pending_browser_login = Some(crate::browser_login::PendingBrowserLogin::spawn(
         provider.id(),
@@ -929,9 +929,12 @@ fn try_template(app: &mut App, name: &str, args: &str) -> Option<String> {
         };
         app.input.cursor = app.input.text.len();
         app.input.ensure_cursor_visible();
-        app.status = Some(format!(
-            "unknown command: /{name} (try /help, or backspace the slash to send as a message)"
-        ));
+        app.status = Some(
+            format!(
+                "unknown command: /{name} (try /help, or backspace the slash to send as a message)"
+            )
+            .into(),
+        );
         return None;
     };
     let arg_list: Vec<&str> = if args.is_empty() {

@@ -246,10 +246,15 @@ fn left_status(app: &App, width: u16) -> LeftStatus {
                 dim,
             ));
         } else if let Some(ref status) = app.status
-            && status != "config reloaded"
+            && status.text != "config reloaded"
         {
+            let style = if status.error {
+                app.theme.tool_error
+            } else {
+                dim
+            };
             b.section_break();
-            b.push_inline(Span::styled(status.clone(), dim));
+            b.push_inline(Span::styled(status.text.clone(), style));
         }
     }
 
@@ -717,7 +722,7 @@ mod tests {
     fn status_bar_left_side_uses_terminal_cell_width_for_halfwidth_dakuten() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.interaction.status_bar.show_cwd = false;
-        app.status = Some("abcｶﾞ".repeat(4));
+        app.status = Some("abcｶﾞ".repeat(4).into());
 
         let spans = left_spans(&app, 200);
         let ratatui_width = spans_cell_width(&spans);

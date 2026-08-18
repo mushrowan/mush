@@ -77,7 +77,10 @@ fn ctrl_c_with_empty_input_arms_quit_confirm() {
     let event = handle_key(&mut app, ctrl(KeyCode::Char('c')));
     assert!(event.is_none());
     assert!(app.confirm_quit_pending);
-    assert_eq!(app.status.as_deref(), Some("press ctrl+c again to exit"));
+    assert_eq!(
+        app.status.as_ref().map(|s| s.text.as_str()),
+        Some("press ctrl+c again to exit")
+    );
 }
 
 #[test]
@@ -609,8 +612,8 @@ fn slash_commands_blocked_while_streaming() {
     assert_eq!(app.input.text, "/compact");
     assert!(
         app.status
-            .as_deref()
-            .is_some_and(|s| s.contains("blocked while streaming")),
+            .as_ref()
+            .is_some_and(|s| s.text.contains("blocked while streaming")),
         "status was {:?}",
         app.status
     );
@@ -1212,8 +1215,8 @@ fn alt_m_with_no_favourites_nudges_via_status() {
     assert!(event.is_none());
     assert!(
         app.status
-            .as_deref()
-            .is_some_and(|s| s.contains("favourite")),
+            .as_ref()
+            .is_some_and(|s| s.text.contains("favourite")),
         "expected a status nudge about favourites, got {:?}",
         app.status
     );

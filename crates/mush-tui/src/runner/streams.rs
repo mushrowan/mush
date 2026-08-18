@@ -224,10 +224,10 @@ pub(super) async fn answer_confirmation(
     app.interaction.confirm_prompt = None;
     app.interaction.confirm_tool_call_id = None;
     if !allowed {
-        app.status = Some(match pending_tool_call_id {
+        app.status = Some(crate::app_state::Status::from(match pending_tool_call_id {
             Some(tool_call_id) => format!("tool denied: {tool_call_id}"),
             None => "tool denied".into(),
-        });
+        }));
     }
 }
 
@@ -1499,7 +1499,7 @@ mod tests {
         assert!(app.interaction.confirm_prompt.is_none());
         assert!(app.interaction.confirm_tool_call_id.is_none());
         assert_eq!(
-            app.status.as_deref(),
+            app.status.as_ref().map(|s| s.text.as_str()),
             Some(format!("tool denied: {tool_call_id}").as_str())
         );
     }

@@ -103,7 +103,7 @@ pub struct App {
     pub model_id: ModelId,
     pub stats: TokenStats,
     pub should_quit: bool,
-    pub status: Option<String>,
+    pub status: Option<crate::app_state::Status>,
     pub active_tools: Vec<ActiveToolState>,
     tick_count: u64,
     pub thinking_level: ThinkingLevel,

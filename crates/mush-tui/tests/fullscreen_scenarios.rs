@@ -523,7 +523,10 @@ fn ctrl_c_leaves_what_i_typed_alone() {
 
     assert!(event.is_none(), "{event:?}");
     assert_eq!(app.input.text, "explain the borrow checker");
-    assert_eq!(app.status.as_deref(), Some("press ctrl+c again to exit"));
+    assert_eq!(
+        app.status.as_ref().map(|s| s.text.as_str()),
+        Some("press ctrl+c again to exit")
+    );
 }
 
 #[test]

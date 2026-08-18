@@ -591,13 +591,13 @@ fn apply_settings_toggle(
         Ok(None) => String::new(),
         Err(e) => format!(" (persist failed: {e})"),
     };
-    app.status = Some(format!("{} → {}{}", item.label(), new_value, persist_note));
+    app.status = Some(format!("{} → {}{}", item.label(), new_value, persist_note).into());
 }
 
 fn copy_to_clipboard(app: &mut App, text: &str) {
     let env = crate::clipboard::Environment::detect();
     if let Err(error) = crate::clipboard::copy(text, &env, &mut std::io::stdout()) {
-        app.status = Some(error.to_string());
+        app.status = Some(crate::app_state::Status::error(error.to_string()));
     }
 }
 
@@ -610,7 +610,7 @@ async fn paste_clipboard_image(app: &mut App) {
             app.input.add_image(image);
             let n = app.input.images.len();
             let kb = size / 1024;
-            app.status = Some(format!("{n} image(s) attached ({mime}, {kb}kb)"));
+            app.status = Some(format!("{n} image(s) attached ({mime}, {kb}kb)").into());
         }
         Ok(None) => {
             app.status = Some("no image in clipboard".into());

@@ -121,15 +121,18 @@ pub fn apply_applied_compaction(
         app.push_system_message(note);
     }
 
-    app.status = Some(format!(
-        "compacted with {}: {} → {} messages, ~{} → ~{} tokens ({} summarised)",
-        result.model_id,
-        result.before_count,
-        after_count,
-        result.tokens_before,
-        result.tokens_after,
-        result.summarised_count,
-    ));
+    app.status = Some(
+        format!(
+            "compacted with {}: {} → {} messages, ~{} → ~{} tokens ({} summarised)",
+            result.model_id,
+            result.before_count,
+            after_count,
+            result.tokens_before,
+            result.tokens_after,
+            result.summarised_count,
+        )
+        .into(),
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -549,8 +552,8 @@ mod tests {
         );
         assert!(
             app.status
-                .as_deref()
-                .is_some_and(|status| status.contains("summary-model"))
+                .as_ref()
+                .is_some_and(|status| status.text.contains("summary-model"))
         );
     }
 

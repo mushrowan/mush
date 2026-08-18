@@ -308,7 +308,7 @@ fn insert_template(app: &mut App, start: usize, end: usize, content: &str) {
     let slot_count = slots.len();
     app.interaction.slot_edit = Some(crate::app_state::SlotEditState { slots, current: 0 });
     app.interaction.mode = AppMode::SlotEdit;
-    app.status = Some(format!("slot 1/{slot_count} · tab to cycle, ⏎ to finish"));
+    app.status = Some(format!("slot 1/{slot_count} · tab to cycle, ⏎ to finish").into());
 }
 
 fn try_open_at_picker(app: &mut App) -> bool {
@@ -491,10 +491,8 @@ fn jump_to_slot(app: &mut App, target: usize) {
         let total = state.slots.len();
         app.input.cursor = position;
         app.input.ensure_cursor_visible();
-        app.status = Some(format!(
-            "slot {}/{total} · tab to cycle, ⏎ to finish",
-            target + 1
-        ));
+        app.status =
+            Some(format!("slot {}/{total} · tab to cycle, ⏎ to finish", target + 1).into());
     }
 }
 
@@ -807,8 +805,7 @@ fn apply_delete_confirm(confirm: &crate::slash_menu::DeleteConfirm) -> usize {
 fn cycle_favourite_model(app: &mut App, direction: isize) -> Option<AppEvent> {
     let favs = &app.completion.favourite_models;
     if favs.is_empty() {
-        app.status =
-            Some("no favourite models yet, open /model and ★ some with ctrl+f".to_string());
+        app.status = Some("no favourite models yet, open /model and ★ some with ctrl+f".into());
         return None;
     }
     let current = favs.iter().position(|id| id == app.model_id.as_str());

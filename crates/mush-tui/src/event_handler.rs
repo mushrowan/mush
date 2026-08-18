@@ -140,9 +140,7 @@ pub fn handle_agent_event(
             app.push_system_message(format!(
                 "━ compacted: {before_count} → {after_count} messages ━"
             ));
-            app.status = Some(format!(
-                "compacted: {before_count} → {after_count} messages"
-            ));
+            app.status = Some(format!("compacted: {before_count} → {after_count} messages").into());
         }
         AgentEvent::MaxTurnsReached { max_turns } => {
             app.stream.active = false;
