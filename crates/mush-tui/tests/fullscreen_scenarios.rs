@@ -1366,3 +1366,36 @@ fn a_count_repeats_a_motion() {
 
     assert_eq!(caret(&app), Some((1, 1)));
 }
+
+#[test]
+fn a_count_repeats_a_word_motion() {
+    let mut app = log_on("hello brave new world");
+
+    press(&mut app, KeyCode::Char('3'));
+    press(&mut app, KeyCode::Char('w'));
+
+    assert_eq!(caret(&app), Some((17, 6)));
+}
+
+#[test]
+fn a_count_with_no_motion_evaporates() {
+    let mut app = log_on("hello brave new world");
+
+    press(&mut app, KeyCode::Char('4'));
+    press(&mut app, KeyCode::Char('z'));
+    press(&mut app, KeyCode::Char('w'));
+
+    assert_eq!(caret(&app), Some((7, 6)));
+}
+
+#[test]
+fn a_count_works_in_visual_mode() {
+    let mut app = log_on("hello brave new world");
+    press(&mut app, KeyCode::Char('v'));
+
+    press(&mut app, KeyCode::Char('2'));
+    press(&mut app, KeyCode::Char('e'));
+
+    let expected: Vec<(u16, u16)> = (1..12).map(|x| (x, 6)).collect();
+    assert_eq!(selected_cells(&app), expected);
+}
