@@ -1313,3 +1313,32 @@ fn capital_w_skips_to_the_next_chunk() {
 
     assert_eq!(caret(&app), Some((9, 6)));
 }
+
+#[test]
+fn b_goes_back_to_the_start_of_the_previous_word() {
+    let mut app = log_on("hello world");
+    press(&mut app, KeyCode::Char('w'));
+
+    press(&mut app, KeyCode::Char('b'));
+
+    assert_eq!(caret(&app), Some((1, 6)));
+}
+
+#[test]
+fn e_goes_to_the_end_of_the_word() {
+    let mut app = log_on("hello world");
+
+    press(&mut app, KeyCode::Char('e'));
+
+    assert_eq!(caret(&app), Some((5, 6)));
+}
+
+#[test]
+fn capital_b_goes_back_a_whole_chunk() {
+    let mut app = log_on("foo.bar baz");
+    press_with(&mut app, KeyCode::Char('W'), KeyModifiers::SHIFT);
+
+    press_with(&mut app, KeyCode::Char('B'), KeyModifiers::SHIFT);
+
+    assert_eq!(caret(&app), Some((1, 6)));
+}

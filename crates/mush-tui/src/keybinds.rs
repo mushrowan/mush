@@ -146,6 +146,10 @@ pub enum Action {
     CursorFirstNonBlank,
     CursorWordForward,
     CursorChunkForward,
+    CursorWordBack,
+    CursorChunkBack,
+    CursorWordEnd,
+    CursorChunkEnd,
     StartSelection,
     StartLineSelection,
     StartBlockSelection,
@@ -196,6 +200,10 @@ impl Action {
             Self::CursorFirstNonBlank => "cursor_first_non_blank",
             Self::CursorWordForward => "cursor_word_forward",
             Self::CursorChunkForward => "cursor_chunk_forward",
+            Self::CursorWordBack => "cursor_word_back",
+            Self::CursorChunkBack => "cursor_chunk_back",
+            Self::CursorWordEnd => "cursor_word_end",
+            Self::CursorChunkEnd => "cursor_chunk_end",
             Self::StartSelection => "start_selection",
             Self::StartLineSelection => "start_line_selection",
             Self::StartBlockSelection => "start_block_selection",
@@ -250,6 +258,10 @@ impl Action {
         Self::CursorFirstNonBlank,
         Self::CursorWordForward,
         Self::CursorChunkForward,
+        Self::CursorWordBack,
+        Self::CursorChunkBack,
+        Self::CursorWordEnd,
+        Self::CursorChunkEnd,
         Self::StartSelection,
         Self::StartLineSelection,
         Self::StartBlockSelection,
@@ -401,6 +413,10 @@ const fn default_scope_for_action(action: Action) -> KeyScope {
         | Action::CursorFirstNonBlank
         | Action::CursorWordForward
         | Action::CursorChunkForward
+        | Action::CursorWordBack
+        | Action::CursorChunkBack
+        | Action::CursorWordEnd
+        | Action::CursorChunkEnd
         | Action::StartSelection
         | Action::StartLineSelection
         | Action::StartBlockSelection
@@ -591,6 +607,26 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
         KeyScope::Navigate,
         Action::CursorChunkForward,
         &[(KeyCode::Char('W'), KeyModifiers::SHIFT)],
+    ),
+    (
+        KeyScope::Navigate,
+        Action::CursorWordBack,
+        &[(KeyCode::Char('b'), KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Navigate,
+        Action::CursorChunkBack,
+        &[(KeyCode::Char('B'), KeyModifiers::SHIFT)],
+    ),
+    (
+        KeyScope::Navigate,
+        Action::CursorWordEnd,
+        &[(KeyCode::Char('e'), KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Navigate,
+        Action::CursorChunkEnd,
+        &[(KeyCode::Char('E'), KeyModifiers::SHIFT)],
     ),
     (
         KeyScope::Navigate,

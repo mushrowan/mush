@@ -920,9 +920,13 @@ fn handle_visual_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
 }
 
 fn move_by_word(app: &mut App, word: crate::motion::Word) {
+    move_cursor_to(app, crate::motion::word_forward, word);
+}
+
+fn move_cursor_to(app: &mut App, motion: crate::motion::Motion, word: crate::motion::Word) {
     let rows = crate::selection::transcript_rows(app);
     let cursor = app.viewport.cursor();
-    let (line, column) = crate::motion::word_forward(&rows, (cursor.line, cursor.column), word);
+    let (line, column) = motion(&rows, (cursor.line, cursor.column), word);
     app.viewport.cursor_to(line);
     app.viewport.cursor_to_column(column);
 }
@@ -966,6 +970,14 @@ fn handle_log_motion(app: &mut App, key: KeyEvent) {
         move_by_word(app, crate::motion::Word::Small);
     } else if matches(Action::CursorChunkForward) {
         move_by_word(app, crate::motion::Word::Big);
+    } else if matches(Action::CursorWordBack) {
+        move_cursor_to(app, crate::motion::word_back, crate::motion::Word::Small);
+    } else if matches(Action::CursorChunkBack) {
+        move_cursor_to(app, crate::motion::word_back, crate::motion::Word::Big);
+    } else if matches(Action::CursorWordEnd) {
+        move_cursor_to(app, crate::motion::word_end, crate::motion::Word::Small);
+    } else if matches(Action::CursorChunkEnd) {
+        move_cursor_to(app, crate::motion::word_end, crate::motion::Word::Big);
     } else if matches(Action::PreviousItem) {
         app.viewport.move_cursor(0, -1);
     } else if matches(Action::NextItem) {

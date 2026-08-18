@@ -1,3 +1,5 @@
+pub(crate) type Motion = fn(&[String], (usize, usize), Word) -> (usize, usize);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Word {
     Small,
@@ -85,6 +87,46 @@ pub(crate) fn word_forward(rows: &[String], at: (usize, usize), word: Word) -> (
     text.position(i.min(text.len().saturating_sub(1)))
 }
 
+pub(crate) fn word_back(rows: &[String], at: (usize, usize), word: Word) -> (usize, usize) {
+    let text = Text::new(rows);
+    let Some(start) = text.index_of(at) else {
+        return at;
+    };
+    let mut i = start;
+    while i > 0 && text.class(i - 1, word) == Class::Blank {
+        i -= 1;
+    }
+    if i == 0 {
+        return text.position(0);
+    }
+    i -= 1;
+    let from = text.class(i, word);
+    while i > 0 && text.class(i - 1, word) == from {
+        i -= 1;
+    }
+    text.position(i)
+}
+
+pub(crate) fn word_end(rows: &[String], at: (usize, usize), word: Word) -> (usize, usize) {
+    let text = Text::new(rows);
+    let Some(start) = text.index_of(at) else {
+        return at;
+    };
+    let last = text.len().saturating_sub(1);
+    let mut i = start + 1;
+    while i < text.len() && text.class(i, word) == Class::Blank {
+        i += 1;
+    }
+    if i > last {
+        return text.position(last);
+    }
+    let from = text.class(i, word);
+    while i + 1 < text.len() && text.class(i + 1, word) == from {
+        i += 1;
+    }
+    text.position(i)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,6 +153,30 @@ mod tests {
         let rows = rows(&[" hello world"]);
 
         assert_eq!(word_forward(&rows, (0, 1), Word::Small), (0, 7));
+    }
+
+    #[test]
+    fn a_word_back_lands_on_the_start_of_the_one_before() {
+        let rows = rows(&[" hello world"]);
+
+        assert_eq!(word_back(&rows, (0, 7), Word::Small), (0, 1));
+        assert_eq!(word_back(&rows, (0, 9), Word::Small), (0, 7));
+    }
+
+    #[test]
+    fn a_word_end_lands_on_the_last_character() {
+        let rows = rows(&[" hello world"]);
+
+        assert_eq!(word_end(&rows, (0, 1), Word::Small), (0, 5));
+        assert_eq!(word_end(&rows, (0, 5), Word::Small), (0, 11));
+    }
+
+    #[test]
+    fn a_chunk_back_ignores_punctuation() {
+        let rows = rows(&[" foo.bar baz"]);
+
+        assert_eq!(word_back(&rows, (0, 9), Word::Big), (0, 1));
+        assert_eq!(word_back(&rows, (0, 9), Word::Small), (0, 5));
     }
 
     #[test]
