@@ -974,3 +974,17 @@ fn capital_y_does_nothing_outside_a_selection() {
     assert!(event.is_none(), "{event:?}");
     assert!(selected_cells(&app).is_empty());
 }
+
+#[test]
+fn esc_drops_the_selection_without_copying() {
+    let mut app = log_with_world();
+    press(&mut app, KeyCode::Char('v'));
+    for _ in 0..4 {
+        press(&mut app, KeyCode::Char('l'));
+    }
+
+    let event = handle_key(&mut app, KeyEvent::from(KeyCode::Esc));
+
+    assert!(event.is_none(), "{event:?}");
+    assert!(selected_cells(&app).is_empty());
+}

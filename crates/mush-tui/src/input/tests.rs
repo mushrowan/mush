@@ -2286,3 +2286,16 @@ fn capital_y_skips_the_indent_strip() {
     assert!(matches!(event, Some(AppEvent::Copy { .. })), "{event:?}");
     assert_eq!(app.interaction.mode, AppMode::Navigate);
 }
+
+#[test]
+fn esc_leaves_visual_mode_for_the_log() {
+    let mut app = app_with_log();
+    app.interaction.mode = AppMode::Visual;
+    app.viewport.cursor_to(190);
+    app.viewport.start_selection();
+
+    handle_key(&mut app, key(KeyCode::Esc));
+
+    assert_eq!(app.interaction.mode, AppMode::Navigate);
+    assert_eq!(app.viewport.selection(), None);
+}

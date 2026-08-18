@@ -909,6 +909,11 @@ fn handle_visual_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     if app.keymap.matches(Action::QuitOrAbort, key) {
         return handle_quit_or_abort(app);
     }
+    if is_cancel_key(app, key) {
+        app.viewport.clear_selection();
+        app.interaction.mode = AppMode::Navigate;
+        return None;
+    }
     for (action, strip_indent) in [(Action::Yank, true), (Action::YankRaw, false)] {
         if app.keymap.matches_in(KeyScope::Navigate, action, key) {
             let text = crate::selection::selected_text(app, strip_indent)?;
