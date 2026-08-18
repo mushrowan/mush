@@ -872,3 +872,15 @@ fn v_starts_a_selection_at_the_cursor() {
 
     assert_eq!(selected_cells(&app), vec![(1, 6)]);
 }
+
+#[test]
+fn a_motion_extends_the_selection_from_the_anchor() {
+    let mut app = log_with_world();
+    press(&mut app, KeyCode::Char('v'));
+
+    for _ in 0..3 {
+        press(&mut app, KeyCode::Char('l'));
+    }
+
+    assert_eq!(selected_cells(&app), vec![(1, 6), (2, 6), (3, 6), (4, 6)]);
+}

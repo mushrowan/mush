@@ -2256,3 +2256,17 @@ fn v_in_the_log_anchors_a_selection_at_the_cursor() {
     assert_eq!(app.interaction.mode, AppMode::Visual);
     assert_eq!(app.viewport.selection(), Some((190, 3)..=(190, 3)));
 }
+
+#[test]
+fn motions_move_the_head_of_the_selection() {
+    let mut app = app_with_log();
+    app.interaction.mode = AppMode::Navigate;
+    app.viewport.cursor_to(190);
+    handle_key(&mut app, key(KeyCode::Char('v')));
+
+    handle_key(&mut app, key(KeyCode::Char('l')));
+    handle_key(&mut app, key(KeyCode::Char('j')));
+
+    assert_eq!(app.interaction.mode, AppMode::Visual);
+    assert_eq!(app.viewport.selection(), Some((190, 0)..=(191, 1)));
+}

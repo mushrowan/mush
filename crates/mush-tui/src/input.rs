@@ -60,6 +60,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     if app.interaction.mode == AppMode::Navigate {
         return handle_navigate_key(app, key);
     }
+    if app.interaction.mode == AppMode::Visual {
+        return handle_visual_key(app, key);
+    }
     if app.interaction.mode == AppMode::ComposerNormal {
         return handle_composer_normal_key(app, key);
     }
@@ -877,7 +880,7 @@ fn handle_composer_normal_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> 
 }
 
 fn handle_navigate_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
-    use crate::keybinds::{Action, KeyScope};
+    use crate::keybinds::Action;
 
     if app.keymap.matches(Action::QuitOrAbort, key) {
         return handle_quit_or_abort(app);
@@ -887,13 +890,35 @@ fn handle_navigate_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         app.viewport.resume();
         return None;
     }
+    if app.keymap.matches_in(
+        crate::keybinds::KeyScope::Navigate,
+        Action::StartSelection,
+        key,
+    ) {
+        app.viewport.start_selection();
+        app.interaction.mode = AppMode::Visual;
+        return None;
+    }
+    handle_log_motion(app, key);
+    None
+}
+
+fn handle_visual_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
+    use crate::keybinds::Action;
+
+    if app.keymap.matches(Action::QuitOrAbort, key) {
+        return handle_quit_or_abort(app);
+    }
+    handle_log_motion(app, key);
+    None
+}
+
+fn handle_log_motion(app: &mut App, key: KeyEvent) {
+    use crate::keybinds::{Action, KeyScope};
 
     let page = app.viewport.page() as isize;
     let matches = |action| app.keymap.matches_in(KeyScope::Navigate, action, key);
-    if matches(Action::StartSelection) {
-        app.viewport.start_selection();
-        app.interaction.mode = AppMode::Visual;
-    } else if matches(Action::PreviousItem) {
+    if matches(Action::PreviousItem) {
         app.viewport.move_cursor(0, -1);
     } else if matches(Action::NextItem) {
         app.viewport.move_cursor(0, 1);
@@ -918,7 +943,6 @@ fn handle_navigate_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     } else if matches(Action::NavigateBottom) {
         app.viewport.to_bottom();
     }
-    None
 }
 
 fn is_cancel_key(app: &App, key: KeyEvent) -> bool {
