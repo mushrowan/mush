@@ -1342,3 +1342,14 @@ fn capital_b_goes_back_a_whole_chunk() {
 
     assert_eq!(caret(&app), Some((1, 6)));
 }
+
+#[test]
+fn a_word_motion_crosses_into_the_next_row() {
+    let mut app = log_on("hello\nworld");
+    press(&mut app, KeyCode::Char('e'));
+    assert_eq!(caret(&app), Some((5, 6)));
+
+    press(&mut app, KeyCode::Char('w'));
+
+    assert_eq!(caret(&app), Some((1, 7)));
+}
