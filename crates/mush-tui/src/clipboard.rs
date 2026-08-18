@@ -1,6 +1,53 @@
+use std::io::Write;
 use std::process::Command;
 
 use mush_ai::types::ImageMimeType;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Environment {
+    pub ssh: bool,
+    pub tool: Option<String>,
+}
+
+impl Environment {
+    #[must_use]
+    pub fn detect() -> Self {
+        Self {
+            ssh: std::env::var_os("SSH_CONNECTION").is_some()
+                || std::env::var_os("SSH_TTY").is_some(),
+            tool: ["wl-copy", "xclip", "pbcopy"]
+                .into_iter()
+                .find(|tool| on_path(tool))
+                .map(str::to_string),
+        }
+    }
+}
+
+fn on_path(tool: &str) -> bool {
+    std::env::var_os("PATH")
+        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(tool).is_file()))
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum CopyError {
+    #[error("clipboard failed: {0}")]
+    Command(String),
+    #[error("clipboard failed: {0}")]
+    Terminal(#[from] std::io::Error),
+}
+
+pub fn copy(text: &str, env: &Environment, out: &mut impl Write) -> Result<(), CopyError> {
+    let _ = env;
+    write_osc52(text, out)
+}
+
+fn write_osc52(text: &str, out: &mut impl Write) -> Result<(), CopyError> {
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(text);
+    write!(out, "\x1b]52;c;{encoded}\x07")?;
+    out.flush()?;
+    Ok(())
+}
 
 #[derive(Debug, Clone)]
 pub struct ClipboardImage {
@@ -244,5 +291,23 @@ mod tests {
         assert_eq!(decoded.dimensions(), (2, 1));
         assert_eq!(decoded.get_pixel(0, 0).0, [0, 0, 255], "left pixel blue");
         assert_eq!(decoded.get_pixel(1, 0).0, [255, 0, 0], "right pixel red");
+    }
+}
+
+#[cfg(test)]
+mod copy_tests {
+    use super::*;
+
+    #[test]
+    fn on_ssh_the_text_goes_out_as_osc_52() {
+        let env = Environment {
+            ssh: true,
+            tool: Some("wl-copy".into()),
+        };
+        let mut out = Vec::new();
+
+        copy("world", &env, &mut out).unwrap();
+
+        assert_eq!(String::from_utf8(out).unwrap(), "\x1b]52;c;d29ybGQ=\x07");
     }
 }

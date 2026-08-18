@@ -110,6 +110,10 @@ async fn handle_common_app_event(
             paste_clipboard_image(&mut session.app).await;
             Some(LoopAction::Redraw)
         }
+        AppEvent::Copy { text } => {
+            copy_to_clipboard(&mut session.app, text);
+            Some(LoopAction::Redraw)
+        }
         AppEvent::ValidateAndSaveApiKey {
             entry_id,
             provider_name,
@@ -588,6 +592,13 @@ fn apply_settings_toggle(
         Err(e) => format!(" (persist failed: {e})"),
     };
     app.status = Some(format!("{} → {}{}", item.label(), new_value, persist_note));
+}
+
+fn copy_to_clipboard(app: &mut App, text: &str) {
+    let env = crate::clipboard::Environment::detect();
+    if let Err(error) = crate::clipboard::copy(text, &env, &mut std::io::stdout()) {
+        app.status = Some(error.to_string());
+    }
 }
 
 async fn paste_clipboard_image(app: &mut App) {
