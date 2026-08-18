@@ -988,3 +988,19 @@ fn esc_drops_the_selection_without_copying() {
     assert!(event.is_none(), "{event:?}");
     assert!(selected_cells(&app).is_empty());
 }
+
+#[test]
+fn a_streaming_reply_leaves_the_selection_where_it_is() {
+    let mut app = log_with_world();
+    press(&mut app, KeyCode::Char('v'));
+    for _ in 0..4 {
+        press(&mut app, KeyCode::Char('l'));
+    }
+    let before = selected_cells(&app);
+
+    app.start_streaming();
+    stream(&mut app, 0..40);
+
+    assert_eq!(selected_cells(&app), before);
+    assert_eq!(before.len(), 5);
+}
