@@ -165,10 +165,16 @@ impl Viewport {
         let selection = self.selection()?;
         let (start_line, start_column) = *selection.start();
         let (end_line, end_column) = *selection.end();
-        if line != start_line || line != end_line {
+        if line < start_line || line > end_line {
             return None;
         }
-        Some(start_column..end_column + 1)
+        let first = if line == start_line { start_column } else { 0 };
+        let last = if line == end_line {
+            end_column + 1
+        } else {
+            self.line_width(line)
+        };
+        Some(first..last)
     }
 
     #[must_use]
@@ -390,6 +396,23 @@ mod tests {
 
         assert_eq!(viewport.selected_columns(190), Some(3..4));
         assert_eq!(viewport.selected_columns(189), None);
+    }
+
+    #[test]
+    fn a_selection_over_several_lines_runs_each_to_its_end() {
+        let viewport = Viewport::default();
+        viewport.place(&lines(&[10; 200]), log_area(20));
+        viewport.cursor_to(190);
+        viewport.move_cursor(3, 0);
+        viewport.start_selection();
+
+        viewport.move_cursor(0, 2);
+        viewport.move_cursor(-2, 0);
+
+        assert_eq!(viewport.selected_columns(190), Some(3..10));
+        assert_eq!(viewport.selected_columns(191), Some(0..10));
+        assert_eq!(viewport.selected_columns(192), Some(0..2));
+        assert_eq!(viewport.selected_columns(193), None);
     }
 
     #[test]

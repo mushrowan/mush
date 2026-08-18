@@ -903,3 +903,46 @@ fn yank_copies_the_selection_and_leaves_the_cursor_put() {
     assert!(selected_cells(&app).is_empty());
     assert_eq!(app.viewport.cursor(), cursor);
 }
+
+fn log_with_indented_hello() -> App {
+    let mut app = conversation(1);
+    app.messages.push(DisplayMessage::new(
+        MessageRole::Assistant,
+        "  hello\n    hello",
+    ));
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Esc);
+    rows(&app, 80, 24);
+    for _ in 0..6 {
+        press(&mut app, KeyCode::Char('j'));
+    }
+    press(&mut app, KeyCode::Char('v'));
+    press(&mut app, KeyCode::Char('j'));
+    for _ in 0..20 {
+        press(&mut app, KeyCode::Char('l'));
+    }
+    app
+}
+
+#[test]
+fn a_multi_row_yank_drops_the_common_indent() {
+    let mut app = log_with_indented_hello();
+
+    let event = handle_key(&mut app, KeyEvent::from(KeyCode::Char('y')));
+
+    assert!(
+        matches!(&event, Some(AppEvent::Copy { text }) if text == "hello\n  hello"),
+        "{event:?}"
+    );
+}
+
+#[test]
+fn a_selection_over_two_rows_highlights_both() {
+    let app = log_with_indented_hello();
+
+    let cells = selected_cells(&app);
+
+    assert_eq!(cells.first(), Some(&(0, 6)));
+    assert_eq!(cells.last(), Some(&(9, 7)));
+    assert_eq!(cells.len(), 8 + 10);
+}
