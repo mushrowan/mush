@@ -1076,3 +1076,23 @@ fn ctrl_v_highlights_a_rectangle() {
         .collect();
     assert_eq!(selected_cells(&app), expected);
 }
+
+#[test]
+fn the_block_is_the_same_either_way_round() {
+    let mut app = log_with_alphabet();
+    for _ in 0..6 {
+        press(&mut app, KeyCode::Char('l'));
+    }
+
+    press_with(&mut app, KeyCode::Char('v'), KeyModifiers::CONTROL);
+    for _ in 0..3 {
+        press(&mut app, KeyCode::Char('h'));
+    }
+    press(&mut app, KeyCode::Char('j'));
+
+    let expected: Vec<(u16, u16)> = (3..7)
+        .map(|x| (x, 6))
+        .chain((3..7).map(|x| (x, 7)))
+        .collect();
+    assert_eq!(selected_cells(&app), expected);
+}
