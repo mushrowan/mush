@@ -919,6 +919,14 @@ fn handle_visual_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     None
 }
 
+fn move_by_word(app: &mut App, word: crate::motion::Word) {
+    let rows = crate::selection::transcript_rows(app);
+    let cursor = app.viewport.cursor();
+    let (line, column) = crate::motion::word_forward(&rows, (cursor.line, cursor.column), word);
+    app.viewport.cursor_to(line);
+    app.viewport.cursor_to_column(column);
+}
+
 fn current_row(app: &App) -> String {
     let line = app.viewport.cursor().line;
     crate::selection::transcript_rows(app)
@@ -954,6 +962,8 @@ fn handle_log_motion(app: &mut App, key: KeyEvent) {
     } else if matches(Action::CursorLineEnd) {
         let column = crate::motion::last_cell(&current_row(app));
         app.viewport.cursor_to_column(column);
+    } else if matches(Action::CursorWordForward) {
+        move_by_word(app, crate::motion::Word::Small);
     } else if matches(Action::PreviousItem) {
         app.viewport.move_cursor(0, -1);
     } else if matches(Action::NextItem) {

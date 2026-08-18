@@ -1271,3 +1271,27 @@ fn dollar_goes_to_the_last_cell() {
 
     assert_eq!(caret(&app), Some((7, 6)));
 }
+
+fn log_on(text: &str) -> App {
+    let mut app = conversation(1);
+    app.messages
+        .push(DisplayMessage::new(MessageRole::Assistant, text));
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Esc);
+    rows(&app, 80, 24);
+    for _ in 0..6 {
+        press(&mut app, KeyCode::Char('j'));
+    }
+    press(&mut app, KeyCode::Char('^'));
+    app
+}
+
+#[test]
+fn w_goes_to_the_start_of_the_next_word() {
+    let mut app = log_on("hello world");
+    assert_eq!(caret(&app), Some((1, 6)));
+
+    press(&mut app, KeyCode::Char('w'));
+
+    assert_eq!(caret(&app), Some((7, 6)));
+}
