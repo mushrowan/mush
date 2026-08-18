@@ -1175,3 +1175,45 @@ fn a_row_too_short_for_the_block_keeps_its_line() {
         "{event:?}"
     );
 }
+
+fn linewise_over_indented_hello() -> App {
+    let mut app = conversation(1);
+    app.messages.push(DisplayMessage::new(
+        MessageRole::Assistant,
+        "  hello\n    hello",
+    ));
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Esc);
+    rows(&app, 80, 24);
+    for _ in 0..6 {
+        press(&mut app, KeyCode::Char('j'));
+    }
+    press_with(&mut app, KeyCode::Char('V'), KeyModifiers::SHIFT);
+    app
+}
+
+#[test]
+fn capital_y_after_a_linewise_selection_copies_the_rows_as_drawn() {
+    let mut app = linewise_over_indented_hello();
+    press(&mut app, KeyCode::Char('j'));
+
+    let event = handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT),
+    );
+
+    assert!(
+        matches!(&event, Some(AppEvent::Copy { text }) if text == "   hello\n     hello"),
+        "{event:?}"
+    );
+}
+
+#[test]
+fn esc_drops_a_linewise_selection() {
+    let mut app = linewise_over_indented_hello();
+
+    let event = handle_key(&mut app, KeyEvent::from(KeyCode::Esc));
+
+    assert!(event.is_none(), "{event:?}");
+    assert!(selected_cells(&app).is_empty());
+}
