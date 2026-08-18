@@ -112,4 +112,12 @@ mod tests {
 
         assert_eq!(word_forward(&rows, (0, 1), Word::Small), (0, 7));
     }
+
+    #[test]
+    fn a_small_word_stops_at_punctuation_and_a_big_one_does_not() {
+        let rows = rows(&[" foo.bar baz"]);
+
+        assert_eq!(word_forward(&rows, (0, 1), Word::Small), (0, 4));
+        assert_eq!(word_forward(&rows, (0, 1), Word::Big), (0, 9));
+    }
 }

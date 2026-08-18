@@ -145,6 +145,7 @@ pub enum Action {
     SelectOrSpace,
     CursorFirstNonBlank,
     CursorWordForward,
+    CursorChunkForward,
     StartSelection,
     StartLineSelection,
     StartBlockSelection,
@@ -194,6 +195,7 @@ impl Action {
             Self::SelectOrSpace => "select_or_space",
             Self::CursorFirstNonBlank => "cursor_first_non_blank",
             Self::CursorWordForward => "cursor_word_forward",
+            Self::CursorChunkForward => "cursor_chunk_forward",
             Self::StartSelection => "start_selection",
             Self::StartLineSelection => "start_line_selection",
             Self::StartBlockSelection => "start_block_selection",
@@ -247,6 +249,7 @@ impl Action {
         Self::SelectOrSpace,
         Self::CursorFirstNonBlank,
         Self::CursorWordForward,
+        Self::CursorChunkForward,
         Self::StartSelection,
         Self::StartLineSelection,
         Self::StartBlockSelection,
@@ -397,6 +400,7 @@ const fn default_scope_for_action(action: Action) -> KeyScope {
         | Action::PageUp
         | Action::CursorFirstNonBlank
         | Action::CursorWordForward
+        | Action::CursorChunkForward
         | Action::StartSelection
         | Action::StartLineSelection
         | Action::StartBlockSelection
@@ -582,6 +586,11 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
         KeyScope::Navigate,
         Action::CursorWordForward,
         &[(KeyCode::Char('w'), KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Navigate,
+        Action::CursorChunkForward,
+        &[(KeyCode::Char('W'), KeyModifiers::SHIFT)],
     ),
     (
         KeyScope::Navigate,

@@ -964,6 +964,8 @@ fn handle_log_motion(app: &mut App, key: KeyEvent) {
         app.viewport.cursor_to_column(column);
     } else if matches(Action::CursorWordForward) {
         move_by_word(app, crate::motion::Word::Small);
+    } else if matches(Action::CursorChunkForward) {
+        move_by_word(app, crate::motion::Word::Big);
     } else if matches(Action::PreviousItem) {
         app.viewport.move_cursor(0, -1);
     } else if matches(Action::NextItem) {

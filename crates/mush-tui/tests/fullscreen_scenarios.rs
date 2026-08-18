@@ -1295,3 +1295,21 @@ fn w_goes_to_the_start_of_the_next_word() {
 
     assert_eq!(caret(&app), Some((7, 6)));
 }
+
+#[test]
+fn punctuation_is_a_word_of_its_own() {
+    let mut app = log_on("foo.bar baz");
+
+    press(&mut app, KeyCode::Char('w'));
+
+    assert_eq!(caret(&app), Some((4, 6)));
+}
+
+#[test]
+fn capital_w_skips_to_the_next_chunk() {
+    let mut app = log_on("foo.bar baz");
+
+    press_with(&mut app, KeyCode::Char('W'), KeyModifiers::SHIFT);
+
+    assert_eq!(caret(&app), Some((9, 6)));
+}
