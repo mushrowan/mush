@@ -834,3 +834,41 @@ fn sideways_wheel_and_middle_click_are_ignored() {
     assert_eq!(window_rows(&app), before);
     assert!(app.input.text.is_empty());
 }
+
+fn log_with_world() -> App {
+    let mut app = conversation(1);
+    app.messages
+        .push(DisplayMessage::new(MessageRole::Assistant, "world"));
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Esc);
+    rows(&app, 80, 24);
+    for _ in 0..6 {
+        press(&mut app, KeyCode::Char('j'));
+    }
+    press(&mut app, KeyCode::Char('l'));
+    app
+}
+
+fn selected_cells(app: &App) -> Vec<(u16, u16)> {
+    let area = Rect::new(0, 0, 80, 24);
+    let mut buffer = Buffer::empty(area);
+    Screen::new().render(app, area, &mut buffer);
+    let mut cells = Vec::new();
+    for y in 0..area.height {
+        for x in 0..area.width {
+            if buffer[(x, y)].style().bg == app.theme.selection.bg {
+                cells.push((x, y));
+            }
+        }
+    }
+    cells
+}
+
+#[test]
+fn v_starts_a_selection_at_the_cursor() {
+    let mut app = log_with_world();
+
+    press(&mut app, KeyCode::Char('v'));
+
+    assert_eq!(selected_cells(&app), vec![(1, 6)]);
+}

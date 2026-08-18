@@ -890,7 +890,10 @@ fn handle_navigate_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
 
     let page = app.viewport.page() as isize;
     let matches = |action| app.keymap.matches_in(KeyScope::Navigate, action, key);
-    if matches(Action::PreviousItem) {
+    if matches(Action::StartSelection) {
+        app.viewport.start_selection();
+        app.interaction.mode = AppMode::Visual;
+    } else if matches(Action::PreviousItem) {
         app.viewport.move_cursor(0, -1);
     } else if matches(Action::NextItem) {
         app.viewport.move_cursor(0, 1);

@@ -52,6 +52,7 @@ pub struct Theme {
     pub pane_separator_active: Style,
 
     pub selection_marker: Style,
+    pub selection: Style,
 
     pub scroll_hint: Style,
     pub scroll_indicator: Style,
@@ -172,6 +173,7 @@ impl Theme {
             pane_separator_active: Style::default().fg(Color::DarkGray),
 
             selection_marker: Style::default().fg(Color::Cyan),
+            selection: Style::default().bg(Color::Indexed(239)),
             scroll_hint: Style::default().fg(Color::DarkGray),
             scroll_indicator: Style::default().fg(Color::Blue),
 
@@ -286,6 +288,7 @@ impl Theme {
             pane_separator_active: Style::default().fg(Color::Gray),
 
             selection_marker: Style::default().fg(Color::Blue),
+            selection: Style::default().bg(Color::Indexed(251)),
             scroll_hint: Style::default().fg(Color::Gray),
             scroll_indicator: Style::default().fg(Color::Blue),
 
@@ -489,6 +492,7 @@ fn apply_palette(theme: &mut Theme, p: &Base24Palette) {
     if let Some(col) = c(&p.base02) {
         theme.block_highlight_bg = col;
         theme.menu_selected_bg = col;
+        theme.selection = Style::default().bg(col);
         theme.picker_selected = Style::default().bg(col);
     }
     if let Some(col) = c(&p.base01) {

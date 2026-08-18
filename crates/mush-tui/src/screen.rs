@@ -33,6 +33,7 @@ pub struct Viewport {
     cursor: Cell<Cursor>,
     widths: RefCell<Vec<usize>>,
     area: Cell<Rect>,
+    anchor: Cell<Option<(usize, usize)>>,
 }
 
 impl Default for Viewport {
@@ -46,6 +47,7 @@ impl Default for Viewport {
             cursor: Cell::new(Cursor::default()),
             widths: RefCell::new(Vec::new()),
             area: Cell::new(Rect::default()),
+            anchor: Cell::new(None),
         }
     }
 }
@@ -139,6 +141,34 @@ impl Viewport {
         self.cursor.set(cursor);
         self.keep_in_view(cursor.line);
         self.clamp_cursor();
+    }
+
+    pub fn start_selection(&self) {
+        let cursor = self.cursor.get();
+        self.anchor.set(Some((cursor.line, cursor.column)));
+    }
+
+    pub fn clear_selection(&self) {
+        self.anchor.set(None);
+    }
+
+    #[must_use]
+    pub fn selection(&self) -> Option<std::ops::RangeInclusive<(usize, usize)>> {
+        let anchor = self.anchor.get()?;
+        let cursor = self.cursor.get();
+        let head = (cursor.line, cursor.column);
+        Some(anchor.min(head)..=anchor.max(head))
+    }
+
+    #[must_use]
+    pub fn selected_columns(&self, line: usize) -> Option<Range<usize>> {
+        let selection = self.selection()?;
+        let (start_line, start_column) = *selection.start();
+        let (end_line, end_column) = *selection.end();
+        if line != start_line || line != end_line {
+            return None;
+        }
+        Some(start_column..end_column + 1)
     }
 
     #[must_use]
@@ -290,10 +320,11 @@ impl Screen {
         let transcript = transcript_guards(app, area.width);
         let lines = transcript.flatten();
         let window = app.viewport.place(&lines, regions.messages);
-        for (row, line) in regions.messages.rows().zip(&lines[window]) {
+        for (row, line) in regions.messages.rows().zip(&lines[window.clone()]) {
             line.render(row, buf);
             redraw_stitched_row(row, buf);
         }
+        self.paint_selection(app, regions.messages, window, buf);
         self.render_scrollbar(app, regions.messages, buf);
 
         if let Some(tools) = regions.tools {
@@ -301,6 +332,25 @@ impl Screen {
         }
         InputBox::new(app).render(regions.input, buf);
         StatusBar::new(app).render(regions.status, buf);
+    }
+
+    fn paint_selection(&self, app: &App, area: Rect, window: Range<usize>, buf: &mut Buffer) {
+        for (row, line) in area.rows().zip(window) {
+            let Some(columns) = app.viewport.selected_columns(line) else {
+                continue;
+            };
+            for column in columns {
+                let Ok(x) = u16::try_from(column) else {
+                    continue;
+                };
+                if x >= row.width {
+                    break;
+                }
+                if let Some(cell) = buf.cell_mut((row.x + x, row.y)) {
+                    cell.set_style(app.theme.selection);
+                }
+            }
+        }
     }
 
     fn render_scrollbar(&self, app: &App, area: Rect, buf: &mut Buffer) {
@@ -327,6 +377,19 @@ mod tests {
 
     fn lines(widths: &[usize]) -> Vec<Line<'static>> {
         widths.iter().map(|w| Line::raw("x".repeat(*w))).collect()
+    }
+
+    #[test]
+    fn a_fresh_selection_covers_the_cursor_cell() {
+        let viewport = Viewport::default();
+        viewport.place(&lines(&[10; 200]), log_area(20));
+        viewport.cursor_to(190);
+        viewport.move_cursor(3, 0);
+
+        viewport.start_selection();
+
+        assert_eq!(viewport.selected_columns(190), Some(3..4));
+        assert_eq!(viewport.selected_columns(189), None);
     }
 
     #[test]

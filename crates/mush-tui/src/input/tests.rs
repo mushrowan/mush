@@ -2140,7 +2140,7 @@ fn k_moves_the_cursor_up_one_row_while_navigating() {
 fn app_with_log() -> App {
     let app = App::new("test".into(), TokenCount::new(200_000));
     app.viewport
-        .place(&vec![Line::raw("x"); 200], Rect::new(0, 0, 80, 20));
+        .place(&vec![Line::raw("xxxxxxxxxx"); 200], Rect::new(0, 0, 80, 20));
     app
 }
 
@@ -2242,4 +2242,17 @@ fn a_notch_moves_the_configured_number_of_lines() {
     );
 
     assert_eq!(app.viewport.window(200, 20), 175..195);
+}
+
+#[test]
+fn v_in_the_log_anchors_a_selection_at_the_cursor() {
+    let mut app = app_with_log();
+    app.interaction.mode = AppMode::Navigate;
+    app.viewport.cursor_to(190);
+    app.viewport.move_cursor(3, 0);
+
+    handle_key(&mut app, key(KeyCode::Char('v')));
+
+    assert_eq!(app.interaction.mode, AppMode::Visual);
+    assert_eq!(app.viewport.selection(), Some((190, 3)..=(190, 3)));
 }

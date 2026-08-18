@@ -143,6 +143,7 @@ pub enum Action {
     SearchNext,
     SearchPrev,
     SelectOrSpace,
+    StartSelection,
 }
 
 impl Action {
@@ -185,6 +186,7 @@ impl Action {
             Self::SearchNext => "search_next",
             Self::SearchPrev => "search_prev",
             Self::SelectOrSpace => "select_or_space",
+            Self::StartSelection => "start_selection",
             Self::PasteImage => "paste_image",
             Self::QuitOrAbort => "quit_or_abort",
             Self::SelectAll => "select_all",
@@ -231,6 +233,7 @@ impl Action {
         Self::SearchNext,
         Self::SearchPrev,
         Self::SelectOrSpace,
+        Self::StartSelection,
         Self::PasteImage,
         Self::QuitOrAbort,
         Self::SelectAll,
@@ -373,7 +376,8 @@ const fn default_scope_for_action(action: Action) -> KeyScope {
         | Action::LineDown
         | Action::LineUp
         | Action::PageDown
-        | Action::PageUp => KeyScope::Navigate,
+        | Action::PageUp
+        | Action::StartSelection => KeyScope::Navigate,
         Action::SessionPickerToggleScope => KeyScope::SessionPicker,
         Action::ModelPickerDeleteAllStale
         | Action::ModelPickerDeleteSelectedStale
@@ -534,6 +538,11 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
             (KeyCode::End, KeyModifiers::NONE),
             (KeyCode::Char('G'), KeyModifiers::SHIFT),
         ],
+    ),
+    (
+        KeyScope::Navigate,
+        Action::StartSelection,
+        &[(KeyCode::Char('v'), KeyModifiers::NONE)],
     ),
     (
         KeyScope::Navigate,

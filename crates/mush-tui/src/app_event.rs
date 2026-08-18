@@ -56,6 +56,7 @@ pub enum AppMode {
     SlotEdit,
     ToolConfirm,
     Navigate,
+    Visual,
     Search,
     Settings,
     CompactionRecovery,
@@ -64,13 +65,16 @@ pub enum AppMode {
 impl AppMode {
     #[must_use]
     pub fn scrolls_the_log(&self) -> bool {
-        matches!(self, Self::Normal | Self::ComposerNormal | Self::Navigate)
+        matches!(
+            self,
+            Self::Normal | Self::ComposerNormal | Self::Navigate | Self::Visual
+        )
     }
 
     #[must_use]
     pub fn caret(&self) -> Caret {
         match self {
-            Self::Navigate => Caret::Log,
+            Self::Navigate | Self::Visual => Caret::Log,
             Self::ComposerNormal => Caret::ComposerBlock,
             _ => Caret::ComposerBar,
         }
