@@ -904,10 +904,16 @@ fn handle_navigate_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
 }
 
 fn handle_visual_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
-    use crate::keybinds::Action;
+    use crate::keybinds::{Action, KeyScope};
 
     if app.keymap.matches(Action::QuitOrAbort, key) {
         return handle_quit_or_abort(app);
+    }
+    if app.keymap.matches_in(KeyScope::Navigate, Action::Yank, key) {
+        let text = crate::selection::selected_text(app)?;
+        app.viewport.clear_selection();
+        app.interaction.mode = AppMode::Navigate;
+        return Some(AppEvent::Copy { text });
     }
     handle_log_motion(app, key);
     None

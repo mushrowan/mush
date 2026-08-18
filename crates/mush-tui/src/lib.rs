@@ -21,6 +21,7 @@ pub mod path_utils;
 pub mod prompt_cache;
 pub mod runner;
 pub mod screen;
+mod selection;
 pub mod serving_provider;
 pub mod session;
 pub mod session_picker;

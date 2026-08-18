@@ -884,3 +884,22 @@ fn a_motion_extends_the_selection_from_the_anchor() {
 
     assert_eq!(selected_cells(&app), vec![(1, 6), (2, 6), (3, 6), (4, 6)]);
 }
+
+#[test]
+fn yank_copies_the_selection_and_leaves_the_cursor_put() {
+    let mut app = log_with_world();
+    press(&mut app, KeyCode::Char('v'));
+    for _ in 0..4 {
+        press(&mut app, KeyCode::Char('l'));
+    }
+    let cursor = app.viewport.cursor();
+
+    let event = handle_key(&mut app, KeyEvent::from(KeyCode::Char('y')));
+
+    assert!(
+        matches!(&event, Some(AppEvent::Copy { text }) if text == "world"),
+        "{event:?}"
+    );
+    assert!(selected_cells(&app).is_empty());
+    assert_eq!(app.viewport.cursor(), cursor);
+}

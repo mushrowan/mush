@@ -25,6 +25,9 @@ pub enum AppEvent {
         provider_name: String,
         key: String,
     },
+    Copy {
+        text: String,
+    },
     CompactionRecoverySelected {
         action: crate::app_state::CompactionRecoveryAction,
     },
