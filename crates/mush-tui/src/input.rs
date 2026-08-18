@@ -926,6 +926,7 @@ fn selection_kind_for(app: &App, key: KeyEvent) -> Option<crate::screen::Selecti
     [
         (Action::StartSelection, SelectionKind::Char),
         (Action::StartLineSelection, SelectionKind::Line),
+        (Action::StartBlockSelection, SelectionKind::Block),
     ]
     .into_iter()
     .find(|(action, _)| app.keymap.matches_in(KeyScope::Navigate, *action, key))

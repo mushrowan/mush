@@ -22,6 +22,7 @@ navigate::line_down = Ctrl-j
 navigate::line_up = Ctrl-k
 navigate::page_down = Ctrl-f | PageDown
 navigate::page_up = Ctrl-b | PageUp
+navigate::start_block_selection = Ctrl-v
 navigate::start_line_selection = Shift-v
 navigate::start_selection = v
 navigate::yank = y

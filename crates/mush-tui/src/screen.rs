@@ -183,8 +183,14 @@ impl Viewport {
         if line < start_line || line > end_line {
             return None;
         }
-        if self.kind.get() == SelectionKind::Line {
-            return Some(0..self.line_width(line));
+        match self.kind.get() {
+            SelectionKind::Line => return Some(0..self.line_width(line)),
+            SelectionKind::Block => {
+                let left = start_column.min(end_column);
+                let right = start_column.max(end_column) + 1;
+                return Some(left..right.min(self.line_width(line)));
+            }
+            SelectionKind::Char => {}
         }
         let first = if line == start_line { start_column } else { 0 };
         let last = if line == end_line {
@@ -401,6 +407,22 @@ mod tests {
 
     fn lines(widths: &[usize]) -> Vec<Line<'static>> {
         widths.iter().map(|w| Line::raw("x".repeat(*w))).collect()
+    }
+
+    #[test]
+    fn a_blockwise_selection_covers_the_same_columns_on_every_row() {
+        let viewport = Viewport::default();
+        viewport.place(&lines(&[10; 200]), log_area(20));
+        viewport.cursor_to(190);
+        viewport.move_cursor(3, 0);
+        viewport.start_selection(SelectionKind::Block);
+
+        viewport.move_cursor(3, 2);
+
+        assert_eq!(viewport.selected_columns(190), Some(3..7));
+        assert_eq!(viewport.selected_columns(191), Some(3..7));
+        assert_eq!(viewport.selected_columns(192), Some(3..7));
+        assert_eq!(viewport.selected_columns(193), None);
     }
 
     #[test]

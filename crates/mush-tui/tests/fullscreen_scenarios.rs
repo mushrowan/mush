@@ -1041,3 +1041,38 @@ fn a_motion_in_linewise_mode_adds_whole_rows() {
         .collect();
     assert_eq!(selected_cells(&app), expected);
 }
+
+fn log_with_alphabet() -> App {
+    let mut app = conversation(1);
+    app.messages.push(DisplayMessage::new(
+        MessageRole::Assistant,
+        "abcdefg\nuvwxyz",
+    ));
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Esc);
+    rows(&app, 80, 24);
+    for _ in 0..6 {
+        press(&mut app, KeyCode::Char('j'));
+    }
+    app
+}
+
+#[test]
+fn ctrl_v_highlights_a_rectangle() {
+    let mut app = log_with_alphabet();
+    for _ in 0..3 {
+        press(&mut app, KeyCode::Char('l'));
+    }
+
+    press_with(&mut app, KeyCode::Char('v'), KeyModifiers::CONTROL);
+    press(&mut app, KeyCode::Char('j'));
+    for _ in 0..3 {
+        press(&mut app, KeyCode::Char('l'));
+    }
+
+    let expected: Vec<(u16, u16)> = (3..7)
+        .map(|x| (x, 6))
+        .chain((3..7).map(|x| (x, 7)))
+        .collect();
+    assert_eq!(selected_cells(&app), expected);
+}
