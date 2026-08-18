@@ -719,6 +719,20 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_copy_reads_red() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.status = Some(crate::app_state::Status::error("clipboard failed: wl-copy"));
+
+        let spans = left_spans(&app, 200);
+
+        let span = spans
+            .iter()
+            .find(|span| span.content == "clipboard failed: wl-copy")
+            .expect("the failure is on the status line");
+        assert_eq!(span.style, app.theme.tool_error);
+    }
+
+    #[test]
     fn status_bar_left_side_uses_terminal_cell_width_for_halfwidth_dakuten() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.interaction.status_bar.show_cwd = false;

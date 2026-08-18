@@ -111,7 +111,8 @@ async fn handle_common_app_event(
             Some(LoopAction::Redraw)
         }
         AppEvent::Copy { text } => {
-            copy_to_clipboard(&mut session.app, text);
+            let env = crate::clipboard::Environment::detect();
+            copy_to_clipboard(&mut session.app, text, &env, &mut std::io::stdout());
             Some(LoopAction::Redraw)
         }
         AppEvent::ValidateAndSaveApiKey {
@@ -594,9 +595,13 @@ fn apply_settings_toggle(
     app.status = Some(format!("{} → {}{}", item.label(), new_value, persist_note).into());
 }
 
-fn copy_to_clipboard(app: &mut App, text: &str) {
-    let env = crate::clipboard::Environment::detect();
-    if let Err(error) = crate::clipboard::copy(text, &env, &mut std::io::stdout()) {
+fn copy_to_clipboard(
+    app: &mut App,
+    text: &str,
+    env: &crate::clipboard::Environment,
+    out: &mut impl std::io::Write,
+) {
+    if let Err(error) = crate::clipboard::copy(text, env, out) {
         app.status = Some(crate::app_state::Status::error(error.to_string()));
     }
 }
@@ -834,5 +839,31 @@ mod tests {
             Some(key_info(None, Some(4.50), None, None)),
         );
         assert!(toast.contains("$4.50"), "got: {toast}");
+    }
+}
+
+#[cfg(test)]
+mod clipboard_failure_tests {
+    use super::*;
+    use mush_ai::types::TokenCount;
+
+    #[test]
+    fn a_clipboard_command_that_fails_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = dir.path().join("wl-copy");
+        std::fs::write(&tool, "#!/bin/sh\nexit 1\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let env = crate::clipboard::Environment {
+            ssh: false,
+            tool: Some(tool.to_string_lossy().into_owned()),
+        };
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+
+        copy_to_clipboard(&mut app, "world", &env, &mut std::io::sink());
+
+        let status = app.status.expect("a status");
+        assert_eq!(status.text, format!("clipboard failed: {}", tool.display()));
+        assert!(status.error);
     }
 }
