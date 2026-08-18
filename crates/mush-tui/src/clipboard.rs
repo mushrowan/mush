@@ -37,8 +37,35 @@ pub enum CopyError {
 }
 
 pub fn copy(text: &str, env: &Environment, out: &mut impl Write) -> Result<(), CopyError> {
-    let _ = env;
-    write_osc52(text, out)
+    match &env.tool {
+        Some(tool) if !env.ssh => feed_tool(text, tool),
+        _ => write_osc52(text, out),
+    }
+}
+
+fn feed_tool(text: &str, tool: &str) -> Result<(), CopyError> {
+    use std::process::Stdio;
+
+    let mut child = Command::new(tool)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| CopyError::Command(format!("{tool}: {error}")))?;
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin
+            .write_all(text.as_bytes())
+            .map_err(|error| CopyError::Command(format!("{tool}: {error}")))?;
+    }
+    drop(child.stdin.take());
+    let status = child
+        .wait()
+        .map_err(|error| CopyError::Command(format!("{tool}: {error}")))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(CopyError::Command(tool.to_string()))
+    }
 }
 
 fn write_osc52(text: &str, out: &mut impl Write) -> Result<(), CopyError> {
@@ -297,6 +324,38 @@ mod tests {
 #[cfg(test)]
 mod copy_tests {
     use super::*;
+
+    fn recording_tool(dir: &std::path::Path, name: &str, body: &str) -> String {
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn locally_the_text_goes_to_the_system_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = dir.path().join("copied");
+        let tool = recording_tool(
+            dir.path(),
+            "wl-copy",
+            &format!("#!/bin/sh\ncat > {}\n", sink.display()),
+        );
+        let env = Environment {
+            ssh: false,
+            tool: Some(tool),
+        };
+        let mut out = Vec::new();
+
+        copy("world", &env, &mut out).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&sink).unwrap_or_default(), "world");
+        assert!(out.is_empty(), "{out:?}");
+    }
 
     #[test]
     fn on_ssh_the_text_goes_out_as_osc_52() {
