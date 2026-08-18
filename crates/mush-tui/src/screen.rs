@@ -16,6 +16,13 @@ use crate::widgets::tool_panels::{ToolPanels, tool_panels_height};
 
 pub const SCROLLBAR_FADE: Duration = Duration::from_millis(1200);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionKind {
+    Char,
+    Line,
+    Block,
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Cursor {
     pub line: usize,
@@ -34,6 +41,7 @@ pub struct Viewport {
     widths: RefCell<Vec<usize>>,
     area: Cell<Rect>,
     anchor: Cell<Option<(usize, usize)>>,
+    kind: Cell<SelectionKind>,
 }
 
 impl Default for Viewport {
@@ -48,6 +56,7 @@ impl Default for Viewport {
             widths: RefCell::new(Vec::new()),
             area: Cell::new(Rect::default()),
             anchor: Cell::new(None),
+            kind: Cell::new(SelectionKind::Char),
         }
     }
 }
@@ -143,9 +152,15 @@ impl Viewport {
         self.clamp_cursor();
     }
 
-    pub fn start_selection(&self) {
+    pub fn start_selection(&self, kind: SelectionKind) {
         let cursor = self.cursor.get();
         self.anchor.set(Some((cursor.line, cursor.column)));
+        self.kind.set(kind);
+    }
+
+    #[must_use]
+    pub fn selection_kind(&self) -> SelectionKind {
+        self.kind.get()
     }
 
     pub fn clear_selection(&self) {
@@ -167,6 +182,9 @@ impl Viewport {
         let (end_line, end_column) = *selection.end();
         if line < start_line || line > end_line {
             return None;
+        }
+        if self.kind.get() == SelectionKind::Line {
+            return Some(0..self.line_width(line));
         }
         let first = if line == start_line { start_column } else { 0 };
         let last = if line == end_line {
@@ -386,13 +404,26 @@ mod tests {
     }
 
     #[test]
+    fn a_linewise_selection_covers_the_whole_row() {
+        let viewport = Viewport::default();
+        viewport.place(&lines(&[10; 200]), log_area(20));
+        viewport.cursor_to(190);
+        viewport.move_cursor(3, 0);
+
+        viewport.start_selection(SelectionKind::Line);
+
+        assert_eq!(viewport.selected_columns(190), Some(0..10));
+        assert_eq!(viewport.selected_columns(189), None);
+    }
+
+    #[test]
     fn a_fresh_selection_covers_the_cursor_cell() {
         let viewport = Viewport::default();
         viewport.place(&lines(&[10; 200]), log_area(20));
         viewport.cursor_to(190);
         viewport.move_cursor(3, 0);
 
-        viewport.start_selection();
+        viewport.start_selection(SelectionKind::Char);
 
         assert_eq!(viewport.selected_columns(190), Some(3..4));
         assert_eq!(viewport.selected_columns(189), None);
@@ -404,7 +435,7 @@ mod tests {
         viewport.place(&lines(&[10; 200]), log_area(20));
         viewport.cursor_to(190);
         viewport.move_cursor(3, 0);
-        viewport.start_selection();
+        viewport.start_selection(SelectionKind::Char);
 
         viewport.move_cursor(0, 2);
         viewport.move_cursor(-2, 0);

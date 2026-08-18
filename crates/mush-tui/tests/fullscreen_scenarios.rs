@@ -1007,3 +1007,13 @@ fn a_streaming_reply_leaves_the_selection_where_it_is() {
     assert_eq!(selected_cells(&app), before);
     assert_eq!(before.len(), 5);
 }
+
+#[test]
+fn capital_v_highlights_the_whole_row() {
+    let mut app = log_with_world();
+
+    press_with(&mut app, KeyCode::Char('V'), KeyModifiers::SHIFT);
+
+    let row: Vec<(u16, u16)> = (0..6).map(|x| (x, 6)).collect();
+    assert_eq!(selected_cells(&app), row);
+}

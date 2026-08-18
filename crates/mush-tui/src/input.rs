@@ -887,12 +887,8 @@ fn handle_navigate_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         app.viewport.resume();
         return None;
     }
-    if app.keymap.matches_in(
-        crate::keybinds::KeyScope::Navigate,
-        Action::StartSelection,
-        key,
-    ) {
-        app.viewport.start_selection();
+    if let Some(kind) = selection_kind_for(app, key) {
+        app.viewport.start_selection(kind);
         app.interaction.mode = AppMode::Visual;
         return None;
     }
@@ -921,6 +917,19 @@ fn handle_visual_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     }
     handle_log_motion(app, key);
     None
+}
+
+fn selection_kind_for(app: &App, key: KeyEvent) -> Option<crate::screen::SelectionKind> {
+    use crate::keybinds::{Action, KeyScope};
+    use crate::screen::SelectionKind;
+
+    [
+        (Action::StartSelection, SelectionKind::Char),
+        (Action::StartLineSelection, SelectionKind::Line),
+    ]
+    .into_iter()
+    .find(|(action, _)| app.keymap.matches_in(KeyScope::Navigate, *action, key))
+    .map(|(_, kind)| kind)
 }
 
 fn handle_log_motion(app: &mut App, key: KeyEvent) {

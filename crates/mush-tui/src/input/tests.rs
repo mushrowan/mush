@@ -2279,7 +2279,8 @@ fn capital_y_skips_the_indent_strip() {
     let mut app = app_with_log();
     app.interaction.mode = AppMode::Visual;
     app.viewport.cursor_to(190);
-    app.viewport.start_selection();
+    app.viewport
+        .start_selection(crate::screen::SelectionKind::Char);
 
     let event = handle_key(
         &mut app,
@@ -2295,7 +2296,8 @@ fn esc_leaves_visual_mode_for_the_log() {
     let mut app = app_with_log();
     app.interaction.mode = AppMode::Visual;
     app.viewport.cursor_to(190);
-    app.viewport.start_selection();
+    app.viewport
+        .start_selection(crate::screen::SelectionKind::Char);
 
     handle_key(&mut app, key(KeyCode::Esc));
 
