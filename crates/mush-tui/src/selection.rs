@@ -10,6 +10,22 @@ pub(crate) fn text_for(
 ) -> String {
     let (start_line, start_column) = *range.start();
     let (end_line, end_column) = *range.end();
+    if kind == SelectionKind::Block {
+        let left = start_column.min(end_column);
+        let right = start_column.max(end_column);
+        return lines
+            .iter()
+            .take(end_line + 1)
+            .skip(start_line)
+            .map(|line| {
+                line.chars()
+                    .skip(left)
+                    .take(right + 1 - left)
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
     if kind == SelectionKind::Line {
         return lines
             .iter()
@@ -70,6 +86,16 @@ pub(crate) fn selected_text(app: &App, strip_indent: bool) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_blockwise_range_takes_the_same_columns_from_each_row() {
+        let lines = vec![" abcdefg".to_string(), " uvwxyz".to_string()];
+
+        assert_eq!(
+            text_for(&lines, &((0, 3)..=(1, 6)), SelectionKind::Block),
+            "cdef\nwxyz"
+        );
+    }
 
     #[test]
     fn a_linewise_range_takes_whole_rows() {

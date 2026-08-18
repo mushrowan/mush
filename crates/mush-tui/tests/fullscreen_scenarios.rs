@@ -1123,3 +1123,23 @@ fn a_linewise_yank_copies_the_rows_with_the_indent_off() {
         "{event:?}"
     );
 }
+
+#[test]
+fn a_blockwise_yank_joins_the_pieces_with_newlines() {
+    let mut app = log_with_alphabet();
+    for _ in 0..3 {
+        press(&mut app, KeyCode::Char('l'));
+    }
+    press_with(&mut app, KeyCode::Char('v'), KeyModifiers::CONTROL);
+    press(&mut app, KeyCode::Char('j'));
+    for _ in 0..3 {
+        press(&mut app, KeyCode::Char('l'));
+    }
+
+    let event = handle_key(&mut app, KeyEvent::from(KeyCode::Char('y')));
+
+    assert!(
+        matches!(&event, Some(AppEvent::Copy { text }) if text == "cdef\nwxyz"),
+        "{event:?}"
+    );
+}
