@@ -1096,3 +1096,30 @@ fn the_block_is_the_same_either_way_round() {
         .collect();
     assert_eq!(selected_cells(&app), expected);
 }
+
+#[test]
+fn a_linewise_yank_copies_the_rows_with_the_indent_off() {
+    let mut app = conversation(1);
+    app.messages.push(DisplayMessage::new(
+        MessageRole::Assistant,
+        "  hello\n    hello",
+    ));
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Esc);
+    rows(&app, 80, 24);
+    for _ in 0..6 {
+        press(&mut app, KeyCode::Char('j'));
+    }
+    for _ in 0..4 {
+        press(&mut app, KeyCode::Char('l'));
+    }
+    press_with(&mut app, KeyCode::Char('V'), KeyModifiers::SHIFT);
+    press(&mut app, KeyCode::Char('j'));
+
+    let event = handle_key(&mut app, KeyEvent::from(KeyCode::Char('y')));
+
+    assert!(
+        matches!(&event, Some(AppEvent::Copy { text }) if text == "hello\n  hello"),
+        "{event:?}"
+    );
+}
