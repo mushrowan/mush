@@ -1543,3 +1543,68 @@ fn a_tool_settles_in_place_when_it_finishes() {
         running
     );
 }
+
+fn panel_row_indices(app: &App) -> Vec<u16> {
+    let area = Rect::new(0, 0, 80, 24);
+    let mut buffer = Buffer::empty(area);
+    Screen::new().render(app, area, &mut buffer);
+    (0..20)
+        .filter(|y| (0..80).all(|x| buffer[(x, *y)].style().bg == app.theme.tool_panel_bg.bg))
+        .collect()
+}
+
+#[test]
+fn the_panel_keeps_its_background_and_padding() {
+    let app = bash_with_output(3);
+
+    let filled = panel_row_indices(&app);
+    let transcript = window_rows(&app);
+
+    assert!(!filled.is_empty(), "{transcript:#?}");
+    for y in filled {
+        let row = &transcript[y as usize];
+        assert!(row.starts_with("  "), "{row:?}");
+    }
+}
+
+fn selected_panel_row(app: &mut App, y: u16) {
+    press(&mut *app, KeyCode::Esc);
+    press(&mut *app, KeyCode::Esc);
+    rows(app, 80, 24);
+    press(&mut *app, KeyCode::Char('g'));
+    for _ in 0..y {
+        press(&mut *app, KeyCode::Char('j'));
+    }
+    press_with(&mut *app, KeyCode::Char('V'), KeyModifiers::SHIFT);
+}
+
+#[test]
+fn y_trims_the_padding_off_the_copy() {
+    let mut app = bash_with_output(3);
+    let row = panel_row_indices(&app)[1];
+    selected_panel_row(&mut app, row);
+
+    let event = handle_key(&mut app, KeyEvent::from(KeyCode::Char('y')));
+
+    assert!(
+        matches!(&event, Some(AppEvent::Copy { text }) if text == "seq"),
+        "{event:?}"
+    );
+}
+
+#[test]
+fn capital_y_keeps_the_row_as_drawn() {
+    let mut app = bash_with_output(3);
+    let row = panel_row_indices(&app)[1];
+    selected_panel_row(&mut app, row);
+
+    let event = handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT),
+    );
+
+    assert!(
+        matches!(&event, Some(AppEvent::Copy { text }) if text.len() == 80 && text.trim() == "seq"),
+        "{event:?}"
+    );
+}

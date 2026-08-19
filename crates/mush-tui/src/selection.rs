@@ -55,7 +55,7 @@ pub(crate) fn text_for(
     out.join("\n")
 }
 
-pub(crate) fn strip_common_indent(text: &str) -> String {
+pub(crate) fn strip_padding(text: &str) -> String {
     let indent = text
         .lines()
         .filter(|line| !line.trim().is_empty())
@@ -63,7 +63,7 @@ pub(crate) fn strip_common_indent(text: &str) -> String {
         .min()
         .unwrap_or(0);
     text.lines()
-        .map(|line| line.get(indent..).unwrap_or(""))
+        .map(|line| line.get(indent..).unwrap_or("").trim_end())
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -81,7 +81,7 @@ pub(crate) fn selected_text(app: &App, strip_indent: bool) -> Option<String> {
     let lines = transcript_rows(app);
     let text = text_for(&lines, &range, app.viewport.selection_kind());
     Some(if strip_indent {
-        strip_common_indent(&text)
+        strip_padding(&text)
     } else {
         text
     })
@@ -130,11 +130,13 @@ mod tests {
     }
 
     #[test]
+    fn trailing_padding_comes_off_every_row() {
+        assert_eq!(strip_padding("  seq      \n  line 1   "), "seq\nline 1");
+    }
+
+    #[test]
     fn the_common_indent_comes_off_a_multi_line_copy() {
-        assert_eq!(
-            strip_common_indent("   hello\n     hello"),
-            "hello\n  hello"
-        );
+        assert_eq!(strip_padding("   hello\n     hello"), "hello\n  hello");
     }
 
     #[test]
