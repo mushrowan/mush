@@ -1450,3 +1450,15 @@ fn no_tool_rendering_draws_a_border() {
         assert!(!transcript.contains(border), "{border} in {transcript:?}");
     }
 }
+
+#[test]
+fn two_running_tools_stack_in_call_order() {
+    let mut app = with_running_bash();
+    app.start_tool(&ToolCallId::from("tc_2"), "read", "src/main.rs");
+
+    let transcript = window_rows(&app);
+    let bash = transcript.iter().position(|r| r.contains("bash"));
+    let read = transcript.iter().position(|r| r.contains("read"));
+
+    assert!(bash < read, "{transcript:#?}");
+}
