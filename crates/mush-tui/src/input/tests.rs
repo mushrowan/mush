@@ -537,7 +537,7 @@ fn configured_cursor_bindings_are_used() {
 fn configured_insert_newline_binding_is_used() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     let raw = crate::keybinds::scoped_test_config(
-        crate::keybinds::KeyScope::Normal,
+        crate::keybinds::KeyScope::Insert,
         [(
             "insert_newline",
             crate::keybinds::BindingSource::One("alt+n".into()),
@@ -805,7 +805,7 @@ fn at_picker_enter_inserts_selected_template() {
         "enter inside the picker must not submit, got {event:?}"
     );
     assert_eq!(app.input.text, "hi REVIEW PR");
-    assert_eq!(app.interaction.mode, AppMode::Normal);
+    assert_eq!(app.interaction.mode, AppMode::Insert);
     assert!(app.interaction.at_picker.is_none());
 }
 
@@ -821,7 +821,7 @@ fn at_picker_esc_closes_without_touching_input() {
 
     handle_key(&mut app, key(KeyCode::Esc));
 
-    assert_eq!(app.interaction.mode, AppMode::Normal);
+    assert_eq!(app.interaction.mode, AppMode::Insert);
     assert!(app.interaction.at_picker.is_none());
     assert_eq!(app.input.text, "@rev", "esc preserves the trigger text");
 }
@@ -863,7 +863,7 @@ fn at_picker_typing_past_all_matches_closes_and_keeps_text() {
     handle_key(&mut app, key(KeyCode::Char('z')));
 
     assert_eq!(app.input.text, "@rez");
-    assert_eq!(app.interaction.mode, AppMode::Normal);
+    assert_eq!(app.interaction.mode, AppMode::Insert);
     assert!(app.interaction.at_picker.is_none());
 }
 
@@ -879,7 +879,7 @@ fn at_picker_backspace_past_at_sign_closes() {
     handle_key(&mut app, key(KeyCode::Backspace));
 
     assert_eq!(app.input.text, "");
-    assert_eq!(app.interaction.mode, AppMode::Normal);
+    assert_eq!(app.interaction.mode, AppMode::Insert);
     assert!(app.interaction.at_picker.is_none());
 }
 
@@ -912,7 +912,7 @@ fn template_without_placeholders_stays_in_normal_mode() {
     handle_key(&mut app, key(KeyCode::Tab));
 
     assert_eq!(app.input.text, "plain content");
-    assert_eq!(app.interaction.mode, AppMode::Normal);
+    assert_eq!(app.interaction.mode, AppMode::Insert);
     assert!(app.interaction.slot_edit.is_none());
 }
 
@@ -965,7 +965,7 @@ fn slot_edit_enter_exits_without_submitting() {
 
     assert!(event.is_none(), "first enter must not submit");
     assert_eq!(app.input.text, "fix bug");
-    assert_eq!(app.interaction.mode, AppMode::Normal);
+    assert_eq!(app.interaction.mode, AppMode::Insert);
     assert!(app.interaction.slot_edit.is_none());
 }
 
@@ -981,7 +981,7 @@ fn slot_edit_esc_keeps_typed_content_and_exits_mode() {
     handle_key(&mut app, key(KeyCode::Esc));
 
     assert_eq!(app.input.text, "fix x");
-    assert_eq!(app.interaction.mode, AppMode::Normal);
+    assert_eq!(app.interaction.mode, AppMode::Insert);
     assert!(app.interaction.slot_edit.is_none());
 }
 
@@ -1087,7 +1087,7 @@ fn slash_menu_navigate_and_select() {
     assert_eq!(app.completion.slash_menu.as_ref().unwrap().selected, 0);
 
     handle_key(&mut app, key(KeyCode::Enter));
-    assert_eq!(app.interaction.mode, AppMode::Normal);
+    assert_eq!(app.interaction.mode, AppMode::Insert);
     assert_eq!(app.input.text, "/help");
 }
 
@@ -1148,7 +1148,7 @@ fn slash_menu_enter_accepts_and_closes() {
     handle_key(&mut app, key(KeyCode::Tab));
 
     handle_key(&mut app, key(KeyCode::Enter));
-    assert_eq!(app.interaction.mode, AppMode::Normal);
+    assert_eq!(app.interaction.mode, AppMode::Insert);
     assert!(app.completion.slash_menu.is_none());
     assert_eq!(app.input.text, "/login-complete");
 }
@@ -1281,7 +1281,7 @@ fn slash_menu_esc_closes() {
     assert_eq!(app.interaction.mode, AppMode::SlashComplete);
 
     handle_key(&mut app, key(KeyCode::Esc));
-    assert_eq!(app.interaction.mode, AppMode::Normal);
+    assert_eq!(app.interaction.mode, AppMode::Insert);
     assert!(app.completion.slash_menu.is_none());
 }
 
@@ -1307,7 +1307,7 @@ fn ctrl_bracket_closes_slash_menu() {
     assert_eq!(app.interaction.mode, AppMode::SlashComplete);
 
     handle_key(&mut app, ctrl(KeyCode::Char('[')));
-    assert_eq!(app.interaction.mode, AppMode::Normal);
+    assert_eq!(app.interaction.mode, AppMode::Insert);
     assert!(app.completion.slash_menu.is_none());
 }
 
@@ -1318,7 +1318,7 @@ fn ctrl_bracket_exits_search_mode() {
     app.interaction.mode = AppMode::Search;
 
     handle_key(&mut app, ctrl(KeyCode::Char('[')));
-    assert_eq!(app.interaction.mode, AppMode::Normal);
+    assert_eq!(app.interaction.mode, AppMode::Insert);
 }
 
 #[test]
@@ -1328,7 +1328,7 @@ fn ctrl_bracket_closes_session_picker() {
     assert_eq!(app.interaction.mode, AppMode::SessionPicker);
 
     handle_key(&mut app, ctrl(KeyCode::Char('[')));
-    assert_eq!(app.interaction.mode, AppMode::Normal);
+    assert_eq!(app.interaction.mode, AppMode::Insert);
     assert!(app.interaction.session_picker.is_none());
 }
 
@@ -1448,7 +1448,7 @@ fn model_picker_overlay_esc_closes() {
     assert_eq!(app.interaction.mode, AppMode::ModelPicker);
 
     handle_key(&mut app, key(KeyCode::Esc));
-    assert_eq!(app.interaction.mode, AppMode::Normal);
+    assert_eq!(app.interaction.mode, AppMode::Insert);
     assert!(app.interaction.model_picker.is_none());
 }
 
@@ -1534,7 +1534,7 @@ fn model_picker_overlay_enter_emits_model_action_and_closes() {
         }) => assert_eq!(id.as_str(), "claude-haiku-4"),
         other => panic!("expected SlashAction::Model, got {other:?}"),
     }
-    assert_eq!(app.interaction.mode, AppMode::Normal);
+    assert_eq!(app.interaction.mode, AppMode::Insert);
     assert!(app.interaction.model_picker.is_none());
 }
 
@@ -1838,7 +1838,7 @@ fn login_picker_esc_closes() {
     let mut app = app_with_login_picker();
     assert_eq!(app.interaction.mode, AppMode::LoginPicker);
     handle_key(&mut app, key(KeyCode::Esc));
-    assert_eq!(app.interaction.mode, AppMode::Normal);
+    assert_eq!(app.interaction.mode, AppMode::Insert);
     assert!(app.interaction.login_picker.is_none());
 }
 
@@ -1885,7 +1885,7 @@ fn login_picker_enter_on_logged_out_oauth_emits_login_action_and_closes() {
         }) => assert_eq!(id, "openai-codex"),
         other => panic!("expected SlashAction::Login, got {other:?}"),
     }
-    assert_eq!(app.interaction.mode, AppMode::Normal);
+    assert_eq!(app.interaction.mode, AppMode::Insert);
     assert!(app.interaction.login_picker.is_none());
 }
 
@@ -2123,7 +2123,7 @@ fn esc_while_navigating_goes_back_to_typing() {
 
     handle_key(&mut app, key(KeyCode::Esc));
 
-    assert_eq!(app.interaction.mode, AppMode::Normal);
+    assert_eq!(app.interaction.mode, AppMode::Insert);
 }
 
 #[test]
@@ -2209,7 +2209,7 @@ fn the_wheel_is_dead_while_an_overlay_is_up() {
 
 #[test]
 fn the_wheel_lives_in_the_log_and_composer_modes() {
-    for mode in [AppMode::Normal, AppMode::ComposerNormal, AppMode::Navigate] {
+    for mode in [AppMode::Insert, AppMode::ComposerNormal, AppMode::Navigate] {
         let mut app = app_with_log();
         app.interaction.mode = mode.clone();
 

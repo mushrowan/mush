@@ -8,7 +8,7 @@ use serde::{Deserialize, Deserializer};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum KeyScope {
     Shared,
-    Normal,
+    Insert,
     Edit,
     Session,
     SessionPicker,
@@ -24,7 +24,7 @@ impl KeyScope {
     pub const fn config_key(self) -> &'static str {
         match self {
             Self::Shared => "shared",
-            Self::Normal => "normal",
+            Self::Insert => "insert",
             Self::Edit => "edit",
             Self::Session => "pane",
             Self::SessionPicker => "session_picker",
@@ -39,7 +39,7 @@ impl KeyScope {
 
     pub const ALL: &'static [Self] = &[
         Self::Shared,
-        Self::Normal,
+        Self::Insert,
         Self::Edit,
         Self::Session,
         Self::SessionPicker,
@@ -437,7 +437,7 @@ const fn default_scope_for_action(action: Action) -> KeyScope {
         | Action::DeleteToStart
         | Action::DeleteWordBackward
         | Action::DeleteWordForward => KeyScope::Edit,
-        _ => KeyScope::Normal,
+        _ => KeyScope::Insert,
     }
 }
 
@@ -447,7 +447,7 @@ type DefaultBinding = (KeyScope, Action, &'static [DefaultCombo]);
 
 const DEFAULT_BINDINGS: &[DefaultBinding] = &[
     (
-        KeyScope::Normal,
+        KeyScope::Insert,
         Action::EditSteering,
         &[
             (KeyCode::Char('k'), KeyModifiers::ALT),
@@ -464,22 +464,22 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
         ],
     ),
     (
-        KeyScope::Normal,
+        KeyScope::Insert,
         Action::CycleFavourite,
         &[(KeyCode::Char('m'), KeyModifiers::ALT)],
     ),
     (
-        KeyScope::Normal,
+        KeyScope::Insert,
         Action::CycleFavouriteBackward,
         &[(KeyCode::Char('M'), KeyModifiers::ALT)],
     ),
     (
-        KeyScope::Normal,
+        KeyScope::Insert,
         Action::EnterSearch,
         &[(KeyCode::Char('f'), KeyModifiers::CONTROL)],
     ),
     (
-        KeyScope::Normal,
+        KeyScope::Insert,
         Action::SelectAll,
         &[(KeyCode::Char('a'), KeyModifiers::CONTROL)],
     ),
@@ -706,12 +706,12 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
         ],
     ),
     (
-        KeyScope::Normal,
+        KeyScope::Insert,
         Action::CycleThinkingLevel,
         &[(KeyCode::Char('t'), KeyModifiers::CONTROL)],
     ),
     (
-        KeyScope::Normal,
+        KeyScope::Insert,
         Action::PasteImage,
         &[(KeyCode::Char('v'), KeyModifiers::CONTROL)],
     ),
@@ -789,7 +789,7 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
         ],
     ),
     (
-        KeyScope::Normal,
+        KeyScope::Insert,
         Action::InsertNewline,
         &[
             (KeyCode::Enter, KeyModifiers::ALT),
@@ -860,7 +860,7 @@ pub struct ScopedKeysConfig {
 #[serde(default)]
 pub struct KeysConfig {
     pub shared: KeyScopeConfig,
-    pub normal: KeyScopeConfig,
+    pub insert: KeyScopeConfig,
     pub edit: KeyScopeConfig,
     pub pane: KeyScopeConfig,
     pub model_picker: KeyScopeConfig,
@@ -876,7 +876,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         for (key, value) in raw {
             match key.as_str() {
                 "shared" => config.shared = value.try_into().map_err(serde::de::Error::custom)?,
-                "normal" => config.normal = value.try_into().map_err(serde::de::Error::custom)?,
+                "insert" => config.insert = value.try_into().map_err(serde::de::Error::custom)?,
                 "edit" => config.edit = value.try_into().map_err(serde::de::Error::custom)?,
                 "pane" => config.pane = value.try_into().map_err(serde::de::Error::custom)?,
                 "model_picker" => {
@@ -884,7 +884,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
                 }
                 old_key => {
                     return Err(serde::de::Error::custom(format!(
-                        "old flat [keys] entry `{old_key}` is no longer supported. move it under a scoped table such as [keys.normal], [keys.edit], [keys.pane], [keys.shared], or [keys.model_picker]"
+                        "old flat [keys] entry `{old_key}` is no longer supported. move it under a scoped table such as [keys.insert], [keys.edit], [keys.pane], [keys.shared], or [keys.model_picker]"
                     )));
                 }
             }
@@ -901,8 +901,8 @@ impl KeysConfig {
             self.shared.raw.clone(),
         );
         scopes.insert(
-            KeyScope::Normal.config_key().to_string(),
-            self.normal.raw.clone(),
+            KeyScope::Insert.config_key().to_string(),
+            self.insert.raw.clone(),
         );
         scopes.insert(
             KeyScope::Edit.config_key().to_string(),
@@ -1088,7 +1088,7 @@ mod tests {
     fn scoped_override_replaces_default() {
         let mut map = KeyMap::default();
         let raw = scoped_test_config(
-            KeyScope::Normal,
+            KeyScope::Insert,
             [("edit_steering", BindingSource::One("ctrl+e".into()))],
         );
         let warnings = map.override_scoped(&raw);
@@ -1103,7 +1103,7 @@ mod tests {
     fn scoped_override_accepts_list() {
         let mut map = KeyMap::default();
         let raw = scoped_test_config(
-            KeyScope::Normal,
+            KeyScope::Insert,
             [(
                 "edit_steering",
                 BindingSource::Many(vec!["ctrl+e".into(), "f4".into()]),
@@ -1135,7 +1135,7 @@ mod tests {
             KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL)
         ));
         assert!(map.matches_in(
-            KeyScope::Normal,
+            KeyScope::Insert,
             Action::Cancel,
             KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
         ));
@@ -1145,7 +1145,7 @@ mod tests {
     fn scoped_override_unknown_action_warns_but_does_not_panic() {
         let mut map = KeyMap::default();
         let raw = scoped_test_config(
-            KeyScope::Normal,
+            KeyScope::Insert,
             [("send_a_cat_emoji", BindingSource::One("ctrl+c".into()))],
         );
         let warnings = map.override_scoped(&raw);
@@ -1157,7 +1157,7 @@ mod tests {
     fn scoped_override_invalid_keystring_warns() {
         let mut map = KeyMap::default();
         let raw = scoped_test_config(
-            KeyScope::Normal,
+            KeyScope::Insert,
             [(
                 "edit_steering",
                 BindingSource::One("totally-not-a-key".into()),
@@ -1183,7 +1183,7 @@ mod tests {
     fn scoped_keys_config_deserialises() {
         let keys = toml::from_str::<KeysConfig>(
             r#"
-            [normal]
+            [insert]
             edit_steering = "alt+k"
 
             [model_picker]
@@ -1192,7 +1192,7 @@ mod tests {
         )
         .expect("scoped keys should parse");
 
-        assert!(keys.normal.raw.contains_key("edit_steering"));
+        assert!(keys.insert.raw.contains_key("edit_steering"));
         assert!(keys.model_picker.raw.contains_key("delete_selected_stale"));
     }
 
@@ -1250,5 +1250,30 @@ mod default_table_snapshot {
             "default bindings changed. if deliberate, regenerate \
              src/snapshots/default_keybindings.txt from this dump"
         );
+    }
+}
+
+#[cfg(test)]
+mod insert_scope_tests {
+    use super::*;
+
+    #[test]
+    fn the_composer_scope_is_called_insert() {
+        let config: KeysConfig = toml::from_str(
+            r#"
+[insert]
+paste_image = "ctrl+y"
+"#,
+        )
+        .unwrap();
+
+        let mut keymap = KeyMap::default();
+        let warnings = keymap.override_scoped(&config.scoped());
+
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(keymap.matches(
+            Action::PasteImage,
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL)
+        ));
     }
 }

@@ -49,7 +49,7 @@ impl Caret {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppMode {
-    Normal,
+    Insert,
     ComposerNormal,
     SessionPicker,
     ModelPicker,
@@ -70,7 +70,7 @@ impl AppMode {
     pub fn scrolls_the_log(&self) -> bool {
         matches!(
             self,
-            Self::Normal | Self::ComposerNormal | Self::Navigate | Self::Visual
+            Self::Insert | Self::ComposerNormal | Self::Navigate | Self::Visual
         )
     }
 

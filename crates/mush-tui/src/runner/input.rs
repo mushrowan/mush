@@ -138,10 +138,10 @@ async fn handle_compaction_recovery_action(
 ) {
     let pane_id = PaneId::new(1);
     let Some(recovery) = session.app.interaction.compaction_recovery.take() else {
-        session.app.interaction.mode = app::AppMode::Normal;
+        session.app.interaction.mode = app::AppMode::Insert;
         return;
     };
-    session.app.interaction.mode = app::AppMode::Normal;
+    session.app.interaction.mode = app::AppMode::Insert;
 
     match action {
         crate::app_state::CompactionRecoveryAction::Retry => {

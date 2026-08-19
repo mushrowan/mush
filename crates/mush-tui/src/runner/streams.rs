@@ -220,7 +220,7 @@ pub(super) async fn answer_confirmation(
     };
 
     let app = &mut session.app;
-    app.interaction.mode = crate::app::AppMode::Normal;
+    app.interaction.mode = crate::app::AppMode::Insert;
     app.interaction.confirm_prompt = None;
     app.interaction.confirm_tool_call_id = None;
     if !allowed {
@@ -1446,7 +1446,7 @@ mod tests {
 
         assert!(reply_rx.await.unwrap());
         let app = &session.app;
-        assert_eq!(app.interaction.mode, crate::app::AppMode::Normal);
+        assert_eq!(app.interaction.mode, crate::app::AppMode::Insert);
         assert!(app.interaction.confirm_prompt.is_none());
         assert!(app.interaction.confirm_tool_call_id.is_none());
         assert!(
@@ -1495,7 +1495,7 @@ mod tests {
 
         assert!(!reply_rx.await.unwrap());
         let app = &session.app;
-        assert_eq!(app.interaction.mode, crate::app::AppMode::Normal);
+        assert_eq!(app.interaction.mode, crate::app::AppMode::Insert);
         assert!(app.interaction.confirm_prompt.is_none());
         assert!(app.interaction.confirm_tool_call_id.is_none());
         assert_eq!(

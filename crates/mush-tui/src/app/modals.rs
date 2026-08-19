@@ -26,7 +26,7 @@ impl App {
 
     pub fn close_slash_menu(&mut self) {
         self.completion.slash_menu = None;
-        self.interaction.mode = AppMode::Normal;
+        self.interaction.mode = AppMode::Insert;
     }
 
     pub fn open_session_picker(&mut self, sessions: Vec<SessionMeta>, cwd: String) {
@@ -45,7 +45,7 @@ impl App {
 
     pub fn close_session_picker(&mut self) {
         self.interaction.session_picker = None;
-        self.interaction.mode = AppMode::Normal;
+        self.interaction.mode = AppMode::Insert;
     }
 
     pub fn selected_session(&self) -> Option<&SessionMeta> {
@@ -84,7 +84,7 @@ impl App {
 
     pub fn close_model_picker(&mut self) {
         self.interaction.model_picker = None;
-        self.interaction.mode = AppMode::Normal;
+        self.interaction.mode = AppMode::Insert;
     }
 
     pub fn selected_model_id(&self) -> Option<String> {
@@ -106,7 +106,7 @@ impl App {
 
     pub fn close_login_picker(&mut self) {
         self.interaction.login_picker = None;
-        self.interaction.mode = AppMode::Normal;
+        self.interaction.mode = AppMode::Insert;
     }
 
     pub fn open_compaction_recovery(
@@ -127,7 +127,7 @@ impl App {
 
     pub fn close_compaction_recovery(&mut self) {
         self.interaction.compaction_recovery = None;
-        self.interaction.mode = AppMode::Normal;
+        self.interaction.mode = AppMode::Insert;
     }
 
     pub fn selected_login_provider(&self) -> Option<String> {

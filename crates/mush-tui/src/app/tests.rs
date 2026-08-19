@@ -644,7 +644,7 @@ fn multi_line_input() {
 #[test]
 fn session_picker_open_close() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
-    assert_eq!(app.interaction.mode, AppMode::Normal);
+    assert_eq!(app.interaction.mode, AppMode::Insert);
 
     let sessions = vec![SessionMeta {
         id: mush_session::SessionId::from("abc"),
@@ -661,7 +661,7 @@ fn session_picker_open_close() {
     assert!(app.interaction.session_picker.is_some());
 
     app.close_session_picker();
-    assert_eq!(app.interaction.mode, AppMode::Normal);
+    assert_eq!(app.interaction.mode, AppMode::Insert);
     assert!(app.interaction.session_picker.is_none());
 }
 
@@ -1819,7 +1819,7 @@ fn open_model_picker_overlay_is_noop_without_models() {
     app.completion.model_completions.clear();
     app.open_model_picker_overlay();
     assert!(app.interaction.model_picker.is_none());
-    assert_eq!(app.interaction.mode, AppMode::Normal);
+    assert_eq!(app.interaction.mode, AppMode::Insert);
 }
 
 #[test]
@@ -1913,7 +1913,7 @@ fn login_picker_open_close() {
     assert!(app.interaction.login_picker.is_some());
 
     app.close_login_picker();
-    assert_eq!(app.interaction.mode, AppMode::Normal);
+    assert_eq!(app.interaction.mode, AppMode::Insert);
     assert!(app.interaction.login_picker.is_none());
 }
 

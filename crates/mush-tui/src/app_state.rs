@@ -175,7 +175,7 @@ pub struct InteractionState {
 impl Default for InteractionState {
     fn default() -> Self {
         Self {
-            mode: AppMode::Normal,
+            mode: AppMode::Insert,
             session_picker: None,
             model_picker: None,
             login_picker: None,

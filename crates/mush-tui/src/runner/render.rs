@@ -43,7 +43,7 @@ pub(super) fn draw_panes(
         }
         let streaming_idle = focused_app.is_busy() && focused_app.input.text.is_empty();
         if !streaming_idle
-            && (focused_app.interaction.mode == app::AppMode::Normal
+            && (focused_app.interaction.mode == app::AppMode::Insert
                 || focused_app.interaction.mode == app::AppMode::SlashComplete
                 || (focused_app.stream.active
                     && focused_app.interaction.mode != app::AppMode::ToolConfirm))

@@ -740,13 +740,13 @@ mouse_scroll_lines = 5
     fn scoped_keys_config_is_accepted() {
         let config = toml::from_str::<Config>(
             r#"
-            [keys.normal]
+            [keys.insert]
             edit_steering = "alt+k"
             "#,
         )
         .expect("scoped keys should be accepted");
 
-        assert!(config.keys.normal.raw.contains_key("edit_steering"));
+        assert!(config.keys.insert.raw.contains_key("edit_steering"));
     }
 
     #[test]

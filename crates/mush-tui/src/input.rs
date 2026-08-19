@@ -336,7 +336,7 @@ fn try_open_at_picker(app: &mut App) -> bool {
 
 fn handle_at_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     let Some(picker) = app.interaction.at_picker.as_mut() else {
-        app.interaction.mode = AppMode::Normal;
+        app.interaction.mode = AppMode::Insert;
         return None;
     };
     let count = picker.matches.len();
@@ -369,7 +369,7 @@ fn handle_at_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             let start = picker.trigger_start;
             let end = picker.trigger_end;
             app.interaction.at_picker = None;
-            app.interaction.mode = AppMode::Normal;
+            app.interaction.mode = AppMode::Insert;
             insert_template(app, start, end, &template.content);
             None
         }
@@ -380,7 +380,7 @@ fn handle_at_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         ) =>
         {
             app.interaction.at_picker = None;
-            app.interaction.mode = AppMode::Normal;
+            app.interaction.mode = AppMode::Insert;
             None
         }
         _ if crate::keybinds::is_backspace(key) => {
@@ -401,7 +401,7 @@ fn refresh_at_picker(app: &mut App) {
     let Some(trigger) = crate::at_template::parse_at_trigger(&app.input.text, app.input.cursor)
     else {
         app.interaction.at_picker = None;
-        app.interaction.mode = AppMode::Normal;
+        app.interaction.mode = AppMode::Insert;
         return;
     };
     let matches: Vec<mush_ext::PromptTemplate> =
@@ -411,7 +411,7 @@ fn refresh_at_picker(app: &mut App) {
             .collect();
     if matches.is_empty() {
         app.interaction.at_picker = None;
-        app.interaction.mode = AppMode::Normal;
+        app.interaction.mode = AppMode::Insert;
         return;
     }
     if let Some(picker) = app.interaction.at_picker.as_mut() {
@@ -423,7 +423,7 @@ fn refresh_at_picker(app: &mut App) {
 
 fn handle_slot_edit_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     let Some(state) = app.interaction.slot_edit.as_ref() else {
-        app.interaction.mode = AppMode::Normal;
+        app.interaction.mode = AppMode::Insert;
         return None;
     };
     let count = state.slots.len();
@@ -459,7 +459,7 @@ fn handle_slot_edit_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         ) =>
         {
             app.interaction.slot_edit = None;
-            app.interaction.mode = AppMode::Normal;
+            app.interaction.mode = AppMode::Insert;
             None
         }
         _ if crate::keybinds::is_backspace(key) => {
@@ -604,7 +604,7 @@ fn handle_settings_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     use crate::keybinds::{Action, KeyScope};
 
     let Some(menu) = app.settings_menu.as_mut() else {
-        app.interaction.mode = AppMode::Normal;
+        app.interaction.mode = AppMode::Insert;
         return None;
     };
     if app.keymap.matches(Action::QuitOrAbort, key)
@@ -613,7 +613,7 @@ fn handle_settings_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             .matches_in(KeyScope::Settings, Action::Cancel, key)
     {
         app.settings_menu = None;
-        app.interaction.mode = AppMode::Normal;
+        app.interaction.mode = AppMode::Insert;
     } else if app
         .keymap
         .matches_in(KeyScope::Settings, Action::NextItem, key)
@@ -647,7 +647,7 @@ fn handle_compaction_recovery_key(app: &mut App, key: KeyEvent) -> Option<AppEve
     use crate::keybinds::Action;
 
     let Some(recovery) = app.interaction.compaction_recovery.as_mut() else {
-        app.interaction.mode = AppMode::Normal;
+        app.interaction.mode = AppMode::Insert;
         return None;
     };
     if app.keymap.matches(Action::QuitOrAbort, key) || app.keymap.matches(Action::Cancel, key) {
@@ -678,7 +678,7 @@ fn handle_search_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         _ if app.keymap.matches_in(KeyScope::Search, Action::Cancel, key)
             || app.keymap.matches(Action::EnterSearch, key) =>
         {
-            app.interaction.mode = AppMode::Normal;
+            app.interaction.mode = AppMode::Insert;
             app.interaction.search.query.clear();
             app.interaction.search.matches.clear();
         }
@@ -686,7 +686,7 @@ fn handle_search_mode(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             .keymap
             .matches_in(KeyScope::Search, Action::Confirm, key) =>
         {
-            app.interaction.mode = AppMode::Normal;
+            app.interaction.mode = AppMode::Insert;
             app.interaction.search.query.clear();
             app.interaction.search.matches.clear();
         }
@@ -723,14 +723,14 @@ fn handle_slash_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
 
     match () {
         _ if app.keymap.matches(Action::QuitOrAbort, key)
-            || app.keymap.matches_in(KeyScope::Normal, Action::Cancel, key) =>
+            || app.keymap.matches_in(KeyScope::Insert, Action::Cancel, key) =>
         {
             app.close_slash_menu();
             None
         }
         _ if app
             .keymap
-            .matches_in(KeyScope::Normal, Action::Confirm, key) =>
+            .matches_in(KeyScope::Insert, Action::Confirm, key) =>
         {
             if let Some(ref menu) = app.completion.slash_menu
                 && let Some(cmd) = menu.matches.get(menu.selected)
@@ -744,7 +744,7 @@ fn handle_slash_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         }
         _ if app
             .keymap
-            .matches_in(KeyScope::Normal, Action::NextItem, key) =>
+            .matches_in(KeyScope::Insert, Action::NextItem, key) =>
         {
             if let Some(ref mut menu) = app.completion.slash_menu {
                 let len = menu.matches.len();
@@ -756,7 +756,7 @@ fn handle_slash_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         }
         _ if app
             .keymap
-            .matches_in(KeyScope::Normal, Action::PreviousItem, key) =>
+            .matches_in(KeyScope::Insert, Action::PreviousItem, key) =>
         {
             if let Some(ref mut menu) = app.completion.slash_menu {
                 let len = menu.matches.len();
@@ -883,7 +883,7 @@ fn handle_navigate_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         return handle_quit_or_abort(app);
     }
     if is_cancel_key(app, key) {
-        app.interaction.mode = AppMode::Normal;
+        app.interaction.mode = AppMode::Insert;
         app.viewport.resume();
         return None;
     }
