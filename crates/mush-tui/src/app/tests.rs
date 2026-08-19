@@ -282,9 +282,9 @@ fn truncate_long_output() {
         .join("\n");
     let output = truncate_output(&lines);
     assert!(output.contains("line 19"));
-    assert!(output.contains("line 8"));
-    assert!(output.contains("8 earlier lines"));
-    assert!(!output.contains("line 7\n"));
+    assert!(output.contains("line 15"));
+    assert!(output.contains("15 earlier lines"));
+    assert!(!output.contains("line 14\n"));
 }
 
 #[test]
@@ -303,28 +303,19 @@ fn the_earlier_lines_note_uses_a_single_ellipsis() {
         .collect::<Vec<_>>()
         .join("\n");
     let output = truncate_output(&lines);
-    assert!(output.starts_with("… 8 earlier lines\n"));
+    assert!(output.starts_with("… 15 earlier lines\n"));
     assert!(!output.contains("..."));
 }
 
 #[test]
-fn truncate_output_large_allows_more_lines_than_small() {
+fn both_caps_keep_the_same_five_lines() {
     let lines = (0..30)
         .map(|i| format!("line {i}"))
         .collect::<Vec<_>>()
         .join("\n");
-    let small = truncate_output(&lines);
-    let large = truncate_output_large(&lines);
-    assert!(
-        small.contains("earlier lines"),
-        "small cap should truncate 30 lines"
-    );
-    assert!(
-        !large.contains("earlier lines"),
-        "large cap should fit 30 lines: {large}"
-    );
-    assert!(large.contains("line 0"));
-    assert!(large.contains("line 29"));
+
+    assert_eq!(truncate_output(&lines), truncate_output_large(&lines));
+    assert!(truncate_output(&lines).starts_with("… 25 earlier lines\n"));
 }
 
 #[test]

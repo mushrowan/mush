@@ -1,7 +1,5 @@
 use super::*;
 
-const LIVE_PREVIEW_LINES: usize = 5;
-
 impl App {
     fn current_turn_message_mut(&mut self) -> Option<crate::display_types::MessageMut<'_>> {
         self.messages
@@ -223,7 +221,7 @@ impl App {
             return false;
         }
         tool.live_output = Some(output.to_string());
-        let preview = crate::batch_output::truncate_output_to(output, LIVE_PREVIEW_LINES);
+        let preview = crate::batch_output::truncate_output(output);
         if let Some(mut turn) = self.current_turn_message_mut()
             && let Some(call) = turn
                 .tool_calls

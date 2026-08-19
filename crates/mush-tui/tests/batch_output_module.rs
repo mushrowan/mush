@@ -22,5 +22,5 @@ fn batch_output_module_exposes_parser_and_preview_helpers() {
             .join("\n"),
     );
     assert!(preview.contains("line 13"));
-    assert!(preview.contains("2 earlier lines"));
+    assert!(preview.contains("9 earlier lines"));
 }

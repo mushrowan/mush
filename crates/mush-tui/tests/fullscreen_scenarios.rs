@@ -1514,7 +1514,7 @@ fn a_finished_tool_keeps_the_tail_too() {
         .unwrap_or_default();
 
     assert!(
-        preview.starts_with("… 5 earlier lines\nline 6\n"),
+        preview.starts_with("… 40 earlier lines\nline 41\n"),
         "{preview}"
     );
     assert!(preview.ends_with("line 45"), "{preview}");

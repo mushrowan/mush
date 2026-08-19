@@ -1,5 +1,5 @@
-const MAX_PREVIEW_LINES: usize = 12;
-const MAX_SINGLE_TOOL_LINES: usize = 40;
+const MAX_PREVIEW_LINES: usize = 5;
+const MAX_SINGLE_TOOL_LINES: usize = 5;
 const MAX_PREVIEW_LINE_LEN: usize = 120;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
