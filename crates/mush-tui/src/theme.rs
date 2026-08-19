@@ -173,7 +173,7 @@ impl Theme {
             pane_separator_active: Style::default().fg(Color::DarkGray),
 
             selection_marker: Style::default().fg(Color::Cyan),
-            selection: Style::default().bg(Color::Indexed(239)),
+            selection: Style::default().bg(Color::Indexed(60)),
             scroll_hint: Style::default().fg(Color::DarkGray),
             scroll_indicator: Style::default().fg(Color::Blue),
 
@@ -288,7 +288,7 @@ impl Theme {
             pane_separator_active: Style::default().fg(Color::Gray),
 
             selection_marker: Style::default().fg(Color::Blue),
-            selection: Style::default().bg(Color::Indexed(251)),
+            selection: Style::default().bg(Color::Indexed(147)),
             scroll_hint: Style::default().fg(Color::Gray),
             scroll_indicator: Style::default().fg(Color::Blue),
 
@@ -746,5 +746,57 @@ mod tests {
         };
         let theme = auto_theme(&config);
         assert_eq!(theme.user_label.fg, Some(Color::Magenta));
+    }
+}
+
+#[cfg(test)]
+mod selection_colour_tests {
+    use super::*;
+
+    fn rgb(colour: Color) -> (f64, f64, f64) {
+        let index = match colour {
+            Color::Rgb(r, g, b) => return (f64::from(r), f64::from(g), f64::from(b)),
+            Color::Indexed(i) => i,
+            other => panic!("expected an indexed or rgb colour, got {other:?}"),
+        };
+        if index >= 232 {
+            let grey = f64::from(8 + (index - 232) * 10);
+            return (grey, grey, grey);
+        }
+        let cube = [0.0, 95.0, 135.0, 175.0, 215.0, 255.0];
+        let i = usize::from(index - 16);
+        (cube[i / 36], cube[(i / 6) % 6], cube[i % 6])
+    }
+
+    fn luminance(colour: Color) -> f64 {
+        let (r, g, b) = rgb(colour);
+        0.2126f64.mul_add(r, 0.7152f64.mul_add(g, 0.0722 * b))
+    }
+
+    fn assert_selection_stands_out(theme: &Theme, name: &str) {
+        let selection = theme.selection.bg.expect("a selection background");
+        let backgrounds = [
+            ("tool panel", theme.tool_panel_bg.bg),
+            ("block highlight", Some(theme.block_highlight_bg)),
+            ("user message", theme.user_msg_bg.bg),
+        ];
+        for (label, background) in backgrounds {
+            let background = background.expect("a background");
+            let delta = (luminance(selection) - luminance(background)).abs();
+            assert!(
+                delta >= 28.0,
+                "{name}: selection sits {delta:.0} from the {label} background"
+            );
+        }
+    }
+
+    #[test]
+    fn the_dark_selection_stands_out() {
+        assert_selection_stands_out(&Theme::dark(), "dark");
+    }
+
+    #[test]
+    fn the_light_selection_stands_out() {
+        assert_selection_stands_out(&Theme::light(), "light");
     }
 }
