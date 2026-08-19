@@ -1519,3 +1519,27 @@ fn a_finished_tool_keeps_the_tail_too() {
     );
     assert!(preview.ends_with("line 45"), "{preview}");
 }
+
+#[test]
+fn a_tool_settles_in_place_when_it_finishes() {
+    let mut app = bash_with_output(8);
+    let output: Vec<String> = (1..=8).map(|i| format!("line {i}")).collect();
+    let running = window_rows(&app);
+
+    app.end_tool(
+        &ToolCallId::from("tc_1"),
+        "bash",
+        mush_ai::types::ToolOutcome::Success,
+        Some(&output.join("\n")),
+        None,
+    );
+
+    let settled = window_rows(&app);
+    assert_eq!(
+        settled
+            .iter()
+            .map(|r| r.replace("bash · done", "bash · running"))
+            .collect::<Vec<_>>(),
+        running
+    );
+}
