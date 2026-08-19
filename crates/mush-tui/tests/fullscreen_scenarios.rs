@@ -1608,3 +1608,13 @@ fn capital_y_keeps_the_row_as_drawn() {
         "{event:?}"
     );
 }
+
+#[test]
+fn the_caret_stays_put_when_a_selection_starts() {
+    let mut app = log_with_world();
+    let before = caret(&app);
+
+    press(&mut app, KeyCode::Char('v'));
+
+    assert_eq!(caret(&app), before);
+}

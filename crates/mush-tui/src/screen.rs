@@ -330,7 +330,10 @@ impl Screen {
 
     #[must_use]
     pub fn cursor_cell(&self, app: &App, area: Rect) -> Option<(u16, u16)> {
-        if app.interaction.mode != crate::app::AppMode::Navigate {
+        if !matches!(
+            app.interaction.mode,
+            crate::app::AppMode::Navigate | crate::app::AppMode::Visual
+        ) {
             return None;
         }
         let input_h = input_height(&app.input, area.width);
