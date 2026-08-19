@@ -84,8 +84,6 @@ pub(super) fn draw_panes(
 
 fn input_region(app: &App, pane_area: Rect) -> Rect {
     let input_h = crate::ui::input_height(&app.input, pane_area.width);
-    let tools_h =
-        crate::widgets::tool_panels::tool_panels_height(&app.active_tools, pane_area.width);
     let status_h = crate::widgets::status_bar::status_bar_height(app, pane_area.width);
-    crate::ui::layout(pane_area, input_h, tools_h, status_h).input
+    crate::ui::layout(pane_area, input_h, status_h).input
 }

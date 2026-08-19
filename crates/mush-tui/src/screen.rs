@@ -12,7 +12,6 @@ use crate::ui::{input_height, layout, status_bar_height};
 use crate::widgets::input_box::InputBox;
 use crate::widgets::message_list::transcript_guards;
 use crate::widgets::status_bar::StatusBar;
-use crate::widgets::tool_panels::{ToolPanels, tool_panels_height};
 
 pub const SCROLLBAR_FADE: Duration = Duration::from_millis(1200);
 
@@ -334,10 +333,9 @@ impl Screen {
         if app.interaction.mode != crate::app::AppMode::Navigate {
             return None;
         }
-        let tools_h = tool_panels_height(&app.active_tools, area.width);
         let input_h = input_height(&app.input, area.width);
         let status_h = status_bar_height(app, area.width);
-        let window = layout(area, input_h, tools_h, status_h).messages;
+        let window = layout(area, input_h, status_h).messages;
         let column = u16::try_from(app.viewport.cursor().column).unwrap_or(u16::MAX);
         Some((
             window.x + column.min(window.width.saturating_sub(1)),
@@ -350,10 +348,9 @@ impl Screen {
     }
 
     pub fn render(&mut self, app: &App, area: Rect, buf: &mut Buffer) {
-        let tools_h = tool_panels_height(&app.active_tools, area.width);
         let input_h = input_height(&app.input, area.width);
         let status_h = status_bar_height(app, area.width);
-        let regions = layout(area, input_h, tools_h, status_h);
+        let regions = layout(area, input_h, status_h);
         app.input.area.set(regions.input);
 
         let transcript = transcript_guards(app, area.width);
@@ -366,9 +363,6 @@ impl Screen {
         self.paint_selection(app, regions.messages, window, buf);
         self.render_scrollbar(app, regions.messages, buf);
 
-        if let Some(tools) = regions.tools {
-            ToolPanels::new(&app.active_tools, &app.theme).render(tools, buf);
-        }
         InputBox::new(app).render(regions.input, buf);
         StatusBar::new(app).render(regions.status, buf);
     }

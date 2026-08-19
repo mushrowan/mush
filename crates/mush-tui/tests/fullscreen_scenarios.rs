@@ -1418,3 +1418,35 @@ fn a_running_tool_draws_in_the_transcript() {
         "{transcript:#?}"
     );
 }
+
+fn transcript_height(app: &App) -> usize {
+    rows(app, 80, 24);
+    app.viewport.page()
+}
+
+#[test]
+fn nothing_is_reserved_above_the_composer() {
+    let idle = conversation(1);
+    let running = with_running_bash();
+
+    assert_eq!(transcript_height(&running), transcript_height(&idle));
+}
+
+#[test]
+fn no_tool_rendering_draws_a_border() {
+    let mut app = with_running_bash();
+    app.end_tool(
+        &ToolCallId::from("tc_1"),
+        "bash",
+        mush_ai::types::ToolOutcome::Success,
+        Some("file1.txt"),
+        None,
+    );
+    app.start_tool(&ToolCallId::from("tc_2"), "read", "src/main.rs");
+
+    let transcript = window_rows(&app).join("");
+
+    for border in ['┌', '─', '│', '└'] {
+        assert!(!transcript.contains(border), "{border} in {transcript:?}");
+    }
+}

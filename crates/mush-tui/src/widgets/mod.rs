@@ -14,5 +14,4 @@ pub mod settings_menu;
 pub mod shimmer;
 pub mod slash_menu;
 pub mod status_bar;
-pub mod tool_panels;
 pub mod usage_bar;
