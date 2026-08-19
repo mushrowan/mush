@@ -300,7 +300,7 @@ fn build_message_lines(
         }
     }
 
-    push_completed_tool_box_lines(style.theme, msg, width, &mut lines);
+    push_tool_box_lines(style.theme, msg, width, &mut lines);
     push_usage_line(msg, style, &mut lines);
     lines
 }
@@ -554,19 +554,15 @@ fn line_cell_width(line: &Line<'_>) -> usize {
     spans_cell_width(&line.spans)
 }
 
-fn push_completed_tool_box_lines(
+fn push_tool_box_lines(
     theme: &Theme,
     msg: &DisplayMessage,
     width: u16,
     lines: &mut Vec<Line<'static>>,
 ) {
-    let completed: Vec<&DisplayToolCall> = msg
-        .tool_calls
-        .iter()
-        .filter(|tc| tc.status != ToolCallStatus::Running)
-        .collect();
+    let calls: Vec<&DisplayToolCall> = msg.tool_calls.iter().collect();
 
-    for group in completed.chunk_by(|a, b| a.batch == b.batch) {
+    for group in calls.chunk_by(|a, b| a.batch == b.batch) {
         render_tool_box_group(group, width, lines, theme);
     }
 }

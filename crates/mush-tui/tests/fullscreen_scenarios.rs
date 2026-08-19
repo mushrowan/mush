@@ -1,7 +1,7 @@
 use chrono::{TimeDelta, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use mush_ai::oauth::usage::{OAuthUsage, UsageWindow};
-use mush_ai::types::TokenCount;
+use mush_ai::types::{TokenCount, ToolCallId};
 use mush_tui::AppEvent;
 use mush_tui::app::{App, Caret, DisplayMessage, MessageRole};
 use mush_tui::input::{handle_key, handle_mouse};
@@ -1398,4 +1398,23 @@ fn a_count_works_in_visual_mode() {
 
     let expected: Vec<(u16, u16)> = (1..12).map(|x| (x, 6)).collect();
     assert_eq!(selected_cells(&app), expected);
+}
+
+fn with_running_bash() -> App {
+    let mut app = conversation(1);
+    app.start_streaming();
+    app.start_tool(&ToolCallId::from("tc_1"), "bash", "ls -la");
+    app
+}
+
+#[test]
+fn a_running_tool_draws_in_the_transcript() {
+    let app = with_running_bash();
+
+    let transcript = window_rows(&app);
+
+    assert!(
+        transcript.iter().any(|row| row.contains("bash · running")),
+        "{transcript:#?}"
+    );
 }

@@ -1558,3 +1558,24 @@ fn expanding_a_thinking_block_rebuilds_only_that_message() {
 
     assert_eq!(message_build_count(), 1);
 }
+
+#[test]
+fn a_running_tool_call_renders_its_header() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.messages.push(DisplayMessage {
+        tool_calls: vec![crate::app::DisplayToolCall {
+            name: "bash".into(),
+            summary: "ls -la".into(),
+            status: ToolCallStatus::Running,
+            output_preview: None,
+            image_data: None,
+            batch: 1,
+        }],
+        ..DisplayMessage::new(MessageRole::Assistant, "let me check")
+    });
+
+    let content = buffer_to_string(&render_app(&app, 50, 15));
+
+    assert!(content.contains("bash"), "{content}");
+    assert!(content.contains("running"), "{content}");
+}
