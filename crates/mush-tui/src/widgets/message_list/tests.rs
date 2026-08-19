@@ -309,6 +309,7 @@ fn usage_line_deferred_while_tool_running() {
     app.interaction.show_usage_lines = true;
     app.messages.push(DisplayMessage {
         tool_calls: vec![crate::app::DisplayToolCall {
+            tool_call_id: "tc".into(),
             name: "bash".into(),
             summary: "ls -la".into(),
             status: ToolCallStatus::Running,
@@ -349,6 +350,7 @@ fn tool_calls_render() {
     app.messages.push(DisplayMessage {
         tool_calls: vec![
             crate::app::DisplayToolCall {
+                tool_call_id: "tc".into(),
                 name: "bash".into(),
                 summary: "ls -la".into(),
                 status: ToolCallStatus::Done,
@@ -357,6 +359,7 @@ fn tool_calls_render() {
                 batch: 1,
             },
             crate::app::DisplayToolCall {
+                tool_call_id: "tc".into(),
                 name: "read".into(),
                 summary: "src/main.rs".into(),
                 status: ToolCallStatus::Error,
@@ -378,6 +381,7 @@ fn edit_tool_renders_inline_diff_when_wide() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.messages.push(DisplayMessage {
         tool_calls: vec![crate::app::DisplayToolCall {
+            tool_call_id: "tc".into(),
             name: "edit".into(),
             summary: "src/main.rs".into(),
             status: ToolCallStatus::Done,
@@ -405,6 +409,7 @@ fn edit_tool_renders_inline_diff_when_narrow() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.messages.push(DisplayMessage {
         tool_calls: vec![crate::app::DisplayToolCall {
+            tool_call_id: "tc".into(),
             name: "edit".into(),
             summary: "src/main.rs".into(),
             status: ToolCallStatus::Done,
@@ -500,6 +505,7 @@ fn a_completed_tool_is_a_tinted_panel_with_a_status_header() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.messages.push(DisplayMessage {
         tool_calls: vec![crate::app::DisplayToolCall {
+            tool_call_id: "tc".into(),
             name: "bash".into(),
             summary: "cargo test".into(),
             status: ToolCallStatus::Done,
@@ -538,6 +544,7 @@ fn a_completed_tool_is_a_tinted_panel_with_a_status_header() {
 fn batched_tools_stack_one_panel_per_call() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     let tool = |name: &str| crate::app::DisplayToolCall {
+        tool_call_id: "tc".into(),
         name: name.into(),
         summary: format!("{name} summary"),
         status: ToolCallStatus::Done,
@@ -567,6 +574,7 @@ fn a_failed_tool_says_error_in_red() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.messages.push(DisplayMessage {
         tool_calls: vec![crate::app::DisplayToolCall {
+            tool_call_id: "tc".into(),
             name: "bash".into(),
             summary: "cargo check".into(),
             status: ToolCallStatus::Error,
@@ -624,6 +632,7 @@ fn tool_box_wraps_long_summary() {
     let long_path = "/home/user/dev/mush/crates/mush-tui/src/widgets/message_list.rs";
     app.messages.push(DisplayMessage {
         tool_calls: vec![crate::app::DisplayToolCall {
+            tool_call_id: "tc".into(),
             name: "read".into(),
             summary: long_path.into(),
             status: ToolCallStatus::Done,
@@ -648,6 +657,7 @@ fn completed_tool_box_sizes_output_with_halfwidth_dakuten_by_cells() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.messages.push(DisplayMessage {
         tool_calls: vec![crate::app::DisplayToolCall {
+            tool_call_id: "tc".into(),
             name: "noop".into(),
             summary: "ok".into(),
             status: ToolCallStatus::Done,
@@ -671,6 +681,7 @@ fn read_tool_box_pads_halfwidth_dakuten_by_cells() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.messages.push(DisplayMessage {
         tool_calls: vec![crate::app::DisplayToolCall {
+            tool_call_id: "tc".into(),
             name: "read".into(),
             summary: "src/lib.rs".into(),
             status: ToolCallStatus::Done,
@@ -772,6 +783,7 @@ fn read_tool_box_trims_shared_leading_indent() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.messages.push(DisplayMessage {
         tool_calls: vec![crate::app::DisplayToolCall {
+            tool_call_id: "tc".into(),
             name: "read".into(),
             summary: "src/main.rs".into(),
             status: ToolCallStatus::Done,
@@ -806,6 +818,7 @@ fn read_tool_box_renders_dim_line_numbers_with_highlighted_content() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.messages.push(DisplayMessage {
         tool_calls: vec![crate::app::DisplayToolCall {
+            tool_call_id: "tc".into(),
             name: "read".into(),
             summary: "src/main.rs".into(),
             status: ToolCallStatus::Done,
@@ -844,6 +857,7 @@ fn bash_tool_summary_is_syntax_highlighted() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.messages.push(DisplayMessage {
         tool_calls: vec![crate::app::DisplayToolCall {
+            tool_call_id: "tc".into(),
             name: "bash".into(),
             summary: "for file in *.rs; do echo $file; done".into(),
             status: ToolCallStatus::Done,
@@ -882,6 +896,7 @@ fn bash_tool_output_is_syntax_highlighted_when_plain() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.messages.push(DisplayMessage {
         tool_calls: vec![crate::app::DisplayToolCall {
+            tool_call_id: "tc".into(),
             name: "bash".into(),
             summary: "script".into(),
             status: ToolCallStatus::Done,
@@ -921,6 +936,7 @@ fn bash_tool_output_wraps_long_highlighted_lines() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.messages.push(DisplayMessage {
         tool_calls: vec![crate::app::DisplayToolCall {
+            tool_call_id: "tc".into(),
             name: "bash".into(),
             summary: "cargo nextest run".into(),
             status: ToolCallStatus::Done,
@@ -1293,6 +1309,7 @@ fn a_running_tool_defers_the_usage_line() {
         ..Default::default()
     });
     msg.tool_calls.push(DisplayToolCall {
+        tool_call_id: "tc".into(),
         name: "bash".into(),
         summary: "ls".into(),
         status: ToolCallStatus::Running,
@@ -1529,6 +1546,7 @@ fn a_tool_result_rebuilds_only_the_message_that_owns_it() {
         .expect("message")
         .tool_calls
         .push(crate::app::DisplayToolCall {
+            tool_call_id: "tc".into(),
             name: "bash".into(),
             summary: "cargo build".into(),
             status: ToolCallStatus::Done,
@@ -1564,6 +1582,7 @@ fn a_running_tool_call_renders_its_header() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.messages.push(DisplayMessage {
         tool_calls: vec![crate::app::DisplayToolCall {
+            tool_call_id: "tc".into(),
             name: "bash".into(),
             summary: "ls -la".into(),
             status: ToolCallStatus::Running,

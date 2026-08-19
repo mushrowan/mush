@@ -21,6 +21,6 @@ fn batch_output_module_exposes_parser_and_preview_helpers() {
             .collect::<Vec<_>>()
             .join("\n"),
     );
-    assert!(preview.contains("line 0"));
-    assert!(preview.contains("2 more lines"));
+    assert!(preview.contains("line 13"));
+    assert!(preview.contains("2 earlier lines"));
 }

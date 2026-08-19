@@ -281,10 +281,10 @@ fn truncate_long_output() {
         .collect::<Vec<_>>()
         .join("\n");
     let output = truncate_output(&lines);
-    assert!(output.contains("line 0"));
-    assert!(output.contains("line 11"));
-    assert!(output.contains("8 more lines"));
-    assert!(!output.contains("line 12\n"));
+    assert!(output.contains("line 19"));
+    assert!(output.contains("line 8"));
+    assert!(output.contains("8 earlier lines"));
+    assert!(!output.contains("line 7\n"));
 }
 
 #[test]
@@ -297,14 +297,14 @@ fn truncate_long_line() {
 }
 
 #[test]
-fn truncate_more_lines_footer_uses_single_ellipsis() {
+fn the_earlier_lines_note_uses_a_single_ellipsis() {
     let lines = (0..20)
         .map(|i| format!("line {i}"))
         .collect::<Vec<_>>()
         .join("\n");
     let output = truncate_output(&lines);
-    assert!(output.contains("… (8 more lines)"));
-    assert!(!output.contains("... (8 more lines)"));
+    assert!(output.starts_with("… 8 earlier lines\n"));
+    assert!(!output.contains("..."));
 }
 
 #[test]
@@ -316,11 +316,11 @@ fn truncate_output_large_allows_more_lines_than_small() {
     let small = truncate_output(&lines);
     let large = truncate_output_large(&lines);
     assert!(
-        small.contains("more lines"),
+        small.contains("earlier lines"),
         "small cap should truncate 30 lines"
     );
     assert!(
-        !large.contains("more lines"),
+        !large.contains("earlier lines"),
         "large cap should fit 30 lines: {large}"
     );
     assert!(large.contains("line 0"));
@@ -2095,4 +2095,36 @@ fn the_commit_point_only_moves_forward_across_a_session() {
     }
 
     assert!(seen > 0, "a three turn session should commit something");
+}
+
+#[test]
+fn live_output_reaches_the_tool_call_in_the_transcript() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.messages
+        .push(DisplayMessage::new(MessageRole::Assistant, "on it"));
+    app.start_streaming();
+    app.start_tool(&ToolCallId::from("tc_1"), "bash", "seq");
+
+    app.push_tool_output_by_exec_id("tc_1", "line 1\nline 2");
+
+    let call = &app.messages[0].tool_calls[0];
+    assert_eq!(call.output_preview.as_deref(), Some("line 1\nline 2"));
+}
+
+#[test]
+fn a_running_tool_keeps_only_the_last_five_lines() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.messages
+        .push(DisplayMessage::new(MessageRole::Assistant, "on it"));
+    app.start_streaming();
+    app.start_tool(&ToolCallId::from("tc_1"), "bash", "seq");
+    let output: Vec<String> = (1..=8).map(|i| format!("line {i}")).collect();
+
+    app.push_tool_output_by_exec_id("tc_1", &output.join("\n"));
+
+    let call = &app.messages[0].tool_calls[0];
+    assert_eq!(
+        call.output_preview.as_deref(),
+        Some("… 3 earlier lines\nline 4\nline 5\nline 6\nline 7\nline 8")
+    );
 }

@@ -1,5 +1,7 @@
 use super::*;
 
+const LIVE_PREVIEW_LINES: usize = 5;
+
 impl App {
     fn current_turn_message_mut(&mut self) -> Option<crate::display_types::MessageMut<'_>> {
         self.messages
@@ -51,6 +53,7 @@ impl App {
         let batch_idx = self.current_tool_batch;
         if let Some(mut turn) = self.current_turn_message_mut() {
             turn.tool_calls.push(DisplayToolCall {
+                tool_call_id: tool_call_id.clone(),
                 name: name.to_string(),
                 summary: summary.to_string(),
                 status: ToolCallStatus::Running,
@@ -84,8 +87,12 @@ impl App {
         }
         let batch_idx = self.current_tool_batch;
         if let Some(mut turn) = self.current_turn_message_mut() {
-            for (name, sub_summary) in sub_calls {
+            for (i, (name, sub_summary)) in sub_calls.iter().enumerate() {
                 turn.tool_calls.push(DisplayToolCall {
+                    tool_call_id: ToolCallId::from(mush_agent::exec_context::batch_sub_exec_id(
+                        tool_call_id.as_str(),
+                        i,
+                    )),
                     name: name.clone(),
                     summary: sub_summary.clone(),
                     status: ToolCallStatus::Running,
@@ -205,18 +212,27 @@ impl App {
     }
 
     pub fn push_tool_output_by_exec_id(&mut self, exec_id: &str, output: &str) -> bool {
-        if let Some(tool) = self
+        let Some(tool) = self
             .active_tools
             .iter_mut()
             .find(|t| t.tool_call_id.as_str() == exec_id)
-        {
-            if tool.live_output.as_deref() == Some(output) {
-                return false;
-            }
-            tool.live_output = Some(output.to_string());
-            return true;
+        else {
+            return false;
+        };
+        if tool.live_output.as_deref() == Some(output) {
+            return false;
         }
-        false
+        tool.live_output = Some(output.to_string());
+        let preview = crate::batch_output::truncate_output_to(output, LIVE_PREVIEW_LINES);
+        if let Some(mut turn) = self.current_turn_message_mut()
+            && let Some(call) = turn
+                .tool_calls
+                .iter_mut()
+                .find(|c| c.tool_call_id.as_str() == exec_id)
+        {
+            call.output_preview = Some(preview);
+        }
+        true
     }
 
     pub fn finish_streaming(&mut self, usage: Option<Usage>, cost: Option<Dollars>) {

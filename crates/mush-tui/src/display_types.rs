@@ -183,6 +183,7 @@ pub enum MessageRole {
 
 #[derive(Debug, Clone)]
 pub struct DisplayToolCall {
+    pub tool_call_id: ToolCallId,
     pub name: String,
     pub summary: String,
     pub status: ToolCallStatus,

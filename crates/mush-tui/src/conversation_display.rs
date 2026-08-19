@@ -83,10 +83,16 @@ pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
                                 .cloned()
                                 .unwrap_or_default();
                             let first_tc_idx = tool_calls.len();
-                            for sub in &sub_calls {
+                            for (i, sub) in sub_calls.iter().enumerate() {
                                 let name = sub["tool"].as_str().unwrap_or("?").to_string();
                                 let summary = summarise_tool_args(&name, &sub["parameters"]);
                                 tool_calls.push(DisplayToolCall {
+                                    tool_call_id: mush_ai::types::ToolCallId::from(
+                                        mush_agent::exec_context::batch_sub_exec_id(
+                                            tool_call.id.as_str(),
+                                            i,
+                                        ),
+                                    ),
                                     name,
                                     summary,
                                     status: ToolCallStatus::Running,
@@ -104,6 +110,7 @@ pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
                         } else {
                             let tc_idx = tool_calls.len();
                             tool_calls.push(DisplayToolCall {
+                                tool_call_id: tool_call.id.clone(),
                                 name: tool_call.name.to_string(),
                                 summary: summarise_tool_args(
                                     tool_call.name.as_str(),

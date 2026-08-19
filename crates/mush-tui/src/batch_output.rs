@@ -55,12 +55,17 @@ pub fn truncate_output_large(output: &str) -> String {
     truncate_output_with_cap(output, MAX_SINGLE_TOOL_LINES)
 }
 
+pub fn truncate_output_to(output: &str, max_lines: usize) -> String {
+    truncate_output_with_cap(output, max_lines)
+}
+
 fn truncate_output_with_cap(output: &str, max_lines: usize) -> String {
     let lines: Vec<&str> = output.lines().collect();
     let total = lines.len();
+    let skipped = total.saturating_sub(max_lines);
     let preview: Vec<String> = lines
         .into_iter()
-        .take(max_lines)
+        .skip(skipped)
         .map(|l| {
             if l.len() > MAX_PREVIEW_LINE_LEN {
                 let end = l.floor_char_boundary(MAX_PREVIEW_LINE_LEN);
@@ -70,9 +75,9 @@ fn truncate_output_with_cap(output: &str, max_lines: usize) -> String {
             }
         })
         .collect();
-    let mut result = preview.join("\n");
-    if total > max_lines {
-        result.push_str(&format!("\n… ({} more lines)", total - max_lines));
+    let body = preview.join("\n");
+    if skipped == 0 {
+        return body;
     }
-    result
+    format!("… {skipped} earlier lines\n{body}")
 }

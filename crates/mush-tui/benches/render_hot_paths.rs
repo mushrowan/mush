@@ -60,6 +60,7 @@ fn tool_heavy_app(message_count: usize) -> App {
     for (i, mut msg) in app.messages.iter_mut().enumerate() {
         if matches!(msg.role, MessageRole::Assistant) {
             msg.tool_calls.push(DisplayToolCall {
+                tool_call_id: "tc".into(),
                 name: "read".into(),
                 summary: format!("crates/mush-tui/src/widgets/message_list{i}.rs"),
                 status: ToolCallStatus::Done,

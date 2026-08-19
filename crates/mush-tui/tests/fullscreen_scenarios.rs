@@ -1462,3 +1462,60 @@ fn two_running_tools_stack_in_call_order() {
 
     assert!(bash < read, "{transcript:#?}");
 }
+
+fn bash_with_output(lines: usize) -> App {
+    let mut app = conversation(1);
+    app.start_streaming();
+    app.start_tool(&ToolCallId::from("tc_1"), "bash", "seq");
+    let output: Vec<String> = (1..=lines).map(|i| format!("line {i}")).collect();
+    app.push_tool_output_by_exec_id("tc_1", &output.join("\n"));
+    app
+}
+
+#[test]
+fn a_running_tool_shows_the_last_five_lines() {
+    let app = bash_with_output(8);
+
+    let transcript = window_rows(&app);
+
+    assert!(
+        transcript.iter().any(|r| r.contains("… 3 earlier lines")),
+        "{transcript:#?}"
+    );
+    assert!(transcript.iter().any(|r| r.contains("line 8")));
+    assert!(!transcript.iter().any(|r| r.contains("line 3")));
+}
+
+#[test]
+fn short_output_gets_no_note() {
+    let app = bash_with_output(3);
+
+    let transcript = window_rows(&app);
+
+    assert!(transcript.iter().any(|r| r.contains("line 1")));
+    assert!(!transcript.iter().any(|r| r.contains("earlier lines")));
+}
+
+#[test]
+fn a_finished_tool_keeps_the_tail_too() {
+    let mut app = bash_with_output(45);
+    let output: Vec<String> = (1..=45).map(|i| format!("line {i}")).collect();
+    app.end_tool(
+        &ToolCallId::from("tc_1"),
+        "bash",
+        mush_ai::types::ToolOutcome::Success,
+        Some(&output.join("\n")),
+        None,
+    );
+
+    let preview = app.messages[1].tool_calls[0]
+        .output_preview
+        .clone()
+        .unwrap_or_default();
+
+    assert!(
+        preview.starts_with("… 5 earlier lines\nline 6\n"),
+        "{preview}"
+    );
+    assert!(preview.ends_with("line 45"), "{preview}");
+}
