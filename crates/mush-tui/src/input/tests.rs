@@ -155,7 +155,8 @@ fn escape_does_not_abort_when_streaming() {
     app.stream.active = true;
     let event = handle_key(&mut app, key(KeyCode::Esc));
     assert!(event.is_none(), "{event:?}");
-    assert_eq!(app.interaction.mode, AppMode::ComposerNormal);
+    assert_eq!(app.interaction.mode, AppMode::Normal);
+    assert!(!app.interaction.focus.is_log());
 }
 
 #[test]
@@ -182,7 +183,8 @@ fn escape_does_not_abort_while_tool_runs_between_messages() {
 
     let event = handle_key(&mut app, key(KeyCode::Esc));
     assert!(event.is_none(), "{event:?}");
-    assert_eq!(app.interaction.mode, AppMode::ComposerNormal);
+    assert_eq!(app.interaction.mode, AppMode::Normal);
+    assert!(!app.interaction.focus.is_log());
 }
 
 #[test]
@@ -1709,7 +1711,8 @@ fn ctrl_bracket_does_not_abort_streaming() {
 
     let event = handle_key(&mut app, ctrl(KeyCode::Char('[')));
     assert!(event.is_none(), "{event:?}");
-    assert_eq!(app.interaction.mode, AppMode::ComposerNormal);
+    assert_eq!(app.interaction.mode, AppMode::Normal);
+    assert!(!app.interaction.focus.is_log());
 }
 
 #[test]
@@ -2082,7 +2085,8 @@ fn esc_on_an_empty_input_enters_normal_on_the_composer() {
 
     handle_key(&mut app, key(KeyCode::Esc));
 
-    assert_eq!(app.interaction.mode, AppMode::ComposerNormal);
+    assert_eq!(app.interaction.mode, AppMode::Normal);
+    assert!(!app.interaction.focus.is_log());
 }
 
 #[test]
@@ -2102,7 +2106,8 @@ fn ctrl_o_focuses_the_log_from_insert() {
 
     handle_key(&mut app, ctrl(KeyCode::Char('o')));
 
-    assert_eq!(app.interaction.mode, AppMode::Navigate);
+    assert_eq!(app.interaction.mode, AppMode::Normal);
+    assert!(app.interaction.focus.is_log());
 }
 
 #[test]
@@ -2112,7 +2117,8 @@ fn ctrl_o_focuses_the_log_from_normal_on_the_composer() {
 
     handle_key(&mut app, ctrl(KeyCode::Char('o')));
 
-    assert_eq!(app.interaction.mode, AppMode::Navigate);
+    assert_eq!(app.interaction.mode, AppMode::Normal);
+    assert!(app.interaction.focus.is_log());
 }
 
 #[test]
@@ -2123,7 +2129,8 @@ fn esc_while_navigating_stays_in_the_log() {
 
     handle_key(&mut app, key(KeyCode::Esc));
 
-    assert_eq!(app.interaction.mode, AppMode::Navigate);
+    assert_eq!(app.interaction.mode, AppMode::Normal);
+    assert!(app.interaction.focus.is_log());
 }
 
 #[test]
@@ -2209,7 +2216,7 @@ fn the_wheel_is_dead_while_an_overlay_is_up() {
 
 #[test]
 fn the_wheel_lives_in_the_log_and_composer_modes() {
-    for mode in [AppMode::Insert, AppMode::ComposerNormal, AppMode::Navigate] {
+    for mode in [AppMode::Insert, AppMode::Normal, AppMode::Visual] {
         let mut app = app_with_log();
         app.interaction.mode = mode.clone();
 
@@ -2250,7 +2257,8 @@ fn a_notch_moves_the_configured_number_of_lines() {
 #[test]
 fn v_in_the_log_anchors_a_selection_at_the_cursor() {
     let mut app = app_with_log();
-    app.interaction.mode = AppMode::Navigate;
+    app.interaction.mode = AppMode::Normal;
+    app.interaction.focus = crate::app_event::Focus::Log;
     app.viewport.cursor_to(190);
     app.viewport.move_cursor(3, 0);
 
@@ -2263,7 +2271,8 @@ fn v_in_the_log_anchors_a_selection_at_the_cursor() {
 #[test]
 fn motions_move_the_head_of_the_selection() {
     let mut app = app_with_log();
-    app.interaction.mode = AppMode::Navigate;
+    app.interaction.mode = AppMode::Normal;
+    app.interaction.focus = crate::app_event::Focus::Log;
     app.viewport.cursor_to(190);
     handle_key(&mut app, key(KeyCode::Char('v')));
 
@@ -2278,6 +2287,7 @@ fn motions_move_the_head_of_the_selection() {
 fn capital_y_skips_the_indent_strip() {
     let mut app = app_with_log();
     app.interaction.mode = AppMode::Visual;
+    app.interaction.focus = crate::app_event::Focus::Log;
     app.viewport.cursor_to(190);
     app.viewport
         .start_selection(crate::screen::SelectionKind::Char);
@@ -2288,27 +2298,31 @@ fn capital_y_skips_the_indent_strip() {
     );
 
     assert!(matches!(event, Some(AppEvent::Copy { .. })), "{event:?}");
-    assert_eq!(app.interaction.mode, AppMode::Navigate);
+    assert_eq!(app.interaction.mode, AppMode::Normal);
+    assert!(app.interaction.focus.is_log());
 }
 
 #[test]
 fn esc_leaves_visual_mode_for_the_log() {
     let mut app = app_with_log();
     app.interaction.mode = AppMode::Visual;
+    app.interaction.focus = crate::app_event::Focus::Log;
     app.viewport.cursor_to(190);
     app.viewport
         .start_selection(crate::screen::SelectionKind::Char);
 
     handle_key(&mut app, key(KeyCode::Esc));
 
-    assert_eq!(app.interaction.mode, AppMode::Navigate);
+    assert_eq!(app.interaction.mode, AppMode::Normal);
+    assert!(app.interaction.focus.is_log());
     assert_eq!(app.viewport.selection(), None);
 }
 
 #[test]
 fn a_digit_holds_a_count_for_the_next_motion() {
     let mut app = app_with_log();
-    app.interaction.mode = AppMode::Navigate;
+    app.interaction.mode = AppMode::Normal;
+    app.interaction.focus = crate::app_event::Focus::Log;
     app.viewport.cursor_to(190);
 
     handle_key(&mut app, key(KeyCode::Char('3')));

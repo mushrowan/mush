@@ -155,6 +155,7 @@ impl Default for StatusBarConfig {
 #[derive(Debug)]
 pub struct InteractionState {
     pub mode: AppMode,
+    pub focus: crate::app_event::Focus,
     pub session_picker: Option<SessionPickerState>,
     pub model_picker: Option<ModelPickerState>,
     pub login_picker: Option<LoginPickerState>,
@@ -176,6 +177,7 @@ impl Default for InteractionState {
     fn default() -> Self {
         Self {
             mode: AppMode::Insert,
+            focus: crate::app_event::Focus::default(),
             session_picker: None,
             model_picker: None,
             login_picker: None,

@@ -200,7 +200,10 @@ fn esc_leaves_insert_without_interrupting_work() {
         "cargo build line",
     ));
 
-    assert_eq!(app.interaction.mode.caret(), Caret::ComposerBlock);
+    assert_eq!(
+        app.interaction.mode.caret(app.interaction.focus),
+        Caret::ComposerBlock
+    );
     assert!(rows(&app, 80, 24).join("\n").contains("cargo build line"));
 }
 
@@ -211,7 +214,10 @@ fn a_second_esc_moves_me_to_the_log() {
 
     press(&mut app, KeyCode::Esc);
 
-    assert_eq!(app.interaction.mode.caret(), Caret::Log);
+    assert_eq!(
+        app.interaction.mode.caret(app.interaction.focus),
+        Caret::Log
+    );
 }
 
 #[test]
@@ -239,7 +245,10 @@ fn ctrl_o_reaches_the_log_in_one_press() {
 
     press_with(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL);
 
-    assert_eq!(app.interaction.mode.caret(), Caret::Log);
+    assert_eq!(
+        app.interaction.mode.caret(app.interaction.focus),
+        Caret::Log
+    );
 }
 
 #[test]
@@ -1718,7 +1727,8 @@ fn ctrl_o_comes_back_to_the_composer() {
 
     press_with(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL);
 
-    assert_eq!(app.interaction.mode, mush_tui::app::AppMode::ComposerNormal);
+    assert_eq!(app.interaction.mode, mush_tui::app::AppMode::Normal);
+    assert!(!app.interaction.focus.is_log());
 }
 
 #[test]
@@ -1744,5 +1754,6 @@ fn esc_with_the_log_focused_does_nothing() {
     press(&mut app, KeyCode::Esc);
 
     assert_eq!(app.viewport.cursor(), before);
-    assert_eq!(app.interaction.mode, mush_tui::app::AppMode::Navigate);
+    assert_eq!(app.interaction.mode, mush_tui::app::AppMode::Normal);
+    assert!(app.interaction.focus.is_log());
 }

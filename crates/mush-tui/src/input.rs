@@ -57,14 +57,15 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     if app.interaction.mode == AppMode::CompactionRecovery {
         return handle_compaction_recovery_key(app, key);
     }
-    if app.interaction.mode == AppMode::Navigate {
-        return handle_navigate_key(app, key);
-    }
     if app.interaction.mode == AppMode::Visual {
         return handle_visual_key(app, key);
     }
-    if app.interaction.mode == AppMode::ComposerNormal {
-        return handle_composer_normal_key(app, key);
+    if app.interaction.mode == AppMode::Normal {
+        return if app.interaction.focus.is_log() {
+            handle_navigate_key(app, key)
+        } else {
+            handle_composer_normal_key(app, key)
+        };
     }
     if app.input.selected {
         return handle_selection_key(app, key);
@@ -82,7 +83,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         return Some(AppEvent::PasteImage);
     }
     if is_cancel_key(app, key) {
-        app.interaction.mode = AppMode::ComposerNormal;
+        app.interaction.mode = AppMode::Normal;
         app.input.step_back_one_char();
         return None;
     }
@@ -859,10 +860,11 @@ fn handle_selection_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
 }
 
 fn focus_composer(app: &mut App, insert: bool) -> Option<AppEvent> {
+    app.interaction.focus = crate::app_event::Focus::Composer;
     app.interaction.mode = if insert {
         AppMode::Insert
     } else {
-        AppMode::ComposerNormal
+        AppMode::Normal
     };
     app.viewport.resume();
     if insert {
@@ -872,7 +874,8 @@ fn focus_composer(app: &mut App, insert: bool) -> Option<AppEvent> {
 }
 
 fn focus_log(app: &mut App) -> Option<AppEvent> {
-    app.interaction.mode = AppMode::Navigate;
+    app.interaction.focus = crate::app_event::Focus::Log;
+    app.interaction.mode = AppMode::Normal;
     app.viewport.pause();
     None
 }
@@ -982,14 +985,14 @@ fn handle_visual_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     }
     if is_cancel_key(app, key) {
         app.viewport.clear_selection();
-        app.interaction.mode = AppMode::Navigate;
+        app.interaction.mode = AppMode::Normal;
         return None;
     }
     for (action, strip_indent) in [(Action::Yank, true), (Action::YankRaw, false)] {
         if app.keymap.matches_in(KeyScope::Normal, action, key) {
             let text = crate::selection::selected_text(app, strip_indent)?;
             app.viewport.clear_selection();
-            app.interaction.mode = AppMode::Navigate;
+            app.interaction.mode = AppMode::Normal;
             return Some(AppEvent::Copy { text });
         }
     }

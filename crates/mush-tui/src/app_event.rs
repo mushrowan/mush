@@ -33,6 +33,20 @@ pub enum AppEvent {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Focus {
+    #[default]
+    Composer,
+    Log,
+}
+
+impl Focus {
+    #[must_use]
+    pub fn is_log(self) -> bool {
+        matches!(self, Self::Log)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Caret {
     ComposerBar,
@@ -50,7 +64,7 @@ impl Caret {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppMode {
     Insert,
-    ComposerNormal,
+    Normal,
     SessionPicker,
     ModelPicker,
     LoginPicker,
@@ -58,7 +72,6 @@ pub enum AppMode {
     AtPicker,
     SlotEdit,
     ToolConfirm,
-    Navigate,
     Visual,
     Search,
     Settings,
@@ -68,17 +81,14 @@ pub enum AppMode {
 impl AppMode {
     #[must_use]
     pub fn scrolls_the_log(&self) -> bool {
-        matches!(
-            self,
-            Self::Insert | Self::ComposerNormal | Self::Navigate | Self::Visual
-        )
+        matches!(self, Self::Insert | Self::Normal | Self::Visual)
     }
 
     #[must_use]
-    pub fn caret(&self) -> Caret {
-        match self {
-            Self::Navigate | Self::Visual => Caret::Log,
-            Self::ComposerNormal => Caret::ComposerBlock,
+    pub fn caret(&self, focus: Focus) -> Caret {
+        match (self, focus) {
+            (Self::Normal | Self::Visual, Focus::Log) => Caret::Log,
+            (Self::Normal | Self::Visual, Focus::Composer) => Caret::ComposerBlock,
             _ => Caret::ComposerBar,
         }
     }
