@@ -1757,3 +1757,41 @@ fn esc_with_the_log_focused_does_nothing() {
     assert_eq!(app.interaction.mode, mush_tui::app::AppMode::Normal);
     assert!(app.interaction.focus.is_log());
 }
+
+fn tinted_text(app: &App) -> String {
+    let area = Rect::new(0, 0, 80, 24);
+    let mut buffer = Buffer::empty(area);
+    Screen::new().render(app, area, &mut buffer);
+    let mut out = String::new();
+    for y in 0..area.height {
+        for x in 0..area.width {
+            if buffer[(x, y)].style().bg == app.theme.selection.bg {
+                out.push_str(buffer[(x, y)].symbol());
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn v_starts_a_selection_at_the_composer_caret() {
+    let mut app = composer_in_normal("hello world");
+    press(&mut app, KeyCode::Char('w'));
+
+    press(&mut app, KeyCode::Char('v'));
+
+    assert_eq!(tinted_text(&app), "w");
+}
+
+#[test]
+fn esc_drops_the_composer_selection() {
+    let mut app = composer_in_normal("hello world");
+    press(&mut app, KeyCode::Char('w'));
+    press(&mut app, KeyCode::Char('v'));
+
+    press(&mut app, KeyCode::Esc);
+
+    assert_eq!(tinted_text(&app), "");
+    assert_eq!(app.interaction.mode, mush_tui::app::AppMode::Normal);
+    assert!(!app.interaction.focus.is_log());
+}

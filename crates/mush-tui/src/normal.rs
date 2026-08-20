@@ -6,6 +6,8 @@ pub(crate) trait NormalTarget {
     fn cursor(&self) -> (usize, usize);
     fn place_cursor(&mut self, at: (usize, usize));
     fn move_line(&mut self, delta: isize);
+    fn start_selection(&mut self, kind: crate::screen::SelectionKind);
+    fn clear_selection(&mut self);
 
     fn to_top(&mut self) {
         self.place_cursor((0, 0));
@@ -80,6 +82,14 @@ impl NormalTarget for LogTarget<'_> {
         self.viewport.move_cursor(0, delta);
     }
 
+    fn start_selection(&mut self, kind: crate::screen::SelectionKind) {
+        self.viewport.start_selection(kind);
+    }
+
+    fn clear_selection(&mut self) {
+        self.viewport.clear_selection();
+    }
+
     fn to_top(&mut self) {
         self.viewport.to_top();
     }
@@ -139,6 +149,18 @@ impl NormalTarget for ComposerTarget<'_> {
             .saturating_add_signed(delta)
             .min(self.rows.len().saturating_sub(1));
         self.place_cursor((line, column));
+    }
+
+    fn start_selection(&mut self, kind: crate::screen::SelectionKind) {
+        self.input.anchor = Some(self.input.cursor);
+        self.input.selection_kind = match kind {
+            crate::screen::SelectionKind::Block => crate::screen::SelectionKind::Char,
+            kind => kind,
+        };
+    }
+
+    fn clear_selection(&mut self) {
+        self.input.anchor = None;
     }
 }
 

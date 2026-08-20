@@ -1,6 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 
 use crate::app::{App, AppEvent, AppMode};
+use crate::normal::NormalTarget;
 use crate::session_picker::{SessionScope, filtered_sessions};
 
 fn should_escape_enter_to_newline(app: &App, key: KeyEvent) -> bool {
@@ -859,6 +860,14 @@ fn handle_selection_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     None
 }
 
+fn clear_selection(app: &mut App) {
+    if app.interaction.focus.is_log() {
+        crate::normal::LogTarget::new(app).clear_selection();
+    } else {
+        crate::normal::ComposerTarget::new(&mut app.input).clear_selection();
+    }
+}
+
 fn focus_composer(app: &mut App, insert: bool) -> Option<AppEvent> {
     app.interaction.focus = crate::app_event::Focus::Composer;
     app.interaction.mode = if insert {
@@ -896,6 +905,11 @@ fn handle_composer_normal_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> 
         key,
     ) {
         app.interaction.mode = AppMode::Insert;
+        return None;
+    }
+    if let Some(kind) = selection_kind_for(app, key) {
+        crate::normal::ComposerTarget::new(&mut app.input).start_selection(kind);
+        app.interaction.mode = AppMode::Visual;
         return None;
     }
     with_count(app, key, |app, action| {
@@ -984,7 +998,7 @@ fn handle_visual_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         return handle_quit_or_abort(app);
     }
     if is_cancel_key(app, key) {
-        app.viewport.clear_selection();
+        clear_selection(app);
         app.interaction.mode = AppMode::Normal;
         return None;
     }

@@ -368,6 +368,37 @@ impl<'a> InputBox<'a> {
     }
 }
 
+impl InputBox<'_> {
+    fn paint_selection(&self, layout: &InputLayout, inner: Rect, scroll: u16, buf: &mut Buffer) {
+        let Some(selected) = self.app.input.selected_bytes() else {
+            return;
+        };
+        for (line_idx, line) in layout.wrapped_lines.iter().enumerate() {
+            let Some(row) = u16::try_from(line_idx)
+                .ok()
+                .and_then(|idx| idx.checked_sub(scroll))
+                .filter(|row| *row < inner.height)
+            else {
+                continue;
+            };
+            let mut column = if line.show_prompt { 2 } else { 0 };
+            for (offset, c) in layout.expanded.text[line.start..line.end].char_indices() {
+                let width = u16::try_from(char_width(c)).unwrap_or(1);
+                if selected.contains(&(line.start + offset)) {
+                    for x in column..column + width {
+                        if x < inner.width
+                            && let Some(cell) = buf.cell_mut((inner.x + x, inner.y + row))
+                        {
+                            cell.set_style(self.app.theme.selection);
+                        }
+                    }
+                }
+                column += width;
+            }
+        }
+    }
+}
+
 impl Widget for InputBox<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let streaming_idle = self.app.is_busy() && self.app.input.text.is_empty();
@@ -457,11 +488,13 @@ impl Widget for InputBox<'_> {
         let scroll = self.app.input.scroll.get().min(max_scroll);
         self.app.input.scroll.set(scroll);
 
+        let inner = block.inner(area);
         let text = ratatui::text::Text::from(lines);
         Paragraph::new(text)
             .block(block)
             .scroll((scroll, 0))
             .render(area, buf);
+        self.paint_selection(&layout, inner, scroll, buf);
     }
 }
 

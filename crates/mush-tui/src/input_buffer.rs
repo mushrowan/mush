@@ -17,6 +17,8 @@ pub struct InputBuffer {
     pub text: String,
     pub cursor: usize,
     pub selected: bool,
+    pub anchor: Option<usize>,
+    pub selection_kind: crate::screen::SelectionKind,
     pub images: Vec<PendingImage>,
     pub scroll: Cell<u16>,
     pub total_lines: Cell<u16>,
@@ -28,6 +30,24 @@ pub struct InputBuffer {
 }
 
 impl InputBuffer {
+    #[must_use]
+    pub fn selected_bytes(&self) -> Option<std::ops::Range<usize>> {
+        let anchor = self.anchor?;
+        let (from, to) = (anchor.min(self.cursor), anchor.max(self.cursor));
+        let to = self.text[to..]
+            .chars()
+            .next()
+            .map_or(self.text.len(), |c| to + c.len_utf8());
+        if self.selection_kind == crate::screen::SelectionKind::Line {
+            let start = self.text[..from].rfind('\n').map_or(0, |i| i + 1);
+            let end = self.text[to..]
+                .find('\n')
+                .map_or(self.text.len(), |i| to + i);
+            return Some(start..end);
+        }
+        Some(from..to)
+    }
+
     pub fn step_back_one_char(&mut self) {
         self.cursor = self.text[..self.cursor]
             .char_indices()
@@ -41,6 +61,8 @@ impl InputBuffer {
             text: String::new(),
             cursor: 0,
             selected: false,
+            anchor: None,
+            selection_kind: crate::screen::SelectionKind::Char,
             images: Vec::new(),
             scroll: Cell::new(0),
             total_lines: Cell::new(0),
