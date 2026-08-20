@@ -919,26 +919,6 @@ fn handle_visual_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     None
 }
 
-fn move_by_word(app: &mut App, word: crate::motion::Word) {
-    move_cursor_to(app, crate::motion::word_forward, word);
-}
-
-fn move_cursor_to(app: &mut App, motion: crate::motion::Motion, word: crate::motion::Word) {
-    let rows = crate::selection::transcript_rows(app);
-    let cursor = app.viewport.cursor();
-    let (line, column) = motion(&rows, (cursor.line, cursor.column), word);
-    app.viewport.cursor_to(line);
-    app.viewport.cursor_to_column(column);
-}
-
-fn current_row(app: &App) -> String {
-    let line = app.viewport.cursor().line;
-    crate::selection::transcript_rows(app)
-        .get(line)
-        .cloned()
-        .unwrap_or_default()
-}
-
 fn selection_kind_for(app: &App, key: KeyEvent) -> Option<crate::screen::SelectionKind> {
     use crate::keybinds::{Action, KeyScope};
     use crate::screen::SelectionKind;
@@ -984,52 +964,45 @@ fn take_count_digit(app: &mut App, key: KeyEvent) -> bool {
 fn run_log_motion(app: &mut App, key: KeyEvent) {
     use crate::keybinds::{Action, KeyScope};
 
+    let Some(action) = [
+        Action::LineUp,
+        Action::LineDown,
+        Action::HalfPageUp,
+        Action::HalfPageDown,
+        Action::PageUp,
+        Action::PageDown,
+        Action::CursorLineStart,
+        Action::CursorFirstNonBlank,
+        Action::CursorLineEnd,
+        Action::CursorLeft,
+        Action::CursorRight,
+        Action::PreviousItem,
+        Action::NextItem,
+        Action::NavigateTop,
+        Action::NavigateBottom,
+        Action::CursorWordForward,
+        Action::CursorChunkForward,
+        Action::CursorWordBack,
+        Action::CursorChunkBack,
+        Action::CursorWordEnd,
+        Action::CursorChunkEnd,
+    ]
+    .into_iter()
+    .find(|action| app.keymap.matches_in(KeyScope::Navigate, *action, key)) else {
+        return;
+    };
+
     let page = app.viewport.page() as isize;
-    let matches = |action| app.keymap.matches_in(KeyScope::Navigate, action, key);
-    if matches(Action::CursorLineStart) {
-        app.viewport.cursor_to_column(0);
-    } else if matches(Action::CursorFirstNonBlank) {
-        let column = crate::motion::first_non_blank(&current_row(app));
-        app.viewport.cursor_to_column(column);
-    } else if matches(Action::CursorLineEnd) {
-        let column = crate::motion::last_cell(&current_row(app));
-        app.viewport.cursor_to_column(column);
-    } else if matches(Action::CursorWordForward) {
-        move_by_word(app, crate::motion::Word::Small);
-    } else if matches(Action::CursorChunkForward) {
-        move_by_word(app, crate::motion::Word::Big);
-    } else if matches(Action::CursorWordBack) {
-        move_cursor_to(app, crate::motion::word_back, crate::motion::Word::Small);
-    } else if matches(Action::CursorChunkBack) {
-        move_cursor_to(app, crate::motion::word_back, crate::motion::Word::Big);
-    } else if matches(Action::CursorWordEnd) {
-        move_cursor_to(app, crate::motion::word_end, crate::motion::Word::Small);
-    } else if matches(Action::CursorChunkEnd) {
-        move_cursor_to(app, crate::motion::word_end, crate::motion::Word::Big);
-    } else if matches(Action::PreviousItem) {
-        app.viewport.move_cursor(0, -1);
-    } else if matches(Action::NextItem) {
-        app.viewport.move_cursor(0, 1);
-    } else if matches(Action::CursorLeft) {
-        app.viewport.move_cursor(-1, 0);
-    } else if matches(Action::CursorRight) {
-        app.viewport.move_cursor(1, 0);
-    } else if matches(Action::LineUp) {
-        app.viewport.scroll_by(-1);
-    } else if matches(Action::LineDown) {
-        app.viewport.scroll_by(1);
-    } else if matches(Action::HalfPageUp) {
-        app.viewport.page_by(-page / 2);
-    } else if matches(Action::HalfPageDown) {
-        app.viewport.page_by(page / 2);
-    } else if matches(Action::PageUp) {
-        app.viewport.page_by(-page);
-    } else if matches(Action::PageDown) {
-        app.viewport.page_by(page);
-    } else if matches(Action::NavigateTop) {
-        app.viewport.to_top();
-    } else if matches(Action::NavigateBottom) {
-        app.viewport.to_bottom();
+    match action {
+        Action::LineUp => app.viewport.scroll_by(-1),
+        Action::LineDown => app.viewport.scroll_by(1),
+        Action::HalfPageUp => app.viewport.page_by(-page / 2),
+        Action::HalfPageDown => app.viewport.page_by(page / 2),
+        Action::PageUp => app.viewport.page_by(-page),
+        Action::PageDown => app.viewport.page_by(page),
+        action => {
+            crate::normal::apply_motion(&mut crate::normal::LogTarget::new(app), action);
+        }
     }
 }
 

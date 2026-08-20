@@ -17,6 +17,7 @@ pub mod login_picker;
 pub mod markdown;
 pub mod model_picker;
 mod motion;
+mod normal;
 pub mod notify;
 pub mod path_utils;
 pub mod prompt_cache;
