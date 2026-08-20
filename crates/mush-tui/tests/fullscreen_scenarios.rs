@@ -1795,3 +1795,23 @@ fn esc_drops_the_composer_selection() {
     assert_eq!(app.interaction.mode, mush_tui::app::AppMode::Normal);
     assert!(!app.interaction.focus.is_log());
 }
+
+#[test]
+fn a_motion_extends_the_composer_selection() {
+    let mut app = composer_in_normal("hello world");
+    press(&mut app, KeyCode::Char('w'));
+    press(&mut app, KeyCode::Char('v'));
+
+    press(&mut app, KeyCode::Char('e'));
+
+    assert_eq!(tinted_text(&app), "world");
+}
+
+#[test]
+fn capital_v_takes_the_whole_composer_line() {
+    let mut app = composer_in_normal("hello\nworld");
+
+    press_with(&mut app, KeyCode::Char('V'), KeyModifiers::SHIFT);
+
+    assert_eq!(tinted_text(&app), "hello");
+}

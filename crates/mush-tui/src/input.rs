@@ -1002,6 +1002,15 @@ fn handle_visual_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         app.interaction.mode = AppMode::Normal;
         return None;
     }
+    if !app.interaction.focus.is_log() {
+        with_count(app, key, |app, action| {
+            crate::normal::apply_motion(
+                &mut crate::normal::ComposerTarget::new(&mut app.input),
+                action,
+            );
+        });
+        return None;
+    }
     for (action, strip_indent) in [(Action::Yank, true), (Action::YankRaw, false)] {
         if app.keymap.matches_in(KeyScope::Normal, action, key) {
             let text = crate::selection::selected_text(app, strip_indent)?;
