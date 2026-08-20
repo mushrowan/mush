@@ -1815,3 +1815,35 @@ fn capital_v_takes_the_whole_composer_line() {
 
     assert_eq!(tinted_text(&app), "hello");
 }
+
+#[test]
+fn y_copies_the_composer_selection_and_returns_to_normal() {
+    let mut app = composer_in_normal("hello world");
+    press(&mut app, KeyCode::Char('w'));
+    press(&mut app, KeyCode::Char('v'));
+    press(&mut app, KeyCode::Char('e'));
+
+    let event = handle_key(&mut app, KeyEvent::from(KeyCode::Char('y')));
+    press(&mut app, KeyCode::Char('x'));
+
+    assert!(
+        matches!(&event, Some(AppEvent::Copy { text }) if text == "world"),
+        "{event:?}"
+    );
+    assert_eq!(tinted_text(&app), "");
+    assert_eq!(app.input.text, "hello world");
+}
+
+#[test]
+fn y_in_the_composer_strips_the_common_indent() {
+    let mut app = composer_in_normal("  one\n    two");
+    press_with(&mut app, KeyCode::Char('V'), KeyModifiers::SHIFT);
+    press(&mut app, KeyCode::Char('j'));
+
+    let event = handle_key(&mut app, KeyEvent::from(KeyCode::Char('y')));
+
+    assert!(
+        matches!(&event, Some(AppEvent::Copy { text }) if text == "one\n  two"),
+        "{event:?}"
+    );
+}

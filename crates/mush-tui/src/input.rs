@@ -860,6 +860,16 @@ fn handle_selection_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     None
 }
 
+fn composer_selected_text(app: &App, strip_indent: bool) -> Option<String> {
+    let selected = app.input.selected_bytes()?;
+    let text = app.input.text.get(selected)?.to_string();
+    Some(if strip_indent {
+        crate::selection::strip_padding(&text)
+    } else {
+        text
+    })
+}
+
 fn clear_selection(app: &mut App) {
     if app.interaction.focus.is_log() {
         crate::normal::LogTarget::new(app).clear_selection();
@@ -1003,6 +1013,14 @@ fn handle_visual_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         return None;
     }
     if !app.interaction.focus.is_log() {
+        for (action, strip_indent) in [(Action::Yank, true), (Action::YankRaw, false)] {
+            if app.keymap.matches_in(KeyScope::Normal, action, key) {
+                let text = composer_selected_text(app, strip_indent)?;
+                crate::normal::ComposerTarget::new(&mut app.input).clear_selection();
+                app.interaction.mode = AppMode::Normal;
+                return Some(AppEvent::Copy { text });
+            }
+        }
         with_count(app, key, |app, action| {
             crate::normal::apply_motion(
                 &mut crate::normal::ComposerTarget::new(&mut app.input),
