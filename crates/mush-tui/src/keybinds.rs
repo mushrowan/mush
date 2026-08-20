@@ -144,6 +144,7 @@ pub enum Action {
     SearchPrev,
     SelectOrSpace,
     CursorFirstNonBlank,
+    EnterInsert,
     CursorWordForward,
     CursorChunkForward,
     CursorWordBack,
@@ -198,6 +199,7 @@ impl Action {
             Self::SearchPrev => "search_prev",
             Self::SelectOrSpace => "select_or_space",
             Self::CursorFirstNonBlank => "cursor_first_non_blank",
+            Self::EnterInsert => "enter_insert",
             Self::CursorWordForward => "cursor_word_forward",
             Self::CursorChunkForward => "cursor_chunk_forward",
             Self::CursorWordBack => "cursor_word_back",
@@ -256,6 +258,7 @@ impl Action {
         Self::SearchPrev,
         Self::SelectOrSpace,
         Self::CursorFirstNonBlank,
+        Self::EnterInsert,
         Self::CursorWordForward,
         Self::CursorChunkForward,
         Self::CursorWordBack,
@@ -411,6 +414,7 @@ const fn default_scope_for_action(action: Action) -> KeyScope {
         | Action::PageDown
         | Action::PageUp
         | Action::CursorFirstNonBlank
+        | Action::EnterInsert
         | Action::CursorWordForward
         | Action::CursorChunkForward
         | Action::CursorWordBack
@@ -582,6 +586,11 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
             (KeyCode::End, KeyModifiers::NONE),
             (KeyCode::Char('G'), KeyModifiers::SHIFT),
         ],
+    ),
+    (
+        KeyScope::Normal,
+        Action::EnterInsert,
+        &[(KeyCode::Char('i'), KeyModifiers::NONE)],
     ),
     (
         KeyScope::Normal,

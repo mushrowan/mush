@@ -33,6 +33,7 @@ normal::cursor_right = l | Right
 normal::cursor_word_back = b
 normal::cursor_word_end = e
 normal::cursor_word_forward = w
+normal::enter_insert = i
 normal::half_page_down = Ctrl-d
 normal::half_page_up = Ctrl-u
 normal::line_down = Ctrl-j

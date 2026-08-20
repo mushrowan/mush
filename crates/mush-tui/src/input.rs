@@ -874,6 +874,14 @@ fn handle_composer_normal_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> 
     if is_cancel_key(app, key) || app.keymap.matches(crate::keybinds::Action::FocusLog, key) {
         return focus_log(app);
     }
+    if app.keymap.matches_in(
+        crate::keybinds::KeyScope::Normal,
+        crate::keybinds::Action::EnterInsert,
+        key,
+    ) {
+        app.interaction.mode = AppMode::Insert;
+        return None;
+    }
     with_count(app, key, |app, action| {
         crate::normal::apply_motion(
             &mut crate::normal::ComposerTarget::new(&mut app.input),

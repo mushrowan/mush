@@ -1685,3 +1685,14 @@ fn esc_steps_back_onto_the_last_character() {
     assert_eq!(app.input.text, "hello");
     assert_eq!(app.input.cursor, 4);
 }
+
+#[test]
+fn i_returns_to_insert_at_the_caret() {
+    let mut app = composer_in_normal("hello");
+    press(&mut app, KeyCode::Char('$'));
+
+    press(&mut app, KeyCode::Char('i'));
+    press(&mut app, KeyCode::Char('!'));
+
+    assert_eq!(app.input.text, "hell!o");
+}
