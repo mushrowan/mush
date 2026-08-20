@@ -2116,14 +2116,14 @@ fn ctrl_o_focuses_the_log_from_normal_on_the_composer() {
 }
 
 #[test]
-fn esc_while_navigating_goes_back_to_typing() {
+fn esc_while_navigating_stays_in_the_log() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     handle_key(&mut app, key(KeyCode::Esc));
     handle_key(&mut app, key(KeyCode::Esc));
 
     handle_key(&mut app, key(KeyCode::Esc));
 
-    assert_eq!(app.interaction.mode, AppMode::Insert);
+    assert_eq!(app.interaction.mode, AppMode::Navigate);
 }
 
 #[test]

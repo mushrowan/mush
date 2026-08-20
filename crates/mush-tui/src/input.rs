@@ -858,6 +858,19 @@ fn handle_selection_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     None
 }
 
+fn focus_composer(app: &mut App, insert: bool) -> Option<AppEvent> {
+    app.interaction.mode = if insert {
+        AppMode::Insert
+    } else {
+        AppMode::ComposerNormal
+    };
+    app.viewport.resume();
+    if insert {
+        app.input.cursor = app.input.text.len();
+    }
+    None
+}
+
 fn focus_log(app: &mut App) -> Option<AppEvent> {
     app.interaction.mode = AppMode::Navigate;
     app.viewport.pause();
@@ -935,15 +948,22 @@ fn with_count(app: &mut App, key: KeyEvent, run: impl Fn(&mut App, crate::keybin
 }
 
 fn handle_navigate_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
-    use crate::keybinds::Action;
+    use crate::keybinds::{Action, KeyScope};
 
     if app.keymap.matches(Action::QuitOrAbort, key) {
         return handle_quit_or_abort(app);
     }
     if is_cancel_key(app, key) {
-        app.interaction.mode = AppMode::Insert;
-        app.viewport.resume();
         return None;
+    }
+    if app.keymap.matches(Action::FocusLog, key) {
+        return focus_composer(app, false);
+    }
+    if app
+        .keymap
+        .matches_in(KeyScope::Normal, Action::EnterInsert, key)
+    {
+        return focus_composer(app, true);
     }
     if let Some(kind) = selection_kind_for(app, key) {
         app.viewport.start_selection(kind);

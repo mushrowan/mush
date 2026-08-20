@@ -215,7 +215,7 @@ fn a_second_esc_moves_me_to_the_log() {
 }
 
 #[test]
-fn a_third_esc_returns_to_insert_with_the_view_where_i_left_it() {
+fn coming_back_to_the_composer_leaves_the_view_where_i_left_it() {
     let mut app = conversation(20);
     let bottom = window_rows(&app);
     start_reading(&mut app);
@@ -223,7 +223,7 @@ fn a_third_esc_returns_to_insert_with_the_view_where_i_left_it() {
     let scrolled = window_rows(&app);
     assert_ne!(scrolled, bottom, "the view moved off the tail");
 
-    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Char('i'));
     for c in "ok".chars() {
         press(&mut app, KeyCode::Char(c));
     }
@@ -270,11 +270,11 @@ fn the_composer_survives_the_whole_cycle() {
 }
 
 #[test]
-fn esc_while_reading_goes_back_to_typing() {
+fn i_while_reading_goes_back_to_typing() {
     let mut app = conversation(20);
     start_reading(&mut app);
 
-    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Char('i'));
     press(&mut app, KeyCode::Char('k'));
 
     assert_eq!(app.input.text, "k");
@@ -1695,4 +1695,54 @@ fn i_returns_to_insert_at_the_caret() {
     press(&mut app, KeyCode::Char('!'));
 
     assert_eq!(app.input.text, "hell!o");
+}
+
+#[test]
+fn ctrl_o_moves_focus_to_the_log() {
+    let mut app = composer_in_normal("hello");
+    rows(&app, 80, 24);
+
+    press_with(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL);
+    let before = app.viewport.cursor().line;
+    press(&mut app, KeyCode::Char('k'));
+
+    assert_eq!(app.viewport.cursor().line, before - 1);
+    assert_eq!(app.input.cursor, 0);
+}
+
+#[test]
+fn ctrl_o_comes_back_to_the_composer() {
+    let mut app = composer_in_normal("hello");
+    rows(&app, 80, 24);
+    press_with(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL);
+
+    press_with(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL);
+
+    assert_eq!(app.interaction.mode, mush_tui::app::AppMode::ComposerNormal);
+}
+
+#[test]
+fn i_from_the_log_appends_at_the_end_of_the_composer() {
+    let mut app = composer_in_normal("hello");
+    rows(&app, 80, 24);
+    press_with(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL);
+
+    press(&mut app, KeyCode::Char('i'));
+    press(&mut app, KeyCode::Char('!'));
+
+    assert_eq!(app.input.text, "hello!");
+}
+
+#[test]
+fn esc_with_the_log_focused_does_nothing() {
+    let mut app = composer_in_normal("hello");
+    rows(&app, 80, 24);
+    press_with(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL);
+    press(&mut app, KeyCode::Char('k'));
+    let before = app.viewport.cursor();
+
+    press(&mut app, KeyCode::Esc);
+
+    assert_eq!(app.viewport.cursor(), before);
+    assert_eq!(app.interaction.mode, mush_tui::app::AppMode::Navigate);
 }
