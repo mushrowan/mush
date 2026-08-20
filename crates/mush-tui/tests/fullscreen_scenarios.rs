@@ -1618,3 +1618,20 @@ fn the_caret_stays_put_when_a_selection_starts() {
 
     assert_eq!(caret(&app), before);
 }
+
+fn composer_in_normal(text: &str) -> App {
+    let mut app = conversation(1);
+    app.input.text = text.into();
+    app.input.cursor = 0;
+    press(&mut app, KeyCode::Esc);
+    app
+}
+
+#[test]
+fn w_moves_the_composer_caret_to_the_next_word() {
+    let mut app = composer_in_normal("hello world");
+
+    press(&mut app, KeyCode::Char('w'));
+
+    assert_eq!(app.input.cursor, 6);
+}

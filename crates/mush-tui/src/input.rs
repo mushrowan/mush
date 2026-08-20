@@ -873,7 +873,56 @@ fn handle_composer_normal_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> 
     if is_cancel_key(app, key) || app.keymap.matches(crate::keybinds::Action::FocusLog, key) {
         return focus_log(app);
     }
+    with_count(app, key, |app, action| {
+        crate::normal::apply_motion(
+            &mut crate::normal::ComposerTarget::new(&mut app.input),
+            action,
+        );
+    });
     None
+}
+
+fn resolve_motion(app: &App, key: KeyEvent) -> Option<crate::keybinds::Action> {
+    use crate::keybinds::{Action, KeyScope};
+
+    [
+        Action::LineUp,
+        Action::LineDown,
+        Action::HalfPageUp,
+        Action::HalfPageDown,
+        Action::PageUp,
+        Action::PageDown,
+        Action::CursorLineStart,
+        Action::CursorFirstNonBlank,
+        Action::CursorLineEnd,
+        Action::CursorLeft,
+        Action::CursorRight,
+        Action::PreviousItem,
+        Action::NextItem,
+        Action::NavigateTop,
+        Action::NavigateBottom,
+        Action::CursorWordForward,
+        Action::CursorChunkForward,
+        Action::CursorWordBack,
+        Action::CursorChunkBack,
+        Action::CursorWordEnd,
+        Action::CursorChunkEnd,
+    ]
+    .into_iter()
+    .find(|action| app.keymap.matches_in(KeyScope::Normal, *action, key))
+}
+
+fn with_count(app: &mut App, key: KeyEvent, run: impl Fn(&mut App, crate::keybinds::Action)) {
+    if take_count_digit(app, key) {
+        return;
+    }
+    let count = app.interaction.pending_count.take().unwrap_or(1);
+    let Some(action) = resolve_motion(app, key) else {
+        return;
+    };
+    for _ in 0..count {
+        run(app, action);
+    }
 }
 
 fn handle_navigate_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
@@ -934,13 +983,7 @@ fn selection_kind_for(app: &App, key: KeyEvent) -> Option<crate::screen::Selecti
 }
 
 fn handle_log_motion(app: &mut App, key: KeyEvent) {
-    if take_count_digit(app, key) {
-        return;
-    }
-    let count = app.interaction.pending_count.take().unwrap_or(1);
-    for _ in 0..count {
-        run_log_motion(app, key);
-    }
+    with_count(app, key, run_log_motion);
 }
 
 fn take_count_digit(app: &mut App, key: KeyEvent) -> bool {
@@ -961,36 +1004,8 @@ fn take_count_digit(app: &mut App, key: KeyEvent) -> bool {
     true
 }
 
-fn run_log_motion(app: &mut App, key: KeyEvent) {
-    use crate::keybinds::{Action, KeyScope};
-
-    let Some(action) = [
-        Action::LineUp,
-        Action::LineDown,
-        Action::HalfPageUp,
-        Action::HalfPageDown,
-        Action::PageUp,
-        Action::PageDown,
-        Action::CursorLineStart,
-        Action::CursorFirstNonBlank,
-        Action::CursorLineEnd,
-        Action::CursorLeft,
-        Action::CursorRight,
-        Action::PreviousItem,
-        Action::NextItem,
-        Action::NavigateTop,
-        Action::NavigateBottom,
-        Action::CursorWordForward,
-        Action::CursorChunkForward,
-        Action::CursorWordBack,
-        Action::CursorChunkBack,
-        Action::CursorWordEnd,
-        Action::CursorChunkEnd,
-    ]
-    .into_iter()
-    .find(|action| app.keymap.matches_in(KeyScope::Normal, *action, key)) else {
-        return;
-    };
+fn run_log_motion(app: &mut App, action: crate::keybinds::Action) {
+    use crate::keybinds::Action;
 
     let page = app.viewport.page() as isize;
     match action {
