@@ -28,6 +28,13 @@ pub struct InputBuffer {
 }
 
 impl InputBuffer {
+    pub fn step_back_one_char(&mut self) {
+        self.cursor = self.text[..self.cursor]
+            .char_indices()
+            .next_back()
+            .map_or(0, |(byte, _)| byte);
+    }
+
     #[must_use]
     pub fn new() -> Self {
         Self {

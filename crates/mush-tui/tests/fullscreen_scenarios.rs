@@ -1672,3 +1672,16 @@ fn a_motion_key_types_nothing() {
 
     assert_eq!(app.input.text, "hello");
 }
+
+#[test]
+fn esc_steps_back_onto_the_last_character() {
+    let mut app = conversation(1);
+    for c in "hello".chars() {
+        press(&mut app, KeyCode::Char(c));
+    }
+
+    press(&mut app, KeyCode::Esc);
+
+    assert_eq!(app.input.text, "hello");
+    assert_eq!(app.input.cursor, 4);
+}

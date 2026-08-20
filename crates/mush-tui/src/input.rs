@@ -83,6 +83,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     }
     if is_cancel_key(app, key) {
         app.interaction.mode = AppMode::ComposerNormal;
+        app.input.step_back_one_char();
         return None;
     }
     if app.keymap.matches(crate::keybinds::Action::FocusLog, key) {
