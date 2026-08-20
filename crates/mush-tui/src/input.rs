@@ -908,7 +908,7 @@ fn handle_visual_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         return None;
     }
     for (action, strip_indent) in [(Action::Yank, true), (Action::YankRaw, false)] {
-        if app.keymap.matches_in(KeyScope::Navigate, action, key) {
+        if app.keymap.matches_in(KeyScope::Normal, action, key) {
             let text = crate::selection::selected_text(app, strip_indent)?;
             app.viewport.clear_selection();
             app.interaction.mode = AppMode::Navigate;
@@ -929,7 +929,7 @@ fn selection_kind_for(app: &App, key: KeyEvent) -> Option<crate::screen::Selecti
         (Action::StartBlockSelection, SelectionKind::Block),
     ]
     .into_iter()
-    .find(|(action, _)| app.keymap.matches_in(KeyScope::Navigate, *action, key))
+    .find(|(action, _)| app.keymap.matches_in(KeyScope::Normal, *action, key))
     .map(|(_, kind)| kind)
 }
 
@@ -988,7 +988,7 @@ fn run_log_motion(app: &mut App, key: KeyEvent) {
         Action::CursorChunkEnd,
     ]
     .into_iter()
-    .find(|action| app.keymap.matches_in(KeyScope::Navigate, *action, key)) else {
+    .find(|action| app.keymap.matches_in(KeyScope::Normal, *action, key)) else {
         return;
     };
 

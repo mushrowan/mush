@@ -374,7 +374,7 @@ fn the_keys_are_rebindable() {
     let mut app = conversation(20);
     let before = window_rows(&app);
     app.keymap
-        .override_scoped(&scoped_keys("navigate", "line_up", "ctrl+y"));
+        .override_scoped(&scoped_keys("normal", "line_up", "ctrl+y"));
     start_reading(&mut app);
 
     press_with(&mut app, KeyCode::Char('y'), KeyModifiers::CONTROL);

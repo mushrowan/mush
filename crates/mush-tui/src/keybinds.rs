@@ -17,7 +17,7 @@ pub enum KeyScope {
     SlotEdit,
     Settings,
     Search,
-    Navigate,
+    Normal,
 }
 
 impl KeyScope {
@@ -33,7 +33,7 @@ impl KeyScope {
             Self::SlotEdit => "slot_edit",
             Self::Settings => "settings",
             Self::Search => "search",
-            Self::Navigate => "navigate",
+            Self::Normal => "normal",
         }
     }
 
@@ -48,7 +48,7 @@ impl KeyScope {
         Self::SlotEdit,
         Self::Settings,
         Self::Search,
-        Self::Navigate,
+        Self::Normal,
     ];
 }
 
@@ -421,7 +421,7 @@ const fn default_scope_for_action(action: Action) -> KeyScope {
         | Action::StartLineSelection
         | Action::StartBlockSelection
         | Action::Yank
-        | Action::YankRaw => KeyScope::Navigate,
+        | Action::YankRaw => KeyScope::Normal,
         Action::SessionPickerToggleScope => KeyScope::SessionPicker,
         Action::ModelPickerDeleteAllStale
         | Action::ModelPickerDeleteSelectedStale
@@ -584,87 +584,87 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
         ],
     ),
     (
-        KeyScope::Navigate,
+        KeyScope::Normal,
         Action::CursorLineStart,
         &[(KeyCode::Char('0'), KeyModifiers::NONE)],
     ),
     (
-        KeyScope::Navigate,
+        KeyScope::Normal,
         Action::CursorFirstNonBlank,
         &[(KeyCode::Char('^'), KeyModifiers::NONE)],
     ),
     (
-        KeyScope::Navigate,
+        KeyScope::Normal,
         Action::CursorLineEnd,
         &[(KeyCode::Char('$'), KeyModifiers::NONE)],
     ),
     (
-        KeyScope::Navigate,
+        KeyScope::Normal,
         Action::CursorWordForward,
         &[(KeyCode::Char('w'), KeyModifiers::NONE)],
     ),
     (
-        KeyScope::Navigate,
+        KeyScope::Normal,
         Action::CursorChunkForward,
         &[(KeyCode::Char('W'), KeyModifiers::SHIFT)],
     ),
     (
-        KeyScope::Navigate,
+        KeyScope::Normal,
         Action::CursorWordBack,
         &[(KeyCode::Char('b'), KeyModifiers::NONE)],
     ),
     (
-        KeyScope::Navigate,
+        KeyScope::Normal,
         Action::CursorChunkBack,
         &[(KeyCode::Char('B'), KeyModifiers::SHIFT)],
     ),
     (
-        KeyScope::Navigate,
+        KeyScope::Normal,
         Action::CursorWordEnd,
         &[(KeyCode::Char('e'), KeyModifiers::NONE)],
     ),
     (
-        KeyScope::Navigate,
+        KeyScope::Normal,
         Action::CursorChunkEnd,
         &[(KeyCode::Char('E'), KeyModifiers::SHIFT)],
     ),
     (
-        KeyScope::Navigate,
+        KeyScope::Normal,
         Action::StartSelection,
         &[(KeyCode::Char('v'), KeyModifiers::NONE)],
     ),
     (
-        KeyScope::Navigate,
+        KeyScope::Normal,
         Action::StartLineSelection,
         &[(KeyCode::Char('V'), KeyModifiers::SHIFT)],
     ),
     (
-        KeyScope::Navigate,
+        KeyScope::Normal,
         Action::StartBlockSelection,
         &[(KeyCode::Char('v'), KeyModifiers::CONTROL)],
     ),
     (
-        KeyScope::Navigate,
+        KeyScope::Normal,
         Action::Yank,
         &[(KeyCode::Char('y'), KeyModifiers::NONE)],
     ),
     (
-        KeyScope::Navigate,
+        KeyScope::Normal,
         Action::YankRaw,
         &[(KeyCode::Char('Y'), KeyModifiers::SHIFT)],
     ),
     (
-        KeyScope::Navigate,
+        KeyScope::Normal,
         Action::LineDown,
         &[(KeyCode::Char('j'), KeyModifiers::CONTROL)],
     ),
     (
-        KeyScope::Navigate,
+        KeyScope::Normal,
         Action::LineUp,
         &[(KeyCode::Char('k'), KeyModifiers::CONTROL)],
     ),
     (
-        KeyScope::Navigate,
+        KeyScope::Normal,
         Action::CursorLeft,
         &[
             (KeyCode::Char('h'), KeyModifiers::NONE),
@@ -672,7 +672,7 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
         ],
     ),
     (
-        KeyScope::Navigate,
+        KeyScope::Normal,
         Action::CursorRight,
         &[
             (KeyCode::Char('l'), KeyModifiers::NONE),
@@ -680,17 +680,17 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
         ],
     ),
     (
-        KeyScope::Navigate,
+        KeyScope::Normal,
         Action::HalfPageDown,
         &[(KeyCode::Char('d'), KeyModifiers::CONTROL)],
     ),
     (
-        KeyScope::Navigate,
+        KeyScope::Normal,
         Action::HalfPageUp,
         &[(KeyCode::Char('u'), KeyModifiers::CONTROL)],
     ),
     (
-        KeyScope::Navigate,
+        KeyScope::Normal,
         Action::PageDown,
         &[
             (KeyCode::Char('f'), KeyModifiers::CONTROL),
@@ -698,7 +698,7 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
         ],
     ),
     (
-        KeyScope::Navigate,
+        KeyScope::Normal,
         Action::PageUp,
         &[
             (KeyCode::Char('b'), KeyModifiers::CONTROL),
