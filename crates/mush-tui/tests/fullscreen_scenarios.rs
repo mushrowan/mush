@@ -1635,3 +1635,40 @@ fn w_moves_the_composer_caret_to_the_next_word() {
 
     assert_eq!(app.input.cursor, 6);
 }
+
+#[test]
+fn a_count_repeats_a_composer_motion() {
+    let mut app = composer_in_normal("hello world");
+
+    press(&mut app, KeyCode::Char('3'));
+    press(&mut app, KeyCode::Char('l'));
+
+    assert_eq!(app.input.cursor, 3);
+}
+
+#[test]
+fn dollar_goes_to_the_end_of_the_composer_line() {
+    let mut app = composer_in_normal("hello world");
+
+    press(&mut app, KeyCode::Char('$'));
+
+    assert_eq!(app.input.cursor, 10);
+}
+
+#[test]
+fn j_moves_down_a_logical_line_not_a_wrapped_one() {
+    let mut app = composer_in_normal(&format!("{}\nsecond", "x".repeat(200)));
+
+    press(&mut app, KeyCode::Char('j'));
+
+    assert_eq!(app.input.cursor, 201);
+}
+
+#[test]
+fn a_motion_key_types_nothing() {
+    let mut app = composer_in_normal("hello");
+
+    press(&mut app, KeyCode::Char('w'));
+
+    assert_eq!(app.input.text, "hello");
+}
