@@ -405,8 +405,6 @@ impl Widget for InputBox<'_> {
         let prompt = if streaming_idle { "… " } else { "> " };
         let style = if streaming_idle {
             self.app.theme.dim
-        } else if self.app.input.selected {
-            Style::default().add_modifier(ratatui::style::Modifier::REVERSED)
         } else {
             Style::default()
         };

@@ -430,40 +430,6 @@ fn sending_a_message_snaps_to_the_bottom() {
     assert_eq!(window_rows(&app), bottom, "back at the newest line");
 }
 
-fn highlighted(app: &App) -> String {
-    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-    let mut screen = Screen::new();
-    terminal
-        .draw(|frame| screen.render(app, frame.area(), frame.buffer_mut()))
-        .unwrap();
-    let buffer = terminal.backend().buffer().clone();
-    (0..buffer.area.height)
-        .map(|y| {
-            (0..buffer.area.width)
-                .filter(|x| {
-                    buffer[(*x, y)]
-                        .modifier
-                        .contains(ratatui::style::Modifier::REVERSED)
-                })
-                .map(|x| buffer[(x, y)].symbol())
-                .collect::<String>()
-        })
-        .collect::<Vec<_>>()
-        .join("")
-}
-
-#[test]
-fn ctrl_a_highlights_the_whole_composer() {
-    let mut app = conversation(1);
-    app.input.text = "explain the borrow checker".into();
-    app.input.cursor = app.input.text.len();
-
-    press_with(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
-
-    assert_eq!(app.input.text, "explain the borrow checker");
-    assert_eq!(highlighted(&app), "explain the borrow checker");
-}
-
 #[test]
 fn typing_does_nothing_while_the_selection_is_live() {
     let mut app = conversation(1);
@@ -507,7 +473,7 @@ fn c_empties_the_composer() {
 }
 
 #[test]
-fn esc_drops_the_selection_and_leaves_the_cursor_at_the_end() {
+fn esc_after_select_all_leaves_the_text_alone() {
     let mut app = conversation(1);
     app.input.text = "explain the borrow checker".into();
     app.input.cursor = 0;
@@ -516,7 +482,8 @@ fn esc_drops_the_selection_and_leaves_the_cursor_at_the_end() {
     press(&mut app, KeyCode::Esc);
     press(&mut app, KeyCode::Char('!'));
 
-    assert_eq!(app.input.text, "explain the borrow checker!");
+    assert_eq!(app.input.text, "explain the borrow checker");
+    assert_eq!(tinted_text(&app), "");
 }
 
 #[test]
@@ -1846,4 +1813,29 @@ fn y_in_the_composer_strips_the_common_indent() {
         matches!(&event, Some(AppEvent::Copy { text }) if text == "one\n  two"),
         "{event:?}"
     );
+}
+
+#[test]
+fn ctrl_a_selects_the_whole_composer() {
+    let mut app = composer_in_normal("hello\nworld");
+
+    press_with(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
+
+    assert_eq!(tinted_text(&app), "helloworld");
+}
+
+#[test]
+fn backspace_does_nothing_to_the_log() {
+    let mut app = log_with_world();
+    press(&mut app, KeyCode::Char('v'));
+    for _ in 0..4 {
+        press(&mut app, KeyCode::Char('l'));
+    }
+    let before = window_rows(&app);
+    let selected = selected_cells(&app);
+
+    press(&mut app, KeyCode::Backspace);
+
+    assert_eq!(window_rows(&app), before);
+    assert_eq!(selected_cells(&app), selected);
 }

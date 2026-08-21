@@ -16,7 +16,6 @@ pub struct PendingImage {
 pub struct InputBuffer {
     pub text: String,
     pub cursor: usize,
-    pub selected: bool,
     pub anchor: Option<usize>,
     pub selection_kind: crate::screen::SelectionKind,
     pub images: Vec<PendingImage>,
@@ -60,7 +59,6 @@ impl InputBuffer {
         Self {
             text: String::new(),
             cursor: 0,
-            selected: false,
             anchor: None,
             selection_kind: crate::screen::SelectionKind::Char,
             images: Vec::new(),

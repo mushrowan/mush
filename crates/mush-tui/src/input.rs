@@ -68,9 +68,6 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             handle_composer_normal_key(app, key)
         };
     }
-    if app.input.selected {
-        return handle_selection_key(app, key);
-    }
 
     if app
         .keymap
@@ -92,8 +89,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         return focus_log(app);
     }
     if app.keymap.matches(crate::keybinds::Action::SelectAll, key) {
-        app.input.selected = !app.input.text.is_empty();
-        return None;
+        return select_all_composer(app);
     }
 
     if app
@@ -838,25 +834,13 @@ fn handle_quit_or_abort(app: &mut App) -> Option<AppEvent> {
     None
 }
 
-fn handle_selection_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
-    if app
-        .keymap
-        .matches(crate::keybinds::Action::QuitOrAbort, key)
-    {
-        return handle_quit_or_abort(app);
-    }
-    if is_cancel_key(app, key) {
-        app.input.selected = false;
-        app.input.cursor = app.input.text.len();
-        app.input.ensure_cursor_visible();
+fn select_all_composer(app: &mut App) -> Option<AppEvent> {
+    if app.input.text.is_empty() {
         return None;
     }
-    if crate::keybinds::is_backspace(key)
-        || (key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::NONE)
-    {
-        app.input.take_text();
-        app.input.selected = false;
-    }
+    crate::normal::ComposerTarget::new(&mut app.input).select_all();
+    app.interaction.mode = AppMode::Visual;
+    app.interaction.focus = crate::app_event::Focus::Composer;
     None
 }
 
@@ -916,6 +900,9 @@ fn handle_composer_normal_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> 
     ) {
         app.interaction.mode = AppMode::Insert;
         return None;
+    }
+    if app.keymap.matches(crate::keybinds::Action::SelectAll, key) {
+        return select_all_composer(app);
     }
     if let Some(kind) = selection_kind_for(app, key) {
         crate::normal::ComposerTarget::new(&mut app.input).start_selection(kind);
@@ -1013,6 +1000,16 @@ fn handle_visual_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         return None;
     }
     if !app.interaction.focus.is_log() {
+        if crate::keybinds::is_backspace(key)
+            || (key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::NONE)
+        {
+            crate::normal::EditTarget::delete_selection(&mut crate::normal::ComposerTarget::new(
+                &mut app.input,
+            ));
+            app.interaction.mode = AppMode::Insert;
+            app.input.ensure_cursor_visible();
+            return None;
+        }
         for (action, strip_indent) in [(Action::Yank, true), (Action::YankRaw, false)] {
             if app.keymap.matches_in(KeyScope::Normal, action, key) {
                 let text = composer_selected_text(app, strip_indent)?;
