@@ -128,10 +128,12 @@ mod tests {
     #[test]
     fn push_message_updates_count() {
         let mut session = Session::new("test-model", "/tmp");
-        session.push_message(Message::User(UserMessage {
-            content: UserContent::Text("hi".into()),
-            timestamp_ms: Timestamp::zero(),
-        }));
+        session.push_message(Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text("hi".into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        ));
         assert_eq!(session.meta.message_count, 1);
         assert_eq!(session.context().len(), 1);
     }
@@ -139,10 +141,12 @@ mod tests {
     #[test]
     fn auto_title_from_first_message() {
         let mut session = Session::new("test-model", "/tmp");
-        session.push_message(Message::User(UserMessage {
-            content: UserContent::Text("explain how rust traits work".into()),
-            timestamp_ms: Timestamp::zero(),
-        }));
+        session.push_message(Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text("explain how rust traits work".into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        ));
         session.auto_title();
         assert_eq!(
             session.meta.title.as_deref(),
@@ -154,10 +158,12 @@ mod tests {
     fn auto_title_truncates_long_messages() {
         let mut session = Session::new("test-model", "/tmp");
         let long_text = "the quick brown fox jumps over the lazy dog and then proceeds to do many other things that make this message very long indeed";
-        session.push_message(Message::User(UserMessage {
-            content: UserContent::Text(long_text.into()),
-            timestamp_ms: Timestamp::zero(),
-        }));
+        session.push_message(Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text(long_text.into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        ));
         session.auto_title();
         let title = session.meta.title.unwrap();
         assert!(title.len() <= 81);
@@ -168,10 +174,12 @@ mod tests {
     #[test]
     fn auto_title_collapses_whitespace() {
         let mut session = Session::new("test-model", "/tmp");
-        session.push_message(Message::User(UserMessage {
-            content: UserContent::Text("hello\n\nworld\t  foo".into()),
-            timestamp_ms: Timestamp::zero(),
-        }));
+        session.push_message(Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text("hello\n\nworld\t  foo".into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        ));
         session.auto_title();
         assert_eq!(session.meta.title.as_deref(), Some("hello world foo"));
     }
@@ -179,12 +187,15 @@ mod tests {
     #[test]
     fn auto_title_strips_skill_hints() {
         let mut session = Session::new("test-model", "/tmp");
-        session.push_message(Message::User(UserMessage {
-            content: UserContent::Text(
-                "[relevant skills: commit, jj. follow their instructions.]\nfix the build".into(),
-            ),
-            timestamp_ms: Timestamp::zero(),
-        }));
+        session.push_message(Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text(
+                    "[relevant skills: commit, jj. follow their instructions.]\nfix the build"
+                        .into(),
+                ))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        ));
         session.auto_title();
         assert_eq!(session.meta.title.as_deref(), Some("fix the build"));
     }
@@ -209,10 +220,12 @@ mod tests {
     #[test]
     fn session_serialisation_roundtrip() {
         let mut session = Session::new("test-model", "/tmp/project");
-        session.push_message(Message::User(UserMessage {
-            content: UserContent::Text("hello".into()),
-            timestamp_ms: Timestamp::from_ms(1000),
-        }));
+        session.push_message(Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text("hello".into()))
+                .timestamp_ms(Timestamp::from_ms(1000))
+                .build(),
+        ));
 
         let json = serde_json::to_string(&session).unwrap();
         let restored: Session = serde_json::from_str(&json).unwrap();
@@ -223,16 +236,20 @@ mod tests {
     #[test]
     fn session_with_panes_roundtrips() {
         let mut session = Session::new("test-model", "/tmp");
-        session.push_message(Message::User(UserMessage {
-            content: UserContent::Text("main pane".into()),
-            timestamp_ms: Timestamp::zero(),
-        }));
+        session.push_message(Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text("main pane".into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        ));
 
         let mut pane_conv = ConversationState::new();
-        pane_conv.append_message(Message::User(UserMessage {
-            content: UserContent::Text("pane 2".into()),
-            timestamp_ms: Timestamp::zero(),
-        }));
+        pane_conv.append_message(Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text("pane 2".into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        ));
         session.panes.push(PaneSession {
             pane_id: PaneId::new(2),
             label: Some("helper".into()),

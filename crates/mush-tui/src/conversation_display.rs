@@ -311,10 +311,12 @@ mod tests {
     }
 
     fn user_message(text: &str) -> Message {
-        Message::User(UserMessage {
-            content: UserContent::Text(text.into()),
-            timestamp_ms: Timestamp::zero(),
-        })
+        Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text(text.into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )
     }
 
     fn assistant_with_tool(tool_call_id: &str) -> Message {
@@ -471,13 +473,15 @@ mod tests {
     }
 
     fn compaction_summary_message(body: &str) -> Message {
-        Message::User(UserMessage {
-            content: UserContent::Text(format!(
-                "{}\n\n<summary>\n{body}\n</summary>",
-                mush_session::COMPACTION_SUMMARY_PREFIX
-            )),
-            timestamp_ms: Timestamp::zero(),
-        })
+        Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text(format!(
+                    "{}\n\n<summary>\n{body}\n</summary>",
+                    mush_session::COMPACTION_SUMMARY_PREFIX
+                )))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )
     }
 
     #[test]
@@ -659,10 +663,12 @@ mod tests {
                 mime_type: ImageMimeType::Png,
             }),
         ];
-        let conversation = vec![Message::User(UserMessage {
-            content: UserContent::Parts(parts),
-            timestamp_ms: Timestamp::now(),
-        })];
+        let conversation = vec![Message::User(
+            UserMessage::builder()
+                .content(UserContent::Parts(parts))
+                .timestamp_ms(Timestamp::now())
+                .build(),
+        )];
 
         let mut app = app();
         rebuild_display(&mut app, &conversation);

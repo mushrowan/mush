@@ -157,10 +157,12 @@ mod tests {
     use mush_ai::types::{Message, Timestamp, UserContent, UserMessage};
 
     fn user_message(text: &str) -> Message {
-        Message::User(UserMessage {
-            content: UserContent::Text(text.into()),
-            timestamp_ms: Timestamp::zero(),
-        })
+        Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text(text.into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )
     }
 
     #[test]

@@ -223,12 +223,9 @@ pub fn agent_loop(
                 .collect::<Vec<_>>()
                 .join("\n");
             if !all_output.is_empty() {
-                messages.push(Message::User(UserMessage {
-                    content: UserContent::Text(format!(
+                messages.push(Message::User(UserMessage::builder().content(UserContent::Text(format!(
                         "[pre-session hook output]\n{all_output}"
-                    )),
-                    timestamp_ms: Timestamp::now(),
-                }));
+                    ))).timestamp_ms(Timestamp::now()).build()));
             }
         }
 
@@ -447,10 +444,7 @@ pub fn agent_loop(
                                 &results,
                                 crate::hooks::HookPoint::Stop,
                             ) {
-                                messages.push(Message::User(UserMessage {
-                                    content: UserContent::Text(feedback),
-                                    timestamp_ms: Timestamp::now(),
-                                }));
+                                messages.push(Message::User(UserMessage::builder().content(UserContent::Text(feedback)).timestamp_ms(Timestamp::now()).build()));
                             }
                             yield AgentEvent::TurnEnd { turn_index, message: assistant_msg };
                             turn_index += 1;
@@ -938,10 +932,12 @@ mod tests {
             cancel: None,
         };
 
-        let messages = vec![Message::User(UserMessage {
-            content: UserContent::Text("hi".into()),
-            timestamp_ms: Timestamp::zero(),
-        })];
+        let messages = vec![Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text("hi".into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )];
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let events: Vec<AgentEvent> = rt.block_on(async {
@@ -1006,10 +1002,12 @@ mod tests {
             injections: AgentInjections::default(),
             cancel: None,
         };
-        let user_messages = vec![Message::User(UserMessage {
-            content: UserContent::Text("do the thing".into()),
-            timestamp_ms: Timestamp::zero(),
-        })];
+        let user_messages = vec![Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text("do the thing".into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )];
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let events: Vec<AgentEvent> =
@@ -1076,10 +1074,12 @@ mod tests {
             cancel: None,
         };
 
-        let messages = vec![Message::User(UserMessage {
-            content: UserContent::Text("hi".into()),
-            timestamp_ms: Timestamp::zero(),
-        })];
+        let messages = vec![Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text("hi".into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )];
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let _events: Vec<AgentEvent> =
@@ -1163,10 +1163,12 @@ mod tests {
             Box::pin(async move {
                 let n = calls.fetch_add(1, Ordering::SeqCst);
                 if n == 0 {
-                    vec![Message::User(UserMessage {
-                        content: UserContent::Text("queued follow-up".into()),
-                        timestamp_ms: Timestamp::zero(),
-                    })]
+                    vec![Message::User(
+                        UserMessage::builder()
+                            .content(UserContent::Text("queued follow-up".into()))
+                            .timestamp_ms(Timestamp::zero())
+                            .build(),
+                    )]
                 } else {
                     vec![]
                 }
@@ -1188,10 +1190,12 @@ mod tests {
             cancel: None,
         };
 
-        let messages = vec![Message::User(UserMessage {
-            content: UserContent::Text("hi".into()),
-            timestamp_ms: Timestamp::zero(),
-        })];
+        let messages = vec![Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text("hi".into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )];
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let events: Vec<AgentEvent> =
@@ -1264,10 +1268,12 @@ mod tests {
             cancel: Some(token),
         };
 
-        let messages = vec![Message::User(UserMessage {
-            content: UserContent::Text("hi".into()),
-            timestamp_ms: Timestamp::zero(),
-        })];
+        let messages = vec![Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text("hi".into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )];
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let events: Vec<AgentEvent> =
@@ -1340,10 +1346,12 @@ mod tests {
             injections: AgentInjections::default(),
             cancel: Some(cancel),
         };
-        let messages = vec![Message::User(UserMessage {
-            content: UserContent::Text("use a tool".into()),
-            timestamp_ms: Timestamp::zero(),
-        })];
+        let messages = vec![Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text("use a tool".into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )];
 
         let events: Vec<AgentEvent> = tokio::runtime::Runtime::new()
             .unwrap()
@@ -1410,10 +1418,12 @@ mod tests {
             injections: AgentInjections::default(),
             cancel: None,
         };
-        let messages = vec![Message::User(UserMessage {
-            content: UserContent::Text("use a tool".into()),
-            timestamp_ms: Timestamp::zero(),
-        })];
+        let messages = vec![Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text("use a tool".into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )];
 
         let events: Vec<AgentEvent> = tokio::runtime::Runtime::new()
             .unwrap()
@@ -1502,10 +1512,12 @@ mod tests {
             cancel: None,
         };
 
-        let messages = vec![Message::User(UserMessage {
-            content: UserContent::Text("hi".into()),
-            timestamp_ms: Timestamp::zero(),
-        })];
+        let messages = vec![Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text("hi".into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )];
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let events: Vec<AgentEvent> =

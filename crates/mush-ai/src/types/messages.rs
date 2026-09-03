@@ -2,7 +2,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use super::content::{AssistantContentPart, ToolResultContentPart, UserContent};
 use super::model::{Api, Provider};
-use super::newtypes::{Dollars, ModelId, Timestamp, TokenCount, ToolCallId, ToolName};
+use super::newtypes::{Dollars, ModelId, PromptId, Timestamp, TokenCount, ToolCallId, ToolName};
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
 pub struct Usage {
@@ -47,10 +47,13 @@ pub enum StopReason {
     Aborted,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, bon::Builder)]
+#[builder(on(String, into))]
 pub struct UserMessage {
     pub content: UserContent,
     pub timestamp_ms: Timestamp,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_id: Option<PromptId>,
 }
 
 impl UserMessage {
@@ -226,10 +229,12 @@ mod tests {
 
     #[test]
     fn message_serialisation_roundtrip() {
-        let msg = Message::User(UserMessage {
-            content: UserContent::Text("hello".into()),
-            timestamp_ms: Timestamp::from_ms(1_234_567_890),
-        });
+        let msg = Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text("hello".into()))
+                .timestamp_ms(Timestamp::from_ms(1_234_567_890))
+                .build(),
+        );
         let json = serde_json::to_string(&msg).unwrap();
         let back: Message = serde_json::from_str(&json).unwrap();
         assert_eq!(msg, back);
@@ -292,10 +297,12 @@ mod tests {
     }
 
     fn user(text: &str) -> Message {
-        Message::User(UserMessage {
-            content: UserContent::Text(text.into()),
-            timestamp_ms: Timestamp::zero(),
-        })
+        Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text(text.into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )
     }
 
     fn assistant() -> Message {

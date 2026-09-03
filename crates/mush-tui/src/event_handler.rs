@@ -329,10 +329,14 @@ async fn inject_post_compaction_hooks(
 
     if !output.is_empty() {
         tracing::info!("post-compaction hook output injected into context");
-        messages.push(Message::User(UserMessage {
-            content: UserContent::Text(format!("[post-compaction hook output]\n{output}")),
-            timestamp_ms: Timestamp::now(),
-        }));
+        messages.push(Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text(format!(
+                    "[post-compaction hook output]\n{output}"
+                )))
+                .timestamp_ms(Timestamp::now())
+                .build(),
+        ));
     }
 
     for r in &results {
@@ -392,13 +396,15 @@ pub fn slim_for_fork(messages: &[Message]) -> Vec<Message> {
         result.push(first_user.clone());
     }
 
-    result.push(Message::User(UserMessage {
-        content: UserContent::Text(format!(
-            "[context trimmed: {} earlier messages omitted for focus]",
-            messages.len() - FORK_CONTEXT_LIMIT
-        )),
-        timestamp_ms: Timestamp::now(),
-    }));
+    result.push(Message::User(
+        UserMessage::builder()
+            .content(UserContent::Text(format!(
+                "[context trimmed: {} earlier messages omitted for focus]",
+                messages.len() - FORK_CONTEXT_LIMIT
+            )))
+            .timestamp_ms(Timestamp::now())
+            .build(),
+    ));
 
     let recent_start = messages.len().saturating_sub(FORK_CONTEXT_LIMIT);
     for msg in &messages[recent_start..] {
@@ -449,10 +455,12 @@ mod tests {
     }
 
     fn make_user(text: &str) -> Message {
-        Message::User(UserMessage {
-            content: UserContent::Text(text.into()),
-            timestamp_ms: Timestamp::now(),
-        })
+        Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text(text.into()))
+                .timestamp_ms(Timestamp::now())
+                .build(),
+        )
     }
 
     fn tool_text(msg: &Message) -> &str {
@@ -642,10 +650,12 @@ mod tests {
             image_protos: &mut image_protos,
         };
 
-        let injected = vec![Message::User(UserMessage {
-            content: UserContent::Text("steered mid-stream".into()),
-            timestamp_ms: Timestamp::zero(),
-        })];
+        let injected = vec![Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text("steered mid-stream".into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )];
 
         let event = AgentEvent::SteeringInjected {
             messages: injected.clone(),
@@ -676,10 +686,12 @@ mod tests {
             image_protos: &mut image_protos,
         };
 
-        let injected = vec![Message::User(UserMessage {
-            content: UserContent::Text("follow up".into()),
-            timestamp_ms: Timestamp::zero(),
-        })];
+        let injected = vec![Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text("follow up".into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )];
 
         let event = AgentEvent::FollowUpInjected {
             messages: injected.clone(),

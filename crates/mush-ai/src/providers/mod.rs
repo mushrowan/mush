@@ -276,10 +276,12 @@ mod tests {
     #[test]
     fn walk_messages_dispatches_and_marks_old_turns() {
         fn u(text: &str) -> Message {
-            Message::User(UserMessage {
-                content: UserContent::Text(text.into()),
-                timestamp_ms: Timestamp::now(),
-            })
+            Message::User(
+                UserMessage::builder()
+                    .content(UserContent::Text(text.into()))
+                    .timestamp_ms(Timestamp::now())
+                    .build(),
+            )
         }
         fn a() -> Message {
             Message::Assistant(

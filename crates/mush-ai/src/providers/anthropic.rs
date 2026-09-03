@@ -1925,10 +1925,12 @@ mod tests {
 
     #[test]
     fn convert_simple_user_message() {
-        let messages = vec![Message::User(UserMessage {
-            content: UserContent::Text("hello".into()),
-            timestamp_ms: Timestamp::zero(),
-        })];
+        let messages = vec![Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text("hello".into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )];
 
         let converted = convert_messages(&messages, false, None, ToolResultTrimming::SlidingWindow);
         assert_eq!(converted.len(), 1);
@@ -1941,16 +1943,18 @@ mod tests {
 
     #[test]
     fn convert_image_only_message_omits_empty_text() {
-        let messages = vec![Message::User(UserMessage {
-            content: UserContent::Parts(vec![
-                UserContentPart::Text(TextContent { text: "".into() }),
-                UserContentPart::Image(ImageContent {
-                    data: "iVBOR...".into(),
-                    mime_type: ImageMimeType::Png,
-                }),
-            ]),
-            timestamp_ms: Timestamp::zero(),
-        })];
+        let messages = vec![Message::User(
+            UserMessage::builder()
+                .content(UserContent::Parts(vec![
+                    UserContentPart::Text(TextContent { text: "".into() }),
+                    UserContentPart::Image(ImageContent {
+                        data: "iVBOR...".into(),
+                        mime_type: ImageMimeType::Png,
+                    }),
+                ]))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )];
 
         let converted = convert_messages(&messages, false, None, ToolResultTrimming::SlidingWindow);
         assert_eq!(converted.len(), 1);
@@ -2258,10 +2262,12 @@ mod tests {
                     .timestamp_ms(Timestamp::zero())
                     .build(),
             ),
-            Message::User(UserMessage {
-                content: UserContent::Text("stop! undo that".into()),
-                timestamp_ms: Timestamp::zero(),
-            }),
+            Message::User(
+                UserMessage::builder()
+                    .content(UserContent::Text("stop! undo that".into()))
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            ),
         ];
 
         let converted = convert_messages(&messages, false, None, ToolResultTrimming::SlidingWindow);
@@ -2281,10 +2287,12 @@ mod tests {
     #[test]
     fn orphaned_tool_result_stripped() {
         let messages = vec![
-            Message::User(UserMessage {
-                content: UserContent::Text("compacted summary".into()),
-                timestamp_ms: Timestamp::zero(),
-            }),
+            Message::User(
+                UserMessage::builder()
+                    .content(UserContent::Text("compacted summary".into()))
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            ),
             Message::Assistant(
                 AssistantMessage::builder()
                     .content(vec![AssistantContentPart::ToolCall(ToolCall {
@@ -2351,10 +2359,12 @@ mod tests {
                 outcome: ToolOutcome::Success,
                 timestamp_ms: Timestamp::zero(),
             }),
-            Message::User(UserMessage {
-                content: UserContent::Text("continue".into()),
-                timestamp_ms: Timestamp::zero(),
-            }),
+            Message::User(
+                UserMessage::builder()
+                    .content(UserContent::Text("continue".into()))
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            ),
         ];
 
         let converted = convert_messages(&messages, false, None, ToolResultTrimming::SlidingWindow);
@@ -2974,17 +2984,19 @@ mod tests {
                     .timestamp_ms(Timestamp::zero())
                     .build(),
             ),
-            Message::User(UserMessage {
-                content: UserContent::Parts(vec![
-                    UserContentPart::Text(TextContent {
-                        text: "read foo.rs".into(),
-                    }),
-                    UserContentPart::Text(TextContent {
-                        text: "and bar.rs".into(),
-                    }),
-                ]),
-                timestamp_ms: Timestamp::zero(),
-            }),
+            Message::User(
+                UserMessage::builder()
+                    .content(UserContent::Parts(vec![
+                        UserContentPart::Text(TextContent {
+                            text: "read foo.rs".into(),
+                        }),
+                        UserContentPart::Text(TextContent {
+                            text: "and bar.rs".into(),
+                        }),
+                    ]))
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            ),
         ];
 
         assert_eq!(first_user_text(&assistant_first), "read foo.rs");
@@ -3020,10 +3032,12 @@ mod tests {
     #[test]
     fn the_previous_request_id_rides_in_the_billing_block() {
         let messages = vec![
-            Message::User(UserMessage {
-                content: UserContent::Text("test test 1212 hello".into()),
-                timestamp_ms: Timestamp::zero(),
-            }),
+            Message::User(
+                UserMessage::builder()
+                    .content(UserContent::Text("test test 1212 hello".into()))
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            ),
             Message::Assistant(
                 AssistantMessage::builder()
                     .model("claude-sonnet-4-20250514".into())
@@ -3051,10 +3065,12 @@ mod tests {
 
     #[test]
     fn the_billing_suffix_hashes_the_first_user_message() {
-        let messages = vec![Message::User(UserMessage {
-            content: UserContent::Text("test test 1212 hello".into()),
-            timestamp_ms: Timestamp::zero(),
-        })];
+        let messages = vec![Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text("test test 1212 hello".into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )];
         let body = build_request_body(
             &test_model(),
             &None,
@@ -3253,10 +3269,12 @@ mod tests {
             ttl: None,
             scope: None,
         });
-        let messages = vec![Message::User(UserMessage {
-            content: UserContent::Text("hello".into()),
-            timestamp_ms: Timestamp::zero(),
-        })];
+        let messages = vec![Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text("hello".into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )];
 
         let converted =
             convert_messages(&messages, false, cache, ToolResultTrimming::SlidingWindow);
@@ -3274,10 +3292,12 @@ mod tests {
             scope: None,
         });
 
-        let messages_r1 = vec![Message::User(UserMessage {
-            content: UserContent::Text("hello".into()),
-            timestamp_ms: Timestamp::zero(),
-        })];
+        let messages_r1 = vec![Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text("hello".into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )];
         let converted_r1 = convert_messages(
             &messages_r1,
             false,
@@ -3286,10 +3306,12 @@ mod tests {
         );
 
         let messages_r2 = vec![
-            Message::User(UserMessage {
-                content: UserContent::Text("hello".into()),
-                timestamp_ms: Timestamp::zero(),
-            }),
+            Message::User(
+                UserMessage::builder()
+                    .content(UserContent::Text("hello".into()))
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            ),
             Message::Assistant(AssistantMessage {
                 content: vec![AssistantContentPart::Text(TextContent {
                     text: "hi there".into(),
@@ -3297,10 +3319,12 @@ mod tests {
                 generation_id: None,
                 ..test_output()
             }),
-            Message::User(UserMessage {
-                content: UserContent::Text("goodbye".into()),
-                timestamp_ms: Timestamp::zero(),
-            }),
+            Message::User(
+                UserMessage::builder()
+                    .content(UserContent::Text("goodbye".into()))
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            ),
         ];
         let converted_r2 =
             convert_messages(&messages_r2, false, cache, ToolResultTrimming::Preserve);
@@ -3333,10 +3357,12 @@ mod tests {
             scope: None,
         });
         let messages = vec![
-            Message::User(UserMessage {
-                content: UserContent::Text("do the thing".into()),
-                timestamp_ms: Timestamp::zero(),
-            }),
+            Message::User(
+                UserMessage::builder()
+                    .content(UserContent::Text("do the thing".into()))
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            ),
             Message::Assistant(
                 AssistantMessage::builder()
                     .content(vec![AssistantContentPart::ToolCall(ToolCall {
@@ -3398,10 +3424,12 @@ mod tests {
             ttl: None,
             scope: None,
         });
-        let mut messages = vec![Message::User(UserMessage {
-            content: UserContent::Text("do the thing".into()),
-            timestamp_ms: Timestamp::zero(),
-        })];
+        let mut messages = vec![Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text("do the thing".into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )];
 
         for i in 0..25 {
             let id = format!("tc_{i}");
@@ -3854,10 +3882,12 @@ mod tests {
     fn messages_with_old_large_tool_result() -> Vec<Message> {
         let large_output = "x".repeat(3000);
         vec![
-            Message::User(UserMessage {
-                content: UserContent::Text("read foo.rs".into()),
-                timestamp_ms: Timestamp::zero(),
-            }),
+            Message::User(
+                UserMessage::builder()
+                    .content(UserContent::Text("read foo.rs".into()))
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            ),
             Message::Assistant(
                 AssistantMessage::builder()
                     .content(vec![AssistantContentPart::ToolCall(ToolCall {
@@ -3881,18 +3911,24 @@ mod tests {
                 outcome: ToolOutcome::Success,
                 timestamp_ms: Timestamp::zero(),
             }),
-            Message::User(UserMessage {
-                content: UserContent::Text("thanks".into()),
-                timestamp_ms: Timestamp::zero(),
-            }),
-            Message::User(UserMessage {
-                content: UserContent::Text("now do something else".into()),
-                timestamp_ms: Timestamp::zero(),
-            }),
-            Message::User(UserMessage {
-                content: UserContent::Text("one more thing".into()),
-                timestamp_ms: Timestamp::zero(),
-            }),
+            Message::User(
+                UserMessage::builder()
+                    .content(UserContent::Text("thanks".into()))
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            ),
+            Message::User(
+                UserMessage::builder()
+                    .content(UserContent::Text("now do something else".into()))
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            ),
+            Message::User(
+                UserMessage::builder()
+                    .content(UserContent::Text("one more thing".into()))
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            ),
         ]
     }
 

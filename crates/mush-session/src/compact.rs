@@ -381,13 +381,15 @@ pub fn compact_with_summary(
     };
     let kept = messages[split_at..].to_vec();
 
-    let summary_msg = Message::User(UserMessage {
-        content: UserContent::Text(format!(
-            "{COMPACTION_SUMMARY_PREFIX}\n\n\
+    let summary_msg = Message::User(
+        UserMessage::builder()
+            .content(UserContent::Text(format!(
+                "{COMPACTION_SUMMARY_PREFIX}\n\n\
              <summary>\n{summary}\n</summary>"
-        )),
-        timestamp_ms: Timestamp::now(),
-    });
+            )))
+            .timestamp_ms(Timestamp::now())
+            .build(),
+    );
 
     let mut result = vec![summary_msg];
     result.extend(kept);
@@ -665,10 +667,12 @@ fn compaction_context(
 
     LlmContext {
         system_prompt: Some(system_prompt),
-        messages: vec![Message::User(UserMessage {
-            content: UserContent::Text(request_body),
-            timestamp_ms: Timestamp::now(),
-        })],
+        messages: vec![Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text(request_body))
+                .timestamp_ms(Timestamp::now())
+                .build(),
+        )],
         tools: vec![],
     }
 }
@@ -1014,10 +1018,12 @@ mod tests {
     use mush_ai::registry::{ApiProvider, EventStream, ProviderError};
 
     fn user_msg(text: &str) -> Message {
-        Message::User(UserMessage {
-            content: UserContent::Text(text.into()),
-            timestamp_ms: Timestamp::zero(),
-        })
+        Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text(text.into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )
     }
 
     fn assistant_msg(text: &str) -> Message {
@@ -1072,13 +1078,17 @@ mod tests {
 
     #[test]
     fn message_char_count_image_uses_constant() {
-        let msg = Message::User(UserMessage {
-            content: UserContent::Parts(vec![UserContentPart::Image(ImageContent {
-                mime_type: ImageMimeType::Png,
-                data: "base64data".into(),
-            })]),
-            timestamp_ms: Timestamp::zero(),
-        });
+        let msg = Message::User(
+            UserMessage::builder()
+                .content(UserContent::Parts(vec![UserContentPart::Image(
+                    ImageContent {
+                        mime_type: ImageMimeType::Png,
+                        data: "base64data".into(),
+                    },
+                )]))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        );
         assert_eq!(message_char_count(&msg), IMAGE_CHAR_ESTIMATE);
     }
 

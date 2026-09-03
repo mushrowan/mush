@@ -99,10 +99,12 @@ mod tests {
     use mush_ai::types::*;
 
     fn user_msg(text: &str) -> Message {
-        Message::User(UserMessage {
-            content: UserContent::Text(text.into()),
-            timestamp_ms: Timestamp::zero(),
-        })
+        Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text(text.into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )
     }
 
     fn assistant_msg(text: &str) -> Message {

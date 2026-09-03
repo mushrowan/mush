@@ -181,10 +181,12 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
     };
     setup.options.session_id = Some(session.meta.id.clone());
 
-    let user_msg = Message::User(UserMessage {
-        content: UserContent::Text(prompt),
-        timestamp_ms: Timestamp::now(),
-    });
+    let user_msg = Message::User(
+        UserMessage::builder()
+            .content(UserContent::Text(prompt))
+            .timestamp_ms(Timestamp::now())
+            .build(),
+    );
     session.push_message(user_msg);
     session.auto_title();
 

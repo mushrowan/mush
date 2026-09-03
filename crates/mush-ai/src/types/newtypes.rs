@@ -89,6 +89,30 @@ impl Default for SessionId {
 }
 
 #[derive(
+    Debug, Clone, PartialEq, Eq, Hash, Display, From, Deref, AsRef, Serialize, Deserialize,
+)]
+pub struct PromptId(String);
+
+impl From<&str> for PromptId {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+impl PromptId {
+    #[must_use]
+    pub fn new() -> Self {
+        Self(crate::ids::random_uuid_v4())
+    }
+}
+
+impl Default for PromptId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Display, From, Serialize, Deserialize,
 )]
 pub struct PaneId(u32);

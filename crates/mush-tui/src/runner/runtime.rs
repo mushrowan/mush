@@ -381,10 +381,12 @@ pub(super) fn save_prompt_to_conversation(
     conversation: &mut ConversationState,
     prompt: &crate::session::PendingPrompt,
 ) {
-    let user_message = Message::User(UserMessage {
-        content: streams::build_user_content(&prompt.text, &prompt.images),
-        timestamp_ms: Timestamp::now(),
-    });
+    let user_message = Message::User(
+        UserMessage::builder()
+            .content(streams::build_user_content(&prompt.text, &prompt.images))
+            .timestamp_ms(Timestamp::now())
+            .build(),
+    );
     conversation.append_message(user_message);
 }
 
@@ -494,10 +496,12 @@ mod tests {
     }
 
     fn user_message(text: &str) -> Message {
-        Message::User(UserMessage {
-            content: UserContent::Text(text.into()),
-            timestamp_ms: Timestamp::zero(),
-        })
+        Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text(text.into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )
     }
 
     fn assistant_message(text: &str) -> Message {

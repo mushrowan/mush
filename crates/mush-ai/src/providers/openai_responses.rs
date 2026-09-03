@@ -1553,10 +1553,12 @@ mod tests {
     fn orphaned_function_call_gets_synthetic_output() {
         let model = sample_codex_model();
         let messages = vec![
-            Message::User(UserMessage {
-                content: UserContent::Text("hello".into()),
-                timestamp_ms: Timestamp::zero(),
-            }),
+            Message::User(
+                UserMessage::builder()
+                    .content(UserContent::Text("hello".into()))
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            ),
             Message::Assistant(
                 AssistantMessage::builder()
                     .model("gpt-5.2".into())
@@ -1570,10 +1572,12 @@ mod tests {
                     })])
                     .build(),
             ),
-            Message::User(UserMessage {
-                content: UserContent::Text("retrying".into()),
-                timestamp_ms: Timestamp::zero(),
-            }),
+            Message::User(
+                UserMessage::builder()
+                    .content(UserContent::Text("retrying".into()))
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            ),
         ];
 
         let input =

@@ -724,10 +724,12 @@ mod tests {
         let body = build_request_body(
             &model,
             &Some("you are helpful".into()),
-            &[Message::User(UserMessage {
-                content: UserContent::Text("hi".into()),
-                timestamp_ms: Timestamp::zero(),
-            })],
+            &[Message::User(
+                UserMessage::builder()
+                    .content(UserContent::Text("hi".into()))
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            )],
             &[],
             &options,
         );

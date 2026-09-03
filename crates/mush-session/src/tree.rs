@@ -102,20 +102,24 @@ fn push_context_message(
 fn entry_to_message(entry: &SessionEntry) -> Message {
     match &entry.kind {
         EntryKind::Message { message } => message.clone(),
-        EntryKind::BranchSummary { summary, .. } => Message::User(UserMessage {
-            content: UserContent::Text(format!(
-                "Context from a previous conversation branch:\n\n\
+        EntryKind::BranchSummary { summary, .. } => Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text(format!(
+                    "Context from a previous conversation branch:\n\n\
                  <branch_summary>\n{summary}\n</branch_summary>"
-            )),
-            timestamp_ms: entry.timestamp,
-        }),
-        EntryKind::Compaction { summary, .. } => Message::User(UserMessage {
-            content: UserContent::Text(format!(
-                "The conversation history before this point was compacted \
+                )))
+                .timestamp_ms(entry.timestamp)
+                .build(),
+        ),
+        EntryKind::Compaction { summary, .. } => Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text(format!(
+                    "The conversation history before this point was compacted \
                  into the following summary:\n\n<summary>\n{summary}\n</summary>"
-            )),
-            timestamp_ms: entry.timestamp,
-        }),
+                )))
+                .timestamp_ms(entry.timestamp)
+                .build(),
+        ),
     }
 }
 
@@ -470,10 +474,12 @@ mod tests {
     use super::*;
 
     fn user_msg(text: &str) -> Message {
-        Message::User(UserMessage {
-            content: UserContent::Text(text.into()),
-            timestamp_ms: Timestamp::zero(),
-        })
+        Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text(text.into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )
     }
 
     fn assistant_msg(text: &str) -> Message {

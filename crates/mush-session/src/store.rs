@@ -235,10 +235,12 @@ mod tests {
     fn save_and_load_session() {
         let (_dir, store) = temp_store();
         let mut session = Session::new("test-model", "/tmp");
-        session.push_message(Message::User(UserMessage {
-            content: UserContent::Text("hello".into()),
-            timestamp_ms: Timestamp::from_ms(1000),
-        }));
+        session.push_message(Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text("hello".into()))
+                .timestamp_ms(Timestamp::from_ms(1000))
+                .build(),
+        ));
 
         store.save(&session).unwrap();
         let loaded = store.load(&session.meta.id).unwrap();

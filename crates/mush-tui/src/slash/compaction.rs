@@ -287,10 +287,14 @@ async fn build_applied_compaction(
             .collect::<Vec<_>>()
             .join("\n");
         if !output.is_empty() {
-            compacted.push(Message::User(UserMessage {
-                content: UserContent::Text(format!("[post-compaction hook output]\n{output}")),
-                timestamp_ms: Timestamp::now(),
-            }));
+            compacted.push(Message::User(
+                UserMessage::builder()
+                    .content(UserContent::Text(format!(
+                        "[post-compaction hook output]\n{output}"
+                    )))
+                    .timestamp_ms(Timestamp::now())
+                    .build(),
+            ));
         }
         for r in &hook_results {
             if !r.success {
@@ -362,10 +366,12 @@ mod tests {
     }
 
     fn user_msg(text: &str) -> Message {
-        Message::User(UserMessage {
-            content: UserContent::Text(text.into()),
-            timestamp_ms: Timestamp::zero(),
-        })
+        Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text(text.into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )
     }
 
     fn assistant_msg(text: &str, input_tokens: u64) -> Message {

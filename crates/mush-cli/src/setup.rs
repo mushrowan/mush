@@ -672,10 +672,14 @@ pub async fn auto_compact(
             .join("\n");
         if !output.is_empty() {
             eprintln!("\x1b[2m(post-compaction hook output injected)\x1b[0m");
-            messages.push(Message::User(UserMessage {
-                content: UserContent::Text(format!("[post-compaction hook output]\n{output}")),
-                timestamp_ms: Timestamp::now(),
-            }));
+            messages.push(Message::User(
+                UserMessage::builder()
+                    .content(UserContent::Text(format!(
+                        "[post-compaction hook output]\n{output}"
+                    )))
+                    .timestamp_ms(Timestamp::now())
+                    .build(),
+            ));
         }
         for r in &results {
             if !r.success {

@@ -503,13 +503,12 @@ pub(super) async fn submit_streaming_input(
     let focused_id = PaneId::new(1);
     if let Some(meta) = stream_state.meta(focused_id) {
         let content = build_user_content(&text, &images);
-        meta.steering_queue
-            .lock()
-            .await
-            .push(Message::User(UserMessage {
-                content,
-                timestamp_ms: Timestamp::now(),
-            }));
+        meta.steering_queue.lock().await.push(Message::User(
+            UserMessage::builder()
+                .content(content)
+                .timestamp_ms(Timestamp::now())
+                .build(),
+        ));
         let image_bytes: Vec<Vec<u8>> = images.into_iter().map(|img| img.data).collect();
         if image_bytes.is_empty() {
             session.app.push_queued_message(text);
@@ -562,13 +561,12 @@ pub(super) async fn edit_last_queued_steering(session: &mut Session, stream_stat
         if !current_input.trim().is_empty() {
             app.push_queued_message(&current_input);
             if let Some(meta) = stream_state.meta(focused_id) {
-                meta.steering_queue
-                    .lock()
-                    .await
-                    .push(Message::User(UserMessage {
-                        content: UserContent::Text(current_input),
-                        timestamp_ms: Timestamp::now(),
-                    }));
+                meta.steering_queue.lock().await.push(Message::User(
+                    UserMessage::builder()
+                        .content(UserContent::Text(current_input))
+                        .timestamp_ms(Timestamp::now())
+                        .build(),
+                ));
             }
         }
 
@@ -1089,10 +1087,12 @@ mod tests {
     }
 
     fn user_msg(text: impl Into<String>) -> Message {
-        Message::User(UserMessage {
-            content: UserContent::Text(text.into()),
-            timestamp_ms: Timestamp::zero(),
-        })
+        Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text(text.into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )
     }
 
     #[tokio::test]
@@ -1615,12 +1615,12 @@ mod tests {
     #[test]
     fn save_dirty_session_flushes_after_debounce() {
         let mut session = Session::new(app());
-        session
-            .conversation
-            .append_message(Message::User(UserMessage {
-                content: UserContent::Text("persist me".into()),
-                timestamp_ms: Timestamp::zero(),
-            }));
+        session.conversation.append_message(Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text("persist me".into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        ));
         let mut config = test_tui_config();
         let saves = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let saves_for_callback = saves.clone();
