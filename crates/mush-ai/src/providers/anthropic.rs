@@ -554,7 +554,7 @@ fn build_request_headers(
         headers.insert("x-stainless-os", HeaderValue::from_static("Linux"));
         headers.insert(
             "x-stainless-package-version",
-            HeaderValue::from_static("0.94.0"),
+            HeaderValue::from_static("0.112.1"),
         );
         headers.insert("x-stainless-retry-count", HeaderValue::from_static("0"));
         headers.insert("x-stainless-runtime", HeaderValue::from_static("node"));
@@ -2940,6 +2940,12 @@ mod tests {
     }
 
     #[test]
+    fn the_bundled_sdk_version_is_reported() {
+        let headers = oauth_test_headers();
+        assert_eq!(headers["x-stainless-package-version"], "0.112.1");
+    }
+
+    #[test]
     fn version_reaches_user_agent_and_billing_block() {
         let model = test_model();
         let options = StreamOptions::default();
@@ -3617,6 +3623,11 @@ mod tests {
                 },
             ]
         })
+    }
+
+    fn oauth_test_headers() -> HeaderMap {
+        let key = ApiKey::new("sk-ant-oat01-test").unwrap();
+        build_request_headers(&test_model(), &StreamOptions::default(), &key, true).unwrap()
     }
 
     fn test_model() -> Model {
