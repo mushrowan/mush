@@ -426,22 +426,6 @@ pub fn agent_loop(
                                 result: r.clone(),
                             };
                         }
-
-                        if crate::hooks::has_blocking_failure(&results) {
-                            if let Some(feedback) = crate::hooks::format_hook_results(
-                                &results,
-                                crate::hooks::HookPoint::Stop,
-                            ) {
-                                messages.push(Message::User(UserMessage::builder().content(UserContent::Text(feedback)).timestamp_ms(Timestamp::now()).build()));
-                            }
-                            yield AgentEvent::TurnEnd { turn_index, message: assistant_msg };
-                            turn_index += 1;
-                            if turn_index >= config.max_turns {
-                                yield AgentEvent::MaxTurnsReached { max_turns: config.max_turns };
-                                break 'outer;
-                            }
-                            continue;
-                        }
                     }
 
                     yield AgentEvent::TurnEnd { turn_index, message: assistant_msg };
@@ -1618,6 +1602,50 @@ mod tests {
 
         let _: Vec<AgentEvent> = agent_loop(config, messages).collect().await;
 
+        assert_eq!(seen.lock().unwrap().clone(), vec!["hi".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_blocking_stop_hook_ends_the_turn() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut registry = ApiRegistry::new();
+        registry.register(Box::new(RecordingProvider { seen: seen.clone() }));
+        let mut lifecycle_hooks = crate::hooks::LifecycleHooks::default();
+        lifecycle_hooks.set(
+            crate::hooks::HookPoint::Stop,
+            vec![crate::hooks::LifecycleHook {
+                blocking: true,
+                ..echoing_hook("echo tests are red; exit 1")
+            }],
+        );
+        let config = AgentConfig {
+            model: test_model(),
+            system_prompt: None,
+            tools: ToolRegistry::new(),
+            registry: &registry,
+            options: StreamOptions::default(),
+            max_turns: 3,
+            hooks: Box::new(NoopHooks),
+            injections: AgentInjections {
+                lifecycle_hooks,
+                ..AgentInjections::default()
+            },
+            cancel: None,
+        };
+        let messages = vec![Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text("hi".into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )];
+
+        let events: Vec<AgentEvent> = agent_loop(config, messages).collect().await;
+
+        let turn_ends = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::TurnEnd { .. }))
+            .count();
+        assert_eq!(turn_ends, 1, "the model should not be asked again");
         assert_eq!(seen.lock().unwrap().clone(), vec!["hi".to_string()]);
     }
 }
