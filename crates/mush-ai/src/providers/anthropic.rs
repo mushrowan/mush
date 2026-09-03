@@ -360,8 +360,6 @@ struct RequestBody {
     #[serde(skip_serializing_if = "Option::is_none")]
     context_management: Option<ContextManagement>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    fallbacks: Option<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     output_config: Option<OutputConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     diagnostics: Option<Diagnostics>,
@@ -585,7 +583,6 @@ fn build_request_body(
 
     let metadata = is_oauth.then(|| claude_code_metadata(options));
     let context_management = oauth_context_management(model, options, is_oauth, thinking.is_some());
-    let fallbacks = oauth_fallbacks(options, is_oauth);
     let diagnostics = is_oauth.then(|| Diagnostics {
         previous_message_id: messages.iter().rev().find_map(|message| match message {
             Message::Assistant(assistant) => assistant.generation_id.clone(),
@@ -603,7 +600,6 @@ fn build_request_body(
         temperature,
         thinking,
         context_management,
-        fallbacks,
         output_config,
         diagnostics,
         stream: true,
@@ -688,11 +684,6 @@ fn build_request_headers(
     }
 
     Ok(headers)
-}
-
-fn oauth_fallbacks(options: &StreamOptions, is_oauth: bool) -> Option<&'static str> {
-    let betas = options.anthropic_betas.clone().unwrap_or_default();
-    (is_oauth && betas.fallbacks).then_some("default")
 }
 
 fn oauth_context_management(
@@ -1932,7 +1923,7 @@ mod tests {
         assert!(header.contains("context-1m-2025-08-07"));
         assert!(header.contains("effort-2025-11-24"));
         assert!(header.contains("context-management-2025-06-27"));
-        assert!(header.contains("redact-thinking-2026-02-12"));
+        assert!(header.contains("thinking-token-count-2026-05-13"));
         assert!(header.contains("advisor-tool-2026-03-01"));
         assert!(header.contains("advanced-tool-use-2025-11-20"));
     }
@@ -1949,7 +1940,7 @@ mod tests {
         assert!(!header.contains("context-1m-2025-08-07"));
         assert!(!header.contains("effort-2025-11-24"));
         assert!(!header.contains("context-management-2025-06-27"));
-        assert!(header.contains("redact-thinking-2026-02-12"));
+        assert!(header.contains("thinking-token-count-2026-05-13"));
         assert!(header.contains("advisor-tool-2026-03-01"));
         assert!(header.contains("advanced-tool-use-2025-11-20"));
     }
@@ -3332,56 +3323,6 @@ mod tests {
     }
 
     #[test]
-    fn a_beta_toggle_off_drops_only_its_own_flags() {
-        let betas = AnthropicBetas {
-            server_side_fallback: false,
-            ..AnthropicBetas::default()
-        };
-        let header = betas.to_header_value();
-
-        assert!(
-            !header.contains("server-side-fallback-2026-06-01"),
-            "{header}"
-        );
-        assert!(
-            !header.contains("server-side-fallback-2026-07-01"),
-            "{header}"
-        );
-        assert!(header.contains("effort-2025-11-24"), "{header}");
-        assert!(header.contains("fallback-credit-2026-06-01"), "{header}");
-    }
-
-    #[test]
-    fn the_fallback_selector_is_absent_by_default() {
-        let body = build_request_body(
-            &test_model(),
-            &None,
-            &[],
-            &[],
-            &StreamOptions::default(),
-            true,
-        );
-        let json = serde_json::to_value(&body).unwrap();
-
-        assert!(json.get("fallbacks").is_none(), "json={json}");
-    }
-
-    #[test]
-    fn the_fallback_selector_is_sent_when_enabled() {
-        let options = StreamOptions {
-            anthropic_betas: Some(AnthropicBetas {
-                fallbacks: true,
-                ..AnthropicBetas::default()
-            }),
-            ..Default::default()
-        };
-        let body = build_request_body(&test_model(), &None, &[], &[], &options, true);
-        let json = serde_json::to_value(&body).unwrap();
-
-        assert_eq!(json["fallbacks"], "default");
-    }
-
-    #[test]
     fn every_beta_toggle_on_matches_the_claude_code_capture() {
         let model = Model {
             context_window: TokenCount::new(1_000_000),
@@ -3392,7 +3333,7 @@ mod tests {
 
         assert_eq!(
             headers["anthropic-beta"],
-            "claude-code-20250219,oauth-2025-04-20,context-1m-2025-08-07,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,advisor-tool-2026-03-01,advanced-tool-use-2025-11-20,effort-2025-11-24,server-side-fallback-2026-06-01,server-side-fallback-2026-07-01,fallback-credit-2026-06-01,extended-cache-ttl-2025-04-11,cache-diagnosis-2026-04-07"
+            "claude-code-20250219,oauth-2025-04-20,context-1m-2025-08-07,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,advisor-tool-2026-03-01,advanced-tool-use-2025-11-20,effort-2025-11-24,fallback-credit-2026-06-01,extended-cache-ttl-2025-04-11,cache-diagnosis-2026-04-07"
         );
     }
 

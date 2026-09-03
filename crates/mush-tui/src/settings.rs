@@ -66,13 +66,10 @@ pub enum MenuItemKind {
     ContextOneM,
     Effort,
     ContextManagement,
-    RedactThinking,
     ThinkingTokenCount,
     Advisor,
     AdvancedToolUse,
-    ServerSideFallback,
     FallbackCredit,
-    Fallbacks,
 }
 
 impl MenuItemKind {
@@ -83,13 +80,10 @@ impl MenuItemKind {
             Self::ContextOneM,
             Self::Effort,
             Self::ContextManagement,
-            Self::RedactThinking,
             Self::ThinkingTokenCount,
             Self::Advisor,
             Self::AdvancedToolUse,
-            Self::ServerSideFallback,
             Self::FallbackCredit,
-            Self::Fallbacks,
         ]
     }
 
@@ -100,13 +94,10 @@ impl MenuItemKind {
             Self::ContextOneM => "context_1m",
             Self::Effort => "effort",
             Self::ContextManagement => "context_management",
-            Self::RedactThinking => "redact_thinking",
             Self::ThinkingTokenCount => "thinking_token_count",
             Self::Advisor => "advisor",
             Self::AdvancedToolUse => "advanced_tool_use",
-            Self::ServerSideFallback => "server_side_fallback",
             Self::FallbackCredit => "fallback_credit",
-            Self::Fallbacks => "fallbacks",
         }
     }
 
@@ -117,17 +108,12 @@ impl MenuItemKind {
             Self::ContextOneM => "context-1m-2025-08-07: 1M context on claude models",
             Self::Effort => "effort-2025-11-24: send output_config.effort",
             Self::ContextManagement => "context-management-2025-06-27: server-side edits",
-            Self::RedactThinking => "redact-thinking-2026-02-12: allow thinking redaction",
             Self::ThinkingTokenCount => "thinking-token-count-2026-05-13",
             Self::Advisor => "advisor-tool-2026-03-01: advisor tool (not yet supported)",
             Self::AdvancedToolUse => {
                 "advanced-tool-use-2025-11-20: advanced tool-use (experimental)"
             }
-            Self::ServerSideFallback => {
-                "server-side-fallback-2026-06-01 and -07-01: refusal fallbacks"
-            }
             Self::FallbackCredit => "fallback-credit-2026-06-01: reprice refusal retries",
-            Self::Fallbacks => "send fallbacks=default (the server must have armed it)",
         }
     }
 
@@ -150,11 +136,6 @@ impl MenuItemKind {
                     !settings.anthropic_betas.context_management;
                 bool_str(settings.anthropic_betas.context_management).to_string()
             }
-            Self::RedactThinking => {
-                settings.anthropic_betas.redact_thinking =
-                    !settings.anthropic_betas.redact_thinking;
-                bool_str(settings.anthropic_betas.redact_thinking).to_string()
-            }
             Self::Advisor => {
                 settings.anthropic_betas.advisor = !settings.anthropic_betas.advisor;
                 bool_str(settings.anthropic_betas.advisor).to_string()
@@ -169,19 +150,10 @@ impl MenuItemKind {
                     !settings.anthropic_betas.thinking_token_count;
                 bool_str(settings.anthropic_betas.thinking_token_count).to_string()
             }
-            Self::ServerSideFallback => {
-                settings.anthropic_betas.server_side_fallback =
-                    !settings.anthropic_betas.server_side_fallback;
-                bool_str(settings.anthropic_betas.server_side_fallback).to_string()
-            }
             Self::FallbackCredit => {
                 settings.anthropic_betas.fallback_credit =
                     !settings.anthropic_betas.fallback_credit;
                 bool_str(settings.anthropic_betas.fallback_credit).to_string()
-            }
-            Self::Fallbacks => {
-                settings.anthropic_betas.fallbacks = !settings.anthropic_betas.fallbacks;
-                bool_str(settings.anthropic_betas.fallbacks).to_string()
             }
         }
     }
@@ -195,7 +167,6 @@ impl MenuItemKind {
             Self::ContextManagement => {
                 bool_str(settings.anthropic_betas.context_management).to_string()
             }
-            Self::RedactThinking => bool_str(settings.anthropic_betas.redact_thinking).to_string(),
             Self::ThinkingTokenCount => {
                 bool_str(settings.anthropic_betas.thinking_token_count).to_string()
             }
@@ -203,11 +174,7 @@ impl MenuItemKind {
             Self::AdvancedToolUse => {
                 bool_str(settings.anthropic_betas.advanced_tool_use).to_string()
             }
-            Self::ServerSideFallback => {
-                bool_str(settings.anthropic_betas.server_side_fallback).to_string()
-            }
             Self::FallbackCredit => bool_str(settings.anthropic_betas.fallback_credit).to_string(),
-            Self::Fallbacks => bool_str(settings.anthropic_betas.fallbacks).to_string(),
         }
     }
 }
@@ -306,17 +273,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn activating_the_fallbacks_row_turns_the_selector_on() {
-        let mut settings = ScopedSettings::default();
-        assert_eq!(MenuItemKind::Fallbacks.value(&settings), "off");
-
-        let shown = MenuItemKind::Fallbacks.activate(&mut settings);
-
-        assert_eq!(shown, "on");
-        assert!(settings.anthropic_betas.fallbacks);
-    }
-
-    #[test]
     fn the_new_parity_toggles_appear_in_the_settings_menu() {
         let settings = ScopedSettings::default();
         let listed: Vec<(&str, String)> = MenuItemKind::all()
@@ -324,12 +280,7 @@ mod tests {
             .map(|item| (item.label(), item.value(&settings)))
             .collect();
 
-        for expected in [
-            ("thinking_token_count", "on"),
-            ("server_side_fallback", "on"),
-            ("fallback_credit", "on"),
-            ("fallbacks", "off"),
-        ] {
+        for expected in [("thinking_token_count", "on"), ("fallback_credit", "on")] {
             assert!(
                 listed
                     .iter()

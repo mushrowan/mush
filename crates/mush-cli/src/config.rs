@@ -572,6 +572,19 @@ xai = "sk-xai-ALSO-SECRET-xyz789"
     }
 
     #[test]
+    fn a_removed_beta_key_still_loads() {
+        let toml = r#"
+[settings.anthropic_betas]
+redact_thinking = true
+server_side_fallback = true
+fallbacks = true
+advisor = false
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(!config.settings.anthropic_betas.advisor);
+    }
+
+    #[test]
     fn settings_parses_scope_and_betas() {
         let toml = r#"
 [settings]
@@ -579,13 +592,13 @@ scope = "global"
 
 [settings.anthropic_betas]
 context_1m = false
-redact_thinking = true
+thinking_token_count = true
 advisor = true
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.settings.scope, SettingsScope::Global);
         assert!(!config.settings.anthropic_betas.context_1m);
-        assert!(config.settings.anthropic_betas.redact_thinking);
+        assert!(config.settings.anthropic_betas.thinking_token_count);
         assert!(config.settings.anthropic_betas.advisor);
         assert!(config.settings.anthropic_betas.effort);
         assert!(config.settings.anthropic_betas.context_management);

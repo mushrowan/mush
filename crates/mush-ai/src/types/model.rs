@@ -221,13 +221,10 @@ pub struct AnthropicBetas {
     pub context_1m: bool,
     pub effort: bool,
     pub context_management: bool,
-    pub redact_thinking: bool,
     pub thinking_token_count: bool,
     pub advisor: bool,
     pub advanced_tool_use: bool,
-    pub server_side_fallback: bool,
     pub fallback_credit: bool,
-    pub fallbacks: bool,
 }
 
 impl Default for AnthropicBetas {
@@ -236,13 +233,10 @@ impl Default for AnthropicBetas {
             context_1m: true,
             effort: true,
             context_management: true,
-            redact_thinking: true,
             thinking_token_count: true,
             advisor: true,
             advanced_tool_use: true,
-            server_side_fallback: true,
             fallback_credit: true,
-            fallbacks: false,
         }
     }
 }
@@ -265,9 +259,6 @@ impl AnthropicBetas {
             betas.push("context-1m-2025-08-07");
         }
         betas.push("interleaved-thinking-2025-05-14");
-        if self.redact_thinking {
-            betas.push("redact-thinking-2026-02-12");
-        }
         if self.thinking_token_count {
             betas.push("thinking-token-count-2026-05-13");
         }
@@ -286,12 +277,6 @@ impl AnthropicBetas {
         }
         if self.effort {
             betas.push("effort-2025-11-24");
-        }
-        if self.server_side_fallback {
-            betas.extend([
-                "server-side-fallback-2026-06-01",
-                "server-side-fallback-2026-07-01",
-            ]);
         }
         if self.fallback_credit {
             betas.push("fallback-credit-2026-06-01");
