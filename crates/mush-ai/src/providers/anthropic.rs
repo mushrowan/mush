@@ -508,13 +508,22 @@ fn build_request_body(
         }
         Some(blocks)
     } else {
-        system_prompt.as_ref().map(|prompt| {
-            vec![SystemBlock {
+        let mut blocks = Vec::new();
+        if model.base_url.contains(ANTHROPIC_DIRECT_API) {
+            blocks.push(SystemBlock {
+                block_type: "text".into(),
+                text: claude_code_billing_header(messages),
+                cache_control: None,
+            });
+        }
+        if let Some(prompt) = system_prompt {
+            blocks.push(SystemBlock {
                 block_type: "text".into(),
                 text: prompt.clone(),
                 cache_control: user_system_cache_control.clone(),
-            }]
-        })
+            });
+        }
+        (!blocks.is_empty()).then_some(blocks)
     };
 
     let trimming = if cache_control.is_some() {
@@ -3090,6 +3099,29 @@ mod tests {
         assert_eq!(last_prompt_id(&[]), None);
     }
 
+    #[test]
+    fn an_api_key_to_the_anthropic_endpoint_gets_the_block_too() {
+        let messages = vec![Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text("test test 1212 hello".into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )];
+        let body = build_request_body(
+            &test_model(),
+            &Some("be helpful".into()),
+            &messages,
+            &[],
+            &StreamOptions::default(),
+            false,
+        );
+
+        assert_eq!(
+            body.system.unwrap()[0].text,
+            "x-anthropic-billing-header: cc_version=2.1.238.426; cc_entrypoint=cli; cch=00000;"
+        );
+    }
+
     #[tokio::test]
     async fn the_reply_records_the_request_id_the_server_gave_it() {
         let sse = concat!(
@@ -3469,8 +3501,8 @@ mod tests {
         let system = Some("you are helpful".to_string());
         let body = build_request_body(&test_model(), &system, &[], &[], &options, false);
         let system_blocks = body.system.unwrap();
-        assert_eq!(system_blocks.len(), 1);
-        let cc = system_blocks[0].cache_control.as_ref().unwrap();
+        assert_eq!(system_blocks.len(), 2);
+        let cc = system_blocks[1].cache_control.as_ref().unwrap();
         assert!(cc.scope.is_none());
         assert!(cc.ttl.is_none());
     }
@@ -3698,8 +3730,9 @@ mod tests {
             false,
         );
         let system = body.system.unwrap();
-        assert_eq!(system.len(), 1);
-        assert_eq!(system[0].text, "be helpful");
+        assert_eq!(system.len(), 2);
+        assert!(system[0].text.starts_with("x-anthropic-billing-header:"));
+        assert_eq!(system[1].text, "be helpful");
     }
 
     #[test]
