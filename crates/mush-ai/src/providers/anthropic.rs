@@ -12,15 +12,23 @@ use crate::types::*;
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const API_VERSION: &str = "2023-06-01";
 const ANTHROPIC_DIRECT_API: &str = "api.anthropic.com";
-const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/2.1.177 (external, cli)";
-const CLAUDE_CODE_BILLING_HEADER: &str =
-    "x-anthropic-billing-header: cc_version=2.1.177.154; cc_entrypoint=cli; cch=00000;";
+const CLAUDE_CODE_VERSION: &str = "2.1.238";
 const CLAUDE_CODE_MAX_OUTPUT_TOKENS: u64 = 64_000;
 const ADVISOR_TOOL_TYPE: &str = "advisor_20260301";
 const ADVISOR_TOOL_NAME: &str = "advisor";
 const DEFAULT_ADVISOR_MODEL: &str = "claude-opus-4-8";
 
 const CLAUDE_CODE_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
+
+fn claude_cli_user_agent() -> String {
+    format!("claude-cli/{CLAUDE_CODE_VERSION} (external, cli)")
+}
+
+fn claude_code_billing_header() -> String {
+    format!(
+        "x-anthropic-billing-header: cc_version={CLAUDE_CODE_VERSION}.154; cc_entrypoint=cli; cch=00000;"
+    )
+}
 
 const CLAUDE_CODE_TOOLS: &[&str] = &[
     "Read",
@@ -147,7 +155,7 @@ impl ApiProvider for AnthropicProvider {
             );
             headers.insert(
                 "user-agent",
-                HeaderValue::from_static(CLAUDE_CLI_USER_AGENT),
+                HeaderValue::from_str(&claude_cli_user_agent())?,
             );
             headers.insert("x-app", HeaderValue::from_static("cli"));
             headers.insert(
@@ -460,7 +468,7 @@ fn build_request_body(
         let mut blocks = vec![
             SystemBlock {
                 block_type: "text".into(),
-                text: CLAUDE_CODE_BILLING_HEADER.into(),
+                text: claude_code_billing_header(),
                 cache_control: None,
             },
             SystemBlock {
@@ -2921,8 +2929,20 @@ mod tests {
     }
 
     #[test]
-    fn oauth_user_agent_matches_claude_code_capture() {
-        assert_eq!(CLAUDE_CLI_USER_AGENT, "claude-cli/2.1.177 (external, cli)");
+    fn version_reaches_user_agent_and_billing_block() {
+        let model = test_model();
+        let options = StreamOptions::default();
+        let body = build_request_body(&model, &None, &[], &[], &options, true);
+        let billing = body.system.unwrap()[0].text.clone();
+
+        assert_eq!(
+            claude_cli_user_agent(),
+            "claude-cli/2.1.238 (external, cli)"
+        );
+        assert!(
+            billing.starts_with("x-anthropic-billing-header: cc_version=2.1.238."),
+            "billing={billing}"
+        );
     }
 
     #[test]
@@ -3326,7 +3346,7 @@ mod tests {
 
         let system = json["system"].as_array().unwrap();
         assert_eq!(system.len(), 3);
-        assert_eq!(system[0]["text"], CLAUDE_CODE_BILLING_HEADER);
+        assert_eq!(system[0]["text"], claude_code_billing_header());
         assert!(system[0].get("cache_control").is_none());
         assert_eq!(system[1]["text"], CLAUDE_CODE_IDENTITY);
         assert!(system[1].get("cache_control").is_none());
