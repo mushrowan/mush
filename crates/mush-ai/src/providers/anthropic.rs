@@ -1921,9 +1921,7 @@ mod tests {
             context_1m: false,
             effort: false,
             context_management: false,
-            redact_thinking: true,
-            advisor: true,
-            advanced_tool_use: true,
+            ..AnthropicBetas::default()
         };
         let header = betas.to_header_value();
         assert!(!header.contains("context-1m-2025-08-07"));
@@ -3035,6 +3033,41 @@ mod tests {
         assert_eq!(
             body.system.unwrap()[0].text,
             "x-anthropic-billing-header: cc_version=2.1.238.426; cc_entrypoint=cli; cch=00000;"
+        );
+    }
+
+    #[test]
+    fn a_beta_toggle_off_drops_only_its_own_flags() {
+        let betas = AnthropicBetas {
+            server_side_fallback: false,
+            ..AnthropicBetas::default()
+        };
+        let header = betas.to_header_value();
+
+        assert!(
+            !header.contains("server-side-fallback-2026-06-01"),
+            "{header}"
+        );
+        assert!(
+            !header.contains("server-side-fallback-2026-07-01"),
+            "{header}"
+        );
+        assert!(header.contains("effort-2025-11-24"), "{header}");
+        assert!(header.contains("fallback-credit-2026-06-01"), "{header}");
+    }
+
+    #[test]
+    fn every_beta_toggle_on_matches_the_claude_code_capture() {
+        let model = Model {
+            context_window: TokenCount::new(1_000_000),
+            ..test_model()
+        };
+        let key = ApiKey::new("sk-ant-oat01-test").unwrap();
+        let headers = build_request_headers(&model, &StreamOptions::default(), &key, true).unwrap();
+
+        assert_eq!(
+            headers["anthropic-beta"],
+            "claude-code-20250219,oauth-2025-04-20,context-1m-2025-08-07,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,advisor-tool-2026-03-01,advanced-tool-use-2025-11-20,effort-2025-11-24,server-side-fallback-2026-06-01,server-side-fallback-2026-07-01,fallback-credit-2026-06-01,extended-cache-ttl-2025-04-11,cache-diagnosis-2026-04-07"
         );
     }
 
