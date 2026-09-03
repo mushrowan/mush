@@ -131,76 +131,7 @@ impl ApiProvider for AnthropicProvider {
             is_oauth,
         );
 
-        let mut headers = HeaderMap::new();
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        headers.insert(
-            ACCEPT,
-            HeaderValue::from_static(if is_oauth {
-                "application/json"
-            } else {
-                "text/event-stream"
-            }),
-        );
-        headers.insert("anthropic-version", HeaderValue::from_static(API_VERSION));
-
-        if is_oauth {
-            let betas = options
-                .anthropic_betas
-                .clone()
-                .unwrap_or_default()
-                .gated_for_context_window(model.context_window);
-            headers.insert(
-                "anthropic-beta",
-                HeaderValue::from_str(&betas.to_header_value())?,
-            );
-            headers.insert(
-                "user-agent",
-                HeaderValue::from_str(&claude_cli_user_agent())?,
-            );
-            headers.insert("x-app", HeaderValue::from_static("cli"));
-            headers.insert(
-                "anthropic-dangerous-direct-browser-access",
-                HeaderValue::from_static("true"),
-            );
-            headers.insert(
-                "x-client-request-id",
-                HeaderValue::from_str(&random_uuid_v4())?,
-            );
-            headers.insert("x-stainless-arch", HeaderValue::from_static("x64"));
-            headers.insert("x-stainless-lang", HeaderValue::from_static("js"));
-            headers.insert("x-stainless-os", HeaderValue::from_static("Linux"));
-            headers.insert(
-                "x-stainless-package-version",
-                HeaderValue::from_static("0.94.0"),
-            );
-            headers.insert("x-stainless-retry-count", HeaderValue::from_static("0"));
-            headers.insert("x-stainless-runtime", HeaderValue::from_static("node"));
-            headers.insert(
-                "x-stainless-runtime-version",
-                HeaderValue::from_static("v24.3.0"),
-            );
-            headers.insert("x-stainless-timeout", HeaderValue::from_static("600"));
-            if let Some(sid) = &options.session_id
-                && let Ok(hv) = HeaderValue::from_str(sid.as_ref())
-            {
-                headers.insert("x-claude-code-session-id", hv);
-            }
-            let key = api_key.expose();
-            let mut auth = HeaderValue::from_str(&format!("Bearer {key}"))?;
-            auth.set_sensitive(true);
-            headers.insert("authorization", auth);
-        } else {
-            let key = api_key.expose();
-            headers.insert(
-                "anthropic-beta",
-                HeaderValue::from_static(
-                    "fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14",
-                ),
-            );
-            let mut api_key_hv = HeaderValue::from_str(key)?;
-            api_key_hv.set_sensitive(true);
-            headers.insert("x-api-key", api_key_hv);
-        }
+        let mut headers = build_request_headers(model, options, &api_key, is_oauth)?;
 
         let base_url = if model.base_url.is_empty() {
             DEFAULT_BASE_URL
@@ -575,6 +506,86 @@ fn build_request_body(
         diagnostics,
         stream: true,
     }
+}
+
+fn build_request_headers(
+    model: &Model,
+    options: &StreamOptions,
+    api_key: &ApiKey,
+    is_oauth: bool,
+) -> Result<HeaderMap, ProviderError> {
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    headers.insert(
+        ACCEPT,
+        HeaderValue::from_static(if is_oauth {
+            "application/json"
+        } else {
+            "text/event-stream"
+        }),
+    );
+    headers.insert("anthropic-version", HeaderValue::from_static(API_VERSION));
+
+    if is_oauth {
+        let betas = options
+            .anthropic_betas
+            .clone()
+            .unwrap_or_default()
+            .gated_for_context_window(model.context_window);
+        headers.insert(
+            "anthropic-beta",
+            HeaderValue::from_str(&betas.to_header_value())?,
+        );
+        headers.insert(
+            "user-agent",
+            HeaderValue::from_str(&claude_cli_user_agent())?,
+        );
+        headers.insert("x-app", HeaderValue::from_static("cli"));
+        headers.insert(
+            "anthropic-dangerous-direct-browser-access",
+            HeaderValue::from_static("true"),
+        );
+        headers.insert(
+            "x-client-request-id",
+            HeaderValue::from_str(&random_uuid_v4())?,
+        );
+        headers.insert("x-stainless-arch", HeaderValue::from_static("x64"));
+        headers.insert("x-stainless-lang", HeaderValue::from_static("js"));
+        headers.insert("x-stainless-os", HeaderValue::from_static("Linux"));
+        headers.insert(
+            "x-stainless-package-version",
+            HeaderValue::from_static("0.94.0"),
+        );
+        headers.insert("x-stainless-retry-count", HeaderValue::from_static("0"));
+        headers.insert("x-stainless-runtime", HeaderValue::from_static("node"));
+        headers.insert(
+            "x-stainless-runtime-version",
+            HeaderValue::from_static("v24.3.0"),
+        );
+        headers.insert("x-stainless-timeout", HeaderValue::from_static("600"));
+        if let Some(sid) = &options.session_id
+            && let Ok(hv) = HeaderValue::from_str(sid.as_ref())
+        {
+            headers.insert("x-claude-code-session-id", hv);
+        }
+        let key = api_key.expose();
+        let mut auth = HeaderValue::from_str(&format!("Bearer {key}"))?;
+        auth.set_sensitive(true);
+        headers.insert("authorization", auth);
+    } else {
+        let key = api_key.expose();
+        headers.insert(
+            "anthropic-beta",
+            HeaderValue::from_static(
+                "fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14",
+            ),
+        );
+        let mut api_key_hv = HeaderValue::from_str(key)?;
+        api_key_hv.set_sensitive(true);
+        headers.insert("x-api-key", api_key_hv);
+    }
+
+    Ok(headers)
 }
 
 fn oauth_context_management(
