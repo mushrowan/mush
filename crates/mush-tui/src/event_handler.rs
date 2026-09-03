@@ -299,14 +299,14 @@ pub async fn auto_compact(
         );
     }
 
-    let mut messages = result.messages;
+    let messages = result.messages;
 
     if let Some(hooks) = lifecycle_hooks
         && !hooks
             .for_point(mush_agent::HookPoint::PostCompaction)
             .is_empty()
     {
-        inject_post_compaction_hooks(hooks, cwd, &mut messages).await;
+        inject_post_compaction_hooks(hooks, cwd).await;
     }
 
     messages
@@ -315,29 +315,10 @@ pub async fn auto_compact(
 async fn inject_post_compaction_hooks(
     hooks: &mush_agent::LifecycleHooks,
     cwd: Option<&std::path::Path>,
-    messages: &mut Vec<Message>,
 ) {
     let results = hooks
         .run_all(mush_agent::HookPoint::PostCompaction, cwd)
         .await;
-    let output: String = results
-        .iter()
-        .filter(|r| !r.output.is_empty())
-        .map(|r| r.output.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    if !output.is_empty() {
-        tracing::info!("post-compaction hook output injected into context");
-        messages.push(Message::User(
-            UserMessage::builder()
-                .content(UserContent::Text(format!(
-                    "[post-compaction hook output]\n{output}"
-                )))
-                .timestamp_ms(Timestamp::now())
-                .build(),
-        ));
-    }
 
     for r in &results {
         if !r.success {
@@ -346,265 +327,9 @@ async fn inject_post_compaction_hooks(
     }
 }
 
-const MASK_TRUNCATE_LEN: usize = 200;
-
-const FORK_CONTEXT_LIMIT: usize = 30;
-const FORK_MASK_RECENT: usize = 3;
-
-#[cfg(test)]
-fn mask_observations(messages: &mut [Message]) -> bool {
-    let mut changed = false;
-    for msg in messages.iter_mut() {
-        if let Message::ToolResult(tr) = msg {
-            changed |= mask_tool_result_content(&mut tr.content);
-        }
-    }
-    changed
-}
-
-fn mask_tool_result_content(content: &mut [ToolResultContentPart]) -> bool {
-    let mut changed = false;
-    for part in content.iter_mut() {
-        if let ToolResultContentPart::Text(t) = part {
-            let original_len = t.text.len();
-            if original_len > MASK_TRUNCATE_LEN {
-                let truncated: String = t.text.chars().take(MASK_TRUNCATE_LEN).collect();
-                t.text = format!("{truncated}\n\n[... truncated, {original_len} chars total]");
-                changed = true;
-            }
-        }
-        if matches!(part, ToolResultContentPart::Image(_)) {
-            *part = ToolResultContentPart::Text(TextContent {
-                text: "[image omitted]".into(),
-            });
-            changed = true;
-        }
-    }
-    changed
-}
-
-pub fn slim_for_fork(messages: &[Message]) -> Vec<Message> {
-    if messages.len() <= FORK_CONTEXT_LIMIT {
-        let mut result = messages.to_vec();
-        mask_observations_with_limit(&mut result, FORK_MASK_RECENT);
-        return result;
-    }
-
-    let mut result = Vec::with_capacity(FORK_CONTEXT_LIMIT + 2);
-
-    if let Some(first_user) = messages.iter().find(|m| matches!(m, Message::User(_))) {
-        result.push(first_user.clone());
-    }
-
-    result.push(Message::User(
-        UserMessage::builder()
-            .content(UserContent::Text(format!(
-                "[context trimmed: {} earlier messages omitted for focus]",
-                messages.len() - FORK_CONTEXT_LIMIT
-            )))
-            .timestamp_ms(Timestamp::now())
-            .build(),
-    ));
-
-    let recent_start = messages.len().saturating_sub(FORK_CONTEXT_LIMIT);
-    for msg in &messages[recent_start..] {
-        if result.len() == 1 && msg == &result[0] {
-            continue;
-        }
-        result.push(msg.clone());
-    }
-
-    mask_observations_with_limit(&mut result, FORK_MASK_RECENT);
-    result
-}
-
-fn mask_observations_with_limit(messages: &mut [Message], preserve_recent: usize) {
-    let tool_positions: Vec<usize> = messages
-        .iter()
-        .enumerate()
-        .filter(|(_, m)| matches!(m, Message::ToolResult(_)))
-        .map(|(i, _)| i)
-        .collect();
-
-    if tool_positions.len() <= preserve_recent {
-        return;
-    }
-
-    let to_mask = tool_positions.len() - preserve_recent;
-    for &pos in &tool_positions[..to_mask] {
-        if let Message::ToolResult(tr) = &mut messages[pos] {
-            let _ = mask_tool_result_content(&mut tr.content);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn make_tool_result(text: &str) -> Message {
-        Message::ToolResult(ToolResultMessage {
-            tool_call_id: "tc_1".into(),
-            tool_name: "read".into(),
-            content: vec![ToolResultContentPart::Text(TextContent {
-                text: text.into(),
-            })],
-            outcome: ToolOutcome::Success,
-            timestamp_ms: Timestamp::now(),
-        })
-    }
-
-    fn make_user(text: &str) -> Message {
-        Message::User(
-            UserMessage::builder()
-                .content(UserContent::Text(text.into()))
-                .timestamp_ms(Timestamp::now())
-                .build(),
-        )
-    }
-
-    fn tool_text(msg: &Message) -> &str {
-        match msg {
-            Message::ToolResult(tr) => match &tr.content[0] {
-                ToolResultContentPart::Text(t) => &t.text,
-                _ => panic!("expected text"),
-            },
-            _ => panic!("expected tool result"),
-        }
-    }
-
-    #[test]
-    fn mask_is_deterministic_across_turns() {
-        let long = "x".repeat(500);
-        let mut base = vec![
-            make_user("q"),
-            make_tool_result(&long),
-            make_tool_result("short"),
-        ];
-
-        let mut once = base.clone();
-        mask_observations(&mut once);
-
-        base.push(make_tool_result("new output"));
-        let mut with_new = base.clone();
-        mask_observations(&mut with_new);
-
-        assert_eq!(&with_new[..once.len()], once.as_slice());
-    }
-
-    #[test]
-    fn mask_truncates_long_results() {
-        let long_text = "x".repeat(500);
-        let mut msgs: Vec<Message> = Vec::new();
-        for _ in 0..3 {
-            msgs.push(make_tool_result(&long_text));
-        }
-        msgs.push(make_user("question"));
-        for i in 0..6 {
-            msgs.push(make_tool_result(&format!("recent {i}")));
-        }
-
-        mask_observations(&mut msgs);
-
-        for msg in &msgs[..3] {
-            let text = tool_text(msg);
-            assert!(text.contains("truncated"));
-            assert!(text.contains("500 chars total"));
-            assert!(text.len() < 500);
-        }
-        for (i, msg) in msgs[4..].iter().enumerate() {
-            assert_eq!(tool_text(msg), format!("recent {i}"));
-        }
-    }
-
-    #[test]
-    fn mask_leaves_short_text_alone() {
-        let mut msgs: Vec<Message> = Vec::new();
-        for _ in 0..8 {
-            msgs.push(make_tool_result("short"));
-        }
-
-        mask_observations(&mut msgs);
-
-        for msg in &msgs {
-            assert_eq!(tool_text(msg), "short");
-        }
-    }
-
-    #[test]
-    fn mask_replaces_images() {
-        let mut msgs = vec![Message::ToolResult(ToolResultMessage {
-            tool_call_id: "tc_img".into(),
-            tool_name: "read".into(),
-            content: vec![ToolResultContentPart::Image(ImageContent {
-                data: "base64data".into(),
-                mime_type: ImageMimeType::Png,
-            })],
-            outcome: ToolOutcome::Success,
-            timestamp_ms: Timestamp::now(),
-        })];
-        for _ in 0..6 {
-            msgs.push(make_tool_result("recent"));
-        }
-
-        mask_observations(&mut msgs);
-
-        assert_eq!(tool_text(&msgs[0]), "[image omitted]");
-    }
-
-    #[test]
-    fn slim_for_fork_short_conversation() {
-        let msgs: Vec<Message> = vec![make_user("hello"), make_tool_result("output")];
-        let result = slim_for_fork(&msgs);
-        assert_eq!(result.len(), 2);
-    }
-
-    #[test]
-    fn slim_for_fork_trims_long_conversation() {
-        let mut msgs: Vec<Message> = Vec::new();
-        msgs.push(make_user("initial instructions"));
-        for i in 0..40 {
-            msgs.push(make_tool_result(&format!("{}: {}", i, "x".repeat(500))));
-        }
-        msgs.push(make_user("latest question"));
-
-        let result = slim_for_fork(&msgs);
-
-        assert!(result.len() <= FORK_CONTEXT_LIMIT + 3);
-        match &result[0] {
-            Message::User(u) => assert!(u.text().contains("initial instructions")),
-            _ => panic!("first message should be user"),
-        }
-        match &result[1] {
-            Message::User(u) => assert!(u.text().contains("context trimmed")),
-            _ => panic!("second message should be trim note"),
-        }
-    }
-
-    #[test]
-    fn slim_for_fork_masks_aggressively() {
-        let mut msgs: Vec<Message> = Vec::new();
-        for _ in 0..10 {
-            msgs.push(make_tool_result(&"y".repeat(500)));
-        }
-
-        let result = slim_for_fork(&msgs);
-
-        let full_outputs = result
-            .iter()
-            .filter(|m| {
-                if let Message::ToolResult(tr) = m {
-                    tr.content.iter().any(|p| match p {
-                        ToolResultContentPart::Text(t) => !t.text.contains("truncated"),
-                        _ => false,
-                    })
-                } else {
-                    false
-                }
-            })
-            .count();
-        assert_eq!(full_outputs, FORK_MASK_RECENT);
-    }
 
     #[test]
     fn agent_error_becomes_system_message() {

@@ -270,7 +270,7 @@ async fn build_applied_compaction(
     let summary = result.summary.clone();
     let summarised_count = result.summarised_count;
     let diagnostics = result.diagnostics;
-    let mut compacted = result.messages;
+    let compacted = result.messages;
 
     if let Some(hooks) = lifecycle_hooks
         && !hooks
@@ -280,22 +280,6 @@ async fn build_applied_compaction(
         let hook_results = hooks
             .run_all(mush_agent::HookPoint::PostCompaction, cwd)
             .await;
-        let output: String = hook_results
-            .iter()
-            .filter(|r| !r.output.is_empty())
-            .map(|r| r.output.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        if !output.is_empty() {
-            compacted.push(Message::User(
-                UserMessage::builder()
-                    .content(UserContent::Text(format!(
-                        "[post-compaction hook output]\n{output}"
-                    )))
-                    .timestamp_ms(Timestamp::now())
-                    .build(),
-            ));
-        }
         for r in &hook_results {
             if !r.success {
                 tracing::warn!(command = %r.command, "post-compaction hook failed: {}", r.output);
@@ -747,5 +731,38 @@ mod tests {
             original_messages_present, 24,
             "all 24 original Message entries must remain in the tree"
         );
+    }
+
+    #[tokio::test]
+    async fn a_post_compaction_hooks_output_stays_out_of_the_conversation() {
+        let mut hooks = mush_agent::LifecycleHooks::default();
+        hooks.set(
+            mush_agent::HookPoint::PostCompaction,
+            vec![mush_agent::LifecycleHook {
+                tool_match: "*".into(),
+                command: "echo reloaded the index".into(),
+                timeout: std::time::Duration::from_secs(5),
+                blocking: false,
+            }],
+        );
+        let result = mush_session::compact::CompactionResult {
+            messages: vec![user_msg("the summary"), user_msg("a kept message")],
+            summarised_count: 4,
+            summary: "the summary".into(),
+            diagnostics: mush_session::compact::CompactionDiagnostics::default(),
+        };
+
+        let applied =
+            build_applied_compaction(result, 100, 6, "test".into(), Some(&hooks), None).await;
+
+        let texts: Vec<String> = applied
+            .messages
+            .iter()
+            .map(|message| match message {
+                Message::User(user) => user.text(),
+                _ => String::new(),
+            })
+            .collect();
+        assert_eq!(texts, vec!["the summary", "a kept message"]);
     }
 }

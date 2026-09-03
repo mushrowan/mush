@@ -654,7 +654,7 @@ pub async fn auto_compact(
         );
     }
 
-    let mut messages = result.messages;
+    let messages = result.messages;
 
     if let Some(hooks) = lifecycle_hooks
         && !hooks
@@ -664,23 +664,6 @@ pub async fn auto_compact(
         let results = hooks
             .run_all(mush_agent::HookPoint::PostCompaction, cwd)
             .await;
-        let output: String = results
-            .iter()
-            .filter(|r| !r.output.is_empty())
-            .map(|r| r.output.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        if !output.is_empty() {
-            eprintln!("\x1b[2m(post-compaction hook output injected)\x1b[0m");
-            messages.push(Message::User(
-                UserMessage::builder()
-                    .content(UserContent::Text(format!(
-                        "[post-compaction hook output]\n{output}"
-                    )))
-                    .timestamp_ms(Timestamp::now())
-                    .build(),
-            ));
-        }
         for r in &results {
             if !r.success {
                 eprintln!(
