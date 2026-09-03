@@ -215,18 +215,6 @@ pub fn agent_loop(
                     result: r.clone(),
                 };
             }
-
-            let all_output: String = results
-                .iter()
-                .filter(|r| !r.output.is_empty())
-                .map(|r| r.output.as_str())
-                .collect::<Vec<_>>()
-                .join("\n");
-            if !all_output.is_empty() {
-                messages.push(Message::User(UserMessage::builder().content(UserContent::Text(format!(
-                        "[pre-session hook output]\n{all_output}"
-                    ))).timestamp_ms(Timestamp::now()).build()));
-            }
         }
 
         let mut pending: Vec<Message> = config.hooks.get_steering().await;
@@ -1548,5 +1536,88 @@ mod tests {
             error_count, 0,
             "no AgentEvent::Error should be emitted when retry succeeds"
         );
+    }
+
+    struct RecordingProvider {
+        seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl mush_ai::registry::ApiProvider for RecordingProvider {
+        fn api(&self) -> Api {
+            Api::AnthropicMessages
+        }
+        async fn stream(
+            &self,
+            model: &Model,
+            context: &mush_ai::registry::LlmContext,
+            _options: &StreamOptions,
+        ) -> Result<mush_ai::registry::EventStream, mush_ai::registry::ProviderError> {
+            self.seen
+                .lock()
+                .unwrap()
+                .extend(context.messages.iter().filter_map(|message| match message {
+                    Message::User(user) => Some(user.text()),
+                    _ => None,
+                }));
+            let done = AssistantMessage::builder()
+                .content(vec![AssistantContentPart::Text(TextContent {
+                    text: "done".into(),
+                })])
+                .model(model.id.clone())
+                .provider(model.provider.clone())
+                .api(model.api)
+                .timestamp_ms(Timestamp::zero())
+                .build();
+            let s = async_stream::stream! {
+                yield StreamEvent::Done { message: done, reason: StopReason::Stop };
+            };
+            Ok(Box::pin(s) as mush_ai::registry::EventStream)
+        }
+    }
+
+    fn echoing_hook(command: &str) -> crate::hooks::LifecycleHook {
+        crate::hooks::LifecycleHook {
+            tool_match: "*".into(),
+            command: command.into(),
+            timeout: std::time::Duration::from_secs(5),
+            blocking: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pre_session_hooks_output_stays_out_of_the_conversation() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut registry = ApiRegistry::new();
+        registry.register(Box::new(RecordingProvider { seen: seen.clone() }));
+        let mut lifecycle_hooks = crate::hooks::LifecycleHooks::default();
+        lifecycle_hooks.set(
+            crate::hooks::HookPoint::PreSession,
+            vec![echoing_hook("echo repo is dirty")],
+        );
+        let config = AgentConfig {
+            model: test_model(),
+            system_prompt: None,
+            tools: ToolRegistry::new(),
+            registry: &registry,
+            options: StreamOptions::default(),
+            max_turns: DEFAULT_MAX_TURNS,
+            hooks: Box::new(NoopHooks),
+            injections: AgentInjections {
+                lifecycle_hooks,
+                ..AgentInjections::default()
+            },
+            cancel: None,
+        };
+        let messages = vec![Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text("hi".into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )];
+
+        let _: Vec<AgentEvent> = agent_loop(config, messages).collect().await;
+
+        assert_eq!(seen.lock().unwrap().clone(), vec!["hi".to_string()]);
     }
 }
