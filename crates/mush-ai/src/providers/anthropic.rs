@@ -71,6 +71,13 @@ fn last_request_id(messages: &[Message]) -> Option<String> {
     })
 }
 
+fn last_prompt_id(messages: &[Message]) -> Option<PromptId> {
+    messages.iter().rev().find_map(|message| match message {
+        Message::User(user) => user.prompt_id.clone(),
+        _ => None,
+    })
+}
+
 fn claude_code_billing_header(messages: &[Message]) -> String {
     let suffix = claude_code_version_suffix(&first_user_text(messages));
     let mut header = format!(
@@ -78,6 +85,9 @@ fn claude_code_billing_header(messages: &[Message]) -> String {
     );
     if let Some(prev_req) = last_request_id(messages) {
         header.push_str(&format!(" cc_prev_req={prev_req};"));
+    }
+    if let Some(prompt_id) = last_prompt_id(messages) {
+        header.push_str(&format!(" cc_prompt_id={prompt_id};"));
     }
     header
 }
@@ -3027,6 +3037,89 @@ mod tests {
             Some("req_011CegEdLttts7Bw3ZRVuax3")
         );
         assert_eq!(last_request_id(&[]), None);
+    }
+
+    #[test]
+    fn last_prompt_id_takes_the_newest_user_turn_that_has_one() {
+        let with_id = |id: Option<&str>| {
+            Message::User(
+                UserMessage::builder()
+                    .content(UserContent::Text("hi".into()))
+                    .timestamp_ms(Timestamp::zero())
+                    .maybe_prompt_id(id.map(PromptId::from))
+                    .build(),
+            )
+        };
+        let messages = vec![
+            with_id(Some("b492a0c4-b3a8-4cb6-a309-7dac9efccb68")),
+            with_id(Some("af566db0-4832-4c55-bfe2-c807d443d91f")),
+            with_id(None),
+        ];
+
+        assert_eq!(
+            last_prompt_id(&messages).map(|id| id.to_string()),
+            Some("af566db0-4832-4c55-bfe2-c807d443d91f".to_string())
+        );
+        assert_eq!(last_prompt_id(&[]), None);
+    }
+
+    #[test]
+    fn both_ride_in_the_block_previous_request_first() {
+        let messages = vec![
+            Message::User(
+                UserMessage::builder()
+                    .content(UserContent::Text("test test 1212 hello".into()))
+                    .timestamp_ms(Timestamp::zero())
+                    .prompt_id("af566db0-4832-4c55-bfe2-c807d443d91f".into())
+                    .build(),
+            ),
+            Message::Assistant(
+                AssistantMessage::builder()
+                    .model("claude-sonnet-4-20250514".into())
+                    .provider(Provider::Anthropic)
+                    .api(Api::AnthropicMessages)
+                    .timestamp_ms(Timestamp::zero())
+                    .request_id("req_011CegEdLttts7Bw3ZRVuax3")
+                    .build(),
+            ),
+        ];
+        let body = build_request_body(
+            &test_model(),
+            &None,
+            &messages,
+            &[],
+            &StreamOptions::default(),
+            true,
+        );
+
+        assert_eq!(
+            body.system.unwrap()[0].text,
+            "x-anthropic-billing-header: cc_version=2.1.238.426; cc_entrypoint=cli; cch=00000; cc_prev_req=req_011CegEdLttts7Bw3ZRVuax3; cc_prompt_id=af566db0-4832-4c55-bfe2-c807d443d91f;"
+        );
+    }
+
+    #[test]
+    fn the_prompt_id_rides_in_the_billing_block() {
+        let messages = vec![Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text("test test 1212 hello".into()))
+                .timestamp_ms(Timestamp::zero())
+                .prompt_id("af566db0-4832-4c55-bfe2-c807d443d91f".into())
+                .build(),
+        )];
+        let body = build_request_body(
+            &test_model(),
+            &None,
+            &messages,
+            &[],
+            &StreamOptions::default(),
+            true,
+        );
+
+        assert_eq!(
+            body.system.unwrap()[0].text,
+            "x-anthropic-billing-header: cc_version=2.1.238.426; cc_entrypoint=cli; cch=00000; cc_prompt_id=af566db0-4832-4c55-bfe2-c807d443d91f;"
+        );
     }
 
     #[test]
