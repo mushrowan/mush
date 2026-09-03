@@ -560,7 +560,7 @@ fn build_request_headers(
         headers.insert("x-stainless-runtime", HeaderValue::from_static("node"));
         headers.insert(
             "x-stainless-runtime-version",
-            HeaderValue::from_static("v24.3.0"),
+            HeaderValue::from_static("v26.3.0"),
         );
         headers.insert("x-stainless-timeout", HeaderValue::from_static("600"));
         if let Some(sid) = &options.session_id
@@ -2937,6 +2937,12 @@ mod tests {
         assert_eq!(from_claude_code_name("WebFetch", &tools), "web_fetch");
         assert_eq!(from_claude_code_name("WebSearch", &tools), "web_search");
         assert_eq!(from_claude_code_name("Unknown", &tools), "Unknown");
+    }
+
+    #[test]
+    fn the_node_runtime_version_is_reported() {
+        let headers = oauth_test_headers();
+        assert_eq!(headers["x-stainless-runtime-version"], "v26.3.0");
     }
 
     #[test]
