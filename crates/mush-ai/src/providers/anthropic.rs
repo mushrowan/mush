@@ -64,18 +64,45 @@ fn first_user_text(messages: &[Message]) -> String {
         .unwrap_or_default()
 }
 
+fn is_request_id(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix("req_") else {
+        return false;
+    };
+    (1..=36).contains(&rest.len())
+        && rest
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+fn is_uuid(value: &str) -> bool {
+    let groups: Vec<&str> = value.split('-').collect();
+    groups.len() == 5
+        && [8, 4, 4, 4, 12]
+            .iter()
+            .zip(&groups)
+            .all(|(len, group)| is_hex_len(group, *len))
+}
+
 fn last_request_id(messages: &[Message]) -> Option<String> {
-    messages.iter().rev().find_map(|message| match message {
-        Message::Assistant(assistant) => assistant.request_id.clone(),
-        _ => None,
-    })
+    messages
+        .iter()
+        .rev()
+        .find_map(|message| match message {
+            Message::Assistant(assistant) => assistant.request_id.clone(),
+            _ => None,
+        })
+        .filter(|id| is_request_id(id))
 }
 
 fn last_prompt_id(messages: &[Message]) -> Option<PromptId> {
-    messages.iter().rev().find_map(|message| match message {
-        Message::User(user) => user.prompt_id.clone(),
-        _ => None,
-    })
+    messages
+        .iter()
+        .rev()
+        .find_map(|message| match message {
+            Message::User(user) => user.prompt_id.clone(),
+            _ => None,
+        })
+        .filter(|id| is_uuid(id))
 }
 
 fn claude_code_billing_header(messages: &[Message]) -> String {
@@ -3061,6 +3088,60 @@ mod tests {
             Some("af566db0-4832-4c55-bfe2-c807d443d91f".to_string())
         );
         assert_eq!(last_prompt_id(&[]), None);
+    }
+
+    #[test]
+    fn request_id_shape_matches_claude_codes_pattern() {
+        assert!(is_request_id("req_011CegEdLttts7Bw3ZRVuax3"));
+        assert!(is_request_id("req_a-b_C9"));
+        assert!(!is_request_id("msg_011CegE4MyDYb8hhpqGcgXTQ"));
+        assert!(!is_request_id("req_"));
+        assert!(!is_request_id(&format!("req_{}", "a".repeat(37))));
+        assert!(!is_request_id("req_has spaces"));
+    }
+
+    #[test]
+    fn prompt_id_shape_matches_claude_codes_pattern() {
+        assert!(is_uuid("af566db0-4832-4c55-bfe2-c807d443d91f"));
+        assert!(is_uuid("AF566DB0-4832-4C55-BFE2-C807D443D91F"));
+        assert!(!is_uuid("not-a-uuid"));
+        assert!(!is_uuid("af566db048324c55bfe2c807d443d91f"));
+        assert!(!is_uuid("af566db0-4832-4c55-bfe2-c807d443d91"));
+    }
+
+    #[test]
+    fn an_id_of_the_wrong_shape_is_dropped() {
+        let messages = vec![
+            Message::User(
+                UserMessage::builder()
+                    .content(UserContent::Text("test test 1212 hello".into()))
+                    .timestamp_ms(Timestamp::zero())
+                    .prompt_id("not-a-uuid".into())
+                    .build(),
+            ),
+            Message::Assistant(
+                AssistantMessage::builder()
+                    .model("claude-sonnet-4-20250514".into())
+                    .provider(Provider::Anthropic)
+                    .api(Api::AnthropicMessages)
+                    .timestamp_ms(Timestamp::zero())
+                    .request_id("msg_011CegE4MyDYb8hhpqGcgXTQ")
+                    .build(),
+            ),
+        ];
+        let body = build_request_body(
+            &test_model(),
+            &None,
+            &messages,
+            &[],
+            &StreamOptions::default(),
+            true,
+        );
+
+        assert_eq!(
+            body.system.unwrap()[0].text,
+            "x-anthropic-billing-header: cc_version=2.1.238.426; cc_entrypoint=cli; cch=00000;"
+        );
     }
 
     #[test]
