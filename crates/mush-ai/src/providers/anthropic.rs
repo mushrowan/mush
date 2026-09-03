@@ -13,6 +13,7 @@ const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const API_VERSION: &str = "2023-06-01";
 const ANTHROPIC_DIRECT_API: &str = "api.anthropic.com";
 const CLAUDE_CODE_VERSION: &str = "2.1.238";
+const CLAUDE_CODE_VERSION_SALT: &str = "59cf53e54c78";
 const CLAUDE_CODE_MAX_OUTPUT_TOKENS: u64 = 64_000;
 const ADVISOR_TOOL_TYPE: &str = "advisor_20260301";
 const ADVISOR_TOOL_NAME: &str = "advisor";
@@ -24,9 +25,48 @@ fn claude_cli_user_agent() -> String {
     format!("claude-cli/{CLAUDE_CODE_VERSION} (external, cli)")
 }
 
-fn claude_code_billing_header() -> String {
+fn claude_code_version_suffix(first_user_text: &str) -> String {
+    let units: Vec<u16> = first_user_text.encode_utf16().collect();
+    let picked: String = [4, 7, 20]
+        .into_iter()
+        .map(|i| {
+            units.get(i).map_or_else(
+                || "0".to_string(),
+                |unit| String::from_utf16_lossy(&[*unit]),
+            )
+        })
+        .collect();
+    let digest = Sha256::digest(format!(
+        "{CLAUDE_CODE_VERSION_SALT}{picked}{CLAUDE_CODE_VERSION}"
+    ));
+    let mut hex = lower_hex(&digest[..2]);
+    hex.truncate(3);
+    hex
+}
+
+fn first_user_text(messages: &[Message]) -> String {
+    messages
+        .iter()
+        .find_map(|message| match message {
+            Message::User(user) => Some(match &user.content {
+                UserContent::Text(text) => text.clone(),
+                UserContent::Parts(parts) => parts
+                    .iter()
+                    .find_map(|part| match part {
+                        UserContentPart::Text(text) => Some(text.text.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_default(),
+            }),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+fn claude_code_billing_header(messages: &[Message]) -> String {
+    let suffix = claude_code_version_suffix(&first_user_text(messages));
     format!(
-        "x-anthropic-billing-header: cc_version={CLAUDE_CODE_VERSION}.154; cc_entrypoint=cli; cch=00000;"
+        "x-anthropic-billing-header: cc_version={CLAUDE_CODE_VERSION}.{suffix}; cc_entrypoint=cli; cch=00000;"
     )
 }
 
@@ -399,7 +439,7 @@ fn build_request_body(
         let mut blocks = vec![
             SystemBlock {
                 block_type: "text".into(),
-                text: claude_code_billing_header(),
+                text: claude_code_billing_header(messages),
                 cache_control: None,
             },
             SystemBlock {
@@ -2940,6 +2980,65 @@ mod tests {
     }
 
     #[test]
+    fn version_suffix_hashes_three_characters_of_the_prompt() {
+        assert_eq!(claude_code_version_suffix("test test 1212 hello"), "426");
+        assert_eq!(
+            claude_code_version_suffix("hello world, this is a longer prompt"),
+            "b1b"
+        );
+        assert_eq!(claude_code_version_suffix(""), "2a8");
+    }
+
+    #[test]
+    fn first_user_text_skips_assistant_turns_and_takes_the_leading_text_part() {
+        let assistant_first = vec![
+            Message::Assistant(
+                AssistantMessage::builder()
+                    .model("claude-sonnet-4-20250514".into())
+                    .provider(Provider::Anthropic)
+                    .api(Api::AnthropicMessages)
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            ),
+            Message::User(UserMessage {
+                content: UserContent::Parts(vec![
+                    UserContentPart::Text(TextContent {
+                        text: "read foo.rs".into(),
+                    }),
+                    UserContentPart::Text(TextContent {
+                        text: "and bar.rs".into(),
+                    }),
+                ]),
+                timestamp_ms: Timestamp::zero(),
+            }),
+        ];
+
+        assert_eq!(first_user_text(&assistant_first), "read foo.rs");
+        assert_eq!(first_user_text(&[]), "");
+    }
+
+    #[test]
+    fn the_billing_suffix_hashes_the_first_user_message() {
+        let messages = vec![Message::User(UserMessage {
+            content: UserContent::Text("test test 1212 hello".into()),
+            timestamp_ms: Timestamp::zero(),
+        })];
+        let body = build_request_body(
+            &test_model(),
+            &None,
+            &messages,
+            &[],
+            &StreamOptions::default(),
+            true,
+        );
+
+        assert_eq!(
+            body.system.unwrap()[0].text,
+            "x-anthropic-billing-header: cc_version=2.1.238.426; cc_entrypoint=cli; cch=00000;"
+        );
+    }
+
+    #[test]
     fn the_node_runtime_version_is_reported() {
         let headers = oauth_test_headers();
         assert_eq!(headers["x-stainless-runtime-version"], "v26.3.0");
@@ -3369,7 +3468,7 @@ mod tests {
 
         let system = json["system"].as_array().unwrap();
         assert_eq!(system.len(), 3);
-        assert_eq!(system[0]["text"], claude_code_billing_header());
+        assert_eq!(system[0]["text"], claude_code_billing_header(&messages));
         assert!(system[0].get("cache_control").is_none());
         assert_eq!(system[1]["text"], CLAUDE_CODE_IDENTITY);
         assert!(system[1].get("cache_control").is_none());
