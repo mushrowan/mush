@@ -385,6 +385,7 @@ pub(super) fn save_prompt_to_conversation(
         UserMessage::builder()
             .content(streams::build_user_content(&prompt.text, &prompt.images))
             .timestamp_ms(Timestamp::now())
+            .prompt_id(mush_ai::types::PromptId::new())
             .build(),
     );
     conversation.append_message(user_message);
@@ -1011,5 +1012,41 @@ mod tests {
             "startup discovery must not post a system message"
         );
         assert!(!app.completion.model_completions.is_empty());
+    }
+
+    fn submitted_prompt_id(text: &str) -> mush_ai::types::PromptId {
+        let mut conversation = ConversationState::new();
+        save_prompt_to_conversation(
+            &mut conversation,
+            &crate::session::PendingPrompt::text(text),
+        );
+        match conversation.messages().last().expect("a message") {
+            Message::User(user) => user.prompt_id.clone().expect("a prompt id"),
+            other => panic!("expected a user message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_submitted_prompt_carries_a_uuid_prompt_id() {
+        let id = submitted_prompt_id("test test 1212 hello").to_string();
+
+        let groups: Vec<&str> = id.split('-').collect();
+        assert_eq!(
+            groups.iter().map(|g| g.len()).collect::<Vec<_>>(),
+            vec![8, 4, 4, 4, 12],
+            "id={id}"
+        );
+        assert!(
+            id.chars().all(|c| c.is_ascii_hexdigit() || c == '-'),
+            "id={id}"
+        );
+    }
+
+    #[test]
+    fn two_submissions_carry_different_prompt_ids() {
+        let first = submitted_prompt_id("hi");
+        let second = submitted_prompt_id("and again");
+
+        assert_ne!(first, second);
     }
 }

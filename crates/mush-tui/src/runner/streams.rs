@@ -507,6 +507,7 @@ pub(super) async fn submit_streaming_input(
             UserMessage::builder()
                 .content(content)
                 .timestamp_ms(Timestamp::now())
+                .prompt_id(mush_ai::types::PromptId::new())
                 .build(),
         ));
         let image_bytes: Vec<Vec<u8>> = images.into_iter().map(|img| img.data).collect();
@@ -565,6 +566,7 @@ pub(super) async fn edit_last_queued_steering(session: &mut Session, stream_stat
                     UserMessage::builder()
                         .content(UserContent::Text(current_input))
                         .timestamp_ms(Timestamp::now())
+                        .prompt_id(mush_ai::types::PromptId::new())
                         .build(),
                 ));
             }

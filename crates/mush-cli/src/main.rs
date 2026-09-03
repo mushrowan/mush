@@ -185,6 +185,7 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
         UserMessage::builder()
             .content(UserContent::Text(prompt))
             .timestamp_ms(Timestamp::now())
+            .prompt_id(mush_ai::types::PromptId::new())
             .build(),
     );
     session.push_message(user_msg);
