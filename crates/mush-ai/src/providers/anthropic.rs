@@ -63,11 +63,22 @@ fn first_user_text(messages: &[Message]) -> String {
         .unwrap_or_default()
 }
 
+fn last_request_id(messages: &[Message]) -> Option<String> {
+    messages.iter().rev().find_map(|message| match message {
+        Message::Assistant(assistant) => assistant.request_id.clone(),
+        _ => None,
+    })
+}
+
 fn claude_code_billing_header(messages: &[Message]) -> String {
     let suffix = claude_code_version_suffix(&first_user_text(messages));
-    format!(
+    let mut header = format!(
         "x-anthropic-billing-header: cc_version={CLAUDE_CODE_VERSION}.{suffix}; cc_entrypoint=cli; cch=00000;"
-    )
+    );
+    if let Some(prev_req) = last_request_id(messages) {
+        header.push_str(&format!(" cc_prev_req={prev_req};"));
+    }
+    header
 }
 
 const CLAUDE_CODE_TOOLS: &[&str] = &[
@@ -3022,6 +3033,64 @@ mod tests {
 
         assert_eq!(first_user_text(&assistant_first), "read foo.rs");
         assert_eq!(first_user_text(&[]), "");
+    }
+
+    #[test]
+    fn last_request_id_takes_the_newest_assistant_turn_that_has_one() {
+        let with_id = |id: Option<&str>| {
+            Message::Assistant(
+                AssistantMessage::builder()
+                    .model("claude-sonnet-4-20250514".into())
+                    .provider(Provider::Anthropic)
+                    .api(Api::AnthropicMessages)
+                    .timestamp_ms(Timestamp::zero())
+                    .maybe_request_id(id.map(str::to_string))
+                    .build(),
+            )
+        };
+        let messages = vec![
+            with_id(Some("req_011CegE4MyDYb8hhpqGcgXTQ")),
+            with_id(Some("req_011CegEdLttts7Bw3ZRVuax3")),
+            with_id(None),
+        ];
+
+        assert_eq!(
+            last_request_id(&messages).as_deref(),
+            Some("req_011CegEdLttts7Bw3ZRVuax3")
+        );
+        assert_eq!(last_request_id(&[]), None);
+    }
+
+    #[test]
+    fn the_previous_request_id_rides_in_the_billing_block() {
+        let messages = vec![
+            Message::User(UserMessage {
+                content: UserContent::Text("test test 1212 hello".into()),
+                timestamp_ms: Timestamp::zero(),
+            }),
+            Message::Assistant(
+                AssistantMessage::builder()
+                    .model("claude-sonnet-4-20250514".into())
+                    .provider(Provider::Anthropic)
+                    .api(Api::AnthropicMessages)
+                    .timestamp_ms(Timestamp::zero())
+                    .request_id("req_011CegEdLttts7Bw3ZRVuax3")
+                    .build(),
+            ),
+        ];
+        let body = build_request_body(
+            &test_model(),
+            &None,
+            &messages,
+            &[],
+            &StreamOptions::default(),
+            true,
+        );
+
+        assert_eq!(
+            body.system.unwrap()[0].text,
+            "x-anthropic-billing-header: cc_version=2.1.238.426; cc_entrypoint=cli; cch=00000; cc_prev_req=req_011CegEdLttts7Bw3ZRVuax3;"
+        );
     }
 
     #[test]
