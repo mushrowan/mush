@@ -13,7 +13,7 @@ use crate::types::*;
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const API_VERSION: &str = "2023-06-01";
 const ANTHROPIC_DIRECT_API: &str = "api.anthropic.com";
-const CLAUDE_CODE_VERSION: &str = "2.1.238";
+const CLAUDE_CODE_VERSION: &str = "2.1.257";
 const CLAUDE_CODE_VERSION_SALT: &str = "59cf53e54c78";
 const CLAUDE_CODE_MAX_OUTPUT_TOKENS: u64 = 64_000;
 const ADVISOR_TOOL_TYPE: &str = "advisor_20260301";
@@ -3011,12 +3011,12 @@ mod tests {
 
     #[test]
     fn version_suffix_hashes_three_characters_of_the_prompt() {
-        assert_eq!(claude_code_version_suffix("test test 1212 hello"), "426");
+        assert_eq!(claude_code_version_suffix("test test 1212 hello"), "d64");
         assert_eq!(
             claude_code_version_suffix("hello world, this is a longer prompt"),
-            "b1b"
+            "580"
         );
-        assert_eq!(claude_code_version_suffix(""), "2a8");
+        assert_eq!(claude_code_version_suffix(""), "9c3");
     }
 
     #[test]
@@ -3118,7 +3118,7 @@ mod tests {
 
         assert_eq!(
             body.system.unwrap()[0].text,
-            "x-anthropic-billing-header: cc_version=2.1.238.426; cc_entrypoint=cli; cch=00000;"
+            "x-anthropic-billing-header: cc_version=2.1.257.d64; cc_entrypoint=cli; cch=00000;"
         );
     }
 
@@ -3211,7 +3211,7 @@ mod tests {
 
         assert_eq!(
             body.system.unwrap()[0].text,
-            "x-anthropic-billing-header: cc_version=2.1.238.426; cc_entrypoint=cli; cch=00000;"
+            "x-anthropic-billing-header: cc_version=2.1.257.d64; cc_entrypoint=cli; cch=00000;"
         );
     }
 
@@ -3246,7 +3246,7 @@ mod tests {
 
         assert_eq!(
             body.system.unwrap()[0].text,
-            "x-anthropic-billing-header: cc_version=2.1.238.426; cc_entrypoint=cli; cch=00000; cc_prev_req=req_011CegEdLttts7Bw3ZRVuax3; cc_prompt_id=af566db0-4832-4c55-bfe2-c807d443d91f;"
+            "x-anthropic-billing-header: cc_version=2.1.257.d64; cc_entrypoint=cli; cch=00000; cc_prev_req=req_011CegEdLttts7Bw3ZRVuax3; cc_prompt_id=af566db0-4832-4c55-bfe2-c807d443d91f;"
         );
     }
 
@@ -3270,7 +3270,7 @@ mod tests {
 
         assert_eq!(
             body.system.unwrap()[0].text,
-            "x-anthropic-billing-header: cc_version=2.1.238.426; cc_entrypoint=cli; cch=00000; cc_prompt_id=af566db0-4832-4c55-bfe2-c807d443d91f;"
+            "x-anthropic-billing-header: cc_version=2.1.257.d64; cc_entrypoint=cli; cch=00000; cc_prompt_id=af566db0-4832-4c55-bfe2-c807d443d91f;"
         );
     }
 
@@ -3304,7 +3304,7 @@ mod tests {
 
         assert_eq!(
             body.system.unwrap()[0].text,
-            "x-anthropic-billing-header: cc_version=2.1.238.426; cc_entrypoint=cli; cch=00000; cc_prev_req=req_011CegEdLttts7Bw3ZRVuax3;"
+            "x-anthropic-billing-header: cc_version=2.1.257.d64; cc_entrypoint=cli; cch=00000; cc_prev_req=req_011CegEdLttts7Bw3ZRVuax3;"
         );
     }
 
@@ -3327,7 +3327,7 @@ mod tests {
 
         assert_eq!(
             body.system.unwrap()[0].text,
-            "x-anthropic-billing-header: cc_version=2.1.238.426; cc_entrypoint=cli; cch=00000;"
+            "x-anthropic-billing-header: cc_version=2.1.257.d64; cc_entrypoint=cli; cch=00000;"
         );
     }
 
@@ -3417,10 +3417,10 @@ mod tests {
 
         assert_eq!(
             claude_cli_user_agent(),
-            "claude-cli/2.1.238 (external, cli)"
+            "claude-cli/2.1.257 (external, cli)"
         );
         assert!(
-            billing.starts_with("x-anthropic-billing-header: cc_version=2.1.238."),
+            billing.starts_with("x-anthropic-billing-header: cc_version=2.1.257."),
             "billing={billing}"
         );
     }
