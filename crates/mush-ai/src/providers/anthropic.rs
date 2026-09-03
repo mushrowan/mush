@@ -311,6 +311,8 @@ struct RequestBody {
     #[serde(skip_serializing_if = "Option::is_none")]
     context_management: Option<ContextManagement>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    fallbacks: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     output_config: Option<OutputConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     diagnostics: Option<Diagnostics>,
@@ -525,6 +527,7 @@ fn build_request_body(
 
     let metadata = is_oauth.then(|| claude_code_metadata(options));
     let context_management = oauth_context_management(model, options, is_oauth, thinking.is_some());
+    let fallbacks = oauth_fallbacks(options, is_oauth);
     let diagnostics = is_oauth.then(|| Diagnostics {
         previous_message_id: messages.iter().rev().find_map(|message| match message {
             Message::Assistant(assistant) => assistant.generation_id.clone(),
@@ -542,6 +545,7 @@ fn build_request_body(
         temperature,
         thinking,
         context_management,
+        fallbacks,
         output_config,
         diagnostics,
         stream: true,
@@ -626,6 +630,11 @@ fn build_request_headers(
     }
 
     Ok(headers)
+}
+
+fn oauth_fallbacks(options: &StreamOptions, is_oauth: bool) -> Option<&'static str> {
+    let betas = options.anthropic_betas.clone().unwrap_or_default();
+    (is_oauth && betas.fallbacks).then_some("default")
 }
 
 fn oauth_context_management(
@@ -3054,6 +3063,36 @@ mod tests {
         );
         assert!(header.contains("effort-2025-11-24"), "{header}");
         assert!(header.contains("fallback-credit-2026-06-01"), "{header}");
+    }
+
+    #[test]
+    fn the_fallback_selector_is_absent_by_default() {
+        let body = build_request_body(
+            &test_model(),
+            &None,
+            &[],
+            &[],
+            &StreamOptions::default(),
+            true,
+        );
+        let json = serde_json::to_value(&body).unwrap();
+
+        assert!(json.get("fallbacks").is_none(), "json={json}");
+    }
+
+    #[test]
+    fn the_fallback_selector_is_sent_when_enabled() {
+        let options = StreamOptions {
+            anthropic_betas: Some(AnthropicBetas {
+                fallbacks: true,
+                ..AnthropicBetas::default()
+            }),
+            ..Default::default()
+        };
+        let body = build_request_body(&test_model(), &None, &[], &[], &options, true);
+        let json = serde_json::to_value(&body).unwrap();
+
+        assert_eq!(json["fallbacks"], "default");
     }
 
     #[test]

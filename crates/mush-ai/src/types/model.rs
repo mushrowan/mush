@@ -227,6 +227,7 @@ pub struct AnthropicBetas {
     pub advanced_tool_use: bool,
     pub server_side_fallback: bool,
     pub fallback_credit: bool,
+    pub fallbacks: bool,
 }
 
 impl Default for AnthropicBetas {
@@ -241,6 +242,7 @@ impl Default for AnthropicBetas {
             advanced_tool_use: true,
             server_side_fallback: true,
             fallback_credit: true,
+            fallbacks: false,
         }
     }
 }
