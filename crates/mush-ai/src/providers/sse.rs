@@ -167,12 +167,18 @@ pub fn run_sse_stream(
     mut processor: impl SseProcessor,
 ) -> EventStream {
     let label = processor.label();
+    let request_id = response
+        .headers()
+        .get("request-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
     let event_stream = async_stream::stream! {
         let mut output = AssistantMessage::builder()
             .model(model_id.clone())
             .provider(provider_name.clone())
             .api(api)
             .timestamp_ms(Timestamp::now())
+            .maybe_request_id(request_id)
             .build();
 
         let mut parser = SseParser::new();

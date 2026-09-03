@@ -3090,6 +3090,45 @@ mod tests {
         assert_eq!(last_prompt_id(&[]), None);
     }
 
+    #[tokio::test]
+    async fn the_reply_records_the_request_id_the_server_gave_it() {
+        let sse = concat!(
+            "event: message_start\n",
+            r#"data: {"type":"message_start","message":{"id":"msg_01x","usage":{"input_tokens":1,"output_tokens":0}}}"#,
+            "\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        );
+        let http_resp = http::Response::builder()
+            .status(200)
+            .header("content-type", "text/event-stream")
+            .header("request-id", "req_011CegE4MyDYb8hhpqGcgXTQ")
+            .body(bytes::Bytes::from(sse))
+            .unwrap();
+        let mut stream = parse_sse_stream(
+            reqwest::Response::from(http_resp),
+            "claude-sonnet-4-20250514".into(),
+            Provider::Anthropic,
+            Api::AnthropicMessages,
+            0,
+            true,
+            vec![],
+        );
+
+        let mut last = None;
+        use futures::StreamExt;
+        while let Some(event) = stream.next().await {
+            if let StreamEvent::Done { message, .. } = event {
+                last = Some(message);
+            }
+        }
+
+        assert_eq!(
+            last.unwrap().request_id.as_deref(),
+            Some("req_011CegE4MyDYb8hhpqGcgXTQ")
+        );
+    }
+
     #[test]
     fn request_id_shape_matches_claude_codes_pattern() {
         assert!(is_request_id("req_011CegEdLttts7Bw3ZRVuax3"));
