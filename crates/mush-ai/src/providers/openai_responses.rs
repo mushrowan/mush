@@ -567,6 +567,14 @@ struct DeltaEvent {
 }
 
 #[derive(serde::Deserialize)]
+struct SummaryPartEvent {
+    #[serde(default)]
+    output_index: u64,
+    #[serde(default)]
+    summary_index: u64,
+}
+
+#[derive(serde::Deserialize)]
 struct OutputIndexEvent {
     #[serde(default)]
     output_index: u64,
@@ -808,20 +816,14 @@ fn process_sse_event(
             let Ok(ev) = serde_json::from_str::<DeltaEvent>(data) else {
                 return events;
             };
-            if let Some(active_block) = active.get_mut(ev.output_index)
-                && let StreamBlock::Thinking { text, .. } = &mut active_block.block
-            {
-                text.push_str(&ev.delta);
-                if let Some(AssistantContentPart::Thinking(content)) =
-                    output.content.get_mut(active_block.content_index)
-                    && let Some(buf) = content.text_mut()
-                {
-                    buf.push_str(&ev.delta);
-                }
-                events.push(StreamEvent::ThinkingDelta {
-                    content_index: active_block.content_index,
-                    delta: ev.delta,
-                });
+            push_thinking(ev.output_index, ev.delta, output, active, &mut events);
+        }
+        "response.reasoning_summary_part.added" => {
+            let Ok(ev) = serde_json::from_str::<SummaryPartEvent>(data) else {
+                return events;
+            };
+            if ev.summary_index > 0 {
+                push_thinking(ev.output_index, "\n\n".into(), output, active, &mut events);
             }
         }
         "response.function_call_arguments.delta" => {
@@ -966,6 +968,30 @@ fn process_sse_event(
     }
 
     events
+}
+
+fn push_thinking(
+    output_index: u64,
+    delta: String,
+    output: &mut AssistantMessage,
+    active: &mut ActiveBlocks,
+    events: &mut Vec<StreamEvent>,
+) {
+    if let Some(active_block) = active.get_mut(output_index)
+        && let StreamBlock::Thinking { text, .. } = &mut active_block.block
+    {
+        text.push_str(&delta);
+        if let Some(AssistantContentPart::Thinking(content)) =
+            output.content.get_mut(active_block.content_index)
+            && let Some(buf) = content.text_mut()
+        {
+            buf.push_str(&delta);
+        }
+        events.push(StreamEvent::ThinkingDelta {
+            content_index: active_block.content_index,
+            delta,
+        });
+    }
 }
 
 fn finish_block(
@@ -1258,6 +1284,61 @@ mod tests {
         assert_eq!(map_response_status("completed"), StopReason::Stop);
         assert_eq!(map_response_status("incomplete"), StopReason::Length);
         assert_eq!(map_response_status("failed"), StopReason::Error);
+    }
+
+    #[test]
+    fn summary_parts_are_separated_by_a_blank_line() {
+        let mut output = AssistantMessage::builder()
+            .model("test".into())
+            .provider(Provider::Custom("test".into()))
+            .api(Api::OpenaiResponses)
+            .timestamp_ms(Timestamp::zero())
+            .build();
+        let mut active = ActiveBlocks::new();
+        let feed = |name: &str, data: serde_json::Value, output: &mut _, active: &mut _| {
+            process_sse_event(Some(name), &data.to_string(), output, active)
+        };
+        feed(
+            "response.output_item.added",
+            serde_json::json!({"output_index": 0, "item": {"type": "reasoning", "id": "rs_1"}}),
+            &mut output,
+            &mut active,
+        );
+        feed(
+            "response.reasoning_summary_part.added",
+            serde_json::json!({"output_index": 0, "summary_index": 0}),
+            &mut output,
+            &mut active,
+        );
+        feed(
+            "response.reasoning_summary_text.delta",
+            serde_json::json!({"output_index": 0, "delta": "**Defining**"}),
+            &mut output,
+            &mut active,
+        );
+        let sep = feed(
+            "response.reasoning_summary_part.added",
+            serde_json::json!({"output_index": 0, "summary_index": 1}),
+            &mut output,
+            &mut active,
+        );
+        feed(
+            "response.reasoning_summary_text.delta",
+            serde_json::json!({"output_index": 0, "delta": "**Locating**"}),
+            &mut output,
+            &mut active,
+        );
+
+        assert!(matches!(
+            &sep[0],
+            StreamEvent::ThinkingDelta { delta, .. } if delta == "\n\n"
+        ));
+        match &output.content[0] {
+            AssistantContentPart::Thinking(ThinkingContent::Thinking { thinking, .. }) => {
+                assert_eq!(thinking, "**Defining**\n\n**Locating**");
+            }
+            other => panic!("expected thinking, got {other:?}"),
+        }
     }
 
     #[test]
