@@ -446,6 +446,10 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         config::resolve_favourites(&setup.cfg.favourite_models, config::load_favourite_models());
     let startup_discovery_client = setup.http_client.clone();
 
+    let session_saver = (!cli.no_session)
+        .then(|| SaverThread::spawn(cwd_str.clone()))
+        .transpose()?;
+
     let tui_config = TuiConfig {
         model: setup.model,
         system_prompt: Some(system_prompt),
@@ -468,33 +472,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         save_last_models: Some(std::sync::Arc::new(|models| {
             config::save_last_models(models);
         })),
-        save_session: if cli.no_session {
-            None
-        } else {
-            let cwd_s = cwd_str.clone();
-            Some(std::sync::Arc::new(
-                move |snapshot: mush_tui::SessionSnapshot| {
-                    let store = SessionStore::new(SessionStore::default_dir());
-                    let mut session = Session::new(&snapshot.model_id, &cwd_s);
-                    session.meta.id = snapshot.session_id;
-                    session.conversation = snapshot.primary;
-                    session.system_prompt = snapshot.system_prompt;
-                    session.meta.message_count = session.conversation.context_len();
-                    session.panes = snapshot
-                        .panes
-                        .into_iter()
-                        .map(|p| PaneSession {
-                            pane_id: p.pane_id,
-                            label: p.label,
-                            model_id: p.model_id.into(),
-                            conversation: p.conversation,
-                        })
-                        .collect();
-                    session.auto_title();
-                    let _ = store.save(&session);
-                },
-            ))
-        },
+        save_session: session_saver.as_ref().map(|saver| saver.handle()),
         confirm_tools: setup.cfg.confirm_tools,
         auto_compact: setup.cfg.auto_compact,
         auto_fork_compact: setup.cfg.auto_fork_compact,
@@ -598,7 +576,65 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
     .await
     .map_err(|e| eyre!("TUI error: {e}"))?;
 
+    if let Some(saver) = session_saver {
+        saver.finish();
+    }
     Ok(())
+}
+
+struct SaverThread {
+    tx: std::sync::mpsc::Sender<mush_tui::SessionSnapshot>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl SaverThread {
+    fn spawn(cwd: String) -> std::io::Result<Self> {
+        let (tx, rx) = std::sync::mpsc::channel::<mush_tui::SessionSnapshot>();
+        let thread = std::thread::Builder::new()
+            .name("session-saver".into())
+            .spawn(move || {
+                let store = SessionStore::new(SessionStore::default_dir());
+                while let Ok(mut snapshot) = rx.recv() {
+                    while let Ok(newer) = rx.try_recv() {
+                        snapshot = newer;
+                    }
+                    let _ = store.save(&session_from_snapshot(snapshot, &cwd));
+                }
+            })?;
+        Ok(Self { tx, thread })
+    }
+
+    fn handle(&self) -> mush_tui::runner::SessionSaver {
+        let tx = self.tx.clone();
+        std::sync::Arc::new(move |snapshot| {
+            let _ = tx.send(snapshot);
+        })
+    }
+
+    fn finish(self) {
+        drop(self.tx);
+        let _ = self.thread.join();
+    }
+}
+
+fn session_from_snapshot(snapshot: mush_tui::SessionSnapshot, cwd: &str) -> Session {
+    let mut session = Session::new(&snapshot.model_id, cwd);
+    session.meta.id = snapshot.session_id;
+    session.conversation = snapshot.primary;
+    session.system_prompt = snapshot.system_prompt;
+    session.meta.message_count = session.conversation.context_len();
+    session.panes = snapshot
+        .panes
+        .into_iter()
+        .map(|p| PaneSession {
+            pane_id: p.pane_id,
+            label: p.label,
+            model_id: p.model_id.into(),
+            conversation: p.conversation,
+        })
+        .collect();
+    session.auto_title();
+    session
 }
 
 #[cfg(test)]
