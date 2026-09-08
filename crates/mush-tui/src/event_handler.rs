@@ -552,4 +552,99 @@ mod tests {
             "the actual error (Overloaded) should be shown to the user"
         );
     }
+
+    #[test]
+    fn text_before_and_between_tool_calls_all_reaches_the_display() {
+        use crate::app::App;
+        use mush_ai::types::TokenCount;
+
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        let mut conversation = ConversationState::new();
+        let mut image_protos = std::collections::HashMap::new();
+        let model = mush_ai::models::all_models().first().unwrap().clone();
+        let mut ctx = EventCtx {
+            app: &mut app,
+            conversation: &mut conversation,
+            image_protos: &mut image_protos,
+        };
+
+        let tool_call = |id: &str| ToolCall {
+            id: ToolCallId::from(id.to_string()),
+            name: "bash".into(),
+            arguments: serde_json::json!({"command": "ls"}),
+        };
+        let assistant = |text: &str, id: &str| {
+            AssistantMessage::builder()
+                .content(vec![
+                    AssistantContentPart::Text(TextContent { text: text.into() }),
+                    AssistantContentPart::ToolCall(tool_call(id)),
+                ])
+                .model(model.id.clone())
+                .provider(model.provider.clone())
+                .api(model.api)
+                .stop_reason(StopReason::ToolUse)
+                .timestamp_ms(Timestamp::now())
+                .build()
+        };
+        let text_delta = |delta: &str| AgentEvent::StreamEvent {
+            event: StreamEvent::TextDelta {
+                content_index: 0,
+                delta: delta.into(),
+            },
+        };
+        let tool_start = |id: &str| AgentEvent::ToolExecStart {
+            tool_call_id: ToolCallId::from(id.to_string()),
+            tool_name: "bash".into(),
+            args: serde_json::json!({"command": "ls"}),
+        };
+
+        let events = [
+            AgentEvent::TurnStart { turn_index: 0 },
+            text_delta("yes, because a, b, c"),
+            AgentEvent::MessageEnd {
+                message: assistant("yes, because a, b, c", "tc1"),
+            },
+            tool_start("tc1"),
+            AgentEvent::ToolExecEnd {
+                tool_call_id: ToolCallId::from("tc1".to_string()),
+                tool_name: "bash".into(),
+                result: mush_agent::tool::ToolResult::text("file.rs"),
+            },
+            AgentEvent::TurnStart { turn_index: 1 },
+            text_delta("now the second step"),
+            AgentEvent::MessageEnd {
+                message: assistant("now the second step", "tc2"),
+            },
+            tool_start("tc2"),
+        ];
+        for event in &events {
+            handle_agent_event(&mut ctx, event, &model, false, &None);
+        }
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 30)).unwrap();
+        let mut screen = crate::screen::Screen::new();
+        terminal
+            .draw(|frame| screen.render(ctx.app, frame.area(), frame.buffer_mut()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let rows: Vec<String> = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect();
+
+        let position = |needle: &str| {
+            rows.iter()
+                .position(|row| row.contains(needle))
+                .unwrap_or_else(|| panic!("{needle:?} missing from {rows:#?}"))
+        };
+        assert!(position("yes, because a, b, c") < position("file.rs"));
+        assert!(position("file.rs") < position("now the second step"));
+        assert!(position("now the second step") < position("bash · running"));
+    }
 }
