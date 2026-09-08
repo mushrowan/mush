@@ -15,34 +15,50 @@ pub fn parse_batch_output(text: &str) -> Vec<BatchSection> {
     let mut i = 0;
 
     while i < lines.len() {
-        let line = lines[i];
-        if line.starts_with("--- [") && line.ends_with("] ---") {
-            let is_error = line.contains("[error]");
+        let Some(is_error) = section_header(lines[i], sections.len()) else {
             i += 1;
-            let mut content = String::new();
-            while i < lines.len() {
-                let next = lines[i];
-                if (next.starts_with("--- [") && next.ends_with("] ---"))
-                    || next.starts_with("batch: ")
-                {
-                    break;
-                }
-                if !content.is_empty() {
-                    content.push('\n');
-                }
-                content.push_str(next);
-                i += 1;
+            continue;
+        };
+        i += 1;
+        let mut content = String::new();
+        while i < lines.len() {
+            let next = lines[i];
+            if section_header(next, sections.len() + 1).is_some() || is_summary_line(next) {
+                break;
             }
-            sections.push(BatchSection {
-                is_error,
-                content: content.trim().to_string(),
-            });
-        } else {
+            if !content.is_empty() {
+                content.push('\n');
+            }
+            content.push_str(next);
             i += 1;
         }
+        sections.push(BatchSection {
+            is_error,
+            content: content.trim().to_string(),
+        });
     }
 
     sections
+}
+
+fn section_header(line: &str, expected_index: usize) -> Option<bool> {
+    let rest = line.strip_prefix("--- [")?;
+    let (index, rest) = rest.split_once("] ")?;
+    if index.parse::<usize>().ok()? != expected_index {
+        return None;
+    }
+    if rest.ends_with(" [ok] ---") {
+        Some(false)
+    } else if rest.ends_with(" [error] ---") {
+        Some(true)
+    } else {
+        None
+    }
+}
+
+fn is_summary_line(line: &str) -> bool {
+    line.strip_prefix("batch: ")
+        .is_some_and(|rest| rest.contains(" succeeded, ") && rest.ends_with(" failed"))
 }
 
 #[must_use]
