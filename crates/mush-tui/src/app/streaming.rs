@@ -108,11 +108,30 @@ impl App {
         outcome: mush_ai::types::ToolOutcome,
         output: Option<&str>,
     ) {
-        let Some(text) = output else { return };
+        let text = output.unwrap_or_default();
         let sections = parse_batch_output(text);
-
         let batch_error =
             (sections.is_empty() && !text.trim().is_empty()).then(|| truncate_output(text));
+        let resolve = |idx: usize| -> (ToolCallStatus, Option<String>) {
+            if let Some(ref err) = batch_error {
+                (ToolCallStatus::from(outcome), Some(err.clone()))
+            } else if let Some(section) = sections.get(idx) {
+                let status = if section.is_error {
+                    ToolCallStatus::Error
+                } else {
+                    ToolCallStatus::Done
+                };
+                let preview =
+                    (!section.content.is_empty()).then(|| truncate_output(&section.content));
+                (status, preview)
+            } else {
+                (
+                    ToolCallStatus::Error,
+                    Some("missing result in batch output".into()),
+                )
+            }
+        };
+
         for tool in &mut self.active_tools {
             let Some(idx) = mush_agent::exec_context::batch_sub_index(
                 tool.tool_call_id.as_str(),
@@ -121,59 +140,22 @@ impl App {
                 continue;
             };
             tool.live_output = None;
-            if let Some(ref err) = batch_error {
-                tool.status = ToolCallStatus::from(outcome);
-                tool.output = Some(err.clone());
-            } else if let Some(section) = sections.get(idx) {
-                tool.status = if section.is_error {
-                    ToolCallStatus::Error
-                } else {
-                    ToolCallStatus::Done
-                };
-                tool.output =
-                    (!section.content.is_empty()).then(|| truncate_output(&section.content));
-            } else {
-                tool.status = ToolCallStatus::Error;
-                tool.output = Some("missing result in batch output".into());
-            }
+            (tool.status, tool.output) = resolve(idx);
         }
 
         if let Some(mut turn) = self.current_turn_message_mut() {
-            let running: Vec<usize> = turn
-                .tool_calls
-                .iter()
-                .enumerate()
-                .filter(|(_, tc)| tc.status == ToolCallStatus::Running)
-                .map(|(i, _)| i)
-                .collect();
-
-            if sections.is_empty() && !text.trim().is_empty() {
-                let preview = truncate_output(text);
-                for &idx in &running {
-                    let tc = &mut turn.tool_calls[idx];
-                    tc.status = ToolCallStatus::Error;
-                    tc.output_preview = Some(preview.clone());
+            for tc in &mut turn.tool_calls {
+                let Some(idx) = mush_agent::exec_context::batch_sub_index(
+                    tc.tool_call_id.as_str(),
+                    tool_call_id.as_str(),
+                ) else {
+                    continue;
+                };
+                let (status, preview) = resolve(idx);
+                tc.status = status;
+                if preview.is_some() {
+                    tc.output_preview = preview;
                 }
-                return;
-            }
-
-            for (section_idx, section) in sections.iter().enumerate() {
-                if let Some(&tc_idx) = running.get(section_idx) {
-                    let tc = &mut turn.tool_calls[tc_idx];
-                    tc.status = if section.is_error {
-                        ToolCallStatus::Error
-                    } else {
-                        ToolCallStatus::Done
-                    };
-                    if !section.content.is_empty() {
-                        tc.output_preview = Some(truncate_output(&section.content));
-                    }
-                }
-            }
-            for &idx in running.iter().skip(sections.len()) {
-                let tc = &mut turn.tool_calls[idx];
-                tc.status = ToolCallStatus::Error;
-                tc.output_preview = Some("missing result in batch output".into());
             }
         }
     }
@@ -197,7 +179,10 @@ impl App {
             tool.live_output = None;
         }
         if let Some(mut turn) = self.current_turn_message_mut()
-            && let Some(tc) = turn.tool_calls.iter_mut().rfind(|t| t.name == name)
+            && let Some(tc) = turn
+                .tool_calls
+                .iter_mut()
+                .find(|t| &t.tool_call_id == tool_call_id)
         {
             tc.status = status;
             tc.output_preview = output.map(|o| preview_for_tool(name, o));

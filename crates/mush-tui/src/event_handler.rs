@@ -330,6 +330,7 @@ async fn inject_post_compaction_hooks(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::ToolCallStatus;
 
     #[test]
     fn agent_error_becomes_system_message() {
@@ -646,5 +647,147 @@ mod tests {
         assert!(position("yes, because a, b, c") < position("file.rs"));
         assert!(position("file.rs") < position("now the second step"));
         assert!(position("now the second step") < position("bash · running"));
+    }
+
+    fn bash_call(id: &str, command: &str) -> ToolCall {
+        ToolCall {
+            id: ToolCallId::from(id.to_string()),
+            name: "bash".into(),
+            arguments: serde_json::json!({"command": command}),
+        }
+    }
+
+    fn tool_turn(model: &Model, text: &str, calls: Vec<ToolCall>) -> AssistantMessage {
+        let mut content = vec![AssistantContentPart::Text(TextContent {
+            text: text.into(),
+        })];
+        content.extend(calls.into_iter().map(AssistantContentPart::ToolCall));
+        AssistantMessage::builder()
+            .content(content)
+            .model(model.id.clone())
+            .provider(model.provider.clone())
+            .api(model.api)
+            .stop_reason(StopReason::ToolUse)
+            .timestamp_ms(Timestamp::now())
+            .build()
+    }
+
+    fn tool_start(call: &ToolCall) -> AgentEvent {
+        AgentEvent::ToolExecStart {
+            tool_call_id: call.id.clone(),
+            tool_name: call.name.clone(),
+            args: call.arguments.clone(),
+        }
+    }
+
+    fn tool_end(call: &ToolCall, result: mush_agent::tool::ToolResult) -> AgentEvent {
+        AgentEvent::ToolExecEnd {
+            tool_call_id: call.id.clone(),
+            tool_name: call.name.clone(),
+            result,
+        }
+    }
+
+    fn shown_tool_calls(app: &crate::app::App) -> Vec<(String, ToolCallStatus, Option<String>)> {
+        app.messages
+            .last()
+            .unwrap()
+            .tool_calls
+            .iter()
+            .map(|tc| (tc.summary.clone(), tc.status, tc.output_preview.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn two_same_name_tools_in_one_turn_each_get_their_own_result() {
+        use crate::app::App;
+        use mush_agent::tool::ToolResult;
+        use mush_ai::types::TokenCount;
+
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        let mut conversation = ConversationState::new();
+        let mut image_protos = std::collections::HashMap::new();
+        let model = mush_ai::models::all_models().first().unwrap().clone();
+        let mut ctx = EventCtx {
+            app: &mut app,
+            conversation: &mut conversation,
+            image_protos: &mut image_protos,
+        };
+        let a = bash_call("a", "ls");
+        let b = bash_call("b", "pwd");
+        let events = [
+            AgentEvent::TurnStart { turn_index: 0 },
+            AgentEvent::MessageEnd {
+                message: tool_turn(&model, "checking both", vec![a.clone(), b.clone()]),
+            },
+            tool_start(&a),
+            tool_start(&b),
+            tool_end(&a, ToolResult::text("file.rs")),
+            tool_end(&b, ToolResult::text("/home")),
+        ];
+        for event in &events {
+            handle_agent_event(&mut ctx, event, &model, false, &None);
+        }
+
+        assert_eq!(
+            shown_tool_calls(ctx.app),
+            vec![
+                ("ls".into(), ToolCallStatus::Done, Some("file.rs".into())),
+                ("pwd".into(), ToolCallStatus::Done, Some("/home".into())),
+            ]
+        );
+    }
+
+    #[test]
+    fn batch_sub_calls_next_to_a_parallel_tool_each_get_their_own_result() {
+        use crate::app::App;
+        use mush_agent::tool::ToolResult;
+        use mush_ai::types::TokenCount;
+
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        let mut conversation = ConversationState::new();
+        let mut image_protos = std::collections::HashMap::new();
+        let model = mush_ai::models::all_models().first().unwrap().clone();
+        let mut ctx = EventCtx {
+            app: &mut app,
+            conversation: &mut conversation,
+            image_protos: &mut image_protos,
+        };
+        let bash = bash_call("bash1", "ls");
+        let batch = ToolCall {
+            id: ToolCallId::from("batch1".to_string()),
+            name: "batch".into(),
+            arguments: serde_json::json!({"tool_calls": [
+                {"tool": "read", "parameters": {"path": "a.rs"}},
+                {"tool": "read", "parameters": {"path": "b.rs"}},
+            ]}),
+        };
+        let events = [
+            AgentEvent::TurnStart { turn_index: 0 },
+            AgentEvent::MessageEnd {
+                message: tool_turn(&model, "reading", vec![bash.clone(), batch.clone()]),
+            },
+            tool_start(&bash),
+            tool_start(&batch),
+            tool_end(
+                &batch,
+                ToolResult::text(
+                    "--- [0] read [ok] ---\nA\n\n--- [1] read [error] ---\nno b\n\nbatch: 1/2 succeeded, 1 failed",
+                ),
+            ),
+            tool_end(&bash, ToolResult::text("file.rs")),
+        ];
+        for event in &events {
+            handle_agent_event(&mut ctx, event, &model, false, &None);
+        }
+
+        assert_eq!(
+            shown_tool_calls(ctx.app),
+            vec![
+                ("ls".into(), ToolCallStatus::Done, Some("file.rs".into())),
+                ("a.rs".into(), ToolCallStatus::Done, Some("A".into())),
+                ("b.rs".into(), ToolCallStatus::Error, Some("no b".into())),
+            ]
+        );
     }
 }
