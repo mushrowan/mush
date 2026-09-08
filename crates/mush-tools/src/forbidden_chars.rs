@@ -253,11 +253,22 @@ impl mush_agent::tool::AgentTool for ForbiddenCharsGuard {
         if !bypass {
             for content in (self.extractor)(&args) {
                 if let Err(err) = self.chars.check(&content) {
-                    return mush_agent::tool::ToolResult::error(err.to_string());
+                    let saved = mush_agent::truncation::save_rejected_content(&content);
+                    return mush_agent::tool::ToolResult::error(rejection_message(
+                        &err,
+                        saved.as_deref(),
+                    ));
                 }
             }
         }
         self.inner.execute(args).await
+    }
+}
+
+fn rejection_message(err: &ForbiddenCharError, saved: Option<&std::path::Path>) -> String {
+    match saved {
+        Some(path) => format!("{err}\nrejected content saved to {}", path.display()),
+        None => format!("{err}\nrejected content could not be saved"),
     }
 }
 
@@ -451,6 +462,45 @@ mod tests {
             inner.last_received().is_none(),
             "inner tool must not be invoked when validation fails"
         );
+    }
+
+    #[tokio::test]
+    async fn guard_saves_rejected_content_and_names_the_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("MUSH_DATA_DIR", tmp.path());
+        }
+        let (_, guard) = record_with_guard(ForbiddenChars::new(['—']));
+        let content = "line one\nline — two\n";
+        let result = guard.execute(serde_json::json!({"content": content})).await;
+        assert!(!result.outcome.is_success());
+
+        let saved: Vec<_> = std::fs::read_dir(tmp.path().join("tool-output"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        let [path] = saved.as_slice() else {
+            panic!("expected exactly one scratch file, got {saved:?}");
+        };
+        assert!(
+            path.file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("rejected_")
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), content);
+
+        let msg = match &result.content[0] {
+            mush_ai::types::ToolResultContentPart::Text(t) => t.text.clone(),
+            other => panic!("expected text, got {other:?}"),
+        };
+        assert!(
+            msg.contains(&path.display().to_string()),
+            "error should name the scratch file: {msg}"
+        );
+        assert!(msg.contains("line 2, column 6"), "{msg}");
+        assert!(msg.contains("'—'"), "{msg}");
     }
 
     #[tokio::test]

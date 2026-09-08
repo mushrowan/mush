@@ -161,10 +161,14 @@ fn write_content_extractor() -> forbidden_chars::ContentExtractor {
 
 fn edit_content_extractor() -> forbidden_chars::ContentExtractor {
     Arc::new(|args: &serde_json::Value| {
-        args.get("newText")
-            .and_then(|v| v.as_str())
-            .map(|s| vec![s.to_string()])
-            .unwrap_or_default()
+        let top = args.get("newText").and_then(|v| v.as_str());
+        let batch = args
+            .get("edits")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|edit| edit.get("newText").and_then(|v| v.as_str()));
+        top.into_iter().chain(batch).map(str::to_string).collect()
     })
 }
 
@@ -348,6 +352,90 @@ mod tests {
             !result.outcome.is_success(),
             "apply_patch should be blocked when added content has a forbidden char"
         );
+    }
+
+    #[tokio::test]
+    async fn rejected_write_saves_content_and_leaves_target_untouched() {
+        let data = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("MUSH_DATA_DIR", data.path());
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.txt");
+        let content = "fn main() {\n    // a → b\n}\n";
+        let registry = registry_with_chars(
+            false,
+            ForbiddenChars::with_classes([], [forbidden_chars::CharClass::Arrows]),
+        );
+        let write = registry.get("write").expect("write tool registered");
+        let result = write
+            .execute(serde_json::json!({
+                "path": target.to_str().unwrap(),
+                "content": content,
+            }))
+            .await;
+
+        assert!(!result.outcome.is_success());
+        assert!(!target.exists(), "target must not be written");
+
+        let saved: Vec<_> = std::fs::read_dir(data.path().join("tool-output"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        let [scratch] = saved.as_slice() else {
+            panic!("expected exactly one scratch file, got {saved:?}");
+        };
+        assert_eq!(std::fs::read_to_string(scratch).unwrap(), content);
+
+        let msg = result_text(&result);
+        assert!(
+            msg.contains(&scratch.display().to_string()),
+            "error should name the scratch file: {msg}"
+        );
+        assert!(msg.contains("line 2, column 10"), "{msg}");
+        assert!(msg.contains("'→' (U+2192)"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn rejected_edits_array_saves_the_failing_new_text() {
+        let data = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("MUSH_DATA_DIR", data.path());
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.txt");
+        std::fs::write(&target, "one\ntwo\n").unwrap();
+        let registry = registry_with_chars(false, ForbiddenChars::new(['—']));
+        let edit = registry.get("edit").expect("edit tool registered");
+        let result = edit
+            .execute(serde_json::json!({
+                "path": target.to_str().unwrap(),
+                "edits": [
+                    {"oldText": "one", "newText": "1"},
+                    {"oldText": "two", "newText": "two — with dash"},
+                ],
+            }))
+            .await;
+
+        assert!(!result.outcome.is_success());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "one\ntwo\n");
+
+        let saved: Vec<_> = std::fs::read_dir(data.path().join("tool-output"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        let [scratch] = saved.as_slice() else {
+            panic!("expected exactly one scratch file, got {saved:?}");
+        };
+        assert_eq!(std::fs::read_to_string(scratch).unwrap(), "two — with dash");
+        assert!(result_text(&result).contains(&scratch.display().to_string()));
+    }
+
+    fn result_text(result: &mush_agent::tool::ToolResult) -> String {
+        match &result.content[0] {
+            mush_ai::types::ToolResultContentPart::Text(t) => t.text.clone(),
+            other => panic!("expected text, got {other:?}"),
+        }
     }
 
     #[tokio::test]

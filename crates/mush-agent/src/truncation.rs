@@ -22,6 +22,14 @@ fn output_dir() -> PathBuf {
 }
 
 fn save_full_output(content: &str) -> Option<PathBuf> {
+    save_to_output_dir("tool", content)
+}
+
+pub fn save_rejected_content(content: &str) -> Option<PathBuf> {
+    save_to_output_dir("rejected", content)
+}
+
+fn save_to_output_dir(prefix: &str, content: &str) -> Option<PathBuf> {
     let primary = output_dir();
     let fallback = std::env::temp_dir().join("mush").join("tool-output");
 
@@ -36,7 +44,7 @@ fn save_full_output(content: &str) -> Option<PathBuf> {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    let path = dir.join(format!("tool_{ts}.txt"));
+    let path = dir.join(format!("{prefix}_{ts}.txt"));
     mush_ai::private_io::write_private(&path, content).ok()?;
     Some(path)
 }
