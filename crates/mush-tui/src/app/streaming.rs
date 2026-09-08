@@ -35,6 +35,44 @@ impl App {
         self.stream.tool_args.push_str(delta);
     }
 
+    pub fn announce_tool_calls(&mut self, message: &mush_ai::types::AssistantMessage) {
+        self.announced_tool_calls = message
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                mush_ai::types::AssistantContentPart::ToolCall(tc) => Some(tc.clone()),
+                _ => None,
+            })
+            .collect();
+    }
+
+    #[must_use]
+    pub fn announced_tool_call(
+        &self,
+        tool_call_id: &ToolCallId,
+    ) -> Option<&mush_ai::types::ToolCall> {
+        self.announced_tool_calls
+            .iter()
+            .find(|tc| &tc.id == tool_call_id)
+    }
+
+    #[must_use]
+    pub fn turn_shows_tool_call(&self, tool_call_id: &ToolCallId) -> bool {
+        self.messages
+            .iter()
+            .rfind(|m| m.role == MessageRole::Assistant)
+            .is_some_and(|turn| {
+                turn.tool_calls.iter().any(|tc| {
+                    &tc.tool_call_id == tool_call_id
+                        || mush_agent::exec_context::batch_sub_index(
+                            tc.tool_call_id.as_str(),
+                            tool_call_id.as_str(),
+                        )
+                        .is_some()
+                })
+            })
+    }
+
     pub fn start_tool(&mut self, tool_call_id: &ToolCallId, name: &str, summary: &str) {
         if !self.has_running_tool() {
             self.current_tool_batch += 1;

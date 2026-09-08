@@ -36,6 +36,7 @@ pub fn handle_agent_event(
             _ => {}
         },
         AgentEvent::MessageEnd { message } => {
+            app.announce_tool_calls(message);
             apply_message_end(app, message, model, debug_cache);
             let msg = Message::Assistant(message.clone());
             conversation.append_message(msg);
@@ -44,33 +45,19 @@ pub fn handle_agent_event(
             tool_call_id,
             tool_name,
             args,
-        } => {
-            if tool_name.as_str().eq_ignore_ascii_case("batch") {
-                let summary = summarise_tool_args("batch", args);
-                let sub_calls: Vec<(String, String)> = args["tool_calls"]
-                    .as_array()
-                    .map(|calls| {
-                        calls
-                            .iter()
-                            .map(|c| {
-                                let name = c["tool"].as_str().unwrap_or("?").to_string();
-                                let sub_summary = summarise_tool_args(&name, &c["parameters"]);
-                                (name, sub_summary)
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                app.start_batch_tool(tool_call_id, &summary, &sub_calls);
-            } else {
-                let summary = summarise_tool_args(tool_name.as_str(), args);
-                app.start_tool(tool_call_id, tool_name.as_str(), &summary);
-            }
-        }
+        } => show_tool_start(app, tool_call_id, tool_name.as_str(), args),
         AgentEvent::ToolExecEnd {
             tool_call_id,
             tool_name,
             result,
         } => {
+            if !app.turn_shows_tool_call(tool_call_id) {
+                let args = app
+                    .announced_tool_call(tool_call_id)
+                    .map(|tc| tc.arguments.clone())
+                    .unwrap_or_default();
+                show_tool_start(app, tool_call_id, tool_name.as_str(), &args);
+            }
             let output_text = result.content.iter().find_map(|p| match p {
                 ToolResultContentPart::Text(t) => Some(t.text.as_str()),
                 _ => None,
@@ -156,6 +143,34 @@ pub fn handle_agent_event(
             app.active_tools.clear();
         }
         _ => {}
+    }
+}
+
+fn show_tool_start(
+    app: &mut App,
+    tool_call_id: &ToolCallId,
+    tool_name: &str,
+    args: &serde_json::Value,
+) {
+    if tool_name.eq_ignore_ascii_case("batch") {
+        let summary = summarise_tool_args("batch", args);
+        let sub_calls: Vec<(String, String)> = args["tool_calls"]
+            .as_array()
+            .map(|calls| {
+                calls
+                    .iter()
+                    .map(|c| {
+                        let name = c["tool"].as_str().unwrap_or("?").to_string();
+                        let sub_summary = summarise_tool_args(&name, &c["parameters"]);
+                        (name, sub_summary)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        app.start_batch_tool(tool_call_id, &summary, &sub_calls);
+    } else {
+        let summary = summarise_tool_args(tool_name, args);
+        app.start_tool(tool_call_id, tool_name, &summary);
     }
 }
 
@@ -788,6 +803,43 @@ mod tests {
                 ("a.rs".into(), ToolCallStatus::Done, Some("A".into())),
                 ("b.rs".into(), ToolCallStatus::Error, Some("no b".into())),
             ]
+        );
+    }
+
+    #[test]
+    fn a_denied_tool_call_still_shows_in_the_turn() {
+        use crate::app::App;
+        use mush_agent::tool::ToolResult;
+        use mush_ai::types::TokenCount;
+
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        let mut conversation = ConversationState::new();
+        let mut image_protos = std::collections::HashMap::new();
+        let model = mush_ai::models::all_models().first().unwrap().clone();
+        let mut ctx = EventCtx {
+            app: &mut app,
+            conversation: &mut conversation,
+            image_protos: &mut image_protos,
+        };
+        let call = bash_call("a", "rm -rf /");
+        let events = [
+            AgentEvent::TurnStart { turn_index: 0 },
+            AgentEvent::MessageEnd {
+                message: tool_turn(&model, "let me wipe it", vec![call.clone()]),
+            },
+            tool_end(&call, ToolResult::error("tool call denied by user")),
+        ];
+        for event in &events {
+            handle_agent_event(&mut ctx, event, &model, false, &None);
+        }
+
+        assert_eq!(
+            shown_tool_calls(ctx.app),
+            vec![(
+                "rm -rf /".into(),
+                ToolCallStatus::Error,
+                Some("tool call denied by user".into()),
+            )]
         );
     }
 }
