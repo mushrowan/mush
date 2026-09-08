@@ -472,6 +472,37 @@ mod tests {
         Session::new(app)
     }
 
+    static CONFIG_DIR_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    struct ConfigDir {
+        _dir: tempfile::TempDir,
+        _lock: tokio::sync::MutexGuard<'static, ()>,
+        saved: Option<std::ffi::OsString>,
+    }
+
+    impl Drop for ConfigDir {
+        fn drop(&mut self) {
+            unsafe {
+                match self.saved.take() {
+                    Some(value) => std::env::set_var("MUSH_CONFIG_DIR", value),
+                    None => std::env::remove_var("MUSH_CONFIG_DIR"),
+                }
+            }
+        }
+    }
+
+    async fn isolated_config_dir() -> ConfigDir {
+        let lock = CONFIG_DIR_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let saved = std::env::var_os("MUSH_CONFIG_DIR");
+        unsafe { std::env::set_var("MUSH_CONFIG_DIR", dir.path()) };
+        ConfigDir {
+            _dir: dir,
+            _lock: lock,
+            saved,
+        }
+    }
+
     async fn drain_when_settled(session: &mut Session) -> DrainedLogins {
         for _ in 0..100 {
             let drained = drain_finished_browser_logins(session);
@@ -485,9 +516,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_finished_browser_login_saves_credentials_without_login_complete() {
-        let dir = tempfile::tempdir().unwrap();
-        // SAFETY: nextest runs each test in its own process
-        unsafe { std::env::set_var("MUSH_CONFIG_DIR", dir.path()) };
+        let _config = isolated_config_dir().await;
 
         let mut session = session();
         session.app.pending_browser_login = Some(PendingBrowserLogin::spawn(
@@ -516,9 +545,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_browser_login_reports_the_reason_and_offers_the_paste_fallback() {
-        let dir = tempfile::tempdir().unwrap();
-        // SAFETY: nextest runs each test in its own process
-        unsafe { std::env::set_var("MUSH_CONFIG_DIR", dir.path()) };
+        let _config = isolated_config_dir().await;
 
         let mut session = session();
         session.app.pending_browser_login = Some(PendingBrowserLogin::spawn(
