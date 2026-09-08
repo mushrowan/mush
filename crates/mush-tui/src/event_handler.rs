@@ -108,7 +108,12 @@ pub fn handle_agent_event(
             }
         }
         AgentEvent::SteeringInjected { messages } => {
-            for mut msg in app.messages.iter_mut().rev().take(messages.len()) {
+            for mut msg in app
+                .messages
+                .iter_mut()
+                .filter(|m| m.queued)
+                .take(messages.len())
+            {
                 msg.queued = false;
             }
             for msg in messages {
@@ -841,5 +846,45 @@ mod tests {
                 Some("tool call denied by user".into()),
             )]
         );
+    }
+
+    #[test]
+    fn injecting_the_first_queued_message_leaves_the_second_queued() {
+        use crate::app::App;
+        use mush_ai::types::{TokenCount, UserContent, UserMessage};
+
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.push_queued_message("first");
+        app.push_queued_message("second");
+        let mut conversation = ConversationState::new();
+        let mut image_protos = std::collections::HashMap::new();
+        let model = mush_ai::models::all_models().first().unwrap().clone();
+        let mut ctx = EventCtx {
+            app: &mut app,
+            conversation: &mut conversation,
+            image_protos: &mut image_protos,
+        };
+        let injected = vec![Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text("first".into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )];
+
+        handle_agent_event(
+            &mut ctx,
+            &AgentEvent::SteeringInjected { messages: injected },
+            &model,
+            false,
+            &None,
+        );
+
+        let queued: Vec<(&str, bool)> = ctx
+            .app
+            .messages
+            .iter()
+            .map(|m| (m.content.as_str(), m.queued))
+            .collect();
+        assert_eq!(queued, vec![("first", false), ("second", true)]);
     }
 }
