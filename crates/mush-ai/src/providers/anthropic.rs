@@ -542,11 +542,7 @@ fn build_request_body(
             if model.supports_adaptive_thinking && !options.force_budget_thinking {
                 Some(ThinkingConfig::Adaptive {
                     config_type: "adaptive".into(),
-                    display: if is_oauth {
-                        String::new()
-                    } else {
-                        "summarized".into()
-                    },
+                    display: thinking_display(options, is_oauth).into(),
                 })
             } else {
                 let budget = thinking_budget(level, max_tokens.get());
@@ -684,6 +680,17 @@ fn build_request_headers(
     }
 
     Ok(headers)
+}
+
+fn thinking_display(options: &StreamOptions, is_oauth: bool) -> &'static str {
+    if !is_oauth {
+        return "summarized";
+    }
+    let updates = options
+        .anthropic_betas
+        .as_ref()
+        .is_none_or(|betas| betas.thinking_updates);
+    if updates { "updates" } else { "" }
 }
 
 fn oauth_context_management(
@@ -1924,6 +1931,7 @@ mod tests {
         assert!(header.contains("effort-2025-11-24"));
         assert!(header.contains("context-management-2025-06-27"));
         assert!(header.contains("thinking-token-count-2026-05-13"));
+        assert!(header.contains("thinking-display-updates-2026-08-18"));
         assert!(header.contains("advisor-tool-2026-03-01"));
         assert!(header.contains("advanced-tool-use-2025-11-20"));
     }
@@ -3333,7 +3341,37 @@ mod tests {
 
         assert_eq!(
             headers["anthropic-beta"],
-            "claude-code-20250219,oauth-2025-04-20,context-1m-2025-08-07,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,advisor-tool-2026-03-01,advanced-tool-use-2025-11-20,effort-2025-11-24,fallback-credit-2026-06-01,extended-cache-ttl-2025-04-11,cache-diagnosis-2026-04-07"
+            "claude-code-20250219,oauth-2025-04-20,context-1m-2025-08-07,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,thinking-display-updates-2026-08-18,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,advisor-tool-2026-03-01,advanced-tool-use-2025-11-20,effort-2025-11-24,fallback-credit-2026-06-01,extended-cache-ttl-2025-04-11,cache-diagnosis-2026-04-07"
+        );
+    }
+
+    #[test]
+    fn thinking_updates_off_restores_the_claude_code_thinking_shape() {
+        let model = Model {
+            reasoning: true,
+            supports_adaptive_thinking: true,
+            ..test_model()
+        };
+        let options = StreamOptions {
+            thinking: Some(ThinkingLevel::High),
+            anthropic_betas: Some(AnthropicBetas {
+                thinking_updates: false,
+                ..AnthropicBetas::default()
+            }),
+            ..Default::default()
+        };
+
+        let body = build_request_body(&model, &None, &[], &[], &options, true);
+        let json = serde_json::to_value(&body).unwrap();
+
+        assert_eq!(json["thinking"], serde_json::json!({"type": "adaptive"}));
+        assert!(
+            !options
+                .anthropic_betas
+                .as_ref()
+                .unwrap()
+                .to_header_value()
+                .contains("thinking-display-updates-2026-08-18")
         );
     }
 
@@ -3754,7 +3792,10 @@ mod tests {
             json.get("cache_control").is_none(),
             "claude-code keeps cache_control on blocks, not the request root: {json}"
         );
-        assert_eq!(json["thinking"], serde_json::json!({"type": "adaptive"}));
+        assert_eq!(
+            json["thinking"],
+            serde_json::json!({"type": "adaptive", "display": "updates"})
+        );
         assert_eq!(
             json["context_management"],
             expected_claude_code_context_management()

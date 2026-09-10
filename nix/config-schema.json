@@ -22,7 +22,15 @@
           "default": true,
           "type": "boolean"
         },
-        "redact_thinking": {
+        "fallback_credit": {
+          "default": true,
+          "type": "boolean"
+        },
+        "thinking_token_count": {
+          "default": true,
+          "type": "boolean"
+        },
+        "thinking_updates": {
           "default": true,
           "type": "boolean"
         }
@@ -381,14 +389,14 @@
           "default": {},
           "type": "object"
         },
-        "model_picker": {
+        "insert": {
           "additionalProperties": {
             "$ref": "#/$defs/BindingSource"
           },
           "default": {},
           "type": "object"
         },
-        "normal": {
+        "model_picker": {
           "additionalProperties": {
             "$ref": "#/$defs/BindingSource"
           },
@@ -619,7 +627,9 @@
             "context_1m": true,
             "context_management": true,
             "effort": true,
-            "redact_thinking": true
+            "fallback_credit": true,
+            "thinking_token_count": true,
+            "thinking_updates": true
           }
         },
         "scope": {
@@ -680,6 +690,12 @@
         "keyboard_enhancement": {
           "$ref": "#/$defs/KeyboardEnhancementMode",
           "default": "auto"
+        },
+        "mouse_scroll_lines": {
+          "default": 1,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
         }
       },
       "type": "object"
@@ -958,8 +974,8 @@
       "$ref": "#/$defs/KeysConfig",
       "default": {
         "edit": {},
+        "insert": {},
         "model_picker": {},
-        "normal": {},
         "pane": {},
         "shared": {}
       }
@@ -1039,7 +1055,9 @@
           "context_1m": true,
           "context_management": true,
           "effort": true,
-          "redact_thinking": true
+          "fallback_credit": true,
+          "thinking_token_count": true,
+          "thinking_updates": true
         },
         "scope": "session"
       }
@@ -1079,7 +1097,8 @@
       "$ref": "#/$defs/TerminalPolicy",
       "default": {
         "image_probe": "auto",
-        "keyboard_enhancement": "auto"
+        "keyboard_enhancement": "auto",
+        "mouse_scroll_lines": 1
       }
     },
     "theme": {

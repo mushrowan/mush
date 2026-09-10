@@ -222,6 +222,7 @@ pub struct AnthropicBetas {
     pub effort: bool,
     pub context_management: bool,
     pub thinking_token_count: bool,
+    pub thinking_updates: bool,
     pub advisor: bool,
     pub advanced_tool_use: bool,
     pub fallback_credit: bool,
@@ -234,6 +235,7 @@ impl Default for AnthropicBetas {
             effort: true,
             context_management: true,
             thinking_token_count: true,
+            thinking_updates: true,
             advisor: true,
             advanced_tool_use: true,
             fallback_credit: true,
@@ -261,6 +263,9 @@ impl AnthropicBetas {
         betas.push("interleaved-thinking-2025-05-14");
         if self.thinking_token_count {
             betas.push("thinking-token-count-2026-05-13");
+        }
+        if self.thinking_updates {
+            betas.push("thinking-display-updates-2026-08-18");
         }
         if self.context_management {
             betas.push("context-management-2025-06-27");

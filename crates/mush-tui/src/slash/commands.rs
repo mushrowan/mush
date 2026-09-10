@@ -675,7 +675,7 @@ fn handle_settings(app: &mut App, tui_config: &mut TuiConfig, args: &str) {
             }
             let Some(field) = parts.next() else {
                 app.push_system_message(
-                    "usage: /settings betas <field> <true|false>  (fields: context_1m, effort, context_management, thinking_token_count, advisor, advanced_tool_use, fallback_credit)",
+                    "usage: /settings betas <field> <true|false>  (fields: context_1m, effort, context_management, thinking_token_count, thinking_updates, advisor, advanced_tool_use, fallback_credit)",
                 );
                 return;
             };
@@ -725,6 +725,7 @@ fn format_settings_view(settings: &crate::settings::ScopedSettings) -> String {
     let _ = writeln!(out, "  effort             = {}", b.effort);
     let _ = writeln!(out, "  context_management = {}", b.context_management);
     let _ = writeln!(out, "  thinking_token_count = {}", b.thinking_token_count);
+    let _ = writeln!(out, "  thinking_updates   = {}", b.thinking_updates);
     let _ = writeln!(out, "  advisor            = {}", b.advisor);
     let _ = writeln!(out, "  advanced_tool_use  = {}", b.advanced_tool_use);
     let _ = write!(out, "  fallback_credit    = {}", b.fallback_credit);
@@ -745,6 +746,7 @@ fn apply_beta_toggle(betas: &mut mush_ai::types::AnthropicBetas, field: &str, va
         "effort" => betas.effort = value,
         "context_management" => betas.context_management = value,
         "thinking_token_count" => betas.thinking_token_count = value,
+        "thinking_updates" => betas.thinking_updates = value,
         "advisor" => betas.advisor = value,
         "advanced_tool_use" => betas.advanced_tool_use = value,
         "fallback_credit" => betas.fallback_credit = value,

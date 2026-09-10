@@ -67,6 +67,7 @@ pub enum MenuItemKind {
     Effort,
     ContextManagement,
     ThinkingTokenCount,
+    ThinkingUpdates,
     Advisor,
     AdvancedToolUse,
     FallbackCredit,
@@ -81,6 +82,7 @@ impl MenuItemKind {
             Self::Effort,
             Self::ContextManagement,
             Self::ThinkingTokenCount,
+            Self::ThinkingUpdates,
             Self::Advisor,
             Self::AdvancedToolUse,
             Self::FallbackCredit,
@@ -95,6 +97,7 @@ impl MenuItemKind {
             Self::Effort => "effort",
             Self::ContextManagement => "context_management",
             Self::ThinkingTokenCount => "thinking_token_count",
+            Self::ThinkingUpdates => "thinking_updates",
             Self::Advisor => "advisor",
             Self::AdvancedToolUse => "advanced_tool_use",
             Self::FallbackCredit => "fallback_credit",
@@ -109,6 +112,9 @@ impl MenuItemKind {
             Self::Effort => "effort-2025-11-24: send output_config.effort",
             Self::ContextManagement => "context-management-2025-06-27: server-side edits",
             Self::ThinkingTokenCount => "thinking-token-count-2026-05-13",
+            Self::ThinkingUpdates => {
+                "thinking-display-updates-2026-08-18: show progress updates between tool calls"
+            }
             Self::Advisor => "advisor-tool-2026-03-01: advisor tool (not yet supported)",
             Self::AdvancedToolUse => {
                 "advanced-tool-use-2025-11-20: advanced tool-use (experimental)"
@@ -150,6 +156,11 @@ impl MenuItemKind {
                     !settings.anthropic_betas.thinking_token_count;
                 bool_str(settings.anthropic_betas.thinking_token_count).to_string()
             }
+            Self::ThinkingUpdates => {
+                settings.anthropic_betas.thinking_updates =
+                    !settings.anthropic_betas.thinking_updates;
+                bool_str(settings.anthropic_betas.thinking_updates).to_string()
+            }
             Self::FallbackCredit => {
                 settings.anthropic_betas.fallback_credit =
                     !settings.anthropic_betas.fallback_credit;
@@ -169,6 +180,9 @@ impl MenuItemKind {
             }
             Self::ThinkingTokenCount => {
                 bool_str(settings.anthropic_betas.thinking_token_count).to_string()
+            }
+            Self::ThinkingUpdates => {
+                bool_str(settings.anthropic_betas.thinking_updates).to_string()
             }
             Self::Advisor => bool_str(settings.anthropic_betas.advisor).to_string(),
             Self::AdvancedToolUse => {
@@ -280,7 +294,11 @@ mod tests {
             .map(|item| (item.label(), item.value(&settings)))
             .collect();
 
-        for expected in [("thinking_token_count", "on"), ("fallback_credit", "on")] {
+        for expected in [
+            ("thinking_token_count", "on"),
+            ("thinking_updates", "on"),
+            ("fallback_credit", "on"),
+        ] {
             assert!(
                 listed
                     .iter()
