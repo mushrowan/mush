@@ -50,6 +50,10 @@ pub enum AgentEvent {
         before_count: usize,
         after_count: usize,
     },
+    ContextCompacted {
+        before_count: usize,
+        compaction: ContextCompaction,
+    },
     TurnEnd {
         turn_index: usize,
         message: AssistantMessage,
@@ -72,6 +76,14 @@ pub enum ContextTransformResult {
     Unchanged,
     Updated(Vec<Message>),
     Silent(Vec<Message>),
+    Compacted(ContextCompaction),
+}
+
+#[derive(Debug, Clone)]
+pub struct ContextCompaction {
+    pub messages: Vec<Message>,
+    pub summary: String,
+    pub summarised_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -252,6 +264,14 @@ pub fn agent_loop(
                             transformed
                         }
                         ContextTransformResult::Silent(transformed) => transformed,
+                        ContextTransformResult::Compacted(compaction) => {
+                            messages = compaction.messages.clone();
+                            yield AgentEvent::ContextCompacted {
+                                before_count: before,
+                                compaction,
+                            };
+                            messages.clone()
+                        }
                     }
                 };
 
@@ -1567,6 +1587,75 @@ mod tests {
             timeout: std::time::Duration::from_secs(5),
             blocking: false,
         }
+    }
+
+    #[tokio::test]
+    async fn compaction_replaces_history_for_follow_up_turns() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let user = |text: &str| {
+            Message::User(
+                UserMessage::builder()
+                    .content(UserContent::Text(text.into()))
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            )
+        };
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut registry = ApiRegistry::new();
+        registry.register(Box::new(RecordingProvider { seen: seen.clone() }));
+        let transform_called = AtomicBool::new(false);
+        let follow_up_sent = AtomicBool::new(false);
+        let config = AgentConfig {
+            model: test_model(),
+            system_prompt: None,
+            tools: ToolRegistry::new(),
+            registry: &registry,
+            options: StreamOptions::default(),
+            max_turns: 3,
+            hooks: Box::new(ClosureHooks {
+                transform: Some(Box::new(move |messages| {
+                    let result = if transform_called.swap(true, Ordering::SeqCst) {
+                        assert_eq!(messages.len(), 4);
+                        ContextTransformResult::Unchanged
+                    } else {
+                        ContextTransformResult::Compacted(ContextCompaction {
+                            messages: vec![user("summary"), messages[2].clone()],
+                            summary: "summary".into(),
+                            summarised_count: 2,
+                        })
+                    };
+                    Box::pin(async move { result })
+                })),
+                follow_up: Some(Box::new(move || {
+                    let messages = if follow_up_sent.swap(true, Ordering::SeqCst) {
+                        vec![]
+                    } else {
+                        vec![user("follow up")]
+                    };
+                    Box::pin(async move { messages })
+                })),
+                ..Default::default()
+            }),
+            injections: Default::default(),
+            cancel: None,
+        };
+        let events: Vec<_> = agent_loop(config, vec![user("old 1"), user("old 2"), user("kept")])
+            .collect()
+            .await;
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            ["summary", "kept", "summary", "kept", "follow up"]
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, AgentEvent::ContextCompacted { .. }))
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]

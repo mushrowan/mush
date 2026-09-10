@@ -101,14 +101,7 @@ pub fn apply_applied_compaction(
     app.compacting = false;
     let summary_body = extract_fresh_summary(&result.messages);
 
-    let tree_compaction_applied = !result.summary.is_empty()
-        && result.summarised_count > 0
-        && conversation
-            .compact_at_leaf(result.summary.clone(), result.summarised_count)
-            .is_some();
-    if !tree_compaction_applied {
-        conversation.replace_messages(result.messages);
-    }
+    conversation.apply_compaction(result.summary, result.summarised_count, result.messages);
 
     let after_count = conversation.context_len();
     app.stats

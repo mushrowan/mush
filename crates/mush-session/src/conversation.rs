@@ -95,6 +95,20 @@ impl ConversationState {
         self.tree.compact_at_leaf(summary, first_kept_context_index)
     }
 
+    pub fn apply_compaction(
+        &mut self,
+        summary: String,
+        summarised_count: usize,
+        messages: Vec<Message>,
+    ) {
+        if summary.is_empty()
+            || summarised_count == 0
+            || self.compact_at_leaf(summary, summarised_count).is_none()
+        {
+            self.replace_messages(messages);
+        }
+    }
+
     pub fn reset_leaf(&mut self) {
         self.tree.reset_leaf();
     }

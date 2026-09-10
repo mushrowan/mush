@@ -629,7 +629,7 @@ pub async fn auto_compact(
     options: &StreamOptions,
     lifecycle_hooks: Option<&mush_agent::LifecycleHooks>,
     cwd: Option<&std::path::Path>,
-) -> Vec<Message> {
+) -> compact::AutoCompactResult {
     let result = compact::auto_compact(
         messages,
         context_tokens,
@@ -654,8 +654,6 @@ pub async fn auto_compact(
         );
     }
 
-    let messages = result.messages;
-
     if let Some(hooks) = lifecycle_hooks
         && !hooks
             .for_point(mush_agent::HookPoint::PostCompaction)
@@ -674,7 +672,7 @@ pub async fn auto_compact(
         }
     }
 
-    messages
+    result
 }
 
 #[cfg(test)]

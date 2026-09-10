@@ -206,14 +206,13 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
             let m = compact_model.clone();
             let o = compact_options.clone();
             let ctx = ctx_tokens_for_transform.clone();
-            let input_len = msgs.len();
             let owned = msgs.to_vec();
             let hooks = lifecycle_hooks.clone();
             let cwd = cwd.clone();
             let reg = reg_ref.clone();
             Box::pin(async move {
                 let tokens = TokenCount::new(ctx.load(std::sync::atomic::Ordering::Relaxed));
-                let compacted = auto_compact(
+                let result = auto_compact(
                     owned,
                     tokens,
                     context_window,
@@ -224,8 +223,18 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
                     Some(cwd.as_path()),
                 )
                 .await;
-                if compacted.len() < input_len {
-                    mush_agent::ContextTransformResult::Updated(compacted)
+                if result.summarised_count > 0 {
+                    ctx.store(
+                        mush_session::compact::estimate_tokens(&result.messages) as u64,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    mush_agent::ContextTransformResult::Compacted(mush_agent::ContextCompaction {
+                        messages: result.messages,
+                        summary: result.summary,
+                        summarised_count: result.summarised_count,
+                    })
+                } else if result.masked_count > 0 {
+                    mush_agent::ContextTransformResult::Silent(result.messages)
                 } else {
                     mush_agent::ContextTransformResult::Unchanged
                 }
@@ -332,6 +341,19 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
                 before_count,
                 after_count,
             } => {
+                eprintln!("\x1b[2m(compacted: {before_count} → {after_count} messages)\x1b[0m");
+            }
+            AgentEvent::ContextCompacted {
+                before_count,
+                compaction,
+            } => {
+                session.conversation.apply_compaction(
+                    compaction.summary,
+                    compaction.summarised_count,
+                    compaction.messages,
+                );
+                let after_count = session.conversation.context_len();
+                session.meta.message_count = after_count;
                 eprintln!("\x1b[2m(compacted: {before_count} → {after_count} messages)\x1b[0m");
             }
             AgentEvent::SteeringInjected { messages } => {

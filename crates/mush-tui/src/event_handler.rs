@@ -134,6 +134,24 @@ pub fn handle_agent_event(
             ));
             app.status = Some(format!("compacted: {before_count} → {after_count} messages").into());
         }
+        AgentEvent::ContextCompacted {
+            before_count,
+            compaction,
+        } => {
+            let tokens_after = mush_session::compact::estimate_tokens(&compaction.messages);
+            conversation.apply_compaction(
+                compaction.summary.clone(),
+                compaction.summarised_count,
+                compaction.messages.clone(),
+            );
+            app.stats
+                .reset_live_state(TokenCount::new(tokens_after as u64));
+            let after_count = conversation.context_len();
+            app.push_system_message(format!(
+                "━ compacted: {before_count} → {after_count} messages ━"
+            ));
+            app.status = Some(format!("compacted: {before_count} → {after_count} messages").into());
+        }
         AgentEvent::MaxTurnsReached { max_turns } => {
             app.stream.active = false;
             app.push_system_message(format!("hit max turns limit ({max_turns})"));
@@ -294,7 +312,7 @@ pub async fn auto_compact(
     options: &StreamOptions,
     lifecycle_hooks: Option<&mush_agent::LifecycleHooks>,
     cwd: Option<&std::path::Path>,
-) -> Vec<Message> {
+) -> mush_session::compact::AutoCompactResult {
     let result = mush_session::compact::auto_compact(
         messages,
         context_tokens,
@@ -319,8 +337,6 @@ pub async fn auto_compact(
         );
     }
 
-    let messages = result.messages;
-
     if let Some(hooks) = lifecycle_hooks
         && !hooks
             .for_point(mush_agent::HookPoint::PostCompaction)
@@ -329,7 +345,7 @@ pub async fn auto_compact(
         inject_post_compaction_hooks(hooks, cwd).await;
     }
 
-    messages
+    result
 }
 
 async fn inject_post_compaction_hooks(

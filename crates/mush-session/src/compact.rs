@@ -501,6 +501,7 @@ pub struct AutoCompactResult {
     pub masked_count: usize,
     pub mask_tokens_saved: usize,
     pub summarised_count: usize,
+    pub summary: String,
 }
 
 pub async fn auto_compact(
@@ -517,6 +518,7 @@ pub async fn auto_compact(
             masked_count: 0,
             mask_tokens_saved: 0,
             summarised_count: 0,
+            summary: String::new(),
         };
     }
 
@@ -531,6 +533,7 @@ pub async fn auto_compact(
                 masked_count: mask_result.masked_count,
                 mask_tokens_saved: mask_result.tokens_saved,
                 summarised_count: 0,
+                summary: String::new(),
             };
         }
     }
@@ -550,6 +553,7 @@ pub async fn auto_compact(
         masked_count: mask_result.masked_count,
         mask_tokens_saved: mask_result.tokens_saved,
         summarised_count: result.summarised_count,
+        summary: result.summary,
     }
 }
 

@@ -337,7 +337,9 @@ pub(super) async fn handle_agent_event_side_effects(
 
     if matches!(
         event,
-        AgentEvent::MessageEnd { .. } | AgentEvent::ToolExecEnd { .. }
+        AgentEvent::MessageEnd { .. }
+            | AgentEvent::ToolExecEnd { .. }
+            | AgentEvent::ContextCompacted { .. }
     ) {
         stream_state.save_session_debounced(session, tui_config);
     }
@@ -799,9 +801,6 @@ fn build_context_transform(
     let ctx_tokens_for_transform = context_tokens_shared;
     let baseline_estimated_tokens =
         Arc::new(std::sync::atomic::AtomicU64::new(initial_estimated_tokens));
-    #[expect(clippy::type_complexity)]
-    let compaction_cache: std::sync::Arc<tokio::sync::Mutex<Option<(usize, Vec<Message>)>>> =
-        std::sync::Arc::new(tokio::sync::Mutex::new(None));
     let hooks = Arc::new(lifecycle_hooks);
     let cwd = Arc::new(cwd);
     let registry = Arc::new(registry);
@@ -810,32 +809,16 @@ fn build_context_transform(
         let owned_messages = messages.to_vec();
         let model = compact_model.clone();
         let options = compact_options.clone();
-        let cache = compaction_cache.clone();
         let ctx_tokens = ctx_tokens_for_transform.clone();
         let baseline_estimated_tokens = baseline_estimated_tokens.clone();
         let hooks = hooks.clone();
         let cwd = cwd.clone();
         let registry = registry.clone();
         Box::pin(async move {
-            let mut guard = cache.lock().await;
             let current_tokens =
                 TokenCount::new(ctx_tokens.load(std::sync::atomic::Ordering::Relaxed));
 
-            let msgs = if let Some((orig_len, ref compacted)) = *guard {
-                if owned_messages.len() >= orig_len {
-                    let mut result = compacted.clone();
-                    result.extend(owned_messages[orig_len..].iter().cloned());
-                    result
-                } else {
-                    *guard = None;
-                    owned_messages.clone()
-                }
-            } else {
-                owned_messages.clone()
-            };
-
-            let pre_len = msgs.len();
-            let current_estimated_tokens = TokenCount::new(estimated_tokens_u64(&msgs));
+            let current_estimated_tokens = TokenCount::new(estimated_tokens_u64(&owned_messages));
             let baseline_tokens = TokenCount::new(
                 baseline_estimated_tokens.load(std::sync::atomic::Ordering::Relaxed),
             );
@@ -845,42 +828,39 @@ fn build_context_transform(
                     baseline_tokens,
                     current_estimated_tokens,
                 );
-            let compacted = if mush_session::compact::needs_compaction_at(
+            if !mush_session::compact::needs_compaction_at(
                 effective_compaction_tokens,
                 compaction_window,
-                msgs.len(),
+                owned_messages.len(),
             ) {
-                event_handler::auto_compact(
-                    msgs,
-                    effective_compaction_tokens,
-                    compaction_window,
-                    &registry,
-                    &model,
-                    &options,
-                    Some(&hooks),
-                    Some(cwd.as_path()),
-                )
-                .await
-            } else {
-                msgs
-            };
-            baseline_estimated_tokens.store(
-                estimated_tokens_u64(&compacted),
-                std::sync::atomic::Ordering::Relaxed,
-            );
-            let mut fresh_compaction = false;
-            let mut replayed_cached_compaction = false;
-            if compacted.len() < pre_len {
-                *guard = Some((pre_len, compacted.clone()));
-                fresh_compaction = true;
-            } else if guard.is_some() {
-                replayed_cached_compaction = true;
+                baseline_estimated_tokens.store(
+                    current_estimated_tokens.get(),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                return mush_agent::ContextTransformResult::Unchanged;
             }
-
-            if fresh_compaction {
-                mush_agent::ContextTransformResult::Updated(compacted)
-            } else if replayed_cached_compaction {
-                mush_agent::ContextTransformResult::Silent(compacted)
+            let result = event_handler::auto_compact(
+                owned_messages,
+                effective_compaction_tokens,
+                compaction_window,
+                &registry,
+                &model,
+                &options,
+                Some(&hooks),
+                Some(cwd.as_path()),
+            )
+            .await;
+            let tokens_after = estimated_tokens_u64(&result.messages);
+            baseline_estimated_tokens.store(tokens_after, std::sync::atomic::Ordering::Relaxed);
+            if result.summarised_count > 0 {
+                ctx_tokens.store(tokens_after, std::sync::atomic::Ordering::Relaxed);
+                mush_agent::ContextTransformResult::Compacted(mush_agent::ContextCompaction {
+                    messages: result.messages,
+                    summary: result.summary,
+                    summarised_count: result.summarised_count,
+                })
+            } else if result.masked_count > 0 {
+                mush_agent::ContextTransformResult::Silent(result.messages)
             } else {
                 mush_agent::ContextTransformResult::Unchanged
             }
@@ -1097,6 +1077,164 @@ mod tests {
         )
     }
 
+    struct RecordingProvider {
+        requests: Arc<std::sync::Mutex<Vec<Vec<Message>>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl mush_ai::registry::ApiProvider for RecordingProvider {
+        fn api(&self) -> mush_ai::types::Api {
+            mush_ai::types::Api::AnthropicMessages
+        }
+
+        async fn stream(
+            &self,
+            model: &Model,
+            context: &mush_ai::registry::LlmContext,
+            _options: &StreamOptions,
+        ) -> Result<mush_ai::registry::EventStream, mush_ai::registry::ProviderError> {
+            self.requests.lock().unwrap().push(context.messages.clone());
+            let message = mush_ai::types::AssistantMessage::builder()
+                .content(vec![mush_ai::types::AssistantContentPart::Text(
+                    mush_ai::types::TextContent {
+                        text: "waiting for val push".into(),
+                    },
+                )])
+                .model(model.id.clone())
+                .provider(model.provider.clone())
+                .api(model.api)
+                .stop_reason(mush_ai::types::StopReason::Stop)
+                .timestamp_ms(Timestamp::zero())
+                .build();
+            Ok(Box::pin(futures::stream::iter([
+                mush_ai::stream::StreamEvent::TextDelta {
+                    content_index: 0,
+                    delta: "waiting for val push".into(),
+                },
+                mush_ai::stream::StreamEvent::Done {
+                    reason: mush_ai::types::StopReason::Stop,
+                    message,
+                },
+            ])))
+        }
+    }
+
+    #[tokio::test]
+    async fn automatic_compaction_survives_next_prompt_and_resume() {
+        use futures::StreamExt;
+        use mush_session::ConversationState;
+
+        let model = models::all_models()
+            .into_iter()
+            .find(|model| model.api == mush_ai::types::Api::AnthropicMessages)
+            .unwrap();
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut registry = ApiRegistry::new();
+        registry.register(Box::new(RecordingProvider {
+            requests: requests.clone(),
+        }));
+        let messages: Vec<_> = (0..30)
+            .map(|i| user_msg(format!("turn {i}: {}", "x".repeat(2_000))))
+            .collect();
+        let mut conversation = ConversationState::from_messages(messages);
+        let mut app = app();
+        let mut image_protos = HashMap::new();
+        let saved = Arc::new(std::sync::Mutex::new(None));
+        let save_target = saved.clone();
+        let mut tui_config = test_tui_config();
+        tui_config.save_session = Some(Arc::new(move |snapshot| {
+            *save_target.lock().unwrap() = Some(snapshot);
+        }));
+        let mut stream_state = StreamState::new();
+
+        for turn in 0..2 {
+            let messages = conversation.context();
+            let transform = build_context_transform(
+                model.clone(),
+                StreamOptions::default(),
+                true,
+                TokenCount::new(10_000),
+                registry.clone(),
+                Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                estimated_tokens_u64(&messages),
+                mush_agent::LifecycleHooks::default(),
+                std::path::PathBuf::from("/tmp"),
+            );
+            let config = AgentConfig {
+                model: model.clone(),
+                system_prompt: None,
+                tools: mush_agent::ToolRegistry::new(),
+                registry: &registry,
+                options: StreamOptions::default(),
+                max_turns: 2,
+                hooks: Box::new(mush_agent::ClosureHooks {
+                    transform,
+                    ..Default::default()
+                }),
+                injections: Default::default(),
+                cancel: None,
+            };
+            let mut stream = agent_loop(config, messages);
+            while let Some(event) = stream.next().await {
+                event_handler::handle_agent_event(
+                    &mut event_handler::EventCtx {
+                        app: &mut app,
+                        conversation: &mut conversation,
+                        image_protos: &mut image_protos,
+                    },
+                    &event,
+                    &model,
+                    false,
+                    &None,
+                );
+                if matches!(event, AgentEvent::ContextCompacted { .. }) {
+                    let mut session =
+                        Session::new(App::new(model.id.clone(), model.context_window));
+                    session.conversation = conversation.clone();
+                    handle_agent_event_side_effects(
+                        &mut session,
+                        &mut stream_state,
+                        PaneId::new(1),
+                        &event,
+                        &tui_config,
+                        &registry,
+                    )
+                    .await;
+                    assert_eq!(
+                        saved
+                            .lock()
+                            .unwrap()
+                            .as_ref()
+                            .unwrap()
+                            .primary
+                            .context_len(),
+                        11
+                    );
+                }
+            }
+
+            assert_eq!(conversation.context_len(), 12 + turn * 2);
+            let saved = serde_json::to_string(&conversation).unwrap();
+            conversation = serde_json::from_str(&saved).unwrap();
+            assert_eq!(conversation.context_len(), 12 + turn * 2);
+            assert!(conversation.display_history().iter().any(
+                |message| matches!(message, Message::User(user) if user.text().starts_with("turn 0:"))
+            ));
+            if turn == 0 {
+                conversation.append_message(user_msg("so im allowed to push?"));
+            }
+        }
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[1].len(), 11);
+        assert_eq!(requests[2].len(), 13);
+        assert!(matches!(
+            &requests[2][0],
+            Message::User(user) if user.text().contains("<summary>\nwaiting for val push\n</summary>")
+        ));
+    }
+
     #[tokio::test]
     async fn context_transform_compacts_after_unsent_payload_growth() {
         let model = models::all_models_with_user().into_iter().next().unwrap();
@@ -1124,9 +1262,9 @@ mod tests {
         grown.push(user_msg("x".repeat(16_000)));
 
         match transform(&grown).await {
-            mush_agent::ContextTransformResult::Updated(compacted) => {
+            mush_agent::ContextTransformResult::Compacted(compaction) => {
                 assert!(
-                    compacted.len() < grown.len(),
+                    compaction.messages.len() < grown.len(),
                     "unsent payload growth should force compaction before the next provider call"
                 );
             }
