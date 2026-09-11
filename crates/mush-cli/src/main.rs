@@ -1,4 +1,5 @@
 use clap::Parser;
+mod headless;
 use color_eyre::eyre::{Result, eyre};
 use futures::StreamExt;
 
@@ -57,6 +58,9 @@ struct Cli {
     #[arg(long)]
     no_session: bool,
 
+    #[arg(long)]
+    status_file: Option<std::path::PathBuf>,
+
     #[arg(long, env = "MUSH_PROFILE_STARTUP")]
     profile_startup: bool,
 
@@ -100,7 +104,22 @@ async fn main() -> Result<()> {
 
     mush_agent::truncation::cleanup();
 
-    let stdin_prompt = if !atty::is(atty::Stream::Stdin) {
+    match cli.command {
+        Some(Command::Login { provider }) => return commands::login(provider).await,
+        Some(Command::Logout { provider }) => return commands::logout(provider),
+        Some(Command::Models) => return commands::list_models(),
+        Some(Command::Sessions) => return commands::list_sessions(),
+        Some(Command::Status) => return commands::status(cli.terminal_policy_overrides()),
+        Some(Command::Delete { id }) => return commands::delete_session(&id),
+        Some(Command::Config) => return commands::open_config(),
+        None => {}
+    }
+
+    let stdin_prompt = if cli.prompt.is_empty()
+        && cli.resume.is_none()
+        && cli.status_file.is_none()
+        && !atty::is(atty::Stream::Stdin)
+    {
         let mut buf = String::new();
         std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
         if buf.is_empty() { None } else { Some(buf) }
@@ -120,22 +139,12 @@ async fn main() -> Result<()> {
         (None, None) => None,
     };
 
-    match cli.command {
-        Some(Command::Login { provider }) => return commands::login(provider).await,
-        Some(Command::Logout { provider }) => return commands::logout(provider),
-        Some(Command::Models) => return commands::list_models(),
-        Some(Command::Sessions) => return commands::list_sessions(),
-        Some(Command::Status) => return commands::status(cli.terminal_policy_overrides()),
-        Some(Command::Delete { id }) => return commands::delete_session(&id),
-        Some(Command::Config) => return commands::open_config(),
-        None => {}
-    }
-
     match prompt {
         Some(prompt) => {
             let prompt = expand_template(&prompt);
             print_mode(cli, prompt).await
         }
+        None if cli.status_file.is_some() => print_mode(cli, String::new()).await,
         None => tui_mode(cli, log_buffer).await,
     }
 }
@@ -150,13 +159,67 @@ fn resume_session(store: &SessionStore, id_or_prefix: &str) -> Result<Session> {
 }
 
 async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
+    let mut status = headless::Status {
+        path: cli.status_file.clone(),
+        session_id: None,
+        state: "starting",
+        model: cli.model.clone(),
+        error_classification: None,
+    };
+    status.write()?;
+    let result = print_mode_inner(cli, prompt, &mut status).await;
+    if let Err(error) = &result {
+        if status.state != "cancelled" {
+            status.state = "error";
+            status.error_classification = Some(headless::classify_error(&error.to_string()));
+        }
+    } else if status.state == "running" {
+        status.state = "completed";
+    }
+    status.write()?;
+    result
+}
+
+async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Status) -> Result<()> {
+    let store = SessionStore::new(SessionStore::default_dir());
+    let cwd = mush_tui::canonical_dir(&std::env::current_dir()?);
+    let mut session = if let Some(ref id) = cli.resume {
+        resume_session(&store, id)?
+    } else {
+        Session::new(
+            &cli.model
+                .clone()
+                .unwrap_or_else(|| setup::default_model_id(&config::load_config(), &cwd)),
+            &cwd.display().to_string(),
+        )
+    };
+    if let Some(model) = &cli.model {
+        session.meta.model_id = model.clone().into();
+    }
+    status.model = Some(session.meta.model_id.to_string());
+    if !prompt.is_empty() {
+        session.push_message(Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text(prompt))
+                .timestamp_ms(Timestamp::now())
+                .prompt_id(PromptId::new())
+                .build(),
+        ));
+        session.auto_title();
+    }
+    status.session_id = Some(session.meta.id.clone());
+    if !cli.no_session {
+        store.save(&session)?;
+    }
+    status.write()?;
+    let mut shutdown = std::pin::pin!(headless::shutdown_signal());
     let timer = if cli.profile_startup {
         Some(timing::PhaseTimer::new())
     } else {
         None
     };
-    let (mut setup, startup_report) = AppSetup::init(SetupArgs {
-        model: cli.model.clone(),
+    let init = AppSetup::init(SetupArgs {
+        model: Some(session.meta.model_id.to_string()),
         thinking: cli.thinking,
         max_tokens: cli.max_tokens,
         max_turns: cli.max_turns,
@@ -165,31 +228,29 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
         debug_cache: cli.debug_cache,
         output_sink: None,
         timer,
-    })
-    .await?;
+    });
+    let (mut setup, startup_report) = tokio::select! {
+        biased;
+        result = &mut shutdown => {
+            result?;
+            status.state = "cancelled";
+            return Err(eyre!("cancelled"));
+        }
+        result = init => result?,
+    };
 
     if let Some(report) = startup_report {
         eprintln!("{report}");
     }
 
-    let cwd_str = setup.cwd.display().to_string();
-    let store = SessionStore::new(SessionStore::default_dir());
-    let mut session = if let Some(ref id) = cli.resume {
-        resume_session(&store, id)?
-    } else {
-        Session::new(setup.model.id.as_str(), &cwd_str)
-    };
     setup.options.session_id = Some(session.meta.id.clone());
-
-    let user_msg = Message::User(
-        UserMessage::builder()
-            .content(UserContent::Text(prompt))
-            .timestamp_ms(Timestamp::now())
-            .prompt_id(mush_ai::types::PromptId::new())
-            .build(),
-    );
-    session.push_message(user_msg);
-    session.auto_title();
+    session.meta.model_id = setup.model.id.clone();
+    status.model = Some(setup.model.id.to_string());
+    status.state = "running";
+    if !cli.no_session {
+        store.save(&session)?;
+    }
+    status.write()?;
 
     let (compact_model, compact_options) = setup
         .compaction_model
@@ -260,14 +321,42 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
             cwd: Some(std::env::current_dir().unwrap_or_default()),
             ..mush_agent::AgentInjections::default()
         },
-        cancel: None,
+        cancel: Some(Default::default()),
     };
 
+    let cancel = config
+        .cancel
+        .clone()
+        .ok_or_else(|| eyre!("missing cancellation token"))?;
     let mut stream = std::pin::pin!(agent_loop(config, session.context()));
     let mut in_text = false;
+    let mut transcript = headless::Transcript::default();
+    let mut cancelled = false;
+    let mut cancel_deadline = None;
+    let mut ended = false;
 
-    while let Some(event) = stream.next().await {
+    loop {
+        let event = tokio::select! {
+            biased;
+            result = &mut shutdown, if !cancelled => {
+                result?;
+                cancel.cancel();
+                cancelled = true;
+                status.state = "cancelled";
+                if !cli.no_session { store.save(&session)?; }
+                status.write()?;
+                cancel_deadline = Some(tokio::time::Instant::now() + std::time::Duration::from_secs(2));
+                continue;
+            }
+            _ = async { if let Some(deadline) = cancel_deadline { tokio::time::sleep_until(deadline).await } else { std::future::pending::<()>().await } } => break,
+            event = stream.next() => event,
+        };
+        let Some(event) = event else { break };
+        if transcript.apply(&mut session, &event) && !cli.no_session {
+            store.save(&session)?;
+        }
         match event {
+            AgentEvent::AgentEnd => ended = true,
             AgentEvent::StreamEvent { event } => match event {
                 StreamEvent::TextDelta { delta, .. } => {
                     if !in_text {
@@ -314,7 +403,6 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
                     message.usage.total_input_tokens().get(),
                     std::sync::atomic::Ordering::Relaxed,
                 );
-                session.push_message(Message::Assistant(message));
             }
             AgentEvent::TurnEnd { message, .. } => {
                 if in_text {
@@ -354,6 +442,9 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
                 );
                 let after_count = session.conversation.context_len();
                 session.meta.message_count = after_count;
+                if !cli.no_session {
+                    store.save(&session)?;
+                }
                 eprintln!("\x1b[2m(compacted: {before_count} → {after_count} messages)\x1b[0m");
             }
             AgentEvent::SteeringInjected { messages } => {
@@ -369,12 +460,15 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
                 );
             }
             AgentEvent::MaxTurnsReached { max_turns } => {
+                if !cancelled {
+                    status.state = "turn_limit";
+                }
                 eprintln!("\n\x1b[33m⚠ hit max turns limit ({max_turns})\x1b[0m");
             }
             AgentEvent::Error { error } => {
                 eprintln!("\x1b[31merror: {}\x1b[0m", format_error(&error));
                 if !cli.no_session {
-                    let _ = store.save(&session);
+                    store.save(&session)?;
                     eprintln!("\x1b[2msession: {}\x1b[0m", session.meta.id);
                 }
                 return Err(eyre!("{error}"));
@@ -388,6 +482,12 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
         eprintln!("\x1b[2msession: {}\x1b[0m", session.meta.id);
     }
 
+    if cancelled {
+        return Err(eyre!("cancelled"));
+    }
+    if !ended || !transcript.is_complete() {
+        return Err(eyre!("agent ended with an incomplete transcript"));
+    }
     Ok(())
 }
 
