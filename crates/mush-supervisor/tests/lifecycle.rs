@@ -188,3 +188,45 @@ async fn deadline_terminates_a_silent_worker() {
     assert!(!process_is_running(pid.trim()));
     assert_eq!(fixture.state()["state"], "stopped");
 }
+
+#[tokio::test]
+async fn restarting_a_finished_run_does_not_repeat_completed_work() {
+    let fixture = Fixture::new(
+        &format!("{ARGUMENTS}\necho '{{\"state\":\"done\"}}' >report.json"),
+        20,
+    );
+    fixture.run().await;
+    fixture.run().await;
+    assert_eq!(
+        fs::read_to_string(fixture.cwd.join("calls"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn restarting_an_interrupted_run_resumes_its_saved_session() {
+    let fixture = Fixture::new(
+        &format!("{ARGUMENTS}\necho '{{\"state\":\"done\"}}' >report.json"),
+        20,
+    );
+    fs::create_dir_all(fixture.run.join("test")).unwrap();
+    fs::write(
+        fixture.run.join("test/round-001.json"),
+        r#"{"session_id":"fixture","state":"cancelled","model":"fallback"}"#,
+    )
+    .unwrap();
+    fs::write(
+        fixture.run.join("test/state.json"),
+        r#"{"state":"stopped","round":1,"model":"fallback","session_id":"fixture"}"#,
+    )
+    .unwrap();
+    fixture.run().await;
+    assert_eq!(
+        fs::read_to_string(fixture.cwd.join("calls")).unwrap(),
+        "fallback:fixture\n"
+    );
+    assert!(fixture.run.join("test/round-002.log").exists());
+}

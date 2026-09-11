@@ -315,12 +315,40 @@ async fn worker(
         }
     }
     let state_path = dir.join("state.json");
-    let mut session = None::<String>;
-    let mut fallback = false;
+    let previous = read_json(&state_path);
+    let previous_state = previous.as_ref().and_then(|v| v["state"].as_str());
+    if matches!(previous_state, Some("blocked" | "error"))
+        || previous_state == Some("done") && !job.repeat_done
+    {
+        return Ok(());
+    }
+    let previous_round = previous
+        .as_ref()
+        .and_then(|v| v["round"].as_u64())
+        .map(u32::try_from)
+        .transpose()?
+        .unwrap_or(0);
+    let latest_status = dir.join(format!("round-{previous_round:03}.json"));
+    let mut session = session_from_status(&latest_status).or_else(|| {
+        previous
+            .as_ref()
+            .and_then(|v| v["session_id"].as_str())
+            .map(str::to_owned)
+    });
+    let mut model = previous
+        .as_ref()
+        .and_then(|v| v["model"].as_str())
+        .unwrap_or(&manifest.model)
+        .to_owned();
+    if model != manifest.model && model != manifest.fallback_model {
+        return Err("saved model is outside the authorised provider set".into());
+    }
+    let mut fallback = model == manifest.fallback_model;
     let mut retries = 0;
     let mut stalled = 0;
-    let mut model = manifest.model.clone();
-    for round in 1..=manifest.max_rounds {
+    let mut last_round = previous_round;
+    for round in previous_round.saturating_add(1)..=manifest.max_rounds {
+        last_round = round;
         let mut detail = String::new();
         if *stop.borrow() {
             break;
@@ -548,7 +576,7 @@ async fn worker(
             name: &job.name,
             state: "stopped",
             model: &model,
-            round: manifest.max_rounds,
+            round: last_round,
             session_id: session.as_deref(),
             at: Utc::now(),
             detail: "deadline, cancellation or round limit",
