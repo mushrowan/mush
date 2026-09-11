@@ -16,6 +16,7 @@ use tokio::process::Command;
 use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinSet;
 
+mod follow_up;
 mod tasks;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -29,6 +30,12 @@ struct Cli {
 #[derive(Subcommand)]
 enum Operation {
     Prepare(tasks::Prepare),
+    FollowUp {
+        directory: PathBuf,
+        worker: String,
+        #[arg(long)]
+        prompt_file: PathBuf,
+    },
     Run {
         manifest: PathBuf,
     },
@@ -424,6 +431,10 @@ async fn worker(
         };
         let inbox = manifest.directory.join("inbox").join(&job.name);
         let mut prompt = prompt;
+        if let Some(follow_up) = follow_up::instructions(&dir, round)? {
+            prompt.push_str("\n\nexplicit follow-up assignment. the previous completed task remains in history. work on this assignment within the existing permissions, then update your report:\n");
+            prompt.push_str(&follow_up);
+        }
         if inbox.exists() {
             let mut paths: Vec<_> = fs::read_dir(&inbox)?
                 .filter_map(|e| e.ok().map(|e| e.path()))
@@ -679,6 +690,11 @@ async fn run(path: &Path) -> Result<()> {
 async fn main() -> Result<()> {
     match Cli::parse().command {
         Operation::Prepare(args) => tasks::prepare(args).await,
+        Operation::FollowUp {
+            directory,
+            worker,
+            prompt_file,
+        } => follow_up::queue(&directory, &worker, &prompt_file),
         Operation::Logs {
             directory,
             worker,
