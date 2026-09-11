@@ -56,12 +56,24 @@ pub(super) struct StreamMeta {
 
 const SESSION_SAVE_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(5);
 
+#[cfg(not(test))]
+fn default_notification_sink(summary: &str, body: &str, sound: Option<crate::notify::Sound>) {
+    crate::notify::send_with_sound(summary, body, sound);
+}
+
+#[cfg(test)]
+fn default_notification_sink(_: &str, _: &str, _: Option<crate::notify::Sound>) {}
+
+pub(super) type NotificationSink =
+    Arc<dyn Fn(&str, &str, Option<crate::notify::Sound>) + Send + Sync>;
+
 pub(super) struct StreamState {
     metas: HashMap<PaneId, StreamMeta>,
     generations: HashMap<PaneId, StreamGeneration>,
     next_gen: u64,
     last_session_save: std::time::Instant,
     session_dirty: bool,
+    pub(super) notify: NotificationSink,
 }
 
 pub(super) struct StreamConfig {
@@ -91,6 +103,7 @@ impl StreamState {
             next_gen: 0,
             last_session_save: std::time::Instant::now() - SESSION_SAVE_DEBOUNCE,
             session_dirty: false,
+            notify: Arc::new(default_notification_sink),
         }
     }
 
@@ -188,7 +201,10 @@ pub(super) async fn poll_confirmation_prompt(
 ) -> bool {
     let focused_id = PaneId::new(1);
     if let Some(meta) = stream_state.meta_mut(focused_id)
+        && !meta.cancel.is_cancelled()
+        && meta.confirm_reply.lock().await.is_none()
         && let Ok(confirm) = meta.confirm_req_rx.try_recv()
+        && !confirm.reply.is_closed()
     {
         let app = &mut session.app;
         app.interaction.mode = crate::app::AppMode::ToolConfirm;
@@ -198,6 +214,11 @@ pub(super) async fn poll_confirmation_prompt(
             tool_call_id: confirm.tool_call_id,
             reply: confirm.reply,
         });
+        (stream_state.notify)(
+            "tool confirmation required",
+            "awaiting your approval",
+            Some(crate::notify::Sound::Attention),
+        );
         return true;
     }
     false
@@ -256,9 +277,23 @@ async fn handle_agent_end(
     pane_id: PaneId,
     tui_config: &TuiConfig,
     registry: &ApiRegistry,
+    automatic_continuation: bool,
 ) {
-    stream_state.remove(pane_id);
-    crate::notify::play(crate::notify::Sound::Complete);
+    let stopped = stream_state
+        .remove(pane_id)
+        .is_some_and(|meta| !meta.cancel.is_cancelled());
+    if stopped
+        && !automatic_continuation
+        && session.pending_prompt.is_none()
+        && session.pending_compaction_inputs.is_empty()
+        && !session.app.has_queued_messages()
+    {
+        (stream_state.notify)(
+            "awaiting input",
+            "task stopped and needs your input",
+            Some(crate::notify::Sound::Complete),
+        );
+    }
 
     let title_request = if !session.title_generated
         && session.conversation.context_len() >= 2
@@ -289,17 +324,6 @@ async fn handle_agent_end(
         }
     }
 
-    if tui_config.cache_timer
-        && let Some(remaining) = session.app.cache.remaining_secs()
-        && remaining > crate::app::CACHE_WARN_SECS
-    {
-        crate::notify::send_with_sound(
-            "awaiting input",
-            &format!("cache warm for {remaining}s"),
-            Some(crate::notify::Sound::Attention),
-        );
-    }
-
     if tui_config.auto_fork_compact {
         auto_compact(session, pane_id, tui_config, registry).await;
     }
@@ -314,6 +338,7 @@ pub(super) async fn handle_agent_event_side_effects(
     event: &AgentEvent,
     tui_config: &TuiConfig,
     registry: &ApiRegistry,
+    automatic_continuation: bool,
 ) {
     if let AgentEvent::MessageEnd { message } = event
         && let Some(meta) = stream_state.meta(pane_id)
@@ -345,7 +370,15 @@ pub(super) async fn handle_agent_event_side_effects(
     }
 
     if matches!(event, AgentEvent::AgentEnd) {
-        handle_agent_end(session, stream_state, pane_id, tui_config, registry).await;
+        handle_agent_end(
+            session,
+            stream_state,
+            pane_id,
+            tui_config,
+            registry,
+            automatic_continuation,
+        )
+        .await;
     }
 }
 
@@ -1198,6 +1231,7 @@ mod tests {
                         &event,
                         &tui_config,
                         &registry,
+                        false,
                     )
                     .await;
                     assert_eq!(
@@ -1501,6 +1535,14 @@ mod tests {
         let pane_id = PaneId::new(1);
         let mut session = Session::new(app());
         let mut stream_state = StreamState::new();
+        let alerts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = alerts.clone();
+        stream_state.notify = Arc::new(move |summary, body, sound| {
+            captured
+                .lock()
+                .unwrap()
+                .push((summary.to_owned(), body.to_owned(), sound));
+        });
         let (confirm_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
 
         stream_state.register_active(
@@ -1527,6 +1569,15 @@ mod tests {
             .unwrap();
 
         assert!(poll_confirmation_prompt(&mut session, &mut stream_state).await);
+        assert!(!poll_confirmation_prompt(&mut session, &mut stream_state).await);
+        assert_eq!(
+            *alerts.lock().unwrap(),
+            vec![(
+                "tool confirmation required".into(),
+                "awaiting your approval".into(),
+                Some(crate::notify::Sound::Attention)
+            )]
+        );
 
         let app = &session.app;
         assert_eq!(app.interaction.mode, crate::app::AppMode::ToolConfirm);

@@ -54,7 +54,10 @@ in {
     // {
       inherit cargoArtifacts;
       doCheck = false;
-      nativeBuildInputs = commonArgs.nativeBuildInputs ++ [fd];
+      nativeBuildInputs = commonArgs.nativeBuildInputs ++ [fd] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.makeWrapper];
+      postFixup = pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+        wrapProgram $out/bin/mush --prefix PATH : ${pkgs.lib.makeBinPath [pkgs.libnotify]}
+      '';
       SSL_CERT_FILE = "${cacert}/etc/ssl/certs/ca-bundle.crt";
     });
 

@@ -73,7 +73,7 @@ pub(super) struct RunnerRuntime {
 
 impl RunnerRuntime {
     #[cfg(test)]
-    fn from_pane(session: Session, thinking_prefs: ThinkingPrefs) -> Self {
+    pub(super) fn from_pane(session: Session, thinking_prefs: ThinkingPrefs) -> Self {
         Self {
             cwd: PathBuf::new(),
             session,

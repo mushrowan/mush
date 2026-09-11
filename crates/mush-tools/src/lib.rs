@@ -9,6 +9,7 @@ pub mod forbidden_chars;
 pub mod glob;
 pub mod grep;
 pub mod ls;
+pub mod notification;
 pub mod notify_user;
 pub mod read;
 pub mod repo_map;

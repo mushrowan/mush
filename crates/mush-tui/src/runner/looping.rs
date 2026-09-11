@@ -281,6 +281,7 @@ async fn dispatch_agent_event(
         &event,
         tui_config,
         registry,
+        runtime.pending_prompt.is_some() || runtime.pending_compactions.contains_key(&pane_id),
     )
     .await;
 
@@ -345,6 +346,170 @@ async fn handle_idle_iteration(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn completion_notifications_follow_production_events() {
+        use super::super::streams::{StreamMeta, StreamState};
+        use mush_ai::types::PaneId;
+        use std::sync::{Arc, Mutex};
+
+        for case in [
+            "disabled",
+            "missing",
+            "stale",
+            "warm",
+            "abort",
+            "replaced",
+            "cancel",
+            "queued",
+            "automatic",
+            "error",
+            "max",
+        ] {
+            let mut config = super::super::TuiConfig::for_test();
+            config.cache_timer = case != "disabled";
+            config.auto_fork_compact = false;
+            config.update_title = None;
+            config.save_session = None;
+            let session = crate::session::Session::new(crate::app::App::new(
+                config.model.id.clone(),
+                config.model.context_window,
+            ));
+            let mut runtime = RunnerRuntime::from_pane(session, Default::default());
+            if matches!(case, "warm" | "stale") {
+                runtime.session.app.cache.refresh();
+                if case == "stale" {
+                    runtime.session.app.cache.ttl_secs = 1;
+                    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+                    assert_eq!(runtime.session.app.cache.remaining_secs(), Some(0));
+                }
+            }
+            if case == "queued" {
+                runtime
+                    .session
+                    .app
+                    .push_queued_message("private queued text");
+            }
+            if case == "automatic" {
+                runtime.pending_prompt = Some("private continuation".into());
+            }
+            let mut state = StreamState::new();
+            let alerts = Arc::new(Mutex::new(Vec::new()));
+            let captured = alerts.clone();
+            state.notify = Arc::new(move |summary, body, sound| {
+                captured
+                    .lock()
+                    .unwrap()
+                    .push((summary.to_owned(), body.to_owned(), sound))
+            });
+            let pane = PaneId::new(1);
+            let (_tx, rx) = tokio::sync::mpsc::channel(1);
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let generation = state.register_active(
+                pane,
+                StreamMeta {
+                    steering_queue: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+                    confirm_req_rx: rx,
+                    confirm_reply: Arc::new(tokio::sync::Mutex::new(None)),
+                    model: config.model.clone(),
+                    context_tokens: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                    cancel: cancel.clone(),
+                },
+            );
+            if case == "abort" {
+                state.abort(pane);
+            }
+            if case == "replaced" {
+                let (_tx, rx) = tokio::sync::mpsc::channel(1);
+                state.register_active(
+                    pane,
+                    StreamMeta {
+                        steering_queue: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+                        confirm_req_rx: rx,
+                        confirm_reply: Arc::new(tokio::sync::Mutex::new(None)),
+                        model: config.model.clone(),
+                        context_tokens: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                        cancel: tokio_util::sync::CancellationToken::new(),
+                    },
+                );
+            }
+            if case == "cancel" {
+                cancel.cancel();
+            }
+            let registry = ApiRegistry::new();
+            for turn_index in 0..3 {
+                dispatch_agent_event(
+                    pane,
+                    generation,
+                    AgentEvent::TurnStart { turn_index },
+                    &mut state,
+                    &mut runtime,
+                    &mut config,
+                    &registry,
+                    &None,
+                )
+                .await;
+            }
+            if case == "error" {
+                dispatch_agent_event(
+                    pane,
+                    generation,
+                    AgentEvent::Error {
+                        error: "private error".into(),
+                    },
+                    &mut state,
+                    &mut runtime,
+                    &mut config,
+                    &registry,
+                    &None,
+                )
+                .await;
+            }
+            if case == "max" {
+                dispatch_agent_event(
+                    pane,
+                    generation,
+                    AgentEvent::MaxTurnsReached { max_turns: 1 },
+                    &mut state,
+                    &mut runtime,
+                    &mut config,
+                    &registry,
+                    &None,
+                )
+                .await;
+            }
+            assert!(alerts.lock().unwrap().is_empty());
+            for _ in 0..2 {
+                dispatch_agent_event(
+                    pane,
+                    generation,
+                    AgentEvent::AgentEnd,
+                    &mut state,
+                    &mut runtime,
+                    &mut config,
+                    &registry,
+                    &None,
+                )
+                .await;
+            }
+            let alerts = alerts.lock().unwrap();
+            let expected = usize::from(!matches!(
+                case,
+                "abort" | "replaced" | "cancel" | "queued" | "automatic"
+            ));
+            assert_eq!(alerts.len(), expected, "{case}");
+            if expected == 1 {
+                assert_eq!(
+                    alerts[0],
+                    (
+                        "awaiting input".into(),
+                        "task stopped and needs your input".into(),
+                        Some(crate::notify::Sound::Complete)
+                    )
+                );
+            }
+        }
+    }
 
     #[test]
     fn defers_streaming_redraw_when_agent_events_arrive_inside_frame_budget() {

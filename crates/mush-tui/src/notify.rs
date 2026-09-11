@@ -1,4 +1,6 @@
-use std::process::{Command, Stdio};
+use mush_tools::notification::{DELIVERY_TIMEOUT, command_with_sound, deliver};
+
+static DELIVERY_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sound {
@@ -8,11 +10,11 @@ pub enum Sound {
 }
 
 impl Sound {
-    fn filename(self) -> &'static str {
+    fn name(self) -> &'static str {
         match self {
-            Sound::Complete => "message.oga",
-            Sound::Attention => "dialog-information.oga",
-            Sound::Error => "dialog-warning.oga",
+            Self::Complete => "message",
+            Self::Attention => "dialog-information",
+            Self::Error => "dialog-warning",
         }
     }
 }
@@ -22,123 +24,82 @@ pub fn send(summary: &str, body: &str) {
 }
 
 pub fn send_with_sound(summary: &str, body: &str, sound: Option<Sound>) {
-    let mut cmd = Command::new("notify-send");
-    cmd.arg("--app-name=mush").arg(summary).arg(body);
-
-    if let Some(sound) = sound {
-        let sound_path = format!(
-            "/run/current-system/sw/share/sounds/freedesktop/stereo/{}",
-            sound.filename()
-        );
-        if std::path::Path::new(&sound_path).exists() {
-            cmd.arg(format!("--hint=string:sound-file:{sound_path}"));
-        }
-    }
-
-    spawn_detached(cmd);
-
-    if let Some(sound) = sound {
-        play_sound(sound);
-    }
+    let command = command_with_sound(summary, body, sound.map(Sound::name));
+    spawn_delivery(command, DELIVERY_TIMEOUT, &DELIVERY_SLOTS);
 }
 
-pub fn play(sound: Sound) {
-    play_sound(sound);
-}
-
-fn play_sound(sound: Sound) {
-    let path = format!(
-        "/run/current-system/sw/share/sounds/freedesktop/stereo/{}",
-        sound.filename()
-    );
-    if !std::path::Path::new(&path).exists() {
-        return;
-    }
-
-    let mut cmd = Command::new("pw-play");
-    cmd.arg(&path);
-    spawn_detached(cmd);
-}
-
-fn spawn_detached(mut cmd: Command) {
-    let spawned = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
-    let Ok(mut child) = spawned else {
-        return;
+fn spawn_delivery(
+    command: tokio::process::Command,
+    timeout: std::time::Duration,
+    slots: &'static tokio::sync::Semaphore,
+) -> Option<tokio::task::JoinHandle<Result<(), mush_tools::notification::DeliveryError>>> {
+    let Ok(permit) = slots.try_acquire() else {
+        tracing::warn!("desktop notification delivery limit reached");
+        return None;
     };
-    let _ = std::thread::Builder::new()
-        .name("mush-notify-reaper".into())
-        .spawn(move || {
-            let _ = child.wait();
-        });
+    Some(tokio::spawn(async move {
+        let _permit = permit;
+        let result = deliver(command, timeout).await;
+        if let Err(ref error) = result {
+            tracing::warn!(%error, "desktop notification failed");
+        }
+        result
+    }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mush_tools::notification::DeliveryError;
 
-    #[test]
-    fn complete_sound_is_softer_than_default_complete() {
-        assert_eq!(Sound::Complete.filename(), "message.oga");
+    #[tokio::test]
+    async fn delivery_launch_failure_is_observable() {
+        static SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+        let directory = tempfile::tempdir().unwrap();
+        let command = tokio::process::Command::new(directory.path().join("missing"));
+        let task = spawn_delivery(command, DELIVERY_TIMEOUT, &SLOTS).unwrap();
+        assert!(matches!(task.await.unwrap(), Err(DeliveryError::Launch(_))));
+        assert_eq!(SLOTS.available_permits(), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn delivery_is_nonblocking_bounded_and_times_out() {
+        static SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.args(["-c", "exec sleep 30"]);
+        let task = spawn_delivery(command, std::time::Duration::from_millis(100), &SLOTS).unwrap();
+        assert!(!task.is_finished());
+        assert!(
+            spawn_delivery(
+                tokio::process::Command::new("unused"),
+                DELIVERY_TIMEOUT,
+                &SLOTS
+            )
+            .is_none()
+        );
+        assert!(matches!(task.await.unwrap(), Err(DeliveryError::Timeout)));
+        assert_eq!(SLOTS.available_permits(), 1);
     }
 
     #[test]
-    fn attention_and_error_sounds_use_dialog_theme() {
-        assert_eq!(Sound::Attention.filename(), "dialog-information.oga");
-        assert_eq!(Sound::Error.filename(), "dialog-warning.oga");
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn spawn_detached_does_not_leave_zombies() {
-        for _ in 0..5 {
-            let cmd = Command::new("true");
-            spawn_detached(cmd);
-        }
-
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        loop {
-            let zombies = zombie_child_count(std::process::id());
-            if zombies == 0 {
-                return;
-            }
-            if std::time::Instant::now() >= deadline {
-                panic!("expected no zombie children, found {zombies}");
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    fn zombie_child_count(parent: u32) -> usize {
-        let Ok(entries) = std::fs::read_dir("/proc") else {
-            return 0;
-        };
-        let mut count = 0;
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let Some(name) = name.to_str() else { continue };
-            if name.parse::<u32>().is_err() {
-                continue;
-            }
-            let stat_path = format!("/proc/{name}/stat");
-            let Ok(stat) = std::fs::read_to_string(&stat_path) else {
-                continue;
-            };
-            let Some(rparen) = stat.rfind(')') else {
-                continue;
-            };
-            let rest = stat[rparen + 1..].trim_start();
-            let mut fields = rest.split_ascii_whitespace();
-            let state = fields.next().unwrap_or("");
-            let ppid: u32 = fields.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-            if ppid == parent && state == "Z" {
-                count += 1;
-            }
-        }
-        count
+    fn desktop_owns_the_only_sound() {
+        let command = command_with_sound(
+            "awaiting input",
+            "task stopped and needs your input",
+            Some(Sound::Complete.name()),
+        );
+        let args: Vec<_> = command.as_std().get_args().collect();
+        assert_eq!(
+            args,
+            [
+                "--app-name=mush",
+                "--urgency=normal",
+                "--hint=string:sound-name:message",
+                "--",
+                "awaiting input",
+                "task stopped and needs your input"
+            ]
+        );
     }
 }

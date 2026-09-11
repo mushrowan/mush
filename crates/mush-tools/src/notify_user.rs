@@ -63,43 +63,16 @@ impl AgentTool for NotifyUserTool {
             Err(error) => return error,
         };
 
-        let title = args.title;
-        let body = args.body;
+        execute_command(crate::notification::command(&args.title, &args.body)).await
+    }
+}
 
-        let mut notif_cmd = tokio::process::Command::new("notify-send");
-        notif_cmd
-            .arg("--app-name=mush")
-            .arg(&title)
-            .arg(&body)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        let notif_result = notif_cmd.status().await;
-
-        let sound_path =
-            "/run/current-system/sw/share/sounds/freedesktop/stereo/message-new-instant.oga";
-        if std::path::Path::new(sound_path).exists() {
-            let mut sound_cmd = tokio::process::Command::new("pw-play");
-            sound_cmd
-                .arg(sound_path)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null());
-            if let Ok(mut child) = sound_cmd.spawn() {
-                tokio::spawn(async move {
-                    let _ = child.wait().await;
-                });
-            }
-        }
-
-        match notif_result {
-            Ok(status) if status.success() => {
-                ToolResult::text(format!("notification sent: {title}"))
-            }
-            Ok(status) => ToolResult::text(format!(
-                "notify-send exited with {status}, notification may not have appeared"
-            )),
-            Err(_) => ToolResult::text("notification attempted (notify-send not available)"),
+async fn execute_command(command: tokio::process::Command) -> ToolResult {
+    match crate::notification::deliver(command, crate::notification::DELIVERY_TIMEOUT).await {
+        Ok(()) => ToolResult::text("notification accepted by desktop service"),
+        Err(error) => {
+            tracing::warn!(%error, "desktop notification failed");
+            ToolResult::error(error.to_string())
         }
     }
 }
@@ -110,16 +83,25 @@ mod tests {
     use crate::util::extract_text;
 
     #[tokio::test]
-    async fn notify_returns_success() {
-        let tool = NotifyUserTool::new();
-        let result = tool
-            .execute(serde_json::json!({
-                "title": "test",
-                "body": "hello"
-            }))
-            .await;
+    async fn notify_reports_missing_helper() {
+        let directory = tempfile::tempdir().unwrap();
+        let result = execute_command(tokio::process::Command::new(
+            directory.path().join("missing"),
+        ))
+        .await;
         let text = extract_text(&result);
-        assert!(text.contains("notif"));
+        assert!(text.contains("could not launch notification helper"));
+        assert_eq!(result.outcome, mush_ai::types::ToolOutcome::Error);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn notify_reports_helper_exit_failure() {
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.args(["-c", "exit 7"]);
+        let result = execute_command(command).await;
+        assert_eq!(result.outcome, mush_ai::types::ToolOutcome::Error);
+        assert!(extract_text(&result).contains("exited with"));
     }
 
     #[test]
