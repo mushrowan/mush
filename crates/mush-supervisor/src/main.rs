@@ -87,6 +87,8 @@ struct State<'a> {
     session_id: Option<&'a str>,
     at: DateTime<Utc>,
     detail: &'a str,
+    retries: u32,
+    stalled: u32,
 }
 
 fn private_file(path: &Path) -> std::io::Result<File> {
@@ -344,8 +346,15 @@ async fn worker(
         return Err("saved model is outside the authorised provider set".into());
     }
     let mut fallback = model == manifest.fallback_model;
-    let mut retries = 0;
-    let mut stalled = 0;
+    let counter = |key: &str| -> Result<u32> {
+        previous
+            .as_ref()
+            .and_then(|v| v.get(key))
+            .map(|value| serde_json::from_value(value.clone()).map_err(Into::into))
+            .unwrap_or(Ok(0))
+    };
+    let mut retries = counter("retries")?;
+    let mut stalled = counter("stalled")?;
     let mut last_round = previous_round;
     for round in previous_round.saturating_add(1)..=manifest.max_rounds {
         last_round = round;
@@ -364,6 +373,8 @@ async fn worker(
                     session_id: session.as_deref(),
                     at: Utc::now(),
                     detail: "waiting for coordinator handoff",
+                    retries,
+                    stalled,
                 },
             )?;
             sleep_or_stop(2, &mut stop).await;
@@ -381,6 +392,8 @@ async fn worker(
                 session_id: session.as_deref(),
                 at: Utc::now(),
                 detail: "waiting for an execution slot",
+                retries,
+                stalled,
             },
         )?;
         let permit = tokio::select! {
@@ -451,6 +464,8 @@ async fn worker(
                 session_id: session.as_deref(),
                 at: Utc::now(),
                 detail: "",
+                retries,
+                stalled,
             },
         )?;
         let mut child = cmd.spawn()?;
@@ -510,7 +525,7 @@ async fn worker(
             )
         };
         if timed_out {
-            stalled += 1;
+            stalled = stalled.saturating_add(1);
             detail = "worker exceeded its attempt or silence limit".into();
             failure = Some(if stalled < 2 {
                 Failure::RateLimit
@@ -555,6 +570,8 @@ async fn worker(
                 session_id: session.as_deref(),
                 at: Utc::now(),
                 detail: &detail,
+                retries,
+                stalled,
             },
         )?;
         if action == Action::Stop {
@@ -580,6 +597,8 @@ async fn worker(
             session_id: session.as_deref(),
             at: Utc::now(),
             detail: "deadline, cancellation or round limit",
+            retries,
+            stalled,
         },
     )?;
     Ok(())

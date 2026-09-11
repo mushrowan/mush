@@ -86,6 +86,40 @@ printf '{"session_id":"fixture","state":"completed"}\n' >"$status"
 "#;
 
 #[tokio::test]
+async fn restarting_preserves_exhausted_rate_limit_budget() {
+    let fixture = Fixture::new(&format!("{ARGUMENTS}\necho 'rate_limit' >&2\nexit 1"), 2);
+    fs::create_dir_all(fixture.run.join("test")).unwrap();
+    fs::write(
+        fixture.run.join("test/state.json"),
+        r#"{"state":"retrying","round":1,"model":"primary","retries":2,"stalled":0}"#,
+    )
+    .unwrap();
+    fixture.run().await;
+    assert_eq!(fixture.state()["state"], "error");
+    assert_eq!(fixture.state()["retries"], 2);
+}
+
+#[tokio::test]
+async fn restarting_preserves_previous_stall() {
+    let fixture = Fixture::new("sleep 300 &\necho $! >child\nwait", 6);
+    let mut manifest: Value =
+        serde_json::from_slice(&fs::read(&fixture.manifest).unwrap()).unwrap();
+    manifest["silence_seconds"] = json!(1);
+    fs::write(&fixture.manifest, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    fs::create_dir_all(fixture.run.join("test")).unwrap();
+    fs::write(
+        fixture.run.join("test/state.json"),
+        r#"{"state":"retrying","round":1,"model":"primary","retries":1,"stalled":1}"#,
+    )
+    .unwrap();
+    fixture.run().await;
+    assert_eq!(fixture.state()["state"], "error");
+    assert_eq!(fixture.state()["stalled"], 2);
+    let pid = fs::read_to_string(fixture.cwd.join("child")).unwrap();
+    assert!(!process_is_running(pid.trim()));
+}
+
+#[tokio::test]
 async fn unfinished_worker_is_resumed_and_done_worker_is_not_restarted() {
     let fixture = Fixture::new(
         &format!(
