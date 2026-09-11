@@ -9,6 +9,7 @@ default-members = [
   "crates/mush-lsp",
   "crates/mush-mcp",
   "crates/mush-session",
+  "crates/mush-supervisor",
   "crates/mush-tools",
   "crates/mush-treesitter",
   "crates/mush-tui",

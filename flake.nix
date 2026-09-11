@@ -89,6 +89,10 @@
         };
       in {
         packages.default = craneOutputs.package;
+        apps.supervisor = {
+          type = "app";
+          program = "${craneOutputs.package}/bin/mush-supervisor";
+        };
         packages.debug = pkgs.writeShellScriptBin "mush-debug" ''
           export RUST_LOG=''${RUST_LOG:-warn,mush_agent=debug,mush_ai=debug,mush_tools=debug,mush_tui=debug,mush_cli=debug,mush_ext=debug,mush_session=debug,mush_lsp=debug,mush_mcp=debug,mush_treesitter=debug}
           echo "logging to ''${XDG_DATA_HOME:-$HOME/.local/share}/mush/mush.log" >&2

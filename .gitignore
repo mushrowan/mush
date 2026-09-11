@@ -20,3 +20,5 @@ profile.json.gz
 
 # hooks
 .pre-commit-config.yaml
+/data/
+/workspaces/

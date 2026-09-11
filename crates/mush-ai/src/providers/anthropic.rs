@@ -1453,6 +1453,31 @@ struct UsageDeltaData {
 struct ErrorData {
     #[serde(default)]
     message: String,
+    #[serde(default, rename = "type")]
+    kind: Option<String>,
+    #[serde(default)]
+    details: Option<ErrorDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ErrorDetails {
+    #[serde(default)]
+    error_code: Option<String>,
+}
+
+impl ErrorData {
+    fn description(self) -> String {
+        [
+            self.kind,
+            self.details.and_then(|d| d.error_code),
+            Some(self.message),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(": ")
+    }
 }
 
 use super::StreamBlock;
@@ -1728,7 +1753,7 @@ fn process_sse_event(
         SseEvent::Error { error } => {
             tracing::error!(error = %error.message, "anthropic SSE error event");
             output.stop_reason = StopReason::Error;
-            output.error_message = Some(error.message);
+            output.error_message = Some(error.description());
         }
     }
 
@@ -1917,6 +1942,24 @@ mod tests {
             output.error_message.as_deref().unwrap().contains("cyber"),
             "got {:?}",
             output.error_message
+        );
+    }
+
+    #[test]
+    fn streaming_error_preserves_spend_limit_code() {
+        let event: SseEvent = serde_json::from_str(
+            r#"{"type":"error","error":{"type":"rate_limit_error","message":"limit reached","details":{"error_code":"enforced_spend_limit_reached"}}}"#,
+        ).unwrap();
+        let mut output = AssistantMessage::builder()
+            .model("test".into())
+            .provider(Provider::Anthropic)
+            .api(Api::AnthropicMessages)
+            .timestamp_ms(Timestamp::zero())
+            .build();
+        process_sse_event(event, &mut output, &mut Vec::new(), false, &[]);
+        assert_eq!(
+            output.error_message.as_deref(),
+            Some("rate_limit_error: enforced_spend_limit_reached: limit reached")
         );
     }
 

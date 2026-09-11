@@ -24,6 +24,7 @@
       pname = "mush";
       version = "0.1.0";
       strictDeps = true;
+      meta.mainProgram = "mush";
 
       nativeBuildInputs = [pkg-config];
       buildInputs = [openssl];

@@ -640,12 +640,49 @@ struct ErrorEvent {
     error: Option<ErrorDetail>,
     #[serde(default)]
     message: Option<String>,
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    response: Option<FailedResponse>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Default)]
 struct ErrorDetail {
     #[serde(default)]
     message: Option<String>,
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default, rename = "type")]
+    kind: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct FailedResponse {
+    error: Option<ErrorDetail>,
+}
+
+impl ErrorEvent {
+    fn description(self) -> String {
+        let detail = self
+            .response
+            .and_then(|r| r.error)
+            .or(self.error)
+            .unwrap_or_default();
+        let parts: Vec<_> = [
+            detail.kind,
+            detail.code.or(self.code),
+            detail.message.or(self.message),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|s| !s.is_empty())
+        .collect();
+        if parts.is_empty() {
+            "openai responses stream failed".into()
+        } else {
+            parts.join(": ")
+        }
+    }
 }
 
 use super::StreamBlock;
@@ -951,11 +988,7 @@ fn process_sse_event(
             finish_all_blocks(active, output);
             output.stop_reason = StopReason::Error;
             if let Ok(ev) = serde_json::from_str::<ErrorEvent>(data) {
-                output.error_message = ev
-                    .error
-                    .and_then(|e| e.message)
-                    .or(ev.message)
-                    .or_else(|| Some("openai responses stream failed".into()));
+                output.error_message = Some(ev.description());
             } else {
                 output.error_message = Some("openai responses stream failed".into());
             }
@@ -1167,6 +1200,31 @@ pub fn benchmark_tool_call_deltas(chunk_count: usize, arg_bytes: usize) -> usize
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_response_preserves_nested_quota_code() {
+        let mut output = AssistantMessage::builder()
+            .model("test".into())
+            .provider(Provider::Custom("openai-codex".into()))
+            .api(Api::OpenaiResponses)
+            .timestamp_ms(Timestamp::zero())
+            .build();
+        let events = process_sse_event(
+            Some("response.failed"),
+            r#"{"type":"response.failed","response":{"error":{"code":"insufficient_quota","message":"limit reached"}}}"#,
+            &mut output,
+            &mut ActiveBlocks::new(),
+        );
+        assert_eq!(
+            output.error_message.as_deref(),
+            Some("insufficient_quota: limit reached")
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, StreamEvent::Error { .. }))
+        );
+    }
 
     #[test]
     fn resolve_standard_url() {
