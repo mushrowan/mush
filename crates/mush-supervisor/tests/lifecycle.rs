@@ -100,6 +100,37 @@ async fn restarting_preserves_exhausted_rate_limit_budget() {
 }
 
 #[tokio::test]
+async fn stop_interrupts_rate_limit_backoff() {
+    let fixture = Fixture::new(&format!("{ARGUMENTS}\necho 'rate_limit' >&2\nexit 1"), 20);
+    let mut process = fixture.command().spawn().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let path = fixture.run.join("test/state.json");
+            if let Ok(bytes) = fs::read(path)
+                && let Ok(state) = serde_json::from_slice::<Value>(&bytes)
+                && state["state"] == "retrying"
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    fs::write(fixture.run.join("STOP"), "").unwrap();
+    let status = tokio::time::timeout(Duration::from_secs(4), process.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(fixture.state()["state"], "stopped");
+    assert_eq!(
+        fs::read_to_string(fixture.cwd.join("calls")).unwrap(),
+        "primary:\n"
+    );
+}
+
+#[tokio::test]
 async fn restarting_preserves_previous_stall() {
     let fixture = Fixture::new("sleep 300 &\necho $! >child\nwait", 6);
     let mut manifest: Value =
