@@ -16,6 +16,8 @@ use tokio::process::Command;
 use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinSet;
 
+mod tasks;
+
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 #[derive(Parser)]
@@ -26,11 +28,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Operation {
+    Prepare(tasks::Prepare),
     Run {
         manifest: PathBuf,
     },
     Status {
         directory: PathBuf,
+    },
+    Logs {
+        directory: PathBuf,
+        worker: String,
+        #[arg(long, default_value_t = 8192)]
+        bytes: u64,
     },
     Stop {
         directory: PathBuf,
@@ -42,7 +51,7 @@ enum Operation {
     },
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Manifest {
     directory: PathBuf,
@@ -59,7 +68,7 @@ struct Manifest {
     workers: Vec<Worker>,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Worker {
     name: String,
@@ -408,7 +417,8 @@ async fn worker(
             base
         } else {
             format!(
-                "{base}\n\nautomatic continuation {round}. read your data/overnight-state.json and inspect jj status before working. continue your scoped backlog or independently review your completed slice. don't repeat finished work. preserve blocked/done states. deadline {}. external effects remain forbidden.",
+                "{base}\n\nautomatic continuation {round}. read {} and inspect jj status before working. continue your scoped backlog or independently review your completed slice. don't repeat finished work. preserve blocked/done states. deadline {}. external effects remain forbidden.",
+                job.report.display(),
                 manifest.until
             )
         };
@@ -617,6 +627,7 @@ async fn run(path: &Path) -> Result<()> {
         &json!({"state":"running", "pid":std::process::id(), "until":manifest.until, "started_at":Utc::now()}),
     )?;
     let manifest = Arc::new(manifest);
+    atomic(&manifest.directory.join("manifest.json"), manifest.as_ref())?;
     let permits = Arc::new(Semaphore::new(manifest.concurrency));
     let (cancel, receiver) = watch::channel(false);
     let mut jobs = JoinSet::new();
@@ -625,7 +636,20 @@ async fn run(path: &Path) -> Result<()> {
         let m = manifest.clone();
         let p = permits.clone();
         let s = receiver.clone();
-        jobs.spawn(async move { (name, worker(m, job, p, s).await) });
+        jobs.spawn(async move {
+            let state_path = m.directory.join(&name).join("state.json");
+            let result = worker(m, job, p, s).await;
+            if let Err(error) = &result {
+                let mut state = read_json(&state_path).unwrap_or_else(|| json!({"name":name}));
+                state["state"] = json!("error");
+                state["detail"] = json!(error.to_string());
+                state["at"] = json!(Utc::now());
+                if let Err(status_error) = atomic(&state_path, &state) {
+                    eprintln!("recording worker failure: {status_error}");
+                }
+            }
+            (name, result)
+        });
     }
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -654,6 +678,12 @@ async fn run(path: &Path) -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     match Cli::parse().command {
+        Operation::Prepare(args) => tasks::prepare(args).await,
+        Operation::Logs {
+            directory,
+            worker,
+            bytes,
+        } => tasks::logs(&directory, &worker, bytes),
         Operation::Run { manifest } => run(&manifest).await,
         Operation::Stop { directory } => {
             private_file(&directory.join("STOP"))?;
@@ -670,6 +700,14 @@ async fn main() -> Result<()> {
             if directory.join("STOP").exists() {
                 return Err("run is stopped".into());
             }
+            let state =
+                read_json(&directory.join(&worker).join("state.json")).ok_or("unknown worker")?;
+            if matches!(
+                state["state"].as_str(),
+                Some("done" | "blocked" | "error" | "stopped")
+            ) {
+                return Err("worker is terminal; prepare a follow-up task".into());
+            }
             let dir = directory.join("inbox").join(worker);
             fs::create_dir_all(&dir)?;
             let path = dir.join(format!(
@@ -685,21 +723,7 @@ async fn main() -> Result<()> {
             file.write_all(prompt.as_bytes())?;
             Ok(())
         }
-        Operation::Status { directory } => {
-            let mut states = Vec::new();
-            for entry in fs::read_dir(&directory)?.flatten() {
-                if let Some(value) = read_json(&entry.path().join("state.json")) {
-                    states.push(value);
-                }
-            }
-            println!(
-                "{}",
-                serde_json::to_string_pretty(
-                    &json!({"supervisor":read_json(&directory.join("supervisor.json")),"workers":states})
-                )?
-            );
-            Ok(())
-        }
+        Operation::Status { directory } => tasks::status(&directory),
     }
 }
 

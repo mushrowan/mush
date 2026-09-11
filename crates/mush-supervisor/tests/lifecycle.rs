@@ -208,6 +208,17 @@ async fn a_blocked_worker_does_not_get_another_prompt() {
     assert_eq!(fixture.state()["state"], "blocked");
 }
 
+#[tokio::test]
+async fn spawn_failure_is_visible_in_worker_status() {
+    let fixture = Fixture::new("exit 0", 20);
+    fs::remove_file(fixture.dir.path().join("fake-mush")).unwrap();
+    fixture.run().await;
+    assert_eq!(fixture.state()["state"], "error");
+    let state: Value =
+        serde_json::from_slice(&fs::read(fixture.run.join("supervisor.json")).unwrap()).unwrap();
+    assert_eq!(state["errors"][0]["worker"], "test");
+}
+
 #[expect(clippy::unwrap_used)]
 async fn wait_for(path: &Path) {
     tokio::time::timeout(Duration::from_secs(4), async {

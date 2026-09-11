@@ -67,7 +67,7 @@ in {
   test = craneLib.cargoNextest (commonArgs
     // {
       inherit cargoArtifacts;
-      nativeBuildInputs = commonArgs.nativeBuildInputs ++ [fd];
+      nativeBuildInputs = commonArgs.nativeBuildInputs ++ [fd pkgs.jujutsu];
       SSL_CERT_FILE = "${cacert}/etc/ssl/certs/ca-bundle.crt";
     });
 
