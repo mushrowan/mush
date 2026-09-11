@@ -4251,6 +4251,62 @@ mod tests {
         assert_eq!(text.len(), 3000, "preserved result should be full size");
     }
 
+    #[test]
+    fn cached_message_content_survives_saved_history_and_follow_up() {
+        let original = messages_with_old_large_tool_result();
+        for oauth in [false, true] {
+            let cache = anthropic_cache_control(
+                "https://api.anthropic.com",
+                Some(CacheRetention::Long),
+                oauth,
+            );
+            let before = convert_messages(
+                &original,
+                oauth,
+                cache.clone(),
+                ToolResultTrimming::Preserve,
+            );
+            let mut resumed: Vec<Message> =
+                serde_json::from_slice(&serde_json::to_vec(&original).unwrap()).unwrap();
+            resumed.push(Message::Assistant(
+                AssistantMessage::builder()
+                    .model("test".into())
+                    .provider(Provider::Anthropic)
+                    .api(Api::AnthropicMessages)
+                    .timestamp_ms(Timestamp::zero())
+                    .content(vec![AssistantContentPart::Text(TextContent {
+                        text: "done".into(),
+                    })])
+                    .build(),
+            ));
+            resumed.push(Message::User(
+                UserMessage::builder()
+                    .content(UserContent::Text("explicit follow-up".into()))
+                    .timestamp_ms(Timestamp::now())
+                    .build(),
+            ));
+            let after = convert_messages(&resumed, oauth, cache, ToolResultTrimming::Preserve);
+            for (a, b) in before.iter().zip(&after) {
+                let strip = |message: &RequestMessage| {
+                    let mut content = message.content.clone();
+                    for block in content.as_array_mut().unwrap() {
+                        block.as_object_mut().unwrap().remove("cache_control");
+                    }
+                    (message.role.clone(), content)
+                };
+                assert_eq!(strip(a), strip(b));
+            }
+            assert_eq!(
+                after.last().unwrap().content[0]["cache_control"]["type"],
+                "ephemeral"
+            );
+            assert_eq!(
+                after.last().unwrap().content[0]["cache_control"]["ttl"],
+                "1h"
+            );
+        }
+    }
+
     fn test_output() -> AssistantMessage {
         AssistantMessage::builder()
             .model("test".into())

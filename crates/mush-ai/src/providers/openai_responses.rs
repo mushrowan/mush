@@ -124,12 +124,17 @@ fn build_request_body(
     options: &StreamOptions,
     is_codex: bool,
 ) -> RequestBody {
+    let cache_retention = options.cache_retention.unwrap_or(CacheRetention::Short);
     let input_system_prompt = if is_codex { &None } else { system_prompt };
     let input = convert_input_messages(
         model,
         input_system_prompt,
         messages,
-        ToolResultTrimming::SlidingWindow,
+        if cache_retention == CacheRetention::None {
+            ToolResultTrimming::SlidingWindow
+        } else {
+            ToolResultTrimming::Preserve
+        },
     );
     let instructions = if is_codex {
         Some(system_prompt.clone().unwrap_or_default())
@@ -169,7 +174,6 @@ fn build_request_body(
         None
     };
 
-    let cache_retention = options.cache_retention.unwrap_or(CacheRetention::Short);
     let prompt_cache_key = if cache_retention == CacheRetention::None {
         None
     } else {
@@ -1335,6 +1339,139 @@ mod tests {
         let body = build_request_body(&model, &None, &[], &[], &options, false);
         assert_eq!(body.prompt_cache_key.as_deref(), Some("sess_abc"));
         assert_eq!(body.prompt_cache_retention.as_deref(), Some("24h"));
+    }
+
+    fn cache_replay_messages() -> Vec<Message> {
+        let user = |text: &str| {
+            Message::User(
+                UserMessage::builder()
+                    .content(UserContent::Text(text.into()))
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            )
+        };
+        vec![
+            user("initial task"),
+            Message::Assistant(
+                AssistantMessage::builder()
+                    .model("gpt-5.2".into())
+                    .provider(Provider::Custom("openai-codex".into()))
+                    .api(Api::OpenaiResponses)
+                    .timestamp_ms(Timestamp::zero())
+                    .content(vec![AssistantContentPart::ToolCall(ToolCall {
+                        id: "call_saved".into(),
+                        name: "read".into(),
+                        arguments: serde_json::json!({"path":"fixture"}),
+                    })])
+                    .build(),
+            ),
+            Message::ToolResult(ToolResultMessage {
+                tool_call_id: "call_saved".into(),
+                tool_name: "read".into(),
+                content: vec![ToolResultContentPart::Text(TextContent {
+                    text: "retained fixture output ".repeat(400),
+                })],
+                outcome: ToolOutcome::Success,
+                timestamp_ms: Timestamp::zero(),
+            }),
+            user("second task"),
+            user("third task"),
+        ]
+    }
+
+    #[test]
+    fn cached_response_prefix_survives_serialization_and_new_user_turns() {
+        let model = sample_codex_model();
+        let system = Some("fixed system".into());
+        let tools = vec![ToolDefinition {
+            name: "read".into(),
+            description: "read fixture".into(),
+            parameters: serde_json::json!({"type":"object"}),
+        }];
+        let original = cache_replay_messages();
+        for is_codex in [false, true] {
+            for retention in [
+                None,
+                Some(CacheRetention::Short),
+                Some(CacheRetention::Long),
+            ] {
+                let options = StreamOptions {
+                    session_id: Some("same-session".into()),
+                    cache_retention: retention,
+                    ..Default::default()
+                };
+                let first = serde_json::to_value(build_request_body(
+                    &model, &system, &original, &tools, &options, is_codex,
+                ))
+                .unwrap();
+                let mut resumed: Vec<Message> =
+                    serde_json::from_slice(&serde_json::to_vec(&original).unwrap()).unwrap();
+                for turn in 0..4 {
+                    resumed.push(Message::User(
+                        UserMessage::builder()
+                            .content(UserContent::Text(format!("follow-up {turn}")))
+                            .timestamp_ms(Timestamp::now())
+                            .prompt_id(PromptId::new())
+                            .build(),
+                    ));
+                    let next = serde_json::to_value(build_request_body(
+                        &model, &system, &resumed, &tools, &options, is_codex,
+                    ))
+                    .unwrap();
+                    let prefix = first["input"].as_array().unwrap();
+                    assert_eq!(&next["input"].as_array().unwrap()[..prefix.len()], prefix);
+                    for field in [
+                        "instructions",
+                        "tools",
+                        "model",
+                        "reasoning",
+                        "prompt_cache_key",
+                        "prompt_cache_retention",
+                    ] {
+                        assert_eq!(first[field], next[field], "{field}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn disabled_response_caching_retains_sliding_trimming() {
+        let model = sample_codex_model();
+        let mut messages = cache_replay_messages();
+        messages.push(Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text("fourth task".into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        ));
+        let options = StreamOptions {
+            cache_retention: Some(CacheRetention::None),
+            session_id: Some("same-session".into()),
+            ..Default::default()
+        };
+        let body = serde_json::to_value(build_request_body(
+            &model,
+            &None,
+            &messages,
+            &[],
+            &options,
+            true,
+        ))
+        .unwrap();
+        assert!(body.get("prompt_cache_key").is_none());
+        let output = body["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["type"] == "function_call_output")
+            .unwrap();
+        assert!(
+            output["output"]
+                .as_str()
+                .unwrap()
+                .contains("trimmed from old tool result")
+        );
     }
 
     #[test]

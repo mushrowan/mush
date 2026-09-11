@@ -168,3 +168,215 @@ fn no_session_still_reports_setup_failure() {
     assert_eq!(status["state"], "error");
     assert!(!dir.path().join("data/sessions").exists());
 }
+
+#[test]
+fn resume_appends_to_saved_context_without_rewriting_the_prefix() {
+    use mush_ai::types::*;
+    let dir = tempfile::tempdir().unwrap();
+    let store = mush_session::SessionStore::new(dir.path().join("data/sessions"));
+    let mut session = mush_session::Session::new(
+        "nonexistent-headless-test-model",
+        &dir.path().display().to_string(),
+    );
+    session.push_message(Message::User(
+        UserMessage::builder()
+            .content(UserContent::Text("original task".into()))
+            .timestamp_ms(Timestamp::zero())
+            .prompt_id(PromptId::new())
+            .build(),
+    ));
+    session.push_message(Message::Assistant(
+        AssistantMessage::builder()
+            .model("nonexistent-headless-test-model".into())
+            .provider(Provider::Anthropic)
+            .api(Api::AnthropicMessages)
+            .timestamp_ms(Timestamp::zero())
+            .content(vec![
+                AssistantContentPart::Thinking(ThinkingContent::Thinking {
+                    thinking: "fixture reasoning".into(),
+                    signature: Some("fixture signature".into()),
+                }),
+                AssistantContentPart::ToolCall(ToolCall {
+                    id: "saved-call".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({"path":"fixture"}),
+                }),
+            ])
+            .build(),
+    ));
+    session.push_message(Message::ToolResult(ToolResultMessage {
+        tool_call_id: "saved-call".into(),
+        tool_name: "read".into(),
+        timestamp_ms: Timestamp::zero(),
+        outcome: ToolOutcome::Success,
+        content: vec![ToolResultContentPart::Text(TextContent {
+            text: "full output ".repeat(1000),
+        })],
+    }));
+    store.save(&session).unwrap();
+    let before = serde_json::to_value(session.context()).unwrap();
+    let mut child = command(dir.path())
+        .args(["--status-file"])
+        .arg(dir.path().join("status.json"))
+        .args(["-c", session.meta.id.as_str(), "-p", "new follow-up"])
+        .spawn()
+        .unwrap();
+    assert!(!wait(&mut child).unwrap().success());
+    let resumed = store.load(&session.meta.id).unwrap();
+    let context = serde_json::to_value(resumed.context()).unwrap();
+    let before = before.as_array().unwrap();
+    assert_eq!(&context.as_array().unwrap()[..before.len()], before);
+    assert_eq!(context.as_array().unwrap().len(), before.len() + 1);
+    assert_eq!(resumed.meta.id, session.meta.id);
+}
+
+#[test]
+fn restarted_headless_requests_keep_cache_key_tools_and_history_prefix() {
+    use mush_ai::types::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config/mush");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("config.toml"),
+        "auto_compact = false\n[api_keys]\nfixture = 'fixture-key'\n",
+    )
+    .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let model = Model::builder()
+        .id("gpt-fixture".into())
+        .name("fixture".into())
+        .provider(Provider::Custom("fixture".into()))
+        .api(Api::OpenaiResponses)
+        .base_url(format!("http://{}", listener.local_addr().unwrap()).into())
+        .context_window(TokenCount::new(1_000_000))
+        .max_output_tokens(TokenCount::new(64))
+        .build();
+    std::fs::write(
+        config.join("models.json"),
+        serde_json::to_vec(&[model]).unwrap(),
+    )
+    .unwrap();
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(25);
+        let mut requests = Vec::new();
+        while requests.len() < 2 {
+            let (mut socket, _) = match listener.accept() {
+                Ok(connection) => connection,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                Err(error) => panic!("fixture accept: {error}"),
+            };
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            socket
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut bytes = Vec::new();
+            let start = loop {
+                if let Some(index) = bytes.windows(4).position(|s| s == b"\r\n\r\n") {
+                    break index + 4;
+                }
+                let mut buffer = [0u8; 8192];
+                let n = socket.read(&mut buffer).unwrap();
+                assert!(n > 0 && bytes.len() < 1024 * 1024);
+                bytes.extend_from_slice(&buffer[..n]);
+            };
+            let headers = String::from_utf8_lossy(&bytes[..start]).to_ascii_lowercase();
+            let length: usize = headers
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            assert!(length < 1024 * 1024);
+            while bytes.len() < start + length {
+                let mut buffer = [0u8; 8192];
+                let n = socket.read(&mut buffer).unwrap();
+                assert!(n > 0);
+                bytes.extend_from_slice(&buffer[..n]);
+            }
+            requests.push(
+                serde_json::from_slice::<serde_json::Value>(&bytes[start..start + length]).unwrap(),
+            );
+            let body = concat!(
+                "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\",\"role\":\"assistant\"}}\n\n",
+                "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"done\"}\n\n",
+                "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":50,\"output_tokens\":1}}}\n\n",
+            );
+            write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+        }
+        requests
+    });
+    let store = mush_session::SessionStore::new(dir.path().join("data/sessions"));
+    let mut session = mush_session::Session::new("gpt-fixture", &dir.path().display().to_string());
+    session.push_message(Message::User(
+        UserMessage::builder()
+            .content(UserContent::Text("first task".into()))
+            .timestamp_ms(Timestamp::zero())
+            .build(),
+    ));
+    session.push_message(Message::Assistant(
+        AssistantMessage::builder()
+            .model("gpt-fixture".into())
+            .provider(Provider::Custom("fixture".into()))
+            .api(Api::OpenaiResponses)
+            .timestamp_ms(Timestamp::zero())
+            .content(vec![AssistantContentPart::ToolCall(ToolCall {
+                id: "saved".into(),
+                name: "read".into(),
+                arguments: serde_json::json!({"path":"fixture"}),
+            })])
+            .build(),
+    ));
+    session.push_message(Message::ToolResult(ToolResultMessage {
+        tool_call_id: "saved".into(),
+        tool_name: "read".into(),
+        timestamp_ms: Timestamp::zero(),
+        outcome: ToolOutcome::Success,
+        content: vec![ToolResultContentPart::Text(TextContent {
+            text: "preserved tool output ".repeat(400),
+        })],
+    }));
+    store.save(&session).unwrap();
+    for text in ["next task", "follow-up task"] {
+        let mut child = command(dir.path())
+            .args([
+                "--max-turns",
+                "1",
+                "-c",
+                session.meta.id.as_str(),
+                "-p",
+                text,
+            ])
+            .spawn()
+            .unwrap();
+        assert!(wait(&mut child).unwrap().success());
+    }
+    let requests = server.join().unwrap();
+    let first = &requests[0];
+    let next = &requests[1];
+    for key in [
+        "model",
+        "tools",
+        "instructions",
+        "prompt_cache_key",
+        "reasoning",
+    ] {
+        assert_eq!(first[key], next[key], "{key}");
+    }
+    assert_eq!(first["prompt_cache_key"], session.meta.id.as_str());
+    assert!(!first["tools"].as_array().unwrap().is_empty());
+    let prefix = first["input"].as_array().unwrap();
+    assert_eq!(&next["input"].as_array().unwrap()[..prefix.len()], prefix);
+    assert_eq!(next["input"].as_array().unwrap().len(), prefix.len() + 2);
+}
