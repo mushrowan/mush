@@ -298,6 +298,7 @@ pub(super) async fn handle_streaming_terminal_events(
     let mut changed = false;
     while event::poll(std::time::Duration::ZERO)? {
         let event = event::read()?;
+        cancel_signal_for_event(stream_state, &event);
         match event {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
                 match handle_streaming_key_event(session, stream_state, deps, key).await? {
@@ -342,6 +343,7 @@ async fn handle_streaming_key_event(
     deps: &mut InputDeps<'_>,
     key: KeyEvent,
 ) -> io::Result<LoopAction> {
+    stream_state.cancel_signal();
     if session.app.interaction.mode == app::AppMode::ToolConfirm {
         if let Some(allowed) = confirmation_answer(key.code) {
             answer_confirmation(session, stream_state, allowed).await;
@@ -418,6 +420,7 @@ fn record_model_use(session: &mut Session, tui_config: &mut TuiConfig) {
 
 pub(super) async fn handle_idle_terminal_events(
     session: &mut Session,
+    stream_state: &mut StreamState,
     deps: &mut InputDeps<'_>,
 ) -> io::Result<LoopAction> {
     if !event::poll(std::time::Duration::from_millis(50))? {
@@ -426,6 +429,7 @@ pub(super) async fn handle_idle_terminal_events(
 
     loop {
         let event = event::read()?;
+        cancel_signal_for_event(stream_state, &event);
         match event {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
                 let app_event = handle_key(&mut session.app, key);
@@ -575,6 +579,15 @@ pub(super) async fn handle_idle_terminal_events(
     Ok(LoopAction::Redraw)
 }
 
+fn cancel_signal_for_event(stream_state: &mut StreamState, event: &Event) {
+    if matches!(
+        event,
+        Event::Key(_) | Event::Paste(_) | Event::Mouse(_) | Event::FocusGained
+    ) {
+        stream_state.cancel_signal();
+    }
+}
+
 fn apply_settings_toggle(
     session: &mut crate::session::Session,
     tui_config: &mut crate::runner::TuiConfig,
@@ -646,6 +659,203 @@ mod tests {
 
     fn streaming_test_config() -> crate::runner::TuiConfig {
         crate::runner::TuiConfig::for_test()
+    }
+
+    #[cfg(feature = "signal")]
+    struct SignalProbe {
+        started: tokio::time::Instant,
+        sends: std::sync::atomic::AtomicUsize,
+    }
+
+    #[cfg(feature = "signal")]
+    impl mush_notify::Clock for SignalProbe {
+        fn now(&self) -> Option<std::time::Duration> {
+            Some(std::time::Duration::from_secs(1000) + self.started.elapsed())
+        }
+    }
+
+    #[cfg(feature = "signal")]
+    impl mush_notify::ActivitySource for SignalProbe {
+        fn snapshot(
+            &self,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Option<mush_notify::Snapshot>> + Send + '_>,
+        > {
+            Box::pin(async {
+                Some(mush_notify::Snapshot {
+                    observed_at: mush_notify::Clock::now(self).unwrap(),
+                    sessions: vec![mush_notify::SessionActivity {
+                        local: true,
+                        activity: mush_notify::Activity::Locked,
+                    }],
+                })
+            })
+        }
+    }
+
+    #[cfg(feature = "signal")]
+    impl mush_notify::Transport for SignalProbe {
+        fn available(
+            &self,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
+            Box::pin(async { true })
+        }
+
+        fn send(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
+            Box::pin(async {
+                self.sends.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                true
+            })
+        }
+    }
+
+    #[cfg(feature = "signal")]
+    fn signal_probe(state: &mut StreamState) -> std::sync::Arc<SignalProbe> {
+        let probe = std::sync::Arc::new(SignalProbe {
+            started: tokio::time::Instant::now(),
+            sends: std::sync::atomic::AtomicUsize::new(0),
+        });
+        state.signal = Some(
+            mush_notify::Dispatcher::new(
+                mush_notify::Config {
+                    mode: mush_notify::Mode::Send,
+                    account: "+12025550100".into(),
+                    recipients: vec!["+12025550101".into()],
+                    socket: Some("/run/user/1000/private/socket".into()),
+                    grace_seconds: 1,
+                    ..Default::default()
+                },
+                probe.clone(),
+                probe.clone(),
+                probe.clone(),
+            )
+            .unwrap(),
+        );
+        probe
+    }
+
+    #[cfg(feature = "signal")]
+    async fn signal_grace() {
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+    }
+
+    #[cfg(feature = "signal")]
+    #[tokio::test(start_paused = true)]
+    async fn signal_idle_activity_cancels_before_delivery() {
+        for (event, cancelled) in [
+            (Event::Key(key(KeyCode::Char('a'))), true),
+            (Event::Paste("synthetic input".into()), true),
+            (
+                Event::Mouse(crossterm::event::MouseEvent {
+                    kind: crossterm::event::MouseEventKind::Moved,
+                    column: 0,
+                    row: 0,
+                    modifiers: KeyModifiers::NONE,
+                }),
+                true,
+            ),
+            (Event::FocusGained, true),
+            (Event::FocusLost, false),
+            (Event::Resize(80, 24), false),
+        ] {
+            let mut state = StreamState::new();
+            let probe = signal_probe(&mut state);
+            state
+                .signal
+                .as_mut()
+                .unwrap()
+                .completion(mush_notify::Completion(1));
+            cancel_signal_for_event(&mut state, &event);
+            signal_grace().await;
+            assert_eq!(
+                probe.sends.load(std::sync::atomic::Ordering::SeqCst),
+                usize::from(!cancelled)
+            );
+            assert_eq!(
+                state.signal.as_mut().unwrap().finished().await,
+                (!cancelled).then_some(mush_notify::Outcome::Accepted)
+            );
+        }
+    }
+
+    #[cfg(feature = "signal")]
+    #[tokio::test(start_paused = true)]
+    async fn signal_approval_input_cancels_and_preserves_reply() {
+        for (code, expected) in [
+            (KeyCode::Char('y'), Some(true)),
+            (KeyCode::Char('n'), Some(false)),
+            (KeyCode::Char('x'), None),
+        ] {
+            let mut session = Session::new(App::new("test".into(), TokenCount::new(200_000)));
+            let mut state = StreamState::new();
+            let (_tx, rx) = tokio::sync::mpsc::channel(1);
+            let (reply, mut received) = tokio::sync::oneshot::channel();
+            state.register_active(
+                PaneId::new(1),
+                super::super::streams::StreamMeta {
+                    cancel: tokio_util::sync::CancellationToken::new(),
+                    steering_queue: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
+                    confirm_req_rx: rx,
+                    confirm_reply: std::sync::Arc::new(tokio::sync::Mutex::new(Some(
+                        super::super::streams::PendingConfirmation {
+                            tool_call_id: "synthetic-tool".into(),
+                            reply,
+                        },
+                    ))),
+                    context_tokens: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                    model: mush_ai::models::all_models_with_user()
+                        .into_iter()
+                        .next()
+                        .unwrap(),
+                },
+            );
+            session.app.interaction.mode = app::AppMode::ToolConfirm;
+            let probe = signal_probe(&mut state);
+            state
+                .signal
+                .as_mut()
+                .unwrap()
+                .completion(mush_notify::Completion(1));
+            let mut tui_config = streaming_test_config();
+            let registry = mush_ai::registry::ApiRegistry::new();
+            let lifecycle_hooks = mush_agent::LifecycleHooks::default();
+            let mut pending_prompt = None;
+            let mut pending_compactions = std::collections::HashMap::new();
+            let image_picker = None;
+            let size_cache = Rc::new(CachedSizeState::default());
+            let mut deps = InputDeps {
+                tui_config: &mut tui_config,
+                thinking_prefs: &mut ThinkingPrefs::default(),
+                thinking_saver: &None,
+                registry: &registry,
+                lifecycle_hooks: &lifecycle_hooks,
+                cwd: std::path::Path::new(""),
+                pending_prompt: &mut pending_prompt,
+                pending_compactions: &mut pending_compactions,
+                image_picker: &image_picker,
+                size_cache: &size_cache,
+            };
+            let action = handle_streaming_key_event(&mut session, &mut state, &mut deps, key(code))
+                .await
+                .unwrap();
+            if let Some(allowed) = expected {
+                assert!(matches!(action, LoopAction::Redraw));
+                assert_eq!(received.try_recv().unwrap(), allowed);
+                assert_eq!(session.app.interaction.mode, app::AppMode::Insert);
+            } else {
+                assert!(matches!(action, LoopAction::Continue));
+                assert!(matches!(
+                    received.try_recv(),
+                    Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+                ));
+                assert_eq!(session.app.interaction.mode, app::AppMode::ToolConfirm);
+            }
+            signal_grace().await;
+            assert_eq!(state.signal.as_mut().unwrap().finished().await, None);
+            assert_eq!(probe.sends.load(std::sync::atomic::Ordering::SeqCst), 0);
+        }
     }
 
     #[test]

@@ -2867,6 +2867,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "mush-notify"
+version = "0.1.0"
+dependencies = [
+ "rustix 1.1.4",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+]
+
+[[package]]
 name = "mush-session"
 version = "0.1.0"
 dependencies = [
@@ -2978,6 +2992,7 @@ dependencies = [
  "mush-ai",
  "mush-ext",
  "mush-mcp",
+ "mush-notify",
  "mush-session",
  "mush-tools",
  "notify",

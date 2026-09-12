@@ -31,6 +31,8 @@ mush-mcp = { path = "crates/mush-mcp" }
 mush-tui = { path = "crates/mush-tui" }
 mush-treesitter = { path = "crates/mush-treesitter" }
 mush-lsp = { path = "crates/mush-lsp" }
+mush-notify = { path = "crates/mush-notify" }
+rustix = { version = "1.1.4", features = ["process", "time"] }
 
 # async
 tokio = { version = "1", features = ["full"] }

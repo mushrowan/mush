@@ -7,11 +7,11 @@
   pkg-config,
   cacert,
   enableProfiling ? false,
+  enableSignal ? false,
 }: let
   featureFlags =
-    if enableProfiling
-    then ["profiling"]
-    else [];
+    pkgs.lib.optionals enableProfiling ["mush-cli/profiling"]
+    ++ pkgs.lib.optionals enableSignal ["mush-cli/signal"];
 
   cargoExtraArgs =
     if featureFlags == []

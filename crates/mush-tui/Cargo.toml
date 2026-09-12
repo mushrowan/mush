@@ -6,7 +6,12 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+default = []
+signal = ["dep:mush-notify"]
+
 [dependencies]
+mush-notify = { workspace = true, optional = true }
 mush-ai.workspace = true
 mush-agent.workspace = true
 mush-mcp.workspace = true

@@ -74,6 +74,10 @@ pub(super) struct StreamState {
     last_session_save: std::time::Instant,
     session_dirty: bool,
     pub(super) notify: NotificationSink,
+    #[cfg(feature = "signal")]
+    pub(super) signal: Option<mush_notify::Dispatcher>,
+    #[cfg(feature = "signal")]
+    completion_sequence: u64,
 }
 
 pub(super) struct StreamConfig {
@@ -104,14 +108,45 @@ impl StreamState {
             last_session_save: std::time::Instant::now() - SESSION_SAVE_DEBOUNCE,
             session_dirty: false,
             notify: Arc::new(default_notification_sink),
+            #[cfg(feature = "signal")]
+            signal: None,
+            #[cfg(feature = "signal")]
+            completion_sequence: 0,
         }
     }
 
     fn advance_generation(&mut self, pane_id: PaneId) -> StreamGeneration {
+        self.cancel_signal();
         let stream_gen = StreamGeneration(self.next_gen);
         self.next_gen += 1;
         self.generations.insert(pane_id, stream_gen);
         stream_gen
+    }
+
+    pub(super) fn cancel_signal(&mut self) {
+        #[cfg(feature = "signal")]
+        if let Some(signal) = &mut self.signal {
+            signal.cancel();
+        }
+    }
+
+    fn completion_signal(&mut self) {
+        #[cfg(feature = "signal")]
+        if let Some(sequence) = self.completion_sequence.checked_add(1) {
+            self.completion_sequence = sequence;
+            if let Some(signal) = &mut self.signal {
+                signal.completion(mush_notify::Completion(sequence));
+            }
+        }
+    }
+
+    pub(super) async fn poll_signal(&mut self) {
+        #[cfg(feature = "signal")]
+        if let Some(signal) = &mut self.signal
+            && let Some(outcome) = signal.finished().await
+        {
+            tracing::debug!(?outcome, "signal notification decision");
+        }
     }
 
     pub(super) fn register_active(
@@ -293,6 +328,7 @@ async fn handle_agent_end(
             "task stopped and needs your input",
             Some(crate::notify::Sound::Complete),
         );
+        stream_state.completion_signal();
     }
 
     let title_request = if !session.title_generated

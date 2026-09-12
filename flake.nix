@@ -87,8 +87,14 @@
           inherit (pkgs) fd pkg-config openssl cacert;
           enableProfiling = true;
         };
+        craneOutputsSignal = import ./nix/package.nix {
+          inherit craneLib pkgs src;
+          inherit (pkgs) fd pkg-config openssl cacert;
+          enableSignal = true;
+        };
       in {
         packages.default = craneOutputs.package;
+        packages.signal = craneOutputsSignal.package;
         apps.supervisor = {
           type = "app";
           program = "${craneOutputs.package}/bin/mush-supervisor";

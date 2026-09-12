@@ -8,6 +8,7 @@ publish = false
 
 [features]
 default = []
+signal = ["mush-tui/signal"]
 tokio-console = ["dep:console-subscriber"]
 profiling = ["dep:tracing-chrome"]
 

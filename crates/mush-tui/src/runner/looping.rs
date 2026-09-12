@@ -335,7 +335,7 @@ async fn handle_idle_iteration(
     let login_changed = drain_browser_logins(&mut runtime.session, tui_config).await;
 
     let (session, mut deps) = input_parts(runtime, tui_config, registry, image_picker, size_cache);
-    let action = handle_idle_terminal_events(session, &mut deps).await?;
+    let action = handle_idle_terminal_events(session, stream_state, &mut deps).await?;
     if matches!(action, LoopAction::Continue) && (picker_changed || login_changed) {
         Ok(LoopAction::Redraw)
     } else {
@@ -347,8 +347,50 @@ async fn handle_idle_iteration(
 mod tests {
     use super::*;
 
+    #[cfg(feature = "signal")]
+    struct SignalFake(tokio::time::Instant);
+
+    #[cfg(feature = "signal")]
+    impl mush_notify::Clock for SignalFake {
+        fn now(&self) -> Option<std::time::Duration> {
+            Some(std::time::Duration::from_secs(1000) + self.0.elapsed())
+        }
+    }
+
+    #[cfg(feature = "signal")]
+    impl mush_notify::ActivitySource for SignalFake {
+        fn snapshot(
+            &self,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Option<mush_notify::Snapshot>> + Send + '_>,
+        > {
+            Box::pin(async {
+                Some(mush_notify::Snapshot {
+                    observed_at: mush_notify::Clock::now(self).unwrap(),
+                    sessions: vec![mush_notify::SessionActivity {
+                        local: true,
+                        activity: mush_notify::Activity::Locked,
+                    }],
+                })
+            })
+        }
+    }
+
+    #[cfg(feature = "signal")]
+    impl mush_notify::Transport for SignalFake {
+        fn available(
+            &self,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
+            Box::pin(async { true })
+        }
+
+        fn send(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
+            panic!("dry-run attempted a send")
+        }
+    }
+
     #[tokio::test]
-    async fn completion_notifications_follow_production_events() {
+    async fn signal_completion_notifications_follow_production_events() {
         use super::super::streams::{StreamMeta, StreamState};
         use mush_ai::types::PaneId;
         use std::sync::{Arc, Mutex};
@@ -394,6 +436,26 @@ mod tests {
                 runtime.pending_prompt = Some("private continuation".into());
             }
             let mut state = StreamState::new();
+            #[cfg(feature = "signal")]
+            {
+                let fake = Arc::new(SignalFake(tokio::time::Instant::now()));
+                state.signal = Some(
+                    mush_notify::Dispatcher::new(
+                        mush_notify::Config {
+                            mode: mush_notify::Mode::DryRun,
+                            account: "+12025550100".into(),
+                            recipients: vec!["+12025550101".into()],
+                            socket: Some("/run/user/1000/private/socket".into()),
+                            grace_seconds: 1,
+                            ..Default::default()
+                        },
+                        fake.clone(),
+                        fake.clone(),
+                        fake,
+                    )
+                    .unwrap(),
+                );
+            }
             let alerts = Arc::new(Mutex::new(Vec::new()));
             let captured = alerts.clone();
             state.notify = Arc::new(move |summary, body, sound| {
@@ -479,6 +541,8 @@ mod tests {
                 .await;
             }
             assert!(alerts.lock().unwrap().is_empty());
+            #[cfg(feature = "signal")]
+            assert_eq!(state.signal.as_mut().unwrap().finished().await, None);
             for _ in 0..2 {
                 dispatch_agent_event(
                     pane,
@@ -492,7 +556,7 @@ mod tests {
                 )
                 .await;
             }
-            let alerts = alerts.lock().unwrap();
+            let alerts = alerts.lock().unwrap().clone();
             let expected = usize::from(!matches!(
                 case,
                 "abort" | "replaced" | "cancel" | "queued" | "automatic"
@@ -506,6 +570,15 @@ mod tests {
                         "task stopped and needs your input".into(),
                         Some(crate::notify::Sound::Complete)
                     )
+                );
+            }
+            #[cfg(feature = "signal")]
+            {
+                assert_eq!(state.signal.as_mut().unwrap().finished().await, None);
+                tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+                assert_eq!(
+                    state.signal.as_mut().unwrap().finished().await,
+                    (expected == 1).then_some(mush_notify::Outcome::WouldNotify)
                 );
             }
         }

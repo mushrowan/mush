@@ -124,6 +124,13 @@ pub async fn run_tui(
     let mut agent_streams = new_agent_streams();
     let mut stream_state = StreamState::new();
     let mut orchestrator_inbox = inbox::OrchestratorInbox::from_env(&tui_config)?;
+    #[cfg(all(feature = "signal", not(test)))]
+    {
+        stream_state.signal = tokio::task::spawn_blocking(mush_notify::user_dispatcher)
+            .await
+            .ok()
+            .flatten();
+    }
     let mut last_draw = std::time::Instant::now();
     let mut last_animation = std::time::Instant::now();
     let mut loop_iteration = 0u64;
@@ -220,6 +227,7 @@ pub async fn run_tui(
         }
 
         runtime.notify_cache_state(tui_config.cache_timer);
+        stream_state.poll_signal().await;
 
         let compaction_finished = runtime.poll_pending_compactions(&tui_config).await;
 
