@@ -164,6 +164,18 @@ fn explicit_follow_up_resumes_the_same_session_and_preserves_previous_results() 
     let prompt = fs::read_to_string(f.workspace.join("received")).unwrap();
     assert!(prompt.contains("original assignment: local only"));
     assert!(prompt.contains("investigate the next result and refactor"));
+    assert!(prompt.contains("continue authorised work within the task scope"));
+    assert!(prompt.contains(
+        "stop and report blocked when the next step needs approval or essential information"
+    ));
+    assert_eq!(
+        fs::read(worker.join("mush-data/sessions/saved.json")).unwrap(),
+        b"original session"
+    );
+    assert_eq!(
+        fs::read(f.temp.path().join("base.md")).unwrap(),
+        b"original assignment: local only"
+    );
     assert!(worker.join("round-002.log").exists());
     assert!(f.temp.path().exists());
 }

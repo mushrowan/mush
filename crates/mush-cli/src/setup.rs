@@ -370,6 +370,9 @@ pub fn build_system_prompt_from_context(
          - Use edit for precise changes (old text must match exactly)\n\
          - Use write only for new files or complete rewrites\n\
          - Be concise in your responses\n\
+         - Continue authorised work within the task scope. Keep a record of decisions, \
+         checks and unresolved issues. Stop and request clarification when the next step \
+         needs approval or essential information\n\
          - Your final answers are plain text that will be styled by the terminal TUI. \
          Use Markdown-compatible basics for readability: short paragraphs, simple lists, \
          inline backticks for paths and commands, and fenced code blocks for snippets. \
@@ -748,6 +751,30 @@ mod tests {
         assert!(prompt.contains("terminal TUI"));
         assert!(prompt.contains("fenced code blocks"));
         assert!(prompt.contains("Avoid HTML, ANSI codes"));
+    }
+
+    #[test]
+    fn default_prompt_sets_work_boundaries_without_presence_claims() {
+        let context = ProjectContext {
+            agents_md: vec![],
+            skills: vec![],
+        };
+        let prompt = build_system_prompt_from_context(&context, std::path::Path::new("/repo"));
+        assert!(prompt.contains("Continue authorised work within the task scope."));
+        assert!(prompt.contains("Keep a record of decisions, checks and unresolved issues."));
+        assert!(prompt.contains("Stop and request clarification when the next step needs approval or essential information"));
+        for claim in [
+            "unattended",
+            "unmonitored",
+            "unsupervised",
+            "user is away",
+            "user is absent",
+            "nobody is watching",
+            "you are being monitored",
+            "user is watching",
+        ] {
+            assert!(!prompt.to_lowercase().contains(claim), "{claim}");
+        }
     }
 
     #[test]

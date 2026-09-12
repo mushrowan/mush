@@ -17,6 +17,7 @@ use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinSet;
 
 mod follow_up;
+mod prompts;
 mod tasks;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -420,15 +421,7 @@ async fn worker(
             break;
         }
         let base = fs::read_to_string(&job.prompt)?;
-        let prompt = if round == 1 {
-            base
-        } else {
-            format!(
-                "{base}\n\nautomatic continuation {round}. read {} and inspect jj status before working. continue your scoped backlog or independently review your completed slice. don't repeat finished work. preserve blocked/done states. deadline {}. external effects remain forbidden.",
-                job.report.display(),
-                manifest.until
-            )
-        };
+        let prompt = prompts::assignment(&base, round, &job.report, manifest.until);
         let inbox = manifest.directory.join("inbox").join(&job.name);
         let mut prompt = prompt;
         if let Some(follow_up) = follow_up::instructions(&dir, round)? {
