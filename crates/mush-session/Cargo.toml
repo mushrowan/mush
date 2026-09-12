@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 mush-ai.workspace = true
+mush-supervisor = { path = "../mush-supervisor" }
 derive_more.workspace = true
 serde.workspace = true
 serde_json.workspace = true

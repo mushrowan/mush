@@ -6,6 +6,7 @@ use ratatui::backend::CrosstermBackend;
 mod commands;
 mod config;
 mod diag;
+mod inbox;
 mod input;
 mod last_model;
 mod looping;
@@ -122,6 +123,7 @@ pub async fn run_tui(
 
     let mut agent_streams = new_agent_streams();
     let mut stream_state = StreamState::new();
+    let mut orchestrator_inbox = inbox::OrchestratorInbox::from_env(&tui_config)?;
     let mut last_draw = std::time::Instant::now();
     let mut last_animation = std::time::Instant::now();
     let mut loop_iteration = 0u64;
@@ -139,35 +141,44 @@ pub async fn run_tui(
             "start_pending_streams",
             "before start_pending_streams",
         );
-        start_pending_streams(
-            &mut agent_streams,
-            &mut stream_state,
-            &mut runtime.session,
-            &mut runtime.pending_prompt,
-            StreamDeps {
-                config: StreamConfig {
-                    default_model: tui_config.model.clone(),
-                    system_prompt: tui_config.system_prompt.clone(),
-                    options: tui_config.stream_options(),
-                    max_turns: tui_config.max_turns,
-                    provider_api_keys: tui_config.provider_api_keys.clone(),
-                    confirm_tools: tui_config.confirm_tools,
-                    auto_compact: tui_config.auto_compact,
-                    compaction_model: tui_config.compaction_options(),
-                    forbidden_chars: tui_config.forbidden_chars.clone(),
+        let inbox_ready = if let Some(inbox) = &mut orchestrator_inbox {
+            inbox
+                .poll(&agent_streams, &stream_state, &mut runtime, &tui_config)
+                .await?
+        } else {
+            true
+        };
+        if inbox_ready {
+            start_pending_streams(
+                &mut agent_streams,
+                &mut stream_state,
+                &mut runtime.session,
+                &mut runtime.pending_prompt,
+                StreamDeps {
+                    config: StreamConfig {
+                        default_model: tui_config.model.clone(),
+                        system_prompt: tui_config.system_prompt.clone(),
+                        options: tui_config.stream_options(),
+                        max_turns: tui_config.max_turns,
+                        provider_api_keys: tui_config.provider_api_keys.clone(),
+                        confirm_tools: tui_config.confirm_tools,
+                        auto_compact: tui_config.auto_compact,
+                        compaction_model: tui_config.compaction_options(),
+                        forbidden_chars: tui_config.forbidden_chars.clone(),
+                    },
+                    injections: mush_agent::AgentInjections {
+                        lifecycle_hooks: tui_config.lifecycle_hooks.clone(),
+                        cwd: Some(tui_config.cwd.clone()),
+                        dynamic_system_context: tui_config.dynamic_system_context.clone(),
+                        file_rules: tui_config.file_rules.clone(),
+                        lsp_diagnostics: tui_config.lsp_diagnostics.clone(),
+                    },
+                    tools,
+                    registry,
                 },
-                injections: mush_agent::AgentInjections {
-                    lifecycle_hooks: tui_config.lifecycle_hooks.clone(),
-                    cwd: Some(tui_config.cwd.clone()),
-                    dynamic_system_context: tui_config.dynamic_system_context.clone(),
-                    file_rules: tui_config.file_rules.clone(),
-                    lsp_diagnostics: tui_config.lsp_diagnostics.clone(),
-                },
-                tools,
-                registry,
-            },
-        )
-        .await;
+            )
+            .await;
+        }
 
         report_loop_progress(
             &stall_watchdog,

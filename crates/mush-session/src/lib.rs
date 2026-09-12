@@ -1,5 +1,6 @@
 pub mod compact;
 pub mod conversation;
+pub mod inbox;
 pub mod session;
 pub mod store;
 pub mod title;

@@ -2875,6 +2875,7 @@ dependencies = [
  "futures",
  "miette",
  "mush-ai",
+ "mush-supervisor",
  "serde",
  "serde_json",
  "tempfile",
@@ -2889,6 +2890,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "clap",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",

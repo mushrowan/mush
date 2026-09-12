@@ -232,6 +232,16 @@ fn resume_appends_to_saved_context_without_rewriting_the_prefix() {
 
 #[test]
 fn restarted_headless_requests_keep_cache_key_tools_and_history_prefix() {
+    restarted_requests_keep_prefix(false);
+}
+
+#[test]
+fn orchestrator_event_preserves_cross_process_provider_prefix() {
+    restarted_requests_keep_prefix(true);
+}
+
+#[expect(clippy::unwrap_used)]
+fn restarted_requests_keep_prefix(with_event: bool) {
     use mush_ai::types::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -348,7 +358,7 @@ fn restarted_headless_requests_keep_cache_key_tools_and_history_prefix() {
         })],
     }));
     store.save(&session).unwrap();
-    for text in ["next task", "follow-up task"] {
+    for (index, text) in ["next task", "follow-up task"].into_iter().enumerate() {
         let mut child = command(dir.path())
             .args([
                 "--max-turns",
@@ -361,6 +371,36 @@ fn restarted_headless_requests_keep_cache_key_tools_and_history_prefix() {
             .spawn()
             .unwrap();
         assert!(wait(&mut child).unwrap().success());
+        if with_event && index == 0 {
+            use mush_session::inbox::{Binding, Consumer, Event, Inbox, TerminalReason, append};
+            let path = dir.path().join("orchestrator-inbox");
+            let inbox = Inbox::register(
+                &path,
+                Binding {
+                    session_id: session.meta.id.to_string(),
+                    cwd: dir.path().to_owned(),
+                    workers: vec![dir.path().to_owned()],
+                },
+            )
+            .unwrap();
+            let event = Event {
+                event_id: "run.worker.1".into(),
+                run_id: "run".into(),
+                worker_id: "worker".into(),
+                assignment_id: 1,
+                round: 2,
+                session_id: Some("worker-session".into()),
+                reason: TerminalReason::Completed,
+                report_path: dir.path().join("private-report.json"),
+            };
+            inbox.enqueue(event.clone(), dir.path()).unwrap();
+            let consumer = Consumer::open(&path, session.meta.id.clone(), dir.path()).unwrap();
+            let mut saved = store.load(&session.meta.id).unwrap();
+            assert!(append(&mut saved.conversation, &event).unwrap());
+            store.save(&saved).unwrap();
+            assert!(consumer.acknowledge_saved(&event.event_id, &store).unwrap());
+            assert!(inbox.pending().unwrap().is_empty());
+        }
     }
     let requests = server.join().unwrap();
     let first = &requests[0];
@@ -378,5 +418,13 @@ fn restarted_headless_requests_keep_cache_key_tools_and_history_prefix() {
     assert!(!first["tools"].as_array().unwrap().is_empty());
     let prefix = first["input"].as_array().unwrap();
     assert_eq!(&next["input"].as_array().unwrap()[..prefix.len()], prefix);
-    assert_eq!(next["input"].as_array().unwrap().len(), prefix.len() + 2);
+    assert_eq!(
+        next["input"].as_array().unwrap().len(),
+        prefix.len() + 2 + usize::from(with_event)
+    );
+    if with_event {
+        let input = serde_json::to_string(&next["input"]).unwrap();
+        assert_eq!(input.matches("run.worker.1").count(), 1);
+        assert!(input.contains("untrusted worker event"));
+    }
 }

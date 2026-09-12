@@ -69,7 +69,10 @@ pub fn queue(directory: &Path, worker: &str, prompt_file: &Path) -> Result<()> {
     let state_path = dir.join("state.json");
     let original_state = bytes(&state_path, 1024 * 1024)?;
     let mut state: Value = serde_json::from_slice(&original_state)?;
-    if !matches!(state["state"].as_str(), Some("done" | "blocked")) {
+    if !matches!(
+        state["state"].as_str(),
+        Some("done" | "blocked" | "awaiting_input")
+    ) {
         return Err("follow-up requires a completed or blocked worker".into());
     }
     let round = state["round"]
@@ -117,9 +120,15 @@ pub fn queue(directory: &Path, worker: &str, prompt_file: &Path) -> Result<()> {
     report["state"] = json!("working");
     report["follow_up"] = json!({"after_round":round,"prompt":archive.join("prompt.txt"),"previous_report":archive.join("report.json"),"queued_at":Utc::now()});
     state["state"] = json!("follow_up_pending");
+    if manifest.orchestrator_inbox.is_some() {
+        state["assignment_id"] = json!(round + 1);
+    }
     state["session_id"] = json!(session);
     state["detail"] = json!("explicit follow-up queued");
     state["at"] = json!(Utc::now());
+    if let Some(state) = state.as_object_mut() {
+        state.remove("terminal_event");
+    }
     atomic(&job.report, &report)?;
     if let Err(error) = atomic(&state_path, &state) {
         atomic(

@@ -146,6 +146,7 @@ pub async fn prepare(args: Prepare) -> Result<()> {
         model: args.model,
         fallback_model: args.fallback_model,
         status_file: true,
+        orchestrator_inbox: None,
         workers: Vec::new(),
     };
     validate(&manifest)?;
