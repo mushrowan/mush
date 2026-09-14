@@ -280,3 +280,14 @@ async fn measure_bounded_queue_round_trip() {
         start.elapsed().as_micros()
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn reviewer_queued_timer_expires_before_dispatch() {
+    let control = Control::new("session".into());
+    request(&control, "timer", schedule(100, 100));
+    tokio::time::advance(std::time::Duration::from_millis(100)).await;
+    assert_eq!(outcome(&control, "timer"), Outcome::Queued);
+    tokio::time::advance(std::time::Duration::from_millis(100)).await;
+    assert!(control.take_next(&control.target()).is_none());
+    assert_eq!(outcome(&control, "timer"), Outcome::Expired);
+}

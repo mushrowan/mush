@@ -7,6 +7,57 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
+#[tokio::test]
+async fn reviewer_rejects_parent_symlink_and_fifo_and_closes_partial_peers() {
+    use std::os::unix::fs::{FileTypeExt, symlink};
+    use std::time::Duration;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let real = dir.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let linked = dir.path().join("linked");
+    symlink(&real, &linked).unwrap();
+    let control = Control::new("session".into());
+    assert!(
+        IpcListener::start_control(linked.join("fixture.sock"), card(), control.clone()).is_err()
+    );
+    let fifo = real.join("fifo.sock");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(IpcListener::start_control(fifo.clone(), card(), control.clone()).is_err());
+    assert!(
+        std::fs::symlink_metadata(&fifo)
+            .unwrap()
+            .file_type()
+            .is_fifo()
+    );
+    let socket = real.join("fixture.sock");
+    let listener = IpcListener::start_control(socket.clone(), card(), control).unwrap();
+    let mut stream = UnixStream::connect(&socket).await.unwrap();
+    assert_eq!(stream.peer_cred().unwrap().uid(), owner_uid());
+    stream.write_all(b"{\"id\":").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::timeout(Duration::from_secs(1), listener.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!socket.exists());
+    let mut byte = [0];
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), stream.read(&mut byte))
+            .await
+            .unwrap()
+            .unwrap(),
+        0
+    );
+}
+
 fn card() -> Arc<AgentCard> {
     Arc::new(AgentCard::build("fixture", &ToolRegistry::new()))
 }

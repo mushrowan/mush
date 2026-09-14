@@ -4,6 +4,94 @@ use mush_agent::ipc::{
 };
 use std::sync::Arc;
 
+#[tokio::test]
+async fn reviewer_cli_checks_required_target_fields_and_full_queue_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let control = Control::new("session".into());
+    let listener = IpcListener::start_control(
+        dir.path().join("control.sock"),
+        Arc::new(mush_agent::AgentCard::build(
+            "fixture",
+            &mush_agent::tool::ToolRegistry::new(),
+        )),
+        control.clone(),
+    )
+    .unwrap();
+    let target = control.target();
+    let invalid = cli(
+        dir.path(),
+        listener.path(),
+        &target,
+        &["schedule", "fixture", "--delay-ms", "99"],
+    )
+    .await;
+    assert!(!invalid.status.success());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&invalid.stdout).unwrap()["kind"]["payload"]["code"],
+        "invalid_payload"
+    );
+    for index in 0..mush_agent::ipc::control::MAX_QUEUE {
+        value(
+            cli(
+                dir.path(),
+                listener.path(),
+                &target,
+                &["--request-id", &format!("id-{index}"), "send", "fixture"],
+            )
+            .await,
+        );
+    }
+    let full = cli(dir.path(), listener.path(), &target, &["send", "fixture"]).await;
+    assert!(!full.status.success());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&full.stdout).unwrap()["kind"]["payload"]["code"],
+        "queue_full"
+    );
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_mush"));
+    let missing = child
+        .env_clear()
+        .env("HOME", dir.path())
+        .env("MUSH_DATA_DIR", dir.path().join("mush-data"))
+        .args([
+            "control",
+            "--socket",
+            listener.path().to_str().unwrap(),
+            "send",
+            "fixture",
+        ])
+        .kill_on_drop(true)
+        .output()
+        .await
+        .unwrap();
+    assert!(!missing.status.success());
+    assert!(
+        String::from_utf8_lossy(&missing.stderr)
+            .contains("provide --instance, --session and --activation")
+    );
+    let discovery = tokio::process::Command::new(env!("CARGO_BIN_EXE_mush"))
+        .env_clear()
+        .env("HOME", dir.path())
+        .env("MUSH_DATA_DIR", dir.path().join("mush-data"))
+        .args([
+            "control",
+            "--socket",
+            listener.path().to_str().unwrap(),
+            "status",
+        ])
+        .kill_on_drop(true)
+        .output()
+        .await
+        .unwrap();
+    assert!(discovery.status.success());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&discovery.stdout).unwrap()["kind"]["payload"]
+            ["queued"],
+        mush_agent::ipc::control::MAX_QUEUE
+    );
+    listener.shutdown().await.unwrap();
+    assert!(!dir.path().join("mush-data").exists());
+}
+
 async fn cli(
     dir: &std::path::Path,
     socket: &std::path::Path,
