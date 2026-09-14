@@ -119,7 +119,7 @@ impl OrchestratorInbox {
     }
 }
 
-async fn safe_to_consume(
+pub(super) async fn safe_to_consume(
     streams: &AgentStreams<'_>,
     state: &StreamState,
     runtime: &RunnerRuntime,

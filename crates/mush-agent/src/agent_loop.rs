@@ -192,6 +192,7 @@ pub struct AgentInjections {
     pub dynamic_system_context: Option<DynamicContext>,
     pub file_rules: Option<FileRuleCallback>,
     pub lsp_diagnostics: Option<DiagnosticCallback>,
+    pub control_endpoint: Option<crate::exec_context::ControlEndpoint>,
 }
 
 pub struct AgentConfig<'a> {
@@ -215,6 +216,7 @@ pub fn agent_loop(
 
         let mut messages = initial_messages;
         let mut turn_index = 0;
+        let cancel = config.cancel.clone().unwrap_or_default();
 
         if !config.injections.lifecycle_hooks.for_point(crate::hooks::HookPoint::PreSession).is_empty() {
             let results = config.injections.lifecycle_hooks
@@ -312,12 +314,17 @@ pub fn agent_loop(
                             (1u64 << (attempt - 1)).min(MAX_BACKOFF_SECS),
                         );
                         tracing::warn!(attempt, ?delay, "retrying after transient error");
-                        tokio::time::sleep(delay).await;
+                        tokio::select! {
+                            _ = tokio::time::sleep(delay) => {},
+                            _ = cancel.cancelled() => break 'outer,
+                        }
                     }
 
-                    let mut event_stream = match config.registry.stream(
-                        &config.model, &context, &config.options,
-                    ).await {
+                    let response = tokio::select! {
+                        response = config.registry.stream(&config.model, &context, &config.options) => response,
+                        _ = cancel.cancelled() => break 'outer,
+                    };
+                    let mut event_stream = match response {
                         Ok(stream) => stream,
                         Err(e) if e.is_retryable() && attempt < MAX_RETRIES => {
                             tracing::warn!(error = %e, "retryable request error");
@@ -334,7 +341,12 @@ pub fn agent_loop(
                     let mut started = false;
                     let mut had_content = false;
 
-                    while let Some(event) = event_stream.next().await {
+                    loop {
+                        let event = tokio::select! {
+                            event = event_stream.next() => event,
+                            _ = cancel.cancelled() => break 'outer,
+                        };
+                        let Some(event) = event else { break };
                         match &event {
                             StreamEvent::Start { partial } if !started => {
                                 yield AgentEvent::MessageStart { message: partial.clone() };
@@ -555,6 +567,7 @@ pub fn agent_loop(
                     let allowed_calls: Vec<ToolCall> =
                         allowed.iter().map(|&tc| tc.clone()).collect();
                     let tools_ref = &config.tools;
+                    let control_endpoint = config.injections.control_endpoint.clone();
                     let futs = crate::tool_grouping::execute_grouped(
                         allowed_calls,
                         |tc: &ToolCall| {
@@ -562,8 +575,9 @@ pub fn agent_loop(
                         },
                         move |tc: ToolCall| {
                             let exec_id = tc.id.to_string();
+                            let endpoint = control_endpoint.clone();
                             crate::exec_context::TOOL_EXEC_ID
-                                .scope(exec_id, async move { execute_tool(tools_ref, &tc).await })
+                                .scope(exec_id, crate::exec_context::CONTROL_ENDPOINT.scope(endpoint, async move { execute_tool(tools_ref, &tc).await }))
                         },
                     );
                     let results = match config.cancel.as_ref() {

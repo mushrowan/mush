@@ -5,6 +5,9 @@ use ratatui::backend::CrosstermBackend;
 
 mod commands;
 mod config;
+mod control;
+#[cfg(test)]
+mod control_tests;
 mod diag;
 mod inbox;
 mod input;
@@ -97,11 +100,16 @@ pub async fn run_tui(
         runtime.install_discovery_updates(rx);
     }
 
-    let _ipc_listener = tui_config.agent_card.as_ref().and_then(|card| {
+    let ipc_listener = tui_config.agent_card.as_ref().and_then(|card| {
         let card = std::sync::Arc::new(card.clone());
-        let sock = mush_agent::ipc::socket_path(&std::process::id().to_string());
-        match mush_agent::IpcListener::start(sock, card) {
-            Ok(listener) => Some(listener),
+        let control = mush_agent::ipc::control::Control::new(tui_config.session_id.to_string());
+        let sock = mush_agent::ipc::control_socket_path(&control.target().instance);
+        match mush_agent::IpcListener::start_control(sock.clone(), card, control.clone()) {
+            Ok(listener) => {
+                runtime.session.control = Some(control);
+                runtime.session.control_socket = Some(sock);
+                Some(listener)
+            }
             Err(e) => {
                 tracing::warn!("failed to start IPC listener: {e}");
                 None
@@ -156,6 +164,8 @@ pub async fn run_tui(
             true
         };
         if inbox_ready {
+            control::poll(&agent_streams, &stream_state, &mut runtime, &tui_config).await?;
+            let control_endpoint = runtime.session.control_endpoint();
             start_pending_streams(
                 &mut agent_streams,
                 &mut stream_state,
@@ -179,6 +189,7 @@ pub async fn run_tui(
                         dynamic_system_context: tui_config.dynamic_system_context.clone(),
                         file_rules: tui_config.file_rules.clone(),
                         lsp_diagnostics: tui_config.lsp_diagnostics.clone(),
+                        control_endpoint,
                     },
                     tools,
                     registry,
@@ -271,6 +282,11 @@ pub async fn run_tui(
         }
     }
 
+    stream_state.abort(mush_ai::types::PaneId::new(1));
+    drop(agent_streams);
+    if let Some(listener) = ipc_listener {
+        listener.shutdown().await.map_err(io::Error::other)?;
+    }
     cleanup(&mut terminal)?;
     sigwinch_task.abort();
     terminal_guard.disarm();

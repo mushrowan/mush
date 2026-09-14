@@ -17,10 +17,11 @@ async-trait.workspace = true
 tracing.workspace = true
 tokio = { workspace = true, features = ["time", "net", "io-util"] }
 tokio-util.workspace = true
+rustix.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-tokio = { workspace = true, features = ["rt", "macros", "time"] }
+tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }
 
 [lints]
 workspace = true

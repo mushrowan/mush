@@ -1,4 +1,9 @@
+pub mod control;
+#[cfg(test)]
+mod control_tests;
 pub mod listener;
+#[cfg(test)]
+mod listener_tests;
 
 use std::path::PathBuf;
 
@@ -9,6 +14,7 @@ use crate::card::AgentCard;
 pub use listener::IpcListener;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct IpcMessage {
     pub id: String,
     pub from: String,
@@ -16,25 +22,43 @@ pub struct IpcMessage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", content = "payload")]
+#[serde(tag = "type", content = "payload", deny_unknown_fields)]
 pub enum IpcMessageKind {
     GetCard,
     Card(AgentCard),
-    UserMessage { text: String },
-    Ack { message_id: String },
-    Error { message: String },
+    UserMessage {
+        text: String,
+        #[serde(default)]
+        target: Option<control::Target>,
+    },
+    Ack {
+        message_id: String,
+    },
+    Error {
+        message: String,
+    },
+    GetTarget,
+    Target(control::Target),
+    Control(control::Request),
+    ControlReply(control::Reply),
 }
 
 pub fn socket_path(session_id: &str) -> PathBuf {
     mush_runtime_dir().join(format!("{session_id}.sock"))
 }
 
+pub fn control_socket_path(instance: &str) -> PathBuf {
+    mush_runtime_dir()
+        .join("control")
+        .join(format!("{instance}.sock"))
+}
+
 pub fn discover_sockets() -> Vec<PathBuf> {
     let dir = mush_runtime_dir();
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return vec![];
-    };
-    entries
+    [dir.clone(), dir.join("control")]
+        .into_iter()
+        .filter_map(|dir| std::fs::read_dir(dir).ok())
+        .flatten()
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|ext| ext == "sock"))
@@ -43,7 +67,7 @@ pub fn discover_sockets() -> Vec<PathBuf> {
 
 fn mush_runtime_dir() -> PathBuf {
     let base = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| {
-        let user = std::env::var("USER").unwrap_or_else(|_| "unknown".into());
+        let user = rustix::process::geteuid().as_raw();
         format!("/tmp/mush-{user}")
     });
     PathBuf::from(base).join("mush")

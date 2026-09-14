@@ -76,6 +76,7 @@ struct Cli {
 
 #[derive(clap::Subcommand)]
 enum Command {
+    Control(mush_cli::control::ControlArgs),
     Login { provider: Option<String> },
     Logout { provider: Option<String> },
     Models,
@@ -97,14 +98,18 @@ impl Cli {
 #[tokio::main]
 async fn main() -> Result<()> {
     color_eyre::install()?;
-    let cfg = config::load_config();
     let cli = Cli::parse();
+    if let Some(Command::Control(args)) = cli.command {
+        return mush_cli::control::run(args).await;
+    }
+    let cfg = config::load_config();
     let (_log_guards, log_buffer) = logging::init_logging(cfg.log_filter.as_deref(), cli.trace);
     tracing::info!("mush starting");
 
     mush_agent::truncation::cleanup();
 
     match cli.command {
+        Some(Command::Control(_)) => unreachable!(),
         Some(Command::Login { provider }) => return commands::login(provider).await,
         Some(Command::Logout { provider }) => return commands::logout(provider),
         Some(Command::Models) => return commands::list_models(),

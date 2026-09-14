@@ -35,7 +35,24 @@ pub(super) async fn handle_slash_action(
         pending_compactions,
     } = env;
     let mut state_changed = false;
-
+    let changes_conversation = matches!(
+        action,
+        SlashAction::New
+            | SlashAction::Resume { .. }
+            | SlashAction::Undo
+            | SlashAction::Branch { .. }
+    );
+    if changes_conversation
+        && session.control.is_some()
+        && (session.app.stream.active
+            || !session.app.active_tools.is_empty()
+            || session.pending_prompt.is_some()
+            || pending_prompt.is_some()
+            || !pending_compactions.is_empty())
+    {
+        session.app.status = Some("wait for the active turn before switching conversation".into());
+        return false;
+    }
     match action {
         SlashAction::Compact { context_budget } => {
             let pane_id = PaneId::new(1);
@@ -167,6 +184,9 @@ pub(super) async fn handle_slash_action(
         }
     }
 
+    if changes_conversation && let Some(control) = &session.control {
+        control.activate(tui_config.session_id.to_string());
+    }
     state_changed
 }
 

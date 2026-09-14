@@ -252,6 +252,7 @@ async fn dispatch_agent_event(
     if !stream_state.is_current(pane_id, stream_gen) {
         return;
     }
+    super::control::complete(runtime.session.control.as_ref(), &event);
 
     {
         let pane = &mut runtime.session;

@@ -516,6 +516,10 @@ async fn auto_compact(
 }
 
 pub(super) async fn abort_focused_stream(session: &mut Session, stream_state: &mut StreamState) {
+    if let Some(control) = &session.control {
+        control.finish(mush_agent::ipc::control::Outcome::Cancelled);
+        session.pending_prompt = None;
+    }
     let focused_id = PaneId::new(1);
     record_cancelled_tools(session);
 
@@ -688,6 +692,9 @@ pub(super) async fn start_pending_streams<'a>(
     pending_prompt: &mut Option<String>,
     deps: StreamDeps<'a>,
 ) {
+    if !agent_streams.is_empty() {
+        return;
+    }
     for (pane_id, prompt) in take_pending_prompts(session, pending_prompt) {
         start_stream_for_prompt(agent_streams, stream_state, session, pane_id, prompt, &deps).await;
     }

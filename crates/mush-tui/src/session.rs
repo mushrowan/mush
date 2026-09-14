@@ -42,6 +42,8 @@ impl PendingPrompt {
 }
 
 pub struct Session {
+    pub control: Option<mush_agent::ipc::control::Control>,
+    pub control_socket: Option<std::path::PathBuf>,
     pub app: App,
     pub conversation: ConversationState,
     pub image_protos: HashMap<(usize, usize), ratatui_image::protocol::StatefulProtocol>,
@@ -55,6 +57,8 @@ pub struct Session {
 impl Session {
     pub fn new(app: App) -> Self {
         Self {
+            control: None,
+            control_socket: None,
             app,
             conversation: ConversationState::new(),
             image_protos: HashMap::new(),
@@ -68,6 +72,8 @@ impl Session {
 
     pub fn with_conversation(app: App, conversation: ConversationState) -> Self {
         Self {
+            control: None,
+            control_socket: None,
             app,
             conversation,
             image_protos: HashMap::new(),
@@ -90,6 +96,13 @@ impl Session {
         self.pending_compaction_inputs.push((text, images));
         self.app.input.text.clear();
         self.app.input.cursor = 0;
+    }
+
+    pub fn control_endpoint(&self) -> Option<mush_agent::exec_context::ControlEndpoint> {
+        Some(mush_agent::exec_context::ControlEndpoint {
+            socket: self.control_socket.clone()?,
+            target: self.control.as_ref()?.target(),
+        })
     }
 
     pub fn drain_compaction_inputs(&mut self) -> Vec<(String, Vec<PendingImage>)> {

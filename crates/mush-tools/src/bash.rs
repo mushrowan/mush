@@ -414,9 +414,22 @@ impl BashTool {
         let registry = registry.clone();
         let task_id = id.clone();
         let (spawn_ready_tx, spawn_ready_rx) = tokio::sync::oneshot::channel();
+        let endpoint = mush_agent::exec_context::control_endpoint();
 
         tokio::spawn(async move {
-            run_background_command(handle, registry, task_id, &cwd, &command, spawn_ready_tx).await;
+            mush_agent::exec_context::CONTROL_ENDPOINT
+                .scope(
+                    endpoint,
+                    run_background_command(
+                        handle,
+                        registry,
+                        task_id,
+                        &cwd,
+                        &command,
+                        spawn_ready_tx,
+                    ),
+                )
+                .await;
         });
         let _ = spawn_ready_rx.await;
 
@@ -441,6 +454,7 @@ async fn run_background_command(
     spawn_ready: tokio::sync::oneshot::Sender<()>,
 ) {
     let mut cmd = tokio::process::Command::new("bash");
+    mush_agent::exec_context::apply_control_environment(&mut cmd);
     let wrapped_command = command_with_direnv(command);
     cmd.arg("-c")
         .arg(wrapped_command)
@@ -576,6 +590,7 @@ async fn run_command_with_no_output_timeout_and_adoption(
     timeout_adoption: Option<&crate::background::BackgroundJobRegistry>,
 ) -> ToolResult {
     let mut cmd = tokio::process::Command::new("bash");
+    mush_agent::exec_context::apply_control_environment(&mut cmd);
     let wrapped_command = command_with_direnv(command);
     cmd.arg("-c")
         .arg(wrapped_command)
@@ -945,6 +960,62 @@ async fn stream_pipe<R: tokio::io::AsyncRead + Unpin>(
 mod tests {
     use super::*;
     use crate::util::extract_text;
+
+    #[tokio::test]
+    async fn control_environment_is_isolated_for_foreground_background_and_batch() {
+        use mush_agent::exec_context::{CONTROL_ENDPOINT, ControlEndpoint};
+        let dir = tempfile::tempdir().unwrap();
+        let a = ControlEndpoint {
+            socket: dir.path().join("a.sock"),
+            target: mush_agent::ipc::control::Control::new("a".into()).target(),
+        };
+        let b = ControlEndpoint {
+            socket: dir.path().join("b.sock"),
+            target: mush_agent::ipc::control::Control::new("b".into()).target(),
+        };
+        let command = "printf '%s/%s/%s' \"$MUSH_CONTROL_INSTANCE\" \"$MUSH_CONTROL_SESSION\" \"$MUSH_CONTROL_ACTIVATION\"";
+        let tool = BashTool::new(dir.path().into());
+        let (ra, rb) = tokio::join!(
+            CONTROL_ENDPOINT.scope(
+                Some(a.clone()),
+                tool.execute(serde_json::json!({"command":command}))
+            ),
+            CONTROL_ENDPOINT.scope(
+                Some(b.clone()),
+                tool.execute(serde_json::json!({"command":command}))
+            ),
+        );
+        assert!(extract_text(&ra).contains(&a.target.instance));
+        assert!(!extract_text(&ra).contains(&b.target.instance));
+        assert!(extract_text(&rb).contains(&b.target.instance));
+        let registry = crate::background::BackgroundJobRegistry::new();
+        let tool = tool.with_background_registry(registry.clone());
+        let result = CONTROL_ENDPOINT
+            .scope(
+                Some(a.clone()),
+                tool.execute(serde_json::json!({"command":command,"background":true})),
+            )
+            .await;
+        assert!(result.outcome.is_success());
+        let handle = registry.get("bg_0").await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if !handle.read().await.status.is_running() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(handle.read().await.stdout.contains(&a.target.instance));
+        let mut tools = mush_agent::tool::ToolRegistry::new();
+        tools.register_shared(Arc::new(tool));
+        let batch = crate::batch::BatchTool::new(tools);
+        let result = CONTROL_ENDPOINT.scope(Some(b.clone()), batch.execute(serde_json::json!({"tool_calls":[{"tool":"bash","parameters":{"command":command}}]}))).await;
+        assert!(extract_text(&result).contains(&b.target.instance));
+        assert!(mush_agent::exec_context::control_endpoint().is_none());
+    }
 
     #[tokio::test]
     async fn run_echo_command() {
