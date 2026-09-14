@@ -4,6 +4,33 @@ use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 
 #[test]
+fn rereviewer_unscoped_worker_is_ambiguous_across_registered_supervisors() {
+    let (dir, mut registration) = fixture();
+    let (_other, other) = fixture();
+    let queue = dir.path().join("queue.json");
+    let review = ReviewSource {
+        path: queue.clone(),
+        schema: ReviewSchema::OperatorQueueV1,
+    };
+    registration.roots[0].review_queue = Some(review.clone());
+    let mut second = other.roots[0].clone();
+    second.review_queue = Some(review);
+    registration.roots.push(second);
+    fs::write(&queue, json!({"updated_at":now(), "root_owner":"operator", "items":[
+        {"id":"one-task", "worker":"one", "state":"accepted", "accepted":true, "reviewed":"one-task-review.json"}
+    ]}).to_string()).unwrap();
+    let mut loader = Loader::default();
+    loader.refresh(&registration, now());
+    for root in &loader.snapshot.roots {
+        assert_eq!(
+            root.tasks[0].review,
+            ReviewState::Unknown,
+            "one unscoped task was associated with duplicate worker roles in separate supervisors"
+        );
+    }
+}
+
+#[test]
 fn reviewer_duplicate_operator_roles_do_not_discard_unrelated_worker_reviews() {
     let (dir, mut registration) = fixture();
     let queue = dir.path().join("queue.json");
