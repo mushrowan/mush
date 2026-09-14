@@ -54,6 +54,9 @@ pub(super) async fn handle_slash_action(
         return false;
     }
     match action {
+        SlashAction::Subagents { args } => {
+            super::subagents::command(&mut session.app, tui_config, &args).await;
+        }
         SlashAction::Compact { context_budget } => {
             let pane_id = PaneId::new(1);
             let messages = session.conversation.context();

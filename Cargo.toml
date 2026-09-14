@@ -26,6 +26,7 @@ mush-ai = { path = "crates/mush-ai" }
 mush-agent = { path = "crates/mush-agent" }
 mush-tools = { path = "crates/mush-tools" }
 mush-session = { path = "crates/mush-session" }
+mush-supervisor = { path = "crates/mush-supervisor" }
 mush-ext = { path = "crates/mush-ext" }
 mush-mcp = { path = "crates/mush-mcp" }
 mush-tui = { path = "crates/mush-tui" }

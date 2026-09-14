@@ -392,3 +392,43 @@ fn tool_confirmation_releases_and_restores_the_log_cursor() {
     repeat_frames(&mut terminal, &mut screen, &mut app, Owner::Log);
     assert_eq!(app.viewport.cursor(), cursor);
 }
+
+#[test]
+fn subagents_overlay_preserves_log_and_modal_across_live_frames() {
+    let mut app = synthetic_app(true);
+    app.input.text = "draft 界".into();
+    app.input.cursor = 2;
+    app.input.anchor = Some(4);
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    let mut screen = Screen::new();
+    draw(&mut terminal, &mut screen, &mut app);
+    switch_focus(&mut app);
+    key(&mut app, KeyCode::Char('k'));
+    let cursor = app.viewport.cursor();
+    let following = app.viewport.is_following();
+    let toggle = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+    handle_key(&mut app, toggle);
+    repeat_frames(&mut terminal, &mut screen, &mut app, Owner::Hidden);
+    assert!(buffer_to_string(terminal.backend().buffer()).contains("subagents"));
+    assert_eq!(app.viewport.cursor(), cursor);
+    assert_eq!(app.viewport.is_following(), following);
+    app.push_text_delta(" continues under the panel");
+    draw(&mut terminal, &mut screen, &mut app);
+    handle_key(&mut app, toggle);
+    draw(&mut terminal, &mut screen, &mut app);
+    assert_eq!(app.viewport.cursor(), cursor);
+    assert_eq!(app.input.anchor, Some(4));
+    assert_eq!(app.input.cursor, 2);
+    app.open_session_picker(Vec::new(), "/synthetic".into());
+    handle_key(&mut app, toggle);
+    for (width, height) in [(45, 12), (8, 4), (1, 1), (80, 24)] {
+        terminal.backend_mut().resize(width, height);
+        draw(&mut terminal, &mut screen, &mut app);
+        assert!(!terminal.backend().cursor_visible());
+    }
+    key(&mut app, KeyCode::Esc);
+    assert_eq!(app.interaction.mode, AppMode::SessionPicker);
+    assert!(app.interaction.session_picker.is_some());
+    assert!(app.stream.active);
+    assert_eq!(app.input.text, "draft 界");
+}

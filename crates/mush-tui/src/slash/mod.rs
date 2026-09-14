@@ -42,6 +42,9 @@ pub enum SlashParseError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SlashAction {
+    Subagents {
+        args: String,
+    },
     Help,
     Keys,
     Clear,
@@ -132,6 +135,9 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
 
     let (name, args) = split_name_and_args(command);
     match name {
+        "subagents" => Ok(SlashAction::Subagents {
+            args: args.to_string(),
+        }),
         "help" => Ok(SlashAction::Help),
         "keys" => Ok(SlashAction::Keys),
         "new" => Ok(SlashAction::New),

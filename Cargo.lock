@@ -2906,9 +2906,11 @@ dependencies = [
  "chrono",
  "clap",
  "libc",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
 ]
 
@@ -2995,6 +2997,7 @@ dependencies = [
  "mush-mcp",
  "mush-notify",
  "mush-session",
+ "mush-supervisor",
  "mush-tools",
  "notify",
  "nucleo-matcher",

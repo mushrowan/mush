@@ -12,6 +12,8 @@ libc = "0.2.186"
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+thiserror.workspace = true
+rustix = { workspace = true, features = ["fs"] }
 
 [dev-dependencies]
 tempfile.workspace = true

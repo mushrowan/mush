@@ -31,6 +31,7 @@ pub mod settings;
 pub mod slash;
 pub mod slash_menu;
 pub mod streaming;
+pub mod subagents;
 pub mod syntax;
 pub mod terminal_policy;
 #[cfg(test)]

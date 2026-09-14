@@ -344,6 +344,9 @@ async fn handle_streaming_key_event(
     key: KeyEvent,
 ) -> io::Result<LoopAction> {
     stream_state.cancel_signal();
+    if session.app.subagents.handle_key(&session.app.keymap, key) {
+        return Ok(LoopAction::Redraw);
+    }
     if session.app.interaction.mode == app::AppMode::ToolConfirm {
         if let Some(allowed) = confirmation_answer(key.code) {
             answer_confirmation(session, stream_state, allowed).await;

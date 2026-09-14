@@ -19,10 +19,12 @@ pub fn handle(
     action: &SlashAction,
 ) -> Option<String> {
     match action {
+        SlashAction::Subagents { .. } => None,
         SlashAction::Help => {
             let mut help = String::from("available commands:\n");
             help.push_str("  /help          - show this message\n");
             help.push_str("  /keys          - show keyboard shortcuts\n");
+            help.push_str("  /subagents     - show or register session supervisors\n");
             help.push_str("  /new           - save session, start fresh\n");
             help.push_str(
                 "  /model [id]    - show or switch model (--all to reveal hidden codex entries)\n",
@@ -72,6 +74,19 @@ pub fn handle(
         SlashAction::Keys => {
             let mut keys = String::from("keyboard shortcuts:\n\n");
             keys.push_str("general:\n");
+            let panel_keys = app
+                .keymap
+                .binding(crate::keybinds::Action::ToggleSubagents)
+                .map(|binding| {
+                    binding
+                        .0
+                        .iter()
+                        .map(|key| key.to_string())
+                        .collect::<Vec<_>>()
+                        .join(" / ")
+                })
+                .unwrap_or_else(|| "unbound".into());
+            keys.push_str(&format!("  {panel_keys} - toggle subagent status panel\n"));
             keys.push_str("  enter          - send message\n");
             keys.push_str("  alt/shift+enter - insert newline\n");
             keys.push_str("  ctrl+c         - quit / abort stream\n");

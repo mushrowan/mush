@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod inbox;
+pub mod status;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

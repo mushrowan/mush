@@ -77,6 +77,11 @@ fn draw_frame(
         }
     }
 
+    if app.subagents.open {
+        crate::subagents::render::render(frame, &app.subagents, &app.theme, chrono::Utc::now());
+        return;
+    }
+
     let busy_empty_input = app.is_busy() && app.input.text.is_empty();
     let cursor = match app.interaction.mode {
         AppMode::Normal | AppMode::Visual if app.interaction.focus.is_log() => {

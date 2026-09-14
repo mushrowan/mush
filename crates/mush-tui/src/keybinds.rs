@@ -8,6 +8,7 @@ use serde::{Deserialize, Deserializer};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum KeyScope {
     Shared,
+    Subagents,
     Insert,
     Edit,
     Session,
@@ -24,6 +25,7 @@ impl KeyScope {
     pub const fn config_key(self) -> &'static str {
         match self {
             Self::Shared => "shared",
+            Self::Subagents => "subagents",
             Self::Insert => "insert",
             Self::Edit => "edit",
             Self::Session => "pane",
@@ -39,6 +41,7 @@ impl KeyScope {
 
     pub const ALL: &'static [Self] = &[
         Self::Shared,
+        Self::Subagents,
         Self::Insert,
         Self::Edit,
         Self::Session,
@@ -101,6 +104,7 @@ pub fn has_alt(key: KeyEvent) -> bool {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Action {
+    ToggleSubagents,
     CycleFavourite,
     CycleFavouriteBackward,
     Cancel,
@@ -161,6 +165,7 @@ pub enum Action {
 impl Action {
     pub const fn config_key(self) -> &'static str {
         match self {
+            Self::ToggleSubagents => "toggle_subagents",
             Self::CycleFavourite => "cycle_favourite",
             Self::CycleFavouriteBackward => "cycle_favourite_backward",
             Self::Cancel => "cancel",
@@ -220,6 +225,7 @@ impl Action {
     }
 
     pub const ALL: &'static [Self] = &[
+        Self::ToggleSubagents,
         Self::CycleFavourite,
         Self::CycleFavouriteBackward,
         Self::Cancel,
@@ -398,7 +404,8 @@ impl KeyMap {
 
 const fn default_scope_for_action(action: Action) -> KeyScope {
     match action {
-        Action::Cancel
+        Action::ToggleSubagents
+        | Action::Cancel
         | Action::Confirm
         | Action::FocusLog
         | Action::NavigateBottom
@@ -450,6 +457,21 @@ type DefaultCombo = (KeyCode, KeyModifiers);
 type DefaultBinding = (KeyScope, Action, &'static [DefaultCombo]);
 
 const DEFAULT_BINDINGS: &[DefaultBinding] = &[
+    (
+        KeyScope::Shared,
+        Action::ToggleSubagents,
+        &[(KeyCode::Char('s'), KeyModifiers::CONTROL)],
+    ),
+    (
+        KeyScope::Subagents,
+        Action::PageDown,
+        &[(KeyCode::PageDown, KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Subagents,
+        Action::PageUp,
+        &[(KeyCode::PageUp, KeyModifiers::NONE)],
+    ),
     (
         KeyScope::Insert,
         Action::EditSteering,
@@ -868,6 +890,7 @@ pub struct ScopedKeysConfig {
 #[derive(Debug, Default, Clone, serde::Serialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct KeysConfig {
+    pub subagents: KeyScopeConfig,
     pub shared: KeyScopeConfig,
     pub insert: KeyScopeConfig,
     pub edit: KeyScopeConfig,
@@ -884,6 +907,9 @@ impl<'de> Deserialize<'de> for KeysConfig {
         let mut config = Self::default();
         for (key, value) in raw {
             match key.as_str() {
+                "subagents" => {
+                    config.subagents = value.try_into().map_err(serde::de::Error::custom)?
+                }
                 "shared" => config.shared = value.try_into().map_err(serde::de::Error::custom)?,
                 "insert" => config.insert = value.try_into().map_err(serde::de::Error::custom)?,
                 "edit" => config.edit = value.try_into().map_err(serde::de::Error::custom)?,
@@ -905,6 +931,10 @@ impl<'de> Deserialize<'de> for KeysConfig {
 impl KeysConfig {
     pub fn scoped(&self) -> ScopedKeysConfig {
         let mut scopes = HashMap::new();
+        scopes.insert(
+            KeyScope::Subagents.config_key().to_string(),
+            self.subagents.raw.clone(),
+        );
         scopes.insert(
             KeyScope::Shared.config_key().to_string(),
             self.shared.raw.clone(),

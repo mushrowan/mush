@@ -17,6 +17,7 @@ mod render;
 mod runtime;
 mod size_cached_backend;
 mod streams;
+mod subagents;
 mod terminal;
 mod thinking_prefs;
 

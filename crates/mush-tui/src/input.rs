@@ -20,6 +20,9 @@ fn should_escape_enter_to_newline(app: &App, key: KeyEvent) -> bool {
     app.input.text[app.input.cursor..].starts_with('\n') || app.input.cursor == app.input.text.len()
 }
 pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
+    if app.subagents.handle_key(&app.keymap, key) {
+        return None;
+    }
     tracing::trace!(
         code = ?key.code,
         modifiers = ?key.modifiers,
@@ -138,6 +141,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
 }
 
 pub fn handle_mouse(app: &mut App, event: MouseEvent) -> Option<AppEvent> {
+    if app.subagents.open {
+        return None;
+    }
     if !app.interaction.mode.scrolls_the_log() {
         return None;
     }

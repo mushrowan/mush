@@ -16,6 +16,7 @@ use crate::slash_menu::SlashCommand;
 pub(super) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("help", "show available commands"),
     ("keys", "show keyboard shortcuts"),
+    ("subagents", "show or register session supervisors"),
     ("new", "save session, start fresh"),
     ("model", "show or switch model"),
     ("sessions", "browse and resume sessions"),

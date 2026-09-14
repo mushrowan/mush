@@ -97,6 +97,7 @@ pub fn next_thinking_level(current: &ThinkingLevel, supported: &[ThinkingLevel])
 }
 
 pub struct App {
+    pub subagents: crate::subagents::SubagentPanel,
     pub messages: Messages,
     pub stream: StreamingState,
     pub input: InputBuffer,
@@ -147,6 +148,7 @@ impl App {
     pub fn new(model_id: ModelId, context_window: TokenCount) -> Self {
         Self {
             messages: Messages::default(),
+            subagents: crate::subagents::SubagentPanel::default(),
             stream: StreamingState::new(),
             input: InputBuffer::new(),
             model_id,
@@ -475,6 +477,9 @@ impl App {
     }
 
     pub fn handle_paste(&mut self, text: &str) {
+        if self.subagents.open {
+            return;
+        }
         if let Some(prompt) = self
             .interaction
             .login_picker

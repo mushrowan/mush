@@ -30,7 +30,7 @@ pub(super) async fn run_loop_iteration(
     size_cache: &std::rc::Rc<super::size_cached_backend::CachedSizeState>,
     last_redraw: std::time::Instant,
 ) -> io::Result<LoopAction> {
-    if agent_streams.is_empty() {
+    let action = if agent_streams.is_empty() {
         handle_idle_iteration(
             stream_state,
             runtime,
@@ -52,7 +52,19 @@ pub(super) async fn run_loop_iteration(
             last_redraw,
         )
         .await
-    }
+    }?;
+    let store = super::subagents::store(tui_config);
+    let panel_changed = runtime
+        .session
+        .app
+        .subagents
+        .poll(store, std::time::Instant::now())
+        .await;
+    Ok(if panel_changed && matches!(action, LoopAction::Continue) {
+        LoopAction::Redraw
+    } else {
+        action
+    })
 }
 
 fn input_parts<'a>(
