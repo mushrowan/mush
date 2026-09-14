@@ -3,6 +3,28 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use mush_ai::types::{ImageMimeType, TokenCount};
 use mush_supervisor::status::{Registration, Source};
 
+#[tokio::test]
+async fn reviewer_invalid_session_store_clears_previous_session_rows() {
+    let (_dir, store) = fixture();
+    let mut panel = SubagentPanel::default();
+    panel.open = true;
+    let now = Instant::now();
+    settle(&mut panel, &store, now).await;
+    assert!(!panel.snapshot.roots.is_empty());
+    let invalid = RegistrationStore::new(
+        std::path::PathBuf::from("/tmp"),
+        "../untrusted-session".into(),
+        std::path::PathBuf::from("/tmp"),
+    );
+    assert_eq!(invalid, Err(ReadError::Unsafe));
+    panel.poll(invalid, now + Duration::from_secs(3)).await;
+    assert_eq!(panel.snapshot.registration_error, Some(ReadError::Unsafe));
+    assert!(
+        panel.snapshot.roots.is_empty(),
+        "previous session rows crossed an invalid store identity"
+    );
+}
+
 fn toggle() -> KeyEvent {
     KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)
 }

@@ -3,6 +3,115 @@ use serde_json::json;
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 
+#[test]
+fn reviewer_duplicate_operator_roles_do_not_discard_unrelated_worker_reviews() {
+    let (dir, mut registration) = fixture();
+    let queue = dir.path().join("queue.json");
+    registration.roots[0].review_queue = Some(ReviewSource {
+        path: queue.clone(),
+        schema: ReviewSchema::OperatorQueueV1,
+    });
+    fs::write(&queue, json!({"updated_at":now(), "root_owner":"interactive_root", "items":[
+        {"id":"worker-task", "worker":"one", "state":"accepted", "accepted":true, "reviewed":"fixture-receipt.json"},
+        {"id":"installed-pipeline", "worker":"interactive_root", "state":"accepted", "accepted":true, "reviewed":"pipeline.json"},
+        {"id":"npm-packaging", "worker":"interactive_root", "state":"independent_review", "accepted":null}
+    ]}).to_string()).unwrap();
+    let mut loader = Loader::default();
+    loader.refresh(&registration, now());
+    assert_eq!(loader.snapshot.roots[0].review_error, None);
+    assert_eq!(
+        loader.snapshot.roots[0].tasks[0].review,
+        ReviewState::Accepted
+    );
+}
+
+#[test]
+fn reviewer_stale_queue_cache_does_not_transfer_to_a_new_supervisor_root() {
+    let (dir, mut registration) = fixture();
+    let (_other, other) = fixture();
+    let queue = dir.path().join("queue.json");
+    registration.roots[0].review_queue = Some(ReviewSource {
+        path: queue.clone(),
+        schema: ReviewSchema::OperatorQueueV1,
+    });
+    fs::write(
+        &queue,
+        json!({"updated_at":now(), "root_owner":"operator", "items":[
+            {"id":"old-root-task", "worker":"one", "state":"integrated", "accepted":true,
+             "reviewed":"old-root.json", "integrated":"0123456789012345678901234567890123456789"}
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+    let mut loader = Loader::default();
+    loader.refresh(&registration, now());
+    assert_eq!(
+        loader.snapshot.roots[0].tasks[0].review,
+        ReviewState::Integrated
+    );
+    registration.roots[0].directory = other.roots[0].directory.clone();
+    fs::write(&queue, "{").unwrap();
+    loader.refresh(&registration, now());
+    assert_eq!(
+        loader.snapshot.roots[0].review_error,
+        Some(ReadError::Malformed)
+    );
+    assert_eq!(
+        loader.snapshot.roots[0].tasks[0].review,
+        ReviewState::Missing
+    );
+}
+
+#[test]
+fn reviewer_shared_queue_requires_a_supervisor_binding_for_duplicate_worker_roles() {
+    let (dir, mut registration) = fixture();
+    let (_other, other) = fixture();
+    let queue = dir.path().join("queue.json");
+    let review = ReviewSource {
+        path: queue.clone(),
+        schema: ReviewSchema::OperatorQueueV1,
+    };
+    registration.roots[0].review_queue = Some(review.clone());
+    let mut second = other.roots[0].clone();
+    second.review_queue = Some(review);
+    registration.roots.push(second);
+    fs::write(&queue, json!({"updated_at":now(), "root_owner":"operator", "items":[
+        {"id":"first-supervisor-one", "worker":"one", "supervisor_root":registration.roots[0].directory,
+         "state":"accepted", "accepted":true, "reviewed":"first-supervisor-review.json"}
+    ]}).to_string()).unwrap();
+    let mut loader = Loader::default();
+    loader.refresh(&registration, now());
+    assert_eq!(
+        loader.snapshot.roots[0].tasks[0].review,
+        ReviewState::Accepted
+    );
+    assert_eq!(
+        loader.snapshot.roots[1].tasks[0].review,
+        ReviewState::Missing
+    );
+}
+
+#[test]
+fn reviewer_open_directory_survives_path_replacement_without_following_symlink() {
+    let (dir, registration) = fixture();
+    let root = &registration.roots[0].directory;
+    let pinned = files::Directory::open(root).unwrap();
+    let old = dir.path().join("old");
+    fs::rename(root, &old).unwrap();
+    let foreign = dir.path().join("foreign");
+    fs::create_dir(&foreign).unwrap();
+    fs::write(foreign.join("supervisor.json"), r#"{"state":"foreign"}"#).unwrap();
+    symlink(&foreign, root).unwrap();
+    let state = pinned
+        .json::<SupervisorState>("supervisor.json", 4096, &mut files::Budget::new())
+        .unwrap();
+    assert_eq!(state.state, "running");
+    assert!(matches!(
+        files::Directory::open(root),
+        Err(ReadError::Unsafe)
+    ));
+}
+
 fn now() -> DateTime<Utc> {
     "2026-09-14T12:00:00Z".parse().unwrap()
 }
