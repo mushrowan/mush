@@ -429,6 +429,7 @@ mod tests {
     #[tokio::test]
     async fn listener_responds_to_get_card() {
         let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let sock = dir.path().join("test.sock");
 
         let card = Arc::new(AgentCard::build("test-model", &ToolRegistry::new()));
@@ -463,6 +464,7 @@ mod tests {
     #[tokio::test]
     async fn listener_cleans_up_socket_on_drop() {
         let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let sock = dir.path().join("cleanup.sock");
 
         let card = Arc::new(AgentCard::build("test", &ToolRegistry::new()));

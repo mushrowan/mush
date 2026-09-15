@@ -2,11 +2,13 @@ use mush_agent::ipc::{
     IpcListener,
     control::{Control, Event, Outcome},
 };
+use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 
 #[tokio::test]
 async fn reviewer_cli_checks_required_target_fields_and_full_queue_errors() {
     let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let control = Control::new("session".into());
     let listener = IpcListener::start_control(
         dir.path().join("control.sock"),
@@ -126,6 +128,7 @@ fn value(output: std::process::Output) -> serde_json::Value {
 #[tokio::test]
 async fn cli_send_schedule_cancel_status_and_explicit_errors() {
     let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let control = Control::new("session".into());
     let listener = IpcListener::start_control(
         dir.path().join("control.sock"),

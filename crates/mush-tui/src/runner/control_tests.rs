@@ -9,6 +9,7 @@ use mush_agent::ipc::control::{Control, Event, Operation, Outcome, Reply, Reques
 use mush_agent::tool::{AgentTool, ToolRegistry, ToolResult};
 use mush_ai::registry::{ApiProvider, ApiRegistry, LlmContext, ProviderError};
 use mush_ai::types::*;
+use std::os::unix::fs::PermissionsExt;
 use std::sync::{Arc, Mutex};
 
 #[tokio::test]
@@ -17,6 +18,7 @@ async fn reviewer_cli_socket_drives_serial_provider_turns_and_preserves_authorit
     let binary = std::env::var("MUSH_REVIEW_CLI_BIN").expect("set MUSH_REVIEW_CLI_BIN");
     let (mut runtime, config, control) = fixture();
     let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let listener = mush_agent::ipc::IpcListener::start_control(
         dir.path().join("review.sock"),
         Arc::new(mush_agent::AgentCard::build(
@@ -546,6 +548,7 @@ async fn idle_event_runs_through_production_prompt_and_fake_provider_once() {
     for fail in [false, true] {
         let (mut runtime, config, control) = fixture();
         let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let listener = mush_agent::ipc::IpcListener::start_control(
             dir.path().join("control.sock"),
             Arc::new(mush_agent::AgentCard::build(

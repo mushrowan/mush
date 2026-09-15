@@ -62,6 +62,12 @@ fn card() -> Arc<AgentCard> {
     Arc::new(AgentCard::build("fixture", &ToolRegistry::new()))
 }
 
+fn runtime() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    dir
+}
+
 fn send(control: &Control, id: &str) -> IpcMessage {
     IpcMessage {
         id: id.into(),
@@ -92,7 +98,7 @@ fn error(response: IpcMessage, expected: ControlError) {
 
 #[tokio::test]
 async fn simultaneous_clients_and_instances_are_isolated() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = runtime();
     let a = Control::new("session".into());
     let b = Control::new("session".into());
     let la = IpcListener::start_control(dir.path().join("a.sock"), card(), a.clone()).unwrap();
@@ -134,7 +140,7 @@ async fn simultaneous_clients_and_instances_are_isolated() {
 
 #[tokio::test]
 async fn malformed_unknown_oversized_and_unbound_messages_get_errors() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = runtime();
     let control = Control::new("session".into());
     let listener =
         IpcListener::start_control(dir.path().join("a.sock"), card(), control.clone()).unwrap();
@@ -183,7 +189,7 @@ async fn malformed_unknown_oversized_and_unbound_messages_get_errors() {
 
 #[tokio::test]
 async fn socket_queue_full_and_unavailable_are_explicit() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = runtime();
     let control = Control::new("session".into());
     let listener =
         IpcListener::start_control(dir.path().join("a.sock"), card(), control.clone()).unwrap();
@@ -215,7 +221,7 @@ async fn socket_queue_full_and_unavailable_are_explicit() {
 
 #[tokio::test(start_paused = true)]
 async fn partial_request_timeout_does_not_block_other_clients() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = runtime();
     let control = Control::new("session".into());
     let listener =
         IpcListener::start_control(dir.path().join("a.sock"), card(), control.clone()).unwrap();
@@ -240,7 +246,7 @@ async fn partial_request_timeout_does_not_block_other_clients() {
 
 #[tokio::test]
 async fn connection_limit_and_shutdown_close_all_clients() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = runtime();
     let control = Control::new("session".into());
     let listener =
         IpcListener::start_control(dir.path().join("a.sock"), card(), control.clone()).unwrap();
@@ -291,7 +297,7 @@ async fn connection_limit_and_shutdown_close_all_clients() {
 
 #[tokio::test]
 async fn socket_permissions_symlinks_stale_files_and_cleanup_ownership() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = runtime();
     let legacy_dir = dir.path().join("legacy");
     std::fs::create_dir(&legacy_dir).unwrap();
     std::fs::set_permissions(&legacy_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
