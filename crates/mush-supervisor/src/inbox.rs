@@ -212,6 +212,12 @@ impl Inbox {
                 Err(std::fs::TryLockError::WouldBlock) if start.elapsed() < wait => {
                     std::thread::sleep(Duration::from_millis(10));
                 }
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        format!("orchestrator inbox lock is held: {}", path.display()),
+                    ));
+                }
                 Err(error) => return Err(io::Error::other(error)),
             }
         }

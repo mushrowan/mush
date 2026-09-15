@@ -19,19 +19,77 @@ pub(super) struct OrchestratorInbox {
     replayed: bool,
 }
 
+pub(super) fn attach(
+    result: io::Result<Option<OrchestratorInbox>>,
+    runtime: &mut RunnerRuntime,
+) -> Option<OrchestratorInbox> {
+    match result {
+        Ok(inbox) => inbox,
+        Err(error) => {
+            report_disabled(runtime, &error);
+            None
+        }
+    }
+}
+
+pub(super) async fn poll(
+    inbox: &mut Option<OrchestratorInbox>,
+    streams: &AgentStreams<'_>,
+    state: &StreamState,
+    runtime: &mut RunnerRuntime,
+    config: &TuiConfig,
+) -> bool {
+    let Some(active) = inbox.as_mut() else {
+        return true;
+    };
+    match active.poll(streams, state, runtime, config).await {
+        Ok(ready) => ready,
+        Err(error) => {
+            if let Some((event, _)) = &active.staged
+                && let Some(mush_ai::types::Message::Event(message)) =
+                    runtime.session.conversation.context().last()
+                && message.receipts.iter().any(|receipt| {
+                    receipt.id.as_str() == format!("orchestrator-event-{}", event.event_id)
+                })
+                && runtime
+                    .session
+                    .pending_prompt
+                    .as_ref()
+                    .is_some_and(|prompt| prompt.is_persisted() && prompt.text == message.text())
+            {
+                runtime.session.pending_prompt = None;
+            }
+            *inbox = None;
+            report_disabled(runtime, &error);
+            true
+        }
+    }
+}
+
+fn report_disabled(runtime: &mut RunnerRuntime, error: &io::Error) {
+    tracing::warn!(%error, "orchestrator inbox disabled");
+    runtime.session.app.push_system_message(format!(
+        "orchestrator inbox disabled: {error}. restart to reconnect"
+    ));
+}
+
 impl OrchestratorInbox {
     pub(super) fn from_env(config: &TuiConfig) -> io::Result<Option<Self>> {
         let Some(path) = std::env::var_os("MUSH_ORCHESTRATOR_INBOX") else {
             return Ok(None);
         };
+        Self::open(Path::new(&path), config).map(Some)
+    }
+
+    fn open(path: &Path, config: &TuiConfig) -> io::Result<Self> {
         if config.save_session.is_none() {
             return Err(io::Error::other(
                 "orchestrator inbox requires session persistence",
             ));
         }
-        Ok(Some(Self {
+        Ok(Self {
             consumer: Arc::new(Consumer::open(
-                Path::new(&path),
+                path,
                 config.session_id.clone(),
                 &config.cwd,
             )?),
@@ -39,7 +97,7 @@ impl OrchestratorInbox {
             staged: None,
             next_poll: Instant::now(),
             replayed: false,
-        }))
+        })
     }
 
     pub(super) async fn poll(
@@ -157,6 +215,147 @@ mod tests {
     use mush_agent::AgentEvent;
     use mush_ai::types::{PaneId, TokenCount};
     use mush_session::inbox::{Binding, Inbox, TerminalReason};
+
+    fn register(dir: &Path, config: &TuiConfig) -> io::Result<Binding> {
+        let binding = Binding {
+            session_id: config.session_id.to_string(),
+            cwd: config.cwd.clone(),
+            workers: vec![config.cwd.clone()],
+        };
+        Inbox::register(dir, binding.clone())?;
+        Ok(binding)
+    }
+
+    fn deliver(dir: &Path, binding: &Binding) -> Event {
+        let event = Event {
+            event_id: "run.worker.1".into(),
+            run_id: "run".into(),
+            worker_id: "worker".into(),
+            assignment_id: 1,
+            round: 1,
+            session_id: None,
+            reason: TerminalReason::Completed,
+            report_path: binding.cwd.join("report.json"),
+        };
+        Inbox::open(dir)
+            .unwrap()
+            .enqueue(event.clone(), &binding.cwd)
+            .unwrap();
+        event
+    }
+
+    fn runtime() -> RunnerRuntime {
+        RunnerRuntime::from_pane(
+            crate::session::Session::new(crate::app::App::new(
+                "fixture".into(),
+                TokenCount::new(200_000),
+            )),
+            super::super::ThinkingPrefs::default(),
+        )
+    }
+
+    #[tokio::test]
+    async fn held_consumer_lock_keeps_interactive_session_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let inbox_dir = dir.path().join("inbox");
+        let mut config = TuiConfig::for_test();
+        config.cwd = dir.path().to_owned();
+        config.save_session = Some(Arc::new(|_| {}));
+        register(&inbox_dir, &config).unwrap();
+        let owner = OrchestratorInbox::open(&inbox_dir, &config).unwrap();
+        let mut runtime = runtime();
+        runtime.session.pending_prompt = Some(crate::session::PendingPrompt::text("continue"));
+        let result = OrchestratorInbox::open(&inbox_dir, &config);
+        assert_eq!(
+            result.as_ref().err().unwrap().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        let mut inbox = attach(result.map(Some), &mut runtime);
+        assert!(inbox.is_none());
+        assert!(
+            poll(
+                &mut inbox,
+                &new_agent_streams(),
+                &StreamState::new(),
+                &mut runtime,
+                &config,
+            )
+            .await
+        );
+        assert_eq!(
+            runtime.session.pending_prompt.as_ref().unwrap().text,
+            "continue"
+        );
+        assert_eq!(runtime.session.app.messages.len(), 1);
+        assert!(!runtime.session.app.should_quit);
+        drop(owner);
+        assert!(OrchestratorInbox::open(&inbox_dir, &config).is_ok());
+    }
+
+    #[tokio::test]
+    async fn changed_binding_disables_delivery_and_keeps_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let inbox_dir = dir.path().join("inbox");
+        let mut config = TuiConfig::for_test();
+        config.cwd = dir.path().to_owned();
+        config.save_session = Some(Arc::new(|_| {}));
+        let binding = register(&inbox_dir, &config).unwrap();
+        let event = deliver(&inbox_dir, &binding);
+        let mut inbox = Some(OrchestratorInbox::open(&inbox_dir, &config).unwrap());
+        let mut runtime = runtime();
+        let path = inbox_dir.join("queue.json");
+        let original = std::fs::read(&path).unwrap();
+        let mut queue: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        queue["binding"]["session_id"] = "different-session".into();
+        let changed = serde_json::to_vec(&queue).unwrap();
+        std::fs::write(&path, &changed).unwrap();
+        assert!(
+            poll(
+                &mut inbox,
+                &new_agent_streams(),
+                &StreamState::new(),
+                &mut runtime,
+                &config,
+            )
+            .await
+        );
+        assert!(inbox.is_none());
+        assert!(runtime.session.conversation.context().is_empty());
+        assert!(runtime.session.pending_prompt.is_none());
+        assert_eq!(runtime.session.app.messages.len(), 1);
+        assert!(!runtime.session.app.should_quit);
+        assert_eq!(std::fs::read(&path).unwrap(), changed);
+        std::fs::write(&path, original).unwrap();
+        let owner = Consumer::open(&inbox_dir, config.session_id.clone(), &config.cwd).unwrap();
+        assert_eq!(owner.pending().unwrap(), vec![event]);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_timeout_does_not_dispatch_unacknowledged_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let inbox_dir = dir.path().join("inbox");
+        let mut config = TuiConfig::for_test();
+        config.cwd = dir.path().to_owned();
+        config.save_session = Some(Arc::new(|_| {}));
+        let binding = register(&inbox_dir, &config).unwrap();
+        let event = deliver(&inbox_dir, &binding);
+        let mut active = OrchestratorInbox::open(&inbox_dir, &config).unwrap();
+        active.store_dir = dir.path().join("sessions");
+        let mut inbox = Some(active);
+        let mut runtime = runtime();
+        let streams = new_agent_streams();
+        let state = StreamState::new();
+        assert!(!poll(&mut inbox, &streams, &state, &mut runtime, &config).await);
+        assert!(runtime.session.pending_prompt.is_some());
+        inbox.as_mut().unwrap().staged.as_mut().unwrap().1 =
+            Instant::now() - Duration::from_secs(6);
+        assert!(poll(&mut inbox, &streams, &state, &mut runtime, &config).await);
+        assert!(inbox.is_none());
+        assert!(runtime.session.pending_prompt.is_none());
+        assert!(contains(&runtime.session.conversation, &event.event_id));
+        let owner = Consumer::open(&inbox_dir, config.session_id.clone(), &config.cwd).unwrap();
+        assert_eq!(owner.pending().unwrap(), vec![event]);
+    }
 
     #[tokio::test]
     async fn production_streams_queue_events_between_tool_calls_and_repeated_agent_end() {

@@ -131,7 +131,10 @@ pub async fn run_tui(
 
     let mut agent_streams = new_agent_streams();
     let mut stream_state = StreamState::new();
-    let mut orchestrator_inbox = inbox::OrchestratorInbox::from_env(&tui_config)?;
+    let mut orchestrator_inbox = inbox::attach(
+        inbox::OrchestratorInbox::from_env(&tui_config),
+        &mut runtime,
+    );
     #[cfg(all(feature = "signal", not(test)))]
     {
         stream_state.signal = tokio::task::spawn_blocking(mush_notify::user_dispatcher)
@@ -156,13 +159,16 @@ pub async fn run_tui(
             "start_pending_streams",
             "before start_pending_streams",
         );
-        let inbox_ready = if let Some(inbox) = &mut orchestrator_inbox {
-            inbox
-                .poll(&agent_streams, &stream_state, &mut runtime, &tui_config)
-                .await?
-        } else {
-            true
-        };
+        let inbox_connected = orchestrator_inbox.is_some();
+        let inbox_ready = inbox::poll(
+            &mut orchestrator_inbox,
+            &agent_streams,
+            &stream_state,
+            &mut runtime,
+            &tui_config,
+        )
+        .await;
+        let inbox_disabled = inbox_connected && orchestrator_inbox.is_none();
         if inbox_ready {
             control::poll(&agent_streams, &stream_state, &mut runtime, &tui_config).await?;
             let control_endpoint = runtime.session.control_endpoint();
@@ -246,6 +252,7 @@ pub async fn run_tui(
             && runtime.needs_periodic_redraw(tui_config.cache_timer);
 
         let should_draw = matches!(action, LoopAction::Redraw)
+            || inbox_disabled
             || discovery_updated
             || compaction_finished
             || maintenance_tick;
