@@ -40,6 +40,7 @@ mush-tui.workspace = true
 mush-treesitter.workspace = true
 mush-lsp.workspace = true
 tokio.workspace = true
+anstream.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -59,6 +60,7 @@ tracing-chrome = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
+rustix = { workspace = true, features = ["pty", "termios"] }
 
 [lints]
 workspace = true

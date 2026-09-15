@@ -5,6 +5,8 @@ use mush_ai::types::{EffortLevel, ThinkingLevel};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::output::Style;
+
 fn deserialise_thinking<'de, D: Deserializer<'de>>(
     d: D,
 ) -> Result<Option<ThinkingLevel>, D::Error> {
@@ -312,12 +314,18 @@ pub fn load_config() -> Config {
             Ok(content) => match toml::from_str::<Config>(&content) {
                 Ok(config) => config,
                 Err(e) => {
-                    eprintln!("\x1b[33mwarning: failed to parse config: {e}\x1b[0m");
+                    eprintln!(
+                        "{}",
+                        Style::Yellow.stderr(format_args!("warning: failed to parse config: {e}"))
+                    );
                     Config::default()
                 }
             },
             Err(e) => {
-                eprintln!("\x1b[33mwarning: failed to read config: {e}\x1b[0m");
+                eprintln!(
+                    "{}",
+                    Style::Yellow.stderr(format_args!("warning: failed to read config: {e}"))
+                );
                 Config::default()
             }
         }
@@ -345,8 +353,11 @@ fn try_load_persisted_settings(
         Ok(p) => Some(p),
         Err(e) => {
             eprintln!(
-                "\x1b[33mwarning: failed to parse {}: {e}\x1b[0m",
-                path.display()
+                "{}",
+                Style::Yellow.stderr(format_args!(
+                    "warning: failed to parse {}: {e}",
+                    path.display()
+                ))
             );
             None
         }

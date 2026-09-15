@@ -128,8 +128,11 @@ pub fn init_logging(config_filter: Option<&str>, profiling: bool) -> (LoggingGua
             .include_args(true)
             .build();
         eprintln!(
-            "\x1b[35mprofiling: trace will be written to {}\x1b[0m",
-            trace_path.display()
+            "{}",
+            crate::output::Style::Magenta.stderr(format_args!(
+                "profiling: trace will be written to {}",
+                trace_path.display()
+            ))
         );
         (subscriber.with(Some(chrome_layer)), Some(guard))
     } else {
@@ -144,7 +147,10 @@ pub fn init_logging(config_filter: Option<&str>, profiling: bool) -> (LoggingGua
             .with_default_env()
             .spawn();
         subscriber.with(console_layer).init();
-        eprintln!("\x1b[2mtokio-console: listening on http://127.0.0.1:6669\x1b[0m");
+        eprintln!(
+            "{}",
+            crate::output::Style::Dim.stderr("tokio-console: listening on http://127.0.0.1:6669")
+        );
     }
 
     #[cfg(not(feature = "tokio-console"))]

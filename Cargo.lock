@@ -2794,6 +2794,7 @@ dependencies = [
 name = "mush-cli"
 version = "0.1.0"
 dependencies = [
+ "anstream",
  "atty",
  "clap",
  "color-eyre",
@@ -2811,6 +2812,7 @@ dependencies = [
  "nixcfg-rs",
  "open",
  "reqwest 0.13.4",
+ "rustix 1.1.4",
  "schemars",
  "serde",
  "serde_json",
@@ -2853,6 +2855,7 @@ dependencies = [
 name = "mush-mcp"
 version = "0.1.0"
 dependencies = [
+ "anstream",
  "async-trait",
  "http",
  "mush-agent",

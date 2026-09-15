@@ -9,6 +9,7 @@ use mush_ai::stream::StreamEvent;
 use mush_ai::types::*;
 use mush_session::{PaneSession, Session, SessionStore};
 
+use mush_cli::output::Style;
 use mush_cli::{commands, config, logging, setup, timing};
 use mush_tui::TuiConfig;
 
@@ -100,7 +101,13 @@ impl Cli {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    color_eyre::install()?;
+    color_eyre::config::HookBuilder::default()
+        .theme(if mush_cli::output::stderr_colour() {
+            color_eyre::config::Theme::dark()
+        } else {
+            color_eyre::config::Theme::new()
+        })
+        .install()?;
     let cli = Cli::parse();
     if let Some(Command::Control(args)) = cli.command {
         return mush_cli::control::run(args).await;
@@ -410,7 +417,7 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
                     let _ = std::io::stdout().flush();
                 }
                 StreamEvent::ThinkingDelta { delta, .. } => {
-                    print!("\x1b[2m{delta}\x1b[0m");
+                    print!("{}", Style::Dim.stdout(delta));
                     use std::io::Write;
                     let _ = std::io::stdout().flush();
                 }
@@ -430,15 +437,21 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
                     in_text = false;
                 }
                 let args_summary = summarise_tool_args(tool_name.as_str(), &args);
-                eprintln!("\x1b[36m▶ {tool_name}\x1b[0m {args_summary}");
+                eprintln!(
+                    "{} {args_summary}",
+                    Style::Cyan.stderr(format_args!("▶ {tool_name}"))
+                );
             }
             AgentEvent::ToolExecEnd {
                 tool_name, result, ..
             } => {
                 if result.outcome.is_error() {
-                    eprintln!("\x1b[31m✗ {tool_name} failed\x1b[0m");
+                    eprintln!(
+                        "{}",
+                        Style::Red.stderr(format_args!("✗ {tool_name} failed"))
+                    );
                 } else {
-                    eprintln!("\x1b[32m✓ {tool_name}\x1b[0m");
+                    eprintln!("{}", Style::Green.stderr(format_args!("✓ {tool_name}")));
                 }
             }
             AgentEvent::MessageEnd { message } => {
@@ -454,17 +467,23 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
                 }
                 let cost = models::calculate_cost(&setup.model, &message.usage);
                 eprintln!(
-                    "\n\x1b[2m{} | in:{} out:{} cache:{} | {}\x1b[0m",
-                    message.model,
-                    message.usage.input_tokens,
-                    message.usage.output_tokens,
-                    message.usage.cache_read_tokens,
-                    cost.total(),
+                    "\n{}",
+                    Style::Dim.stderr(format_args!(
+                        "{} | in:{} out:{} cache:{} | {}",
+                        message.model,
+                        message.usage.input_tokens,
+                        message.usage.output_tokens,
+                        message.usage.cache_read_tokens,
+                        cost.total(),
+                    )),
                 );
                 if setup.debug_cache && message.usage.cache_read_tokens > TokenCount::ZERO {
                     eprintln!(
-                        "\x1b[36mcache read detected: {} tokens\x1b[0m",
-                        message.usage.cache_read_tokens
+                        "{}",
+                        Style::Cyan.stderr(format_args!(
+                            "cache read detected: {} tokens",
+                            message.usage.cache_read_tokens
+                        ))
                     );
                 }
             }
@@ -472,7 +491,12 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
                 before_count,
                 after_count,
             } => {
-                eprintln!("\x1b[2m(compacted: {before_count} → {after_count} messages)\x1b[0m");
+                eprintln!(
+                    "{}",
+                    Style::Dim.stderr(format_args!(
+                        "(compacted: {before_count} → {after_count} messages)"
+                    ))
+                );
             }
             AgentEvent::ContextCompacted {
                 before_count,
@@ -488,31 +512,51 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
                 if !cli.no_session {
                     store.save(&session)?;
                 }
-                eprintln!("\x1b[2m(compacted: {before_count} → {after_count} messages)\x1b[0m");
+                eprintln!(
+                    "{}",
+                    Style::Dim.stderr(format_args!(
+                        "(compacted: {before_count} → {after_count} messages)"
+                    ))
+                );
             }
             AgentEvent::SteeringInjected { messages } => {
                 eprintln!(
-                    "\x1b[2m(steering: {} messages injected)\x1b[0m",
-                    messages.len()
+                    "{}",
+                    Style::Dim.stderr(format_args!(
+                        "(steering: {} messages injected)",
+                        messages.len()
+                    ))
                 );
             }
             AgentEvent::FollowUpInjected { messages } => {
                 eprintln!(
-                    "\x1b[2m(follow-up: {} messages queued)\x1b[0m",
-                    messages.len()
+                    "{}",
+                    Style::Dim.stderr(format_args!(
+                        "(follow-up: {} messages queued)",
+                        messages.len()
+                    ))
                 );
             }
             AgentEvent::MaxTurnsReached { max_turns } => {
                 if !cancelled {
                     status.state = "turn_limit";
                 }
-                eprintln!("\n\x1b[33m⚠ hit max turns limit ({max_turns})\x1b[0m");
+                eprintln!(
+                    "\n{}",
+                    Style::Yellow.stderr(format_args!("⚠ hit max turns limit ({max_turns})"))
+                );
             }
             AgentEvent::Error { error } => {
-                eprintln!("\x1b[31merror: {}\x1b[0m", format_error(&error));
+                eprintln!(
+                    "{}",
+                    Style::Red.stderr(format_args!("error: {}", format_error(&error)))
+                );
                 if !cli.no_session {
                     store.save(&session)?;
-                    eprintln!("\x1b[2msession: {}\x1b[0m", session.meta.id);
+                    eprintln!(
+                        "{}",
+                        Style::Dim.stderr(format_args!("session: {}", session.meta.id))
+                    );
                 }
                 return Err(eyre!("{error}"));
             }
@@ -522,7 +566,10 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
 
     if !cli.no_session {
         store.save(&session)?;
-        eprintln!("\x1b[2msession: {}\x1b[0m", session.meta.id);
+        eprintln!(
+            "{}",
+            Style::Dim.stderr(format_args!("session: {}", session.meta.id))
+        );
     }
 
     if let Some(listener) = listener {

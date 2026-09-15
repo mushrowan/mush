@@ -8,6 +8,7 @@ use mush_ext::loader;
 use mush_session::compact;
 
 use crate::config;
+use crate::output::Style;
 
 pub struct AppSetup {
     pub cfg: config::Config,
@@ -245,7 +246,10 @@ async fn init_compaction_model(
     let id = cfg.compaction_model.as_ref()?;
     let m = mush_ai::discovery::resolve_model_by_id(id).unwrap_or_else(|| {
         eprintln!(
-            "\x1b[33mwarning: unknown compaction_model '{id}', falling back to active model\x1b[0m"
+            "{}",
+            Style::Yellow.stderr(format_args!(
+                "warning: unknown compaction_model '{id}', falling back to active model"
+            ))
         );
         model.clone()
     });
@@ -425,7 +429,10 @@ fn build_file_rules(cwd: &std::path::Path) -> Option<mush_agent::FileRuleCallbac
         None
     } else {
         let count = rules.len();
-        eprintln!("\x1b[2mfound {count} rule files in .mush/rules/\x1b[0m");
+        eprintln!(
+            "{}",
+            Style::Dim.stderr(format_args!("found {count} rule files in .mush/rules/"))
+        );
         Some(std::sync::Arc::new(mush_ext::rules::RuleIndex::new(rules)))
     };
 
@@ -488,7 +495,7 @@ fn build_lsp_diagnostics(
 
     let registry = std::sync::Arc::new(registry);
 
-    eprintln!("\x1b[2mLSP diagnostics enabled\x1b[0m");
+    eprintln!("{}", Style::Dim.stderr("LSP diagnostics enabled"));
 
     let diag_registry = registry.clone();
     let callback: mush_agent::DiagnosticCallback =
@@ -645,15 +652,21 @@ pub async fn auto_compact(
 
     if result.masked_count > 0 {
         eprintln!(
-            "\x1b[2m(masked {} old tool outputs, ~{} tokens saved)\x1b[0m",
-            result.masked_count, result.mask_tokens_saved
+            "{}",
+            Style::Dim.stderr(format_args!(
+                "(masked {} old tool outputs, ~{} tokens saved)",
+                result.masked_count, result.mask_tokens_saved
+            ))
         );
     }
     if result.summarised_count > 0 {
         eprintln!(
-            "\x1b[2m(compacted: {} messages summarised, {} kept)\x1b[0m",
-            result.summarised_count,
-            result.messages.len()
+            "{}",
+            Style::Dim.stderr(format_args!(
+                "(compacted: {} messages summarised, {} kept)",
+                result.summarised_count,
+                result.messages.len()
+            ))
         );
     }
 
@@ -668,8 +681,11 @@ pub async fn auto_compact(
         for r in &results {
             if !r.success {
                 eprintln!(
-                    "\x1b[33mwarning: post-compaction hook failed: {}\x1b[0m",
-                    r.command
+                    "{}",
+                    Style::Yellow.stderr(format_args!(
+                        "warning: post-compaction hook failed: {}",
+                        r.command
+                    ))
                 );
             }
         }

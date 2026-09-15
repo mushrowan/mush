@@ -1,4 +1,3 @@
-use std::io::IsTerminal;
 use std::time::Duration;
 
 use rmcp::ServiceExt;
@@ -39,7 +38,12 @@ fn status_line(text: &str, ansi: &str, colour: bool) -> String {
 pub(crate) fn report_status(text: &str, ansi: &str) {
     eprintln!(
         "{}",
-        status_line(text, ansi, std::io::stderr().is_terminal())
+        status_line(
+            text,
+            ansi,
+            anstream::AutoStream::auto(std::io::stderr()).current_choice()
+                == anstream::ColorChoice::AlwaysAnsi,
+        )
     );
 }
 

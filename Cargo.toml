@@ -121,6 +121,7 @@ pulldown-cmark = "0.13.4"
 crokey = { version = "1.4", features = ["serde"] }
 
 # cli
+anstream = "1.0.0"
 clap = { version = "4", features = ["derive", "env"] }
 # open URLs in the user's browser (used by /login)
 open = "5"

@@ -4,12 +4,13 @@ use mush_ai::types::CacheRetention;
 use mush_session::SessionStore;
 
 use crate::config;
+use crate::output::Style;
 use crate::setup::default_model_id;
 
 pub fn list_models() -> Result<()> {
     for m in mush_ai::discovery::merged_models() {
         let cost = format!("${:.2}/${:.2} per 1M tokens", m.cost.input, m.cost.output);
-        println!("  \x1b[1m{}\x1b[0m ({})", m.id, m.provider);
+        println!("  {} ({})", Style::Bold.stdout(m.id), m.provider);
         println!(
             "    context: {}k, max output: {}, {cost}",
             m.context_window.get() / 1000,
@@ -39,8 +40,13 @@ pub fn list_sessions() -> Result<()> {
         let age = format_age(&meta.updated_at);
         let id = short_id(&meta.id);
         println!(
-            "  \x1b[2m{}\x1b[0m  {} \x1b[2m({}, {} msgs, {})\x1b[0m",
-            id, title, meta.model_id, meta.message_count, age,
+            "  {}  {} {}",
+            Style::Dim.stdout(id),
+            title,
+            Style::Dim.stdout(format_args!(
+                "({}, {} msgs, {})",
+                meta.model_id, meta.message_count, age
+            )),
         );
     }
     println!("\nresume with: mush -c <id>");
@@ -56,7 +62,10 @@ pub fn delete_session(id: &str) -> Result<()> {
     store
         .delete(&session.id)
         .map_err(|e| eyre!("failed to delete: {e}"))?;
-    eprintln!("\x1b[32m✓ deleted session: {title}\x1b[0m");
+    eprintln!(
+        "{}",
+        Style::Green.stderr(format_args!("✓ deleted session: {title}"))
+    );
     Ok(())
 }
 
@@ -123,13 +132,13 @@ pub fn status(terminal_overrides: mush_tui::TerminalPolicyOverrides) -> Result<(
     let cfg = config::load_config();
     let terminal = cfg.terminal.with_overrides(terminal_overrides);
 
-    println!("\x1b[1mmush status\x1b[0m\n");
+    println!("{}\n", Style::Bold.stdout("mush status"));
 
     let config_path = config::config_dir().join("config.toml");
     if config_path.exists() {
         println!("  config: {}", config_path.display());
     } else {
-        println!("  config: \x1b[2m(none, using defaults)\x1b[0m");
+        println!("  config: {}", Style::Dim.stdout("(none, using defaults)"));
     }
 
     let cwd = mush_tui::canonical_dir(&std::env::current_dir().unwrap_or_default());
@@ -160,7 +169,7 @@ pub fn status(terminal_overrides: mush_tui::TerminalPolicyOverrides) -> Result<(
     );
     println!("  image probe: {}", terminal.image_probe.as_str());
 
-    println!("\n\x1b[1mauth\x1b[0m\n");
+    println!("\n{}\n", Style::Bold.stdout("auth"));
 
     let has_anthropic_env = std::env::var("ANTHROPIC_API_KEY").is_ok();
     let has_openrouter_env = std::env::var("OPENROUTER_API_KEY").is_ok();
@@ -175,38 +184,38 @@ pub fn status(terminal_overrides: mush_tui::TerminalPolicyOverrides) -> Result<(
 
     print!("  anthropic:   ");
     if has_anthropic_env {
-        println!("\x1b[32m✓ env var\x1b[0m");
+        println!("{}", Style::Green.stdout("✓ env var"));
     } else if has_anthropic_cfg {
-        println!("\x1b[32m✓ config file\x1b[0m");
+        println!("{}", Style::Green.stdout("✓ config file"));
     } else if has_anthropic_oauth {
-        println!("\x1b[32m✓ oauth\x1b[0m");
+        println!("{}", Style::Green.stdout("✓ oauth"));
     } else {
-        println!("\x1b[31m✗ not configured\x1b[0m");
+        println!("{}", Style::Red.stdout("✗ not configured"));
     }
 
     print!("  openrouter:  ");
     if has_openrouter_env {
-        println!("\x1b[32m✓ env var\x1b[0m");
+        println!("{}", Style::Green.stdout("✓ env var"));
     } else if has_openrouter_cfg {
-        println!("\x1b[32m✓ config file\x1b[0m");
+        println!("{}", Style::Green.stdout("✓ config file"));
     } else {
-        println!("\x1b[2m- not configured\x1b[0m");
+        println!("{}", Style::Dim.stdout("- not configured"));
     }
 
     print!("  openai:      ");
     if has_openai_env {
-        println!("\x1b[32m✓ env var\x1b[0m");
+        println!("{}", Style::Green.stdout("✓ env var"));
     } else if has_openai_cfg {
-        println!("\x1b[32m✓ config file\x1b[0m");
+        println!("{}", Style::Green.stdout("✓ config file"));
     } else {
-        println!("\x1b[2m- not configured\x1b[0m");
+        println!("{}", Style::Dim.stdout("- not configured"));
     }
 
     print!("  openai-codex:");
     if has_openai_codex_oauth {
-        println!("\x1b[32m ✓ oauth\x1b[0m");
+        println!("{}", Style::Green.stdout(" ✓ oauth"));
     } else {
-        println!("\x1b[2m - not configured\x1b[0m");
+        println!("{}", Style::Dim.stdout(" - not configured"));
     }
 
     for provider in [
@@ -223,17 +232,17 @@ pub fn status(terminal_overrides: mush_tui::TerminalPolicyOverrides) -> Result<(
         let has_cfg = cfg.api_keys.get(provider).is_some();
         print!("  {provider:<13}");
         if has_env {
-            println!("\x1b[32m✓ env var\x1b[0m");
+            println!("{}", Style::Green.stdout("✓ env var"));
         } else if has_cfg {
-            println!("\x1b[32m✓ config file\x1b[0m");
+            println!("{}", Style::Green.stdout("✓ config file"));
         } else {
-            println!("\x1b[2m- not configured\x1b[0m");
+            println!("{}", Style::Dim.stdout("- not configured"));
         }
     }
 
     let store = SessionStore::new(SessionStore::default_dir());
     let session_count = store.list().map(|s| s.len()).unwrap_or(0);
-    println!("\n\x1b[1msessions\x1b[0m\n");
+    println!("\n{}\n", Style::Bold.stdout("sessions"));
     println!("  {session_count} saved");
 
     Ok(())
@@ -282,7 +291,10 @@ pub async fn login(provider_id: Option<String>) -> Result<()> {
     store.providers.insert(provider_id, creds);
     oauth::save_credentials(&store).map_err(|e| eyre!("failed to save credentials: {e}"))?;
 
-    eprintln!("\n\x1b[32m✓ logged in to {}\x1b[0m", provider.name());
+    eprintln!(
+        "\n{}",
+        Style::Green.stderr(format_args!("✓ logged in to {}", provider.name()))
+    );
 
     eprintln!("refreshing model catalogue...");
     let client = mush_ai::http::client();
@@ -347,7 +359,10 @@ pub fn logout(provider_id: Option<String>) -> Result<()> {
 
     if store.providers.remove(&provider_id).is_some() {
         oauth::save_credentials(&store).map_err(|e| eyre!("failed to save credentials: {e}"))?;
-        eprintln!("\x1b[32m✓ logged out from {provider_id}\x1b[0m");
+        eprintln!(
+            "{}",
+            Style::Green.stderr(format_args!("✓ logged out from {provider_id}"))
+        );
     } else {
         eprintln!("not logged in to {provider_id}");
     }
