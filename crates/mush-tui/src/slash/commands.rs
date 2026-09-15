@@ -195,6 +195,10 @@ pub fn handle(
                 return None;
             };
 
+            if store.is_leased(&id) {
+                app.push_system_message("resume this supervised session from the cli");
+                return None;
+            }
             match store.load(&id) {
                 Ok(session) => {
                     *conversation = session.conversation;

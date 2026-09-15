@@ -283,3 +283,80 @@ fn empty_or_linked_prompt_cannot_reopen_completed_work() {
         assert!(!f.run.join("one/followups").exists());
     }
 }
+
+#[test]
+fn interrupted_report_state_transaction_recovers_without_losing_manual_edits() {
+    for changed in [false, true] {
+        let f = Fixture::new();
+        assert!(f.queue().status.success());
+        let archive = f.run.join("one/followups/after-001");
+        fs::remove_file(archive.join("committed")).unwrap();
+        fs::copy(archive.join("state.json"), f.run.join("one/state.json")).unwrap();
+        if changed {
+            fs::write(
+                f.workspace.join("report.json"),
+                b"{\"state\":\"blocked\",\"manual\":true}",
+            )
+            .unwrap();
+        }
+        let result = Command::new(env!("CARGO_BIN_EXE_mush-supervisor"))
+            .arg("run")
+            .arg(&f.manifest)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        if changed {
+            let supervisor: Value =
+                serde_json::from_slice(&fs::read(f.run.join("supervisor.json")).unwrap()).unwrap();
+            assert!(
+                supervisor["errors"][0]["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("follow-up transaction changed")
+            );
+            let report: Value =
+                serde_json::from_slice(&fs::read(f.workspace.join("report.json")).unwrap())
+                    .unwrap();
+            assert_eq!(report["manual"], true);
+            assert!(!f.workspace.join("resumed").exists());
+        } else {
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(archive.join("committed").exists());
+            assert_eq!(
+                fs::read_to_string(f.workspace.join("resumed")).unwrap(),
+                "saved"
+            );
+        }
+    }
+}
+
+#[test]
+fn truncated_archived_prompt_cannot_resume() {
+    let fixture = Fixture::new();
+    assert!(fixture.queue().status.success());
+    fs::write(
+        fixture.run.join("one/followups/after-001/prompt.txt"),
+        "short",
+    )
+    .unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_mush-supervisor"))
+        .arg("run")
+        .arg(&fixture.manifest)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(result.status.success());
+    let state: Value =
+        serde_json::from_slice(&fs::read(fixture.run.join("supervisor.json")).unwrap()).unwrap();
+    assert!(
+        state["errors"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("follow-up prompt changed")
+    );
+    assert!(!fixture.workspace.join("resumed").exists());
+}

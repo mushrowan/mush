@@ -552,6 +552,7 @@ fn exact_terminal_reasons_and_headless_evidence_do_not_claim_liveness() {
         session_id: None,
         reason: TerminalReason::Cancelled,
         report_path: "/synthetic/report.json".into(),
+        review: None,
     };
     fs::write(
         root.join("one/state.json"),

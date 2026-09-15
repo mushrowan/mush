@@ -38,6 +38,32 @@ pub struct IgnoredSessionFile {
 }
 
 impl SessionStore {
+    pub fn is_leased(&self, id: &SessionId) -> bool {
+        self.base_dir
+            .join(format!("{id}.lease"))
+            .symlink_metadata()
+            .is_ok()
+    }
+
+    pub fn lease(&self, id: &SessionId) -> Result<Option<std::fs::File>, StoreError> {
+        if !self.is_leased(id) {
+            return Ok(None);
+        }
+        let inherited = std::env::var("MUSH_SESSION_LEASE_FD")
+            .ok()
+            .map(|value| {
+                value
+                    .parse::<i32>()
+                    .map_err(|_| std::io::Error::other("invalid session lease descriptor"))
+            })
+            .transpose()?;
+        Ok(Some(mush_supervisor::admission::session_lock(
+            &self.base_dir,
+            id.as_str(),
+            inherited,
+        )?))
+    }
+
     pub fn default_dir() -> PathBuf {
         data_dir().join("sessions")
     }

@@ -164,15 +164,6 @@ async fn main() -> Result<()> {
     }
 }
 
-fn resume_session(store: &SessionStore, id_or_prefix: &str) -> Result<Session> {
-    let meta = store
-        .resolve(id_or_prefix)
-        .map_err(|e| eyre!("failed to resolve session: {e}"))?;
-    store
-        .load(&meta.id)
-        .map_err(|e| eyre!("failed to load session: {e}"))
-}
-
 async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
     let mut status = headless::Status {
         path: cli.status_file.clone(),
@@ -198,8 +189,11 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
 async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Status) -> Result<()> {
     let store = SessionStore::new(SessionStore::default_dir());
     let cwd = mush_tui::canonical_dir(&std::env::current_dir()?);
+    let mut _session_lease = None;
     let mut session = if let Some(ref id) = cli.resume {
-        resume_session(&store, id)?
+        let meta = store.resolve(id)?;
+        _session_lease = store.lease(&meta.id)?;
+        store.load(&meta.id)?
     } else {
         Session::new(
             &cli.model
@@ -619,9 +613,12 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
     }
 
     let cwd_str = setup.cwd.display().to_string();
+    let mut _session_lease = None;
     let session = if let Some(ref resume_id) = cli.resume {
         let store = SessionStore::new(SessionStore::default_dir());
-        resume_session(&store, resume_id)?
+        let meta = store.resolve(resume_id)?;
+        _session_lease = store.lease(&meta.id)?;
+        store.load(&meta.id)?
     } else {
         Session::new(setup.model.id.as_str(), &cwd_str)
     };

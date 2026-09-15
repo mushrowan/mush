@@ -146,7 +146,13 @@ pub async fn prepare(args: Prepare) -> Result<()> {
         model: args.model,
         fallback_model: args.fallback_model,
         status_file: true,
+        durable_events: false,
         orchestrator_inbox: None,
+        admission: None,
+        routing_guard: None,
+        admitted: None,
+        execution_locked: false,
+        session_lease: None,
         workers: Vec::new(),
     };
     validate(&manifest)?;
@@ -205,6 +211,7 @@ pub async fn prepare(args: Prepare) -> Result<()> {
             gate: None,
             repeat_done: false,
             pause_seconds: 30,
+            review_verdict: None,
         });
         atomic(
             &directory.join("prepared.json"),

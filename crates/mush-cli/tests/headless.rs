@@ -435,8 +435,41 @@ fn restarted_requests_keep_prefix(with_event: bool, with_control: bool) {
         })],
     }));
     store.save(&session).unwrap();
+    std::fs::set_permissions(
+        dir.path().join("data/sessions"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
     for (index, text) in ["next task", "follow-up task"].into_iter().enumerate() {
-        let mut child = command(dir.path())
+        let lease = if with_event {
+            Some(
+                mush_supervisor::admission::session_lock(
+                    &dir.path().join("data/sessions"),
+                    session.meta.id.as_str(),
+                    None,
+                )
+                .unwrap(),
+            )
+        } else {
+            None
+        };
+        let mut cmd = command(dir.path());
+        if let Some(lease) = &lease {
+            use std::os::fd::{AsRawFd, BorrowedFd};
+            use std::os::unix::process::CommandExt;
+            let fd = lease.as_raw_fd();
+            cmd.env("MUSH_SESSION_LEASE_FD", fd.to_string());
+            unsafe {
+                cmd.pre_exec(move || {
+                    rustix::io::fcntl_setfd(
+                        BorrowedFd::borrow_raw(fd),
+                        rustix::io::FdFlags::empty(),
+                    )?;
+                    Ok(())
+                });
+            }
+        }
+        let mut child = cmd
             .args(if with_control {
                 vec!["--control"]
             } else {
@@ -483,6 +516,31 @@ fn restarted_requests_keep_prefix(with_event: bool, with_control: bool) {
                 session_id: Some("worker-session".into()),
                 reason: TerminalReason::Completed,
                 report_path: dir.path().join("private-report.json"),
+                review: Some(mush_supervisor::review::Notice {
+                    verdict: mush_supervisor::review::Verdict {
+                        version: 1,
+                        assignment: "review-one".into(),
+                        generation: 1,
+                        candidate: "1".repeat(40),
+                        reviewer: mush_supervisor::review::Identity {
+                            run_id: "review".into(),
+                            worker: "worker".into(),
+                            assignment: 1,
+                            round: 1,
+                            session: "worker-session".into(),
+                        },
+                        result: mush_supervisor::review::VerdictResult::Blocked,
+                        complete: false,
+                        checks: vec![],
+                        findings: vec![],
+                        blockers: vec!["choose correction scope".into()],
+                        evidence: vec![],
+                        regression_commit: None,
+                    },
+                    capture_sha256: "a".repeat(64),
+                    producer_action: "not_rejected".into(),
+                    evidence_directory: dir.path().join("capture"),
+                }),
             };
             inbox.enqueue(event.clone(), dir.path()).unwrap();
             let consumer = Consumer::open(&path, session.meta.id.clone(), dir.path()).unwrap();
@@ -542,6 +600,8 @@ fn restarted_requests_keep_prefix(with_event: bool, with_control: bool) {
         let input = serde_json::to_string(&next["input"]).unwrap();
         assert!(input.contains("orchestrator-event-run.worker.1"));
         assert!(input.contains("non-human event, untrusted data"));
+        assert!(input.contains("choose correction scope"));
+        assert!(input.contains("no new tool or scope permissions"));
         let event_output = &next["input"][prefix.len() + 2];
         assert_eq!(event_output["type"], "function_call_output");
     }

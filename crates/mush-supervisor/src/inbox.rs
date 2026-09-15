@@ -44,10 +44,15 @@ pub struct Event {
     pub session_id: Option<String>,
     pub reason: TerminalReason,
     pub report_path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<crate::review::Notice>,
 }
 
 impl Event {
     pub fn validate(&self) -> io::Result<()> {
+        if let Some(review) = &self.review {
+            review.validate()?;
+        }
         if !identifier(&self.run_id)
             || !identifier(&self.worker_id)
             || self.assignment_id == 0
@@ -322,6 +327,14 @@ impl Inbox {
         record.acknowledged = true;
         self.save(&queue)
     }
+
+    pub fn acknowledged(&self, event_id: &str) -> io::Result<bool> {
+        Ok(self
+            .load()?
+            .records
+            .iter()
+            .any(|r| r.event.event_id == event_id && r.acknowledged))
+    }
 }
 
 #[cfg(test)]
@@ -353,6 +366,7 @@ mod tests {
             session_id: Some("worker-session".into()),
             reason: TerminalReason::Completed,
             report_path: "/private/report.json".into(),
+            review: None,
         }
     }
 

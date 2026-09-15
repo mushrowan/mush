@@ -19,6 +19,7 @@ fn event(path: &Path) -> Event {
         session_id: Some("worker-session".into()),
         reason: TerminalReason::Completed,
         report_path: path.join("private-report.json"),
+        review: None,
     }
 }
 
@@ -131,4 +132,83 @@ fn event_receipt_survives_compaction() {
     assert!(append(&mut session.conversation, &event).unwrap());
     session.conversation.compact_at_leaf("summary".into(), 1);
     assert!(!append(&mut session.conversation, &event).unwrap());
+}
+
+#[test]
+fn review_payload_survives_parent_reconnect_before_ack() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = Session::new("fixture", &dir.path().display().to_string());
+    let id = session.meta.id.clone();
+    let store = SessionStore::new(dir.path().join("sessions"));
+    store.save(&session).unwrap();
+    let inbox = Inbox::register(
+        &dir.path().join("inbox"),
+        Binding {
+            session_id: id.to_string(),
+            cwd: dir.path().into(),
+            workers: vec![dir.path().into()],
+        },
+    )
+    .unwrap();
+    let mut event = event(dir.path());
+    event.review = Some(mush_supervisor::review::Notice {
+        verdict: mush_supervisor::review::Verdict {
+            version: 1,
+            assignment: "slice-review".into(),
+            generation: 1,
+            candidate: "1".repeat(40),
+            reviewer: mush_supervisor::review::Identity {
+                run_id: "review".into(),
+                worker: "reviewer".into(),
+                assignment: 1,
+                round: 1,
+                session: "review-session".into(),
+            },
+            result: mush_supervisor::review::VerdictResult::Blocked,
+            complete: false,
+            checks: vec![],
+            findings: vec![],
+            blockers: vec!["choose correction scope".into()],
+            evidence: vec![],
+            regression_commit: None,
+        },
+        capture_sha256: "a".repeat(64),
+        producer_action: "not_rejected".into(),
+        evidence_directory: dir.path().join("capture"),
+    });
+    inbox.enqueue(event.clone(), dir.path()).unwrap();
+    let consumer = Consumer::open(&dir.path().join("inbox"), id.clone(), dir.path()).unwrap();
+    assert_eq!(consumer.pending().unwrap(), vec![event.clone()]);
+    assert!(!consumer.acknowledge_saved(&event.event_id, &store).unwrap());
+    append(&mut session.conversation, &event).unwrap();
+    store.save(&session).unwrap();
+    drop(consumer);
+    let consumer = Consumer::open(&dir.path().join("inbox"), id.clone(), dir.path()).unwrap();
+    assert_eq!(consumer.pending().unwrap(), vec![event.clone()]);
+    let loaded = store.load(&id).unwrap();
+    let Message::Event(message) = loaded.context().last().unwrap().clone() else {
+        panic!("missing event")
+    };
+    assert!(message.content.contains("choose correction scope"));
+    assert!(message.content.contains("no new tool or scope permissions"));
+    assert!(consumer.acknowledge_saved(&event.event_id, &store).unwrap());
+    assert!(inbox.pending().unwrap().is_empty());
+}
+
+#[test]
+fn supervised_session_lease_excludes_another_launcher() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(
+        dir.path(),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+    let session = Session::new("fixture", &dir.path().display().to_string());
+    let store = SessionStore::new(dir.path().to_owned());
+    let lock = mush_supervisor::admission::session_lock(dir.path(), session.meta.id.as_str(), None)
+        .unwrap();
+    assert!(store.is_leased(&session.meta.id));
+    assert!(store.lease(&session.meta.id).is_err());
+    drop(lock);
+    assert!(store.lease(&session.meta.id).unwrap().is_some());
 }

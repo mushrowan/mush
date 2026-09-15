@@ -21,6 +21,7 @@ mod events;
 mod follow_up;
 mod poke;
 mod prompts;
+mod routing;
 mod tasks;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -33,6 +34,40 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Operation {
+    RegisterReview {
+        config: PathBuf,
+    },
+    RouteReviews {
+        directory: PathBuf,
+        #[arg(long)]
+        once: bool,
+    },
+    ReviewStatus {
+        directory: PathBuf,
+    },
+    ReviewDisable {
+        directory: PathBuf,
+    },
+    ReviewEnable {
+        directory: PathBuf,
+    },
+    ReviewRetry {
+        directory: PathBuf,
+    },
+    AdmissionStatus {
+        directory: PathBuf,
+    },
+    AdmissionRelease {
+        directory: PathBuf,
+        claim: String,
+        #[arg(long)]
+        confirm_processes_exited: bool,
+    },
+    PreparedWorkspace {
+        directory: PathBuf,
+        #[arg(long)]
+        report: Option<PathBuf>,
+    },
     RegisterInbox {
         path: PathBuf,
         #[arg(long)]
@@ -93,8 +128,20 @@ struct Manifest {
     fallback_model: String,
     #[serde(default)]
     status_file: bool,
+    #[serde(default)]
+    durable_events: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     orchestrator_inbox: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    admission: Option<PathBuf>,
+    #[serde(skip)]
+    routing_guard: Option<PathBuf>,
+    #[serde(skip)]
+    admitted: Option<String>,
+    #[serde(skip)]
+    execution_locked: bool,
+    #[serde(skip)]
+    session_lease: Option<Arc<File>>,
     workers: Vec<Worker>,
 }
 
@@ -111,10 +158,20 @@ struct Worker {
     repeat_done: bool,
     #[serde(default = "pause_seconds")]
     pause_seconds: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    review_verdict: Option<PathBuf>,
 }
 
 fn pause_seconds() -> u64 {
     30
+}
+
+impl Manifest {
+    fn journalled(&self) -> bool {
+        self.durable_events
+            || self.orchestrator_inbox.is_some()
+            || self.workers.iter().any(|w| w.review_verdict.is_some())
+    }
 }
 
 #[derive(Serialize)]
@@ -361,9 +418,18 @@ async fn worker(
     mut stop: watch::Receiver<bool>,
 ) -> Result<()> {
     let dir = manifest.directory.join(&job.name);
+    follow_up::recover(&manifest.directory, &job.name)?;
     fs::create_dir_all(&dir)?;
     let data = dir.join("mush-data");
     fs::create_dir_all(&data)?;
+    if manifest.admission.is_some() {
+        use std::os::unix::fs::DirBuilderExt;
+        let sessions = data.join("sessions");
+        if !sessions.exists() {
+            fs::DirBuilder::new().mode(0o700).create(&sessions)?;
+        }
+        mush_supervisor::inbox::private_directory(&sessions)?;
+    }
     if let Some(home) = std::env::var_os("HOME") {
         let discovery = PathBuf::from(home).join(".local/share/mush/discovered-models.json");
         if discovery.is_file() {
@@ -382,7 +448,7 @@ async fn worker(
     } else {
         previous
     };
-    if manifest.orchestrator_inbox.is_some()
+    if manifest.journalled()
         && events::has_terminal_event(&state_path)
         && previous
             .as_ref()
@@ -430,7 +496,7 @@ async fn worker(
     let mut last_round = previous_round;
     let assignment = events::assignment(previous.as_ref(), previous_round);
     let save = |state: &State<'_>, reason| events::save(&manifest, &job, assignment, state, reason);
-    if manifest.orchestrator_inbox.is_some() && previous_state == Some("running") {
+    if manifest.journalled() && previous_state == Some("running") {
         let process = read_json(&dir.join("process.json"));
         if let Some(tracked) =
             process.and_then(|v| serde_json::from_value::<HashMap<u32, u64>>(v).ok())
@@ -511,11 +577,40 @@ async fn worker(
         if *stop.borrow() {
             break;
         }
+        let admission_id = mush_supervisor::review::digest(
+            format!("{}:{}:{round}", manifest.directory.display(), job.name).as_bytes(),
+        );
+        let _execution = if manifest.execution_locked {
+            None
+        } else {
+            manifest
+                .admission
+                .as_ref()
+                .map(|pool| mush_supervisor::admission::execution_lock(pool, &job.cwd))
+                .transpose()?
+        };
+        if let Some(pool) = &manifest.admission
+            && manifest.admitted.as_ref() != Some(&admission_id)
+        {
+            loop {
+                if mush_supervisor::admission::Pool::open(pool)?.claim(
+                    &admission_id,
+                    &manifest.directory,
+                    &job.name,
+                )? {
+                    break;
+                }
+                sleep_or_stop(1, &mut stop).await;
+                if *stop.borrow() {
+                    return Ok(());
+                }
+            }
+        }
         let base = fs::read_to_string(&job.prompt)?;
         let prompt = prompts::assignment(&base, round, &job.report, manifest.until);
         let inbox = manifest.directory.join("inbox").join(&job.name);
         let mut prompt = prompt;
-        if manifest.orchestrator_inbox.is_some() {
+        if manifest.journalled() {
             prompt.push_str(&format!("\n\nwrite an owner-only json report at {} with these exact identity fields: {}. set state to working, done, blocked or awaiting_input. done means this assignment is complete. blocked means a prerequisite is unavailable. awaiting_input means a decision is needed.", job.report.display(), json!({"run_id": events::run_id(&manifest)?, "worker_id":job.name, "assignment_id":assignment, "round":round})));
         }
         if let Some(follow_up) = follow_up::instructions(&dir, round)? {
@@ -539,7 +634,7 @@ async fn worker(
         }
         let log_path = dir.join(format!("round-{round:03}.log"));
         let headless_status = dir.join(format!("round-{round:03}.json"));
-        if manifest.orchestrator_inbox.is_some() && headless_status.exists() {
+        if manifest.journalled() && headless_status.exists() {
             fs::remove_file(&headless_status)?;
         }
         let log = private_file(&log_path)?;
@@ -566,6 +661,33 @@ async fn worker(
         if status_enabled && let Some(id) = &session {
             cmd.arg("--continue").arg(id);
         }
+        let session_lease = if let Some(lease) = &manifest.session_lease {
+            Some(lease.clone())
+        } else if manifest.admission.is_some()
+            && let Some(session) = &session
+        {
+            let sessions = dir.join("mush-data/sessions");
+            Some(Arc::new(mush_supervisor::admission::session_lock(
+                &sessions, session, None,
+            )?))
+        } else {
+            None
+        };
+        use std::os::fd::AsRawFd;
+        if let Some(lease) = &session_lease {
+            let fd = lease.as_raw_fd();
+            cmd.env("MUSH_SESSION_LEASE_FD", fd.to_string());
+            unsafe {
+                cmd.pre_exec(move || {
+                    if libc::fcntl(fd, libc::F_SETFD, 0) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        } else {
+            cmd.env_remove("MUSH_SESSION_LEASE_FD");
+        }
         cmd.arg("-p").arg(prompt);
         save(
             &State {
@@ -581,11 +703,32 @@ async fn worker(
             },
             None,
         )?;
-        if manifest.orchestrator_inbox.is_some() {
+        if manifest.journalled() {
             cmd.env("MUSH_RUN_ID", events::run_id(&manifest)?)
                 .env("MUSH_WORKER_ID", &job.name)
                 .env("MUSH_ASSIGNMENT_ID", assignment.to_string())
                 .env("MUSH_ROUND", round.to_string());
+        }
+        let launch_guard = manifest
+            .routing_guard
+            .as_ref()
+            .map(|path| Lock::acquire(&path.join("transaction.lock")))
+            .transpose()?;
+        if *stop.borrow()
+            || Utc::now() >= manifest.until
+            || manifest.directory.join("STOP").exists()
+            || manifest
+                .routing_guard
+                .as_ref()
+                .is_some_and(|path| !routing::enabled(path))
+        {
+            if let Some(pool) = &manifest.admission {
+                mush_supervisor::admission::Pool::open(pool)?.release(&admission_id)?;
+            }
+            break;
+        }
+        if let Some(directory) = &manifest.routing_guard {
+            routing::launch_ready(directory)?;
         }
         let mut child = match cmd.spawn() {
             Ok(child) => child,
@@ -613,9 +756,13 @@ async fn worker(
         }
         let mut tracked = HashMap::new();
         descendants(pid, &mut tracked);
-        if manifest.orchestrator_inbox.is_some() {
+        if manifest.journalled() || manifest.admission.is_some() {
             atomic(&dir.join("process.json"), &tracked)?;
         }
+        if let Some(pool) = &manifest.admission {
+            mush_supervisor::admission::Pool::open(pool)?.started(&admission_id, pid, &tracked)?;
+        }
+        drop(launch_guard);
         let started = Instant::now();
         let mut activity = started;
         let mut size = 0;
@@ -630,8 +777,11 @@ async fn worker(
                 },
                 _ = timer.tick() => {
                     descendants(pid, &mut tracked);
-                    if manifest.orchestrator_inbox.is_some() {
+                    if manifest.journalled() {
                         atomic(&dir.join("process.json"), &tracked)?;
+                    }
+                    if let Some(pool) = &manifest.admission {
+                        mush_supervisor::admission::Pool::open(pool)?.started(&admission_id, pid, &tracked)?;
                     }
                     let next_size = fs::metadata(&log_path).map_or(0, |m| m.len());
                     if next_size != size { size = next_size; activity = Instant::now(); }
@@ -652,6 +802,15 @@ async fn worker(
         tracked.extend(survivors);
         signal_tree(&tracked, "-TERM").await;
         signal_tree(&tracked, "-KILL").await;
+        let remaining = processes();
+        if let Some(pool) = &manifest.admission
+            && !tracked.is_empty()
+            && !tracked
+                .iter()
+                .any(|(pid, start)| remaining.get(pid).is_some_and(|p| p.start == *start))
+        {
+            mush_supervisor::admission::Pool::open(pool)?.release(&admission_id)?;
+        }
         drop(permit);
         if status_enabled {
             session = session_from_status(&headless_status).or(session);
@@ -659,12 +818,10 @@ async fn worker(
         if *stop.borrow() || Utc::now() >= manifest.until {
             break;
         }
-        let report = manifest
-            .orchestrator_inbox
-            .is_none()
+        let report = (!manifest.journalled())
             .then(|| read_json(&job.report))
             .flatten();
-        let checked_state = if manifest.orchestrator_inbox.is_some() {
+        let checked_state = if manifest.journalled() {
             Some(events::report_state(&manifest, &job, assignment, round)?)
         } else {
             None
@@ -691,7 +848,7 @@ async fn worker(
         };
         let status_cancelled =
             read_json(&headless_status).is_some_and(|s| s["state"] == "cancelled");
-        if manifest.orchestrator_inbox.is_some()
+        if manifest.journalled()
             && (child_survived
                 || failure.is_none()
                     && read_json(&headless_status).is_none_or(|s| {
@@ -712,7 +869,7 @@ async fn worker(
                 Failure::Other
             });
         }
-        let action = if manifest.orchestrator_inbox.is_some()
+        let action = if manifest.journalled()
             && (timed_out
                 || status_cancelled
                 || child_survived
@@ -825,6 +982,9 @@ async fn run(path: &Path) -> Result<()> {
 }
 
 async fn supervise(manifest: Manifest, _lock: Lock, pending_only: bool) -> Result<()> {
+    if manifest.directory.join("review-reservation.json").exists() {
+        return Err("run has a review reservation".into());
+    }
     events::initialise(&manifest)?;
     events::replay(&manifest)?;
     if manifest.directory.join("STOP").exists() {
@@ -956,7 +1116,7 @@ fn spawn_worker(
             state["detail"] = json!(error.to_string());
             state["at"] = json!(Utc::now());
             if !events::has_terminal_event(&state_path) {
-                let saved = if m.orchestrator_inbox.is_some() {
+                let saved = if m.journalled() {
                     let round = state["round"]
                         .as_u64()
                         .and_then(|n| u32::try_from(n).ok())
@@ -993,6 +1153,55 @@ fn spawn_worker(
 #[tokio::main]
 async fn main() -> Result<()> {
     match Cli::parse().command {
+        Operation::RegisterReview { config } => routing::register(&config),
+        Operation::RouteReviews { directory, once } => routing::run(&directory, once).await,
+        Operation::ReviewStatus { directory } => routing::status(&directory),
+        Operation::ReviewDisable { directory } => routing::disable(&directory),
+        Operation::ReviewEnable { directory } => routing::enable(&directory),
+        Operation::ReviewRetry { directory } => routing::retry(&directory),
+        Operation::AdmissionStatus { directory } => {
+            println!(
+                "{}",
+                mush_supervisor::admission::Pool::open(&directory)?.status()?
+            );
+            Ok(())
+        }
+        Operation::AdmissionRelease {
+            directory,
+            claim,
+            confirm_processes_exited,
+        } => {
+            if !confirm_processes_exited {
+                return Err("confirm process cleanup before releasing capacity".into());
+            }
+            let saved = mush_supervisor::admission::Pool::open(&directory)?
+                .claims()
+                .get(&claim)
+                .cloned()
+                .ok_or("unknown admission claim")?;
+            let _run = Lock::acquire(&saved.run.join("supervisor.lock"))?;
+            let mut pool = mush_supervisor::admission::Pool::open(&directory)?;
+            let saved = pool.claims().get(&claim).ok_or("unknown admission claim")?;
+            let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
+            let live = processes();
+            if saved.boot_id == boot.trim()
+                && saved
+                    .processes
+                    .iter()
+                    .any(|(pid, start)| live.get(pid).is_some_and(|p| p.start == *start))
+            {
+                return Err("claimed processes are still alive".into());
+            }
+            pool.release(&claim)?;
+            Ok(())
+        }
+        Operation::PreparedWorkspace { directory, report } => {
+            println!(
+                "{}",
+                routing::workspace_digest(&directory, report.as_deref())?
+            );
+            Ok(())
+        }
         Operation::RegisterInbox {
             path,
             session_id,

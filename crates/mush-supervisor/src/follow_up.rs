@@ -13,7 +13,10 @@ fn bytes(path: &Path, limit: u64) -> Result<Vec<u8>> {
         return Err("expected a regular follow-up file".into());
     }
     let mut output = Vec::new();
-    fs::File::open(path)?
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?
         .take(limit + 1)
         .read_to_end(&mut output)?;
     if output.len() as u64 > limit {
@@ -39,6 +42,31 @@ pub fn queue(directory: &Path, worker: &str, prompt_file: &Path) -> Result<()> {
     }
     let directory = fs::canonicalize(directory)?;
     let _lock = Lock::acquire(&directory.join("supervisor.lock"))?;
+    if directory.join("review-reservation.json").exists() {
+        return Err("run has a review reservation".into());
+    }
+    let manifest: Manifest =
+        serde_json::from_slice(&bytes(&directory.join("manifest.json"), 1024 * 1024)?)?;
+    let _session = if manifest.admission.is_some() {
+        let state: Value = serde_json::from_slice(&bytes(
+            &directory.join(worker).join("state.json"),
+            1024 * 1024,
+        )?)?;
+        let id = state["session_id"]
+            .as_str()
+            .ok_or("supervised session identity missing")?;
+        Some(mush_supervisor::admission::session_lock(
+            &directory.join(worker).join("mush-data/sessions"),
+            id,
+            None,
+        )?)
+    } else {
+        None
+    };
+    queue_locked(&directory, worker, prompt_file)
+}
+
+pub fn queue_locked(directory: &Path, worker: &str, prompt_file: &Path) -> Result<()> {
     if directory.join("STOP").exists() {
         return Err("run is stopped".into());
     }
@@ -63,6 +91,7 @@ pub fn queue(directory: &Path, worker: &str, prompt_file: &Path) -> Result<()> {
         return Err("follow-up prompt is empty".into());
     }
     let dir = directory.join(worker);
+    recover(directory, worker)?;
     if !dir.symlink_metadata()?.is_dir() {
         return Err("invalid worker directory".into());
     }
@@ -108,19 +137,24 @@ pub fn queue(directory: &Path, worker: &str, prompt_file: &Path) -> Result<()> {
     }
     fs::create_dir_all(&history)?;
     let archive = history.join(format!("after-{round:03}"));
-    fs::DirBuilder::new().mode(0o700).create(&archive)?;
-    save(&archive.join("state.json"), &original_state)?;
-    save(&archive.join("report.json"), &original_report)?;
-    save(&archive.join("checkpoint.json"), &checkpoint)?;
-    save(&archive.join("session.json"), &saved_session)?;
-    save(&archive.join("prompt.txt"), prompt.as_bytes())?;
+    let staged = history.join(format!("preparing-{round:03}"));
+    fs::DirBuilder::new().mode(0o700).create(&staged)?;
+    save(&staged.join("state.json"), &original_state)?;
+    save(&staged.join("report.json"), &original_report)?;
+    save(&staged.join("checkpoint.json"), &checkpoint)?;
+    save(&staged.join("session.json"), &saved_session)?;
+    save(&staged.join("prompt.txt"), prompt.as_bytes())?;
+    save(
+        &staged.join("prompt.sha256"),
+        mush_supervisor::review::digest(prompt.as_bytes()).as_bytes(),
+    )?;
     if directory.join("STOP").exists() || Utc::now() >= manifest.until {
         return Err("run stopped while preparing follow-up".into());
     }
     report["state"] = json!("working");
     report["follow_up"] = json!({"after_round":round,"prompt":archive.join("prompt.txt"),"previous_report":archive.join("report.json"),"queued_at":Utc::now()});
     state["state"] = json!("follow_up_pending");
-    if manifest.orchestrator_inbox.is_some() {
+    if manifest.journalled() {
         state["assignment_id"] = json!(round + 1);
     }
     state["session_id"] = json!(session);
@@ -129,6 +163,20 @@ pub fn queue(directory: &Path, worker: &str, prompt_file: &Path) -> Result<()> {
     if let Some(state) = state.as_object_mut() {
         state.remove("terminal_event");
     }
+    save(
+        &staged.join("next-state.json"),
+        &serde_json::to_vec(&state)?,
+    )?;
+    save(
+        &staged.join("next-report.json"),
+        &serde_json::to_vec(&report)?,
+    )?;
+    fs::File::open(&staged)?.sync_all()?;
+    if archive.exists() {
+        return Err("follow-up archive already exists".into());
+    }
+    fs::rename(&staged, &archive)?;
+    fs::File::open(&history)?.sync_all()?;
     atomic(&job.report, &report)?;
     if let Err(error) = atomic(&state_path, &state) {
         atomic(
@@ -137,7 +185,71 @@ pub fn queue(directory: &Path, worker: &str, prompt_file: &Path) -> Result<()> {
         )?;
         return Err(error);
     }
+    save(&archive.join("committed"), b"committed")?;
+    fs::File::open(&archive)?.sync_all()?;
     println!("{}", archive.display());
+    Ok(())
+}
+
+pub fn recover(directory: &Path, worker: &str) -> Result<()> {
+    let history = directory.join(worker).join("followups");
+    if history.is_symlink() {
+        return Err("invalid follow-up history directory".into());
+    }
+    let entries = match fs::read_dir(&history) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let manifest: Manifest =
+        serde_json::from_slice(&bytes(&directory.join("manifest.json"), 1024 * 1024)?)?;
+    let job = manifest
+        .workers
+        .iter()
+        .find(|job| job.name == worker)
+        .ok_or("unknown follow-up worker")?;
+    let mut entries = entries.collect::<std::io::Result<Vec<_>>>()?;
+    if entries.len() > 1000 {
+        return Err("follow-up history exceeds limit".into());
+    }
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("preparing-") {
+            return Err("incomplete follow-up archive requires reconciliation".into());
+        }
+        let archive = entry.path();
+        if name.starts_with("after-") && !archive.symlink_metadata()?.is_dir() {
+            return Err("unsafe follow-up archive".into());
+        }
+        if !name.starts_with("after-")
+            || archive.join("committed").exists()
+            || !archive.join("next-state.json").exists()
+        {
+            continue;
+        }
+        let state_path = directory.join(worker).join("state.json");
+        let next_state = bytes(&archive.join("next-state.json"), 1024 * 1024)?;
+        let next_report = bytes(&archive.join("next-report.json"), 1024 * 1024)?;
+        for (current, previous, next) in [
+            (&state_path, archive.join("state.json"), &next_state),
+            (&job.report, archive.join("report.json"), &next_report),
+        ] {
+            let current = bytes(current, 1024 * 1024)?;
+            let previous = bytes(&previous, 1024 * 1024)?;
+            let current: Value = serde_json::from_slice(&current)?;
+            if current != serde_json::from_slice::<Value>(&previous)?
+                && current != serde_json::from_slice::<Value>(next)?
+            {
+                return Err("follow-up transaction changed, reconcile manually".into());
+            }
+        }
+        mush_supervisor::inbox::replace(&job.report, &next_report)?;
+        mush_supervisor::inbox::replace(&state_path, &next_state)?;
+        save(&archive.join("committed"), b"committed")?;
+        fs::File::open(&archive)?.sync_all()?;
+    }
     Ok(())
 }
 
@@ -167,7 +279,14 @@ pub fn instructions(directory: &Path, round: u32) -> Result<Option<String>> {
     }
     latest
         .map(|(_, path)| {
-            String::from_utf8(bytes(&path.join("prompt.txt"), 128 * 1024)?).map_err(Into::into)
+            let prompt = bytes(&path.join("prompt.txt"), 128 * 1024)?;
+            let expected = path.join("prompt.sha256");
+            if expected.exists()
+                && bytes(&expected, 64)? != mush_supervisor::review::digest(&prompt).as_bytes()
+            {
+                return Err("follow-up prompt changed".into());
+            }
+            String::from_utf8(prompt).map_err(Into::into)
         })
         .transpose()
 }

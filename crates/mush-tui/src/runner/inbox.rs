@@ -190,6 +190,8 @@ pub(super) async fn safe_to_consume(
     streams.is_empty()
         && state.meta(mush_ai::types::PaneId::new(1)).is_none()
         && !runtime.session.app.stream.active
+        && runtime.session.app.input.text.is_empty()
+        && runtime.session.app.input.images.is_empty()
         && runtime.session.app.active_tools.is_empty()
         && runtime.pending_prompt.is_none()
         && runtime.pending_compactions.is_empty()
@@ -236,6 +238,7 @@ mod tests {
             session_id: None,
             reason: TerminalReason::Completed,
             report_path: binding.cwd.join("report.json"),
+            review: None,
         };
         Inbox::open(dir)
             .unwrap()
@@ -358,6 +361,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn draft_blocks_delivery_and_stays_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let inbox_dir = dir.path().join("inbox");
+        let mut config = TuiConfig::for_test();
+        config.cwd = dir.path().to_owned();
+        config.save_session = Some(Arc::new(|_| {}));
+        let binding = register(&inbox_dir, &config).unwrap();
+        let event = deliver(&inbox_dir, &binding);
+        let mut inbox = Some(OrchestratorInbox::open(&inbox_dir, &config).unwrap());
+        let mut runtime = runtime();
+        runtime.session.app.input.text = "unsent draft".into();
+        runtime.session.app.input.cursor = 4;
+        assert!(
+            poll(
+                &mut inbox,
+                &new_agent_streams(),
+                &StreamState::new(),
+                &mut runtime,
+                &config
+            )
+            .await
+        );
+        assert_eq!(runtime.session.app.input.text, "unsent draft");
+        assert_eq!(runtime.session.app.input.cursor, 4);
+        assert!(runtime.session.pending_prompt.is_none());
+        assert!(runtime.session.conversation.context().is_empty());
+        assert_eq!(
+            Inbox::open(&inbox_dir).unwrap().pending().unwrap(),
+            vec![event]
+        );
+    }
+
+    #[tokio::test]
     async fn production_streams_queue_events_between_tool_calls_and_repeated_agent_end() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = TuiConfig::for_test();
@@ -393,6 +429,7 @@ mod tests {
             session_id: None,
             reason: TerminalReason::Completed,
             report_path: dir.path().join("private.json"),
+            review: None,
         };
         inbox.enqueue(event.clone(), dir.path()).unwrap();
         let consumer = Consumer::open(

@@ -10,15 +10,19 @@ use serde_json::{Value, json};
 use crate::{Manifest, Result, State, Worker, atomic, read_json};
 
 pub fn initialise(manifest: &Manifest) -> Result<()> {
-    if let Some(path) = &manifest.orchestrator_inbox {
+    if manifest.journalled() {
         private_directory(&manifest.directory)?;
-        let binding = Inbox::open(path)?.binding()?;
+        let binding = manifest
+            .orchestrator_inbox
+            .as_ref()
+            .map(|p| Inbox::open(p)?.binding())
+            .transpose()?;
         if !manifest.status_file || manifest.max_rounds > 1024 || manifest.workers.len() > 32 {
             return Err("orchestrator events require status_file and at most 1024 rounds".into());
         }
         for worker in &manifest.workers {
             let cwd = fs::canonicalize(&worker.cwd)?;
-            if !binding.workers.contains(&cwd) {
+            if binding.as_ref().is_some_and(|b| !b.workers.contains(&cwd)) {
                 return Err("worker directory is outside the inbox binding".into());
             }
             if !worker.report.starts_with(cwd)
@@ -103,7 +107,7 @@ pub fn save(
 ) -> Result<()> {
     let dir = manifest.directory.join(&job.name);
     let mut value = serde_json::to_value(state)?;
-    if manifest.orchestrator_inbox.is_some() {
+    if manifest.journalled() {
         value["assignment_id"] = json!(assignment);
         if let Some(reason) = reason {
             let reports = dir.join("event-reports");
@@ -120,6 +124,18 @@ pub fn save(
             let report = read_private(&job.report, 2 * 1024 * 1024)
                 .ok()
                 .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+            let review = job
+                .review_verdict
+                .as_ref()
+                .map(|path| read_private(path, 256 * 1024))
+                .transpose();
+            let review = match review {
+                Ok(Some(bytes)) => {
+                    json!({"sha256":mush_supervisor::review::digest(&bytes),"bytes":bytes})
+                }
+                Ok(None) => Value::Null,
+                Err(error) => json!({"error":error.to_string()}),
+            };
             let run_id = run_id(manifest)?;
             let event = Event {
                 event_id: format!("{run_id}.{}.{assignment}", job.name),
@@ -133,12 +149,15 @@ pub fn save(
                     .map(str::to_owned),
                 reason,
                 report_path: report_path.clone(),
+                review: None,
             };
             event.validate()?;
             value["terminal_event"] = serde_json::to_value(event)?;
             replace(
                 &report_path,
-                &serde_json::to_vec(&json!({"state":value,"worker_report":report}))?,
+                &serde_json::to_vec(
+                    &json!({"state":value,"worker_report":report,"review":review}),
+                )?,
             )?;
         }
     }
@@ -211,7 +230,7 @@ fn reports(manifest: &Manifest, job: &Worker) -> Result<Vec<std::path::PathBuf>>
 }
 
 pub fn recover(manifest: &Manifest, job: &Worker) -> Result<()> {
-    if manifest.orchestrator_inbox.is_none() {
+    if !manifest.journalled() {
         return Ok(());
     }
     let state_path = manifest.directory.join(&job.name).join("state.json");
