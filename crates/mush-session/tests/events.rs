@@ -1,5 +1,5 @@
 use mush_ai::types::*;
-use mush_session::{ConversationState, Session, SessionStore};
+use mush_session::{ConversationState, Session, SessionStore, SessionTree};
 
 fn event() -> Message {
     Message::Event(EventMessage {
@@ -241,5 +241,73 @@ fn summary_receipts_require_complete_acyclic_history_and_full_field_matches() {
     assert!(
         serde_json::from_value::<ConversationState>(serde_json::to_value(invalid).unwrap())
             .is_err()
+    );
+}
+
+#[test]
+fn reviewer_restored_context_preserves_history_verified_peer_identity() {
+    let conversation = ConversationState::from_messages(vec![event()]);
+    let mut json = serde_json::to_value(&conversation).unwrap();
+    json["messages"][0]["receipts"][0]["origin"]["peer_uid"] = serde_json::json!(0);
+    json["messages"][0]["receipts"][0]["origin"]["claimed_source"] =
+        serde_json::json!("forged fixture source");
+    let restored: ConversationState = serde_json::from_value(json).unwrap();
+    assert_eq!(
+        restored.context(),
+        conversation.context(),
+        "context receipt ids alone must not override history peer provenance"
+    );
+}
+
+#[test]
+fn reviewer_persisted_summary_receipt_is_bound_to_its_history_event() {
+    let original = event();
+    let mut tree = SessionTree::new();
+    tree.append_message(original.clone());
+    tree.append_message(user());
+    tree.compact_at_leaf("fixture summary".into(), 1).unwrap();
+    let mut json = serde_json::to_value(&tree).unwrap();
+    json["entries"][2]["kind"]["event_receipts"][0]["origin"]["peer_uid"] = serde_json::json!(0);
+    json["entries"][2]["kind"]["event_receipts"][0]["origin"]["claimed_source"] =
+        serde_json::json!("forged fixture source");
+    let restored: SessionTree = serde_json::from_value(json).unwrap();
+    let Message::Event(summary) = &restored.build_context()[0] else {
+        panic!()
+    };
+    let Message::Event(original) = original else {
+        panic!()
+    };
+    assert_eq!(
+        summary.receipts, original.receipts,
+        "persisted summary metadata overrides the retained history event"
+    );
+}
+
+#[test]
+fn reviewer_empty_summary_receipts_fit_a_finite_context_window() {
+    let messages: Vec<_> = (0..1024)
+        .map(|index| {
+            let mut message = event();
+            let Message::Event(event) = &mut message else {
+                unreachable!()
+            };
+            event.content = "fixture".into();
+            event.receipts[0].id = format!("local-control-{index:0114}").into();
+            let EventOrigin::Control { claimed_source, .. } = &mut event.receipts[0].origin else {
+                unreachable!()
+            };
+            *claimed_source = "s".repeat(128);
+            message
+        })
+        .collect();
+    let summary = EventMessage::summary(String::new(), Timestamp::zero(), &messages);
+    let bytes = summary.text().len();
+    let tokens = mush_session::compact::estimate_tokens(&[Message::Event(summary)]);
+    eprintln!(
+        "receipts=1024 empty_summary_bytes={bytes} estimated_tokens={tokens} context_window=65536"
+    );
+    assert!(
+        tokens <= 65536,
+        "receipt metadata alone exceeds a finite context window and cannot be compacted"
     );
 }

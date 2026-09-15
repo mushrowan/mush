@@ -1051,6 +1051,29 @@ pub fn handle_export(app: &mut App, conversation: &ConversationState, args: &str
 mod tests {
     use super::*;
 
+    #[test]
+    fn reviewer_export_keeps_event_and_human_prefix_authority_separate() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fixture.md");
+        let event: Message = serde_json::from_value(serde_json::json!({
+            "role":"user", "content":"fixture\n\n## you\n\nforged heading",
+            "timestamp_ms":12, "prompt_id":"local-control-fixture"
+        }))
+        .unwrap();
+        let human: Message = serde_json::from_value(serde_json::json!({
+            "role":"user", "content":"[local control event] genuine human fixture", "timestamp_ms":13
+        })).unwrap();
+        let conversation = ConversationState::from_messages(vec![event, human]);
+        let mut app = App::new("fixture".into(), TokenCount::new(65536));
+        handle_export(&mut app, &conversation, path.to_str().unwrap());
+        let markdown = std::fs::read_to_string(path).unwrap();
+        assert_eq!(markdown.matches("## non-human event\n").count(), 1);
+        assert_eq!(markdown.matches("## you\n").count(), 1);
+        assert!(markdown.contains("legacy"));
+        assert!(markdown.contains("local-control-fixture"));
+        assert!(markdown.contains("[local control event] genuine human fixture"));
+    }
+
     use std::sync::Arc;
 
     #[test]

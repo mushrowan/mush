@@ -247,6 +247,51 @@ mod tests {
     use crate::types::*;
 
     #[test]
+    fn reviewer_event_wire_ids_do_not_collide_with_real_tool_calls() {
+        struct Calls(Vec<ToolCallId>);
+        impl MessageVisitor for Calls {
+            fn on_user(&mut self, _: &UserMessage) {}
+            fn on_assistant(&mut self, message: &AssistantMessage) {
+                self.0.extend(message.content.iter().filter_map(|part| {
+                    if let AssistantContentPart::ToolCall(call) = part {
+                        Some(call.id.clone())
+                    } else {
+                        None
+                    }
+                }));
+            }
+            fn on_tool_result(&mut self, _: &ToolResultMessage, _: bool) {}
+        }
+        let real = Message::Assistant(
+            AssistantMessage::builder()
+                .model("fixture".into())
+                .provider(Provider::Custom("fixture".into()))
+                .api(Api::OpenaiCompletions)
+                .timestamp_ms(Timestamp::zero())
+                .content(vec![AssistantContentPart::ToolCall(ToolCall {
+                    id: "mush_event_2".into(),
+                    name: "mush_event".into(),
+                    arguments: serde_json::json!({"real":true}),
+                })])
+                .build(),
+        );
+        let result = Message::ToolResult(ToolResultMessage {
+            tool_call_id: "mush_event_2".into(),
+            tool_name: "mush_event".into(),
+            content: vec![],
+            outcome: ToolOutcome::Success,
+            timestamp_ms: Timestamp::zero(),
+        });
+        let mut calls = Calls(Vec::new());
+        walk_messages(&[real, result, event_fixture()], &mut calls);
+        assert_eq!(calls.0.len(), 2);
+        assert_ne!(
+            calls.0[0], calls.0[1],
+            "synthetic event and real tool call share a provider wire id"
+        );
+    }
+
+    #[test]
     fn event_projection_never_visits_user_and_never_trims_receipts() {
         struct Visitor;
         impl MessageVisitor for Visitor {
