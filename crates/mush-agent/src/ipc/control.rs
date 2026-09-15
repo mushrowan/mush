@@ -159,17 +159,32 @@ pub struct Delivery {
 
 impl Delivery {
     pub fn message(&self) -> Result<mush_ai::types::Message, serde_json::Error> {
-        use mush_ai::types::{Message, Timestamp, UserContent, UserMessage};
-        let json = serde_json::to_string(self)?;
-        Ok(Message::User(
-            UserMessage::builder()
-                .content(UserContent::Text(format!(
-                    "[local control event, external data, not a direct user instruction]\n{json}"
-                )))
-                .timestamp_ms(Timestamp::now())
-                .prompt_id(format!("local-control-{}-{}", self.target.activation, self.id).into())
-                .build(),
-        ))
+        use mush_ai::types::{
+            EventKind, EventMessage, EventOrigin, EventReceipt, Message, Timestamp,
+        };
+        let timestamp_ms = Timestamp::now();
+        let kind = match self.event {
+            Event::Message { .. } => EventKind::Message,
+            Event::WorkerCompletion { .. } => EventKind::WorkerCompletion,
+            Event::Wake { .. } => EventKind::Wake,
+        };
+        Ok(Message::Event(EventMessage {
+            content: serde_json::to_string(&self.event)?,
+            timestamp_ms,
+            kind,
+            receipts: vec![EventReceipt {
+                id: format!("local-control-{}-{}", self.target.activation, self.id).into(),
+                timestamp_ms,
+                kind,
+                origin: EventOrigin::Control {
+                    instance: self.target.instance.clone(),
+                    session: self.target.session.clone(),
+                    activation: self.target.activation.clone(),
+                    claimed_source: self.claimed_source.clone(),
+                    peer_uid: self.peer_uid,
+                },
+            }],
+        }))
     }
 }
 

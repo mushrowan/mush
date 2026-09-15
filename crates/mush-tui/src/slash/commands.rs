@@ -1002,9 +1002,12 @@ pub fn handle_export(app: &mut App, conversation: &ConversationState, args: &str
     };
 
     let mut md = String::new();
-    let messages = conversation.context();
+    let messages = conversation.display_history();
     for msg in &messages {
         match msg {
+            Message::Event(event) => {
+                md.push_str(&format!("## non-human event\n\n{}\n\n", event.audit_text()))
+            }
             Message::User(u) => {
                 let text = u.text();
                 md.push_str(&format!("## you\n\n{text}\n\n"));

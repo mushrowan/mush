@@ -70,14 +70,15 @@ impl OrchestratorInbox {
         self.next_poll = Instant::now() + Duration::from_secs(1);
         if !self.replayed {
             self.replayed = true;
-            if let Some(mush_ai::types::Message::User(user)) =
+            if let Some(mush_ai::types::Message::Event(event)) =
                 runtime.session.conversation.context().last()
-                && user
-                    .prompt_id
-                    .as_ref()
-                    .is_some_and(|id| id.starts_with("orchestrator-event-"))
+                && event
+                    .receipts
+                    .iter()
+                    .any(|r| r.id.starts_with("orchestrator-event-"))
+                && event.kind != mush_ai::types::EventKind::Summary
             {
-                let mut prompt = crate::session::PendingPrompt::text(user.text());
+                let mut prompt = crate::session::PendingPrompt::text(event.text());
                 prompt.mark_persisted();
                 runtime.session.pending_prompt = Some(prompt);
                 return Ok(true);
@@ -92,9 +93,13 @@ impl OrchestratorInbox {
                 self.acknowledge_saved(event.event_id.clone()).await?;
                 continue;
             }
-            let text = event.message()?;
             append(&mut runtime.session.conversation, &event)?;
-            runtime.session.app.push_user_message(text.clone());
+            let context = runtime.session.conversation.context();
+            let Some(mush_ai::types::Message::Event(message)) = context.last() else {
+                return Err(io::Error::other("inbox event missing from history"));
+            };
+            let text = message.text();
+            runtime.session.app.push_event_message(message);
             let mut prompt = crate::session::PendingPrompt::text(text);
             prompt.mark_persisted();
             runtime.session.pending_prompt = Some(prompt);

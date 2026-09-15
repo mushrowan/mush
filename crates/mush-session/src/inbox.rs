@@ -2,7 +2,9 @@ use std::fs::File;
 use std::io;
 use std::path::Path;
 
-use mush_ai::types::{Message, PromptId, Timestamp, UserContent, UserMessage};
+use mush_ai::types::{
+    EventKind, EventMessage, EventOrigin, EventReceipt, Message, PromptId, Timestamp,
+};
 pub use mush_supervisor::inbox::{Binding, Event, Inbox, TerminalReason};
 
 use crate::{ConversationState, EntryKind, SessionId, SessionStore};
@@ -16,26 +18,48 @@ pub struct Consumer {
 
 pub fn contains(conversation: &ConversationState, event_id: &str) -> bool {
     let prompt_id = PromptId::from(format!("orchestrator-event-{event_id}"));
-    conversation.entries().iter().any(|entry| {
-        matches!(&entry.kind, EntryKind::Message { message: Message::User(user) } if user.prompt_id.as_ref() == Some(&prompt_id))
-    })
+    conversation
+        .entries()
+        .iter()
+        .any(|entry| match &entry.kind {
+            EntryKind::Message {
+                message: Message::User(user),
+            } => user.prompt_id.as_ref() == Some(&prompt_id),
+            EntryKind::Message {
+                message: Message::Event(event),
+            } => event.receipts.iter().any(|receipt| receipt.id == prompt_id),
+            _ => false,
+        })
 }
 
 pub fn append(conversation: &mut ConversationState, event: &Event) -> io::Result<bool> {
     if contains(conversation, &event.event_id) {
         return Ok(false);
     }
-    conversation.append_message(Message::User(
-        UserMessage::builder()
-            .content(UserContent::Text(event.message()?))
-            .timestamp_ms(Timestamp::now())
-            .prompt_id(PromptId::from(format!(
-                "orchestrator-event-{}",
-                event.event_id
-            )))
-            .build(),
-    ));
+    conversation.append_message(Message::Event(message(event)?));
     Ok(true)
+}
+
+pub fn message(event: &Event) -> io::Result<EventMessage> {
+    event.validate()?;
+    let timestamp_ms = Timestamp::now();
+    Ok(EventMessage {
+        content: serde_json::to_string(event)?,
+        timestamp_ms,
+        kind: EventKind::WorkerCompletion,
+        receipts: vec![EventReceipt {
+            id: format!("orchestrator-event-{}", event.event_id).into(),
+            timestamp_ms,
+            kind: EventKind::WorkerCompletion,
+            origin: EventOrigin::Inbox {
+                run_id: event.run_id.clone(),
+                worker_id: event.worker_id.clone(),
+                assignment_id: event.assignment_id,
+                round: event.round,
+                session_id: event.session_id.clone(),
+            },
+        }],
+    })
 }
 
 impl Consumer {

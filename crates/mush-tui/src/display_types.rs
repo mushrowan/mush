@@ -179,6 +179,7 @@ pub enum MessageRole {
     User,
     Assistant,
     System,
+    Event(mush_ai::types::EventKind),
 }
 
 #[derive(Debug, Clone)]

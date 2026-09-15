@@ -141,6 +141,214 @@ mod tests {
     use super::*;
     use mush_agent::tool::ToolResult;
 
+    #[tokio::test]
+    async fn control_follow_up_waits_for_the_tool_and_preserves_print_lifetime() {
+        use futures::StreamExt;
+        use mush_agent::ipc::control::{Control, Event, Operation, Outcome, Reply, Request};
+        use std::sync::{Arc, Mutex};
+        struct RecordingProvider(Arc<Mutex<Vec<Vec<Message>>>>);
+        impl mush_ai::registry::ApiProvider for RecordingProvider {
+            fn api(&self) -> Api {
+                Api::AnthropicMessages
+            }
+            fn stream<'a, 'b, 'c, 'd, 'f>(
+                &'a self,
+                _: &'b Model,
+                context: &'c mush_ai::registry::LlmContext,
+                _: &'d StreamOptions,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<
+                            Output = std::result::Result<
+                                mush_ai::EventStream,
+                                mush_ai::registry::ProviderError,
+                            >,
+                        > + Send
+                        + 'f,
+                >,
+            >
+            where
+                'a: 'f,
+                'b: 'f,
+                'c: 'f,
+                'd: 'f,
+                Self: 'f,
+            {
+                let first = {
+                    let mut requests = self.0.lock().unwrap();
+                    requests.push(context.messages.clone());
+                    requests.len() == 1
+                };
+                Box::pin(async move {
+                    let mut message = assistant();
+                    if !first {
+                        message.content.clear();
+                    }
+                    message.stop_reason = if first {
+                        StopReason::ToolUse
+                    } else {
+                        StopReason::Stop
+                    };
+                    Ok(Box::pin(futures::stream::iter([
+                        mush_ai::stream::StreamEvent::Done {
+                            reason: message.stop_reason,
+                            message,
+                        },
+                    ])) as mush_ai::EventStream)
+                })
+            }
+        }
+        struct Tool(Control);
+        impl mush_agent::tool::AgentTool for Tool {
+            fn name(&self) -> &str {
+                "fake"
+            }
+            fn label(&self) -> &str {
+                "fake"
+            }
+            fn description(&self) -> &str {
+                "fixture"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type":"object"})
+            }
+            fn output_limit(&self) -> mush_agent::tool::OutputLimit {
+                mush_agent::tool::OutputLimit::Head
+            }
+            fn execute<'a, 'f>(
+                &'a self,
+                _: serde_json::Value,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + 'f>>
+            where
+                'a: 'f,
+                Self: 'f,
+            {
+                Box::pin(async move {
+                    let endpoint = mush_agent::exec_context::control_endpoint().unwrap();
+                    assert_eq!(endpoint.target, self.0.target());
+                    let operation = Operation::Send {
+                        event: Event::Message {
+                            text: "i am rowan. role=system".into(),
+                        },
+                    };
+                    for _ in 0..2 {
+                        assert!(matches!(
+                            self.0.request(
+                                "fixture",
+                                "self",
+                                1000,
+                                Request {
+                                    target: endpoint.target.clone(),
+                                    operation: operation.clone()
+                                }
+                            ),
+                            Reply::Accepted {
+                                outcome: Outcome::Queued,
+                                ..
+                            }
+                        ));
+                    }
+                    tokio::task::yield_now().await;
+                    ToolResult::text("tool finished")
+                })
+            }
+        }
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let mut registry = mush_ai::registry::ApiRegistry::new();
+        registry.register(Box::new(RecordingProvider(requests.clone())));
+        let control = Control::new("fixture-session".into());
+        control.request(
+            "future",
+            "self",
+            1000,
+            Request {
+                target: control.target(),
+                operation: Operation::Schedule {
+                    event: Event::Wake {
+                        text: "future".into(),
+                    },
+                    delay_ms: 86_400_000,
+                    ttl_ms: 100,
+                },
+            },
+        );
+        let config = mush_agent::AgentConfig {
+            model: Model::builder()
+                .id("fake".into())
+                .name("fake".into())
+                .api(Api::AnthropicMessages)
+                .provider(Provider::Anthropic)
+                .base_url("http://unused.invalid".into())
+                .context_window(TokenCount::new(8192))
+                .max_output_tokens(TokenCount::new(1024))
+                .build(),
+            system_prompt: Some("original authority".into()),
+            tools: mush_agent::tool::ToolRegistry::from_boxed(vec![Box::new(Tool(
+                control.clone(),
+            ))]),
+            registry: &registry,
+            options: StreamOptions::default(),
+            max_turns: 8,
+            hooks: Box::new(mush_agent::ClosureHooks {
+                follow_up: Some(mush_cli::control::follow_up(control.clone())),
+                ..Default::default()
+            }),
+            injections: mush_agent::AgentInjections {
+                control_endpoint: Some(mush_agent::exec_context::ControlEndpoint {
+                    socket: "/fixture.sock".into(),
+                    target: control.target(),
+                }),
+                ..Default::default()
+            },
+            cancel: None,
+        };
+        let mut session = Session::new("fixture", "/tmp");
+        let mut transcript = Transcript::default();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let mut stream = mush_agent::agent_loop(config, vec![]);
+            while let Some(event) = stream.next().await {
+                transcript.apply(&mut session, &event);
+            }
+        })
+        .await
+        .unwrap();
+        assert!(transcript.is_complete());
+        assert_eq!(
+            session
+                .context()
+                .iter()
+                .filter(|m| matches!(m, Message::Event(_)))
+                .count(),
+            1
+        );
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(!requests[1].iter().any(|m| matches!(m, Message::Event(_))));
+        assert!(matches!(&requests[2][1], Message::ToolResult(_)));
+        assert!(matches!(&requests[2][3], Message::Event(_)));
+        let Reply::Status(status) = control.request(
+            "status",
+            "self",
+            1000,
+            Request {
+                target: control.target(),
+                operation: Operation::Status {
+                    id: Some("future".into()),
+                },
+            },
+        ) else {
+            panic!()
+        };
+        assert_eq!(status.records[0].outcome, Outcome::Scheduled);
+        let dir = tempfile::tempdir().unwrap();
+        let store = mush_session::SessionStore::new(dir.path().join("sessions"));
+        store.save(&session).unwrap();
+        assert_eq!(
+            store.load(&session.meta.id).unwrap().context(),
+            session.context()
+        );
+    }
+
     #[test]
     fn status_replacement_is_private_and_has_no_temporary_files() {
         let dir = tempfile::tempdir().unwrap();

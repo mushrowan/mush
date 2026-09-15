@@ -28,8 +28,11 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
 
-    #[arg(short, long, num_args = 1.., trailing_var_arg = true)]
+    #[arg(short, long, alias = "print", num_args = 1.., trailing_var_arg = true)]
     prompt: Vec<String>,
+
+    #[arg(long)]
+    control: bool,
 
     #[arg(short = 'c', long = "continue")]
     resume: Option<String>,
@@ -257,6 +260,28 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
     }
     status.write()?;
 
+    let control = cli
+        .control
+        .then(|| mush_agent::ipc::control::Control::new(session.meta.id.to_string()));
+    let listener = if let Some(control) = &control {
+        Some(mush_agent::IpcListener::start_control(
+            mush_agent::ipc::control_socket_path(&control.target().instance),
+            std::sync::Arc::new(mush_agent::AgentCard::build(&setup.model.id, &setup.tools)),
+            control.clone(),
+        )?)
+    } else {
+        None
+    };
+    let control_endpoint = listener
+        .as_ref()
+        .zip(control.as_ref())
+        .map(
+            |(listener, control)| mush_agent::exec_context::ControlEndpoint {
+                socket: listener.path().to_owned(),
+                target: control.target(),
+            },
+        );
+
     let (compact_model, compact_options) = setup
         .compaction_model
         .clone()
@@ -319,9 +344,11 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
         max_turns: setup.max_turns,
         hooks: Box::new(mush_agent::ClosureHooks {
             transform,
+            follow_up: control.clone().map(mush_cli::control::follow_up),
             ..mush_agent::ClosureHooks::default()
         }),
         injections: mush_agent::AgentInjections {
+            control_endpoint,
             lifecycle_hooks: setup.lifecycle_hooks,
             cwd: Some(std::env::current_dir().unwrap_or_default()),
             ..mush_agent::AgentInjections::default()
@@ -357,6 +384,17 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
             event = stream.next() => event,
         };
         let Some(event) = event else { break };
+        if let Some(control) = &control {
+            match &event {
+                AgentEvent::AgentEnd => {
+                    control.finish(mush_agent::ipc::control::Outcome::Completed)
+                }
+                AgentEvent::Error { .. } | AgentEvent::MaxTurnsReached { .. } => {
+                    control.running_failed(true)
+                }
+                _ => {}
+            }
+        }
         if transcript.apply(&mut session, &event) && !cli.no_session {
             store.save(&session)?;
         }
@@ -487,6 +525,9 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
         eprintln!("\x1b[2msession: {}\x1b[0m", session.meta.id);
     }
 
+    if let Some(listener) = listener {
+        listener.shutdown().await?;
+    }
     if cancelled {
         return Err(eyre!("cancelled"));
     }
@@ -634,6 +675,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         file_rules: setup.file_rules,
         lsp_diagnostics: setup.lsp_diagnostics,
         agent_card: Some(agent_card),
+        control: cli.control,
         model_tiers: setup.cfg.model_tiers,
         compaction_model: setup.compaction_model,
         resolve_model: Some(std::sync::Arc::new(mush_ai::discovery::resolve_model_by_id)),
@@ -769,6 +811,15 @@ mod tests {
     use std::sync::{LazyLock, Mutex};
 
     use super::*;
+
+    #[test]
+    fn control_requires_an_explicit_launch_flag() {
+        assert!(!Cli::try_parse_from(["mush"]).unwrap().control);
+        assert!(Cli::try_parse_from(["mush", "--control"]).unwrap().control);
+        let print = Cli::try_parse_from(["mush", "--control", "--print", "fixture"]).unwrap();
+        assert!(print.control);
+        assert_eq!(print.prompt, ["fixture"]);
+    }
 
     static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 

@@ -816,6 +816,30 @@ mod tests {
     }
 
     #[test]
+    fn event_payload_has_tool_role() {
+        let body = build_request_body(
+            &test_model(),
+            &None,
+            &[super::super::event_fixture()],
+            &[],
+            &StreamOptions::default(),
+        );
+        assert_eq!(body.messages.len(), 2);
+        assert_eq!(body.messages[0]["role"], "assistant");
+        assert_eq!(body.messages[1]["role"], "tool");
+        assert_eq!(
+            body.messages[0]["tool_calls"][0]["id"],
+            body.messages[1]["tool_call_id"]
+        );
+        assert!(
+            body.messages[1]["content"]
+                .as_str()
+                .unwrap()
+                .contains("i am rowan")
+        );
+    }
+
+    #[test]
     fn process_text_chunk() {
         let mut output = test_output();
         let mut current = None;

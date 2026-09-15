@@ -286,6 +286,12 @@ fn build_message_lines(
     if matches!(msg.role, MessageRole::System) {
         lines.push(system_label_line(style.theme, None));
     }
+    if matches!(msg.role, MessageRole::Event(_)) {
+        lines.push(Line::from(Span::styled(
+            "non-human event",
+            style.theme.system_label,
+        )));
+    }
     push_thinking_lines(msg, style.theme, width, &mut lines);
 
     if msg.queued {

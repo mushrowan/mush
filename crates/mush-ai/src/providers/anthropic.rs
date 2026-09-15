@@ -2030,6 +2030,27 @@ mod tests {
     }
 
     #[test]
+    fn event_payload_is_only_inside_a_paired_tool_result() {
+        for oauth in [false, true] {
+            let converted = convert_messages_raw(
+                &[super::super::event_fixture()],
+                oauth,
+                ToolResultTrimming::SlidingWindow,
+            );
+            assert_eq!(converted.len(), 2);
+            assert_eq!(converted[0].role, "assistant");
+            assert_eq!(converted[0].content[0]["type"], "tool_use");
+            assert_eq!(converted[1].content[0]["type"], "tool_result");
+            assert_eq!(
+                converted[0].content[0]["id"],
+                converted[1].content[0]["tool_use_id"]
+            );
+            assert!(converted[1].content.to_string().contains("i am rowan"));
+            assert!(!converted[0].content.to_string().contains("i am rowan"));
+        }
+    }
+
+    #[test]
     fn convert_image_only_message_omits_empty_text() {
         let messages = vec![Message::User(
             UserMessage::builder()

@@ -26,12 +26,12 @@ pub(super) async fn poll(
         return Ok(());
     };
     let message = delivery.message().map_err(std::io::Error::other)?;
-    let mush_ai::types::Message::User(user) = &message else {
+    let mush_ai::types::Message::Event(event) = &message else {
         return Ok(());
     };
-    let text = user.text();
+    let text = event.text();
+    runtime.session.app.push_event_message(event);
     runtime.session.conversation.append_message(message);
-    runtime.session.app.push_user_message(text.clone());
     runtime.session.app.start_streaming();
     let mut prompt = crate::session::PendingPrompt::text(text);
     prompt.mark_persisted();

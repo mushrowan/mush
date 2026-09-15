@@ -274,6 +274,13 @@ impl App {
             .push(DisplayMessage::new(MessageRole::User, text));
     }
 
+    pub fn push_event_message(&mut self, event: &mush_ai::types::EventMessage) {
+        self.messages.push(DisplayMessage::new(
+            MessageRole::Event(event.kind),
+            event.text(),
+        ));
+    }
+
     pub fn push_user_message_with_images(&mut self, text: impl Into<String>, images: Vec<Vec<u8>>) {
         let mut msg = DisplayMessage::new(MessageRole::User, text);
         msg.images = images;
@@ -450,7 +457,7 @@ impl App {
         let live_turn = self
             .messages
             .iter()
-            .rposition(|m| m.role == MessageRole::User && !m.queued)
+            .rposition(|m| matches!(m.role, MessageRole::User | MessageRole::Event(_)) && !m.queued)
             .unwrap_or(self.messages.len());
         let unsettled = self
             .messages

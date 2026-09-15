@@ -101,22 +101,21 @@ pub async fn run_tui(
         runtime.install_discovery_updates(rx);
     }
 
-    let ipc_listener = tui_config.agent_card.as_ref().and_then(|card| {
+    let ipc_listener = if tui_config.control {
+        let card = tui_config
+            .agent_card
+            .as_ref()
+            .ok_or_else(|| io::Error::other("control requires an agent card"))?;
         let card = std::sync::Arc::new(card.clone());
         let control = mush_agent::ipc::control::Control::new(tui_config.session_id.to_string());
         let sock = mush_agent::ipc::control_socket_path(&control.target().instance);
-        match mush_agent::IpcListener::start_control(sock.clone(), card, control.clone()) {
-            Ok(listener) => {
-                runtime.session.control = Some(control);
-                runtime.session.control_socket = Some(sock);
-                Some(listener)
-            }
-            Err(e) => {
-                tracing::warn!("failed to start IPC listener: {e}");
-                None
-            }
-        }
-    });
+        let listener = mush_agent::IpcListener::start_control(sock.clone(), card, control.clone())?;
+        runtime.session.control = Some(control);
+        runtime.session.control_socket = Some(sock);
+        Some(listener)
+    } else {
+        None
+    };
 
     draw_panes(
         &mut terminal,

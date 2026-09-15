@@ -100,6 +100,11 @@ pub fn apply_applied_compaction(
 ) {
     app.compacting = false;
     let summary_body = extract_fresh_summary(&result.messages);
+    if let Some(Message::Event(event)) = result.messages.first()
+        && event.kind == mush_ai::types::EventKind::Summary
+    {
+        app.push_event_message(event);
+    }
 
     conversation.apply_compaction(result.summary, result.summarised_count, result.messages);
 

@@ -155,12 +155,50 @@ pub struct ToolResultMessage {
     pub timestamp_ms: Timestamp,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(tag = "role", rename_all = "snake_case")]
 pub enum Message {
     User(UserMessage),
     Assistant(AssistantMessage),
     ToolResult(ToolResultMessage),
+    Event(super::EventMessage),
+}
+
+impl<'de> Deserialize<'de> for Message {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(tag = "role", rename_all = "snake_case")]
+        enum Stored {
+            User(UserMessage),
+            Assistant(AssistantMessage),
+            ToolResult(ToolResultMessage),
+            Event(super::EventMessage),
+        }
+        Ok(match Stored::deserialize(deserializer)? {
+            Stored::User(user) => {
+                if let Some(id) = &user.prompt_id
+                    && (id.starts_with("orchestrator-event-") || id.starts_with("local-control-"))
+                {
+                    Self::Event(super::EventMessage {
+                        content: user.text(),
+                        timestamp_ms: user.timestamp_ms,
+                        kind: super::EventKind::Legacy,
+                        receipts: vec![super::EventReceipt {
+                            id: id.clone(),
+                            timestamp_ms: user.timestamp_ms,
+                            kind: super::EventKind::Legacy,
+                            origin: super::EventOrigin::Legacy,
+                        }],
+                    })
+                } else {
+                    Self::User(user)
+                }
+            }
+            Stored::Assistant(message) => Self::Assistant(message),
+            Stored::ToolResult(message) => Self::ToolResult(message),
+            Stored::Event(message) => Self::Event(message),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,7 +215,7 @@ pub fn find_recent_boundary(messages: &[Message], pivot: TurnPivot, keep: usize)
     let mut count = 0;
     for (i, msg) in messages.iter().enumerate().rev() {
         let is_pivot = match pivot {
-            TurnPivot::User => matches!(msg, Message::User(_)),
+            TurnPivot::User => matches!(msg, Message::User(_) | Message::Event(_)),
             TurnPivot::Assistant => matches!(msg, Message::Assistant(_)),
         };
         if is_pivot {

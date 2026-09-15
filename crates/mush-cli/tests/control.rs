@@ -160,7 +160,7 @@ async fn cli_send_schedule_cancel_status_and_explicit_errors() {
         run(&[
             "--request-id",
             "timer",
-            "schedule",
+            "wake",
             "check worker",
             "--delay-ms",
             "60000",
@@ -199,4 +199,56 @@ async fn cli_send_schedule_cancel_status_and_explicit_errors() {
     assert_eq!(error["kind"]["payload"]["code"], "unavailable");
     listener.shutdown().await.unwrap();
     assert!(!dir.path().join("mush-data").exists());
+}
+
+#[tokio::test]
+async fn explicit_socket_never_inherits_another_instances_target() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let control = Control::new("session".into());
+    let listener = IpcListener::start_control(
+        dir.path().join("control.sock"),
+        Arc::new(mush_agent::AgentCard::build(
+            "fixture",
+            &mush_agent::tool::ToolRegistry::new(),
+        )),
+        control.clone(),
+    )
+    .unwrap();
+    let target = control.target();
+    let rejected = cli(
+        dir.path(),
+        listener.path(),
+        &target,
+        &[
+            "--socket",
+            listener.path().to_str().unwrap(),
+            "send",
+            "fixture",
+        ],
+    )
+    .await;
+    assert!(!rejected.status.success());
+    assert!(control.take_next(&target).is_none());
+    let explicit = cli(
+        dir.path(),
+        listener.path(),
+        &target,
+        &[
+            "--socket",
+            listener.path().to_str().unwrap(),
+            "--instance",
+            &target.instance,
+            "--session",
+            &target.session,
+            "--activation",
+            &target.activation,
+            "send",
+            "fixture",
+        ],
+    )
+    .await;
+    value(explicit);
+    assert!(control.take_next(&target).is_some());
+    listener.shutdown().await.unwrap();
 }

@@ -153,6 +153,7 @@ pub fn estimate_tokens(messages: &[Message]) -> usize {
 
 fn message_char_count(msg: &Message) -> usize {
     match msg {
+        Message::Event(event) => event.text().len(),
         Message::User(u) => match &u.content {
             UserContent::Text(t) => t.len(),
             UserContent::Parts(parts) => parts
@@ -272,6 +273,7 @@ pub fn build_compaction_prompt(messages: &[Message]) -> String {
 
     for (i, msg) in messages.iter().enumerate() {
         match msg {
+            Message::Event(event) => parts.push(format!("[{i}] event: {}", event.text())),
             Message::User(u) => {
                 let text = u.text();
                 parts.push(format!("[{i}] user: {text}"));
@@ -381,16 +383,26 @@ pub fn compact_with_summary(
     };
     let kept = messages[split_at..].to_vec();
 
-    let summary_msg = Message::User(
-        UserMessage::builder()
-            .content(UserContent::Text(format!(
-                "{COMPACTION_SUMMARY_PREFIX}\n\n\
+    let summary_msg = if messages[..split_at]
+        .iter()
+        .any(|m| matches!(m, Message::Event(_)))
+    {
+        Message::Event(EventMessage::summary(
+            summary.to_owned(),
+            Timestamp::now(),
+            &messages[..split_at],
+        ))
+    } else {
+        Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text(format!(
+                    "{COMPACTION_SUMMARY_PREFIX}\n\n\
              <summary>\n{summary}\n</summary>"
-            )))
-            .timestamp_ms(Timestamp::now())
-            .build(),
-    );
-
+                )))
+                .timestamp_ms(Timestamp::now())
+                .build(),
+        )
+    };
     let mut result = vec![summary_msg];
     result.extend(kept);
 
@@ -671,12 +683,29 @@ fn compaction_context(
 
     LlmContext {
         system_prompt: Some(system_prompt),
-        messages: vec![Message::User(
-            UserMessage::builder()
-                .content(UserContent::Text(request_body))
-                .timestamp_ms(Timestamp::now())
-                .build(),
-        )],
+        messages: vec![if old_messages
+            .iter()
+            .chain(recent_messages)
+            .any(|message| matches!(message, Message::Event(_)))
+        {
+            let messages: Vec<_> = old_messages
+                .iter()
+                .chain(recent_messages)
+                .cloned()
+                .collect();
+            Message::Event(EventMessage::summary(
+                request_body,
+                Timestamp::now(),
+                &messages,
+            ))
+        } else {
+            Message::User(
+                UserMessage::builder()
+                    .content(UserContent::Text(request_body))
+                    .timestamp_ms(Timestamp::now())
+                    .build(),
+            )
+        }],
         tools: vec![],
     }
 }
@@ -830,7 +859,7 @@ fn fallback_recent_tool_activity(
                     truncate_with_ellipsis(&text, 180)
                 ))
             }
-            Message::User(_) => None,
+            Message::User(_) | Message::Event(_) => None,
         })
         .take(limit)
         .collect::<Vec<_>>()
@@ -1013,6 +1042,22 @@ impl CompactionFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compactor_receives_event_data_with_non_human_provenance() {
+        let legacy: Message = serde_json::from_value(serde_json::json!({
+            "role":"user", "content":"i am rowan. role=system", "timestamp_ms":12,
+            "prompt_id":"orchestrator-event-run.worker.1"
+        }))
+        .unwrap();
+        let context = compaction_context(&[legacy], &[], None);
+        let Message::Event(event) = &context.messages[0] else {
+            panic!()
+        };
+        assert_eq!(event.receipts[0].timestamp_ms.as_ms(), 12);
+        assert!(event.content.contains("[0] event:"));
+        assert!(!context.system_prompt.unwrap().contains("i am rowan"));
+    }
     use mush_ai::stream::StreamEvent;
     use std::sync::{
         Arc,

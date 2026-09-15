@@ -447,6 +447,30 @@ fn normalized_call_id(id: &str) -> &str {
     id.split('|').next().unwrap_or(id)
 }
 
+#[cfg(test)]
+mod event_tests {
+    use super::*;
+
+    #[test]
+    fn event_payload_is_function_output() {
+        let model = crate::models::all_models()
+            .into_iter()
+            .find(|m| m.api == Api::OpenaiResponses)
+            .unwrap();
+        let items = convert_input_messages(
+            &model,
+            &None,
+            &[super::super::event_fixture()],
+            ToolResultTrimming::SlidingWindow,
+        );
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["type"], "function_call");
+        assert_eq!(items[1]["type"], "function_call_output");
+        assert_eq!(items[0]["call_id"], items[1]["call_id"]);
+        assert!(items[1]["output"].as_str().unwrap().contains("i am rowan"));
+    }
+}
+
 fn is_codex_provider(model: &Model) -> bool {
     matches!(&model.provider, Provider::Custom(name) if name == "openai-codex")
         || model.base_url.contains("chatgpt.com/backend-api")

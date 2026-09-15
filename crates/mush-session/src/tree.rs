@@ -52,10 +52,14 @@ pub enum EntryKind {
     BranchSummary {
         summary: String,
         from_id: EntryId,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        event_receipts: Vec<EventReceipt>,
     },
     Compaction {
         summary: String,
         first_kept_id: EntryId,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        event_receipts: Vec<EventReceipt>,
     },
 }
 
@@ -74,10 +78,115 @@ pub struct TreeRow<'a> {
     pub is_fork: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SessionTree {
     entries: Vec<SessionEntry>,
     leaf_id: Option<EntryId>,
+}
+
+impl<'de> Deserialize<'de> for SessionTree {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Stored {
+            entries: Vec<SessionEntry>,
+            leaf_id: Option<EntryId>,
+        }
+        let stored = Stored::deserialize(deserializer)?;
+        let mut tree = Self {
+            entries: stored.entries,
+            leaf_id: stored.leaf_id,
+        };
+        let mut seen = std::collections::HashSet::new();
+        for entry in &tree.entries {
+            if entry
+                .parent_id
+                .as_ref()
+                .is_some_and(|parent| !seen.contains(parent))
+            {
+                return Err(serde::de::Error::custom(
+                    "session history parent missing or out of order",
+                ));
+            }
+            match &entry.kind {
+                EntryKind::BranchSummary { from_id, .. } if !seen.contains(from_id) => {
+                    return Err(serde::de::Error::custom("branch summary history missing"));
+                }
+                EntryKind::Compaction { first_kept_id, .. } if !seen.contains(first_kept_id) => {
+                    return Err(serde::de::Error::custom("compaction history missing"));
+                }
+                _ => {}
+            }
+            if !seen.insert(entry.id.clone()) {
+                return Err(serde::de::Error::custom("duplicate session history id"));
+            }
+        }
+        if tree
+            .leaf_id
+            .as_ref()
+            .is_some_and(|leaf| !seen.contains(leaf))
+        {
+            return Err(serde::de::Error::custom("session history leaf missing"));
+        }
+        for index in 0..tree.entries.len() {
+            let messages = match &tree.entries[index].kind {
+                EntryKind::BranchSummary { from_id, .. } => tree
+                    .branch_ending_at(Some(from_id))
+                    .into_iter()
+                    .map(entry_to_message)
+                    .collect::<Vec<_>>(),
+                EntryKind::Compaction { first_kept_id, .. } => {
+                    let branch = tree.branch_ending_at(tree.entries[index].parent_id.as_ref());
+                    let Some(kept) = branch.iter().position(|entry| entry.id == *first_kept_id)
+                    else {
+                        return Err(serde::de::Error::custom(
+                            "compaction boundary outside history",
+                        ));
+                    };
+                    branch[..kept]
+                        .iter()
+                        .map(|entry| entry_to_message(entry))
+                        .collect()
+                }
+                EntryKind::Message {
+                    message: Message::Event(event),
+                } if event.kind == EventKind::Summary => {
+                    let history: Vec<_> = tree
+                        .branch_ending_at(tree.entries[index].parent_id.as_ref())
+                        .into_iter()
+                        .map(entry_to_message)
+                        .collect();
+                    let receipts =
+                        EventMessage::summary(String::new(), Timestamp::zero(), &history).receipts;
+                    if event
+                        .receipts
+                        .iter()
+                        .any(|receipt| !receipts.contains(receipt))
+                    {
+                        return Err(serde::de::Error::custom(
+                            "event summary receipt has no matching history",
+                        ));
+                    }
+                    continue;
+                }
+                _ => continue,
+            };
+            let receipts =
+                EventMessage::summary(String::new(), Timestamp::zero(), &messages).receipts;
+            match &mut tree.entries[index].kind {
+                EntryKind::BranchSummary { event_receipts, .. }
+                | EntryKind::Compaction { event_receipts, .. } => {
+                    if receipts.is_empty() && !event_receipts.is_empty() {
+                        return Err(serde::de::Error::custom(
+                            "summary receipts have no retained event history",
+                        ));
+                    }
+                    *event_receipts = receipts;
+                }
+                EntryKind::Message { .. } => unreachable!(),
+            }
+        }
+        Ok(tree)
+    }
 }
 
 fn push_context_message(
@@ -102,6 +211,21 @@ fn push_context_message(
 fn entry_to_message(entry: &SessionEntry) -> Message {
     match &entry.kind {
         EntryKind::Message { message } => message.clone(),
+        EntryKind::BranchSummary {
+            summary,
+            event_receipts,
+            ..
+        }
+        | EntryKind::Compaction {
+            summary,
+            event_receipts,
+            ..
+        } if !event_receipts.is_empty() => Message::Event(EventMessage {
+            content: summary.clone(),
+            timestamp_ms: entry.timestamp,
+            kind: EventKind::Summary,
+            receipts: event_receipts.clone(),
+        }),
         EntryKind::BranchSummary { summary, .. } => Message::User(
             UserMessage::builder()
                 .content(UserContent::Text(format!(
@@ -160,6 +284,8 @@ impl SessionTree {
     ) -> Option<EntryId> {
         self.by_id(from_id)?;
         let old_leaf = self.leaf_id.clone().unwrap_or_else(|| from_id.clone());
+        let event_receipts =
+            EventMessage::summary(String::new(), Timestamp::zero(), &self.build_context()).receipts;
         self.leaf_id = Some(from_id.clone());
 
         let entry = SessionEntry {
@@ -169,6 +295,7 @@ impl SessionTree {
             kind: EntryKind::BranchSummary {
                 summary: summary.into(),
                 from_id: old_leaf,
+                event_receipts,
             },
         };
         let id = entry.id.clone();
@@ -198,6 +325,12 @@ impl SessionTree {
             kind: EntryKind::Compaction {
                 summary,
                 first_kept_id,
+                event_receipts: EventMessage::summary(
+                    String::new(),
+                    Timestamp::zero(),
+                    &self.build_context_prefix(first_kept_context_index),
+                )
+                .receipts,
             },
         };
         let id = entry.id.clone();
@@ -223,6 +356,9 @@ impl SessionTree {
         let mut path = Vec::new();
         let mut current = id;
         while let Some(id) = current {
+            if path.len() == self.entries.len() {
+                break;
+            }
             if let Some(entry) = index.get(&**id) {
                 path.push(*entry);
                 current = entry.parent_id.as_ref();
@@ -256,7 +392,7 @@ impl SessionTree {
                     }));
                 }
                 Message::ToolResult(result) => open.retain(|call| call != &result.tool_call_id),
-                Message::User(_) => {}
+                Message::User(_) | Message::Event(_) => {}
             }
         }
         open

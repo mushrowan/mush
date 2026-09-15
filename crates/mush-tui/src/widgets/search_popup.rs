@@ -79,6 +79,7 @@ impl Widget for SearchPopup<'_> {
                     crate::app::MessageRole::User => "you",
                     crate::app::MessageRole::Assistant => "assistant",
                     crate::app::MessageRole::System => "system",
+                    crate::app::MessageRole::Event(_) => "event",
                 };
                 let preview = msg
                     .content
