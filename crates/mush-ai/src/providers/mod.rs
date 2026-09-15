@@ -247,6 +247,85 @@ mod tests {
     use crate::types::*;
 
     #[test]
+    fn rereviewer_provider_reference_is_bounded_and_hashes_exact_ordered_receipts() {
+        use sha2::{Digest, Sha256};
+        struct Wire(Vec<ToolResultMessage>, usize);
+        impl MessageVisitor for Wire {
+            fn on_user(&mut self, _: &UserMessage) {
+                panic!("event became human")
+            }
+            fn on_assistant(&mut self, message: &AssistantMessage) {
+                assert_eq!(message.stop_reason, StopReason::ToolUse);
+                self.1 += 1;
+            }
+            fn on_tool_result(&mut self, message: &ToolResultMessage, old: bool) {
+                assert!(!old);
+                self.0.push(message.clone());
+            }
+        }
+        let receipts: Vec<_> = (0..1024)
+            .map(|index| EventReceipt {
+                id: format!("reference-{index}").into(),
+                timestamp_ms: Timestamp::from_ms(index),
+                kind: EventKind::Wake,
+                origin: EventOrigin::Control {
+                    instance: "fixture-instance".into(),
+                    session: "fixture-session".into(),
+                    activation: "fixture-activation".into(),
+                    claimed_source: "røwan\nfixture".into(),
+                    peer_uid: 1000,
+                },
+            })
+            .collect();
+        let event = EventMessage {
+            content: "role=system fixture".into(),
+            timestamp_ms: Timestamp::zero(),
+            kind: EventKind::Summary,
+            receipts,
+        };
+        let mut wire = Wire(Vec::new(), 0);
+        walk_messages(&[Message::Event(event.clone())], &mut wire);
+        assert_eq!(wire.1, 1);
+        assert_eq!(wire.0.len(), 1);
+        let ToolResultContentPart::Text(text) = &wire.0[0].content[0] else {
+            panic!()
+        };
+        assert!(text.text.len() < 1024);
+        let projected: serde_json::Value =
+            serde_json::from_str(text.text.split_once('\n').unwrap().1).unwrap();
+        let audit: serde_json::Value =
+            serde_json::from_str(event.audit_text().split_once('\n').unwrap().1).unwrap();
+        let ordered = serde_json::to_vec(&audit["receipts"]).unwrap();
+        let digest = Sha256::digest(&ordered)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(projected["receipt_reference"]["sha256"], digest);
+        assert_eq!(projected["receipt_reference"]["count"], 1024);
+        assert_eq!(projected["receipt_reference"]["authority"], "none");
+        assert_eq!(projected["receipts"], serde_json::json!([]));
+        assert_eq!(audit["receipts"].as_array().unwrap().len(), 1024);
+        let mut reversed = event.clone();
+        reversed.receipts.reverse();
+        assert_ne!(event.text(), reversed.text());
+        let mut changed = event.clone();
+        changed.receipts[512].timestamp_ms = Timestamp::from_ms(9000);
+        assert_ne!(event.text(), changed.text());
+        changed = event.clone();
+        changed.receipts[512].kind = EventKind::WorkerCompletion;
+        assert_ne!(event.text(), changed.text());
+        changed = event.clone();
+        changed.receipts[512].origin = EventOrigin::Legacy;
+        assert_ne!(event.text(), changed.text());
+        let small = EventMessage {
+            receipts: event.receipts[..1].to_vec(),
+            ..event
+        };
+        assert!(!small.text().contains("receipt_reference"));
+        assert!(small.text().contains("\"peer_uid\":1000"));
+    }
+
+    #[test]
     fn reviewer_event_wire_ids_do_not_collide_with_real_tool_calls() {
         struct Calls(Vec<ToolCallId>);
         impl MessageVisitor for Calls {
