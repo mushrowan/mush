@@ -38,6 +38,8 @@ pub struct SetupArgs {
     pub system: Option<String>,
     pub no_tools: bool,
     pub tools: Option<Vec<String>>,
+    pub append_system: Option<String>,
+    pub discovery: mush_ext::DiscoveryOptions,
     pub debug_cache: bool,
     pub output_sink: Option<mush_tools::bash::OutputSink>,
     pub timer: Option<crate::timing::PhaseTimer>,
@@ -104,7 +106,7 @@ impl AppSetup {
             t.phase("mcp");
         }
 
-        let project_context = loader::discover_project_context(&cwd);
+        let project_context = loader::discover_project_context_with(&cwd, &args.discovery);
         for diagnostic in &project_context.skill_diagnostics {
             tracing::warn!("skill: {diagnostic}");
         }
@@ -113,10 +115,14 @@ impl AppSetup {
             t.phase("project context");
         }
 
-        let system_prompt = args
+        let mut system_prompt = args
             .system
             .or(cfg.system_prompt.clone())
             .unwrap_or_else(|| build_system_prompt_from_context(&project_context, &cwd));
+        if let Some(extra) = args.append_system.as_deref().map(str::trim) {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(extra);
+        }
         if let Some(t) = &mut timer {
             t.phase("system prompt");
         }

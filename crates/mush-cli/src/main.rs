@@ -62,6 +62,18 @@ struct Cli {
     #[arg(long = "tools", short = 't', value_delimiter = ',')]
     tools: Option<Vec<String>>,
 
+    #[arg(long = "append-system-prompt")]
+    append_system: Option<String>,
+
+    #[arg(long = "skill")]
+    skill: Vec<std::path::PathBuf>,
+
+    #[arg(long)]
+    no_skills: bool,
+
+    #[arg(long)]
+    no_context_files: bool,
+
     #[arg(long)]
     no_session: bool,
 
@@ -79,6 +91,16 @@ struct Cli {
 
     #[arg(long, hide = true, env = mush_tui::IMAGE_PROBE_ENV)]
     tui_image_probe: Option<mush_tui::ImageProbeMode>,
+}
+
+impl Cli {
+    fn discovery(&self) -> mush_ext::DiscoveryOptions {
+        mush_ext::DiscoveryOptions {
+            skill_paths: self.skill.clone(),
+            no_skills: self.no_skills,
+            no_context_files: self.no_context_files,
+        }
+    }
 }
 
 #[derive(clap::Subcommand)]
@@ -235,9 +257,11 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
         thinking: cli.thinking,
         max_tokens: cli.max_tokens,
         max_turns: cli.max_turns,
-        system: cli.system,
+        system: cli.system.clone(),
         no_tools: cli.no_tools,
         tools: cli.tools.clone(),
+        append_system: cli.append_system.clone(),
+        discovery: cli.discovery(),
         debug_cache: cli.debug_cache,
         output_sink: None,
         timer,
@@ -604,9 +628,11 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         thinking: cli.thinking,
         max_tokens: cli.max_tokens,
         max_turns: cli.max_turns,
-        system: cli.system,
+        system: cli.system.clone(),
         no_tools: cli.no_tools,
         tools: cli.tools.clone(),
+        append_system: cli.append_system.clone(),
+        discovery: cli.discovery(),
         debug_cache: cli.debug_cache,
         output_sink: Some(output_sink),
         timer,
@@ -745,9 +771,10 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
             }
             km
         },
-        reload_context: Some(std::sync::Arc::new(
+        reload_context: Some(std::sync::Arc::new({
+            let discovery = cli.discovery();
             move |cwd: &std::path::Path| -> mush_tui::ReloadedContext {
-                let project = mush_ext::loader::discover_project_context(cwd);
+                let project = mush_ext::loader::discover_project_context_with(cwd, &discovery);
                 let system_prompt = build_system_prompt_from_context(&project, cwd);
                 let templates = mush_ext::discover_templates(cwd);
                 mush_tui::ReloadedContext {
@@ -758,8 +785,8 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
                         diagnostics: project.skill_diagnostics,
                     },
                 }
-            },
-        )),
+            }
+        })),
         mcp: setup.mcp.clone(),
         skills: setup.skills,
         tool_allowlist: cli.tools.clone(),

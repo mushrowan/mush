@@ -184,16 +184,32 @@ fn extract_tag(text: &str, tag: &str) -> Option<String> {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiscoveryOptions {
+    pub skill_paths: Vec<PathBuf>,
+    pub no_skills: bool,
+    pub no_context_files: bool,
+}
+
 #[tracing::instrument(name = "discover_context", skip_all)]
 pub fn discover_project_context(cwd: &Path) -> ProjectContext {
+    discover_project_context_with(cwd, &DiscoveryOptions::default())
+}
+
+pub fn discover_project_context_with(cwd: &Path, options: &DiscoveryOptions) -> ProjectContext {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let config_dir = resolve_config_dir();
-    discover_project_context_inner(cwd, home.as_deref(), config_dir.as_deref())
+    discover_project_context_inner(cwd, home.as_deref(), config_dir.as_deref(), options)
 }
 
 pub fn discover_project_context_with_home(cwd: &Path, home: Option<&Path>) -> ProjectContext {
     let config_dir = home.map(config_dir_from_home);
-    discover_project_context_inner(cwd, home, config_dir.as_deref())
+    discover_project_context_inner(
+        cwd,
+        home,
+        config_dir.as_deref(),
+        &DiscoveryOptions::default(),
+    )
 }
 
 fn ancestor_dirs_to_home(cwd: &Path, home: Option<&Path>) -> Vec<PathBuf> {
@@ -216,35 +232,62 @@ fn discover_project_context_inner(
     cwd: &Path,
     home: Option<&Path>,
     config_dir: Option<&Path>,
+    options: &DiscoveryOptions,
 ) -> ProjectContext {
-    let agents_md = find_agents_md_inner(cwd, home, config_dir);
+    let agents_md = if options.no_context_files {
+        Vec::new()
+    } else {
+        find_agents_md_inner(cwd, home, config_dir)
+    };
 
     let mut set = SkillSet::default();
 
-    for dir in ancestor_dirs_to_home(cwd, home).iter().rev() {
-        set.add(scan_skills_root(
-            &dir.join(".mush/skills"),
-            SkillSource::Project,
-        ));
-        set.add(scan_skills_root(
-            &dir.join(".agents/skills"),
-            SkillSource::Project,
-        ));
+    for path in &options.skill_paths {
+        let path = if path.is_absolute() {
+            path.clone()
+        } else {
+            cwd.join(path)
+        };
+        if path.is_dir() {
+            set.add(scan_skills_root(&path, SkillSource::Cli));
+        } else if path.is_file() {
+            set.add(crate::skill_scan::load_skill_file(&path, SkillSource::Cli));
+        } else {
+            set.diagnostics.push(SkillDiagnostic {
+                path,
+                kind: crate::skill_scan::SkillDiagnosticKind::Warning(
+                    "skill path does not exist".into(),
+                ),
+            });
+        }
     }
 
-    if let Some(cd) = config_dir {
-        set.add(scan_skills_root(&cd.join("skills"), SkillSource::User));
-    }
-    if let Some(home) = home {
-        set.add(scan_skills_root(
-            &home.join(".agents/skills"),
-            SkillSource::User,
-        ));
-    }
+    if !options.no_skills {
+        for dir in ancestor_dirs_to_home(cwd, home).iter().rev() {
+            set.add(scan_skills_root(
+                &dir.join(".mush/skills"),
+                SkillSource::Project,
+            ));
+            set.add(scan_skills_root(
+                &dir.join(".agents/skills"),
+                SkillSource::Project,
+            ));
+        }
 
-    for agents in &agents_md {
-        for skill in parse_skills_from_agents_md(&agents.content) {
-            set.insert(skill);
+        if let Some(cd) = config_dir {
+            set.add(scan_skills_root(&cd.join("skills"), SkillSource::User));
+        }
+        if let Some(home) = home {
+            set.add(scan_skills_root(
+                &home.join(".agents/skills"),
+                SkillSource::User,
+            ));
+        }
+
+        for agents in &agents_md {
+            for skill in parse_skills_from_agents_md(&agents.content) {
+                set.insert(skill);
+            }
         }
     }
 
@@ -512,6 +555,74 @@ more content
 
         assert_eq!(ctx.system_prompt.unwrap().content, "project prompt");
         assert_eq!(ctx.append_system_prompt.unwrap().content, "global extra");
+    }
+
+    #[test]
+    fn a_cli_skill_path_loads_even_with_no_skills_and_beats_the_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let cwd = home.join("repo");
+        let project = cwd.join(".mush/skills/shared");
+        let explicit = home.join("elsewhere/shared");
+        for (path, description) in [(&project, "project"), (&explicit, "cli")] {
+            std::fs::create_dir_all(path).unwrap();
+            std::fs::write(
+                path.join("SKILL.md"),
+                format!("---\nname: shared\ndescription: {description}\n---\nbody"),
+            )
+            .unwrap();
+        }
+        let config_dir = config_dir_from_home(home);
+
+        let with_defaults = discover_project_context_inner(
+            &cwd,
+            Some(home),
+            Some(&config_dir),
+            &DiscoveryOptions {
+                skill_paths: vec![explicit.clone()],
+                ..Default::default()
+            },
+        );
+        let without = discover_project_context_inner(
+            &cwd,
+            Some(home),
+            Some(&config_dir),
+            &DiscoveryOptions {
+                skill_paths: vec![home.join("elsewhere")],
+                no_skills: true,
+                no_context_files: true,
+            },
+        );
+
+        let shared = with_defaults
+            .skills
+            .iter()
+            .find(|s| s.name == "shared")
+            .unwrap();
+        assert_eq!(shared.description, "cli");
+        assert_eq!(shared.source, SkillSource::Cli);
+        assert_eq!(without.skills.len(), 1);
+        assert_eq!(without.skills[0].description, "cli");
+    }
+
+    #[test]
+    fn a_missing_cli_skill_path_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("repo");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let ctx = discover_project_context_inner(
+            &cwd,
+            Some(dir.path()),
+            None,
+            &DiscoveryOptions {
+                skill_paths: vec![PathBuf::from("nope")],
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(ctx.skill_diagnostics.len(), 1);
+        assert_eq!(ctx.skill_diagnostics[0].path, cwd.join("nope"));
     }
 
     #[test]
