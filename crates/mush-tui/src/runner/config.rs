@@ -42,6 +42,7 @@ pub struct TuiConfig {
     pub options: StreamOptions,
     pub max_turns: usize,
     pub initial_conversation: ConversationState,
+    pub initial_title: Option<String>,
     pub initial_panes: Vec<PaneSnapshot>,
     pub theme: crate::theme::Theme,
     pub config_path: Option<std::path::PathBuf>,
@@ -112,6 +113,7 @@ impl TuiConfig {
         app.thinking_display = self.thinking_display;
         app.theme = self.theme.clone();
         app.keymap = self.keymap.clone();
+        app.session_title = self.initial_title.clone();
         app.interaction.show_cost = self.show_cost;
         app.interaction.show_usage_lines = self.show_usage_lines;
         app.interaction.show_token_counters = self.show_token_counters;
@@ -139,6 +141,7 @@ impl TuiConfig {
             options: StreamOptions::default(),
             max_turns: 32,
             initial_conversation: ConversationState::default(),
+            initial_title: None,
             initial_panes: Vec::new(),
             theme: crate::theme::Theme::default(),
             config_path: None,

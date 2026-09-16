@@ -352,7 +352,8 @@ async fn handle_agent_end(
         )
         .await
         {
-            updater(title);
+            updater(title.clone());
+            session.app.session_title = Some(title);
         }
         {
             let pane = &mut *session;
@@ -1799,6 +1800,7 @@ mod tests {
             options: mush_ai::types::StreamOptions::default(),
             max_turns: 32,
             initial_conversation: Default::default(),
+            initial_title: None,
             initial_panes: vec![],
             theme: crate::theme::Theme::default(),
             config_path: None,

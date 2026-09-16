@@ -12,6 +12,7 @@ use crate::ui::{input_height, layout, status_bar_height};
 use crate::widgets::input_box::InputBox;
 use crate::widgets::message_list::transcript_guards;
 use crate::widgets::status_bar::StatusBar;
+use crate::widgets::top_bar::TopBar;
 
 pub const SCROLLBAR_FADE: Duration = Duration::from_millis(1200);
 
@@ -363,6 +364,7 @@ impl Screen {
         self.paint_selection(app, regions.messages, window, buf);
         self.render_scrollbar(app, regions.messages, buf);
 
+        TopBar::new(app).render(regions.top, buf);
         InputBox::new(app).render(regions.input, buf);
         StatusBar::new(app).render(regions.status, buf);
     }

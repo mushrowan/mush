@@ -3,6 +3,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use crate::app::App;
 use crate::widgets::input_box::InputBox;
 pub use crate::widgets::status_bar::status_bar_height;
+use crate::widgets::top_bar::TOP_BAR_HEIGHT;
 
 pub struct Ui<'a> {
     app: &'a App,
@@ -28,6 +29,7 @@ impl<'a> Ui<'a> {
 }
 
 pub struct LayoutRegions {
+    pub top: Rect,
     pub messages: Rect,
     pub input: Rect,
     pub status: Rect,
@@ -47,6 +49,7 @@ pub fn layout(area: Rect, input_h: u16, status_h: u16) -> LayoutRegions {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(TOP_BAR_HEIGHT),
             Constraint::Min(0),
             Constraint::Length(input_h),
             Constraint::Length(status_h),
@@ -54,9 +57,10 @@ pub fn layout(area: Rect, input_h: u16, status_h: u16) -> LayoutRegions {
         .split(area);
 
     LayoutRegions {
-        messages: chunks[0],
-        input: chunks[1],
-        status: chunks[2],
+        top: chunks[0],
+        messages: chunks[1],
+        input: chunks[2],
+        status: chunks[3],
     }
 }
 
@@ -145,9 +149,12 @@ mod tests {
     fn layout_regions_are_correct() {
         let area = Rect::new(0, 0, 80, 24);
         let regions = layout(area, 3, 1);
+        assert_eq!(regions.top.height, 1);
+        assert_eq!(regions.top.y, 0);
         assert_eq!(regions.status.height, 1);
         assert_eq!(regions.input.height, 3);
-        assert_eq!(regions.messages.height, 20);
+        assert_eq!(regions.messages.height, 19);
+        assert_eq!(regions.messages.y, 1);
     }
 
     #[test]

@@ -8,10 +8,13 @@ use mush_tui::input::{handle_key, handle_mouse};
 use mush_tui::keybinds::{BindingSource, ScopedKeysConfig};
 use mush_tui::screen::Screen;
 use mush_tui::slash_menu::ModelCompletion;
+use mush_tui::widgets::top_bar::TOP_BAR_HEIGHT as TOP;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::layout::Rect;
+
+const SCREEN: u16 = 24 + TOP;
 
 fn conversation(exchanges: usize) -> App {
     let mut app = App::new("claude-opus-4-5".into(), TokenCount::new(200_000));
@@ -32,7 +35,7 @@ fn rows(app: &App, width: u16, height: u16) -> Vec<String> {
         .draw(|frame| screen.render(app, frame.area(), frame.buffer_mut()))
         .unwrap();
     let buffer = terminal.backend().buffer().clone();
-    (0..buffer.area.height)
+    (TOP..buffer.area.height)
         .map(|y| {
             (0..buffer.area.width)
                 .map(|x| buffer[(x, y)].symbol())
@@ -44,7 +47,7 @@ fn rows(app: &App, width: u16, height: u16) -> Vec<String> {
 }
 
 fn window_rows(app: &App) -> Vec<String> {
-    rows(app, 80, 24)[..20]
+    rows(app, 80, SCREEN)[..20]
         .iter()
         .map(|row| {
             row.chars()
@@ -92,7 +95,7 @@ fn esc_twice_on_an_empty_input_starts_reading() {
 
 #[test]
 fn the_dock_sits_on_the_bottom_rows() {
-    let rows = rows(&conversation(20), 80, 24);
+    let rows = rows(&conversation(20), 80, SCREEN);
 
     assert!(rows[20].starts_with('─'), "input box top: {:?}", rows[20]);
     assert!(rows[21].contains('>'), "input line: {:?}", rows[21]);
@@ -134,7 +137,7 @@ fn the_status_bar_keeps_its_usage_bars() {
 
 #[test]
 fn a_long_conversation_shows_its_newest_lines() {
-    let screen = rows(&conversation(20), 80, 24).join("\n");
+    let screen = rows(&conversation(20), 80, SCREEN).join("\n");
 
     assert!(screen.contains("answer 19"), "{screen}");
     assert!(!screen.contains("question 0"), "{screen}");
@@ -143,19 +146,19 @@ fn a_long_conversation_shows_its_newest_lines() {
 #[test]
 fn the_tail_follows_while_i_type() {
     let mut app = conversation(20);
-    let before = rows(&app, 80, 24).join("\n");
+    let before = rows(&app, 80, SCREEN).join("\n");
     assert!(!before.contains("answer 20"));
 
     app.push_user_message("question 20");
     app.messages
         .push(DisplayMessage::new(MessageRole::Assistant, "answer 20"));
 
-    assert!(rows(&app, 80, 24).join("\n").contains("answer 20"));
+    assert!(rows(&app, 80, SCREEN).join("\n").contains("answer 20"));
 }
 
 #[test]
 fn a_short_conversation_sits_at_the_top() {
-    let rows = rows(&conversation(1), 80, 24);
+    let rows = rows(&conversation(1), 80, SCREEN);
 
     assert!(
         rows[..3].iter().any(|row| row.contains("question 0")),
@@ -183,7 +186,7 @@ fn narrowing_the_terminal_keeps_the_newest_line_in_view() {
 }
 
 fn start_reading(app: &mut App) {
-    rows(app, 80, 24);
+    rows(app, 80, SCREEN);
     press(app, KeyCode::Esc);
     press(app, KeyCode::Esc);
 }
@@ -192,7 +195,7 @@ fn start_reading(app: &mut App) {
 fn esc_leaves_insert_without_interrupting_work() {
     let mut app = conversation(20);
     app.start_streaming();
-    rows(&app, 80, 24);
+    rows(&app, 80, SCREEN);
 
     press(&mut app, KeyCode::Esc);
     app.messages.push(DisplayMessage::new(
@@ -204,7 +207,11 @@ fn esc_leaves_insert_without_interrupting_work() {
         app.interaction.mode.caret(app.interaction.focus),
         Caret::ComposerBlock
     );
-    assert!(rows(&app, 80, 24).join("\n").contains("cargo build line"));
+    assert!(
+        rows(&app, 80, SCREEN)
+            .join("\n")
+            .contains("cargo build line")
+    );
 }
 
 #[test]
@@ -350,7 +357,7 @@ fn reading_pauses_the_follow() {
         .push(DisplayMessage::new(MessageRole::Assistant, "brand new"));
 
     assert_eq!(window_rows(&app), paused);
-    assert!(!rows(&app, 80, 24).join("\n").contains("brand new"));
+    assert!(!rows(&app, 80, SCREEN).join("\n").contains("brand new"));
 }
 
 #[test]
@@ -363,7 +370,7 @@ fn coming_back_to_the_bottom_follows_again() {
     app.messages
         .push(DisplayMessage::new(MessageRole::Assistant, "brand new"));
 
-    assert!(rows(&app, 80, 24).join("\n").contains("brand new"));
+    assert!(rows(&app, 80, SCREEN).join("\n").contains("brand new"));
 }
 
 #[test]
@@ -404,12 +411,12 @@ fn right_column(rows: &[String], width: usize) -> String {
 #[test]
 fn the_scrollbar_shows_while_you_move() {
     let mut app = conversation(20);
-    let resting = right_column(&rows(&app, 80, 24), 80);
+    let resting = right_column(&rows(&app, 80, SCREEN), 80);
     start_reading(&mut app);
 
     press(&mut app, KeyCode::Char('k'));
 
-    let moving = right_column(&rows(&app, 80, 24), 80);
+    let moving = right_column(&rows(&app, 80, SCREEN), 80);
     assert!(resting.trim().is_empty(), "at rest: {resting:?}");
     assert!(!moving.trim().is_empty(), "while moving: {moving:?}");
 }
@@ -549,7 +556,7 @@ fn cursor(app: &App) -> (usize, usize) {
 #[test]
 fn the_cursor_starts_at_the_bottom_left_of_the_window() {
     let mut app = conversation(20);
-    let lines = rows(&app, 80, 24);
+    let lines = rows(&app, 80, SCREEN);
 
     start_reading(&mut app);
 
@@ -597,7 +604,7 @@ fn g_takes_the_cursor_to_the_last_line() {
     press_with(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL);
 
     press(&mut app, KeyCode::Char('G'));
-    rows(&app, 80, 24);
+    rows(&app, 80, SCREEN);
 
     assert_eq!(app.viewport.cursor_row(), 19);
 }
@@ -610,7 +617,7 @@ fn a_row_with_a_stitched_cluster_is_never_trusted_stale() {
         "gotcha, dropped \u{d26}\u{d4d}\u{d26}(\u{1d54}\u{15dc}\u{1d54})",
     ));
 
-    let area = Rect::new(0, 0, 80, 24);
+    let area = Rect::new(0, 0, 80, SCREEN);
     let mut buffer = Buffer::empty(area);
     Screen::new().render(&app, area, &mut buffer);
 
@@ -820,7 +827,7 @@ fn log_with_world() -> App {
         .push(DisplayMessage::new(MessageRole::Assistant, "world"));
     press(&mut app, KeyCode::Esc);
     press(&mut app, KeyCode::Esc);
-    rows(&app, 80, 24);
+    rows(&app, 80, SCREEN);
     for _ in 0..6 {
         press(&mut app, KeyCode::Char('j'));
     }
@@ -829,14 +836,14 @@ fn log_with_world() -> App {
 }
 
 fn selected_cells(app: &App) -> Vec<(u16, u16)> {
-    let area = Rect::new(0, 0, 80, 24);
+    let area = Rect::new(0, 0, 80, SCREEN);
     let mut buffer = Buffer::empty(area);
     Screen::new().render(app, area, &mut buffer);
     let mut cells = Vec::new();
-    for y in 0..area.height {
+    for y in TOP..area.height {
         for x in 0..area.width {
             if buffer[(x, y)].style().bg == app.theme.selection.bg {
-                cells.push((x, y));
+                cells.push((x, y - TOP));
             }
         }
     }
@@ -891,7 +898,7 @@ fn log_with_indented_hello() -> App {
     ));
     press(&mut app, KeyCode::Esc);
     press(&mut app, KeyCode::Esc);
-    rows(&app, 80, 24);
+    rows(&app, 80, SCREEN);
     for _ in 0..6 {
         press(&mut app, KeyCode::Char('j'));
     }
@@ -1003,7 +1010,7 @@ fn a_motion_in_linewise_mode_adds_whole_rows() {
     ));
     press(&mut app, KeyCode::Esc);
     press(&mut app, KeyCode::Esc);
-    rows(&app, 80, 24);
+    rows(&app, 80, SCREEN);
     for _ in 0..6 {
         press(&mut app, KeyCode::Char('j'));
     }
@@ -1026,7 +1033,7 @@ fn log_with_alphabet() -> App {
     ));
     press(&mut app, KeyCode::Esc);
     press(&mut app, KeyCode::Esc);
-    rows(&app, 80, 24);
+    rows(&app, 80, SCREEN);
     for _ in 0..6 {
         press(&mut app, KeyCode::Char('j'));
     }
@@ -1082,7 +1089,7 @@ fn a_linewise_yank_copies_the_rows_with_the_indent_off() {
     ));
     press(&mut app, KeyCode::Esc);
     press(&mut app, KeyCode::Esc);
-    rows(&app, 80, 24);
+    rows(&app, 80, SCREEN);
     for _ in 0..6 {
         press(&mut app, KeyCode::Char('j'));
     }
@@ -1129,7 +1136,7 @@ fn a_row_too_short_for_the_block_keeps_its_line() {
     ));
     press(&mut app, KeyCode::Esc);
     press(&mut app, KeyCode::Esc);
-    rows(&app, 80, 24);
+    rows(&app, 80, SCREEN);
     for _ in 0..6 {
         press(&mut app, KeyCode::Char('j'));
     }
@@ -1160,7 +1167,7 @@ fn linewise_over_indented_hello() -> App {
     ));
     press(&mut app, KeyCode::Esc);
     press(&mut app, KeyCode::Esc);
-    rows(&app, 80, 24);
+    rows(&app, 80, SCREEN);
     for _ in 0..6 {
         press(&mut app, KeyCode::Char('j'));
     }
@@ -1195,8 +1202,10 @@ fn esc_drops_a_linewise_selection() {
 }
 
 fn caret(app: &App) -> Option<(u16, u16)> {
-    rows(app, 80, 24);
-    Screen::new().cursor_cell(app, Rect::new(0, 0, 80, 24))
+    rows(app, 80, SCREEN);
+    Screen::new()
+        .cursor_cell(app, Rect::new(0, 0, 80, SCREEN))
+        .map(|(x, y)| (x, y - TOP))
 }
 
 fn log_on_indented_hello() -> App {
@@ -1207,7 +1216,7 @@ fn log_on_indented_hello() -> App {
     ));
     press(&mut app, KeyCode::Esc);
     press(&mut app, KeyCode::Esc);
-    rows(&app, 80, 24);
+    rows(&app, 80, SCREEN);
     for _ in 0..6 {
         press(&mut app, KeyCode::Char('j'));
     }
@@ -1254,7 +1263,7 @@ fn log_on(text: &str) -> App {
         .push(DisplayMessage::new(MessageRole::Assistant, text));
     press(&mut app, KeyCode::Esc);
     press(&mut app, KeyCode::Esc);
-    rows(&app, 80, 24);
+    rows(&app, 80, SCREEN);
     for _ in 0..6 {
         press(&mut app, KeyCode::Char('j'));
     }
@@ -1396,7 +1405,7 @@ fn a_running_tool_draws_in_the_transcript() {
 }
 
 fn transcript_height(app: &App) -> usize {
-    rows(app, 80, 24);
+    rows(app, 80, SCREEN);
     app.viewport.page()
 }
 
@@ -1521,11 +1530,12 @@ fn a_tool_settles_in_place_when_it_finishes() {
 }
 
 fn panel_row_indices(app: &App) -> Vec<u16> {
-    let area = Rect::new(0, 0, 80, 24);
+    let area = Rect::new(0, 0, 80, SCREEN);
     let mut buffer = Buffer::empty(area);
     Screen::new().render(app, area, &mut buffer);
-    (0..20)
+    (TOP..20 + TOP)
         .filter(|y| (0..80).all(|x| buffer[(x, *y)].style().bg == app.theme.tool_panel_bg.bg))
+        .map(|y| y - TOP)
         .collect()
 }
 
@@ -1546,7 +1556,7 @@ fn the_panel_keeps_its_background_and_padding() {
 fn selected_panel_row(app: &mut App, y: u16) {
     press(&mut *app, KeyCode::Esc);
     press(&mut *app, KeyCode::Esc);
-    rows(app, 80, 24);
+    rows(app, 80, SCREEN);
     press(&mut *app, KeyCode::Char('g'));
     for _ in 0..y {
         press(&mut *app, KeyCode::Char('j'));
@@ -1676,7 +1686,7 @@ fn i_returns_to_insert_at_the_caret() {
 #[test]
 fn ctrl_o_moves_focus_to_the_log() {
     let mut app = composer_in_normal("hello");
-    rows(&app, 80, 24);
+    rows(&app, 80, SCREEN);
 
     press_with(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL);
     let before = app.viewport.cursor().line;
@@ -1689,7 +1699,7 @@ fn ctrl_o_moves_focus_to_the_log() {
 #[test]
 fn ctrl_o_comes_back_to_the_composer() {
     let mut app = composer_in_normal("hello");
-    rows(&app, 80, 24);
+    rows(&app, 80, SCREEN);
     press_with(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL);
 
     press_with(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL);
@@ -1701,7 +1711,7 @@ fn ctrl_o_comes_back_to_the_composer() {
 #[test]
 fn i_from_the_log_appends_at_the_end_of_the_composer() {
     let mut app = composer_in_normal("hello");
-    rows(&app, 80, 24);
+    rows(&app, 80, SCREEN);
     press_with(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL);
 
     press(&mut app, KeyCode::Char('i'));
@@ -1713,7 +1723,7 @@ fn i_from_the_log_appends_at_the_end_of_the_composer() {
 #[test]
 fn esc_with_the_log_focused_does_nothing() {
     let mut app = composer_in_normal("hello");
-    rows(&app, 80, 24);
+    rows(&app, 80, SCREEN);
     press_with(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL);
     press(&mut app, KeyCode::Char('k'));
     let before = app.viewport.cursor();
@@ -1726,7 +1736,7 @@ fn esc_with_the_log_focused_does_nothing() {
 }
 
 fn tinted_text(app: &App) -> String {
-    let area = Rect::new(0, 0, 80, 24);
+    let area = Rect::new(0, 0, 80, SCREEN);
     let mut buffer = Buffer::empty(area);
     Screen::new().render(app, area, &mut buffer);
     let mut out = String::new();

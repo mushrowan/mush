@@ -667,6 +667,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         system_prompt: Some(system_prompt),
         options: setup.options,
         max_turns: setup.max_turns,
+        initial_title: session.meta.title.clone(),
         initial_conversation: session.conversation,
         initial_panes,
         theme,

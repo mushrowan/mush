@@ -132,6 +132,7 @@ pub struct App {
     pub confirm_quit_pending: bool,
     pub compacting: bool,
     pub compaction_model_id: Option<ModelId>,
+    pub session_title: Option<String>,
 }
 
 mod modals;
@@ -191,6 +192,7 @@ impl App {
             confirm_quit_pending: false,
             compacting: false,
             compaction_model_id: None,
+            session_title: None,
         }
     }
 
