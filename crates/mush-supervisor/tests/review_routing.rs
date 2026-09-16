@@ -2047,6 +2047,147 @@ fn completed_action_reaches_parent_after_acknowledged_history_fills() {
 }
 
 #[test]
+fn full_unacknowledged_history_retains_completion_until_space_is_acknowledged() {
+    let fixture = Fixture::new(true, true, "rejected");
+    let report = fixture.cwd.join("report.json");
+    let original_report = fs::read(&report).unwrap();
+    let policy = fixture.root.path().join("pool/policy.json");
+    let original_policy = fs::read(&policy).unwrap();
+    let mut full: Value = serde_json::from_slice(&original_policy).unwrap();
+    full["capacity"] = json!(2);
+    write(&policy, &full);
+    let inbox = Inbox::open(&fixture.inbox).unwrap();
+    fixture.route();
+    for index in 0..62 {
+        if index % 2 == 0 {
+            fs::write(&report, "{\"manual\":true}").unwrap();
+        } else {
+            fs::write(&report, &original_report).unwrap();
+        }
+        fixture.route();
+    }
+    let history_path = fixture.route.join("parent-events.json");
+    let full_history = fs::read(&history_path).unwrap();
+    assert_eq!(inbox.pending().unwrap().len(), 64);
+    fs::write(&report, &original_report).unwrap();
+    fs::write(&policy, &original_policy).unwrap();
+    fixture.route();
+    assert_eq!(fixture.state()["producer"], "attempt_finished");
+    assert_eq!(fixture.state()["parent"], "pending");
+    assert_eq!(fs::read(&history_path).unwrap(), full_history);
+    let pending = inbox.pending().unwrap();
+    let oldest = pending.first().unwrap().clone();
+    for event in pending.iter().skip(1).rev() {
+        inbox.acknowledge(&event.event_id).unwrap();
+    }
+    let detached = fixture.root.path().join("detached-parent");
+    fs::rename(&fixture.inbox, &detached).unwrap();
+    fixture.route();
+    assert_eq!(fs::read(&history_path).unwrap(), full_history);
+    fs::rename(&detached, &fixture.inbox).unwrap();
+    fixture.route();
+    fixture.route();
+    let retained: Vec<mush_supervisor::inbox::Event> =
+        serde_json::from_slice(&fs::read(&history_path).unwrap()).unwrap();
+    assert_eq!(retained.len(), 2);
+    assert_eq!(retained[0], oldest);
+    assert_eq!(retained[1].assignment_id, 65);
+    assert!(
+        retained[1]
+            .review
+            .as_ref()
+            .unwrap()
+            .producer_action
+            .starts_with("attempt_finished")
+    );
+    assert_eq!(inbox.pending().unwrap(), retained);
+    let queue_path = fixture.inbox.join("queue.json");
+    let mut queue: Value = serde_json::from_slice(&fs::read(&queue_path).unwrap()).unwrap();
+    queue["records"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|record| record["event"]["assignment_id"] != 65);
+    write(&queue_path, &queue);
+    fixture.route();
+    assert_eq!(inbox.pending().unwrap(), retained);
+    assert_eq!(
+        fs::read_to_string(fixture.root.path().join("calls"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+    inbox.acknowledge(&retained[1].event_id).unwrap();
+    fixture.route();
+    assert_eq!(fixture.state()["parent"], "queued");
+    inbox.acknowledge(&oldest.event_id).unwrap();
+    fixture.route();
+    assert_eq!(fixture.state()["parent"], "acknowledged");
+    assert!(inbox.pending().unwrap().is_empty());
+    assert!(inbox.acknowledged(&pending[63].event_id).unwrap());
+}
+
+#[test]
+fn acknowledged_compaction_keeps_sequence_across_multiple_restarts() {
+    let fixture = Fixture::new(true, true, "rejected");
+    let report = fixture.cwd.join("report.json");
+    let original_report = fs::read(&report).unwrap();
+    let policy = fixture.root.path().join("pool/policy.json");
+    let original_policy = fs::read(&policy).unwrap();
+    let mut full: Value = serde_json::from_slice(&original_policy).unwrap();
+    full["capacity"] = json!(2);
+    write(&policy, &full);
+    let inbox = Inbox::open(&fixture.inbox).unwrap();
+    fixture.route();
+    let mut highest = 0;
+    for index in 0..128 {
+        for event in inbox.pending().unwrap() {
+            assert!(event.assignment_id > highest);
+            highest = event.assignment_id;
+            inbox.acknowledge(&event.event_id).unwrap();
+        }
+        if index % 2 == 0 {
+            fs::write(&report, "{\"manual\":true}").unwrap();
+        } else {
+            fs::write(&report, &original_report).unwrap();
+        }
+        fixture.route();
+        let history: Vec<mush_supervisor::inbox::Event> =
+            serde_json::from_slice(&fs::read(fixture.route.join("parent-events.json")).unwrap())
+                .unwrap();
+        assert!(history.len() <= 64);
+    }
+    fs::write(&report, &original_report).unwrap();
+    fs::write(&policy, &original_policy).unwrap();
+    fixture.route();
+    fixture.route();
+    let pending = inbox.pending().unwrap();
+    assert_eq!(pending.last().unwrap().assignment_id, 131);
+    assert!(
+        pending
+            .last()
+            .unwrap()
+            .review
+            .as_ref()
+            .unwrap()
+            .producer_action
+            .starts_with("attempt_finished")
+    );
+    assert!(
+        inbox
+            .acknowledged("review-parser-task-1.reviewer.64")
+            .unwrap()
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.root.path().join("calls"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn another_tasks_verdict_cannot_launch_or_reach_parent() {
     let fixture = Fixture::new(true, true, "rejected");
     let source = fixture

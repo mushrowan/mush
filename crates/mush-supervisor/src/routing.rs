@@ -765,6 +765,9 @@ fn notify(config: &Config, state: &mut State, verdict: &Verdict, sha: &str) -> R
     } else {
         Vec::new()
     };
+    if events.len() > 64 {
+        return Err("parent action history exceeds limit".into());
+    }
     let action = if state.producer == "attempt_finished" {
         format!(
             "{}: {}",
@@ -780,10 +783,27 @@ fn notify(config: &Config, state: &mut State, verdict: &Verdict, sha: &str) -> R
             .as_ref()
             .is_none_or(|review| review.producer_action != action)
     }) {
-        if events.len() >= 64 {
-            return Err("parent action history is full, inspect review status".into());
+        let number = events
+            .last()
+            .map_or(0, |event| event.assignment_id)
+            .checked_add(1)
+            .ok_or("parent action sequence exhausted")?;
+        if events.len() == 64 {
+            let inbox = Inbox::open(&parent.inbox)?;
+            if inbox.binding()? != parent.binding {
+                return Err("parent binding changed".into());
+            }
+            let mut pending = Vec::new();
+            for event in events {
+                if !inbox.acknowledged(&event.event_id)? {
+                    pending.push(event);
+                }
+            }
+            events = pending;
+            if events.len() == 64 {
+                return Err("parent action history awaits acknowledgement".into());
+            }
         }
-        let number = u32::try_from(events.len())? + 1;
         let run_id = format!("review-{}-{}", config.task, config.generation);
         let event_id = format!("{run_id}.{}.{number}", config.reviewer.worker);
         let event = Event {
