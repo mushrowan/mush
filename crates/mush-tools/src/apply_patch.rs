@@ -453,12 +453,37 @@ Rules:\n\
 
 pub struct ApplyPatchTool {
     cwd: Arc<Path>,
+    ledger: crate::read_ledger::ReadLedger,
 }
 
 impl ApplyPatchTool {
     pub fn new(cwd: Arc<Path>) -> Self {
-        Self { cwd }
+        Self {
+            cwd,
+            ledger: crate::read_ledger::ReadLedger::shared(),
+        }
     }
+
+    #[must_use]
+    pub fn with_read_ledger(mut self, ledger: crate::read_ledger::ReadLedger) -> Self {
+        self.ledger = ledger;
+        self
+    }
+}
+
+fn touched_paths(cwd: &Path, hunks: &[Hunk]) -> Vec<std::path::PathBuf> {
+    hunks
+        .iter()
+        .flat_map(|hunk| match hunk {
+            Hunk::Add { path, .. } | Hunk::Delete { path } => vec![resolve_path(cwd, path)],
+            Hunk::Update {
+                path, move_path, ..
+            } => std::iter::once(path)
+                .chain(move_path.iter())
+                .map(|p| resolve_path(cwd, p))
+                .collect(),
+        })
+        .collect()
 }
 
 #[async_trait::async_trait]
@@ -505,9 +530,19 @@ impl AgentTool for ApplyPatchTool {
         };
 
         let preview = diff_preview(&hunks);
+        let touched = touched_paths(&self.cwd, &hunks);
+        if let Some(stale) = touched
+            .iter()
+            .find_map(|path| self.ledger.check(path).err())
+        {
+            return ToolResult::error(stale.to_string());
+        }
 
         match apply_hunks(&self.cwd, &hunks) {
             Ok(summary) => {
+                for path in &touched {
+                    self.ledger.record(path);
+                }
                 let output = format!(
                     "applied patch successfully:\n{}\n\ndiff:\n{}",
                     summary.join("\n"),
@@ -1207,6 +1242,28 @@ mod tests {
         assert!(text.contains("diff:"), "got: {text}");
         assert!(text.contains("-old"), "got: {text}");
         assert!(text.contains("+new"), "got: {text}");
+    }
+
+    #[test]
+    fn a_patch_over_a_file_changed_since_it_was_read_is_refused() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("file.txt");
+        fs::write(&path, "old\n").unwrap();
+        let ledger = crate::read_ledger::ReadLedger::default();
+        ledger.record(&path);
+        filetime::set_file_mtime(&path, filetime::FileTime::from_unix_time(4_102_444_800, 0))
+            .unwrap();
+        let tool = ApplyPatchTool::new(dir.path().into()).with_read_ledger(ledger);
+
+        let result = tokio::runtime::Runtime::new().unwrap().block_on(tool.execute(
+            serde_json::json!({
+                "patch_text": "*** Begin Patch\n*** Update File: file.txt\n@@\n-old\n+new\n*** End Patch"
+            }),
+        ));
+
+        assert!(result.outcome.is_error());
+        assert!(result_text(&result).contains("read it again"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "old\n");
     }
 
     fn result_text(result: &ToolResult) -> String {
