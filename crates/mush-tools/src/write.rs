@@ -16,11 +16,21 @@ struct WriteArgs {
 
 pub struct WriteTool {
     cwd: Arc<Path>,
+    ledger: crate::read_ledger::ReadLedger,
 }
 
 impl WriteTool {
     pub fn new(cwd: Arc<Path>) -> Self {
-        Self { cwd }
+        Self {
+            cwd,
+            ledger: crate::read_ledger::ReadLedger::shared(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_read_ledger(mut self, ledger: crate::read_ledger::ReadLedger) -> Self {
+        self.ledger = ledger;
+        self
     }
 }
 
@@ -66,10 +76,20 @@ impl AgentTool for WriteTool {
 
         let path = resolve_path(&self.cwd, &args.path);
         let content = args.content;
+        let ledger = self.ledger.clone();
 
-        tokio::task::spawn_blocking(move || write_file(&path, &content))
-            .await
-            .unwrap_or_else(|e| ToolResult::error(format!("task join error: {e}")))
+        tokio::task::spawn_blocking(move || {
+            if let Err(stale) = ledger.check(&path) {
+                return ToolResult::error(stale.to_string());
+            }
+            let result = write_file(&path, &content);
+            if result.outcome.is_success() {
+                ledger.record(&path);
+            }
+            result
+        })
+        .await
+        .unwrap_or_else(|e| ToolResult::error(format!("task join error: {e}")))
     }
 }
 

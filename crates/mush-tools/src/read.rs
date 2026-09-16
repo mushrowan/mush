@@ -193,6 +193,7 @@ impl ReadArgs {
 pub struct ReadTool {
     cwd: Arc<Path>,
     max_image_bytes: usize,
+    ledger: crate::read_ledger::ReadLedger,
 }
 
 impl ReadTool {
@@ -200,7 +201,14 @@ impl ReadTool {
         Self {
             cwd,
             max_image_bytes: DEFAULT_MAX_IMAGE_BYTES,
+            ledger: crate::read_ledger::ReadLedger::shared(),
         }
+    }
+
+    #[must_use]
+    pub fn with_read_ledger(mut self, ledger: crate::read_ledger::ReadLedger) -> Self {
+        self.ledger = ledger;
+        self
     }
 
     #[must_use]
@@ -325,10 +333,14 @@ impl AgentTool for ReadTool {
         let path = resolve_path(&self.cwd, &args.path);
         let json_output = args.output.is_json();
         let max_image_bytes = self.max_image_bytes;
+        let ledger = self.ledger.clone();
 
         tokio::task::spawn_blocking(move || {
             let (result, _lines_read) =
                 read_file(&path, args.offset, args.limit, json_output, max_image_bytes);
+            if result.outcome.is_success() {
+                ledger.record(&path);
+            }
             result
         })
         .await

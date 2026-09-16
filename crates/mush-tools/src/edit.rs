@@ -111,11 +111,21 @@ impl EditArgs {
 
 pub struct EditTool {
     cwd: Arc<Path>,
+    ledger: crate::read_ledger::ReadLedger,
 }
 
 impl EditTool {
     pub fn new(cwd: Arc<Path>) -> Self {
-        Self { cwd }
+        Self {
+            cwd,
+            ledger: crate::read_ledger::ReadLedger::shared(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_read_ledger(mut self, ledger: crate::read_ledger::ReadLedger) -> Self {
+        self.ledger = ledger;
+        self
     }
 }
 
@@ -212,10 +222,20 @@ impl AgentTool for EditTool {
         };
 
         let path = resolve_path(&self.cwd, &path);
+        let ledger = self.ledger.clone();
 
-        tokio::task::spawn_blocking(move || edit_file_batch(&path, &edits, &opts))
-            .await
-            .unwrap_or_else(|e| ToolResult::error(format!("task join error: {e}")))
+        tokio::task::spawn_blocking(move || {
+            if let Err(stale) = ledger.check(&path) {
+                return ToolResult::error(stale.to_string());
+            }
+            let result = edit_file_batch(&path, &edits, &opts);
+            if result.outcome.is_success() {
+                ledger.record(&path);
+            }
+            result
+        })
+        .await
+        .unwrap_or_else(|e| ToolResult::error(format!("task join error: {e}")))
     }
 }
 
@@ -1696,6 +1716,84 @@ mod tests {
         );
         let content = fs::read_to_string(&path).unwrap();
         assert_eq!(content, "let x = 1;\nlet y = 2;\nlet x = 99;\nlet z = 3;\n");
+    }
+
+    async fn read_then_edit(dir: &Path, path: &Path, touch_between: bool) -> ToolResult {
+        let ledger = crate::read_ledger::ReadLedger::default();
+        let read = crate::read::ReadTool::new(dir.into()).with_read_ledger(ledger.clone());
+        let edit = super::EditTool::new(dir.into()).with_read_ledger(ledger);
+        let read_result = read
+            .execute(serde_json::json!({ "path": path.to_str().unwrap() }))
+            .await;
+        assert!(read_result.outcome.is_success());
+        if touch_between {
+            filetime::set_file_mtime(path, filetime::FileTime::from_unix_time(4_102_444_800, 0))
+                .unwrap();
+        }
+        edit.execute(serde_json::json!({
+            "path": path.to_str().unwrap(),
+            "oldText": "hello",
+            "newText": "hi",
+        }))
+        .await
+    }
+
+    #[tokio::test]
+    async fn an_edit_after_a_foreign_change_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        fs::write(&path, "hello\n").unwrap();
+
+        let result = read_then_edit(dir.path(), &path, true).await;
+
+        assert!(result.outcome.is_error());
+        assert!(extract_text(&result).contains("read it again"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "hello\n");
+    }
+
+    #[tokio::test]
+    async fn an_edit_on_an_unchanged_file_goes_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        fs::write(&path, "hello\n").unwrap();
+
+        let result = read_then_edit(dir.path(), &path, false).await;
+
+        assert!(result.outcome.is_success(), "{}", extract_text(&result));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "hi\n");
+    }
+
+    #[tokio::test]
+    async fn two_edits_in_a_row_do_not_trip_the_guard() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        fs::write(&path, "one two\n").unwrap();
+        let ledger = crate::read_ledger::ReadLedger::default();
+        let read = crate::read::ReadTool::new(dir.path().into()).with_read_ledger(ledger.clone());
+        let edit = super::EditTool::new(dir.path().into()).with_read_ledger(ledger);
+        let read_result = read
+            .execute(serde_json::json!({ "path": path.to_str().unwrap() }))
+            .await;
+        assert!(read_result.outcome.is_success());
+
+        let first = edit
+            .execute(serde_json::json!({
+                "path": path.to_str().unwrap(),
+                "oldText": "one",
+                "newText": "1",
+            }))
+            .await;
+        let second = edit
+            .execute(serde_json::json!({
+                "path": path.to_str().unwrap(),
+                "oldText": "two",
+                "newText": "2",
+            }))
+            .await;
+
+        assert!(first.outcome.is_success());
+        assert!(second.outcome.is_success(), "{}", extract_text(&second));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "1 2\n");
     }
 
     #[tokio::test]
