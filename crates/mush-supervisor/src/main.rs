@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -19,6 +19,7 @@ use tokio::task::JoinSet;
 
 mod events;
 mod follow_up;
+mod poke;
 mod prompts;
 mod tasks;
 
@@ -70,6 +71,11 @@ enum Operation {
         directory: PathBuf,
         worker: String,
         prompt: String,
+    },
+    #[command(hide = true)]
+    DeliverPoke {
+        directory: PathBuf,
+        message: PathBuf,
     },
 }
 
@@ -367,6 +373,15 @@ async fn worker(
     let state_path = dir.join("state.json");
     events::recover(&manifest, &job)?;
     let previous = read_json(&state_path);
+    let explicit = poke::pending(&manifest.directory, &job.name)?;
+    if explicit {
+        poke::reopen(&manifest, &job, previous.as_ref()).await?;
+    }
+    let previous = if explicit {
+        read_json(&state_path)
+    } else {
+        previous
+    };
     if manifest.orchestrator_inbox.is_some()
         && events::has_terminal_event(&state_path)
         && previous
@@ -438,13 +453,24 @@ async fn worker(
         )?;
         return Ok(());
     }
-    for round in previous_round.saturating_add(1)..=manifest.max_rounds {
+    let next_round = previous_round
+        .checked_add(1)
+        .ok_or("worker round overflow")?;
+    let max_rounds = if explicit {
+        manifest.max_rounds.max(next_round)
+    } else {
+        manifest.max_rounds
+    };
+    for round in next_round..=max_rounds {
         last_round = round;
         let mut detail = String::new();
         if *stop.borrow() {
             break;
         }
-        while job.gate.as_ref().is_some_and(|p| !p.exists()) && !*stop.borrow() {
+        while !(explicit && round == next_round)
+            && job.gate.as_ref().is_some_and(|p| !p.exists())
+            && !*stop.borrow()
+        {
             save(
                 &State {
                     name: &job.name,
@@ -496,6 +522,7 @@ async fn worker(
             prompt.push_str("\n\nexplicit follow-up assignment. the previous completed task remains in history. work on this assignment within the existing permissions, then update your report:\n");
             prompt.push_str(&follow_up);
         }
+        let mut messages = Vec::new();
         if inbox.exists() {
             let mut paths: Vec<_> = fs::read_dir(&inbox)?
                 .filter_map(|e| e.ok().map(|e| e.path()))
@@ -506,7 +533,7 @@ async fn worker(
                     let text = fs::read_to_string(&path)?;
                     prompt.push_str("\n\ncoordinator task update (within original scope only):\n");
                     prompt.push_str(&text);
-                    fs::rename(&path, path.with_extension("delivered"))?;
+                    messages.push(path);
                 }
             }
         }
@@ -581,6 +608,9 @@ async fn worker(
             }
         };
         let pid = child.id().ok_or("missing child pid")?;
+        for path in messages {
+            fs::rename(&path, path.with_extension("delivered"))?;
+        }
         let mut tracked = HashMap::new();
         descendants(pid, &mut tracked);
         if manifest.orchestrator_inbox.is_some() {
@@ -790,7 +820,11 @@ async fn run(path: &Path) -> Result<()> {
     let manifest: Manifest = serde_json::from_reader(File::open(path)?)?;
     validate(&manifest)?;
     fs::create_dir_all(&manifest.directory)?;
-    let _lock = Lock::acquire(&manifest.directory.join("supervisor.lock"))?;
+    let lock = Lock::acquire(&manifest.directory.join("supervisor.lock"))?;
+    supervise(manifest, lock, false).await
+}
+
+async fn supervise(manifest: Manifest, _lock: Lock, pending_only: bool) -> Result<()> {
     events::initialise(&manifest)?;
     events::replay(&manifest)?;
     if manifest.directory.join("STOP").exists() {
@@ -805,64 +839,64 @@ async fn run(path: &Path) -> Result<()> {
     let permits = Arc::new(Semaphore::new(manifest.concurrency));
     let (cancel, receiver) = watch::channel(false);
     let mut jobs = JoinSet::new();
+    let mut active = HashSet::new();
+    let mut attempted = HashSet::new();
     for job in manifest.workers.clone() {
-        let name = job.name.clone();
-        let m = manifest.clone();
-        let p = permits.clone();
-        let s = receiver.clone();
-        jobs.spawn(async move {
-            let state_path = m.directory.join(&name).join("state.json");
-            let result = worker(Arc::clone(&m), job.clone(), p, s).await;
-            if let Err(error) = &result {
-                let mut state = read_json(&state_path).unwrap_or_else(|| json!({"name":name}));
-                state["state"] = json!("error");
-                state["detail"] = json!(error.to_string());
-                state["at"] = json!(Utc::now());
-                if !events::has_terminal_event(&state_path) {
-                    let saved = if m.orchestrator_inbox.is_some() {
-                        let round = state["round"]
-                            .as_u64()
-                            .and_then(|n| u32::try_from(n).ok())
-                            .unwrap_or(1);
-                        events::save(
-                            &m,
-                            &job,
-                            events::assignment(Some(&state), round),
-                            &State {
-                                name: &name,
-                                state: "error",
-                                model: state["model"].as_str().unwrap_or(&m.model),
-                                round,
-                                session_id: state["session_id"].as_str(),
-                                at: Utc::now(),
-                                detail: "supervisor error",
-                                retries: 0,
-                                stalled: 0,
-                            },
-                            Some(TerminalReason::SupervisorError),
-                        )
-                    } else {
-                        atomic(&state_path, &state)
-                    };
-                    if let Err(status_error) = saved {
-                        eprintln!("recording worker failure: {status_error}");
-                    }
-                }
-            }
-            (name, result)
-        });
+        let messages = poke::messages(&manifest.directory, &job.name)?;
+        if !pending_only || !messages.is_empty() {
+            attempted.extend(messages);
+            active.insert(job.name.clone());
+            spawn_worker(
+                &mut jobs,
+                manifest.clone(),
+                job,
+                permits.clone(),
+                receiver.clone(),
+            );
+        }
     }
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     let mut errors = Vec::new();
     let mut delivery = JoinSet::new();
     let mut delivery_pending = false;
-    while !jobs.is_empty() {
+    loop {
+        if !*receiver.borrow()
+            && Utc::now() < manifest.until
+            && !manifest.directory.join("STOP").exists()
+        {
+            for job in &manifest.workers {
+                if active.contains(&job.name) {
+                    continue;
+                }
+                let messages = poke::messages(&manifest.directory, &job.name)?;
+                if messages.iter().any(|path| !attempted.contains(path)) {
+                    attempted.extend(messages);
+                    active.insert(job.name.clone());
+                    spawn_worker(
+                        &mut jobs,
+                        manifest.clone(),
+                        job.clone(),
+                        permits.clone(),
+                        receiver.clone(),
+                    );
+                }
+            }
+        }
+        if jobs.is_empty() {
+            break;
+        }
         tokio::select! {
             result = jobs.join_next() => { match result {
-                Some(Ok((name, Err(error)))) => { errors.push(json!({"worker":name,"error":error.to_string()})); },
+                Some(Ok((name, result))) => {
+                    active.remove(&name);
+                    if let Err(error) = result {
+                        attempted.extend(poke::messages(&manifest.directory, &name)?);
+                        errors.push(json!({"worker":name,"error":error.to_string()}));
+                    }
+                },
                 Some(Err(error)) => { errors.push(json!({"task_error":error.to_string()})); },
-                Some(Ok((_, Ok(())))) | None => {},
+                None => {},
             }
                 delivery_pending = manifest.orchestrator_inbox.is_some();
                 if delivery_pending && delivery.is_empty() {
@@ -903,6 +937,57 @@ async fn run(path: &Path) -> Result<()> {
     )?;
     events::replay(&manifest)?;
     Ok(())
+}
+
+fn spawn_worker(
+    jobs: &mut JoinSet<(String, Result<()>)>,
+    m: Arc<Manifest>,
+    job: Worker,
+    p: Arc<Semaphore>,
+    s: watch::Receiver<bool>,
+) {
+    let name = job.name.clone();
+    jobs.spawn(async move {
+        let state_path = m.directory.join(&name).join("state.json");
+        let result = worker(Arc::clone(&m), job.clone(), p, s).await;
+        if let Err(error) = &result {
+            let mut state = read_json(&state_path).unwrap_or_else(|| json!({"name":name}));
+            state["state"] = json!("error");
+            state["detail"] = json!(error.to_string());
+            state["at"] = json!(Utc::now());
+            if !events::has_terminal_event(&state_path) {
+                let saved = if m.orchestrator_inbox.is_some() {
+                    let round = state["round"]
+                        .as_u64()
+                        .and_then(|n| u32::try_from(n).ok())
+                        .unwrap_or(1);
+                    events::save(
+                        &m,
+                        &job,
+                        events::assignment(Some(&state), round),
+                        &State {
+                            name: &name,
+                            state: "error",
+                            model: state["model"].as_str().unwrap_or(&m.model),
+                            round,
+                            session_id: state["session_id"].as_str(),
+                            at: Utc::now(),
+                            detail: "supervisor error",
+                            retries: 0,
+                            stalled: 0,
+                        },
+                        Some(TerminalReason::SupervisorError),
+                    )
+                } else {
+                    atomic(&state_path, &state)
+                };
+                if let Err(status_error) = saved {
+                    eprintln!("recording worker failure: {status_error}");
+                }
+            }
+        }
+        (name, result)
+    });
 }
 
 #[tokio::main]
@@ -949,36 +1034,8 @@ async fn main() -> Result<()> {
             directory,
             worker,
             prompt,
-        } => {
-            if !safe_name(&worker) {
-                return Err("invalid worker name".into());
-            }
-            if directory.join("STOP").exists() {
-                return Err("run is stopped".into());
-            }
-            let state =
-                read_json(&directory.join(&worker).join("state.json")).ok_or("unknown worker")?;
-            if matches!(
-                state["state"].as_str(),
-                Some("done" | "blocked" | "awaiting_input" | "cancelled" | "error" | "stopped")
-            ) {
-                return Err("worker is terminal; prepare a follow-up task".into());
-            }
-            let dir = directory.join("inbox").join(worker);
-            fs::create_dir_all(&dir)?;
-            let path = dir.join(format!(
-                "{}-{}.txt",
-                Utc::now().timestamp_micros(),
-                std::process::id()
-            ));
-            let mut file = OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .mode(0o600)
-                .open(path)?;
-            file.write_all(prompt.as_bytes())?;
-            Ok(())
-        }
+        } => poke::queue(&directory, &worker, &prompt),
+        Operation::DeliverPoke { directory, message } => poke::deliver(&directory, &message).await,
         Operation::Status { directory } => tasks::status(&directory),
     }
 }
