@@ -76,6 +76,9 @@ pub enum SlashAction {
     },
     Cost,
     Credits,
+    Name {
+        title: Option<String>,
+    },
     Endpoints {
         model_id: Option<String>,
     },
@@ -178,6 +181,9 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
             query: args.to_string(),
         }),
         "cost" => Ok(SlashAction::Cost),
+        "name" | "rename" => Ok(SlashAction::Name {
+            title: (!args.is_empty()).then(|| args.to_string()),
+        }),
         "credits" => Ok(SlashAction::Credits),
         "endpoints" => Ok(SlashAction::Endpoints {
             model_id: (!args.is_empty()).then(|| args.to_string()),

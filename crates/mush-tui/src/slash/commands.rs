@@ -42,6 +42,7 @@ pub fn handle(
             help.push_str("  /undo          - revert last turn\n");
             help.push_str("  /search [text] - search conversation (or ctrl+f)\n");
             help.push_str("  /cost          - show session cost\n");
+            help.push_str("  /name [title]  - show or set the session title\n");
             help.push_str("  /credits       - show openrouter credit balance\n");
             help.push_str(
                 "  /endpoints [id] - list openrouter providers + cache support for a model\n",
@@ -213,6 +214,7 @@ pub fn handle(
                     }
                     let title = session.meta.title.as_deref().unwrap_or("untitled");
                     app.status = Some(format!("resumed: {title}").into());
+                    app.session_title = session.meta.title;
                 }
                 Err(e) => app.push_system_message(format!("failed to load session: {e}")),
             }
@@ -247,6 +249,23 @@ pub fn handle(
         SlashAction::Cost => {
             app.interaction.show_cost = !app.interaction.show_cost;
             show_cost(app);
+            None
+        }
+        SlashAction::Name { title: None } => {
+            match app.session_title.as_deref() {
+                Some(title) => app.push_system_message(format!("session: {title}")),
+                None => app.push_system_message("session is untitled. /name <title> to set one"),
+            }
+            None
+        }
+        SlashAction::Name { title: Some(title) } => {
+            let title = crate::widgets::top_bar::sanitise_title(title);
+            if title.is_empty() {
+                app.push_system_message("usage: /name <title>");
+                return None;
+            }
+            app.status = Some(format!("session named: {title}").into());
+            app.session_title = Some(title);
             None
         }
         SlashAction::Credits => None,
@@ -1171,6 +1190,54 @@ mod tests {
 
         assert!(config.compaction_model.is_none());
         assert!(app.compaction_model_id.is_none());
+    }
+
+    fn name_session(app: &mut App, title: Option<&str>) {
+        let mut config = test_tui_config(None);
+        let mut conversation = ConversationState::new();
+        handle(
+            app,
+            &mut conversation,
+            &mut config,
+            &ThinkingPrefs::default(),
+            &SlashAction::Name {
+                title: title.map(str::to_string),
+            },
+        );
+    }
+
+    #[test]
+    fn name_sets_the_session_title() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+
+        name_session(&mut app, Some("  port\tprime  "));
+
+        assert_eq!(app.session_title.as_deref(), Some("port prime"));
+    }
+
+    #[test]
+    fn name_without_a_title_reports_the_current_one() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.session_title = Some("port prime".into());
+
+        name_session(&mut app, None);
+
+        assert_eq!(app.session_title.as_deref(), Some("port prime"));
+        assert!(
+            app.messages
+                .iter()
+                .any(|message| message.content.contains("port prime"))
+        );
+    }
+
+    #[test]
+    fn a_blank_name_is_refused() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.session_title = Some("kept".into());
+
+        name_session(&mut app, Some("\x07"));
+
+        assert_eq!(app.session_title.as_deref(), Some("kept"));
     }
 
     #[test]

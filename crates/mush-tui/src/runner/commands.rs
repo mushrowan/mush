@@ -129,9 +129,11 @@ pub(super) async fn handle_slash_action(
             let new_id = mush_ai::types::SessionId::new();
             tui_config.session_id = new_id.clone();
             tui_config.options.session_id = Some(new_id);
+            session.title_generated = false;
             let pane = &mut *session;
             let (app, conversation, _) = pane.fields_mut();
             app.clear_messages();
+            app.session_title = None;
             *conversation = mush_session::ConversationState::new();
             app.status = Some("new session started (previous session saved)".into());
             state_changed = true;

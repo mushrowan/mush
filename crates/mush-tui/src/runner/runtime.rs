@@ -29,6 +29,7 @@ pub(super) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("undo", "revert last turn"),
     ("search", "search conversation"),
     ("cost", "show session cost"),
+    ("name", "show or set the session title"),
     ("credits", "show openrouter credit balance"),
     ("endpoints", "show openrouter providers serving a model"),
     ("logs", "show recent log entries"),
